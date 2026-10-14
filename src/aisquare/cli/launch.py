@@ -340,12 +340,8 @@ def launch(
     choice = claude_accounts_service.AccountChoice(account=None, source=None)
     if selected.adapter.accounts is not None:
         try:
-            choice = (
-                claude_accounts_service.choose(account, role=role, project=project)
-                if selected.adapter.id == claude_accounts_core.AGENT
-                else claude_accounts_service.choose(
-                    account, role=role, project=project, agent=selected.adapter.id
-                )
+            choice = claude_accounts_service.choose(
+                account, role=role, project=project, agent=selected.adapter.id
             )
         except claude_accounts_service.NoSuchAccount as exc:
             fail(str(exc), error="unknown_account", ref=account)

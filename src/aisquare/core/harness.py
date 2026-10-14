@@ -892,6 +892,15 @@ def resolve_model(
     return None  # unreachable: the last rung always returns
 
 
+def _has_ladders(agent: str | None) -> bool:
+    """Whether ``agent``'s models come from the role ladders (``capabilities.model_ladders``);
+    a session recorded with no agent is the default agent's."""
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    adapter = recorded_adapter(agent)
+    return adapter is not None and adapter.capabilities.model_ladders
+
+
 def model_mismatch(role: str, model: str | None, *, agent: str | None = None) -> str | None:
     """A warning when a session's captured model does not fit its role's tiering.
 
@@ -905,7 +914,7 @@ def model_mismatch(role: str, model: str | None, *, agent: str | None = None) ->
     inside the role's ladder is unflagged anyway; one outside it is worth
     saying out loud.
     """
-    if model is None or agent not in (None, "claude-code"):
+    if model is None or not _has_ladders(agent):
         return None
     profile = ROLE_PROFILES.get(base_role(role))
     if profile is None:

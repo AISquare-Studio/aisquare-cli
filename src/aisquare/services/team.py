@@ -232,9 +232,10 @@ class StopDecision:
     offers ``{"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext":
     …}}``, which continues the conversation too but is labelled "Stop hook
     feedback" in the transcript rather than a hook error; switching is one
-    method. Claude Code itself ends the turn after 8 consecutive blocks and caps
-    hook output at 10,000 characters, truncating the rest — mid-JSON-string if it
-    must, which costs the whole payload and not just the tail. The event COUNT
+    function (``agent_adapters.types.block_reply``). Claude Code itself ends the turn
+    after 8 consecutive blocks and caps hook output at 10,000 characters, truncating
+    the rest — mid-JSON-string if it must, which costs the whole payload and not just
+    the tail. The event COUNT
     does not bound that: ``event.text`` is unbounded board text, and the coder's
     own standing cycle asks for ``--note "how to verify + evidence"``. Measured
     with the real renderer: ten ``task_review`` events carrying a 2 KB note each
@@ -246,9 +247,6 @@ class StopDecision:
     reason: str
     cursor: int
     """The event seq the manager's cursor advanced to — what the reason covers."""
-
-    def as_hook_output(self) -> dict[str, str]:
-        return {"decision": "block", "reason": self.reason}
 
 
 @dataclass(frozen=True)

@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import agent_adapters, agents, harness, insights, outbox, paths
+from aisquare.core.agent_adapters import get_adapter as _get_adapter
 from aisquare.core.config import AgentModelSettings, FleetRoleSettings, load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
@@ -36,6 +37,8 @@ from aisquare.services import (
 from aisquare.services.agents import connect
 from tests.test_fleet_service import FakeTmux
 from tests.test_insight_sweeper import FakeSDK, _configure
+
+CODEX = _get_adapter("codex")
 
 
 @pytest.fixture(autouse=True)
@@ -446,9 +449,9 @@ def test_failed_stop_releases_claim_and_cli_reports_the_actual_cost(
     assert "event was not recorded" not in result.stderr
     with store_session() as store:
         assert not store.list_meta("agent-event:")
-    output = agent_events.handle_codex(payload, home)
+    output = agent_events.handle(CODEX, payload, home)
     assert output and json.loads(output)["reason"] == "retry decision"
-    assert agent_events.handle_codex(payload, home) == output and handler.call_count == 2
+    assert agent_events.handle(CODEX, payload, home) == output and handler.call_count == 2
 
 
 @pytest.mark.parametrize("raises", [False, True])
@@ -456,8 +459,8 @@ def test_expired_callback_owner_cannot_overwrite_or_delete_a_new_claim(
     raises: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     home = tmp_path / ".codex"
-    sid = agent_events.session_key("codex", home, "native")
-    key = f"agent-event:{sid}:Stop:one:False"
+    sid = agent_events.session_key(CODEX, home, "native")
+    key = f"agent-event:{sid}:stop:one:False"
     replacement = json.dumps("a newer callback completed")
 
     def replaced(*args: object, **kwargs: object) -> None:
@@ -470,9 +473,9 @@ def test_expired_callback_owner_cannot_overwrite_or_delete_a_new_claim(
     payload = {"session_id": "native", "hook_event_name": "Stop", "turn_id": "one"}
     if raises:
         with pytest.raises(RuntimeError):
-            agent_events.handle_codex(payload, home)
+            agent_events.handle(CODEX, payload, home)
     else:
-        agent_events.handle_codex(payload, home)
+        agent_events.handle(CODEX, payload, home)
     with store_session() as store:
         assert store.get_meta(key) == replacement
 
@@ -496,8 +499,9 @@ def test_unwritable_observation_cache_does_not_block_native_lifecycle(
         agents, "_write_settings", Mock(side_effect=PermissionError("read-only cache"))
     )
     payload = {"session_id": "native", "cwd": str(tmp_path), "hook_event_name": "SessionStart"}
-    assert agent_events.handle_codex(payload, home)
-    agent_events.handle_codex(
+    assert agent_events.handle(CODEX, payload, home)
+    agent_events.handle(
+        CODEX,
         {
             **payload,
             "hook_event_name": "UserPromptSubmit",
@@ -509,12 +513,12 @@ def test_unwritable_observation_cache_does_not_block_native_lifecycle(
     monkeypatch.setattr(
         hooks, "turn_stopped", lambda *args, **kwargs: team.StopDecision("continue", cursor=1)
     )
-    output = agent_events.handle_codex(
-        {**payload, "hook_event_name": "Stop", "turn_id": "one"}, home
+    output = agent_events.handle(
+        CODEX, {**payload, "hook_event_name": "Stop", "turn_id": "one"}, home
     )
     assert output and json.loads(output)["decision"] == "block"
     with store_session() as store:
-        assert store.get_session(agent_events.session_key("codex", home, "native"))
+        assert store.get_session(agent_events.session_key(CODEX, home, "native"))
         assert store.recent_prompts(team_project().id)[0].text == "keep working"
     assert agents.integration_readiness("codex", home)[0] == "unverified"
 

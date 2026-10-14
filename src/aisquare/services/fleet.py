@@ -46,6 +46,12 @@ from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import codenames, harness, orchestrator, selfcli
 from aisquare.core import tmux as tmux_core
+from aisquare.core.agent_adapters import (
+    DEFAULT_AGENT,
+    adapter_for_binary,
+    get_adapter,
+    recorded_adapter,
+)
 from aisquare.core.config import (
     CLAUDE_PERMISSION_MODES,
     FleetRoleSettings,
@@ -180,17 +186,19 @@ class FleetInterrupted(FleetError):
 
 @dataclass(frozen=True)
 class ResumeSpec:
-    """Start the window on an EXISTING Claude session rather than a fresh one (#146).
+    """Start the window on an EXISTING session rather than a fresh one (#146).
 
-    ``claude --resume <absolute transcript path>`` (Claude Code ≥ 2.1.223 finds a
-    session by its ``.jsonl`` wherever it lives) keeps the original session id,
-    so the fleet row is joined to the same board session the agent already had:
-    its claims, its cursor and its notes carry on. ``session_id`` is that id,
-    recorded on the row up front rather than learned from the first hook.
+    The agent's own resume (``AgentAdapter.resume_args``: ``claude --resume <absolute
+    transcript path>``, which Claude Code ≥ 2.1.223 finds wherever it lives) keeps the
+    original session id, so the fleet row is joined to the same board session the
+    agent already had: its claims, its cursor and its notes carry on. ``session_id``
+    is that id, recorded on the row up front rather than learned from the first hook;
+    ``native_session_id`` the agent's own, where it is another.
     """
 
     session_id: str
     transcript_path: Path
+    native_session_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1402,7 +1410,7 @@ def spawn(
     resume: ResumeSpec | None = None,
     size: tuple[int, int] | None = None,
     spec: LaunchSpec | None = None,
-    claude_code: bool = False,
+    family: str | None = None,
     takes_over: str | None = None,
     onboard: bool = True,
     bin_flag: bool = True,
@@ -1418,10 +1426,10 @@ def spawn(
     binary that has left the PATH is resolved again as a spawn resolves it
     when that lands on the same kind of program (``_in_place_of_recorded``),
     and the receipt names it. Every spawn records the spec it ended up with on
-    the row. ``claude_code`` says the replayed agent is Claude Code whatever its
-    binary is called — its hook joined its row to a board session, which only
-    Claude Code does (a ``resume`` says so too) — so the spec's session flags
-    are not replayed and that fallback may land on ``claude``. ``bin_flag`` is
+    the row. ``family`` is the replayed agent's adapter id whatever its binary is
+    called, shown by the board session its own hook joined the row to — so the spec's
+    session flags are not replayed where they are that agent's, and that fallback may
+    land on today's binary of the same agent. ``bin_flag`` is
     whether the caller takes ``--bin``: a replacement :func:`_respawn` starts
     for ``restart`` or ``switch`` does not, so a refusal of its binary names
     ways out those commands have (:func:`_launch_binary`). ``own_worktree`` is
@@ -1510,8 +1518,6 @@ def spawn(
         worktree = worktree if worktree is not None else spec.worktree
         if replayed_args:
             agent_args = _replayed_args(role, spec, config)
-    # A transcript to resume is one only Claude Code writes.
-    claude_code = claude_code or resume is not None
     srv = server(config)
     _require_tmux(srv)
     notes: list[str] = []
@@ -1520,7 +1526,7 @@ def spawn(
     chosen = binary
     if spec is not None and binary is None:
         replayed = _launch_binary(
-            role, binary=None, spec=spec, claude_code=claude_code, notes=notes, bin_flag=bin_flag
+            role, binary=None, spec=spec, family=family, notes=notes, bin_flag=bin_flag
         )
         # Today's default stays the default: carried as `--command` only when chosen.
         chosen = replayed.binary if replayed.source != "default" else None
@@ -1552,10 +1558,9 @@ def spawn(
     extra = list(agent_args)
     if replayed_args:
         # Filtered on the way OUT as well as on the way in: a spec written before
-        # session choices were left out of it still holds them, and a board
-        # session or a resume is what shows the binary to be Claude Code
-        # whatever its name.
-        extra = _without_session_choice(resolution.binary, extra, claude_code=claude_code)
+        # session choices were left out of it still holds them, and the board session
+        # its hook joined is what shows the binary to be that agent's whatever its name.
+        extra = _without_session_choice(resolution.binary, extra, family=family)
     # What the spec records: the agent's own arguments, BEFORE this launch's
     # `--resume` is prepended — a resume is per launch, and a restart of the
     # restarted agent must not carry an old transcript path into the new one.
@@ -1563,10 +1568,15 @@ def spawn(
     # `--continue`): see `_without_session_choice`.
     recorded_args = _without_session_choice(resolution.binary, [*role_args, *extra])
     if resume is not None:
-        # `--resume <transcript path>` keeps the ORIGINAL session id (#146), so
-        # the row is joined to it here rather than minted or learned later; the
-        # identity planner would otherwise read the path as the id.
-        extra = ["--resume", str(resume.transcript_path), *extra]
+        # The agent's resume (`--resume <transcript path>`) keeps the ORIGINAL session
+        # id (#146), so the row is joined to it here rather than minted or learned
+        # later; the identity planner would otherwise read the path as the id.
+        extra = [
+            *selected.adapter.resume_args(
+                resume.native_session_id or resume.session_id, resume.transcript_path
+            ),
+            *extra,
+        ]
     # Validate native model pins before creating a worktree/window or live row.
     model_resolution = None
     try:
@@ -1647,9 +1657,11 @@ def spawn(
         refuse_if_taken()
 
     mode = role_config.permission_mode if permission_mode is None else permission_mode
-    # Claude Code's modes are the role config's; another agent takes only an explicit
-    # one, in its own vocabulary (a replay's "" is "none recorded": its default).
-    native_mode = mode if selected.adapter.id == "claude-code" else (permission_mode or None)
+    # The role config's modes are in the legacy (Claude Code's) vocabulary; another agent
+    # takes only an explicit one, in its own (a replay's "" is "none recorded": its default).
+    native_mode = (
+        mode if selected.adapter.capabilities.legacy_fleet_args else (permission_mode or None)
+    )
     # The agent's own flags, refused (a sandbox for Claude Code, a Claude mode for Codex)
     # before a worktree or a codename is made for a spawn that cannot start.
     native_sandbox = (
@@ -1693,12 +1705,8 @@ def spawn(
     choice = claude_accounts_service.AccountChoice(account=None, source=None)
     if selected.adapter.accounts is not None:
         try:
-            choice = (
-                claude_accounts_service.choose(account, role=role, project=project)
-                if selected.adapter.id == claude_accounts_core.AGENT
-                else claude_accounts_service.choose(
-                    account, role=role, project=project, agent=selected.adapter.id
-                )
+            choice = claude_accounts_service.choose(
+                account, role=role, project=project, agent=selected.adapter.id
             )
         except claude_accounts_service.NoSuchAccount as exc:
             raise FleetError(str(exc)) from exc
@@ -1812,10 +1820,8 @@ def spawn(
         # the CALLER's aisquare home and account variables travel with the
         # window (set as absolute paths, or unset through `env -u`), exactly as
         # the Accounts page's sign-in window carries them.
-        command, carried = (
-            claude_accounts_service.carry_environment(command)
-            if choice.account.agent == claude_accounts_core.AGENT
-            else claude_accounts_service.carry_environment(command, agent=choice.account.agent)
+        command, carried = claude_accounts_service.carry_environment(
+            command, agent=choice.account.agent
         )
         env.update(carried)
     # `auto` behind the explainability proxy is refused from the first tool call
@@ -1936,7 +1942,7 @@ def _launch_binary(
     *,
     binary: str | None,
     spec: LaunchSpec | None,
-    claude_code: bool,
+    family: str | None,
     notes: list[str],
     bin_flag: bool = True,
 ) -> harness.BinaryResolution:
@@ -1958,9 +1964,7 @@ def _launch_binary(
     resolution = harness.resolve_binary(role, override=spec.binary)
     if shutil.which(resolution.binary) is None:
         # Replayed, and gone since: today's resolution, when it is the same kind of program.
-        resolution = _in_place_of_recorded(
-            role, resolution.binary, claude_code=claude_code, notes=notes
-        )
+        resolution = _in_place_of_recorded(role, resolution.binary, family=family, notes=notes)
     return resolution
 
 
@@ -1986,7 +1990,7 @@ def _binary_for(
 
 
 def _in_place_of_recorded(
-    role: str, recorded: str, *, claude_code: bool, notes: list[str]
+    role: str, recorded: str, *, family: str | None, notes: list[str]
 ) -> harness.BinaryResolution:
     """What a replay starts when ``recorded``, the binary its spec holds, has left the PATH.
 
@@ -2001,12 +2005,12 @@ def _in_place_of_recorded(
     override. Two programs that are both not Claude Code are not thereby the
     same one — aider's arguments are not codex's — so the same kind is known
     two ways only. By name: the same basename somewhere else (`/opt/old/aider`,
-    then `aider`). Or as Claude Code: the recorded binary by its name
-    (`harness.is_default_agent`) or by ``claude_code`` — its hook joined the row
-    to a board session, or this launch resumes a transcript, and only Claude
-    Code does either — and today's by its name. So a removed `claude2` parallel
-    install its hook joined comes back on `claude`, resumed or `--fresh`, and
-    one with nothing to show what it was is refused.
+    then `aider`). Or as the same agent: the recorded binary's by its name
+    (`agent_adapters.adapter_for_binary`) or by ``family`` — the board session its
+    own hook joined the row to — and today's by its name. So a removed
+    `claude2` parallel install its hook joined comes back on `claude`, resumed or
+    `--fresh`, a `codex2` on `codex` and never on `claude`, and one with nothing
+    to show what it was is refused.
 
     Every refusal here names a way out that a restart has; `--bin` is not one.
     """
@@ -2018,8 +2022,9 @@ def _in_place_of_recorded(
             "install it, or change the role's binding"
         )
     same_name = Path(today.binary).name == Path(recorded).name
-    was_claude_code = claude_code or harness.is_default_agent(recorded)
-    if not same_name and not (was_claude_code and harness.is_default_agent(today.binary)):
+    was = family or getattr(adapter_for_binary(recorded), "id", None)
+    now = adapter_for_binary(today.binary)
+    if not same_name and not (was is not None and now is not None and now.id == was):
         raise FleetError(
             f"{gone}, and the role resolves to {today.binary!r} today (chosen by: "
             f"{today.source}), not known to be the same kind of program: the recorded "
@@ -2056,7 +2061,7 @@ def _replayed_args(role: str, spec: LaunchSpec, config: FleetSettings) -> list[s
 
 
 def _without_session_choice(
-    binary: str, args: Sequence[str], *, claude_code: bool = False
+    binary: str, args: Sequence[str], *, family: str | None = None
 ) -> list[str]:
     """``args`` less the flags that pick WHICH session a launch runs — for the launch spec.
 
@@ -2067,21 +2072,22 @@ def _without_session_choice(
     Code refuses ``--session-id`` with ``--resume`` unless it forks — or, on
     ``--fresh``, started the replacement on the old session id.
 
-    These are Claude Code's flags, so they go only where they are known to be:
-    another program's ``-c`` is its own — aider's config file, codex's config
-    override — and is replayed as given. Known three ways. By name
-    (``harness.is_default_agent``, the predicate the role's ``default_args``
-    and ``--session-id`` pinning share). By ``claude_code``: a row its hook
-    joined to a board session, or a launch that resumes a transcript — only
-    Claude Code does either, so a ``--fresh`` restart of a ``claude2`` spawned
-    with ``-c`` does not continue the old conversation under the hand-off
+    These are the flags of an agent whose session AISquare names at launch
+    (``capabilities.assigns_session_id``: Claude Code's), so they go only where they
+    are known to be: another program's ``-c`` is its own — aider's config file,
+    codex's config override — and is replayed as given. Known three ways. By name
+    (``agent_adapters.adapter_for_binary``, as the role's ``default_args`` and
+    ``--session-id`` pinning know Claude Code). By ``family``: the board session its
+    hook joined, so a ``--fresh`` restart of a ``claude2``
+    spawned with ``-c`` does not continue the old conversation under the hand-off
     prompt. And by the arguments NAMING a session (``--session-id <id>``,
     ``--resume <id>``): the identity planner reads those whatever the binary
     is called and joins the row to that session, so a restart resumes it with
     its own ``--resume`` — the ``claude2`` parallel install
     (``AISQUARE_BIN_CODER=claude2``) spawned on a session its caller chose.
     """
-    if harness.is_default_agent(binary) or claude_code:
+    kind = recorded_adapter(family) if family else adapter_for_binary(binary)
+    if kind is not None and kind.capabilities.assigns_session_id:
         return explainability_service.without_session_choice(args)
     # An id the planner READ from the arguments, not one it minted — it mints
     # only for Claude Code by name, answered above.
@@ -2715,7 +2721,8 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
     with store_session() as store:
         agent = _live_agent(store, project, label)
     status = status_of(agent)
-    if agent.agent not in (None, "claude-code") and (
+    adapter = recorded_adapter(agent.agent)
+    if not (adapter is not None and adapter.capabilities.reads_pane_readiness) and (
         status.session is None
         or status.session.state != "waiting"
         or _now() - status.session.last_seen_at > _team()._STALE_AFTER
@@ -2940,7 +2947,7 @@ def _stop_row(
     try:
         window = _window()
         if not force and window is not None and not window.dead:
-            srv.send_literal(agent.pane_id, "/exit")
+            srv.send_literal(agent.pane_id, _exit_command(agent))
             _sleep(_KEY_GAP)
             srv.send_keys(agent.pane_id, "Enter")
             exited_here = True
@@ -4372,7 +4379,8 @@ def switch(
     notes: list[str] = []
     failures: list[str] = []  # the notes that say what did not happen (`SwitchReceipt`)
     kind = agent.agent or claude_accounts_core.AGENT
-    if kind != claude_accounts_core.AGENT and not fresh:
+    adapter = recorded_adapter(kind)
+    if adapter is not None and not adapter.capabilities.resumes_across_homes and not fresh:
         # Its rollout lives under the old CODEX_HOME: no session on another home resumes it.
         fresh = True
         notes.append(
@@ -4383,23 +4391,13 @@ def switch(
     # (tests/test_one_account_resolver.py): `--to` is the flag rung; without it
     # headroom decides first, with the account the agent is leaving excluded.
     try:
-        choice = (
-            claude_accounts_service.choose_for_handover(
-                to,
-                role=agent.role,
-                project=project,
-                exclude=() if current is None else (current,),
-                automatic=automatic,
-            )
-            if kind == claude_accounts_core.AGENT
-            else claude_accounts_service.choose_for_handover(
-                to,
-                role=agent.role,
-                project=project,
-                exclude=() if current is None else (current,),
-                automatic=automatic,
-                agent=kind,
-            )
+        choice = claude_accounts_service.choose_for_handover(
+            to,
+            role=agent.role,
+            project=project,
+            exclude=() if current is None else (current,),
+            automatic=automatic,
+            agent=kind,
         )
     except claude_accounts_service.NoSuchAccount as exc:
         raise FleetError(str(exc)) from exc
@@ -4579,7 +4577,7 @@ def _respawn(
     )
     resume: ResumeSpec | None = None
     if not fresh and session is not None and transcript is not None and transcript.is_file():
-        resume = ResumeSpec(session.id, transcript)
+        resume = ResumeSpec(session.id, transcript, session.native_session_id)
     elif not fresh:
         notes.append(
             "no transcript on disk to resume — the replacement starts fresh with a hand-off prompt"
@@ -4598,10 +4596,9 @@ def _respawn(
         size=size,
         permission_mode=permission_mode,
         spec=agent.launch_spec,
-        # Only Claude Code's hooks write a board session (`agents connect`
-        # installs them for Claude Code alone): a row joined to one is Claude
-        # Code whatever its binary is called, resumed or `--fresh`.
-        claude_code=session is not None,
+        # The agent whose own hook joined the row to a board session, whatever its
+        # binary is called, resumed or `--fresh`.
+        family=_family(session),
         takes_over=session.id if takes_over and resume is None and session is not None else None,
         onboard=onboard,
         # Asked again here, after a stop that can outlast the binary (a relink in the
@@ -4648,10 +4645,24 @@ def _refuse_a_replay_that_cannot_start(agent: FleetAgent, session: TeamSession |
         agent.role,
         binary=None,
         spec=agent.launch_spec,
-        claude_code=session is not None,
+        family=_family(session),
         notes=[],
         bin_flag=False,
     )
+
+
+def _family(session: TeamSession | None) -> str | None:
+    """The adapter id of the agent whose own hook wrote ``session``, the board session a
+    row was joined to (one recorded before adapters is :data:`DEFAULT_AGENT`'s, the one
+    agent with hooks then); ``None`` with no session. Evidence, unlike the row's
+    ``agent``, which is what a spawn ASSUMED of a binary it could not name."""
+    return (session.agent or DEFAULT_AGENT) if session is not None else None
+
+
+def _exit_command(agent: FleetAgent) -> str:
+    """What ends ``agent``'s session from its prompt (``AgentAdapter.exit_command``)."""
+    adapter = recorded_adapter(agent.agent) or get_adapter(DEFAULT_AGENT)
+    return adapter.exit_command
 
 
 @dataclass

@@ -3,21 +3,15 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 
 from aisquare.core import agents, harness, orchestrator, paths, selfcli
-from aisquare.core.agent_adapters import adapter_for_binary, get_adapter
-from aisquare.core.agent_adapters.types import (
-    AgentAdapter,
-    BadEffortError,
-    config_home,
-    model_overrides,
-    option_occurrences,
-)
+from aisquare.core.agent_adapters import DEFAULT_AGENT, adapter_for_binary, get_adapter
+from aisquare.core.agent_adapters.types import AgentAdapter, BadEffortError
 from aisquare.core.config import AppConfig, config_snapshot, load_config, save_config
 from aisquare.core.spawn import LAUNCH_AGENT_ENV as LAUNCH_AGENT_ENV
 from aisquare.core.store import store_session
@@ -52,7 +46,7 @@ class UnknownWrapperError(ValueError):
         import shlex
 
         self.fix = shlex.join(
-            ["aisquare", "team", "bind", role, "--agent", "claude-code", "--bin", binary]
+            ["aisquare", "team", "bind", role, "--agent", DEFAULT_AGENT, "--bin", binary]
         )
         super().__init__(
             f"The agent family of {binary!r} is unknown. For a Claude wrapper, run: {self.fix}. "
@@ -89,7 +83,7 @@ def launch_identity(env: dict[str, str], selected: ResolvedAgent, hub: Path | No
     env["AISQUARE_LAUNCH_ID"] = str(uuid.uuid4())
     env[LAUNCH_AGENT_ENV] = selected.adapter.id
     # Claude Code's CLAUDE_CONFIG_DIR stays as the shell or the binding wrote it.
-    if selected.adapter.id != "claude-code":
+    if selected.adapter.capabilities.exports_home_env:
         env[selected.adapter.home_env] = str(selected.config_dir)
     if hub is not None:
         env.setdefault("AISQUARE_TEAM_HUB", str(hub))
@@ -143,7 +137,7 @@ def resolve(
         (owned_family, "inherited"),
         (inherited, "operator"),
         (config.agents.default, "user"),
-        ("claude-code", "default"),
+        (DEFAULT_AGENT, "default"),
     )
     name, source = next((value, origin) for value, origin in choices if value)
     adapter = get_adapter(name)
@@ -156,7 +150,8 @@ def resolve(
     elif (
         inferred is None
         and source not in {"flag", "role", "default"}
-        and not (source == "user" and adapter.id == "claude-code")
+        # A user default of the default agent names what an unnamed binary always was.
+        and not (source == "user" and adapter.id == DEFAULT_AGENT)
     ):
         raise UnknownWrapperError(chosen_binary.binary, role)
     effective_env = {**os.environ, **profile.env}
@@ -165,18 +160,10 @@ def resolve(
         chosen_binary,
         source,
         profile,
-        # Claude Code's as written (core.agents._claude_home), as every reader names it.
-        _claude_home(effective_env)
-        if adapter.id == "claude-code"
-        else config_home(adapter, agents._home(), effective_env),
+        # The binding's or this shell's, as the agent itself reads it (Claude Code's as
+        # written, as every reader names it: core.agents._claude_home).
+        adapter.config_dir(agents._home(), effective_env),
     )
-
-
-def _claude_home(env: Mapping[str, str]) -> Path:
-    """Claude Code's config dir for a launch whose environment is ``env``: the binding's or
-    this shell's ``CLAUDE_CONFIG_DIR``, else ``~/.claude``, as ``core.agents`` names it."""
-    value = env.get("CLAUDE_CONFIG_DIR", "").strip()
-    return agents._claude_home(Path(value) if value else None)
 
 
 def use(name: str, *, project: bool = False, cwd: Path | None = None) -> str:
@@ -209,19 +196,18 @@ def prepare_arguments(
     forwarded: list[str] | None = None,
 ) -> NativeArguments:
     raw = [*owned, *(forwarded or [])]
-    # Saved Claude flags are part of AISquare's configuration contract. The
-    # final native override wins, and one-off passthrough belongs to the CLI
-    # (including values introduced by newer versions or wrappers).
-    if selected.adapter.id == "claude-code":
-        efforts = list(option_occurrences(raw, "--effort"))
-        if efforts and efforts[-1].index < len(owned):
-            selected.adapter.validate(None, efforts[-1].value)
-    model, original_effort = model_overrides(selected.adapter.id, raw)
+    # Saved flags in AISquare's own vocabulary (Claude Code's --effort) are part of
+    # AISquare's configuration contract. The final native override wins, and one-off
+    # passthrough belongs to the CLI (including values introduced by newer versions or
+    # wrappers), as does a native config value (NativeChoice.effort_index).
+    choice = selected.adapter.native_choice(raw)
+    if choice.effort_index is not None and choice.effort_index < len(owned):
+        selected.adapter.validate(None, choice.effort)
+    model, original_effort = choice.model, choice.effort
     argv = selected.adapter.native_args(raw)
     effort = (
         selected.adapter.effort_alias(original_effort)
         if original_effort is not None
-        and selected.adapter.id == "codex"
         and selected.adapter.effort_alias(original_effort) != original_effort.strip().lower()
         else original_effort
     )
@@ -352,7 +338,8 @@ def telemetry_args(
     env: dict[str, str],
     raw_args: list[str] | None = None,
 ) -> tuple[list[str], str]:
-    if selected.adapter.id != "codex":
+    adapter = selected.adapter
+    if not adapter.capabilities.native_telemetry:
         return [], ""
     from aisquare.services import native_telemetry
 
@@ -363,13 +350,14 @@ def telemetry_args(
         if not settings.ship:
             return (
                 [],
-                "Codex model tracing requires configured insight shipping; native auth unchanged",
+                f"{adapter.label} model tracing requires configured insight shipping; "
+                "native auth unchanged",
             )
         if native_telemetry.operator_configured(selected.config_dir, raw_args or []):
             return (
                 [],
-                "Codex keeps your configured exporter; AISquare native tracing is off",
+                f"{adapter.label} keeps your configured exporter; AISquare native tracing is off",
             )
-        return native_telemetry.start_receiver(env)
+        return native_telemetry.start_receiver(env, adapter)
     except Exception as exc:
-        return [], f"Codex launched without native telemetry: {exc}"
+        return [], f"{adapter.label} launched without native telemetry: {exc}"

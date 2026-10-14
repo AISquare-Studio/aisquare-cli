@@ -6,7 +6,6 @@ import contextlib
 import contextvars
 import functools
 import os
-import shutil
 import stat
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -124,7 +123,8 @@ def plugin_beside_note(name: str, config_dir: Path | None = None) -> str | None:
     wrote the hooks beside the plugin and said nothing (review of #257). A plugin enabled
     for one repository is not named: beside the hooks it doubles nothing there.
     """
-    plugin = claude_plugin(config_dir) if name == "claude-code" else None
+    route = agent_core.plugin_of(name)
+    plugin = route.installed(config_dir) if route is not None else None
     if plugin is None:
         return None
     return (
@@ -150,20 +150,21 @@ def disconnect_notes(name: str, config_dir: Path | None = None, *, removed: bool
     if spec is None or not spec.connectable:
         return []
     notes: list[str] = []
-    user = claude_plugin(config_dir) if name == "claude-code" else None
-    if user is not None:
+    route = agent_core.plugin_of(name)
+    user = route.installed(config_dir) if route is not None else None
+    if route is not None and user is not None:
         notes.append(
             f"the aisquare plugin is still enabled in {user.config_dir}, so aisquare keeps "
-            f"running there — to stop it: {claude_plugin_command('disable', user.config_dir)}"
+            f"running there — to stop it: {route.command('disable', user.config_dir)}"
         )
-    if name == "claude-code" and agent_core.plugin_route_supported():
+    if route is not None:
         notes.extend(
             f"the aisquare plugin is still enabled in {plugin.project} ({plugin.scope} scope), "
             "so aisquare keeps running in sessions started there — to stop it: "
-            + agent_core.claude_plugin_command(
+            + route.command(
                 "uninstall", plugin.config_dir, scope=plugin.scope, project=plugin.project
             )
-            for plugin in agent_core.claude_repo_plugins(config_dir)
+            for plugin in route.repo_installs(config_dir)
         )
     if not removed and not notes:
         notes.append(
@@ -423,7 +424,7 @@ def remedies(name: str, directory: Path, refusal: Refusal, *, also: str | None =
         # shell read, with `claude` on PATH: any other not known to be there must be again
         # (behind a folder this user cannot enter, it may not be: delta review 8 of #257).
         there = ""
-        made = refusal.this_shell and agent_core.claude_on_path() is not None
+        made = refusal.this_shell and agent_core.on_path(name) is not None
         if refusal.path in directory.parents and not (made or os.path.isdir(directory)):
             there = f" so that {directory} is there"
         found.append(f"repair {refusal.path} ({refusal.fact}){there}, then connect again")
@@ -438,7 +439,7 @@ def remedies(name: str, directory: Path, refusal: Refusal, *, also: str | None =
         (refusal.this_shell or recorded)
         and access(name, directory).disconnect is None
         # Disconnect takes the hooks and the record out, and leaves a plugin to grade.
-        and not (agent_core.plugin_route_supported() and agent_core.claude_plugin(directory))
+        and not ((plugin := agent_core.plugin_of(name)) and plugin.installed(directory))
     ):
         this = f"{_REPOINT}, and disconnect this one: {disconnect}"
         found.append(this if refusal.this_shell else f"forget it: {disconnect}")
@@ -567,13 +568,17 @@ def _first_run_dir(name: str, config_dir: Path | None) -> Path | None:
     (a typo must not get hooks), nor a ``~olduser/…`` this machine lacks, which read as
     written would be made in the cwd.
 
-    Another agent (Codex) whose binary is on PATH gets its config dir as named: it too
-    makes the directory only when it first runs, and a fleet account's directory is
-    connected before its first launch.
+    An agent without ``capabilities.ambient_first_run`` (Codex) whose binary is on PATH
+    gets its config dir as named: it too makes the directory only when it first runs, and
+    a fleet account's directory is connected before its first launch.
     """
-    if name != "claude-code":
+    try:
+        adapter = get_adapter(name)
+    except ValueError:
+        return None
+    if not adapter.capabilities.ambient_first_run:
         return _native_first_run_dir(name, config_dir)
-    if agent_core.claude_on_path() is None:
+    if agent_core.on_path(name) is None:
         return None
     where = _this_shells_dir(name, config_dir)
     if where is None or paths.names_no_home(where) or agent_core.present(where):
@@ -582,16 +587,10 @@ def _first_run_dir(name: str, config_dir: Path | None) -> Path | None:
 
 
 def _native_first_run_dir(name: str, config_dir: Path | None) -> Path | None:
-    """:func:`_first_run_dir` for an agent other than Claude Code: its config dir, when its
-    binary is on PATH and the directory is not there yet."""
+    """:func:`_first_run_dir` for an agent that makes any dir it is given: its config dir,
+    when its binary is on PATH and the directory is not there yet."""
     spec = agent_core.spec(name, config_dir)
-    if spec is None or not spec.connectable:
-        return None
-    try:
-        binary = get_adapter(name).binary
-    except ValueError:
-        return None
-    if shutil.which(binary) is None:
+    if spec is None or not spec.connectable or agent_core.on_path(name) is None:
         return None
     where = spec.home
     if paths.names_no_home(where) or agent_core.present(where):
@@ -600,9 +599,14 @@ def _native_first_run_dir(name: str, config_dir: Path | None) -> Path | None:
 
 
 def _this_shells_dir(name: str, config_dir: Path | None) -> Path | None:
-    """``config_dir`` when it is the Claude Code config dir sessions from this shell read
-    (``CLAUDE_CONFIG_DIR``, else ``~/.claude``), or it is ``None``; else ``None``."""
-    ambient = agent_core.ambient_hook_dir(name) if name == "claude-code" else None
+    """``config_dir`` when it is the config dir sessions from this shell read
+    (``CLAUDE_CONFIG_DIR``, else ``~/.claude``), or it is ``None``; else ``None``. Only
+    for an agent with ``capabilities.ambient_first_run``, the one connect makes alone."""
+    try:
+        ambient_only = get_adapter(name).capabilities.ambient_first_run
+    except ValueError:
+        ambient_only = False
+    ambient = agent_core.ambient_hook_dir(name) if ambient_only else None
     if ambient is None or config_dir is None:
         return ambient
     same = agent_core.dir_identity(config_dir) == agent_core.dir_identity(ambient)

@@ -1,5 +1,10 @@
 """Per-launch, loopback OTLP/JSON receiver for Codex's native telemetry.
 
+For an agent with ``capabilities.native_telemetry``: the exporter's launch arguments are
+its adapter's (``AgentAdapter.telemetry_args``); the config layers that may hold the
+operator's own exporter (:func:`operator_configured`) and the attributes the receiver
+keeps (``_FIELDS``) are Codex's, which another agent's telemetry would extend here.
+
 The receiver has no provider credentials and never proxies model requests.
 It writes redacted metadata into the existing spool; the existing ship command
 owns gateway authentication, delivery and retry. It exits with its owner.
@@ -26,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from aisquare.core import insights, orchestrator, outbox, paths, selfcli, spawn
-from aisquare.core.agent_adapters.types import option_values
+from aisquare.core.agent_adapters.types import AgentAdapter, option_values
 from aisquare.core.agent_sessions import METADATA_PRUNE_INTERVAL, prune_metadata
 from aisquare.core.agent_sessions import NATIVE_METADATA_TTL as NATIVE_METADATA_TTL
 from aisquare.core.store import store_session
@@ -394,10 +399,13 @@ def serve(
                 ready.parent.rmdir()
 
 
-def start_receiver(env: dict[str, str]) -> tuple[list[str], str]:
+def start_receiver(env: dict[str, str], adapter: AgentAdapter) -> tuple[list[str], str]:
     """Start only for an opted-in launch. Failure costs telemetry, never launch."""
     if os.name != "posix":
-        return [], "Codex native telemetry requires POSIX or WSL; native launch is available"
+        return (
+            [],
+            f"{adapter.label} native telemetry requires POSIX or WSL; native launch is available",
+        )
     directory = Path(tempfile.mkdtemp(prefix="aisquare-otel-"))
     ready = directory / "ready.json"
     child: subprocess.Popen[bytes] | None = None
@@ -428,19 +436,14 @@ def start_receiver(env: dict[str, str]) -> tuple[list[str], str]:
         state = json.loads(ready.read_text())
         # Native exporter does asynchronous delivery. No model routing or auth changes.
         endpoint = f"http://127.0.0.1:{state['port']}/v1/logs"
-        config = "otel.exporter.otlp-http"
-        args = [
-            "-c",
-            f"{config}.endpoint={json.dumps(endpoint)}",
-            "-c",
-            f'{config}.protocol="json"',
-            "-c",
-            f"{config}.headers.Authorization={json.dumps('Bearer ' + state['token'])}",
-        ]
-        args += ["-c", "otel.log_user_prompt=false"]
+        args = adapter.telemetry_args(endpoint, "Bearer " + state["token"])
         env["AISQUARE_PIPELINE_ID"] = env["AISQUARE_LAUNCH_ID"]
         env["AISQUARE_TRACE_AGENT_NAME"] = "aisquare-" + env.get("AISQUARE_ROLE", "coder")
-        return args, "Codex native telemetry enabled (local receiver; gateway delivery uses ship)"
+        return (
+            args,
+            f"{adapter.label} native telemetry enabled "
+            "(local receiver; gateway delivery uses ship)",
+        )
     except Exception as exc:
         if child is not None and child.poll() is None:
             child.terminate()
@@ -448,7 +451,7 @@ def start_receiver(env: dict[str, str]) -> tuple[list[str], str]:
         for file in directory.iterdir():
             file.unlink()
         directory.rmdir()
-        return [], f"Codex launched without native telemetry: {exc}"
+        return [], f"{adapter.label} launched without native telemetry: {exc}"
 
 
 if __name__ == "__main__":

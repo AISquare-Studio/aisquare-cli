@@ -19,7 +19,6 @@ import shutil
 import stat
 import subprocess
 import sys
-import tomllib
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
@@ -29,12 +28,17 @@ from typing import Any
 
 from aisquare.core import atomic, paths, selfcli
 from aisquare.core.agent_adapters import adapters, get_adapter
+from aisquare.core.agent_adapters.claude_code import ClaudeCodeAdapter
 from aisquare.core.agent_adapters.types import (
+    GENERIC_HOOK,
+    AgentAdapter,
     AgentPlugin,
     HookSpec,
+    HooksSwitch,
     PluginInstall,
-    config_home,
+    hook_args,
 )
+from aisquare.core.agent_adapters.types import version_in as native_version
 from aisquare.core.version import DISTRIBUTION, __version__
 from aisquare.models import AgentHookSite, AgentInfo
 
@@ -55,27 +59,21 @@ so this changes nothing for anyone who has not opted in.
 #: and keep Claude Code's default.
 _CONTEXT_HOOKS = frozenset({"SessionStart", "UserPromptSubmit"})
 
-# Claude Code lifecycle events aisquare hooks into → the `aisquare hook` subcommand.
-_HOOKS = (
-    ("SessionStart", "session-start"),
-    ("UserPromptSubmit", "user-prompt-submit"),
-    ("SessionEnd", "session-end"),
-    ("Stop", "stop"),
-    ("Notification", "notification"),
-    # Fires INSTEAD of Stop when the turn ends on an API error — a usage limit
-    # above all (#146). Its output is ignored by Claude Code, so it is pure
-    # bookkeeping: the board learns the session is `limited` and when the limit
-    # lifts. An install from before this event reads as partial, and `doctor`
-    # says to re-run `agents connect`, exactly as it did when Stop and
-    # Notification arrived.
-    ("StopFailure", "stop-failure"),
-)
+#: Claude Code's lifecycle events → the ``aisquare hook`` subcommand, as its adapter installs
+#: them (``ClaudeCodeAdapter.capabilities.hooks``). ``StopFailure`` fires INSTEAD of Stop
+#: when the turn ends on an API error — a usage limit above all (#146); an install from
+#: before an event reads as partial, and ``doctor`` says to re-run ``agents connect``.
+_HOOKS = tuple((hook.event, hook.command) for hook in ClaudeCodeAdapter.capabilities.hooks)
 
 #: The Claude Code plugin route (``plugins/claude-code`` in this repo): the plugin and
 #: the marketplace that lists it, as ``/plugin install aisquare@aisquare-cli`` names
 #: them and ``enabledPlugins`` keys them. Its hooks run the same ``aisquare hook
 #: <event>`` as :data:`_HOOKS`, and stand down for any event settings.json already
 #: runs. tests/test_claude_plugin.py holds both manifests to these names.
+_CLAUDE_CODE = ClaudeCodeAdapter.id
+"""Claude Code's id, for the readers here that are Claude Code's alone (its plugin files,
+its ``~/.claude.json``)."""
+
 CLAUDE_PLUGIN = "aisquare"
 CLAUDE_PLUGIN_MARKETPLACE = "aisquare-cli"
 CLAUDE_PLUGIN_ID = f"{CLAUDE_PLUGIN}@{CLAUDE_PLUGIN_MARKETPLACE}"
@@ -176,11 +174,7 @@ def claude_json_paths(config_dir: Path) -> list[Path]:
 def _specs(config_dir: Path | None = None) -> list[AgentSpec]:
     specs = []
     for adapter in adapters():
-        directory = (
-            _claude_home(config_dir)
-            if adapter.id == "claude-code"
-            else config_home(adapter, _home(), os.environ, config_dir)
-        )
+        directory = adapter.config_dir(_home(), os.environ, config_dir)
         specs.append(
             AgentSpec(
                 adapter.id,
@@ -366,11 +360,16 @@ def _read_settings_file(path: Path, *, strict: bool = False) -> dict[str, Any]:
         return {}
 
 
+#: The options ``hook_args`` puts after the subcommand, and ``--definition`` (a hook that
+#: needs trust), in the order they are written back.
+_HOOK_OPTIONS = ("--definition", "--agent", "--event", "--config-dir")
+
+
 def _hook_command_parts(command: str) -> tuple[list[str], dict[str, str]]:
     """Separate trailing hook options, independent of their order."""
     tokens = _split_command(command)
     options: dict[str, str] = {}
-    while len(tokens) >= 2 and tokens[-2] in {"--definition", "--config-dir"}:
+    while len(tokens) >= 2 and tokens[-2] in _HOOK_OPTIONS:
         options.setdefault(tokens[-2], tokens[-1])
         tokens = tokens[:-2]
     return tokens, options
@@ -378,8 +377,9 @@ def _hook_command_parts(command: str) -> tuple[list[str], dict[str, str]]:
 
 def _without_hook_definition(command: str) -> str:
     tokens, options = _hook_command_parts(command)
-    if "--config-dir" in options:
-        tokens += ["--config-dir", options["--config-dir"]]
+    for option in _HOOK_OPTIONS[1:]:
+        if option in options:
+            tokens += [option, options[option]]
     return " ".join(_quote(token) for token in tokens)
 
 
@@ -492,7 +492,8 @@ def _is_aisquare_hook_command(command: str) -> bool:
     if len(tokens) < 3 or tokens[-2] != "hook":
         return False
     if tokens[-1] not in {
-        hook.command for adapter in adapters() for hook in adapter.capabilities.hooks
+        GENERIC_HOOK,
+        *(hook.command for adapter in adapters() for hook in adapter.capabilities.hooks),
     }:
         return False
     return _is_aisquare_program(tokens[0]) or tokens[-4:-2] == ["-m", "aisquare"]
@@ -532,11 +533,21 @@ def _regular_settings(path: Path) -> os.stat_result | None:
     return info
 
 
+def _adapter(name: str) -> AgentAdapter | None:
+    """The adapter registered as ``name``; ``None`` for an agent aisquare only detects."""
+    try:
+        return get_adapter(name)
+    except ValueError:
+        return None
+
+
 def hooks_shape_strict(name: str) -> bool:
     """Whether ``name``'s hooks file is refused, never rewritten, when its ``hooks`` is not an
-    object of arrays: Codex's ``hooks.json`` (#113). Claude Code's ``settings.json`` reads
-    such a value as no groups, and ``install_hooks`` replaces it with ours."""
-    return name != "claude-code"
+    object of arrays (``capabilities.strict_hooks_file``: Codex's ``hooks.json``, #113).
+    Claude Code's ``settings.json`` reads such a value as no groups, and ``install_hooks``
+    replaces it with ours."""
+    adapter = _adapter(name)
+    return adapter is not None and adapter.capabilities.strict_hooks_file
 
 
 def _hooks_of_their_shape(path: Path, value: dict[str, Any], *, strict: bool) -> dict[str, Any]:
@@ -618,14 +629,12 @@ def install_hooks(name: str, config_dir: Path | None = None) -> bool:
     if not isinstance(hooks, dict):
         hooks = {}
     command = _aisquare_command()  # already shell-quoted where needed
+    adapter = get_adapter(name)
     for hook in spec.hooks:
         groups = hooks.get(hook.event)
         kept = _without_aisquare(groups) if isinstance(groups, list) else []
-        suffix = f" --config-dir {_quote(str(spec.home))}" if hook.command == "codex" else ""
-        entry: dict[str, Any] = {
-            "type": "command",
-            "command": f"{command} hook {hook.command}{suffix}",
-        }
+        argv = " ".join(_quote(arg) for arg in hook_args(adapter, hook, spec.home))
+        entry: dict[str, Any] = {"type": "command", "command": f"{command} hook {argv}"}
         if hook.timeout is not None:
             # Never below the ceiling the CI hook may wait for; never *reducing*
             # a longer one the operator chose deliberately.
@@ -636,7 +645,7 @@ def install_hooks(name: str, config_dir: Path | None = None) -> bool:
         kept.append(group)
         hooks[hook.event] = kept
     settings["hooks"] = hooks
-    if get_adapter(name).capabilities.requires_hook_trust:
+    if adapter.capabilities.requires_hook_trust:
         definition = _definition_fingerprint(settings)
         for groups in hooks.values():
             for group in groups if isinstance(groups, list) else []:
@@ -738,95 +747,23 @@ def hook_timeout_shortfall(name: str, config_dir: Path | None = None) -> list[st
     return _missing_events(name, config_dir, reconciled=True)
 
 
-@dataclass(frozen=True)
-class HooksSwitch:
-    """What switches every one of an agent's hooks off: the setting, as the operator writes
-    it, and the file that sets it (``None``: a launch argument)."""
-
-    setting: str
-    path: Path | None = None
-
-    def __str__(self) -> str:
-        return f"{self.setting} in {self.path or 'the launch arguments'}"
-
-
 #: Each agent's switch for every hook, as messages that name it without a file write it.
-HOOKS_OFF_SETTINGS = {
-    "claude-code": '"disableAllHooks": true',
-    "codex": "`features.hooks = false`",
-}
+HOOKS_OFF_SETTINGS = {adapter.id: adapter.hooks_off_setting for adapter in adapters()}
 
 
 def hooks_switch(
     name: str, config_dir: Path | None = None, args: Sequence[str] = ()
 ) -> HooksSwitch | None:
-    """What switches every hook off for ``name`` in ``config_dir``, launched with ``args``.
-
-    Claude Code: ``"disableAllHooks": true`` in its ``settings.json``, a literal ``true``
-    as Claude Code reads it; ``args`` are not read. Codex (0.162.1): ``hooks = false``
-    under ``[features]``, or its deprecated alias ``codex_hooks``, in ``config.toml``, in
-    the profile ``-p`` layers on it, or in ``args`` (``-c features.hooks=false``,
-    ``--disable hooks``), a later layer winning and the canonical key winning over the
-    alias wherever either is set, as Codex merges them. Either agent then runs no hook
-    from that directory, so none of ours fire however complete they are, and ``agents
-    connect`` leaves the setting alone: Connect cannot change it. Read-only; never raises.
+    """What switches every hook off for ``name`` in ``config_dir``, launched with ``args``
+    (:meth:`AgentAdapter.hooks_switch`: Claude Code's ``"disableAllHooks": true``, Codex's
+    ``features.hooks = false``). The agent then runs no hook from that directory, so none
+    of ours fire however complete they are, and ``agents connect`` leaves the setting
+    alone: Connect cannot change it. Read-only; never raises.
     """
     spec = _spec(name, config_dir)
     if spec is None or spec.settings_path is None:
         return None
-    if name == "codex":
-        return _codex_hooks_switch(spec.home, args)
-    if read_json(spec.settings_path).get("disableAllHooks") is True:
-        return HooksSwitch(HOOKS_OFF_SETTINGS["claude-code"], spec.settings_path)
-    return None
-
-
-def _codex_hooks_switch(home: Path, args: Sequence[str]) -> HooksSwitch | None:
-    from aisquare.core.agent_adapters.types import option_occurrences, option_values
-
-    user = home / "config.toml"
-    layers: list[tuple[dict[str, Any], Path | None, str]] = [(_toml_features(user), user, "")]
-    profile = next(reversed(option_values(args, "-p", "--profile")), None)
-    if profile and Path(profile).name == profile and profile not in {".", ".."}:
-        selected = home / f"{profile}.config.toml"
-        layers.append((_toml_features(selected), selected, ""))
-    for item in option_occurrences(args, "-c", "--config", "--enable", "--disable"):
-        option = item.prefix.rstrip("=") or args[item.index]
-        spelled = f"{option} {item.value}"
-        if option in {"--enable", "--disable"}:
-            layers.append(({item.value: option == "--enable"}, None, spelled))
-            continue
-        key, separator, raw = item.value.partition("=")
-        if separator and key.strip().startswith("features."):
-            try:
-                value = tomllib.loads("value=" + raw)["value"]
-            except (ValueError, RecursionError):
-                continue  # Codex reads it as a string, which no feature switch takes
-            layers.append(({key.strip().removeprefix("features."): value}, None, spelled))
-    decided: dict[str, tuple[bool, Path | None, str]] = {}
-    for features, path, spelled in layers:
-        for key in ("hooks", "codex_hooks"):
-            if isinstance(features.get(key), bool):
-                decided[key] = (features[key], path, spelled)
-    key = "hooks" if "hooks" in decided else "codex_hooks"
-    if key not in decided or decided[key][0]:
-        return None
-    _, path, spelled = decided[key]
-    if path is None:
-        return HooksSwitch(f"`{spelled}`")
-    return HooksSwitch(f"`{key} = false` under [features]", path)
-
-
-def _toml_features(path: Path) -> dict[str, Any]:
-    """``path``'s ``[features]`` table; ``{}`` when there is none or it cannot be read."""
-    try:
-        if not path.is_file():  # a FIFO would block the read
-            return {}
-        with path.open("rb") as handle:
-            features = tomllib.load(handle).get("features")
-    except (OSError, ValueError, RecursionError):
-        return {}
-    return features if isinstance(features, dict) else {}
+    return get_adapter(name).hooks_switch(spec.home, spec.settings_path, args)
 
 
 def hooks_disabled(name: str, config_dir: Path | None = None) -> bool:
@@ -844,42 +781,55 @@ def hooks_off(name: str, config_dir: Path | None = None) -> Path | None:
     return switch.path if switch is not None else None
 
 
-def claude_code_connected(config_dir: Path | None = None, *, cwd: Path | None = None) -> bool:
-    """Whether Claude Code in ``config_dir`` runs aisquare: the one "connected?" answer.
+def connected(name: str, config_dir: Path | None = None, *, cwd: Path | None = None) -> bool:
+    """Whether ``name`` in ``config_dir`` runs aisquare: the one "connected?" answer.
 
     ``cwd`` is the folder a session would start in, for a project- or local-scope
-    plugin (:func:`claude_repo_plugin_here`); this process's working directory
+    plugin (:meth:`AgentPlugin.repo_install_here`); this process's working directory
     unless given.
 
-    ``services.agents.claude_code_connected`` is its public face and says who asks
-    and why. It is implemented here so this module's own per-directory readers ask
-    it too: ``_to_info`` reports it as each site's ``hooks_installed`` in ``agents
-    list`` and ``agents status``.
-
-    Two routes, in a directory whose ``settings.json`` does not switch hooks off:
-    every lifecycle hook ``agents connect`` installs is in that file, or the
-    aisquare Claude Code plugin is installed and enabled there
-    (:func:`claude_plugin`), or, where that file has none of our hooks, installed at
-    project or local scope for the repository a session started in ``cwd`` loads it
-    from (:func:`claude_repo_plugin_here`). The switch comes first because it
-    silences every route, the plugin's included. Never raises: everything it
-    reads goes through :func:`read_json`.
+    Two routes, in a directory whose own config does not switch hooks off
+    (:func:`hooks_switch`): every lifecycle hook ``agents connect`` installs is in its
+    hooks file, or, for an agent with a plugin route (:func:`plugin_of`), the aisquare
+    plugin is installed and enabled there, or, where that file has none of our hooks,
+    installed at project or local scope for the repository a session started in ``cwd``
+    loads it from. The switch comes first because it silences every route, the
+    plugin's included. Never raises.
     """
-    if hooks_disabled("claude-code", config_dir):
+    if hooks_disabled(name, config_dir):
         return False
-    if hooks_installed("claude-code", config_dir):
+    if hooks_installed(name, config_dir):
         return True
-    if not plugin_route_supported():
+    plugin = plugin_of(name)
+    if plugin is None:
         return False
-    if claude_plugin(config_dir) is not None:
+    if plugin.installed(config_dir) is not None:
         return True
-    if hook_commands("claude-code", config_dir):
+    if hook_commands(name, config_dir):
         # Its own hooks, partial ones included, are what every other repository runs on;
         # a repository's plugin covers its repository alone (as in `hook_site_health`).
         # Counted, five of six hooks read "all lifecycle hooks installed" there, with no
         # Connect to add the sixth (review of #257).
         return False
-    return claude_repo_plugin_here(config_dir, cwd) is not None
+    return plugin.repo_install_here(config_dir, cwd) is not None
+
+
+def claude_code_connected(config_dir: Path | None = None, *, cwd: Path | None = None) -> bool:
+    """Whether Claude Code in ``config_dir`` runs aisquare (:func:`connected`).
+
+    ``services.agents.claude_code_connected`` is its public face and says who asks
+    and why. It is implemented here so this module's own per-directory readers ask
+    it too: ``_to_info`` reports it as each site's ``hooks_installed`` in ``agents
+    list`` and ``agents status``.
+    """
+    return connected(_CLAUDE_CODE, config_dir, cwd=cwd)
+
+
+def plugin_of(name: str) -> AgentPlugin | None:
+    """``name``'s aisquare plugin route where it runs on this platform, else ``None``."""
+    adapter = _adapter(name)
+    plugin = adapter.plugin if adapter is not None else None
+    return plugin if plugin is not None and plugin.supported() else None
 
 
 def claude_repo_plugin_here(
@@ -1074,16 +1024,6 @@ ClaudePlugin = PluginInstall
 (user scope) or in one repository (project and local scope): its ``version`` is what
 ``plugins/installed_plugins.json`` records, its ``scope`` the one ``claude plugin
 install`` was given."""
-
-
-def plugin_of(name: str) -> AgentPlugin | None:
-    """``name``'s aisquare plugin route (``AgentAdapter.plugin``) where it runs on this
-    platform, else ``None`` (and for an agent aisquare only detects)."""
-    try:
-        plugin = get_adapter(name).plugin
-    except ValueError:
-        return None
-    return plugin if plugin is not None and plugin.supported() else None
 
 
 def plugin_stands_down(name: str, config_dir: Path) -> bool:
@@ -1474,15 +1414,20 @@ def detected(spec: AgentSpec) -> bool:
     return present(spec.home) or any(present(path) for path in spec.context_files)
 
 
-def claude_on_path() -> str | None:
-    """Where ``claude`` is on PATH, if it is (an indirection so tests can decide).
+def on_path(name: str) -> str | None:
+    """Where agent ``name``'s binary is on PATH, if it is (an indirection so tests can decide).
 
-    npm and Homebrew make Claude Code's config dir only when ``claude`` first runs,
-    so before then the binary is how detection, ``agents connect`` and the doctor know
-    it is installed (review of #257). ``claude`` is ``harness.DEFAULT_AGENT_BINARY``,
-    named here so this module stays light to import.
+    npm and Homebrew make Claude Code's config dir only when ``claude`` first runs, and
+    Codex makes ``~/.codex`` only then too, so before then the binary is how detection,
+    ``agents connect`` and the doctor know it is installed (review of #257).
     """
-    return shutil.which("claude")
+    adapter = _adapter(name)
+    return shutil.which(adapter.binary) if adapter is not None else None
+
+
+def claude_on_path() -> str | None:
+    """Where ``claude`` is on PATH, if it is (:func:`on_path`)."""
+    return on_path(_CLAUDE_CODE)
 
 
 def _to_info(spec: AgentSpec, registry: dict[str, Any], *, ambient: bool = False) -> AgentInfo:
@@ -1494,13 +1439,8 @@ def _to_info(spec: AgentSpec, registry: dict[str, Any], *, ambient: bool = False
     sites = [
         AgentHookSite(
             config_dir=directory,
-            # Claude Code's sites report the shared answer, as the doctor's row does.
-            hooks_installed=(
-                claude_code_connected(directory)
-                if spec.name == "claude-code"
-                else integration_readiness(spec.name, directory)[0]
-                in {"configured", "observed", "unverified"}
-            ),
+            # Each site reports the shared answer, as the doctor's row does.
+            hooks_installed=connected(spec.name, directory),
             # And why it is False where hooks are switched off: read as "missing", it
             # sent the user to Connect, which cannot change it (review of #257).
             hooks_off=hooks_off(spec.name, directory),
@@ -1509,8 +1449,8 @@ def _to_info(spec: AgentSpec, registry: dict[str, Any], *, ambient: bool = False
     ]
     readiness, detail = integration_readiness(spec.name, _hook_dir(spec))
     found = detected(spec)
-    connected = spec.connectable and spec.name in _connected_set(registry)
-    if spec.name == "claude-code":
+    is_connected = False
+    if spec.connectable:
         # The answer doctor and Welcome give, so `agents list`/`status` and `aisquare
         # status` agree with them (review of #257). A directory whose hooks or plugin
         # run aisquare is connected, whoever wrote them: told "not connected", a
@@ -1518,15 +1458,15 @@ def _to_info(spec: AgentSpec, registry: dict[str, Any], *, ambient: bool = False
         # whose hooks are switched off or gone is not: the registry's word kept it
         # "connected" beside the doctor's "switched off" and Welcome's Connect.
         directory = _hook_dir(spec)
-        if all(
-            _dir_key(site.config_dir) != _dir_key(directory) for site in sites
-        ) and claude_code_connected(directory):
+        if all(_dir_key(site.config_dir) != _dir_key(directory) for site in sites) and connected(
+            spec.name, directory
+        ):
             sites.append(AgentHookSite(config_dir=directory, hooks_installed=True))
-        connected = any(site.hooks_installed for site in sites)
-        # A Claude Code that has never started has no config dir yet; its binary on PATH
+        is_connected = any(site.hooks_installed for site in sites)
+        # An agent that has never started has no config dir yet; its binary on PATH
         # says it is installed, for the directory a session from this shell reads (never
         # a --config-dir, which a typo could name), as `agents connect` treats it.
-        if not found and ambient and claude_on_path() is not None:
+        if not found and ambient and on_path(spec.name) is not None:
             found = True
     route = hook_route(spec.name, _hook_dir(spec))
     plugin = plugin_of(spec.name) if route == ROUTE_BOTH else None
@@ -1546,7 +1486,7 @@ def _to_info(spec: AgentSpec, registry: dict[str, Any], *, ambient: bool = False
         name=spec.name,
         detected=found,
         config_paths=context.paths,
-        connected=connected,
+        connected=is_connected,
         route=route,
         sites=sites,
     )
@@ -1727,8 +1667,8 @@ def integration_readiness(name: str, config_dir: Path) -> tuple[str, str]:
     ``not_configured``, ``configured``, or for an agent whose hooks need trust,
     ``unverified`` until AISquare has seen this definition run, then ``observed``.
 
-    Claude Code's ``configured`` is :func:`claude_code_connected`, the one "connected?"
-    answer, so a plugin-only directory reads as configured here too.
+    ``configured`` is :func:`connected`, the one "connected?" answer, so a plugin-only
+    directory reads as configured here too.
     """
     try:
         adapter = get_adapter(name)
@@ -1740,12 +1680,7 @@ def integration_readiness(name: str, config_dir: Path) -> tuple[str, str]:
             _inspected_settings(spec.settings_path, strict=hooks_shape_strict(name))
     except AgentSettingsError as exc:
         return "unreadable", str(exc)
-    installed = (
-        claude_code_connected(config_dir)
-        if name == "claude-code"
-        else hooks_installed(name, config_dir)
-    )
-    if not installed:
+    if not connected(name, config_dir):
         return "not_configured", ""
     if not adapter.capabilities.requires_hook_trust:
         return "configured", ""
@@ -1794,21 +1729,19 @@ _HOOK_BINARY_SEVERITY = {
     HOOK_BINARY_MISSING: 3,
 }
 
+
 #: The first thing in ``aisquare --version`` output that reads as a version
 #: (``0.6.0``, ``0.4.0rc1``, ``1.0.0+local``). Anchored on nothing else because
 #: the prefix has already changed once and may again.
-_VERSION_TOKEN = re.compile(r"\d+(?:\.\d+)+[0-9A-Za-z.+!-]*")
-
-
 def version_in(output: str) -> str | None:
     """The version an ``aisquare --version`` printed, or ``None`` when it printed none.
 
     Public because ``aisquare upgrade`` reads the new install's answer the same
-    way this module reads a hook binary's: one parse, so a change to what
-    ``--version`` prints has one place to land.
+    way this module reads a hook binary's: one parse (an agent's version probe's too,
+    ``agent_adapters.types.version_in``), so a change to what ``--version`` prints has
+    one place to land.
     """
-    match = _VERSION_TOKEN.search(output)
-    return match.group(0) if match else None
+    return native_version(output)
 
 
 @dataclass(frozen=True)
@@ -2082,10 +2015,10 @@ def hook_site_health(
     installed = hooks_installed(name, config_dir)
     commands = hook_commands(name, config_dir)
     plugin = None
-    if name == "claude-code" and plugin_route_supported():
-        plugin = claude_plugin(config_dir)
+    if (route := plugin_of(name)) is not None:
+        plugin = route.installed(config_dir)
         if plugin is None and not commands:
-            plugin = claude_repo_plugin_here(config_dir, cwd)
+            plugin = route.repo_install_here(config_dir, cwd)
     binaries: list[HookBinary] = []
     for command in commands:
         binary = hook_binary(command)
@@ -2119,58 +2052,31 @@ def hook_site_health(
     )
 
 
-def _claude_dirs_on_disk() -> list[Path]:
-    """Claude Code config directories on this machine that carry our hooks.
-
-    ``$CLAUDE_CONFIG_DIR``, ``~/.claude`` and every ``~/.claude*`` directory —
-    the ``[0-9]`` siblings of a parallel-install setup and the
-    ``~/.claude-account1`` naming the README documents. Only directories whose
-    ``settings.json`` holds at least one aisquare hook, or enables the aisquare
-    plugin (:func:`claude_plugin`), are returned: a hook that is on disk runs
-    whether or not this home ever heard of the directory, and that is the only
-    thing that makes a directory doctor's business.
-
-    A candidate whose ``settings.json`` this user cannot read — another
-    account's ``~/.claude-archived``, a backup left at mode 000 — is skipped, not
-    raised: it cannot be shown to carry our hooks, and one unreadable sibling
-    must not cost doctor every other row.
-    """
-    candidates: list[Path] = []
-    env = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
-    if env:
-        candidates.append(paths.expand_user(Path(env)))
-    candidates.append(_home() / ".claude")
-    candidates.extend(claude_dir_siblings())
-    seen: set[Path] = set()
-    found: list[Path] = []
-    for candidate in candidates:
-        key = _dir_key(candidate)
-        if key in seen or not os.path.isdir(candidate):
-            continue
-        seen.add(key)
-        if _holds_aisquare(candidate):
-            found.append(candidate)
-    return found
-
-
 def _agent_dirs_on_disk(name: str) -> list[Path]:
-    """Native config homes on disk carrying our hooks, including account siblings.
+    """``name``'s config dirs on this machine that carry our hooks or plugin.
 
-    Read-only discovery supplements the registry for a fresh AISQUARE_HOME.
-    Only homes with a recognizable AISquare command count; unreadable sibling
-    settings do not hide the other sites from doctor. Claude Code's are
-    :func:`_claude_dirs_on_disk`, which counts its plugin too.
+    The one this shell's sessions read (``$CLAUDE_CONFIG_DIR``, ``$CODEX_HOME``), the
+    default home and every sibling named like it — the ``~/.claude[0-9]`` of a
+    parallel-install setup, the ``~/.claude-account1`` the README documents. Only
+    directories whose hooks file holds at least one aisquare hook, or that enable the
+    aisquare plugin (:func:`plugin_of`), are returned: a hook that is on disk runs
+    whether or not this home ever heard of the directory, and that is the only thing
+    that makes a directory doctor's business. Read-only discovery supplements the
+    registry for a fresh AISQUARE_HOME.
+
+    A candidate whose settings this user cannot read — another account's
+    ``~/.claude-archived``, a backup left at mode 000 — is skipped, not raised: it
+    cannot be shown to carry our hooks, and one unreadable sibling must not cost
+    doctor every other row.
     """
-    if name == "claude-code":
-        return _claude_dirs_on_disk()
-    try:
-        adapter = get_adapter(name)
-    except ValueError:
+    adapter = _adapter(name)
+    if adapter is None:
         return []
     home = _home()
-    candidates = [config_home(adapter, home, os.environ), home / adapter.home_name]
+    candidates = [adapter.config_dir(home, os.environ), home / adapter.home_name]
     with suppress(OSError):
         candidates.extend(sorted(home.glob(adapter.home_name + "*")))
+    plugin = plugin_of(name)
     seen: set[Path] = set()
     found: list[Path] = []
     for candidate in candidates:
@@ -2178,7 +2084,10 @@ def _agent_dirs_on_disk(name: str) -> list[Path]:
         if key in seen or not os.path.isdir(candidate):
             continue
         seen.add(key)
-        if hook_commands(name, candidate):  # unreadable settings name none
+        # Unreadable settings name no command.
+        if hook_commands(name, candidate) or (
+            plugin is not None and plugin.installed(candidate) is not None
+        ):
             found.append(candidate)
     return found
 
@@ -2201,7 +2110,7 @@ def _holds_aisquare(config_dir: Path) -> bool:
 def claude_dir_siblings() -> list[Path]:
     """Every ``~/.claude*`` directory, sorted, hooked or not: ``~/.claude``, the ``[0-9]``
     siblings of a parallel install, ``~/.claude-account1``. The one listing the doctor's
-    scan (:func:`_claude_dirs_on_disk`, :func:`found_on_disk`) and uninstall's MCP and
+    scan (:func:`_agent_dirs_on_disk`, :func:`found_on_disk`) and uninstall's MCP and
     plugin scan share, so they agree on which directories there are (round 25 of #257).
 
     Each is asked with ``os.path.isdir``, which never raises: ``Path.is_dir`` raised
@@ -2218,7 +2127,7 @@ def claude_dir_siblings() -> list[Path]:
 
 def found_on_disk(config_dir: Path) -> bool:
     """Whether the doctor finds ``config_dir`` whatever ``CLAUDE_CONFIG_DIR`` says: a
-    ``~/.claude*`` directory holding aisquare's hooks or plugin (:func:`_claude_dirs_on_disk`),
+    ``~/.claude*`` directory holding aisquare's hooks or plugin (:func:`_agent_dirs_on_disk`),
     reading no sibling's settings but its own."""
     key = _dir_key(config_dir)
     named = _home() / ".claude", *claude_dir_siblings()
@@ -2267,7 +2176,7 @@ def claude_config_dirs() -> list[Path]:
     every Doctor-tab activation and every one-click fix.
 
     And it includes directories this home never connected
-    (``_claude_dirs_on_disk``, the #84 gap), which answers a different question:
+    (``_agent_dirs_on_disk``, the #84 gap), which answers a different question:
     "does ANY Claude install on this box declare a browser tool" rather than
     "will the ui-tester's window find one". A playwright MCP in ``~/.claude4``
     made the row green while the fleet spawned its ui-tester on ``~/.claude``,
@@ -2277,7 +2186,7 @@ def claude_config_dirs() -> list[Path]:
     ``_claude_home`` and ``_dir_key``, which are this module's own (review of
     #203).
     """
-    dirs = [*connected_dirs("claude-code"), _claude_home()]
+    dirs = [*connected_dirs(_CLAUDE_CODE), _claude_home()]
     seen: set[Path] = set()
     unique: list[Path] = []
     for directory in dirs:

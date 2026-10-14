@@ -30,6 +30,7 @@ from aisquare.cli.app import app
 from aisquare.core import claude_accounts as core
 from aisquare.core import codex_accounts as codex
 from aisquare.core.agent_adapters import adapters, get_adapter
+from aisquare.core.agent_adapters import get_adapter as _get_adapter
 from aisquare.core.config import AccountsSettings, load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
@@ -38,6 +39,8 @@ from aisquare.services import agent_events, hooks
 from aisquare.services import claude_accounts as service
 from aisquare.services import settings as settings_service
 from tests.fakebin import executable_fake, prepend_to_path
+
+CODEX = _get_adapter("codex")
 
 NOW = datetime(2026, 10, 13, 12, 0, tzinfo=UTC)
 _REAL_WHICH = shutil.which
@@ -764,8 +767,8 @@ def team_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 def _codex_fleet_row(tmp_path: Path, directory: Path) -> tuple[str, ProjectInfo]:
     """A Codex session started by the fleet under ``directory`` (its account's home)."""
     payload = {"session_id": "native-one", "cwd": str(tmp_path), "hook_event_name": "SessionStart"}
-    agent_events.handle_codex(payload, directory)
-    session_id = agent_events.session_key("codex", directory, "native-one")
+    agent_events.handle(CODEX, payload, directory)
+    session_id = agent_events.session_key(CODEX, directory, "native-one")
     project = team_project(tmp_path)
     with store_session() as store:
         store.upsert_fleet_agent(
@@ -833,7 +836,7 @@ def test_a_codex_turn_that_hit_its_limit_parks_the_row_and_hands_over(
         "transcript_path": str(transcript),
         "turn_id": "turn-1",
     }
-    assert agent_events.handle_codex(payload, limited.config_dir) is None
+    assert agent_events.handle(CODEX, payload, limited.config_dir) == ""
 
     with store_session() as store:
         session = store.get_session(session_id)
@@ -870,7 +873,7 @@ def test_a_codex_session_ending_on_its_limit_records_it_without_a_hand_over(
         "hook_event_name": "SessionEnd",
         "transcript_path": str(transcript),
     }
-    agent_events.handle_codex(payload, limited.config_dir)
+    agent_events.handle(CODEX, payload, limited.config_dir)
 
     with store_session() as store:
         session = store.get_session(session_id)
@@ -898,7 +901,7 @@ def test_a_healthy_codex_stop_is_handled_as_it_always_was(
         "hook_event_name": "Stop",
         "transcript_path": str(transcript),
     }
-    agent_events.handle_codex(payload, slot.config_dir)
+    agent_events.handle(CODEX, payload, slot.config_dir)
     failed.assert_not_called()
     with store_session() as store:
         session = store.get_session(session_id)

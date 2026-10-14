@@ -13,10 +13,21 @@ from typing import Any
 from aisquare.core import harness
 from aisquare.core.agent_adapters.types import (
     AgentCapabilities,
+    AgentEvent,
     BadEffortError,
+    EventKind,
     HookSpec,
+    HooksSwitch,
+    NativeChoice,
+    PermissionIntent,
     PluginInstall,
+    block_reply,
+    config_assignment,
+    config_home,
+    option_occurrences,
     option_values,
+    payload_cwd,
+    payload_text,
 )
 from aisquare.core.codex_accounts import CodexAccounts
 
@@ -117,6 +128,25 @@ class CodexPlugin:
         return f"CODEX_HOME={shlex.quote(str(config_dir))} {command}"
 
 
+#: ``--sandbox`` for each write scope of a :class:`PermissionIntent`.
+_SANDBOXES = {
+    "read_only": "read-only",
+    "workspace": "workspace-write",
+    "full": "danger-full-access",
+}
+#: The hook events AISquare installs (``capabilities.hooks``) and decodes.
+_EVENTS = {
+    "SessionStart": "session_start",
+    "UserPromptSubmit": "prompt",
+    "Stop": "stop",
+    "SessionEnd": "session_end",
+    "Interrupt": "interrupt",
+    "PermissionRequest": "attention",
+    "PreToolUse": "attention",
+    "PostToolUse": "tool_done",
+}
+
+
 class CodexAdapter:
     id = "codex"
     label = "Codex"
@@ -125,6 +155,10 @@ class CodexAdapter:
     home_name = ".codex"
     settings_name = "hooks.json"
     install_hint = "npm install -g @openai/codex"
+    version_args: tuple[str, ...] = ("--version",)
+    hooks_off_setting = "`features.hooks = false`"
+    #: Typed, then its Enter 0.2 s later: the paste-burst guard ate an Enter sent with it.
+    exit_command = "/exit"
     accounts = CodexAccounts()
     plugin = CodexPlugin()
     capabilities = AgentCapabilities(
@@ -139,6 +173,11 @@ class CodexAdapter:
             HookSpec("PostToolUse", "codex", 3),
         ),
         requires_hook_trust=True,
+        hook_names_home=True,
+        strict_hooks_file=True,
+        stop_reason_as_prompt=True,
+        limits_in_transcript=True,
+        native_telemetry=True,
         positional_prompt=True,
         first_context_file_only=True,
         sandbox_permissions=True,
@@ -188,6 +227,80 @@ class CodexAdapter:
         ),
     )
 
+    def config_dir(self, home: Path, env: Mapping[str, str], explicit: Path | None = None) -> Path:
+        return config_home(self, home, env, explicit)
+
+    def hooks_switch(
+        self, home: Path, settings_path: Path, args: Sequence[str] = ()
+    ) -> HooksSwitch | None:
+        """``hooks = false`` under ``[features]``, or its deprecated alias ``codex_hooks``,
+        in ``config.toml``, in the profile ``-p`` layers on it, or in ``args`` (``-c
+        features.hooks=false``, ``--disable hooks``), a later layer winning and the
+        canonical key winning over the alias wherever either is set, as Codex 0.162.1
+        merges them."""
+        user = home / "config.toml"
+        layers: list[tuple[dict[str, Any], Path | None, str]] = [(_toml_features(user), user, "")]
+        profile = next(reversed(option_values(args, "-p", "--profile")), None)
+        if profile and Path(profile).name == profile and profile not in {".", ".."}:
+            selected = home / f"{profile}.config.toml"
+            layers.append((_toml_features(selected), selected, ""))
+        for item in option_occurrences(args, "-c", "--config", "--enable", "--disable"):
+            option = item.prefix.rstrip("=") or args[item.index]
+            spelled = f"{option} {item.value}"
+            if option in {"--enable", "--disable"}:
+                layers.append(({item.value: option == "--enable"}, None, spelled))
+                continue
+            key, separator, raw = item.value.partition("=")
+            if separator and key.strip().startswith("features."):
+                try:
+                    value = tomllib.loads("value=" + raw)["value"]
+                except (ValueError, RecursionError):
+                    continue  # Codex reads it as a string, which no feature switch takes
+                layers.append(({key.strip().removeprefix("features."): value}, None, spelled))
+        decided: dict[str, tuple[bool, Path | None, str]] = {}
+        for features, path, spelled in layers:
+            for key in ("hooks", "codex_hooks"):
+                if isinstance(features.get(key), bool):
+                    decided[key] = (features[key], path, spelled)
+        key = "hooks" if "hooks" in decided else "codex_hooks"
+        if key not in decided or decided[key][0]:
+            return None
+        _, path, spelled = decided[key]
+        if path is None:
+            return HooksSwitch(f"`{spelled}`")
+        return HooksSwitch(f"`{key} = false` under [features]", path)
+
+    def decode_event(self, payload: Mapping[str, Any]) -> AgentEvent | None:
+        """Codex's command hook protocol: one ``aisquare hook codex`` for every event,
+        named by ``hook_event_name``. A payload without a session id, or with one past
+        256 characters, is not one of ours."""
+        native = payload_text(payload, "session_id")
+        event = payload_text(payload, "hook_event_name")
+        kind = _EVENTS.get(event or "")
+        if not native or len(native) > 256 or kind is None:
+            return None
+        if event == "PreToolUse" and payload.get("tool_name") != "request_user_input":
+            return None
+        return AgentEvent(
+            kind,  # type: ignore[arg-type]
+            native,
+            cwd=payload_cwd(payload),
+            prompt=payload_text(payload, "prompt") if kind == "prompt" else None,
+            transcript_path=payload_text(payload, "transcript_path"),
+            model=payload_text(payload, "model"),
+            source=payload_text(payload, "source") if kind == "session_start" else None,
+            stop_hook_active=bool(payload.get("stop_hook_active")),
+            turn_id=payload_text(payload, "turn_id"),
+            message=f"{self.label} needs user input" if kind == "attention" else None,
+        )
+
+    def encode_reply(self, kind: EventKind, reply: str | None) -> str:
+        """Context is plain stdout; a Stop that keeps the turn going is the ``block``
+        decision, as JSON on exit 0."""
+        if not reply:
+            return ""
+        return block_reply(reply) if kind == "stop" else reply
+
     def resolve_model(
         self,
         role: str,
@@ -219,8 +332,24 @@ class CodexAdapter:
         normalized = effort.strip().lower()
         return EFFORT_ALIASES.get(normalized, normalized)
 
+    def native_choice(self, args: Sequence[str]) -> NativeChoice:
+        """``-c model=…``/``-c model_reasoning_effort=…``, and ``--model``/``-m`` over both.
+        The effort is a native config value, Codex's to validate: no ``effort_index``."""
+        model = effort = None
+        for item in option_occurrences(args, "-c", "--config"):
+            parsed = config_assignment(item.value)
+            if parsed is None:
+                continue
+            key, native = parsed
+            if key == "model":
+                model = native
+            elif key == "model_reasoning_effort":
+                effort = native
+        models = option_values(args, "--model", "-m")
+        return NativeChoice(models[-1] if models else model, effort)
+
     def native_args(self, args: list[str]) -> list[str]:
-        from aisquare.core.agent_adapters.types import config_assignment, rewrite_option_values
+        from aisquare.core.agent_adapters.types import rewrite_option_values
 
         def config(value: str) -> str:
             parsed = config_assignment(value)
@@ -243,8 +372,6 @@ class CodexAdapter:
         args: list[str],
         env_vars: list[str] | None = None,
     ) -> list[str]:
-        import json
-
         return [
             "-c",
             f"mcp_servers.aisquare.command={json.dumps(executable)}",
@@ -359,8 +486,57 @@ class CodexAdapter:
             ["--ask-for-approval", approval] if approval and native_approval is None else []
         )
 
+    def permission_args(self, intent: PermissionIntent, role: str) -> list[str]:
+        """``workspace:auto`` is ``--approve-for-me`` (the automatic reviewer, which runs
+        only in workspace-write, so ``full:auto`` is refused); every other intent is
+        ``--sandbox`` with ``--ask-for-approval``, ``ask`` and a read-only ``auto`` being
+        ``on-request`` (a reviewer's seats, as :meth:`fleet_args` gives them)."""
+        if intent.approvals == "auto" and intent.write == "workspace":
+            return ["--approve-for-me"]
+        if intent.approvals == "auto" and intent.write == "full":
+            raise ValueError(
+                "Codex reviews approvals automatically only in the workspace-write sandbox; "
+                "use full:ask or full:never"
+            )
+        approval = "never" if intent.approvals == "never" else "on-request"
+        return ["--sandbox", _SANDBOXES[intent.write], "--ask-for-approval", approval]
+
+    def label_args(self, label: str) -> list[str]:
+        return []
+
+    def resume_args(self, native_session_id: str, transcript_path: Path | None) -> list[str]:
+        """``codex resume <SESSION_ID>``: the thread by its id, any options after it."""
+        return ["resume", native_session_id]
+
     def disable_native_teams(self) -> tuple[list[str], dict[str, str]]:
         return ["-c", "agents.enabled=false"], {}
+
+    def telemetry_args(self, endpoint: str, authorization: str) -> list[str]:
+        """Codex's own OTLP/HTTP log exporter (asynchronous; no model routing or auth
+        change), without the user's prompts."""
+        config = "otel.exporter.otlp-http"
+        return [
+            "-c",
+            f"{config}.endpoint={json.dumps(endpoint)}",
+            "-c",
+            f'{config}.protocol="json"',
+            "-c",
+            f"{config}.headers.Authorization={json.dumps(authorization)}",
+            "-c",
+            "otel.log_user_prompt=false",
+        ]
+
+
+def _toml_features(path: Path) -> dict[str, Any]:
+    """``path``'s ``[features]`` table; ``{}`` when there is none or it cannot be read."""
+    try:
+        if not path.is_file():  # a FIFO would block the read
+            return {}
+        with path.open("rb") as handle:
+            features = tomllib.load(handle).get("features")
+    except (OSError, ValueError, RecursionError):
+        return {}
+    return features if isinstance(features, dict) else {}
 
 
 def _codex_home(config_dir: Path | None) -> Path:

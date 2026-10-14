@@ -1,16 +1,40 @@
 """Claude Code's native integration vocabulary."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
-from aisquare.core import harness
+from aisquare.core import harness, paths
 from aisquare.core.agent_adapters.types import (
     AgentCapabilities,
+    AgentEvent,
     BadEffortError,
+    EventKind,
     HookSpec,
+    HooksSwitch,
+    NativeChoice,
+    PermissionIntent,
     PluginInstall,
+    block_reply,
+    option_occurrences,
+    option_values,
+    payload_cwd,
+    payload_text,
 )
 from aisquare.core.claude_accounts import ClaudeCodeAccounts
+
+#: ``--permission-mode`` for each approvals intent (``core.config.CLAUDE_PERMISSION_MODES``);
+#: ``never`` is ``bypassPermissions`` with a ``full`` write scope, else ``dontAsk``.
+_MODES = {"ask": "manual", "auto": "auto", "never": "dontAsk"}
+
+
+def _effort_level(payload: Mapping[str, Any]) -> str | None:
+    """The ``effort.level`` field of a hook payload (an object; optional)."""
+    effort = payload.get("effort")
+    if not isinstance(effort, dict):
+        return None
+    level = effort.get("level")
+    return level if isinstance(level, str) and level else None
 
 
 class ClaudeCodePlugin:
@@ -52,6 +76,9 @@ class ClaudeCodeAdapter:
     home_name = ".claude"
     settings_name = "settings.json"
     install_hint = "https://claude.ai/install.sh"
+    version_args: tuple[str, ...] = ("--version",)
+    hooks_off_setting = '"disableAllHooks": true'
+    exit_command = "/exit"
     accounts = ClaudeCodeAccounts()
     plugin = ClaudeCodePlugin()
     capabilities = AgentCapabilities(
@@ -61,10 +88,15 @@ class ClaudeCodeAdapter:
             HookSpec("SessionEnd", "session-end"),
             HookSpec("Stop", "stop"),
             HookSpec("Notification", "notification"),
-            # Fires INSTEAD of Stop when a turn ends on an API error (#146): core.agents._HOOKS.
+            # Fires INSTEAD of Stop when a turn ends on an API error (#146).
             HookSpec("StopFailure", "stop-failure"),
         ),
         assigns_session_id=True,
+        ambient_first_run=True,
+        reads_pane_readiness=True,
+        resumes_across_homes=True,
+        exports_home_env=False,
+        own_doctor_check=True,
         model_proxy=True,
         model_ladders=True,
         legacy_fleet_args=True,
@@ -99,6 +131,86 @@ class ClaudeCodeAdapter:
             }
         ),
     )
+
+    def config_dir(self, home: Path, env: Mapping[str, str], explicit: Path | None = None) -> Path:
+        """As written, links and all (``core.agents._claude_home``): an explicit dir, else
+        ``CLAUDE_CONFIG_DIR``, else ``~/.claude``. A link that leads nowhere is named as
+        the link, where another agent's is resolved (:func:`config_home`)."""
+        if explicit is not None:
+            return paths.expand_user(explicit)
+        value = env.get(self.home_env, "").strip()
+        if value:
+            return paths.expand_user(Path(value))
+        return home / self.home_name
+
+    def hooks_switch(
+        self, home: Path, settings_path: Path, args: Sequence[str] = ()
+    ) -> HooksSwitch | None:
+        """``"disableAllHooks": true`` in ``settings.json``, a literal ``true`` as Claude
+        Code reads it; ``args`` are not read."""
+        from aisquare.core.agents import read_json
+
+        if read_json(settings_path).get("disableAllHooks") is True:
+            return HooksSwitch(self.hooks_off_setting, settings_path)
+        return None
+
+    def decode_event(self, payload: Mapping[str, Any]) -> AgentEvent | None:
+        """One payload per hook subcommand (``aisquare hook session-start``…), which names
+        the event; every field optional, a missing ``session_id`` included."""
+        event = payload_text(payload, "hook_event_name")
+        common: dict[str, Any] = {
+            "session_id": payload_text(payload, "session_id"),
+            "cwd": payload_cwd(payload),
+        }
+        if event == "SessionStart":
+            return AgentEvent(
+                "session_start",
+                source=payload_text(payload, "source"),
+                transcript_path=payload_text(payload, "transcript_path"),
+                model=payload_text(payload, "model"),
+                effort=_effort_level(payload),
+                **common,
+            )
+        if event == "UserPromptSubmit":
+            prompt = payload.get("prompt")
+            return AgentEvent(
+                "prompt",
+                prompt=prompt if isinstance(prompt, str) else None,
+                transcript_path=payload_text(payload, "transcript_path"),
+                model=payload_text(payload, "model"),
+                effort=_effort_level(payload),
+                **common,
+            )
+        if event == "SessionEnd":
+            return AgentEvent("session_end", reason=payload_text(payload, "reason"), **common)
+        if event == "Stop":
+            # The loop guard: any value but absent/null/false is "already continuing".
+            return AgentEvent(
+                "stop", stop_hook_active=bool(payload.get("stop_hook_active")), **common
+            )
+        if event == "StopFailure":
+            return AgentEvent(
+                "turn_failed",
+                error=payload_text(payload, "error"),
+                message=payload_text(payload, "last_assistant_message"),
+                details=payload_text(payload, "error_details"),
+                **common,
+            )
+        if event == "Notification":
+            return AgentEvent(
+                "notification",
+                message=payload_text(payload, "message"),
+                notification_type=payload_text(payload, "notification_type"),
+                **common,
+            )
+        return None
+
+    def encode_reply(self, kind: EventKind, reply: str | None) -> str:
+        """stdout of ``SessionStart``/``UserPromptSubmit`` becomes context; a ``Stop`` that
+        keeps the turn going is the top-level ``block`` decision."""
+        if not reply:
+            return ""
+        return block_reply(reply) if kind == "stop" else reply
 
     def resolve_model(
         self,
@@ -137,6 +249,15 @@ class ClaudeCodeAdapter:
     def native_args(self, args: list[str]) -> list[str]:
         return list(args)
 
+    def native_choice(self, args: Sequence[str]) -> NativeChoice:
+        models = option_values(args, "--model", "-m")
+        efforts = list(option_occurrences(args, "--effort"))
+        return NativeChoice(
+            models[-1] if models else None,
+            efforts[-1].value if efforts else None,
+            efforts[-1].index if efforts else None,
+        )
+
     @staticmethod
     def effort_alias(effort: str) -> str:
         return effort.strip().lower()
@@ -151,6 +272,20 @@ class ClaudeCodeAdapter:
     def model_args(self, model: str | None, effort: str | None) -> list[str]:
         self.validate(model, effort)
         return (["--model", model] if model else []) + (["--effort", effort] if effort else [])
+
+    def permission_args(self, intent: PermissionIntent, role: str) -> list[str]:
+        """``--permission-mode`` (``ask`` ``manual``, ``auto`` ``auto``, ``never``
+        ``dontAsk``, or ``bypassPermissions`` with a ``full`` write scope); Claude Code has
+        no sandbox, so ``read_only`` is the reviewer's denial of the tools that edit files
+        (``core.config.REVIEWER_ARGS``)."""
+        from aisquare.core.config import REVIEWER_ARGS
+
+        mode = (
+            "bypassPermissions"
+            if intent.write == "full" and intent.approvals == "never"
+            else _MODES[intent.approvals]
+        )
+        return ["--permission-mode", mode, *(REVIEWER_ARGS if intent.write == "read_only" else ())]
 
     def fleet_args(
         self,
@@ -167,10 +302,20 @@ class ClaudeCodeAdapter:
             raise ValueError(
                 "Claude Code uses --permission-mode; sandbox/approval are Codex settings"
             )
-        return (["--permission-mode", permission_mode] if permission_mode else []) + [
-            "--name",
-            label,
-        ]
+        return (["--permission-mode", permission_mode] if permission_mode else []) + (
+            self.label_args(label)
+        )
+
+    def label_args(self, label: str) -> list[str]:
+        return ["--name", label]
+
+    def resume_args(self, native_session_id: str, transcript_path: Path | None) -> list[str]:
+        """``--resume <transcript>``: Claude Code ≥ 2.1.223 finds a session by its
+        transcript's absolute path from any directory, and keeps its id (#146)."""
+        return ["--resume", str(transcript_path) if transcript_path else native_session_id]
 
     def disable_native_teams(self) -> tuple[list[str], dict[str, str]]:
         return [], {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0"}
+
+    def telemetry_args(self, endpoint: str, authorization: str) -> list[str]:
+        return []

@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import agents
 from aisquare.core.agent_adapters import get_adapter
+from aisquare.core.agent_adapters import get_adapter as _get_adapter
 from aisquare.core.agent_adapters.codex import CodexAdapter
 from aisquare.core.agent_adapters.types import BadEffortError
 from aisquare.core.config import (
@@ -31,6 +32,8 @@ from aisquare.models import CheckStatus
 from aisquare.services import agent_events, agent_launch, diagnostics, fleet
 from aisquare.services.agents import connect
 from tests.test_fleet_service import FakeTmux
+
+CODEX = _get_adapter("codex")
 
 codex = CodexAdapter()
 
@@ -394,9 +397,9 @@ def test_events_aisquare_does_not_install_are_ignored_quietly(
     event: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     payload = {"session_id": "native-1", "hook_event_name": event, "cwd": str(tmp_path)}
-    assert agent_events.handle_codex(payload, tmp_path) is None
+    assert agent_events.handle(CODEX, payload, tmp_path) == ""
     with store_session() as store:
-        assert store.get_session(agent_events.session_key("codex", tmp_path, "native-1")) is None
+        assert store.get_session(agent_events.session_key(CODEX, tmp_path, "native-1")) is None
     assert capsys.readouterr() == ("", "")
 
 

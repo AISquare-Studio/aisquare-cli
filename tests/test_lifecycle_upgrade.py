@@ -1792,7 +1792,9 @@ def test_a_claude_config_dir_pathlib_raises_on_is_read_as_absent_and_never_made(
     cwd.mkdir()
     monkeypatch.chdir(cwd)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(exported))
-    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/usr/bin/claude")
+    monkeypatch.setattr(
+        agent_core, "on_path", lambda name: "/usr/bin/claude" if name == "claude-code" else None
+    )
     _record(_hooked(tmp_path / "claude", tmp_path / "gone" / "aisquare"))
     reads = [
         ["uninstall", "--dry-run"],

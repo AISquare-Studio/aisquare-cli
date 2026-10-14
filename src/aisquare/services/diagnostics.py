@@ -1013,7 +1013,7 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
 
     try:
         uses_claude = any(
-            agent_launch.resolve(role, cwd=cwd).adapter.id == "claude-code"
+            agent_launch.resolve(role, cwd=cwd).adapter.id == info.name
             for role in harness.ROLE_PROFILES
         )
     except ValueError:
@@ -3460,8 +3460,8 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
         )
         checks.append(_warn("coding-agent", str(exc), fix))
     for adapter in adapters():
-        if adapter.id == "claude-code":
-            continue  # legacy diagnostic includes detailed timeout/version checks
+        if adapter.capabilities.own_doctor_check:
+            continue  # its own check includes detailed timeout/version checks
         info = agent_core.detect(adapter.id)
         sites = {site.config_dir: site for site in agent_core.hook_sites(adapter.id)}
         configured = selected is not None and selected.adapter.id == adapter.id

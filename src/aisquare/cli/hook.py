@@ -1,4 +1,11 @@
-"""Hidden hook handlers invoked by Claude Code (installed via ``agents connect``).
+"""Hidden hook handlers invoked by the coding agents (installed via ``agents connect``).
+
+Every one decodes its payload with the agent's adapter
+(:meth:`~aisquare.core.agent_adapters.types.AgentAdapter.decode_event`), runs the shared
+services (``services.agent_events.handle``) and prints the adapter's encoding of the
+reply. Claude Code's installed commands name their event (``aisquare hook
+session-start``…), Codex's is ``aisquare hook codex``, and any other agent's is ``aisquare
+hook event --agent <id>``, so a new agent needs no subcommand of its own.
 
 These run on every session start / prompt submit, so they are defensive: any
 failure is swallowed and the command exits 0, never disrupting the agent.
@@ -7,6 +14,7 @@ failure is swallowed and the command exits 0, never disrupting the agent.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -15,6 +23,7 @@ from typing import Annotated, Any
 import typer
 
 from aisquare.core import paths
+from aisquare.core.agent_adapters.types import GENERIC_HOOK, AgentAdapter
 from aisquare.services import hooks as hooks_service
 from aisquare.services.team import ManagerWakeupError
 
@@ -43,6 +52,8 @@ _COST = {
     "stop-failure": "the board will not show this session as limited, and no hand-over will run",
     "manager-wakeup": "the manager will not be woken by this turn's board updates",
 }
+#: What an agent's one entry for every event (``hook codex``, ``hook event``) costs.
+_NATIVE_COST = "this native event was not recorded"
 
 
 def _cost_of_failing_open(hook: str, exc: Exception, *, cost: str | None = None) -> None:
@@ -85,94 +96,74 @@ def _payload() -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _cwd(payload: dict[str, Any]) -> Path | None:
-    cwd = payload.get("cwd")
-    return Path(cwd) if isinstance(cwd, str) and cwd else None
+def _run(
+    hook: str,
+    adapter: AgentAdapter,
+    payload: dict[str, Any],
+    *,
+    config_dir: str | None = None,
+    definition: str | None = None,
+    cost: str | None = None,
+) -> None:
+    """Handle one hook call of ``adapter``'s and print its reply; never raise.
 
-
-def _str(payload: dict[str, Any], key: str) -> str | None:
-    value = payload.get(key)
-    return value if isinstance(value, str) and value else None
-
-
-def _flag(payload: dict[str, Any], key: str) -> bool:
-    """A boolean payload field, read the way a LOOP GUARD must be read.
-
-    Absent, ``null`` and ``false`` are off — an older payload without the field
-    must still let the manager be woken, or the feature dies in silence. Any
-    other value is on, a stray string ``"false"`` included: misreading "already
-    continuing" as "not" is the mistake that opens a loop, and the cost of the
-    other mistake is one wake-up deferred to the next prompt.
+    stdout is what the agent reads (context, or a Stop decision as JSON), so it carries
+    the reply alone; every failure goes to stderr (:func:`_cost_of_failing_open`), with
+    ``cost`` saying what it cost. Printed inside the ``try``: the write itself can fail on
+    what the context holds (a character stdout cannot encode), and that must not become
+    a traceback and a non-zero exit either.
     """
-    return bool(payload.get(key))
+    from aisquare.core import agents
+    from aisquare.services import agent_events
+
+    try:
+        home = adapter.config_dir(
+            agents._home(), os.environ, Path(config_dir) if config_dir else None
+        )
+        output = agent_events.handle(adapter, payload, home, definition=definition)
+        if output:
+            typer.echo(output)
+    except ManagerWakeupError as exc:  # the row is right; only the wake-up was lost
+        _cost_of_failing_open(hook, exc.cause, cost=_COST["manager-wakeup"])
+    except Exception as exc:  # never disrupt the agent
+        _cost_of_failing_open(hook, exc, cost=cost)
 
 
-def _effort_level(payload: dict[str, Any]) -> str | None:
-    """The ``effort.level`` field of a hook payload (an object; optional)."""
-    effort = payload.get("effort")
-    if not isinstance(effort, dict):
-        return None
-    level = effort.get("level")
-    return level if isinstance(level, str) and level else None
+def _installed(hook: str) -> None:
+    """A subcommand that names its event (Claude Code's ``session-start``…): the payload
+    is that event's, whatever it says, for the adapter that installed the subcommand."""
+    from aisquare.core.agent_adapters import adapters
+
+    try:
+        adapter, spec = next(
+            (adapter, spec)
+            for adapter in adapters()
+            for spec in adapter.capabilities.hooks
+            if spec.command == hook
+        )
+        payload = {**_payload(), "hook_event_name": spec.event}
+    except Exception as exc:  # never disrupt the agent
+        _cost_of_failing_open(hook, exc)
+        return
+    _run(hook, adapter, payload)
 
 
 @app.command("session-start")
 def session_start() -> None:
     """Emit aisquare context for a starting session (stdout becomes context)."""
-    try:
-        payload = _payload()
-        context = hooks_service.session_start_context(
-            _cwd(payload),
-            session_id=_str(payload, "session_id"),
-            source=_str(payload, "source"),
-            transcript_path=_str(payload, "transcript_path"),
-            model=_str(payload, "model"),
-            effort=_effort_level(payload),
-        )
-        # Inside the try: the write itself can fail on what the context holds
-        # (a character stdout cannot encode), and that must not become a
-        # traceback and a non-zero exit either.
-        if context:
-            typer.echo(context)
-    except Exception as exc:  # never disrupt the agent
-        _cost_of_failing_open("session-start", exc)
-        return
+    _installed("session-start")
 
 
 @app.command("user-prompt-submit")
 def user_prompt_submit() -> None:
     """Capture the prompt and emit teammate updates (stdout becomes context)."""
-    try:
-        payload = _payload()
-        prompt = payload.get("prompt")
-        delta = hooks_service.prompt_submitted(
-            prompt if isinstance(prompt, str) else None,
-            _cwd(payload),
-            session_id=_str(payload, "session_id"),
-            transcript_path=_str(payload, "transcript_path"),
-            model=_str(payload, "model"),
-            effort=_effort_level(payload),
-        )
-        if delta:
-            typer.echo(delta)
-    except Exception as exc:  # never disrupt the agent
-        _cost_of_failing_open("user-prompt-submit", exc)
-        return
+    _installed("user-prompt-submit")
 
 
 @app.command("session-end")
 def session_end() -> None:
     """Mark the session ended on the orchestrator (no output)."""
-    try:
-        payload = _payload()
-        hooks_service.session_ended(
-            _cwd(payload),
-            session_id=_str(payload, "session_id"),
-            reason=_str(payload, "reason"),
-        )
-    except Exception as exc:  # never disrupt the agent
-        _cost_of_failing_open("session-end", exc)
-        return
+    _installed("session-end")
 
 
 @app.command("stop")
@@ -186,21 +177,7 @@ def stop() -> None:
     Claude Code saying it is already continuing on a stop hook; it is honoured
     as the loop guard the reference asks for.
     """
-    try:
-        payload = _payload()
-        decision = hooks_service.turn_stopped(
-            _cwd(payload),
-            session_id=_str(payload, "session_id"),
-            stop_hook_active=_flag(payload, "stop_hook_active"),
-        )
-    except ManagerWakeupError as exc:  # the row is right; only the wake-up was lost
-        _cost_of_failing_open("stop", exc.cause, cost=_COST["manager-wakeup"])
-        return
-    except Exception as exc:  # never disrupt the agent
-        _cost_of_failing_open("stop", exc)
-        return
-    if decision is not None:
-        typer.echo(json.dumps(decision.as_hook_output()))
+    _installed("stop")
 
 
 @app.command("stop-failure")
@@ -216,17 +193,7 @@ def stop_failure() -> None:
     a feed line naming the error (#146). Output is ignored by Claude Code, so
     nothing is printed on purpose.
     """
-    try:
-        payload = _payload()
-        hooks_service.turn_failed(
-            session_id=_str(payload, "session_id"),
-            error=_str(payload, "error"),
-            message=_str(payload, "last_assistant_message"),
-            details=_str(payload, "error_details"),
-        )
-    except Exception as exc:  # never disrupt the agent
-        _cost_of_failing_open("stop-failure", exc)
-        return
+    _installed("stop-failure")
 
 
 @app.command("hand-over", hidden=True)
@@ -261,17 +228,7 @@ def notification() -> None:
     family… (#153). Only the ones that need a human become ``attention``; the
     routine idle notice leaves the session as it was; the rest are feed lines.
     """
-    try:
-        payload = _payload()
-        hooks_service.needs_attention(
-            _cwd(payload),
-            session_id=_str(payload, "session_id"),
-            message=_str(payload, "message"),
-            notification_type=_str(payload, "notification_type"),
-        )
-    except Exception as exc:  # never disrupt the agent
-        _cost_of_failing_open("notification", exc)
-        return
+    _installed("notification")
 
 
 @app.command("codex")
@@ -279,25 +236,48 @@ def codex(
     config_dir: str | None = typer.Option(None, "--config-dir"),
     definition: str | None = typer.Option(None, "--definition"),
 ) -> None:
-    """Decode Codex native hooks and run the shared lifecycle services."""
-    import os
-
-    from aisquare.core import agents
+    """Codex's installed hook command: ``hook event --agent codex`` by its 0.8.0 name."""
     from aisquare.core.agent_adapters import get_adapter
-    from aisquare.core.agent_adapters.types import config_home
-    from aisquare.services.agent_events import handle_codex
+
+    _run(
+        "codex",
+        get_adapter("codex"),
+        _payload(),
+        config_dir=config_dir,
+        definition=definition,
+        cost=_NATIVE_COST,
+    )
+
+
+@app.command(GENERIC_HOOK)
+def event(
+    agent: str = typer.Option(..., "--agent", help="The adapter that installed this hook."),
+    hook_event: str | None = typer.Option(
+        None, "--event", help="The native event, where the payload does not name it."
+    ),
+    config_dir: str | None = typer.Option(None, "--config-dir"),
+    definition: str | None = typer.Option(None, "--definition"),
+) -> None:
+    """Any agent's native hook: decoded by its adapter, run through the shared services.
+
+    The one entry an adapter needs (``agent_adapters.types.hook_args`` writes it): the
+    event is ``--event`` or the payload's ``hook_event_name``.
+    """
+    from aisquare.core.agent_adapters import get_adapter
 
     try:
-        directory = config_home(
-            get_adapter("codex"),
-            agents._home(),
-            os.environ,
-            Path(config_dir) if config_dir else None,
-        )
-        output = handle_codex(_payload(), directory, definition=definition)
-        if output:
-            typer.echo(output)
-    except ManagerWakeupError as exc:
-        _cost_of_failing_open("codex", exc.cause, cost=_COST["manager-wakeup"])
-    except Exception as exc:
-        _cost_of_failing_open("codex", exc, cost="this native event was not recorded")
+        adapter = get_adapter(agent)
+        payload = _payload()
+        if hook_event:
+            payload = {**payload, "hook_event_name": hook_event}
+    except Exception as exc:  # never disrupt the agent
+        _cost_of_failing_open(GENERIC_HOOK, exc, cost=_NATIVE_COST)
+        return
+    _run(
+        GENERIC_HOOK,
+        adapter,
+        payload,
+        config_dir=config_dir,
+        definition=definition,
+        cost=_NATIVE_COST,
+    )

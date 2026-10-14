@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import agent_adapters, agents, harness, insights, outbox
+from aisquare.core.agent_adapters import get_adapter as _get_adapter
 from aisquare.core.agent_adapters.codex import CodexAdapter
 from aisquare.core.agent_adapters.types import config_home
 from aisquare.core.config import AgentModelSettings, RoleLaunchProfile, load_config, save_config
@@ -25,6 +26,8 @@ from aisquare.models import FleetAgent
 from aisquare.services import agent_events, agent_launch, hooks, mcp_server, native_telemetry, team
 from aisquare.services.agents import connect, disconnect
 from tests.fakebin import executable_fake
+
+CODEX = _get_adapter("codex")
 
 T = TypeVar("T")
 
@@ -304,9 +307,9 @@ def test_native_identity_lifecycle_early_fleet_binding_and_mcp(
         "hook_event_name": "SessionStart",
         "source": "startup",
     }
-    agent_events.handle_codex(payload, directory)
-    session_id = agent_events.session_key("codex", directory, "native-one")
-    assert session_id != agent_events.session_key("codex", tmp_path / "other", "native-one")
+    agent_events.handle(CODEX, payload, directory)
+    session_id = agent_events.session_key(CODEX, directory, "native-one")
+    assert session_id != agent_events.session_key(CODEX, tmp_path / "other", "native-one")
     project = team_project(tmp_path)
     with store_session() as store:
         session = store.get_session(session_id)
@@ -335,7 +338,7 @@ def test_native_identity_lifecycle_early_fleet_binding_and_mcp(
         "prompt": "implement acceptance",
     }
     with ThreadPoolExecutor(max_workers=2) as executor:
-        list(executor.map(lambda _: agent_events.handle_codex(prompt, directory), range(2)))
+        list(executor.map(lambda _: agent_events.handle(CODEX, prompt, directory), range(2)))
     with store_session() as store:
         captured = store.recent_prompts(project.id)
         assert len(captured) == 1 and captured[0].source == "codex"
@@ -347,14 +350,14 @@ def test_native_identity_lifecycle_early_fleet_binding_and_mcp(
         ("PostToolUse", "working"),
         ("Interrupt", "waiting"),
     ]:
-        agent_events.handle_codex({**payload, "hook_event_name": event}, directory)
+        agent_events.handle(CODEX, {**payload, "hook_event_name": event}, directory)
         with store_session() as store:
             assert present(store.get_session(session_id)).state == state
-    agent_events.handle_codex({**payload, "hook_event_name": "SessionEnd"}, directory)
+    agent_events.handle(CODEX, {**payload, "hook_event_name": "SessionEnd"}, directory)
     with store_session() as store:
         assert present(store.get_session(session_id)).ended_at is not None
         assert present(store.get_task(task.id)).claimed_by is None
-    agent_events.handle_codex({**payload, "source": "resume"}, directory)
+    agent_events.handle(CODEX, {**payload, "source": "resume"}, directory)
     with store_session() as store:
         assert present(store.get_session(session_id)).ended_at is None
 
@@ -364,15 +367,16 @@ def test_continuations_are_deduplicated_and_attributed(
 ) -> None:
     native = {"session_id": "native", "cwd": str(tmp_path), "hook_event_name": "SessionStart"}
     directory = tmp_path / ".codex"
-    agent_events.handle_codex(native, directory)
+    agent_events.handle(CODEX, native, directory)
     guard = Mock(return_value=team.StopDecision("follow the fresh board decision", cursor=4))
     monkeypatch.setattr(hooks, "turn_stopped", guard)
     stop = {**native, "hook_event_name": "Stop", "turn_id": "turn-one"}
-    result = agent_events.handle_codex(stop, directory)
-    assert result == agent_events.handle_codex(stop, directory)
+    result = agent_events.handle(CODEX, stop, directory)
+    assert result == agent_events.handle(CODEX, stop, directory)
     assert guard.call_count == 1
     assert json.loads(present(result))["decision"] == "block"
-    agent_events.handle_codex(
+    agent_events.handle(
+        CODEX,
         {
             **native,
             "hook_event_name": "UserPromptSubmit",
@@ -448,8 +452,8 @@ def test_project_purge_removes_native_bindings_and_callback_claims(
         "hook_event_name": "SessionStart",
     }
     directory = tmp_path / ".codex"
-    agent_events.handle_codex(payload, directory)
-    sid = agent_events.session_key("codex", directory, "native-purge")
+    agent_events.handle(CODEX, payload, directory)
+    sid = agent_events.session_key(CODEX, directory, "native-purge")
     agent_launch.use("codex", project=True)
     with store_session() as store:
         project = present(store.get_session(sid)).project_id

@@ -21,6 +21,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.cli.watch import _session_lines
 from aisquare.core import agents, harness
+from aisquare.core.agent_adapters import get_adapter as _get_adapter
 from aisquare.core.agent_adapters.types import config_home
 from aisquare.core.agent_sessions import adopt_local_session
 from aisquare.core.config import (
@@ -37,6 +38,8 @@ from aisquare.services import agent_events, agent_launch, fleet, mcp_server
 from aisquare.services.agents import connect, disconnect
 from tests.fsperms import can_symlink
 from tests.test_fleet_service import FakeTmux
+
+CODEX = _get_adapter("codex")
 
 
 @pytest.fixture(autouse=True)
@@ -74,8 +77,7 @@ def test_connect_fresh_binary_before_first_native_launch(
 ) -> None:
     directory = tmp_path / "unused-account"
     monkeypatch.setattr(
-        "aisquare.services.agents.shutil.which",
-        lambda name: f"/bin/{binary}" if name == binary else None,
+        agents, "on_path", lambda name: f"/bin/{binary}" if name == family else None
     )
     assert connect(family, directory).hooks_installed
     assert agents.hooks_installed(family, directory)
@@ -92,7 +94,7 @@ def test_only_the_executed_definition_can_verify_trust(
 ) -> None:
     agents.install_hooks("codex", tmp_path)
     first = _definition(tmp_path)
-    monkeypatch.setattr(agent_events, "_dispatch_codex", lambda *args: None)
+    monkeypatch.setattr(agent_events, "_dispatch", lambda *args: None)
     payload = json.dumps({"hook_event_name": "SessionStart", "session_id": "thread"})
 
     def fire(definition: str) -> None:
@@ -297,11 +299,12 @@ def test_codex_new_session_rebinds_board_and_mcp_without_late_old_callback(
     monkeypatch.setenv("AISQUARE_FLEET_AGENT", "fleet")
     project = team_project(tmp_path)
     for native in ("first", "second", "first"):
-        agent_events.handle_codex(
+        agent_events.handle(
+            CODEX,
             {"hook_event_name": "SessionStart", "session_id": native, "cwd": str(tmp_path)},
             tmp_path,
         )
-    second = agent_events.session_key("codex", tmp_path, "second")
+    second = agent_events.session_key(CODEX, tmp_path, "second")
     with store_session() as store:
         assert store.get_meta("fleet-session:fleet") == second
         assert store.get_meta("launch-session:launch") == second

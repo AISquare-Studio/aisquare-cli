@@ -9997,13 +9997,15 @@ def test_the_launch_spec_drops_every_shape_of_a_session_choice() -> None:
     # Claude Code's flags, not every program's: aider's `-c` is its config file.
     assert fleet_service._without_session_choice("aider", ["-c", "a.yml"]) == ["-c", "a.yml"]
     # Claude Code by another name, known by a session its arguments NAME (the
-    # planner joins the row to it), or by a board session its hook joined or a
-    # transcript the launch resumes (`claude_code`).
+    # planner joins the row to it), or by the board session its own hook wrote
+    # (`family`).
     other = fleet_service._without_session_choice
     assert other("claude2", ["--session-id", "x", "--verbose"]) == ["--verbose"]
     assert other("claude2", ["-r", "abc", "-c"]) == [], "named: every session flag goes"
     assert other("claude2", ["-c", "--verbose"]) == ["-c", "--verbose"], "named nothing"
-    assert other("claude2", ["-c", "--verbose"], claude_code=True) == ["--verbose"]
+    assert other("claude2", ["-c", "--verbose"], family="claude-code") == ["--verbose"]
+    # A Codex row's `-c` is its config override, whatever joined it to a board session.
+    assert other("codex2", ["-c", "model=o3"], family="codex") == ["-c", "model=o3"]
 
 
 def _executable(path: Path) -> Path:

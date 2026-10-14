@@ -149,7 +149,8 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
         config.explainability.ship = True
         config.agents.mcp = True
         save_config(config)
-        telemetry_args, note = native_telemetry.start_receiver(env)
+        codex = agent_launch.resolve(agent="codex").adapter
+        telemetry_args, note = native_telemetry.start_receiver(env, codex)
         assert telemetry_args, note
         # Only this test's owned hook definitions are trusted by this flag.
         base = [

@@ -73,6 +73,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("hook", "stop"),
     ("hook", "notification"),
     ("hook", "codex"),
+    ("hook", "event"),
     *(
         ("team", command)
         for command in (

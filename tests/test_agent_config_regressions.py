@@ -197,18 +197,18 @@ def test_codex_hook_runner_uses_the_same_home_as_detection(
     else:
         monkeypatch.delenv("CODEX_HOME", raising=False)
     handle = Mock(return_value="")
-    monkeypatch.setattr("aisquare.services.agent_events.handle_codex", handle)
+    monkeypatch.setattr("aisquare.services.agent_events.handle", handle)
     result = runner.invoke(app, ["hook", "codex"], input="{}")
     assert result.exit_code == 0, result.output
-    assert handle.call_args.args[1] == agents.ambient_hook_dir("codex")
+    assert handle.call_args.args[2] == agents.ambient_hook_dir("codex")
     if not home_value or not home_value.strip():
-        assert handle.call_args.args[1] == isolated_agent_home / ".codex"
+        assert handle.call_args.args[2] == isolated_agent_home / ".codex"
     empty = runner.invoke(app, ["hook", "codex", "--config-dir", ""], input="{}")
     assert empty.exit_code == 0, empty.output
-    assert handle.call_args.args[1] == agents.ambient_hook_dir("codex")
+    assert handle.call_args.args[2] == agents.ambient_hook_dir("codex")
     explicit = isolated_agent_home / " deliberate spaces "
     runner.invoke(app, ["hook", "codex", "--config-dir", str(explicit)], input="{}")
-    assert handle.call_args.args[1] == explicit
+    assert handle.call_args.args[2] == explicit
 
 
 def test_account_readers_share_the_effective_environment_and_home(

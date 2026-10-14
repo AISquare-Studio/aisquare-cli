@@ -17,7 +17,9 @@ from typing import Annotated, Any, NoReturn
 import typer
 
 from aisquare.cli.common import expected_config_write_errors, fail, local_time
+from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import harness, orchestrator, selfcli
+from aisquare.core.agent_adapters import DEFAULT_AGENT, recorded_adapter
 from aisquare.core.agent_adapters.types import BadEffortError
 from aisquare.core.config import ExplainabilitySettings, RoleLaunchProfile, load_config
 from aisquare.core.console import stdout_console
@@ -649,8 +651,12 @@ def harness_status() -> None:
                 "fleet": _fleet_model_status(selected, name),
             }
         )
+    # The variables that override a model ladder's choice, for a role whose agent has one.
+    ladders = (recorded_adapter(row.get("agent")) for row in rows)
     interference = (
-        harness.interfering_env() if any(row.get("agent") == "claude-code" for row in rows) else []
+        harness.interfering_env()
+        if any(adapter and adapter.capabilities.model_ladders for adapter in ladders)
+        else []
     )
     if get_state().json_output:
         typer.echo(
@@ -715,7 +721,7 @@ def _bound_agent(role: str, agent: str | None) -> str:
     try:
         return agent_launch.resolve(role).adapter.id
     except Exception:  # an unresolvable role is the launch's to refuse, not the bind's
-        return "claude-code"
+        return DEFAULT_AGENT
 
 
 @app.command("bind")
@@ -818,10 +824,10 @@ def bind(
                 # Against the agent the role launches (named here, or bound before):
                 # a Codex role bound to a Claude slot is refused now, naming both.
                 whose = _bound_agent(role_name, agent)
-                if whose == "claude-code":
-                    claude_accounts_service.resolve(account)
-                else:
-                    claude_accounts_service.resolve(account, agent=whose)
+                # Claude Code's bindings take any slot, as they did before Codex had slots.
+                claude_accounts_service.resolve(
+                    account, agent=None if whose == claude_accounts_core.AGENT else whose
+                )
             except claude_accounts_service.AccountsError as exc:
                 fail(str(exc), error="unknown_account", ref=account)
         try:

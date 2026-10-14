@@ -60,7 +60,14 @@ from aisquare.core.tmux import (
     WindowInfo,
 )
 from aisquare.core.version import __version__
-from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession, TeamTask
+from aisquare.models import (
+    CheckStatus,
+    FleetAgent,
+    FleetAgentStatus,
+    ProjectInfo,
+    TeamSession,
+    TeamTask,
+)
 from aisquare.services import auto_mode, lifecycle
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
@@ -3105,6 +3112,83 @@ def test_a_held_row_reads_unknown_saying_why_whatever_its_fresh_board_says(
     monkeypatch.setattr(fleet_service, "server", lambda config=None: tmux)
     [own] = fleet_service.list_agents(project)
     assert (own.state, own.held) == (board, False)
+
+
+@pytest.mark.parametrize("shape", ["another", "gone"])
+def test_every_path_that_decides_a_held_rows_fate_gives_the_one_verdict(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    shape: str,
+) -> None:
+    """Reviews of #259, rounds 1 to 3: each found another path that decided a held row's
+    fate its own way: a shutdown plan that said `stopped` where its run recorded the row
+    lost, a kill phase that spared a session for it on another server, an uninstall that
+    advised `SIGUSR1` while another server listened at its socket. Every path that ends a
+    row, keeps it, or says what to do with it asks the one rule (`server_may_run`) and says
+    the one way back (`_unreachable_why`): for a row another server answers for (`another`)
+    and for one whose server lost its socket file (`gone`), this asks each in turn, so the
+    next path is one more line. Only `--forget` ends it, plan and run alike, and every
+    `SIGUSR1` said for a socket another server answers on waits for it to be free."""
+    from aisquare.services import diagnostics
+
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    monkeypatch.setattr(lifecycle, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    coder = _coder(project)
+    if shape == "another":
+        answering = FakeTmux()  # took the socket; its %1 is another agent's
+        answering.started = tmux.started + timedelta(minutes=5)
+        answering.spawn_window("asq-elsewhere", name="x", cwd=project.root, command=["c"])
+        monkeypatch.setattr(fleet_service, "server", lambda config=None: answering)
+        monkeypatch.setattr(TmuxServer, "listener", lambda _self, _recorded=None: "answers")
+        monkeypatch.setattr(TmuxServer, "started_at", lambda _self: answering.started)
+        doctor_sees: TmuxServer = answering
+    else:
+        tmux.running = False  # no tmux client reaches its server…
+        tmux.socket_file = False  # …as its socket file is gone: it may run on
+        monkeypatch.setattr(tmux, "server_absent", lambda: True)  # as tmux says for that
+        monkeypatch.setattr(TmuxServer, "listener", lambda _self, _recorded=None: "gone")
+        doctor_sees = tmux
+    said: list[str] = []
+
+    swept = fleet_service.reap(project, server_down=True)
+    plain = fleet_service.reap(project)  # a server that does not answer is not asked to say
+    for reaped in (swept, plain) if shape == "another" else (swept,):
+        [held] = reaped.held
+        assert held.agent.id == coder.id
+        said.append(held.reason)
+    assert swept.lost == swept.ended == plain.lost == plain.ended == []
+    for verb in (fleet_service.stop, fleet_service.restart):
+        with pytest.raises(FleetError) as refused:
+            verb(project, "coder-1")
+        said.append(str(refused.value))
+    plan = fleet_service.shutdown_plan(project)
+    report = fleet_service.shutdown(project)
+    assert _planned_ends(plan) == _ends(report) == {coder.id: "live"}, (plan, report)
+    said += [plan.held[coder.id], report.failed[0].reason]
+    assert lifecycle.running_fleet()[0] != (), "uninstall counts it as running"
+    refusal = lifecycle.uninstall_plan().refusal
+    assert refusal is not None and refusal.error == "fleet_running"
+    said.append(str(refusal))
+    check = diagnostics._check_fleet(lambda socket: doctor_sees)
+    assert check.status is CheckStatus.warn and "may still be running" in check.detail
+    said.append(check.fix or "")
+    with store_session() as store:
+        assert [a.id for a in store.fleet_agents(project.id, live_only=True)] == [coder.id]
+    assert all("SIGUSR1" in words for words in said), said
+    if shape == "another":
+        # tmux's handler takes the path from whatever listens on it: only once it is free.
+        for words in said:
+            assert re.search(r"SIGUSR1 (\(once|once)", words), words
+
+    forget = fleet_service.shutdown_plan(project, forget=True)
+    forgotten = fleet_service.shutdown(project, forget=True)
+
+    assert _planned_ends(forget) == _ends(forgotten) == {coder.id: "lost"}
+    assert forget.lost_why[coder.id] == forgotten.recorded[0].reason
+    assert lifecycle.running_fleet()[0] == ()
 
 
 def test_every_path_that_types_into_or_shows_a_pane_refuses_a_held_rows_id(

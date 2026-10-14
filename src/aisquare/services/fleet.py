@@ -1697,22 +1697,12 @@ def spawn(
     # starts there would hold them for good: they read lost from now on, in every project,
     # decided while the stale file still says so. And a socket path a running server lost
     # is not one to start a server at: the agents on it would be stranded for good, and the
-    # new server would answer for their rows. Asked again as the window opens (`open_window`).
+    # new server would answer for their rows. Asked here so the refusal comes before the
+    # project is captured or a worktree made (#139), and again as the window opens
+    # (`open_window`), as a server can exit while the worktree is checked out.
     exited = _before_a_server_starts(srv, config)
     if exited:
-        one = len(exited) == 1
-        with store_session() as store:
-            names = ", ".join(
-                f"{row.label} ({_name(store.get_project(row.project_id) or project)})"
-                for row in exited
-            )
-        notes.append(
-            f"the tmux server at {srv.socket_path()} had exited, leaving its socket file: "
-            f"{names} {'reads' if one else 'read'} lost from now on, as {'its' if one else 'their'}"
-            f" {'pane' if one else 'panes'} went with it (`aisquare fleet reap` records "
-            f"{'it' if one else 'them'}, `aisquare fleet restart` starts {'it' if one else 'them'}"
-            " again)"
-        )
+        notes.append(_exited_note(srv, exited))
     # Nothing up to the codename below writes the project's registration: every
     # refusal that needs no window is given first (#139). A spawn refused for its
     # account, its worktree, its task, the cap or a second manager had already
@@ -1924,6 +1914,7 @@ def spawn(
             width=width,
             height=height,
             config=config,
+            notes=notes,
         )
     except TmuxError as exc:
         raise FleetError(f"tmux could not start the window: {exc}") from exc
@@ -2358,12 +2349,9 @@ def _forget_an_exited_server(srv: TmuxServer, config: FleetSettings) -> list[Fle
     Ending it here instead would cost that. Asked per row, and written as a compare-and-set
     (``forget_fleet_agent_server_start``), so a server another process brought up meanwhile
     leaves its rows and any held one alone.
+
+    Asked by :func:`_before_a_server_starts` once it read a stale file at the path.
     """
-    try:
-        if srv.listener(srv.socket_path()) is not None:
-            return []
-    except TmuxUnavailable:
-        return []  # no POSIX uid: no tmux server can exist here
     forgotten: list[FleetAgent] = []
     with store_session() as store:
         for agent, answer in _live_rows_here(store, srv, config):
@@ -2389,10 +2377,38 @@ def _before_a_server_starts(srv: TmuxServer, config: FleetSettings) -> list[Flee
     agents (:func:`_refuse_a_freed_socket`, which raises). Only ``spawn`` asked, and the
     Accounts sign-in window, on the same server, started one past both (review of #259,
     round 3): so every window opened there goes through :func:`open_window`, which asks.
+
+    One read of the socket says which, if either, applies. Each asked it, so a check cost
+    two connects, and a spawn checks twice (review of #259, round 5). A server listening
+    there, the usual case, is one connect and nothing else.
     """
-    exited = _forget_an_exited_server(srv, config)
-    _refuse_a_freed_socket(srv, config)
-    return exited
+    try:
+        answer = srv.listener(srv.socket_path())
+    except TmuxUnavailable:
+        return []  # no POSIX uid: no tmux server can exist here
+    if answer is None:
+        return _forget_an_exited_server(srv, config)
+    if answer == "gone":
+        _refuse_a_freed_socket(srv, config)
+    return []
+
+
+def _exited_note(srv: TmuxServer, exited: Sequence[FleetAgent]) -> str:
+    """What a spawn says of the rows :func:`_before_a_server_starts` forgot the start of: they
+    read lost from now on, named with their projects, forgotten ones' included."""
+    one = len(exited) == 1
+    with store_session() as store:
+        known = {each.id: _name(each) for each in store.list_projects(include_forgotten=True)}
+    names = ", ".join(
+        f"{row.label} ({known.get(row.project_id, row.project_id)})" for row in exited
+    )
+    return (
+        f"the tmux server at {srv.socket_path()} had exited, leaving its socket file: "
+        f"{names} {'reads' if one else 'read'} lost from now on, as {'its' if one else 'their'}"
+        f" {'pane' if one else 'panes'} went with it (`aisquare fleet reap` records "
+        f"{'it' if one else 'them'}, `aisquare fleet restart` starts {'it' if one else 'them'}"
+        " again)"
+    )
 
 
 def open_window(
@@ -2406,14 +2422,20 @@ def open_window(
     width: int = DEFAULT_WINDOW_WIDTH,
     height: int = DEFAULT_WINDOW_HEIGHT,
     config: FleetSettings | None = None,
+    notes: list[str] | None = None,
 ) -> WindowInfo:
     """A window on the fleet's tmux server ``srv`` (:func:`server`), opened once what must hold
     before a server starts there does (:func:`_before_a_server_starts`): the one way anything
     opens a window at the fleet's socket, a spawn's agent and the Accounts sign-in window
     alike (tests/test_fleet_service.py names every caller). :class:`FleetError` when it may
     not; :class:`~aisquare.core.tmux.TmuxError` when tmux would not
-    (:meth:`~aisquare.core.tmux.TmuxServer.spawn_window`)."""
-    _before_a_server_starts(srv, config or settings())
+    (:meth:`~aisquare.core.tmux.TmuxServer.spawn_window`). ``config`` is the one ``srv`` was
+    made for, the caller's, so the check asks the rows of the socket it probes. ``notes``,
+    when given, gets the rows whose exited server's start the check forgot, for the caller
+    to say (:func:`_exited_note`)."""
+    exited = _before_a_server_starts(srv, config or settings())
+    if exited and notes is not None:
+        notes.append(_exited_note(srv, exited))
     return srv.spawn_window(
         session, name=name, cwd=cwd, command=command, env=env, width=width, height=height
     )

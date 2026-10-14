@@ -50,6 +50,7 @@ from aisquare.cli.ui.views.accounts import (
 from aisquare.core import browser, credentials, paths
 from aisquare.core import claude_accounts as core
 from aisquare.core import tmux as tmux_core
+from aisquare.core.config import FleetSettings
 from aisquare.core.store import store_session
 from aisquare.core.tmux import Completed, TmuxServer, WindowInfo
 from aisquare.models import (
@@ -1179,7 +1180,13 @@ def _script_claude_sign_in(
     (with every message held 15 ms).
     """
     monkeypatch.setattr(accounts_view, "LOGIN_POLL_SECONDS", 3600.0)
-    seen: dict[str, Any] = {"opened": [], "completed": [], "abandoned": [], "landed_polls": 0}
+    seen: dict[str, Any] = {
+        "opened": [],
+        "config": [],
+        "completed": [],
+        "abandoned": [],
+        "landed_polls": 0,
+    }
     account = ClaudeAccount(
         slot=2,
         config_dir=tmp_path / "claude-accounts" / "2",
@@ -1193,9 +1200,14 @@ def _script_claude_sign_in(
         return account
 
     def open_window(
-        acct: ClaudeAccount, server: TmuxServer, *, cwd: Path | None = None
+        acct: ClaudeAccount,
+        server: TmuxServer,
+        *,
+        cwd: Path | None = None,
+        config: FleetSettings | None = None,
     ) -> WindowInfo:
         seen["opened"].append((acct.slot, server.socket, cwd))
+        seen["config"].append(config)
         return WindowInfo(
             session=accounts_service.SIGN_IN_SESSION,
             window_id="@7",
@@ -1251,6 +1263,8 @@ def test_add_opens_a_watched_window_and_records_the_account_when_the_login_lands
     box_shown, attached, header, box_after, said = drive(go)
     assert seen["begin"] is None  # + means a fresh slot
     assert seen["opened"] == [(2, PRIVATE_SOCKET, None)]
+    # The page's one read of [fleet], so the check before a server starts reads no other.
+    assert [type(config) for config in seen["config"]] == [FleetSettings]
     assert box_shown and attached == "%7"
     assert header.startswith("Signing in to account 2")
     assert seen["landed_polls"] == 1 and seen["completed"] == [2] and seen["abandoned"] == []
@@ -1293,7 +1307,7 @@ def test_a_sign_in_window_the_fleet_refuses_is_said_and_its_fresh_slot_discarded
     seen = _script_claude_sign_in(monkeypatch, tmp_path, lands=False)
     why = "not started: the tmux server that manager (repo) runs on lost its socket file"
 
-    def refused(acct: ClaudeAccount, server: TmuxServer, *, cwd: Path | None = None) -> None:
+    def refused(acct: ClaudeAccount, server: TmuxServer, **_kwargs: object) -> None:
         raise fleet_service.FleetError(why)
 
     monkeypatch.setattr(accounts_service, "open_sign_in_window", refused)

@@ -2764,6 +2764,67 @@ def test_a_spawn_over_a_server_that_exited_leaves_its_rows_lost_not_held(
     assert [typed for typed in tmux.typed if typed[0] == receipt.agent.pane_id] == []
 
 
+def test_a_check_before_a_server_starts_reads_the_socket_once_and_a_spawn_says_both_checks(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 5: `_forget_an_exited_server` and `_refuse_a_freed_socket` each
+    read the fleet's socket, so a check made two connects, and a spawn, which checks before
+    it captures the project or makes a worktree and again as its window opens, made four.
+    One read says which of the two applies. And the rows the window's check forgot, a
+    server having exited while the spawn checked its worktree out, went unsaid: the spawn
+    threw that check's answer away."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    asked: list[Path | None] = []
+    listener = tmux.listener
+
+    def counted(recorded: Path | None = None) -> SocketAnswer | None:
+        asked.append(recorded)
+        return listener(recorded)
+
+    monkeypatch.setattr(tmux, "listener", counted)
+    manager = fleet_service.spawn(project, "manager").agent
+
+    assert len(asked) == 2, asked  # a server listens: one read per check
+    checks = fleet_service._before_a_server_starts
+    early = [True]
+
+    def then_the_server_exits(srv: TmuxServer, config: FleetSettings) -> list[FleetAgent]:
+        exited = checks(srv, config)
+        if early:  # the spawn's own check, before its worktree
+            early.clear()
+            tmux.kill_server()  # the file stays, nothing listens
+        return exited
+
+    monkeypatch.setattr(fleet_service, "_before_a_server_starts", then_the_server_exits)
+    receipt = fleet_service.spawn(project, "coder", worktree=False)
+
+    [said] = [note for note in receipt.notes if "had exited" in note]
+    assert f"manager ({project.root.name}) reads lost from now on" in said, said
+    with store_session() as store:
+        forgotten = store.get_fleet_agent(manager.id)
+    assert forgotten is not None and forgotten.server_started_at is None
+
+
+def test_the_sign_in_window_asks_its_check_with_the_config_its_server_was_made_for(
+    tmux: FakeTmux, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 5: the Accounts sign-in window passed no `config`, so the check
+    before a server starts read `config.toml` again on Textual's thread, and asked the rows
+    of today's `[fleet] tmux_socket` while the page probed the server it had kept from its
+    first sign-in. The page reads `[fleet]` once and passes it with the server it made."""
+    from aisquare.core import claude_accounts as claude_accounts_core
+    from aisquare.services import claude_accounts as claude_accounts_service
+
+    config = fleet_service.settings()
+    monkeypatch.setattr(fleet_service, "settings", lambda: pytest.fail("[fleet] read again"))
+    account = claude_accounts_core.default_account()
+
+    window = claude_accounts_service.open_sign_in_window(account, tmux, config=config)
+
+    assert window.pane_id in tmux.facts
+
+
 def _callers_of(name: str) -> set[tuple[str, str]]:
     """``(module under src/aisquare, function)`` for each function whose body calls ``.name(…)``
     or holds the string ``name`` as a whole constant (a tmux command word)."""

@@ -45,7 +45,7 @@ from typing import Any, Literal
 
 from aisquare.core import claude_accounts as core
 from aisquare.core import paths
-from aisquare.core.config import AccountsSettings, load_config
+from aisquare.core.config import AccountsSettings, FleetSettings, load_config
 from aisquare.core.spawn import untraced_env
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.tmux import TmuxServer, WindowInfo
@@ -1249,6 +1249,7 @@ def open_sign_in_window(
     *,
     cwd: Path | None = None,
     environ: Mapping[str, str] | None = None,
+    config: FleetSettings | None = None,
 ) -> WindowInfo:
     """Start a Claude Code session for ``account`` in the fleet's tmux server, detached.
 
@@ -1263,7 +1264,9 @@ def open_sign_in_window(
     start first, and a socket path a running server lost refuses it with
     ``fleet.FleetError``. Started past both, after a ``kill-server`` every live row was held
     for good, and over a freed path the agents of the server that lost it were stranded
-    (review of #259, round 3). Imported here, as ``fleet`` imports this module.
+    (review of #259, round 3). Imported here, as ``fleet`` imports this module. ``config`` is
+    the ``[fleet]`` section ``server`` was made for: that check asks the rows of its socket,
+    and without it reads ``config.toml`` again (review of #259, round 5).
     """
     from aisquare.services import fleet as fleet_service
 
@@ -1275,6 +1278,7 @@ def open_sign_in_window(
         cwd=cwd if cwd is not None else Path.home(),
         command=command,
         env=env,
+        config=config,
     )
 
 

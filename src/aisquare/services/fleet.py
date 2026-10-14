@@ -130,9 +130,11 @@ _POLL_INTERVAL = 0.25
 _PROMPT_SETTLE = 2.0
 """After the agent process appears, its UI needs a moment before it reads input."""
 _KEY_GAP = 0.2
-"""Between a typed command and its Enter. Codex reads keys that arrive in one burst as
-a paste, Enter included: ``/exit`` sent with its Enter stayed in the composer and the
-stop's grace ran out into a kill, with no ``SessionEnd`` (0.162.1; 50 ms apart it exits)."""
+"""Between a typed line and its Enter (:func:`_type_line`). Codex reads keys that arrive
+in one burst as a paste, Enter included: ``/exit`` sent with its Enter stayed in the
+composer and the stop's grace ran out into a kill, with no ``SessionEnd``; the manager's
+nudge stayed there unsent, three of them by the end of a run (0.162.1 under tmux 3.7c:
+an Enter 20 ms behind the text is kept, 50 ms behind it submits)."""
 _SHELLS = frozenset({"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "ash"})
 _NOT_AN_AGENT = _SHELLS | {"tmux"}
 """Foreground commands that are never the agent: a shell (left behind after an
@@ -2501,8 +2503,7 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
             f"the agent did not come up within {PROMPT_TIMEOUT:.0f} s — prompt typed anyway"
         )
     try:
-        srv.paste(pane_id, prompt)
-        srv.send_keys(pane_id, "Enter")
+        _type_line(srv, pane_id, prompt)
     except TmuxError as exc:
         notes.append(f"could not type the prompt: {exc}")
         return False
@@ -2855,8 +2856,7 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
                 f"launcher or a shell is in the foreground) — {how}",
             )
         try:
-            srv.paste(agent.pane_id, text)
-            srv.send_keys(agent.pane_id, "Enter")
+            _type_line(srv, agent.pane_id, text)
         except TmuxError as exc:
             how = _file_note(project, label, text, sender)
             return TellResult(False, f"tmux could not type it ({exc}) — {how}")
@@ -2927,6 +2927,25 @@ def _pane_is_the_agent(srv: TmuxServer, pane_id: str) -> bool:
     except TmuxError:
         return False
     return facts is not None and not facts.dead and _agent_running(facts.current_command)
+
+
+def _type_line(srv: TmuxServer, pane_id: str, text: str, *, command: bool = False) -> None:
+    """Type ``text`` at an agent's prompt and submit it: how the fleet types every line.
+
+    The text goes in as one bracketed paste, a line break in it part of the message — a
+    ``command`` (``/exit``) keyed in as typed instead — and its Enter :data:`_KEY_GAP`
+    later, a key of its own: Codex takes keys that arrive in one burst for a paste and
+    keeps the Enter in it as text. (A bracketed paste with its Enter right behind it did
+    submit on 0.162.1, which is why ``tell`` reached a waiting Codex and the nudge, typed
+    key by key, did not; one rule for both costs the paste 0.2 s.) Raises ``TmuxError``
+    as the tmux calls do.
+    """
+    if command:
+        srv.send_literal(pane_id, text)
+    else:
+        srv.paste(pane_id, text)
+    _sleep(_KEY_GAP)
+    srv.send_keys(pane_id, "Enter")
 
 
 def _file_note(project: ProjectInfo, label: str, text: str, sender: str | None) -> str:
@@ -3114,9 +3133,7 @@ def _stop_row(
     try:
         window = _window()
         if not force and window is not None and not window.dead:
-            srv.send_literal(agent.pane_id, _exit_command(agent))
-            _sleep(_KEY_GAP)
-            srv.send_keys(agent.pane_id, "Enter")
+            _type_line(srv, agent.pane_id, _exit_command(agent), command=True)
             exited_here = True
             deadline = _monotonic() + grace
             dead_seen: float | None = None
@@ -5587,7 +5604,9 @@ def nudge_manager(project_id: str, *, reason: str) -> bool:
     that no longer matches) is ``working`` everywhere else, and typing into it
     is the interleaving ``tell`` refuses to cause. Agreeing costs one extra
     ``list-panes`` for the pane's last-output time, on a path the debounce
-    already bounds to one pass per :data:`NUDGE_DEBOUNCE`.
+    already bounds to one pass per :data:`NUDGE_DEBOUNCE`. The line goes in as ``tell``
+    types one (:func:`_type_line`): a Codex manager kept every nudge sent with its Enter
+    in one burst unsent in its composer, and woke for none of them.
     """
     try:
         with store_session() as store:
@@ -5618,8 +5637,7 @@ def nudge_manager(project_id: str, *, reason: str) -> bool:
             if state != "waiting":
                 return False
             store.set_meta(key, now.isoformat())
-            srv.send_literal(manager.pane_id, NUDGE_TEXT)
-            srv.send_keys(manager.pane_id, "Enter")
+            _type_line(srv, manager.pane_id, NUDGE_TEXT)
             return True
     except Exception:
         return False

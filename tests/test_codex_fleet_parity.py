@@ -58,10 +58,12 @@ from aisquare.services import team as team_service
 from tests import fakebin
 from tests.test_codex_account_switch import codex_on_path  # noqa: F401 - fixture, by name
 from tests.test_fleet_service import (  # noqa: F401 - fixtures, by name
+    FakeClock,
     FakeTmux,
     _command,
     _events,
     _flag,
+    _timed_input,
     claude_on_path,
     clock,
     project,
@@ -492,6 +494,37 @@ def test_tell_to_a_codex_agent_that_is_not_working_queues_nothing(
 
     assert told.delivered is False and "board note" in told.how
     assert _notes_to(codex.project, codex.agent.label) == ["hello"]
+
+
+# --- a line typed into a Codex pane: its Enter apart (lane B of #113) ----------------------
+
+
+def test_a_waiting_codex_manager_is_woken_with_the_enter_apart(
+    tmux: FakeTmux,  # noqa: F811
+    clock: FakeClock,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The nudge's line and its Enter went in one burst, which Codex keeps as a paste:
+    three nudges sat unsent in a waiting manager's prompt, and it woke for none."""
+    manager = fleet_service.spawn(project, "manager", agent="codex", worktree=False).agent
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    codex = Codex(manager, project, home, tmux, monkeypatch)
+    codex.start("thread-m")
+    codex.hook("UserPromptSubmit", "thread-m", prompt="run the team", turn_id="turn-1")
+    codex.hook("Stop", "thread-m", turn_id="turn-1", stop_hook_active=False)
+    tmux.set_command(manager.pane_id, "codex")
+    assert fleet_service.status_of(_row(manager.id)).state == "waiting"
+    typed = _timed_input(tmux, clock, monkeypatch)
+
+    assert fleet_service.nudge_manager(project.id, reason="task_review") is True
+
+    [(kind, text, typed_at), (key, enter, entered_at)] = typed
+    assert (kind, text, key, enter) == ("paste", fleet_service.NUDGE_TEXT, "key", "Enter")
+    assert round(entered_at - typed_at, 9) >= fleet_service._KEY_GAP > 0
 
 
 # --- a replacement runs the row's own agent (review r1 of #113, finding 1) ---------------

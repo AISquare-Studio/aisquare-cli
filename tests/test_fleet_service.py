@@ -2317,6 +2317,49 @@ def test_stop_types_the_exit_and_its_enter_apart(
     assert enter == "Enter" and entered_at - typed_at >= fleet_service._KEY_GAP > 0
 
 
+def _timed_input(
+    tmux: FakeTmux, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> list[tuple[str, str, float]]:
+    """Every input the fake takes from here on, as ``(kind, text, when)`` on the service's
+    clock."""
+    seen: list[tuple[str, str, float]] = []
+    take = tmux._input
+
+    def timed(pane_id: str, kind: str, text: str) -> None:
+        take(pane_id, kind, text)
+        seen.append((kind, text, clock.now))
+
+    monkeypatch.setattr(tmux, "_input", timed)
+    return seen
+
+
+def test_a_told_line_and_a_typed_prompt_have_their_enter_apart_too(
+    tmux: FakeTmux,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every line the fleet types goes in one way (``_type_line``): a paste, and its Enter
+    ``_KEY_GAP`` behind it, the gap ``stop`` learned for ``/exit`` on Codex."""
+    agent = _coder(project)
+    _board_session(agent, "waiting")
+    tmux.set_command(agent.pane_id, "claude")
+    typed = _timed_input(tmux, clock, monkeypatch)
+
+    assert fleet_service.tell(project, "coder-1", "please rebase").delivered
+    fleet_service.spawn(project, "coder", worktree=False, prompt="start on tsk_1")
+
+    assert [(kind, text) for kind, text, _ in typed] == [
+        ("paste", "please rebase"),
+        ("key", "Enter"),
+        ("paste", "start on tsk_1"),
+        ("key", "Enter"),
+    ]
+    for (_, _, typed_at), (_, _, entered_at) in (typed[0:2], typed[2:4]):
+        assert round(entered_at - typed_at, 9) >= fleet_service._KEY_GAP > 0
+
+
 def test_stop_outwaits_the_dead_without_status_gap(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:
@@ -6133,7 +6176,7 @@ def test_reap_nudges_a_waiting_manager_when_an_agent_exits(
     tmux.die(coder.pane_id, 1)
     fleet_service.reap(project)
     assert tmux.typed == [
-        (manager.pane_id, "literal", NUDGE_TEXT),
+        (manager.pane_id, "paste", NUDGE_TEXT),
         (manager.pane_id, "key", "Enter"),
     ]
 
@@ -6251,7 +6294,7 @@ def test_nudge_types_one_fixed_line_into_a_waiting_manager(
     manager = _waiting_manager(tmux, project)
     assert fleet_service.nudge_manager(project.id, reason="task_review") is True
     assert tmux.typed == [
-        (manager.pane_id, "literal", NUDGE_TEXT),
+        (manager.pane_id, "paste", NUDGE_TEXT),
         (manager.pane_id, "key", "Enter"),
     ]
     assert not NUDGE_TEXT.startswith(("/", "!")), "Claude Code's command prefixes"
@@ -6309,7 +6352,7 @@ def test_nudge_refuses_a_stale_waiting_row_that_ls_and_tell_call_working(
     assert fleet_service.status_of(manager).state == "waiting"
     assert fleet_service.nudge_manager(project.id, reason="task_review") is True
     assert tmux.typed == [
-        (manager.pane_id, "literal", NUDGE_TEXT),
+        (manager.pane_id, "paste", NUDGE_TEXT),
         (manager.pane_id, "key", "Enter"),
     ]
 
@@ -7790,7 +7833,7 @@ def test_a_listing_records_a_dead_pane_as_ended_and_keeps_the_row_while_its_wind
     assert row is not None and row.ended_at is not None and row.exit_status == 130
     assert _events(project, "agent_exited") == ["coder-1 exited (130)"]
     assert tmux.typed == [
-        (manager.pane_id, "literal", NUDGE_TEXT),
+        (manager.pane_id, "paste", NUDGE_TEXT),
         (manager.pane_id, "key", "Enter"),
     ]
     # Idempotent: the next listing writes nothing and says nothing more.
@@ -9667,7 +9710,7 @@ def test_a_restart_whose_replacement_never_starts_wakes_the_manager_it_held_back
 
     assert len(_events(project, "agent_exited")) == 1
     assert [typed for typed in tmux.typed if typed[0] == manager.pane_id] == [
-        (manager.pane_id, "literal", NUDGE_TEXT),
+        (manager.pane_id, "paste", NUDGE_TEXT),
         (manager.pane_id, "key", "Enter"),
     ]
 

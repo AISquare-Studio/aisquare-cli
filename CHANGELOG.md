@@ -141,11 +141,18 @@ adapter.**
 
 - Codex reasoning levels (`minimal` to `ultra`) pass to Codex unchanged; the
   shared name `ultracode` becomes Codex's `max`, with a note. Codex fleet roles
-  run `--approve-for-me` by default (Codex's own reviewer, in the store
-  profile over `:workspace`); reviewers run `--ask-for-approval on-request`
-  with that same reviewer in the profile over `:read-only` (`read_only:auto`).
-  `fleet.roles.<role>.approve_for_me = false` turns it off. Codex's approval
+  run `--approve-for-me` by default (Codex's own reviewer), in the store
+  profile over `:workspace`. Reviewers (`read_only:auto`) run
+  `--ask-for-approval on-request -c approvals_reviewer="auto_review"` in the
+  store profile over `:read-only`, with no `--sandbox`.
+  `fleet.roles.<role>.approve_for_me = false` turns `--approve-for-me` off. Codex's approval
   policies are `on-request` and `never`, as in 0.162.1.
+- `fleet spawn` gives a Claude Code agent its role's model and effort, as
+  `team spawn` resolves them: the role's ladder from the cached probe verdicts,
+  else its first rung, with no paid probe at the spawn. `[agents.models.claude-code]`
+  (and its `roles.<role>`) pins the model over the ladder. 0.8.0's fleet spawn
+  passed neither, so Claude Code ran its own default. A hand `aisquare launch
+  <role>` still leaves Claude Code's argv as it was.
 - `fleet spawn --agent codex` forwards Codex's own `-c KEY=VALUE` and `-a`;
   on `launch`, `-a` stays AISquare's `--account` and its help says so.
 - Harden coding-agent argument ownership, native effort mapping, and inherited

@@ -589,6 +589,37 @@ def test_actual_launch_preserves_attached_options_and_native_prompt_terminators(
     assert execute.call_args.args[1][-len(args) :] == args
 
 
+def test_an_exporter_in_the_home_of_the_account_the_launch_runs_on_is_kept(
+    tmp_path: Path,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The launch sets CODEX_HOME to its account's home over the shell's: an exporter the
+    operator configured there is theirs, and AISquare's receiver stands down for it."""
+    config = load_config()
+    config.explainability.enabled = config.explainability.ship = True
+    save_config(config)
+    shell = tmp_path / "shell-codex"
+    shell.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(shell))
+    monkeypatch.setattr(native_telemetry, "SYSTEM_CONFIG", tmp_path / "system.toml")
+    monkeypatch.setattr(agent_launch, "executable", lambda selected: "/fixture/codex")
+    start = Mock(return_value=(["-c", "fixture.receiver=true"], "receiver started"))
+    monkeypatch.setattr(native_telemetry, "start_receiver", start)
+    monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", Mock())
+    slot = claude_accounts.create_account("codex")
+    (slot.config_dir / "config.toml").write_text('[otel]\nexporter="none"\n')
+    accounts_service.set_default(str(slot.slot))
+    result = runner.invoke(app, ["launch", "coder", "--agent", "codex"])
+    assert result.exit_code == 0, result.output
+    assert "keeps your configured exporter" in result.output and not start.called
+    # Control: on the shell's own home, which configures none, the receiver starts.
+    accounts_service.set_default(None, agent="codex")
+    result = runner.invoke(app, ["launch", "coder", "--agent", "codex"])
+    assert result.exit_code == 0, result.output
+    assert start.call_count == 1
+
+
 def test_nul_profile_from_native_file_does_not_break_telemetry_inspection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

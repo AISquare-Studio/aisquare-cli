@@ -393,6 +393,13 @@ def telemetry_args(
     adapter = selected.adapter
     if not adapter.capabilities.native_telemetry:
         return [], ""
+    # The home this launch's environment names: an account's (`apply_launch_env`) over
+    # the binding's or the shell's, which `selected` was resolved with.
+    home = (
+        adapter.config_dir(agents._home(), env)
+        if env.get(adapter.home_env, "").strip()
+        else selected.config_dir
+    )
     try:
         settings = load_config().explainability
         if not settings.enabled:
@@ -403,7 +410,7 @@ def telemetry_args(
                 f"{adapter.label} model tracing requires configured insight shipping; "
                 "native auth unchanged",
             )
-        if native_telemetry.operator_configured(selected.config_dir, raw_args or []):
+        if native_telemetry.operator_configured(home, raw_args or []):
             return (
                 [],
                 f"{adapter.label} keeps your configured exporter; AISquare native tracing is off",

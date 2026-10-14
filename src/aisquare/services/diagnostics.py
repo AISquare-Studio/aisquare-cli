@@ -151,6 +151,7 @@ def doctor(
             *_check_other_agents(cwd),
             *_planned_agent_checks(),
             *_claude_accounts_checks(),
+            *_other_accounts_checks(),
             _check_tmux(),
             _check_gh(),
             _check_snapshot(cwd),
@@ -178,6 +179,8 @@ def doctor(
             # Only when a fleet role runs `auto` behind a configured proxy (#150);
             # offline — config, the store, the head of a few transcripts.
             *_optional(auto_mode.doctor_check()),
+            # Offline: another agent's usage is read from its own sessions (Codex's rollouts).
+            *_other_accounts_headroom_checks(),
             # Leaves the machine (one usage request per account), so --live only (#146).
             *_live_only(live, _claude_account_headroom_check),
             # One balance request per destination workspace (#143), so --live only.
@@ -1424,6 +1427,102 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
     ]
 
 
+def _other_accounts_checks() -> list[DoctorCheck]:
+    """The rows :func:`_claude_accounts_checks` gives Claude Code, for every other agent with
+    account slots (Codex): ``codex-accounts``, ``codex-account-default``,
+    ``codex-account-bindings`` and ``codex-account-limits`` — each only when there is
+    something of that agent's to report, so a machine without Codex slots is unchanged."""
+    return [
+        check
+        for agent in claude_accounts_core.account_agents()
+        if agent != claude_accounts_core.AGENT
+        for check in _agent_accounts_checks(agent)
+    ]
+
+
+def _agent_accounts_checks(agent: str) -> list[DoctorCheck]:
+    """:func:`_claude_accounts_checks` for ``agent``'s slots: one line for the ones the CLI
+    added, the default checks when something is arranged, and its limited agents.
+
+    Reads only, like Claude Code's: ``managed_accounts`` lists directories and
+    ``describe`` reads the files the agent left in them (for Codex, ``auth.json``'s
+    id-token claims — never a token). An unsigned slot's fix is the agent's own
+    sign-in in it (``aisquare accounts run <n> login`` for Codex).
+    """
+    kind = claude_accounts_core.kind(agent)
+    managed = claude_accounts_core.managed_accounts(agent)
+    if not managed:
+        defaults = _account_default_checks(agent) if _arranges_an_agent_account(agent) else []
+        return [*defaults, *_account_limit_checks(agent)]
+    statuses = [claude_accounts_service.describe(account) for account in managed]
+    parts = [
+        f"{status.account.slot} {status.identity.email if status.identity else 'not signed in'}"
+        for status in statuses
+    ]
+    detail = f"{len(statuses)} added beside the {kind.plain_label}: " + " · ".join(parts)
+    unsigned = [status.account.slot for status in statuses if not status.signed_in]
+    name = f"{agent}-accounts"
+    rest = [*_account_default_checks(agent), *_account_limit_checks(agent)]
+    if unsigned:
+        sign_in = " ".join(("", *kind.sign_in_args()))
+        return [
+            _warn(
+                name,
+                detail,
+                "Sign in from asq → Accounts, or: "
+                + "; ".join(f"aisquare accounts run {slot}{sign_in}" for slot in unsigned),
+            ),
+            *rest,
+        ]
+    return [_ok(name, detail), *rest]
+
+
+def _arranges_an_agent_account(agent: str) -> bool:
+    """:func:`_arranges_an_account` for ``agent``: a binding of one of its roles, a project
+    default under its key, or a machine default in ``agent_account``. Writes nothing."""
+    try:
+        bindings = settings_service.role_account_bindings()
+        if any(whose == agent for whose in _role_agents(bindings).values()):
+            return True
+        if not paths.db_path().exists():
+            return False
+        with store_session() as store:
+            if store.project_settings(claude_accounts_service.project_account_key(agent)):
+                return True
+            return any(record.is_default for record in store.agent_accounts(agent))
+    except Exception:
+        return False
+
+
+def _role_agents(bindings: Mapping[str, str]) -> dict[str, str]:
+    """Each bound role's agent, as the config names it: the role's own ``agent``, else the one
+    its bound binary runs, else ``[agents] default``, else Claude Code.
+
+    Without the project's or the shell's say (``agent_launch.resolve`` asks those, and
+    registers the project to): a doctor row may not write. An agent without account
+    slots counts as Claude Code's, whose rows have always checked every binding.
+    """
+    try:
+        config = load_config()
+    except Exception:
+        return dict.fromkeys(bindings, claude_accounts_core.AGENT)
+    from aisquare.core.agent_adapters import adapter_for_binary
+
+    known = claude_accounts_core.account_agents()
+    agents: dict[str, str] = {}
+    for role in bindings:
+        profile = config.team.profiles.get(role)
+        inferred = adapter_for_binary(profile.bin) if profile is not None and profile.bin else None
+        whose = (
+            (profile.agent if profile is not None else None)
+            or (inferred.id if inferred is not None else None)
+            or config.agents.default
+            or claude_accounts_core.AGENT
+        )
+        agents[role] = whose if whose in known else claude_accounts_core.AGENT
+    return agents
+
+
 def _arranges_an_account() -> bool:
     """Whether anything the default checks report on was set: a binding or a default.
 
@@ -1569,6 +1668,13 @@ def _claude_account_limit_checks() -> list[DoctorCheck]:
     and when its limit lifts, with the one command that moves it. Nothing when
     no session is limited, so an idle machine's doctor output is unchanged.
     """
+    return _account_limit_checks(claude_accounts_core.AGENT)
+
+
+def _account_limit_checks(agent: str) -> list[DoctorCheck]:
+    """:func:`_claude_account_limit_checks` for the sessions of ``agent`` (a session that
+    names no agent is Claude Code's): one row per agent, in its own words — nothing is
+    relied on to continue a Codex agent at the reset, as Claude Code's own wait does."""
     if not paths.db_path().exists():
         return []
     try:
@@ -1579,12 +1685,14 @@ def _claude_account_limit_checks() -> list[DoctorCheck]:
                 (session, names[p.id])
                 for p in projects
                 for session in store.team_sessions(p.id)
-                if session.ended_at is None and session.state == "limited"
+                if session.ended_at is None
+                and session.state == "limited"
+                and (session.agent or claude_accounts_core.AGENT) == agent
             ]
             labels = {}
             for session, _project_name in limited:
-                agent = store.fleet_agent_for_session(session.project_id, session.id)
-                labels[session.id] = agent.label if agent is not None else session.id[:8]
+                row = store.fleet_agent_for_session(session.project_id, session.id)
+                labels[session.id] = row.label if row is not None else session.id[:8]
     except Exception:  # the database line reports a broken store
         return []
     if not limited:
@@ -1598,6 +1706,16 @@ def _claude_account_limit_checks() -> list[DoctorCheck]:
             else "reset time unknown"
         )
         parts.append(f"{labels[session.id]} ({project_name}, {when})")
+    if agent != claude_accounts_core.AGENT:
+        name = claude_accounts_core.agent_label(agent)
+        return [
+            _warn(
+                f"{agent}-account-limits",
+                f"{len(limited)} agent(s) parked on a {name} usage limit: " + " · ".join(parts),
+                "Move one to an account with headroom: aisquare fleet switch <label>; or wait "
+                f"for the reset and prompt it again — AISquare does not wait for {name} to go on",
+            )
+        ]
     return [
         _warn(
             "claude-account-limits",
@@ -1630,7 +1748,9 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
     accounts = [
         account
         for account in claude_accounts_service.list_accounts()
-        if not account.disabled and claude_accounts_core.signed_in(account)
+        if account.agent == claude_accounts_core.AGENT
+        and not account.disabled
+        and claude_accounts_core.signed_in(account)
     ]
     if not accounts:
         return None
@@ -1670,6 +1790,88 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
     return _ok(
         "claude-account-headroom",
         f"five-hour and weekly windows ({settings.switch_at}% is the line): {summary}",
+    )
+
+
+def _other_accounts_headroom_checks() -> list[DoctorCheck]:
+    """:func:`_agent_account_headroom_check` for every other agent with account slots."""
+    return [
+        check
+        for agent in claude_accounts_core.account_agents()
+        if agent != claude_accounts_core.AGENT
+        and (check := _agent_account_headroom_check(agent)) is not None
+    ]
+
+
+def _agent_account_headroom_check(agent: str) -> DoctorCheck | None:
+    """:func:`_claude_account_headroom_check` for an agent whose usage is read OFFLINE.
+
+    Codex's windows come from the newest ``token_count`` its own sessions wrote
+    (``core.codex_accounts``): no request leaves the machine, so this runs on
+    every ``doctor``, not only ``--live``. An account is as full as the fuller of
+    the windows it HAS (``headroom_percent(..., agent=...)``): a Codex plan can have
+    a weekly window and no five-hour one. ``None`` before ``context.db`` exists
+    (the arranged list reconciles through the store) and when no enabled account
+    of the agent is signed in.
+    """
+    if not paths.db_path().exists():
+        return None
+    try:
+        if claude_accounts_core.kind(agent).network_usage:
+            return None  # leaves the machine: never on a plain doctor run
+        accounts = [
+            account
+            for account in claude_accounts_service.list_accounts()
+            if account.agent == agent
+            and not account.disabled
+            and claude_accounts_core.signed_in(account)
+        ]
+    except Exception:  # the database line reports a broken store
+        return None
+    if not accounts:
+        return None
+    name = f"{agent}-account-headroom"
+    settings = claude_accounts_service.accounts_settings()
+    readings = claude_accounts_service.read_usage(accounts)
+    measured = [
+        (account, percent)
+        for account in accounts
+        if (
+            percent := claude_accounts_service.headroom_percent(readings[account.slot], agent=agent)
+        )
+        is not None
+    ]
+    unreadable = [
+        f"{claude_accounts_core.label(account)}: {readings[account.slot].reason or 'no reading'}"
+        for account in accounts
+        if account.slot not in {a.slot for a, _ in measured}
+    ]
+    summary = " · ".join(
+        claude_accounts_service.describe_headroom(account, readings[account.slot])
+        for account, _pct in measured
+    )
+    if unreadable:
+        summary = (summary + " · " if summary else "") + "unreadable: " + "; ".join(unreadable)
+    label = claude_accounts_core.agent_label(agent)
+    if measured and all(pct >= settings.switch_at for _, pct in measured):
+        return _warn(
+            name,
+            f"every {label} account is at or over {settings.switch_at}% of a window, as its "
+            f"newest session recorded it: {summary}",
+            f"Add or sign in another account (aisquare accounts add --agent {agent}), or wait "
+            "for a reset — a fleet spawned now has nowhere to switch to",
+        )
+    if not measured:
+        return _warn(
+            name,
+            f"no {label} account's usage has been recorded yet: {summary}",
+            f"Open a session on the account (aisquare accounts run <slot>): {label} records "
+            "its limits as it works; then: aisquare accounts usage",
+        )
+    return _ok(
+        name,
+        f"windows as each account's newest session recorded them ({settings.switch_at}% is "
+        f"the line): {summary}",
     )
 
 
@@ -1775,6 +1977,16 @@ def _minted_keys_check(live: bool) -> DoctorCheck | None:
 def _claude_account_default_checks() -> list[DoctorCheck]:
     """The arrangement (#145): is the account a launch will pick one that can launch?
 
+    Claude Code's: :func:`_account_default_checks` for its slots, project defaults and
+    the bindings of its roles, in the words it always used.
+    """
+    return _account_default_checks(claude_accounts_core.AGENT)
+
+
+def _account_default_checks(agent: str) -> list[DoctorCheck]:
+    """The arrangement (#145) of ``agent``'s accounts: is the account a launch will pick one
+    that can launch?
+
     Reads the registry only when ``context.db`` already exists — a doctor run
     must not create the store (``tests/test_doctor_does_not_create_state.py``)
     — and says nothing at all when no default, project default or role binding
@@ -1785,13 +1997,19 @@ def _claude_account_default_checks() -> list[DoctorCheck]:
     and a binding or project default naming a removed slot refuses every
     launch of that role or project with `unknown_account`.
     """
+    claude = agent == claude_accounts_core.AGENT
+    prefix = "claude" if claude else agent
     if not paths.db_path().exists():
         return []
     try:
-        accounts = claude_accounts_service.list_accounts()
-        bindings = settings_service.role_account_bindings()
+        everyone = claude_accounts_service.list_accounts()
+        accounts = [account for account in everyone if account.agent == agent]
+        every_binding = settings_service.role_account_bindings()
+        role_agents = _role_agents(every_binding)
+        # The bindings of THIS agent's roles: each is checked against the agent it launches.
+        bindings = {role: ref for role, ref in every_binding.items() if role_agents[role] == agent}
         with store_session() as store:
-            per_project = store.project_settings(claude_accounts_service.PROJECT_ACCOUNT_KEY)
+            per_project = store.project_settings(claude_accounts_service.project_account_key(agent))
             names = {
                 project_id: (project.root.name or project.id)
                 for project_id in per_project
@@ -1800,7 +2018,7 @@ def _claude_account_default_checks() -> list[DoctorCheck]:
     except Exception as exc:  # the database line says WHY the store is broken; this says the cost
         return [
             _warn(
-                "claude-account-default",
+                f"{prefix}-account-default",
                 f"the accounts registry could not be read ({exc}) — launches run without a "
                 "default account",
                 "aisquare doctor  (the database line above says what is wrong with context.db)",
@@ -1811,29 +2029,43 @@ def _claude_account_default_checks() -> list[DoctorCheck]:
     if default is None and not per_project and not bindings:
         return []
     checks: list[DoctorCheck] = []
+    name = claude_accounts_core.agent_label(agent)
+    whose = "" if claude else f"{name} "
     if default is not None:
         label = f"slot {default.slot} ({claude_accounts_core.label(default)})"
         if default.disabled:
             checks.append(
                 _warn(
-                    "claude-account-default",
-                    f"the machine default is {label} and it is disabled — launches skip it",
+                    f"{prefix}-account-default",
+                    f"the {whose}machine default is {label} and it is disabled — launches skip it"
+                    if not claude
+                    else f"the machine default is {label} and it is disabled — launches skip it",
                     f"aisquare accounts enable {default.slot}, or pick another: "
                     "aisquare accounts default <slot>",
                 )
             )
         elif not claude_accounts_core.signed_in(default):
+            sign_in = " ".join(("", *claude_accounts_core.kind(agent).sign_in_args()))
             checks.append(
                 _warn(
-                    "claude-account-default",
+                    f"{prefix}-account-default",
                     f"the machine default is {label} but it is not signed in — a launch "
-                    "would open Claude Code's login instead of the account you meant",
-                    f"aisquare accounts run {default.slot} and sign in, or pick another: "
+                    "would open Claude Code's login instead of the account you meant"
+                    if claude
+                    else f"the {whose}machine default is {label} but it is not signed in — "
+                    f"a launch would start {name} with no login instead of the account you "
+                    "meant",
+                    f"aisquare accounts run {default.slot}{sign_in} and sign in, or pick "
+                    "another: aisquare accounts default <slot>"
+                    if not claude
+                    else f"aisquare accounts run {default.slot} and sign in, or pick another: "
                     "aisquare accounts default <slot>",
                 )
             )
         else:
-            checks.append(_ok("claude-account-default", f"machine default: {label}"))
+            checks.append(
+                _ok(f"{prefix}-account-default", f"{whose}machine default: {label}".strip())
+            )
     dangling: list[str] = []
     for project_id, raw in per_project.items():
         if not raw.isdigit() or int(raw) not in by_slot:
@@ -1841,18 +2073,25 @@ def _claude_account_default_checks() -> list[DoctorCheck]:
     for role, ref in bindings.items():
         try:
             # Against the list in hand: `resolve` re-opened the store and rescanned
-            # the directories once per binding (review of #205, fourth round).
-            claude_accounts_service._resolve_in(accounts, ref)
+            # the directories once per binding (review of #205, fourth round). As the
+            # role's agent: an account of another agent refuses its launches as well.
+            claude_accounts_service._resolve_in(everyone, ref, agent=agent)
         except claude_accounts_service.AccountsError:
             dangling.append(f"role {role} → {ref}")
     if dangling:
         checks.append(
             _warn(
-                "claude-account-bindings",
+                f"{prefix}-account-bindings",
                 "these name an account this machine does not have, so their launches are "
+                "refused: " + "; ".join(dangling)
+                if claude
+                else f"these name no {name} account this machine has, so their launches are "
                 "refused: " + "; ".join(dangling),
                 "aisquare accounts default --clear --project <project>, or "
-                "aisquare team bind <role> --clear-account",
+                "aisquare team bind <role> --clear-account"
+                if claude
+                else f"aisquare accounts default --clear --agent {agent} --project <project>, "
+                "or aisquare team bind <role> --clear-account",
             )
         )
     return checks

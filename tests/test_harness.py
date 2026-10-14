@@ -1048,6 +1048,38 @@ def test_cached_probe_survives_a_naive_timestamp(monkeypatch: pytest.MonkeyPatch
     assert verdict is None or verdict.alias == "fable"
 
 
+def test_a_probe_on_a_managed_slot_keys_that_slots_cache(isolated_home: Path) -> None:
+    """A pane on slot 2 probes claude on slot 2, so its verdicts are slot 2's.
+
+    ``default_account`` maps an env under one of our slots back to the plain
+    account (the launching shell's): keyed by it, slot 2's fable/opus verdicts
+    answered the plain account for 24h, and the plain account's answered slot 2.
+    """
+    from aisquare.core import claude_accounts
+
+    slot = claude_accounts.create_account()
+    plain = {key: value for key, value in os.environ.items() if key != "CLAUDE_CONFIG_DIR"}
+    on_slot = {**plain, **claude_accounts.launch_env(slot)}
+
+    def scope(env: dict[str, str]) -> str:
+        with harness.probe_context(harness.ProbeContext("claude", env)):
+            return harness.account_scope()
+
+    slot_scope, plain_scope = scope(on_slot), scope(plain)
+    assert slot_scope != plain_scope
+    # Keyed by the slot's own login: the plain account's sign-in leaves it alone.
+    plain_json = claude_accounts.claude_json_path(claude_accounts.default_account(plain))
+    plain_json.parent.mkdir(parents=True, exist_ok=True)
+    plain_json.write_text(
+        json.dumps({"oauthAccount": {"emailAddress": "plain@example.com"}}), encoding="utf-8"
+    )
+    assert scope(on_slot) == slot_scope and scope(plain) != plain_scope
+    (slot.config_dir / ".claude.json").write_text(
+        json.dumps({"oauthAccount": {"emailAddress": "slot@example.com"}}), encoding="utf-8"
+    )
+    assert scope(on_slot) != slot_scope
+
+
 def test_spawn_refresh_forgets_this_accounts_verdicts_only(isolated_home: Path) -> None:
     """--refresh promises a re-check after an entitlement change; bypassing
     reads only re-verified the ladder being walked, leaving other roles'

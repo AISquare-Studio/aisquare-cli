@@ -482,6 +482,7 @@ def account_scope() -> str:
     context = _PROBE_CONTEXT.get()
     if context is not None:
         from aisquare.core import agents, claude_accounts
+        from aisquare.models import ClaudeAccount
 
         resolved = executable_path(context.binary, context.env)
         executable = Path(resolved or context.binary)
@@ -489,8 +490,16 @@ def account_scope() -> str:
         with contextlib.suppress(OSError):
             stat = executable.stat()
             identity += [stat.st_mtime_ns, stat.st_size]
-        selected_account = claude_accounts.default_account(context.env)
-        home = selected_account.config_dir
+        # The directory this probe's claude runs under, as it reads it: not
+        # `default_account`'s, which maps a managed slot back to the plain account.
+        raw = context.env.get(claude_accounts.CONFIG_DIR_VAR, "").strip()
+        home = expand_user(Path(raw)) if raw else claude_accounts.home_config_dir()
+        slot = claude_accounts.managed_slot(home)
+        selected_account = ClaudeAccount(
+            slot=claude_accounts.DEFAULT_SLOT if slot is None else slot,
+            config_dir=home,
+            managed=slot is not None,
+        )
         identity.append(str(home.resolve()))
         account = claude_accounts.identity(selected_account, env=context.env)
         identity.append(account.model_dump() if account else None)

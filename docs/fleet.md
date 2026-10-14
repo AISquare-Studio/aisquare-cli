@@ -585,12 +585,13 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   command line, then the role's binding (the **account** select beside each
   role on the Settings tab, or `aisquare team bind <role> --account`), then the
   project's default (`aisquare accounts default <slot> --project .`), then the
-  machine default. With none of those set, the agent runs on whatever `claude`
-  the shell already has — exactly what it did before any of this existed. The
+  machine default, which with one login only is whatever `claude` the shell
+  already has — exactly what it ran on before any of this existed; with several,
+  the one with room comes before it (*Headroom*, below). The
   agent's header and `fleet ls` show the slot it was resolved to.
-- **Headroom.** With `[accounts] pick = "headroom"` (the Settings tab's
-  *launches pick*, or `aisquare config set accounts.pick headroom`) the machine
-  default gives way to the account with room: every enabled, signed-in account's
+- **Headroom.** By default — `[accounts] pick = "headroom"`, the Settings tab's
+  *launches pick* — the machine default gives way to the account with room
+  (`aisquare config set accounts.pick default` keeps it): every enabled, signed-in account's
   usage is read once, and the first one in priority order under `switch_at`
   (85 % by default) is taken — or, when all are over it, the one with the most
   left. An account counts as full as the fuller of its two windows, so one
@@ -619,7 +620,8 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   agent whose role, task (done or dropped) or binary would refuse the
   replacement is refused before it is stopped, and a task that closes while
   it is being stopped is left off the replacement.
-  With `on_limit = "switch"` (*on a usage limit* on the Settings tab) the fleet
+  With `on_limit = "switch"`, the default (*on a usage limit* on the Settings tab;
+  `wait` leaves the agent parked for you or the manager), the fleet
   does this by itself when the limit lifts more than
   `wait_if_reset_within_minutes` away, in a worker detached from the agent's
   own hook; a hand-over that finds no headroom leaves the agent parked, its
@@ -653,8 +655,8 @@ aisquare accounts alias 2 work         # a name: --account work, [work] on the b
 aisquare accounts order work 3         # the priority order; the rest follow as they were
 aisquare accounts move 3 top           # up · down · top · bottom
 aisquare accounts disable 3            # out of automatic selection; enable puts it back
-aisquare config set accounts.pick headroom     # spawns go where there is room (see above)
-aisquare config set accounts.on_limit switch   # …and an agent that hits its limit is moved
+aisquare config set accounts.pick default      # spawns stay on the machine default (headroom is the default)
+aisquare config set accounts.on_limit wait     # an agent that hits its limit stays parked (switch is the default)
 aisquare fleet switch coder-auth       # move one now: resumes its session on the account with room
 aisquare fleet restart manager         # an exited (or stuck) agent, back under its label, session resumed
                                        # …launched as it was first launched: the row records the
@@ -689,7 +691,7 @@ answer.
 | --- | --- | --- |
 | manager | `auto` | its tool use is board and fleet CLI calls |
 | coder, tester, validator | `auto` | the classifier answers every tool call, the project's own check commands included. A project allowlist that pre-approves `make check`, `pytest`, `git` and `gh` is designed (plan §3.6) and **is not in this checkout**: nothing here writes or passes an allowed-tools list |
-| reviewer | `auto` + `--disallowedTools=Edit Write NotebookEdit` | the flag is the role's `extra_args`: it keeps Bash, which its whole cycle runs on and `--restricted` would take, and loses the tools that edit files, so a prompt injected through the PR it reads cannot edit the tree with them. Its shell is not read-only: `sed -i`, `git push` or `gh pr merge` injected through a PR meets only its briefing and `auto` mode's check of each action, and no allowlist of commands would hold (its inline comments are `gh api` calls, as a merge is, and verifying a finding runs the PR's code). Where that matters, run it with a `gh` token that cannot write the repository's contents, which can comment but not push or merge, and protect the branch: [A reviewer that cannot push](#a-reviewer-that-cannot-push). `extra_args = []` gives it every tool. A config saved by 0.6.0 or 0.7.0 holds that release's default, `extra_args = ["--restricted"]`; exactly that list loads as today's default, once: the next save writes `config_version = 1` at the top of the file, and from then on `--restricted` set there is yours and kept. A reviewer those releases started recorded the flag in its launch spec, and `fleet restart`, `fleet switch` and Restart replay today's arguments in its place, with `--disallowedTools=Edit Write NotebookEdit` beside them where they do not deny those tools: the spec cannot tell that release's default from a `--restricted` its spawn was given, so the replay errs toward the reviewer without them, and a fresh spawn gets whatever today's arguments give. One recorded since is replayed as recorded. Any other list stays as written |
+| reviewer | `auto` + `--disallowedTools=Edit Write NotebookEdit` | the flag is the role's `extra_args`: it keeps Bash, which its whole cycle runs on and `--restricted` would take, and loses the tools that edit files, so a prompt injected through the PR it reads cannot edit the tree with them. Its shell is not read-only: `sed -i`, `git push` or `gh pr merge` injected through a PR meets only its briefing and `auto` mode's check of each action, and no allowlist of commands would hold (its inline comments are `gh api` calls, as a merge is, and verifying a finding runs the PR's code). Where that matters, run it with a `gh` token that cannot write the repository's contents, which can comment but not push or merge, and protect the branch: [A reviewer that cannot push](#a-reviewer-that-cannot-push). `extra_args = []` gives it every tool. A config saved by 0.6.0 or 0.7.0 holds that release's default, `extra_args = ["--restricted"]`; exactly that list loads as today's default, once: the next save writes the file's `config_version` at its top, and from then on `--restricted` set there is yours and kept. A reviewer those releases started recorded the flag in its launch spec, and `fleet restart`, `fleet switch` and Restart replay today's arguments in its place, with `--disallowedTools=Edit Write NotebookEdit` beside them where they do not deny those tools: the spec cannot tell that release's default from a `--restricted` its spawn was given, so the replay errs toward the reviewer without them, and a fresh spawn gets whatever today's arguments give. One recorded since is replayed as recorded. Any other list stays as written |
 | ui-tester | `auto` + `--chrome` | `--chrome` comes from the role, not this table: `aisquare launch ui-tester` adds it for the default `claude` binary wherever the role starts, and `--no-chrome` in `extra_args` or on the command turns it off. Its "read-only" is a briefing instruction, NOT construction — the row above says so, and the sentence in the coder/tester cell applies here too: nothing here writes or passes an allowed-tools list, so a PreToolUse allowlist (plan §3.6, not in this checkout) is what would enforce it |
 
 The mode is passed straight through to `claude` and nothing here reads its
@@ -746,8 +748,15 @@ Three places to change one:
   the file directly;
 - **in the UI** — the project's *Settings* tab writes the same config (Phase 6).
 
-The whole `[fleet]` section of `~/.aisquare/config.toml` at its defaults, as
-`aisquare config set` writes it:
+**Your file holds your changes and nothing else.** The defaults are built in, and
+`~/.aisquare/config.toml` is your layer over them: a save writes only the keys
+that differ from the defaults, so a key you never set follows the built-in default
+even when a release changes it. A config 0.8 saved holds every setting; it loads
+with the values that differ from 0.8's defaults kept as yours and the rest
+following today's, and the next save writes it down to yours.
+
+The whole `[fleet]` section at its defaults — what you get with no `[fleet]` in
+your file at all:
 
 ```toml
 [fleet]
@@ -789,8 +798,8 @@ worktree = false
 extra_args = []
 ```
 
-A role the file omits gets the built-in shape (`auto`, no worktree, no extra
-args). A config file that will not parse costs you the customisation and
+A role or a key your file leaves out takes its default above; a role the table
+above does not name gets `auto`, no worktree and no extra args. A config file that will not parse costs you the customisation and
 never the fleet: the defaults apply and nothing refuses.
 
 **Model, effort and binary per role stay where they already live** — one home

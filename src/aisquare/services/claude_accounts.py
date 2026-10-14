@@ -491,6 +491,11 @@ def choose(
         picked, more = headroom_choice(
             accounts, switch_at=settings.switch_at, exclude=skip, fetch=fetch
         )
+        if spread is None:
+            # The default rung since 0.8.2, so every machine walks it: one with no account
+            # to pick from (an API key, no login yet) is not told so on every launch. A
+            # hand-over that finds none still says it.
+            more = [note for note in more if note != _NOTHING_TO_PICK]
         notes.extend(more)
         if picked is not None:
             return AccountChoice(picked, "headroom", notes)
@@ -1318,6 +1323,9 @@ def read_fleet_headroom(
     return fleet_headroom(candidates, readings)
 
 
+_NOTHING_TO_PICK = "headroom: no enabled, signed-in account to pick from"
+
+
 def headroom_choice(
     accounts: Sequence[ClaudeAccount],
     *,
@@ -1353,7 +1361,7 @@ def headroom_choice(
         if not account.disabled and account.slot not in skip and core.signed_in(account)
     ]
     if not candidates:
-        return None, ["headroom: no enabled, signed-in account to pick from"]
+        return None, [_NOTHING_TO_PICK]
     readings = read_usage(candidates, now=now, fetch=fetch)
     measured: list[tuple[ClaudeAccount, float]] = []
     notes: list[str] = []

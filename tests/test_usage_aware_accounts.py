@@ -508,12 +508,13 @@ def test_the_hook_starts_a_detached_hand_over_only_when_configured_and_the_reset
         with store_session() as store:
             store.touch_session("sess-fleet", state="working")
 
-    # The default: wait. Nothing is started however far the reset is.
+    # Set to wait: nothing is started however far the reset is.
+    _settings(on_limit="wait")
     _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
     assert started == []
 
-    # Configured to switch: a limit whose reset is far away starts the worker…
-    _settings(on_limit="switch", wait_if_reset_within_minutes=15)
+    # Switch, the default since 0.8.2: a limit whose reset is far away starts the worker…
+    _settings(wait_if_reset_within_minutes=15)
     unpark()
     _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
     assert len(started) == 1
@@ -979,11 +980,12 @@ def test_choose_uses_headroom_only_when_configured_and_falls_back_to_the_default
     service.set_default("2")
     fetch = _Usage({"tok-work": _payload(95), "tok-personal": _payload(10)})
 
+    _settings(pick="default")
     plain = service.choose(role="coder", project=work, fetch=fetch)
     assert plain.source == "machine default" and plain.account is not None
     assert plain.account.slot == 2 and fetch.calls == []  # pick=default: no request at all
 
-    _settings(pick="headroom", switch_at=85)
+    _settings(switch_at=85)  # pick=headroom, the default since 0.8.2
     spread = service.choose(role="coder", project=work, fetch=fetch)
     assert spread.source == "headroom" and spread.account is not None
     assert spread.account.slot == 3
@@ -1672,17 +1674,17 @@ def test_the_accounts_section_defaults_and_round_trips_through_config_set(
     runner: CliRunner,
 ) -> None:
     assert AppConfig().accounts == AccountsSettings(
-        pick="default", switch_at=85, on_limit="wait", wait_if_reset_within_minutes=15
+        pick="headroom", switch_at=85, on_limit="switch", wait_if_reset_within_minutes=15
     )
-    assert service.accounts_settings().pick == "default"  # no file: the defaults
+    assert service.accounts_settings().pick == "headroom"  # no file: the defaults
 
-    result = runner.invoke(app, ["config", "set", "accounts.pick", "headroom"])
+    result = runner.invoke(app, ["config", "set", "accounts.pick", "default"])
     assert result.exit_code == 0, result.output
-    assert load_config().accounts.pick == "headroom"
-    assert service.accounts_settings().pick == "headroom"
+    assert load_config().accounts.pick == "default"
+    assert service.accounts_settings().pick == "default"
     bad = runner.invoke(app, ["config", "set", "accounts.pick", "sometimes"])
-    assert bad.exit_code != 0 and load_config().accounts.pick == "headroom"
-    limit = runner.invoke(app, ["config", "set", "accounts.on_limit", "switch"])
-    assert limit.exit_code == 0 and load_config().accounts.on_limit == "switch"
+    assert bad.exit_code != 0 and load_config().accounts.pick == "default"
+    limit = runner.invoke(app, ["config", "set", "accounts.on_limit", "wait"])
+    assert limit.exit_code == 0 and load_config().accounts.on_limit == "wait"
     shown = runner.invoke(app, ["config", "get", "accounts.switch_at"])
     assert shown.stdout.strip() == "accounts.switch_at = 85"

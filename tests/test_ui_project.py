@@ -1017,10 +1017,12 @@ def test_settings_saves_a_changed_permission_mode_to_config_toml(project: Projec
     fleet_on_disk = _config_toml()["fleet"]
     on_disk = fleet_on_disk["roles"]
     assert on_disk["coder"]["permission_mode"] == "plan"  # the bytes, not the widget
-    assert on_disk["coder"]["worktree"] is True  # untouched fields survive the write
-    assert on_disk["manager"]["permission_mode"] == "auto"  # only the changed role changed
+    assert "worktree" not in on_disk["coder"]  # at its default, which the file does not repeat
+    assert load_config().fleet.roles["coder"].worktree is True  # untouched fields survive
+    assert "manager" not in on_disk  # only the changed role changed
     assert fleet_on_disk["worktree_dir"] == ".fleet-trees"  # the worktree root (§4.2)
-    assert fleet_on_disk["escape_key"] == "f12"  # an untouched fleet field keeps its default
+    assert "escape_key" not in fleet_on_disk  # an untouched fleet field keeps its default
+    assert load_config().fleet.escape_key == "f12"
     assert load_config().fleet.roles["coder"].permission_mode == "plan"
 
 
@@ -1125,7 +1127,8 @@ def test_explainability_enable_writes_the_switch_and_disable_clears_it(
         return (
             enabled,
             status_after_enable,
-            _config_toml()["explainability"]["enabled"],
+            # Off is the default, which the file does not hold.
+            _config_toml().get("explainability", {}).get("enabled", False),
             host.notices,
         )
 
@@ -1136,7 +1139,7 @@ def test_explainability_enable_writes_the_switch_and_disable_clears_it(
     assert quiet_explainability["shipping_state"] >= 3  # mount, after enable, after disable
     assert any(m.startswith("✓ tracing enabled") for m, _ in notices)
     assert any(m.startswith("✓ tracing disabled") for m, _ in notices)
-    assert _config_toml()["explainability"]["target"] == "stg"  # nothing else was touched
+    assert load_config().explainability.target == "stg"  # nothing else was touched
 
 
 def test_explainability_ship_drains_through_the_service_and_register_refuses_unconfigured(
@@ -1329,7 +1332,7 @@ def test_the_settings_form_reads_its_file_once_and_the_slots_off_the_ui_thread(
     assert listed and threading.main_thread().name not in listed
     assert any(label.startswith("2 · account 2") for label in labels), labels
     assert value == "2"  # the binding, shown before the slots arrived and after
-    assert form.accounts.pick == "default" and form.fleet.escape_key == "f12"
+    assert form.accounts.pick == "headroom" and form.fleet.escape_key == "f12"
 
 
 def test_a_slot_removed_between_two_reads_falls_back_to_the_binding_on_the_form(
@@ -1366,9 +1369,9 @@ def test_settings_saves_the_accounts_section_and_rejects_a_bad_line(project: Pro
     async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
         host.query_one(ProjectView).active = "tab-settings"
         await pilot.pause()
-        host.query_one("#accounts-pick", Select).value = "headroom"
+        host.query_one("#accounts-pick", Select).value = "default"
         host.query_one("#accounts-switch-at", Input).value = "70"
-        host.query_one("#accounts-on-limit", Select).value = "switch"
+        host.query_one("#accounts-on-limit", Select).value = "wait"
         host.query_one("#accounts-wait-minutes", Input).value = "5"
         host.query_one("#save-settings", Button).press()
         await settle(pilot)
@@ -1378,12 +1381,12 @@ def test_settings_saves_the_accounts_section_and_rejects_a_bad_line(project: Pro
     assert any(m.startswith("✓ fleet settings saved") for m, _ in notices), notices
     on_disk = _config_toml()["accounts"]
     assert on_disk == {
-        "pick": "headroom",
+        "pick": "default",
         "switch_at": 70,
-        "on_limit": "switch",
+        "on_limit": "wait",
         "wait_if_reset_within_minutes": 5,
     }
-    assert load_config().accounts.pick == "headroom"
+    assert load_config().accounts.pick == "default"
 
     async def bad(pilot: Pilot[None], host: Host) -> tuple[str, list[tuple[str, str]]]:
         host.query_one(ProjectView).active = "tab-settings"
@@ -1395,7 +1398,7 @@ def test_settings_saves_the_accounts_section_and_rejects_a_bad_line(project: Pro
         return shown_pick, host.notices
 
     shown_pick, notices = drive(project, bad)
-    assert shown_pick == "headroom"  # the form opened on what the file holds
+    assert shown_pick == "default"  # the form opened on what the file holds
     assert any("between 1 and 100" in m and sev == "error" for m, sev in notices), notices
     assert load_config().accounts.switch_at == 70  # a refused form never reaches the writer
 

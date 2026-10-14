@@ -1,7 +1,11 @@
 """Typed TOML configuration: schema, defaults, load and save.
 
-Loading and saving are real; everything that *uses* the config is still
-stubbed. Unknown keys in the file are ignored so old configs keep loading.
+Two layers. The SYSTEM defaults are the field defaults of the models below and
+live nowhere else (:func:`system_defaults` dumps them). The USER's file,
+``config.toml``, holds only what the user changed: :func:`save_config` writes the
+keys that differ from the system defaults, and :func:`load_config` lays the file
+over them, so a key nobody set follows the system default even after it changes.
+Unknown keys in the file are ignored so old configs keep loading.
 """
 
 from __future__ import annotations
@@ -18,7 +22,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import tomli_w
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from aisquare.core import paths
 from aisquare.core.atomic import write_replacing
@@ -317,8 +321,8 @@ _FORMER_REVIEWER_ARGS = ["--restricted"]
 #: step of :data:`_MIGRATIONS` brings a file from one version to the next as it loads, and
 #: the next save records the version reached, so a step runs once per file: what the file
 #: holds after that was written by a build that knew the step, and is kept. Not a setting,
-#: and not a field.
-CONFIG_VERSION = 1
+#: and not a field. Version 2 is the first that writes only what the user changed.
+CONFIG_VERSION = 2
 _VERSION_KEY = "config_version"
 
 
@@ -419,9 +423,90 @@ def _replace_the_former_reviewer_default(data: dict[str, Any]) -> None:
         reviewer["extra_args"] = replacing_the_former_reviewer_default(reviewer["extra_args"])
 
 
+#: Every setting at its system default in version 1 (0.8.0 and 0.8.1), as those builds
+#: wrote it. Frozen here, never derived from today's models: a later change of a default
+#: must not change which of a version-1 file's values the step below takes for unchosen.
+_V1_DEFAULTS: dict[str, Any] = {
+    "profile": "default",
+    "api_url": "https://api.aisquare.studio",
+    "default_pool": "project",
+    "capture": {"enabled": True},
+    "redaction": {"level": "standard"},
+    "explainability": {
+        "enabled": False,
+        "proxy_url": "http://127.0.0.1:9090",
+        "agent_name_template": "aisquare-{role}",
+        "target": "stg",
+        "roles": [
+            "planner",
+            "coder",
+            "runner",
+            "manager",
+            "tester",
+            "reviewer",
+            "validator",
+            "ui-tester",
+        ],
+        "targets": {},
+        "ship": False,
+        "gateway_url": "",
+    },
+    "team": {"profiles": {}},
+    "fleet": {
+        "tmux_socket": "asq",
+        "escape_key": "f12",
+        "max_agents_per_project": 4,
+        "worktree_dir": ".aisquare-worktrees",
+        "disable_native_agent_teams": True,
+        "max_continuations_per_hour": 30,
+        "roles": {
+            "manager": {"permission_mode": "auto", "worktree": False, "extra_args": []},
+            "coder": {"permission_mode": "auto", "worktree": True, "extra_args": []},
+            "tester": {"permission_mode": "auto", "worktree": False, "extra_args": []},
+            "reviewer": {
+                "permission_mode": "auto",
+                "worktree": True,
+                "extra_args": ["--disallowedTools=Edit Write NotebookEdit"],
+            },
+            "validator": {"permission_mode": "auto", "worktree": False, "extra_args": []},
+            "ui-tester": {"permission_mode": "auto", "worktree": False, "extra_args": []},
+        },
+    },
+    "accounts": {
+        "pick": "default",
+        "switch_at": 85,
+        "on_limit": "wait",
+        "wait_if_reset_within_minutes": 15,
+    },
+    "snapshot": {"max_tokens": 150_000, "ignore": []},
+    "experiment": {"enabled": False, "url": "", "run": ""},
+}
+
+
+def _keep_only_what_v1_did_not_write_by_default(data: dict[str, Any]) -> None:
+    """A file version 1 saved keeps only the values that differ from that version's defaults.
+
+    Version 1 wrote every setting out, so its file cannot tell a value the user chose
+    from one it wrote because it was the default. Taken as written, every such value
+    would stay pinned when a default moves on — ``[accounts] pick = "default"`` from
+    every 0.8 save would keep ``headroom`` from ever becoming the default. So a value
+    equal to version 1's default (:data:`_V1_DEFAULTS`) is taken as unchosen and
+    follows the system default from now on; one that differs is the user's and stays.
+    A user who had chosen exactly the old default gets the new one: the file cannot say
+    otherwise. Keys version 1 did not know, and entries the user added to a mapping,
+    stay as written. The next save writes what is left (:func:`save_config`).
+    """
+    kept = _overrides(data, _V1_DEFAULTS)
+    data.clear()
+    data.update(kept)
+
+
 #: The steps that bring a config file to :data:`CONFIG_VERSION`, in order: the one at
 #: index ``n`` takes a parsed file from version ``n`` to ``n + 1``, in place.
-_MIGRATIONS: tuple[Callable[[dict[str, Any]], None], ...] = (_replace_the_former_reviewer_default,)
+_MIGRATIONS: tuple[Callable[[dict[str, Any]], None], ...] = (
+    _replace_the_former_reviewer_default,
+    _keep_only_what_v1_did_not_write_by_default,
+)
 
 
 def _migrate(data: dict[str, Any]) -> None:
@@ -503,11 +588,12 @@ class AccountsSettings(BaseModel):
     """How the fleet spends several Claude accounts (#146); every field is a changeable default.
 
     ``pick`` is how a launch chooses an account when nothing names one (no
-    ``--account``, no role binding, no project default): ``default`` takes the
-    machine default (#145); ``headroom`` reads each enabled, signed-in account's
+    ``--account``, no role binding, no project default): ``headroom``, the
+    default, reads each enabled, signed-in account's
     usage and takes, in priority order, the first one under ``switch_at``
     percent of the fuller of its two windows (five-hour and weekly) — or, when
-    every account is over it, the one with the most room left. Usage is the
+    every account is over it, the one with the most room left; ``default`` takes
+    the machine default (#145). Usage is the
     undocumented endpoint Claude Code's own
     ``/usage`` reads (docs/plans/claude-accounts.md §5), so ``headroom`` is best
     effort: an account whose usage cannot be read is skipped with a note, and
@@ -516,19 +602,22 @@ class AccountsSettings(BaseModel):
     ``on_limit`` is what the fleet does when an agent's turn ends on a usage
     limit (Claude Code's ``StopFailure`` hook, error ``rate_limit``): ``wait``
     marks the row ``limited`` and wakes the manager, and leaves Claude Code's own
-    wait-and-continue-at-reset in place; ``switch`` also hands the agent over —
-    ``aisquare fleet switch`` — to the account with the most headroom, unless
-    the limit resets within ``wait_if_reset_within_minutes`` (a reset ten minutes
-    away is cheaper than a cold start elsewhere). ``switch_at`` doubles as the
-    line the Accounts page colours red and ``doctor --live`` warns at.
+    wait-and-continue-at-reset in place; ``switch``, the default, also hands the
+    agent over — ``aisquare fleet switch`` — to the account with the most headroom,
+    unless the limit resets within ``wait_if_reset_within_minutes`` (a reset ten
+    minutes away is cheaper than a cold start elsewhere). ``switch_at`` doubles as
+    the line the Accounts page colours red and ``doctor --live`` warns at.
+
+    Both defaults were ``default`` and ``wait`` through 0.8.1; a file those builds
+    saved keeps either only where it differs from them (``_V1_DEFAULTS``).
 
     Read from the config file alone, like ``[fleet]``: there is no
     ``AISQUARE_ACCOUNTS_*`` variable, for the same reason that section gives.
     """
 
-    pick: Literal["default", "headroom"] = "default"
+    pick: Literal["default", "headroom"] = "headroom"
     switch_at: int = Field(default=85, ge=1, le=100)
-    on_limit: Literal["wait", "switch"] = "wait"
+    on_limit: Literal["wait", "switch"] = "switch"
     wait_if_reset_within_minutes: int = Field(default=15, ge=0)
 
 
@@ -546,6 +635,74 @@ class AppConfig(BaseModel):
     accounts: AccountsSettings = Field(default_factory=AccountsSettings)
     snapshot: SnapshotSettings = Field(default_factory=SnapshotSettings)
     experiment: ExperimentSettings = Field(default_factory=ExperimentSettings)
+
+
+def _dumped(model: BaseModel) -> dict[str, Any]:
+    """``model`` as a config file holds it: without ``None``, which TOML cannot write."""
+    return model.model_dump(mode="json", exclude_none=True)
+
+
+def system_defaults() -> dict[str, Any]:
+    """Every setting at its system default, nested as ``config.toml`` would hold it.
+
+    The models' field defaults are the one place a default lives; this is them dumped.
+    """
+    return _dumped(AppConfig())
+
+
+def overrides(config: AppConfig) -> dict[str, Any]:
+    """What of ``config`` differs from the system defaults: what a save writes of it."""
+    return _overrides(_dumped(config), system_defaults(), config)
+
+
+def _overrides(
+    values: dict[str, Any], defaults: dict[str, Any], model: Any = None
+) -> dict[str, Any]:
+    """What of ``values`` differs from ``defaults``, table by table.
+
+    A key at its default is left out, at any depth, and a table left with nothing is
+    left out with it; a list is one value, compared whole. A key ``defaults`` has no
+    entry for stays: a key this build does not know, or an entry the user added to a
+    mapping (``[team.profiles.<role>]``, ``[explainability.targets.<name>]``), whose
+    being there is itself a setting. Such an entry is kept even when empty, holding
+    only what differs from its model's defaults when ``model`` (what ``values`` was
+    dumped from) says which model that is; without one, as for a file's own data
+    (:func:`_keep_only_what_v1_did_not_write_by_default`), it is kept whole.
+    """
+    kept: dict[str, Any] = {}
+    for key, value in values.items():
+        sub = model.get(key) if isinstance(model, dict) else getattr(model, key, None)
+        if key in defaults:
+            default = defaults[key]
+            if isinstance(value, dict) and isinstance(default, dict):
+                nested = _overrides(value, default, sub)
+                if nested:
+                    kept[key] = nested
+            elif value != default:
+                kept[key] = value
+        elif isinstance(value, dict) and isinstance(sub, BaseModel):
+            try:
+                entry_defaults = _dumped(type(sub)())
+            except ValidationError:  # a model with a required field: nothing to diff against
+                kept[key] = value
+            else:
+                kept[key] = _overrides(value, entry_defaults, sub)
+        else:
+            kept[key] = value
+    return kept
+
+
+def _overlay(defaults: Any, layer: Any) -> Any:
+    """``layer`` laid over ``defaults``: tables merge key by key, any other value replaces.
+
+    Key by key into a mapping too, which the models' own defaults would not do: a file
+    that changes one key of ``[fleet.roles.coder]`` holds that key alone, and validated
+    as it stands it would leave the coder with a plain role's defaults and the fleet with
+    no other role.
+    """
+    if not isinstance(defaults, dict) or not isinstance(layer, dict):
+        return layer
+    return {**defaults, **{key: _overlay(defaults.get(key), v) for key, v in layer.items()}}
 
 
 def _keep_unknown(existing: Any, dumped: Any, model: Any) -> Any:
@@ -658,8 +815,9 @@ def one_load() -> Iterator[None]:
 def load_config(path: Path | None = None) -> AppConfig:
     """Load configuration from ``path`` (default: the standard location).
 
-    A missing file yields the built-in defaults. Within :func:`one_load`, a file loaded
-    already is not read again.
+    The file is laid over the system defaults (:func:`_overlay`): what it sets wins, and
+    whatever it leaves out is the default. A missing file yields the defaults alone.
+    Within :func:`one_load`, a file loaded already is not read again.
     """
     target = path or paths.config_path()
     loaded = _ONE_LOAD.get()
@@ -670,7 +828,7 @@ def load_config(path: Path | None = None) -> AppConfig:
     else:
         data = _parse_toml(despite_windows_contention(target.read_bytes))
         _migrate(data)
-        config = AppConfig.model_validate(data)
+        config = AppConfig.model_validate(_overlay(system_defaults(), data))
     if loaded is not None:
         loaded[target] = config
     return config
@@ -682,6 +840,12 @@ def save_config(
     """Write ``config`` as TOML to ``path`` (default: the standard location).
 
     Parent directories are created on demand. Returns the written path.
+
+    **Only what differs from the system defaults is written** (:func:`overrides`): the
+    file is the user's layer over the defaults, so a value nobody changed is not in it
+    and follows the default when that changes, and a config at every default writes a
+    file with nothing but its ``config_version``. Up to version 1 every setting was
+    written out, and nothing could tell a user's choice from a default afterwards.
 
     **A file already there that cannot be read is not written over** unless
     ``discard_unreadable`` says to: its read error is raised and the file is
@@ -764,7 +928,7 @@ def save_config(
         )
     written.parent.mkdir(parents=True, exist_ok=True)
 
-    dumped = config.model_dump(mode="json", exclude_none=True)
+    dumped = _dumped(config)
     if written.exists():
         # Keys this build has never heard of belong to whoever wrote them; see
         # _keep_unknown. A file this read cannot parse or decode is written over
@@ -793,6 +957,9 @@ def save_config(
                 raise
         else:
             dumped = _keep_unknown(existing, dumped, config)
+    # Kept in full until here: _keep_unknown follows the model into every section, and
+    # a section at its defaults may still hold keys this build does not know.
+    dumped = _overrides(dumped, system_defaults(), config)
     # What this writes is this build's, at the version every step has reached (_migrate).
     payload = tomli_w.dumps(_versioned(dumped))
 

@@ -426,39 +426,22 @@ def _follow_table_step(text: str) -> None:
 def test_the_printed_mode_fix_is_one_this_config_accepts(
     isolated_home: Path, runner: CliRunner
 ) -> None:
-    """`config set` only writes keys the config has; a trimmed [fleet.roles] has fewer."""
+    """`config set` only writes keys the config has. A file whose [fleet.roles] lists only
+    coder still has every fleet role, the rest at their defaults (``core.config._overlay``),
+    so the command is the step for manager too; the table step is for a role outside the
+    fleet's six (``test_the_spawn_note_names_a_step_a_restart_or_a_switch_receipt_can_follow``).
+    """
     paths.ensure_home()
-    # A [fleet.roles] that lists only coder: manager runs on the built-in auto, no table.
     _configure(tracing=True, modes={"coder": "acceptEdits"})
     check = auto_mode.doctor_check()
     assert check is not None and check.fix
-    assert "config set fleet.roles.manager" not in check.fix
-    assert (
-        'add a `[fleet.roles.manager]` table with `permission_mode = "acceptEdits"` '
-        f"to {paths.config_path()}"
-    ) in check.fix
-    # Never the header and the key as one line: TOML does not parse that, and a config
-    # that does not parse sends every role back to the built-in auto.
-    assert "] permission_mode" not in check.fix
-    refused = runner.invoke(
-        app, ["config", "set", "fleet.roles.manager.permission_mode", "acceptEdits"]
-    )
-    assert refused.exit_code != 0, "the command it no longer prints fails on this config"
-    # Followed as printed, the file still parses, manager is off auto, and the
-    # config's own customisation survives.
-    _follow_table_step(check.fix)
-    assert load_config().fleet.roles["coder"].permission_mode == "acceptEdits"
-    assert "manager" not in auto_mode.auto_roles()
-
-    # A role in auto WITH a table: the command is named for it, and it works.
-    _configure(tracing=True, modes={"coder": "acceptEdits", "tester": "auto"})
-    check = auto_mode.doctor_check()
-    assert check is not None and check.fix
-    command = "aisquare config set fleet.roles.tester.permission_mode acceptEdits"
-    assert command in check.fix
+    command = "aisquare config set fleet.roles.manager.permission_mode acceptEdits"
+    assert command in check.fix and "add a `[fleet.roles" not in check.fix
     result = runner.invoke(app, command.split()[1:])
     assert result.exit_code == 0, result.output
-    assert "tester" not in auto_mode.auto_roles()
+    # The config's own customisation survives, and manager is off auto.
+    assert load_config().fleet.roles["coder"].permission_mode == "acceptEdits"
+    assert "manager" not in auto_mode.auto_roles()
 
 
 def test_the_doctor_line_reads_the_evidence(isolated_home: Path, tmp_path: Path) -> None:
@@ -594,10 +577,26 @@ def test_the_spawn_note_names_a_step_a_restart_or_a_switch_receipt_can_follow(
     result = runner.invoke(app, command.split()[1:])
     assert result.exit_code == 0, result.output
     assert "coder" not in auto_mode.auto_roles()
-    # A role this config's [fleet.roles] leaves out: the table, as the doctor line names it.
-    manager = _note("auto", role="manager", label="manager")
-    assert manager is not None and "config set fleet.roles.manager" not in manager
-    assert 'add a `[fleet.roles.manager]` table with `permission_mode = "acceptEdits"`' in manager
+    # A role outside the fleet's six, which no [fleet.roles] table holds unless the file
+    # adds one: `config set` would answer "unknown config key", so the step is the table.
+    planner = _note("auto", role="planner", label="planner")
+    assert planner is not None and "config set fleet.roles.planner" not in planner
+    assert (
+        'add a `[fleet.roles.planner]` table with `permission_mode = "acceptEdits"` '
+        f"to {paths.config_path()}"
+    ) in planner
+    refused = runner.invoke(
+        app, ["config", "set", "fleet.roles.planner.permission_mode", "acceptEdits"]
+    )
+    assert refused.exit_code != 0, "the command it does not print fails on this config"
+    # Never the header and the key as one line: TOML does not parse that, and a config
+    # that does not parse sends every role back to the built-in auto. Followed as
+    # printed, the file still parses, the role is off auto, and the rest survives.
+    assert "] permission_mode" not in planner
+    _follow_table_step(planner)
+    assert load_config().fleet.roles["planner"].permission_mode == "acceptEdits"
+    assert load_config().fleet.roles["coder"].permission_mode == "acceptEdits"
+    assert "planner" not in auto_mode.auto_roles()
 
 
 # --- the Stop hook ----------------------------------------------------------------------------
@@ -738,9 +737,9 @@ def test_only_a_session_launched_through_the_proxy_is_blamed_on_it(
     assert _state("sess-plain") == "attention"
     blocked = [text for kind, text in _events(project) if kind == auto_mode.EVENT_KIND]
     assert len(blocked) == 1 and "behind the explainability proxy" in blocked[0]
-    # coder has no [fleet.roles] table in this config: the step is the table, not `config set`.
-    assert 'add a `[fleet.roles.coder]` table with `permission_mode = "acceptEdits"`' in blocked[0]
-    assert "config set fleet.roles.coder" not in blocked[0]
+    # coder, a fleet role, has its table whatever the file holds: the step is `config set`.
+    assert "aisquare config set fleet.roles.coder.permission_mode acceptEdits" in blocked[0]
+    assert "add a `[fleet.roles" not in blocked[0]
 
 
 def test_a_config_that_does_not_parse_does_not_cost_the_notice(

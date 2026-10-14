@@ -358,9 +358,10 @@ aisquare team bind coder --account work   # the same role binding, from the team
 
 A launch — `aisquare launch`, `fleet spawn`, the manager spawning a coder —
 resolves the account in exactly one order: `--account` on the command line, then
-the role's binding, then the project's default, then the machine's default. With
-none of those set it runs on whatever `claude` the shell already has, exactly as
-before, so a machine that never ran `accounts default` notices nothing. One
+the role's binding, then the project's default, then the account with room
+(`[accounts] pick`, below), then the machine's default. With one login and none
+of those set it runs on whatever `claude` the shell already has, exactly as
+before, so a machine that never added an account notices nothing. One
 resolver answers for every surface, so the fleet UI and a hand-typed launch can
 never disagree about which login an agent gets; `accounts list` stars the
 default and lists the slots in priority order; `doctor` warns when the default is
@@ -369,14 +370,16 @@ longer has.
 
 **Spending several accounts.** With more than one login the interesting
 questions are *where is there room* and *what happens when one runs out*. Both
-are `[accounts]` settings (on the Settings tab, or `aisquare config set`):
+are `[accounts]` settings (on the Settings tab, or `aisquare config set`), and both
+default to using the room there is:
 
 ```sh
-aisquare config set accounts.pick headroom   # spawns take, in priority order, the first account
-                                             # under switch_at % of its 5-hour window — or the one
-                                             # with the most room when all are over it
+aisquare config set accounts.pick headroom   # the default: spawns take, in priority order, the
+                                             # first account under switch_at % of its 5-hour
+                                             # window — or the one with the most room when all are over it
+aisquare config set accounts.pick default    # …or every spawn on the machine default
 aisquare config set accounts.switch_at 85    # the line (default 85 %)
-aisquare config set accounts.on_limit switch # when an agent hits its limit, move it (default: wait)
+aisquare config set accounts.on_limit wait   # when an agent hits its limit, leave it parked (default: switch)
 aisquare fleet switch coder-auth             # move one by hand: same label, task and worktree,
                                              # on the account with headroom, resuming its session
 aisquare fleet switch coder-auth --to work --fresh   # a named account, and a fresh session with a
@@ -387,7 +390,7 @@ When an agent's turn ends on a usage limit — Claude Code's `StopFailure` hook,
 `You've hit your session limit · resets 12:30am` — its row shows **⏳ limited**
 with the reset time, the manager is woken with the one command that moves it,
 and Claude Code's own wait-and-continue at the reset is left in place. With
-`on_limit = switch` the fleet hands the agent over on its own: it stops the
+`on_limit = switch`, the default, the fleet hands the agent over on its own: it stops the
 agent, starts it again on the account with the most headroom, and resumes the
 same session by its transcript (`claude --resume <path>`), unless the limit
 lifts within `wait_if_reset_within_minutes` (a reset ten minutes away is cheaper

@@ -29,7 +29,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app as cli
 from aisquare.core.claude_accounts import LimitNotice, format_reset
-from aisquare.core.config import AccountsSettings, FleetSettings
+from aisquare.core.config import AccountsSettings, AppConfig, FleetSettings, save_config
 from aisquare.core.paths import remote_audit_path, remote_needs_path
 from aisquare.core.store import store_session
 from aisquare.models import (
@@ -1016,8 +1016,11 @@ def _scan(
     now: datetime = NOW,
     dismissed: tuple[str, ...] = (),
     first_seen: dict[str, datetime] | None = None,
+    accounts: AccountsSettings | None = None,
 ) -> list[NeedsItem]:
-    return scan_needs_you(_sources(fleet), now=now, dismissed=dismissed, first_seen=first_seen)
+    return scan_needs_you(
+        _sources(fleet, accounts=accounts), now=now, dismissed=dismissed, first_seen=first_seen
+    )
 
 
 def _asking(now: datetime, tool: str = "toolu_push") -> tuple[FleetAgentStatus, TranscriptTail]:
@@ -1303,7 +1306,8 @@ def test_a_manager_parked_on_its_usage_limit_is_no_manager_to_leave_work_to() ->
     manager = _row("manager", role="manager")
     parked = _session(manager, state="limited", resets=NOW + timedelta(hours=4))
     fleet = _crew_and_manager(_status(manager, "limited", parked, "limit resets in 4h"))
-    items = _scan(fleet)
+    # Waiting on a limit, so no hand-over is on it either.
+    items = _scan(fleet, accounts=AccountsSettings(on_limit="wait"))
     assert [(item.kind, item.agent) for item in items] == [
         ("board_question", "coder-1"),
         ("crashed", "coder-2"),
@@ -2021,11 +2025,16 @@ def _limited(resets: datetime | None) -> FleetAgentStatus:
     [
         (NOW + timedelta(minutes=10), AccountsSettings(), False, None),
         (NOW - timedelta(minutes=2), AccountsSettings(), False, None),
-        (NOW + timedelta(minutes=10), AccountsSettings(wait_if_reset_within_minutes=5), False, 0),
-        (NOW + timedelta(hours=3), AccountsSettings(), False, 0),
-        (None, AccountsSettings(), False, 0),
-        (NOW + timedelta(hours=3), AccountsSettings(on_limit="switch"), False, 90),
-        (NOW + timedelta(hours=3), AccountsSettings(), True, 90),
+        (
+            NOW + timedelta(minutes=10),
+            AccountsSettings(on_limit="wait", wait_if_reset_within_minutes=5),
+            False,
+            0,
+        ),
+        (NOW + timedelta(hours=3), AccountsSettings(on_limit="wait"), False, 0),
+        (None, AccountsSettings(on_limit="wait"), False, 0),
+        (NOW + timedelta(hours=3), AccountsSettings(), False, 90),  # on_limit: switch
+        (NOW + timedelta(hours=3), AccountsSettings(on_limit="wait"), True, 90),
     ],
 )
 def test_a_limit_pushes_never_near_its_reset_and_later_when_someone_is_on_it(
@@ -3805,6 +3814,8 @@ def test_a_live_manager_keeps_an_item_off_the_phone_only_on_its_projects_own_boa
     round 25, 2/4). Each
     tuple is a card's kind, project, agent and the seconds its push waits. An action's
     check of each agent finds what the scan found, and no more."""
+    # Waiting on a limit, so a live manager is all a limit's push waits for.
+    save_config(AppConfig(accounts=AccountsSettings(on_limit="wait")))
     projects = _seated(tmp_path, monkeypatch, seats, hub=hub)
     tmux = FakeTmux()
     monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)

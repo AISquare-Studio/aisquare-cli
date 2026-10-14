@@ -4,8 +4,44 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from aisquare.core import harness
-from aisquare.core.agent_adapters.types import AgentCapabilities, BadEffortError, HookSpec
+from aisquare.core.agent_adapters.types import (
+    AgentCapabilities,
+    BadEffortError,
+    HookSpec,
+    PluginInstall,
+)
 from aisquare.core.claude_accounts import ClaudeCodeAccounts
+
+
+class ClaudeCodePlugin:
+    """The aisquare Claude Code plugin (``plugins/claude-code``), as ``core.agents`` reads it."""
+
+    def supported(self) -> bool:
+        from aisquare.core import agents
+
+        return agents.plugin_route_supported()
+
+    def installed(self, config_dir: Path | None) -> PluginInstall | None:
+        from aisquare.core import agents
+
+        return agents.claude_plugin(config_dir)
+
+    def repo_installs(self, config_dir: Path | None) -> list[PluginInstall]:
+        from aisquare.core import agents
+
+        return agents.claude_repo_plugins(config_dir)
+
+    def repo_install_here(self, config_dir: Path | None, cwd: Path | None) -> PluginInstall | None:
+        from aisquare.core import agents
+
+        return agents.claude_repo_plugin_here(config_dir, cwd)
+
+    def command(
+        self, verb: str, config_dir: Path, *, scope: str = "user", project: Path | None = None
+    ) -> str:
+        from aisquare.core import agents
+
+        return agents.claude_plugin_command(verb, config_dir, scope=scope, project=project)
 
 
 class ClaudeCodeAdapter:
@@ -17,6 +53,7 @@ class ClaudeCodeAdapter:
     settings_name = "settings.json"
     install_hint = "https://claude.ai/install.sh"
     accounts = ClaudeCodeAccounts()
+    plugin = ClaudeCodePlugin()
     capabilities = AgentCapabilities(
         hooks=(
             HookSpec("SessionStart", "session-start", 120),

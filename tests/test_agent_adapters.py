@@ -2586,3 +2586,18 @@ def test_the_agent_rows_survive_a_damaged_store(
     assert rows["cursor"]["status"] == "ok" and rows["claude-code"]["status"] == "ok"
     if damaged_store == "at-open":  # control: doctor does see this damage (a zeroed page it
         assert rows["database"]["status"] == "fail", rows["database"]  # never reads, it cannot)
+
+
+def test_the_plugin_route_is_an_adapter_slot(claude_home: Path) -> None:
+    """``AgentAdapter.plugin``: Claude Code's reads its plugin files, Codex has none yet."""
+    from aisquare.core.agent_adapters import get_adapter
+
+    claude = get_adapter("claude-code").plugin
+    assert claude is not None and claude.supported() == agent_core.plugin_route_supported()
+    assert claude.installed(claude_home) == agent_core.claude_plugin(claude_home)
+    assert claude.repo_installs(claude_home) == agent_core.claude_repo_plugins(claude_home)
+    assert claude.command("disable", claude_home) == agent_core.claude_plugin_command(
+        "disable", claude_home
+    )
+    assert get_adapter("codex").plugin is None and agent_core.plugin_of("codex") is None
+    assert agent_core.plugin_of("cursor") is None

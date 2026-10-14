@@ -40,6 +40,52 @@ class AgentCapabilities:
     switch_options: frozenset[str] = frozenset()
 
 
+@dataclass(frozen=True)
+class PluginInstall:
+    """The aisquare plugin, installed in one config directory and enabled there (user
+    scope) or in one repository (project and local scope)."""
+
+    config_dir: Path
+    version: str | None
+    """What the agent's install record says; ``None`` when it records none."""
+    scope: str = "user"
+    """``user``, or ``project``/``local``: the scope the plugin was installed at."""
+    project: Path | None = None
+    """The repository a project- or local-scope install is enabled in; ``None`` at user scope."""
+    trusted: bool = True
+    """Whether the agent runs the plugin's hooks: Codex runs none until ``/hooks`` trusts
+    them; an agent that never asks always does."""
+
+
+class AgentPlugin(Protocol):
+    """The no-installer route: an aisquare plugin whose hooks run ``aisquare hook`` and
+    stand down where the agent's hooks file already runs aisquare's. Read-only; never
+    raises. ``config_dir`` ``None`` is the dir a session from this shell reads."""
+
+    def supported(self) -> bool:
+        """Whether the plugin's hooks can run on this platform."""
+        ...
+
+    def installed(self, config_dir: Path | None) -> PluginInstall | None:
+        """The user-scope install that ``config_dir`` enables, else ``None``."""
+        ...
+
+    def repo_installs(self, config_dir: Path | None) -> list[PluginInstall]:
+        """Project- and local-scope installs recorded in ``config_dir`` whose repository
+        still enables them."""
+        ...
+
+    def repo_install_here(self, config_dir: Path | None, cwd: Path | None) -> PluginInstall | None:
+        """The repository install a session of ``config_dir`` started in ``cwd`` loads."""
+        ...
+
+    def command(
+        self, verb: str, config_dir: Path, *, scope: str = "user", project: Path | None = None
+    ) -> str:
+        """The agent's own ``plugin <verb>`` command line for that install, to paste."""
+        ...
+
+
 class AgentAdapter(Protocol):
     id: str
     label: str
@@ -53,6 +99,11 @@ class AgentAdapter(Protocol):
     @property
     def accounts(self) -> AgentAccounts | None:
         """Numbered login slots (``aisquare accounts``); ``None`` for an agent without them."""
+        ...
+
+    @property
+    def plugin(self) -> AgentPlugin | None:
+        """The aisquare plugin route for this agent; ``None`` when there is none."""
         ...
 
     def mcp_args(

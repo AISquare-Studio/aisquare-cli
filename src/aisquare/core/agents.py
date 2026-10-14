@@ -29,7 +29,12 @@ from typing import Any
 
 from aisquare.core import atomic, paths, selfcli
 from aisquare.core.agent_adapters import adapters, get_adapter
-from aisquare.core.agent_adapters.types import HookSpec, config_home
+from aisquare.core.agent_adapters.types import (
+    AgentPlugin,
+    HookSpec,
+    PluginInstall,
+    config_home,
+)
 from aisquare.core.version import DISTRIBUTION, __version__
 from aisquare.models import AgentHookSite, AgentInfo
 
@@ -1064,18 +1069,21 @@ def _enabled_in(settings: Path) -> list[str]:
     return [str(key) for key, enabled in plugins.items() if enabled]
 
 
-@dataclass(frozen=True)
-class ClaudePlugin:
-    """The aisquare plugin, installed in one Claude Code config directory and enabled
-    there (user scope) or in one repository (project and local scope)."""
+ClaudePlugin = PluginInstall
+"""The aisquare plugin, installed in one Claude Code config directory and enabled there
+(user scope) or in one repository (project and local scope): its ``version`` is what
+``plugins/installed_plugins.json`` records, its ``scope`` the one ``claude plugin
+install`` was given."""
 
-    config_dir: Path
-    version: str | None
-    """What ``plugins/installed_plugins.json`` records; ``None`` when it records none."""
-    scope: str = "user"
-    """``user``, or ``project``/``local``: the scope ``claude plugin install`` was given."""
-    project: Path | None = None
-    """The repository a project- or local-scope install is enabled in; ``None`` at user scope."""
+
+def plugin_of(name: str) -> AgentPlugin | None:
+    """``name``'s aisquare plugin route (``AgentAdapter.plugin``) where it runs on this
+    platform, else ``None`` (and for an agent aisquare only detects)."""
+    try:
+        plugin = get_adapter(name).plugin
+    except ValueError:
+        return None
+    return plugin if plugin is not None and plugin.supported() else None
 
 
 def plugin_route_supported() -> bool:

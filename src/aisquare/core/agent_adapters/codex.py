@@ -38,6 +38,7 @@ class CodexAdapter:
     settings_name = "hooks.json"
     install_hint = "npm install -g @openai/codex"
     accounts = CodexAccounts()
+    plugin = None
     capabilities = AgentCapabilities(
         hooks=(
             HookSpec("SessionStart", "codex", 120),

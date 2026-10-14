@@ -46,6 +46,16 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
             return [name for v in value for name in names(v)]
         return []
 
+    def user_texts(request: dict[str, Any]) -> list[str]:
+        """The user messages a provider request carries, oldest first."""
+        return [
+            part["text"]
+            for item in request.get("input", [])
+            if item.get("role") == "user"
+            for part in item.get("content", [])
+            if part.get("type") == "input_text"
+        ]
+
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
             raw = self.rfile.read(int(self.headers["Content-Length"]))
@@ -55,6 +65,9 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
                 self.wfile.write(b"{}")
                 return
             requests.append(json.loads(raw))
+            said = user_texts(requests[-1])
+            if said and said[-1] == "SLOW busy fixture":
+                time.sleep(8)  # a turn long enough to tell the agent something mid-turn
             item = {
                 "id": "msg_local",
                 "type": "message",
@@ -282,18 +295,88 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
                 while len(requests) < 6 and time.monotonic() < deadline:
                     time.sleep(0.1)
                 assert len(requests) >= 6
-                # A graceful stop: Codex's own SessionEnd hook gives the claim back
-                # ("session ended") before the window goes; a window kill fires no
-                # hook and leaves the release to stop ("agent stopped").
+                label = receipt.agent.label
+
+                def until(check: Any, seconds: float, what: str, pane: str) -> None:
+                    deadline = time.monotonic() + seconds
+                    while not check():
+                        if time.monotonic() >= deadline:
+                            screen = srv.run("capture-pane", "-p", "-t", pane)
+                            raise AssertionError(f"{what}:\n{screen}")
+                        time.sleep(0.1)
+
+                def state(agent: Any) -> str | None:
+                    session = fleet.status_of(agent).session
+                    return session.state if session is not None else None
+
+                def ran(text: str) -> bool:
+                    return any((user_texts(request) or [""])[-1] == text for request in requests)
+
+                # A busy agent is told through `codex queue`, which reaches the
+                # interactive session: the message runs as its next turn.
+                pane = receipt.agent.pane_id
+                until(lambda: state(receipt.agent) == "waiting", 20, "waiting", pane)
+                assert fleet.tell(project, label, "SLOW busy fixture").delivered
+                until(lambda: state(receipt.agent) == "working", 10, "working", pane)
+                queued = fleet.tell(project, label, "queued fixture line")
+                assert queued.delivered and "queued for its next turn" in queued.how, queued
+                until(lambda: ran("queued fixture line"), 40, "the queued line ran", pane)
+                # A restart resumes the bound thread: `codex ... resume <id> -- <line>`,
+                # the history before it and the claims with it.
+                until(lambda: state(receipt.agent) == "waiting", 20, "waiting again", pane)
+                session = fleet.status_of(receipt.agent).session
+                assert session is not None
                 task, _ = team.add_task("graceful stop fixture", cwd=workspace)
                 with store_session() as store:
                     assert store.claim_task(
-                        task.id, status.session.id, datetime.now(UTC) + timedelta(minutes=5)
+                        task.id, session.id, datetime.now(UTC) + timedelta(minutes=5)
                     )
-                stopped = fleet.stop(project, receipt.agent.label, grace=10)
+                restarted = fleet.restart(project, label)
+                assert restarted.resumed and restarted.was_running, restarted.notes
+                assert restarted.started.session_id == session.id
+                line = fleet._restart_prompt(restarted.started)
+                pane = restarted.started.pane_id
+                until(
+                    lambda: any(
+                        (user_texts(request) or [""])[-1] == line
+                        and "queued fixture line" in user_texts(request)
+                        for request in requests
+                    ),
+                    40,
+                    "the restart resumed its thread with its history",
+                    pane,
+                )
+                with store_session() as store:
+                    held = store.get_task(task.id)
+                    assert held is not None and held.claimed_by == session.id
+                # A /clear: no SessionEnd for the thread it leaves; the new thread's
+                # SessionStart (source clear) comes with its first prompt, from the same
+                # process, and the row and the claim move to it there.
+                until(lambda: state(restarted.started) == "waiting", 20, "waiting", pane)
+                srv.send_literal(pane, "/clear")
+                time.sleep(0.3)
+                srv.send_keys(pane, "Enter")
+                time.sleep(1)
+                assert fleet.tell(project, label, "after clear fixture").delivered
+
+                def cleared() -> bool:
+                    with store_session() as store:
+                        row = store.get_fleet_agent(restarted.started.id)
+                    return row is not None and row.session_id not in (None, session.id)
+
+                until(cleared, 20, "the /clear moved the row", pane)
+                with store_session() as store:
+                    row = store.get_fleet_agent(restarted.started.id)
+                    held = store.get_task(task.id)
+                assert row is not None and held is not None
+                assert held.claimed_by == row.session_id, "the claim moved with the row"
+                # A graceful stop: Codex's own SessionEnd hook gives the claim back
+                # ("session ended") before the window goes; a window kill fires no
+                # hook and leaves the release to stop ("agent stopped").
+                stopped = fleet.stop(project, label, grace=10)
                 assert not stopped.released, stopped
                 with store_session() as store:
-                    ended = store.get_session(status.session.id)
+                    ended = store.get_session(row.session_id or "")
                     released = [
                         event.text
                         for event in store.recent_events(project.id, limit=50)

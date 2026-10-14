@@ -895,6 +895,53 @@ def test_key_chords_are_sent_in_the_shown_agents_own_spelling() -> None:
     assert key_spellings(None) == {}
 
 
+def test_a_prompt_steered_into_a_running_turn_is_its_own_prompt(
+    codex_agent: tuple[Codex, TeamTask],
+) -> None:
+    """Codex 0.162.1 fires ``UserPromptSubmit`` for a prompt typed while a turn runs under
+    that turn's id. Deduplicated by the turn alone it read as a redelivery of the first:
+    not recorded, no heartbeat, the first prompt's reply handed back (a ``fleet tell``
+    typed as the turn ended was lost from the board). A true redelivery still answers
+    as the first time."""
+    codex, _ = codex_agent
+    codex.start("thread-one")
+    codex.hook("UserPromptSubmit", "thread-one", prompt="slow work", turn_id="turn-1")
+    codex.hook("UserPromptSubmit", "thread-one", prompt="steered in", turn_id="turn-1")
+    codex.hook("UserPromptSubmit", "thread-one", prompt="steered in", turn_id="turn-1")
+
+    with store_session() as store:
+        said = [prompt.text for prompt in store.recent_prompts(codex.project.id)]
+    assert said.count("steered in") == 1 and said.count("slow work") == 1, said
+
+
+def test_a_turn_a_prompt_was_steered_into_after_its_stop_stops_again(
+    codex_agent: tuple[Codex, TeamTask],
+) -> None:
+    """The other half of the steer: typed as the turn ended, the prompt reopens it, and
+    Codex's next Stop under the same turn id is a new stop — the agent waits again. A
+    Stop redelivered with nothing in between still answers as the first did."""
+    codex, _ = codex_agent
+    codex.start("thread-one")
+    first = codex.board_id("thread-one")
+
+    def state() -> str | None:
+        with store_session() as store:
+            session = store.get_session(first)
+        return session.state if session is not None else None
+
+    codex.hook("UserPromptSubmit", "thread-one", prompt="work", turn_id="turn-1")
+    codex.hook("Stop", "thread-one", turn_id="turn-1", stop_hook_active=False)
+    assert state() == "waiting"
+    codex.hook("UserPromptSubmit", "thread-one", prompt="one more thing", turn_id="turn-1")
+    assert state() == "working"
+    codex.hook("Stop", "thread-one", turn_id="turn-1", stop_hook_active=False)
+    assert state() == "waiting"
+    with store_session() as store:
+        store.touch_session(first, state="working")
+    codex.hook("Stop", "thread-one", turn_id="turn-1", stop_hook_active=False)
+    assert state() == "working", "a redelivered Stop is answered from the cache"
+
+
 def test_a_codex_row_on_a_codex_slot_restarts_on_that_slot(
     tmux: FakeTmux,  # noqa: F811
     codex_on_path: Path,  # noqa: F811

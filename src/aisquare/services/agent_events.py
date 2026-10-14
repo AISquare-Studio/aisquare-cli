@@ -50,6 +50,12 @@ def handle(
         agents.observe_hooks(adapter.id, config_dir, definition)
     cacheable = bool(session_id and event.turn_id) and event.kind in {"prompt", "stop"}
     cached_key = f"agent-event:{session_id}:{event.kind}:{event.turn_id}:{event.stop_hook_active}"
+    if event.kind == "prompt":
+        # A prompt submitted while a turn runs (Codex's steer) comes under that turn's
+        # id (measured on 0.162.1): another prompt, not a redelivery of the first, so
+        # its text is part of what makes it the same event.
+        digest = hashlib.sha256((event.prompt or "").encode()).hexdigest()[:16]
+        cached_key = f"{cached_key}:{digest}"
     pending = ""
     if session_id and (cacheable or not adapter.capabilities.assigns_session_id):
         # These are exact launch tokens supplied by AISquare, never a search for
@@ -68,6 +74,12 @@ def handle(
                     }
                 )
                 claimed = store.set_meta_once(cached_key, pending)
+                if claimed and event.kind == "prompt":
+                    # A prompt in a turn whose Stop was already answered (steered in as
+                    # the turn ended) reopens it: that turn's next Stop is a new one,
+                    # not the redelivery the cache answers. Measured on Codex 0.162.1.
+                    for active in (False, True):
+                        store.delete_meta(f"agent-event:{session_id}:stop:{event.turn_id}:{active}")
                 cached = store.get_meta(cached_key)
                 # A failed owner may have released the row between our INSERT
                 # and SELECT. We still need a claim before dispatching.

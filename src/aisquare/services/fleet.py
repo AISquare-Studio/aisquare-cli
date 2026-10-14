@@ -319,6 +319,10 @@ class ShutdownRow:
 
     agent: FleetAgent
     reason: str
+    held: bool = False
+    """Left live as one whose agent may run where no tmux client reaches it (``_held_rows``),
+    not as a pane seen alive: no server this run asks holds its pane, so it spares no session
+    there (``_spared``)."""
 
 
 @dataclass
@@ -3679,6 +3683,34 @@ def _fleet_sessions(
     return sessions
 
 
+def _spared(
+    report: ShutdownReport, config: FleetSettings
+) -> tuple[set[tuple[_Address, str]], set[tuple[_Address, str]]]:
+    """``(socket, project id)`` and ``(socket, pane id)`` for each row ``report`` LEFT LIVE
+    on a pane its server holds, whose session the kill phase spares.
+
+    The spare rule follows the PANE, not only the project's current session name: a
+    `rename` that failed open (or a hand rename) leaves an agent in an `asq-*` session that
+    `_fleet_sessions` returns with no project, and under `--all` the prefix sweep killed it
+    over a row this had just marked LEFT LIVE (review of #121, round 2). So a session is
+    also spared when one of its panes is a row left live — asked of tmux only when there is
+    such a row, so the ordinary path costs nothing extra. Keyed by (socket, pane id): pane
+    ids are unique only within ONE tmux server (every server starts at %0), so a failed
+    `%1` on the old socket must not spare an unrelated session holding `%1` on the current
+    one (review of #121, round 3).
+
+    Not a row left live as held (:attr:`ShutdownRow.held`): its agent may run where no
+    client reaches it, and its pane is on no server this run asks. A row another server
+    answers for spared its project's session on that server, which the held agent does
+    not run on, with every window there and the server itself (review of #259, round 3).
+    """
+    seen = [row for row in report.failed if not row.held]
+    return (
+        {(_address(row.agent, config), row.agent.project_id) for row in seen},
+        {(_address(row.agent, config), row.agent.pane_id) for row in seen},
+    )
+
+
 def _kill_fleet_sessions(
     targets: Sequence[tuple[ProjectInfo, list[FleetAgent]]],
     sockets: Sequence[_Address],
@@ -3700,23 +3732,11 @@ def _kill_fleet_sessions(
     server down when the fleet is all it held: ``BUNDLED_CONF`` does not set
     ``exit-empty off``, so a server with no session exits on its own.
 
-    A session holding a row this LEFT LIVE is spared. Killing it would end an
-    agent whose pane ``_verify_gone`` had just confirmed alive, and leave its
+    A session holding a row this LEFT LIVE is spared (:func:`_spared`). Killing it would
+    end an agent whose pane ``_verify_gone`` had just confirmed alive, and leave its
     live row on a dead pane — the state this whole command exists to end.
     """
-    spared = {(_address(row.agent, config), row.agent.project_id) for row in report.failed}
-    # The spare rule follows the PANE, not only the project's current session
-    # name: a `rename` that failed open (or a hand rename) leaves an agent in an
-    # `asq-*` session that `_fleet_sessions` returns with no project, and under
-    # `--all` the prefix sweep killed it over a row this had just marked LEFT
-    # LIVE (review of #121, round 2). So a session is also spared when one of
-    # its panes is a row left live — asked of tmux only when there is such a
-    # row, so the ordinary path costs nothing extra.
-    # Keyed by (socket, pane id): pane ids are unique only within ONE tmux
-    # server (every server starts at %0), so a failed `%1` on the old socket
-    # must not spare an unrelated session holding `%1` on the current one
-    # (review of #121, round 3).
-    spared_panes = {(_address(row.agent, config), row.agent.pane_id) for row in report.failed}
+    spared, spared_panes = _spared(report, config)
     for socket in sockets:
         if not answering.get(socket):
             continue
@@ -4048,7 +4068,7 @@ def _shutdown_row(
         agent, answering, held or {}, forget=forget, unusable=unusable, config=config
     )
     if verdict.end == "live":
-        report.failed.append(ShutdownRow(agent, verdict.reason))
+        report.failed.append(ShutdownRow(agent, verdict.reason, held=True))
         _not_down(report, agent.project_id)
         return
     if verdict.end == "lost":
@@ -4097,7 +4117,7 @@ def _retire_late_panes(
     """
     if not late:
         return
-    spared_panes = {(_address(row.agent, config), row.agent.pane_id) for row in report.failed}
+    _, spared_panes = _spared(report, config)
     sessions: list[tuple[_Address, str, str]] = []  # (socket, session, project id)
     for project, agent in late:
         address = _address(agent, config)

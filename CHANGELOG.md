@@ -200,7 +200,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rather than type into the pane the newcomer gave its id, Remote's needs-you
   gives it one `lost` card saying it is out of reach (not prompts whose every
   answer is refused, nor nothing once its board goes stale), `fleet shutdown`
-  leaves it live until `--forget`, and
+  leaves it live until `--forget` (and spares none of its project's sessions on
+  the server that took its socket, where its agent does not run), and
   `upgrade` and `uninstall` count it as running and name `--forget`. A
   server that exited (a `kill-server`, a crash) leaves its socket file with
   nothing listening, and the next spawn, in any project, or asq's Accounts

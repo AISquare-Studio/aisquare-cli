@@ -2824,10 +2824,11 @@ def test_a_row_whose_socket_another_server_took_is_held_not_ended(
     monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
     tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
     coder = _coder(project)
-    session = f"asq-{_codename(project)}"
     newcomer = FakeTmux()  # at the same path, so `-L` reaches it: the row's server is lost
     newcomer.started = tmux.started + timedelta(minutes=5)
-    newcomer.spawn_window(session, name="coder-1", cwd=project.root, command=["claude"])
+    # Another project's agent there took its id. (This project's own session there would
+    # be the shutdown's to take down: the held row spares none on the newcomer.)
+    newcomer.spawn_window("asq-elsewhere", name="coder-1", cwd=project.root, command=["claude"])
     assert newcomer.facts.keys() == {coder.pane_id}, "its %1 is another agent's"
     newcomer.set_command(coder.pane_id, "claude")
     monkeypatch.setattr(fleet_service, "server", lambda config=None: newcomer)
@@ -2953,6 +2954,40 @@ def test_a_forget_plan_says_a_row_another_server_answers_for_is_recorded_lost_as
     payload = json.loads(machine.stdout)
     assert payload["lost"] == {again.id: str(fleet_service._address(again))}
     assert payload["lost_why"][again.id].startswith("ended on your word (--forget): another")
+
+
+def test_a_row_left_live_as_held_spares_no_session_on_the_server_that_took_its_socket(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 3: a row held as another server's lands in the report's
+    `failed`, and the kill phase spared every session of a `failed` row's project at its
+    address: the socket where the newer server answers. So `fleet shutdown` left the
+    project's `asq-<codename>` session on that server up, listed in `sessions_left_up`,
+    with every window in it and the server itself, though the held agent does not run
+    there: the spare is for a pane `_verify_gone` saw alive. A held row spares nothing."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    held = _coder(project)
+    session = f"asq-{_codename(project)}"
+    newcomer = FakeTmux()  # took the socket
+    newcomer.started = tmux.started + timedelta(minutes=5)
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: newcomer)
+    own = _coder(project)  # this project's, on the newcomer: in its session there
+    left = newcomer.spawn_window(session, name="scratch", cwd=project.root, command=["sh"])
+
+    report = fleet_service.shutdown(project)
+
+    assert [row.agent.id for row in report.failed] == [held.id] and report.failed[0].held
+    assert [agent.id for agent in report.stopped] == [own.id]
+    assert report.sessions_killed == [f"asq:{session}"] and report.sessions_left_up == []
+    assert left.pane_id not in newcomer.facts and session not in newcomer.sessions
+    assert report.incomplete_projects == [project.id], "the held row is still live"
+    # Negative control: a row whose pane its own server shows alive spares its session.
+    kept = _coder(project)
+    newcomer.honours_exit, newcomer.refuse_kills = False, True  # alive, and stays so
+    again = fleet_service.shutdown(project)
+    assert [row.agent.id for row in again.failed if not row.held] == [kept.id]
+    assert again.sessions_left_up == [f"asq:{session}"]
 
 
 @pytest.mark.parametrize("board", ["waiting", "working", "attention"])

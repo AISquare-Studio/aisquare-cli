@@ -40,6 +40,7 @@ from typing import Any, TypeVar
 import pytest
 from textual import events
 from textual.app import App, ComposeResult
+from textual.content import Content
 from textual.geometry import Region
 from textual.notifications import Notification, SeverityLevel
 from textual.pilot import Pilot
@@ -340,9 +341,11 @@ def _config_toml() -> dict[str, Any]:
 
 
 def test_project_view_has_the_four_tabs_with_their_widgets(project: ProjectInfo) -> None:
-    """Manager, Board, Explainability, Settings: no Doctor tab — the doctor is the app's page."""
+    """Manager, Board, AISquare, Settings: no Doctor tab — the doctor is the app's page."""
 
-    async def scenario(pilot: Pilot[None], host: Host) -> tuple[int, list[str], str, int]:
+    async def scenario(
+        pilot: Pilot[None], host: Host
+    ) -> tuple[int, list[str], str, list[str], str, int, str]:
         view = host.query_one(ProjectView)
         for pane_id, widget_type in (
             ("#tab-manager", ManagerTab),
@@ -352,13 +355,32 @@ def test_project_view_has_the_four_tabs_with_their_widgets(project: ProjectInfo)
         ):
             assert view.query_one(pane_id).query_one(widget_type)
         ids = [pane.id or "" for pane in view.query("TabPane")]
-        return view.tab_count, ids, view.active, len(view.query(DoctorView))
+        labels = [view.get_tab(pane_id).label_text for pane_id in ids]
+        first = view.query_one(ExplainabilityView).children[0]
+        heading = first.render()
+        assert isinstance(heading, Content)
+        bold = any(
+            span.end - span.start == len(heading.plain) and "bold" in str(span.style)
+            for span in heading.spans
+        )
+        return (
+            view.tab_count,
+            ids,
+            view.active,
+            labels,
+            f"{first.id}:{'bold' if bold else 'plain'}",
+            len(view.query(DoctorView)),
+            heading.plain,
+        )
 
-    count, ids, active, doctors = drive(project, scenario)
+    count, ids, active, labels, first_id, doctors, heading = drive(project, scenario)
     assert count == 4
     assert ids == list(ProjectView.TAB_IDS)
     assert active == "tab-manager"  # the manager first: that is where the goal goes
+    assert labels == ["Manager", "Board", "AISquare", "Settings"]
     assert doctors == 0
+    # The AISquare tab opens on an "Explainability" heading, above the status block as before.
+    assert first_id == "explainability-heading:bold" and heading == "Explainability"
 
 
 # --- the Manager tab ----------------------------------------------------------------------

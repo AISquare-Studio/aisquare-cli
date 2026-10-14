@@ -1,12 +1,13 @@
-"""The Project view: Manager · Board · Explainability · Settings tabs.
+"""The Project view: Manager · Board · AISquare · Settings tabs.
 
 One ``TabbedContent`` per selected project (docs/plans/fleet-tui.md §4.2). The
 Manager tab is where goal intake happens — the user types to the manager's real
 Claude Code session exactly as they would to any other, so the tab is the
 manager's ``TerminalPane`` and nothing more, plus a **Start manager** button
 while the project has none. The Board tab is ``cli.ui.board.BoardPanel``, the
-widgets of ``aisquare board -w``; Explainability and Settings are the two forms
-in this package.
+widgets of ``aisquare board -w``; AISquare (``ExplainabilityView``, under its
+"Explainability" heading — the first of the tab's sections) and Settings are
+the two forms in this package.
 
 There is no Doctor tab: the doctor is the app's, on its own page, run at start
 and when that page opens — not once per project view, nor per tab activation.
@@ -281,7 +282,7 @@ class ManagerTab(Vertical):
 
 
 class ProjectView(TabbedContent):
-    """One project: its manager's pane first, then the board, tracing and settings."""
+    """One project: its manager's pane first, then the board, AISquare and settings."""
 
     TAB_IDS: ClassVar[tuple[str, ...]] = (
         "tab-manager",
@@ -316,7 +317,7 @@ class ProjectView(TabbedContent):
                 id="tab-board",
             ),
             TabPane(
-                "Explainability",
+                "AISquare",
                 # ``project``: the key this tab shows and attaches is the one
                 # THIS page's launches use (#141) — the project they join from
                 # its root — not the ``project switch`` pin's.

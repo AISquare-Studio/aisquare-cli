@@ -78,6 +78,7 @@ import shutil
 import socket as socket_module
 import subprocess
 import sys
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -1537,11 +1538,19 @@ class TmuxServer:
         refused: no key name has one, and tmux would split or mangle it. This
         is the floor under every caller; the remote's allowlist
         (``remote_server.check_remote_key_names``) is the boundary itself.
+
+        A control character is any of Unicode's (``Cc``): C0, DEL and the C1 controls,
+        ``"\\x9b"`` (CSI) among them. ``ord(char) < 0x20`` let DEL and C1 through (review of
+        #259, round 2). So is a lone surrogate (``Cs``), which the argv's encoding turns
+        into the raw byte it escapes, ``"\\udc9b"`` into that CSI. A printable character
+        of any script stays a key: an alt chord sends ``M-é``.
         """
         if not keys:
             return
         for key in keys:
-            if not key or any(char.isspace() or ord(char) < 0x20 for char in key):
+            if not key or any(
+                char.isspace() or unicodedata.category(char) in ("Cc", "Cs") for char in key
+            ):
                 raise TmuxError(f"{key!r} is not a tmux key name")
         self.run("send-keys", "-t", pane_id, "--", *(_data_arg(key) for key in keys))
 

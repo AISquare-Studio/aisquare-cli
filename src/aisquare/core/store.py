@@ -480,12 +480,24 @@ def _converge_v11_fork(connection: sqlite3.Connection) -> None:
     )
 
 
+def _index_task_numbers(connection: sqlite3.Connection) -> None:
+    """v29 → v30: at most one task per number on a board (partial: NULL is no number)."""
+    query = "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'team_task'"
+    if connection.execute(query).fetchone() is None:
+        return
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS team_task_number ON team_task (project_id, number) "
+        "WHERE number IS NOT NULL"
+    )
+
+
 # Python that must run before a migration's statements, inside its transaction,
 # keyed by the version being upgraded FROM. Kept apart from _MIGRATIONS so the
 # scripts stay plain SQL that executescript and _statements build identically.
 _PREPARE: dict[int, Callable[[sqlite3.Connection], None]] = {
     11: _retire_v1_metric_table,
     12: _converge_v11_fork,
+    29: _index_task_numbers,
 }
 
 
@@ -573,6 +585,25 @@ def _bind_keys_to_their_destinations(connection: sqlite3.Connection) -> None:
     )
 
 
+def _number_existing_tasks(connection: sqlite3.Connection) -> None:
+    """v28 → v29's backfill: every task already on a board gets its number, 1, 2, … per
+    project in the order the tasks were added (``created_at``, the id breaking a tie).
+
+    Runs right after ``team_task.number`` is added, in the same transaction, and only
+    then (:data:`_BACKFILLS`), so a store that has its numbers is never renumbered: a
+    number once said on a board keeps meaning that task.
+    """
+    connection.execute(
+        "UPDATE team_task SET number = ("
+        "  SELECT ranked.n FROM ("
+        "    SELECT id, ROW_NUMBER() OVER ("
+        "      PARTITION BY project_id ORDER BY created_at, id"
+        "    ) AS n FROM team_task"
+        "  ) AS ranked WHERE ranked.id = team_task.id"
+        ") WHERE number IS NULL"
+    )
+
+
 #: Backfills that belong to a column, keyed ``(table, column)``. Each runs in the
 #: transaction that adds its column, right after the ALTER, and only when the
 #: column was actually added: by its step on the ladder or by
@@ -584,6 +615,7 @@ def _bind_keys_to_their_destinations(connection: sqlite3.Connection) -> None:
 _BACKFILLS: dict[tuple[str, str], Callable[[sqlite3.Connection], None]] = {
     ("project", "onboarded_at"): _adopt_onboarded_projects,
     ("project_explainability", "api_url"): _bind_keys_to_their_destinations,
+    ("team_task", "number"): _number_existing_tasks,
 }
 
 # v14: ``project forget`` — a tombstone on the registration, in the same spirit as
@@ -846,6 +878,20 @@ _SCHEMA_V27 = ""
 # step, so the script is empty: it is in :data:`_PRODUCTS`; a row from before it keeps
 # NULL, which the cache serves to no token, and which the trends read as before.
 _SCHEMA_V28 = ""
+# v29: a task's number on its board (``#12``) — what a person reads and types instead of
+# ``tsk_01m4wd5p…``. Per project, 1, 2, … in the order tasks are added: given at insert
+# as the project's highest plus one, in the INSERT itself (one statement under the write
+# lock), and never reused, since tasks leave a board only with the whole project. The
+# column is the whole step, so the script is empty: it is in :data:`_PRODUCTS`, and its
+# backfill (:func:`_number_existing_tasks`) numbers the tasks a store already holds.
+_SCHEMA_V29 = ""
+# v30: one number per board — a unique index (:func:`_index_task_numbers`). A step of its
+# own because a step's script runs BEFORE its columns are added (:func:`_run_step`): in
+# v29 it would name a column that is not there yet. Python, not a script, because the
+# presence pass applies a step to a store whatever it lacks, and a store without
+# ``team_task`` at all (doctor's damaged-store case) must still open and be described,
+# as :func:`_add_column_if_absent` already lets it for a column.
+_SCHEMA_V30 = ""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -876,6 +922,8 @@ _MIGRATIONS = (
     _SCHEMA_V26,
     _SCHEMA_V27,
     _SCHEMA_V28,
+    _SCHEMA_V29,
+    _SCHEMA_V30,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -926,6 +974,8 @@ _PRODUCTS: dict[int, _Products] = {
     25: _Products(columns=(("fleet_agent", "server_started_at", "TEXT"),)),
     26: _Products(columns=(("project", "nickname", "TEXT"),)),
     27: _Products(columns=(("claude_usage", "token_fingerprint", "TEXT"),)),
+    28: _Products(columns=(("team_task", "number", "INTEGER"),)),
+    29: _Products(("team_task_number",)),
 }
 
 _PROJECT_COLUMNS = (
@@ -999,7 +1049,7 @@ _USAGE_COLUMNS = (
 #: How long usage readings are kept — long enough for a weekly window's history.
 _USAGE_RETENTION = timedelta(days=7)
 _TASK_COLUMNS = (
-    "id, project_id, key, title, detail, status, role, needs, "
+    "id, project_id, number, key, title, detail, status, role, needs, "
     "claimed_by, claim_expires_at, created_by, created_at, updated_at"
 )
 _EVENT_COLUMNS = "seq, id, project_id, session_id, kind, text, task_id, to_role, created_at"
@@ -1084,6 +1134,8 @@ class ContextStore(Protocol):
     def get_task(
         self, ref: str, *, project_ids: Collection[str] | None = None
     ) -> TeamTask | None: ...
+    def task_by_number(self, project_id: str, number: int) -> TeamTask | None: ...
+    def task_numbers(self, project_id: str) -> dict[str, int]: ...
     def team_tasks(
         self, project_id: str, *, status: TaskStatus | None = None
     ) -> list[TeamTask]: ...
@@ -1451,6 +1503,7 @@ def _row_to_task(row: sqlite3.Row) -> TeamTask:
     return TeamTask(
         id=row["id"],
         project_id=row["project_id"],
+        number=row["number"],
         key=row["key"],
         title=row["title"],
         detail=row["detail"],
@@ -2368,13 +2421,20 @@ class SqliteStore:
 
         The second element reports whether a new task was created — the
         idempotency contract for ``task add``.
+
+        The task's number is the board's highest plus one, read in the INSERT itself,
+        so it is taken under the write lock with the row and two adds cannot share one.
+        A duplicate key inserts nothing and so takes no number. ``task.number`` is
+        ignored: the store gives it.
         """
         cursor = self._conn.execute(
             f"INSERT INTO team_task ({_TASK_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, (SELECT COALESCE(MAX(number), 0) + 1 FROM team_task "
+            "WHERE project_id = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (project_id, key) DO NOTHING",
             (
                 task.id,
+                task.project_id,
                 task.project_id,
                 task.key,
                 task.title,
@@ -2426,6 +2486,22 @@ class SqliteStore:
         if len(matches) > 1:
             raise AmbiguousIdError(ref)
         return _row_to_task(matches[0]) if matches else None
+
+    def task_by_number(self, project_id: str, number: int) -> TeamTask | None:
+        """The task numbered ``number`` on ``project_id``'s board (``#12``), if there is one."""
+        row = self._conn.execute(
+            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE project_id = ? AND number = ?",
+            (project_id, number),
+        ).fetchone()
+        return _row_to_task(row) if row is not None else None
+
+    def task_numbers(self, project_id: str) -> dict[str, int]:
+        """Every numbered task of the board, id → number: for lines that name a task by id."""
+        rows = self._conn.execute(
+            "SELECT id, number FROM team_task WHERE project_id = ? AND number IS NOT NULL",
+            (project_id,),
+        ).fetchall()
+        return {row["id"]: row["number"] for row in rows}
 
     def team_tasks(self, project_id: str, *, status: TaskStatus | None = None) -> list[TeamTask]:
         if status is None:

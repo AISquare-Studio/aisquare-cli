@@ -431,8 +431,9 @@ def test_migrations_reach_the_current_schema_version() -> None:
     # old tombstones (#139, #140), v24 the destination a project's key was attached for (#142),
     # v25 where a fleet agent's server listened and in which boot (round 25 of #257),
     # v26 when that server started, the identity of the server its pane id names (follow-up),
-    # v27 a project's nickname, v28 which token took a usage reading (its fingerprint)
-    assert version == SCHEMA_VERSION == 28
+    # v27 a project's nickname, v28 which token took a usage reading (its fingerprint),
+    # v29 a task's number on its board, v30 its unique index
+    assert version == SCHEMA_VERSION == 30
 
 
 def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:

@@ -683,6 +683,10 @@ class TeamTask(BaseModel):
 
     id: str
     project_id: str
+    number: int | None = None
+    """The task's number on its board (``#12``): 1, 2, … in the order tasks were added to
+    the project, given by the store at insert and never reused. ``None`` only on a task
+    that has not been stored yet. An id for people to say, not an order of work."""
     key: str
     """Idempotency key: re-adding the same key returns the existing task."""
     title: str

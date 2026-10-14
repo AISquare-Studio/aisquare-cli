@@ -13,6 +13,7 @@ Click and where two at one spot become a double-click.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -58,6 +59,17 @@ no_real_tmux = _no_real_tmux
 script = _script
 
 
+@pytest.fixture
+def wide_click_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two clicks at one cell chain within Textual's half-second window, and each event here
+    is waited through the app before the next is sent: on a loaded machine the two halves
+    of the rename's double-click outlasted it and read as two single clicks (once in a
+    12-file UI run; every run with each mouse event held 300 ms). The window's length is not
+    what these test, so it is wide enough for a loaded runner, as in ``test_ui_shell.py``:
+    every two clicks at one cell chain, and the card's own rules alone decide a rename."""
+    monkeypatch.setattr(FleetApp, "CLICK_CHAIN_TIME_THRESHOLD", 5.0)
+
+
 def _stored(project_id: str) -> ProjectInfo | None:
     with store_session() as store:
         return store.get_project(project_id)
@@ -85,6 +97,33 @@ async def _double_click(pilot: Pilot[None], widget: ProjectTitle) -> None:
     """Two clicks at one spot, back to back, as the terminal reports them: Textual chains them."""
     for kind in (events.MouseDown, events.MouseUp, events.MouseDown, events.MouseUp):
         await _as_the_terminal_sends(pilot, kind, widget)
+    await settle(fleet_app(pilot))
+
+
+Gesture = Callable[[Pilot[None], ProjectTitle], Awaitable[None]]
+
+
+async def _shift_click(pilot: Pilot[None], title: ProjectTitle) -> None:
+    await _click(pilot, title, shift=True)
+
+
+async def _right_click_and_esc(pilot: Pilot[None], title: ProjectTitle) -> None:
+    app = fleet_app(pilot)
+    for kind in (events.MouseDown, events.MouseUp):
+        await _as_the_terminal_sends(pilot, kind, title, button=3)
+    await settle(app)
+    assert isinstance(app.screen, ProjectMenu)
+    await pilot.press("escape")
+    await settle(app)
+
+
+async def _drag_away_and_back(pilot: Pilot[None], title: ProjectTitle) -> None:
+    """Press, move onto the next card and back with the button held, release where it began."""
+    beta = card_for(fleet_app(pilot), "prj_b").query_one(ProjectTitle)
+    await _as_the_terminal_sends(pilot, events.MouseDown, title)
+    await _as_the_terminal_sends(pilot, events.MouseMove, beta)
+    await _as_the_terminal_sends(pilot, events.MouseMove, title)
+    await _as_the_terminal_sends(pilot, events.MouseUp, title)
     await settle(fleet_app(pilot))
 
 
@@ -118,6 +157,7 @@ def test_the_card_shows_the_nickname_and_never_the_codename(tmp_path: Path, scri
     assert "amber-otter" not in named + chips and "ruby-fox" not in plain
 
 
+@pytest.mark.usefixtures("wide_click_chain")
 def test_a_double_click_renames_in_place_and_enter_saves_at_once(
     tmp_path: Path, script: Script
 ) -> None:
@@ -157,6 +197,65 @@ def test_a_double_click_renames_in_place_and_enter_saves_at_once(
     assert stored.codename == "amber-otter", "the codename is not touched"
     assert seen["undo"] == 0 and seen["order"], "a double-click is no drag: nothing moved"
     assert seen["view"] == "project-prj_a", "the first click of the two opened it"
+
+
+@pytest.mark.usefixtures("wide_click_chain")
+def test_a_hand_that_drifts_along_the_name_while_pressed_still_double_clicks(
+    tmp_path: Path, script: Script
+) -> None:
+    """A press on the name is a drag only once the pointer leaves its row
+    (``Sidebar.drag_over``): a hand that drifts a cell along the name with the button down
+    still clicks, and two such clicks released at one cell are the double-click."""
+    seed(tmp_path, ("prj_a", "alpha", None), ("prj_b", "beta", None))
+
+    async def go(pilot: Pilot[None]) -> tuple[str | None, bool]:
+        app = fleet_app(pilot)
+        title = card_for(app, "prj_a").query_one(ProjectTitle)
+        for pressed in ((1, 0), (3, 0)):
+            await _as_the_terminal_sends(pilot, events.MouseDown, title, pressed)
+            await _as_the_terminal_sends(pilot, events.MouseMove, title, (2, 0))
+            await _as_the_terminal_sends(pilot, events.MouseUp, title, (2, 0))
+        await settle(app)
+        field = _field(app, "prj_a")
+        return _view_id(app), field.display and app.focused is field
+
+    view, renaming = drive(go)
+    assert view == "project-prj_a", "the first click opened it"
+    assert renaming, "the second, released at the same cell, renames"
+
+
+@pytest.mark.usefixtures("wide_click_chain")
+@pytest.mark.parametrize(
+    "between",
+    [_shift_click, _right_click_and_esc, _drag_away_and_back],
+    ids=["shift+click", "right-click", "drag away and back"],
+)
+def test_only_a_click_after_a_plain_open_of_the_name_renames(
+    tmp_path: Path, script: Script, between: Gesture
+) -> None:
+    """Textual chains any two clicks at one cell, whatever the button and whether the press
+    was dragged: a mark, the menu or a drag dropped where it began, then a click, is a
+    double-click to it. Only the click after a plain click that opened the project renames
+    (``ProjectTitle._opened``). The window is wide, so the chain never breaks here: the
+    click after that one renames, and it is the rule that held the one before."""
+    seed(tmp_path, ("prj_a", "alpha", None), ("prj_b", "beta", None))
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, str | None, bool]:
+        app = fleet_app(pilot)
+        title = card_for(app, "prj_a").query_one(ProjectTitle)
+        await _click(pilot, title)  # a plain open
+        await between(pilot, title)  # chained to it, and no plain open
+        await _click(pilot, title)  # chained again: an open, not a rename
+        early = bool(_field(app, "prj_a").display)
+        view = _view_id(app)
+        await _click(pilot, title)  # after a plain open: the rename
+        field = _field(app, "prj_a")
+        return early, view, field.display and app.focused is field
+
+    early, view, renaming = drive(go)
+    assert not early, "the click after the gesture opened the project and renamed nothing"
+    assert view == "project-prj_a"
+    assert renaming, "the click after that plain open renames: the chain held throughout"
 
 
 def test_leaving_the_field_saves_and_esc_cancels(tmp_path: Path, script: Script) -> None:

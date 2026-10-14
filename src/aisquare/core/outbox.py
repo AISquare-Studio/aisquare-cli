@@ -263,18 +263,49 @@ def claim(path: Path) -> Path | None:
     move a given file, so two sweepers racing the same queue cannot both ship
     the same record.
     """
-    claimed = path.with_name(path.name + _CLAIMED_SUFFIX)
-    try:
+    return claim_all([path])[0]
+
+
+def claim_all(paths: list[Path]) -> list[Path | None]:
+    """:func:`claim` each of ``paths``, in order, under one receipts transaction.
+
+    A native record's receipt commits before it ships (:func:`_receipts`). Claimed
+    one at a time, a drain of N paid N connections, schema checks, retention
+    deletes and fsynced commits, each waiting on the receiver's lock.
+    """
+    claimed: list[Path | None] = [None] * len(paths)
+    native: list[int] = []
+    for index, path in enumerate(paths):
         if path.name.startswith("native-"):
-            with _receipts() as connection:
+            native.append(index)
+        else:
+            claimed[index] = _take(path)
+    if not native:
+        return claimed
+    try:
+        with _receipts() as connection:
+            for index in native:
+                path = paths[index]
                 connection.execute(
                     "INSERT OR IGNORE INTO receipt (key, created_at) VALUES (?, ?)",
                     (path.stem.removeprefix("native-"), int(time.time())),
                 )
-                path.rename(claimed)
-        else:
-            path.rename(claimed)
+                claimed[index] = _take(path)
     except (OSError, sqlite3.Error):
+        # A receipt that did not commit may not ship: its record goes back to the queue.
+        for index in native:
+            handle = claimed[index]
+            if handle is not None:
+                release(handle)
+            claimed[index] = None
+    return claimed
+
+
+def _take(path: Path) -> Path | None:
+    claimed = path.with_name(path.name + _CLAIMED_SUFFIX)
+    try:
+        path.rename(claimed)
+    except OSError:
         return None
     return claimed
 

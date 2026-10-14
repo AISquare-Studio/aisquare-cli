@@ -267,6 +267,46 @@ def test_a_failed_drain_leaves_no_record_claimed(monkeypatch: pytest.MonkeyPatch
     assert list(outbox.queue_dir().glob("*.claimed")) == []
 
 
+def _spool_native(count: int, session_id: str) -> None:
+    with outbox.retry_batch() as batch:
+        for index in range(count):
+            record = {"v": insights.RECORD_VERSION, "kind": "native_event", "text": ""}
+            assert batch.enqueue({**record, "session_id": session_id}, f"{session_id}:{index}")
+
+
+def test_a_drain_claims_its_native_records_in_one_receipts_transaction(
+    sdk: FakeSDK, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One connection, BEGIN IMMEDIATE and fsynced commit per batch, not per record."""
+    _configure()
+    _spool_native(20, "codex-a")
+    _spool_native(20, "codex-b")
+    opened = 0
+    receipts = outbox._receipts
+
+    def counted() -> Any:
+        nonlocal opened
+        opened += 1
+        return receipts()
+
+    monkeypatch.setattr(outbox, "_receipts", counted)
+    assert service.ship_once().sent == 40
+    assert opened == 1 and outbox.pending() == []
+
+
+def test_a_drain_that_fails_returns_every_batch_claim_to_the_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first Run fails; the later session's records, claimed with it, go back too."""
+    _configure()
+    _spool_native(2, "codex-a")
+    _spool_native(2, "codex-b")
+    monkeypatch.setattr(service, "sdk_available", lambda: True)
+    monkeypatch.setattr(service, "_init_sdk", lambda settings, api_key: FakeSDK(fail_on_run=True))
+    assert service.ship_once().deferred == 2
+    assert list(outbox.queue_dir().glob("*.claimed")) == [] and len(outbox.pending()) == 4
+
+
 def test_an_sdk_that_will_not_start_defers_rather_than_loses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

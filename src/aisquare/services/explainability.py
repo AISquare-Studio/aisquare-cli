@@ -1685,14 +1685,36 @@ def _init_sdk(gateway_url: str, api_key: str) -> Any:
 
 
 def _drain(sdk: Any, settings: ExplainabilitySettings, batch: list[Path]) -> ShipReport:
+    groups = _group_by_session(batch)
+    # The whole batch is claimed in one receipts transaction; what this drain does not
+    # reach (a gateway failure ends it) goes back to the queue.
+    ordered = [path for paths_for_run in groups.values() for path in paths_for_run]
+    held = {
+        path: handle
+        for path, handle in zip(ordered, outbox.claim_all(ordered), strict=True)
+        if handle is not None
+    }
+    try:
+        return _ship(sdk, settings, groups, held)
+    finally:
+        for handle in held.values():
+            outbox.release(handle)
+
+
+def _ship(
+    sdk: Any,
+    settings: ExplainabilitySettings,
+    groups: dict[str, list[Path]],
+    held: dict[Path, Path],
+) -> ShipReport:
     sent = 0
     deferred = 0
     dead = 0
     runs: list[str] = []
-    for run_key, paths_for_run in _group_by_session(batch).items():
+    for run_key, paths_for_run in groups.items():
         claimed: list[tuple[Path, dict[str, object]]] = []
         for path in paths_for_run:
-            handle = outbox.claim(path)
+            handle = held.pop(path, None)
             if handle is None:  # another sweeper got there first
                 continue
             record = outbox.load(handle)

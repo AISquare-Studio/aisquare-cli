@@ -11,6 +11,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -21,6 +22,7 @@ from typing import Any
 import pytest
 
 from aisquare.core import agents, outbox, selfcli
+from aisquare.core.agent_adapters.types import store_dir, store_read_only
 from aisquare.core.config import load_config, save_config
 from aisquare.core.entries import new_entry
 from aisquare.core.store import store_session
@@ -595,3 +597,250 @@ def test_real_codex_panes_take_a_told_line_before_any_hook_and_the_managers_nudg
                 srv.run("kill-server")
             server.shutdown()
             thread.join(timeout=2)
+
+
+class _Scripted(BaseHTTPRequestHandler):
+    """A loopback Responses provider driven by the last user line: ``RUN <cmd>`` calls
+    ``exec_command`` in the sandbox, ``ESC <cmd>`` asks for it outside (``sandbox_permissions
+    = require_escalated``), anything else is answered. Codex's automatic reviewer (model
+    ``codex-auto-review``) is told to allow. Each request lands in ``server.requests``."""
+
+    def do_POST(self) -> None:
+        raw = self.rfile.read(int(self.headers["Content-Length"]))
+        if not self.path.endswith("/responses"):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"{}")
+            return
+        request = json.loads(raw)
+        requests: list[dict[str, Any]] = self.server.requests  # type: ignore[attr-defined]
+        requests.append(request)
+        if request.get("model") == "codex-auto-review":
+            verdict = {"outcome": "allow", "risk_level": "low", "rationale": "fixture"}
+            _answer(self, _message(json.dumps(verdict)))
+            return
+        items, said = request.get("input", []), _user_texts(request)
+        verb, _, command = (said[-1] if said else "").partition(" ")
+        if verb not in {"RUN", "ESC"} or items[-1].get("type") == "function_call_output":
+            _answer(self, _message("local fixture complete"))
+            return
+        arguments = {"cmd": command}
+        if verb == "ESC":
+            arguments["sandbox_permissions"] = "require_escalated"
+            arguments["justification"] = "reach the aisquare board"
+        call = f"call_{len(requests)}"
+        _answer(
+            self,
+            {
+                "id": call,
+                "type": "function_call",
+                "call_id": call,
+                "name": "exec_command",
+                "namespace": "functions",
+                "arguments": json.dumps(arguments),
+            },
+        )
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+
+@pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
+def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_human(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lane A of the t8 smoke, on the real Codex with only loopback.
+
+    The aisquare home is OUTSIDE /tmp, which every Codex sandbox may write (the suite's
+    own home is under it, and so hid the defect), and short: Codex binds a socket in its
+    home. Without the store profile a sandboxed ``aisquare note`` cannot open the store;
+    a fleet coder (``--approve-for-me``) posts a note and claims a task on the first,
+    sandboxed attempt, cannot write the account homes or the credentials beside the
+    store, and an escalation its automatic reviewer allows rings no bell. Restarted onto
+    ``workspace:ask`` the human answers: Codex's own approval view in the pane, read as
+    attention for as long as it redraws unanswered, working again after ``y``. A
+    reviewer's read-only seat posts its verdict and cannot write the worktree.
+    """
+    binary = shutil.which("codex")
+    assert binary, "AISQUARE_TEST_CODEX requires an installed Codex"
+    outside = Path(tempfile.mkdtemp(prefix="asq-", dir="/var/tmp"))
+    store, native_home = outside / "h", outside / "c"
+    native_home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    cli = shlex.join(selfcli.argv_for([]))
+    with ThreadingHTTPServer(("127.0.0.1", 0), _Scripted) as server:
+        server.requests = []  # type: ignore[attr-defined]
+        requests: list[dict[str, Any]] = server.requests  # type: ignore[attr-defined]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        (native_home / "config.toml").write_text(
+            'model = "local-fixture"\nmodel_provider = "local"\n'
+            '[model_providers.local]\nname = "Local fixture"\nwire_api = "responses"\n'
+            f'base_url = "http://127.0.0.1:{server.server_port}/v1"\n'
+            "requires_openai_auth = false\n"
+            f'[projects.{json.dumps(str(workspace))}]\ntrust_level = "trusted"\n',
+            encoding="utf-8",
+        )
+        for key in tuple(os.environ):
+            if key.startswith(("OPENAI_", "ANTHROPIC_", "CODEX_")):
+                monkeypatch.delenv(key)
+        monkeypatch.delenv("TMPDIR", raising=False)
+        monkeypatch.setenv("AISQUARE_HOME", str(store))
+        monkeypatch.setenv("CODEX_HOME", str(native_home))
+        monkeypatch.setattr(agents, "_aisquare_command", lambda: shlex.join(selfcli.argv_for([])))
+        agents.install_hooks("codex", native_home)
+        config = load_config()
+        config.fleet.tmux_socket = f"asq-codex-sandbox-{os.getpid()}"
+        save_config(config)
+        project = team.activate(workspace)
+        for kept in store_read_only(store_dir()):
+            kept.parent.mkdir(parents=True, exist_ok=True)
+        (store / "codex-accounts").mkdir(exist_ok=True)
+
+        def outputs() -> list[str]:
+            """Each command's output, oldest first: every request replays the history."""
+            found: dict[str, str] = {}
+            for request in list(requests):
+                for item in request.get("input", []):
+                    if item.get("type") == "function_call_output":
+                        found.setdefault(str(item.get("call_id")), str(item.get("output")))
+            return list(found.values())
+
+        def reviews() -> int:
+            return sum(1 for request in requests if request.get("model") == "codex-auto-review")
+
+        # The defect, measured first: Codex's own workspace sandbox cannot open the store.
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("OPENAI_", "CODEX_"))}
+        env["CODEX_HOME"] = str(native_home)
+        plain = subprocess.run(
+            [
+                binary,
+                "--dangerously-bypass-hook-trust",
+                "exec",
+                "--skip-git-repo-check",
+                "--approve-for-me",
+                f"RUN {cli} board",
+            ],
+            cwd=workspace,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            stdin=subprocess.DEVNULL,
+        )
+        assert plain.returncode == 0, plain.stderr
+        assert "cannot be opened" in outputs()[-1], outputs()[-1:]
+        srv = fleet.server(config.fleet)
+        try:
+
+            def until(check: Any, seconds: float, what: str, pane: str) -> None:
+                deadline = time.monotonic() + seconds
+                while not check():
+                    if time.monotonic() >= deadline:
+                        screen = srv.run("capture-pane", "-p", "-t", pane)
+                        raise AssertionError(f"{what}:\n{screen}\n{outputs()[-2:]}")
+                    time.sleep(0.2)
+
+            def answered(before: int) -> bool:
+                return len(outputs()) > before
+
+            def state(agent: Any) -> str:
+                return fleet.status_of(agent).state
+
+            seen = len(outputs())
+            coder = fleet.spawn(
+                project,
+                "coder",
+                agent="codex",
+                worktree=False,
+                prompt=f"RUN {cli} note 'lane-a sandboxed note'",
+                agent_args=["--dangerously-bypass-hook-trust", "--no-alt-screen"],
+            ).agent
+            pane, label = coder.pane_id, coder.label
+            until(lambda: answered(seen), 40, "the sandboxed note ran", pane)
+            assert "shared (note)" in outputs()[-1], outputs()[-1]
+            until(lambda: state(coder) == "waiting", 20, "waiting", pane)
+            row = fleet.status_of(coder).session
+            assert row is not None
+            task, _ = team.add_task("lane-a sandboxed claim", cwd=workspace)
+            seen = len(outputs())
+            claim = f"RUN {cli} task claim {task.id} --as {row.id[:8]}"
+            assert fleet.tell(project, label, claim).delivered
+            until(lambda: answered(seen), 30, "the sandboxed claim ran", pane)
+            assert "claimed" in outputs()[-1], outputs()[-1]
+            # What runs outside the sandbox stays out of its reach.
+            until(lambda: state(coder) == "waiting", 20, "waiting", pane)
+            seen = len(outputs())
+            probe = (
+                f"RUN touch {store / 'credentials'}; touch {store / 'codex-accounts' / 'x'};"
+                f" touch {store / 'config.toml'}; echo probed"
+            )
+            assert fleet.tell(project, label, probe).delivered
+            until(lambda: answered(seen), 30, "the probe ran", pane)
+            assert outputs()[-1].count("Read-only file system") == 3, outputs()[-1]
+            # An escalation Codex's reviewer answers: reviewed, and no bell.
+            until(lambda: state(coder) == "waiting", 20, "waiting", pane)
+            seen, reviewed = len(outputs()), reviews()
+            assert fleet.tell(project, label, f"ESC {cli} board").delivered
+            until(lambda: answered(seen), 40, "the reviewed escalation ran", pane)
+            assert reviews() > reviewed and "<aisquare-team>" in outputs()[-1]
+            until(lambda: state(coder) == "waiting", 20, "waiting", pane)
+            with store_session() as handle:
+                bells = [
+                    event.text
+                    for event in handle.recent_events(project.id, limit=80)
+                    if event.kind == "attention"
+                ]
+            assert bells == []
+
+            # Onto workspace:ask: the resumed thread is the human's to approve.
+            restarted = fleet.restart(project, label, permission_mode="workspace:ask")
+            assert restarted.resumed, restarted.notes
+            coder, pane = restarted.started, restarted.started.pane_id
+            until(lambda: state(coder) == "waiting", 40, "waiting after the restart", pane)
+            seen, reviewed = len(outputs()), reviews()
+            assert fleet.tell(project, label, f"ESC {cli} note 'asked first'").delivered
+
+            def asking() -> bool:
+                return "Would you like to run" in srv.run("capture-pane", "-p", "-t", pane)
+
+            until(asking, 30, "Codex's approval view", pane)
+            first = fleet._activity_times(srv).get(pane)
+            for _ in range(3):
+                time.sleep(1.2)
+                assert state(coder) == "attention"
+            assert fleet._activity_times(srv).get(pane) != first, "the view redraws"
+            assert reviews() == reviewed and not answered(seen)
+            srv.send_keys(pane, "y")
+            until(lambda: answered(seen), 30, "the approved note ran", pane)
+            assert "shared (note)" in outputs()[-1]
+            until(lambda: state(coder) in {"working", "waiting"}, 20, "the bell cleared", pane)
+            with store_session() as handle:
+                bells = [
+                    event.text
+                    for event in handle.recent_events(project.id, limit=80)
+                    if event.kind == "attention"
+                ]
+            assert bells == ["Codex needs your approval"]
+
+            # A reviewer's read-only seat posts its verdict and cannot edit the worktree.
+            seen = len(outputs())
+            reviewer = fleet.spawn(
+                project,
+                "reviewer",
+                agent="codex",
+                worktree=False,
+                prompt=f"RUN {cli} note 'reviewer verdict'; touch {workspace / 'edited'}",
+                agent_args=["--dangerously-bypass-hook-trust", "--no-alt-screen"],
+            ).agent
+            until(lambda: answered(seen), 40, "the reviewer's note ran", reviewer.pane_id)
+            assert "shared (note)" in outputs()[-1], outputs()[-1]
+            assert "Read-only file system" in outputs()[-1]
+            assert not (workspace / "edited").exists()
+        finally:
+            if srv.has_session(fleet.session_name(fleet.ensure_codename(project).codename or "")):
+                srv.run("kill-server")
+            server.shutdown()
+            thread.join(timeout=2)
+            shutil.rmtree(outside, ignore_errors=True)

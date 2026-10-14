@@ -1,12 +1,12 @@
 """The left pane: Fleet ▸ projects (alternating background) ▸ agents ▸ Accounts ▸ Doctor.
 
 docs/plans/fleet-tui.md §4.1. One ``ProjectCard`` per registered project, each
-with a disclosure, the basename, the codename as a dim badge, chips (agents
-alive · 🔔 count) and — when two projects share a basename — the path as a dim
-subtitle; under it one ``AgentRow`` per fleet agent (role icon, label, state
-chip, exit status) and a spawn-agent row; an Accounts section (the AISquare
-sign-in and the Claude Code accounts, docs/plans/claude-accounts.md) and a
-Doctor section at the bottom.
+with a disclosure, its name (the nickname, else the basename — renamed in place),
+chips (agents alive · 🔔 count), a ⋯ menu, and — when two projects share a name —
+the path as a dim subtitle; under it one ``AgentRow`` per fleet agent (role icon,
+label, state chip, exit status) and a spawn-agent row; an Accounts section (the
+AISquare sign-in and the Claude Code accounts, docs/plans/claude-accounts.md) and
+a Doctor section at the bottom.
 
 Two rules shape the code more than the layout does:
 
@@ -17,9 +17,9 @@ Two rules shape the code more than the layout does:
   tick, and nothing flickers. Only a project or agent that appeared or vanished
   mounts or unmounts a widget.
 - **Rows post messages; the app decides.** ``AddProject``, ``ProjectSelected``,
-  ``AgentSelected``, ``SpawnAgent``, ``AccountsSelected`` and ``DoctorSelected``
-  are the whole contract between this pane and the shell. Nothing here opens a
-  view.
+  ``AgentSelected``, ``SpawnAgent``, ``AccountsSelected``, ``DoctorSelected``,
+  ``RenameProject`` and ``OpenProjectMenu`` are the whole contract between this
+  pane and the shell. Nothing here opens a view or writes the store.
 
 Every visible string is a ``rich.text.Text`` built with ``append`` — a project
 called ``[archive]`` must reach the screen as ``[archive]`` (CONTRIBUTING: no
@@ -34,14 +34,15 @@ from pathlib import Path
 from typing import ClassVar
 
 from rich.text import Text
-from textual import events
+from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
+from textual.geometry import Region
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import Static
+from textual.widgets import Input, Static
 
 from aisquare.cli.ui.groups import (
     DragState,
@@ -54,7 +55,7 @@ from aisquare.cli.ui.groups import (
     UndoLayout,
 )
 from aisquare.models import FleetAgentStatus, ProjectGroup, ProjectInfo
-from aisquare.services.project import display_name
+from aisquare.services.project import NICKNAME_MAX, display_name
 from aisquare.services.project_groups import Arrangement, GroupEntry, arrange
 
 ROLE_ICON: dict[str, str] = {
@@ -121,6 +122,32 @@ class AccountsSelected(Message):
     """The Accounts section: the AISquare sign-in and the Claude Code accounts."""
 
 
+class RenameProject(Message):
+    """A card's name field was saved: call ``project_id`` ``typed`` (blank: its folder's name)."""
+
+    def __init__(self, project_id: str, typed: str) -> None:
+        self.project_id = project_id
+        self.typed = typed
+        super().__init__()
+
+
+class ProjectRenamed(Message):
+    """A project's nickname was written — by a card, its menu or a Settings tab: repaint."""
+
+    def __init__(self, project: ProjectInfo) -> None:
+        self.project = project
+        super().__init__()
+
+
+class OpenProjectMenu(Message):
+    """⋯ on a card, ``.`` or a right-click on its title: the card's menu, under ``anchor``."""
+
+    def __init__(self, project_id: str, anchor: Region) -> None:
+        self.project_id = project_id
+        self.anchor = anchor
+        super().__init__()
+
+
 RESIZE_STEP = 4
 """Columns one keyboard step moves the partition (#137)."""
 
@@ -178,12 +205,19 @@ def agent_row_text(status: FleetAgentStatus) -> Text:
     return text
 
 
-def project_title_text(project: ProjectInfo, statuses: list[FleetAgentStatus]) -> Text:
-    """``🗂 api  amber-otter   3 · 🔔1`` — name, codename badge, chips."""
-    text = Text(no_wrap=True, overflow="ellipsis")
-    text.append(f"🗂 {project_name(project)}")
-    if project.codename:
-        text.append(f"  {project.codename}", style="dim")
+def project_title_text(project: ProjectInfo) -> Text:
+    """``🗂 Auth rewrite`` — the name a person gave it (else the folder's), and nothing else.
+
+    The codename is not shown: it names the tmux session and the branches, and a
+    nickname says what the project is. The chips are their own widget
+    (:func:`project_chips_text`), so a long name is cut before them, not them.
+    """
+    return Text(f"🗂 {project_name(project)}", no_wrap=True, overflow="ellipsis")
+
+
+def project_chips_text(project: ProjectInfo, statuses: list[FleetAgentStatus]) -> Text:
+    """``  captured  3 · 🔔1`` — what follows the name: captured, agents alive, 🔔 count."""
+    text = Text(no_wrap=True)
     if project.onboarded_at is None:
         # Listed only while the shell shows captured directories (#139).
         text.append("  captured", style="dim italic")
@@ -433,21 +467,22 @@ class DragHandle(Activatable):
 
 
 class ProjectTitle(DragHandle):
-    """The card's header line: name, codename badge, chips. Click → Project view.
+    """The card's name. Click → Project view; double-click → rename it in place.
 
     Also the card's drag handle (#140): press and hold, move, drop on a group
     header or between cards. A shift+click marks the card for a multi-selection
-    instead of opening it.
+    instead of opening it, and a right-click opens the card's menu.
     """
 
     DEFAULT_CSS = """
     ProjectTitle { width: 1fr; }
     """
 
-    def __init__(self, project: ProjectInfo, statuses: list[FleetAgentStatus]) -> None:
-        super().__init__(project_title_text(project, statuses))
+    def __init__(self, project: ProjectInfo) -> None:
+        super().__init__(project_title_text(project))
         self.project_id = project.id
         self.selection_key = f"project:{project.id}"
+        self.tooltip = "double-click or F2 to rename · right-click or . for the menu"
 
     def message(self) -> Message:
         return ProjectSelected(self.project_id)
@@ -475,14 +510,107 @@ class ProjectTitle(DragHandle):
                 return node
         return self
 
+    _opened = False
+    """Whether the click before this one was a plain click that opened this title: only
+    then is a second one at the same place a double-click (a rename). Textual chains
+    any two clicks at one spot, a shift+click's mark and the click after it too."""
+
     def on_click(self, event: events.Click) -> None:
         sidebar = self._sidebar()
-        if event.shift and sidebar is not None:
-            # A mark, not an open: ``prevent_default`` keeps the handlers of the
-            # base classes (which open the row) from running after this one.
+        opened, self._opened = self._opened, False
+        if sidebar is None or self._dragged:
+            return  # a drag's release: ``DragHandle.on_click`` says it is no click
+        # Each a gesture of its own, not an open: ``prevent_default`` keeps the
+        # handlers of the base classes (which open the row) from running after this one.
+        if event.button == 3:
+            event.stop()
+            event.prevent_default()
+            sidebar.open_menu(self.project_id)
+        elif event.shift:
             event.stop()
             event.prevent_default()
             sidebar.toggle_mark(self.project_id)
+        elif event.button == 1 and event.chain >= 2 and opened:
+            # The first click of the two opened the project; the second renames it.
+            event.stop()
+            event.prevent_default()
+            sidebar.open_rename(self.project_id)
+        elif event.button == 1:
+            self._opened = True  # and ``Activatable.on_click`` opens it
+
+
+class NicknameInput(Input):
+    """The card's name as a field: Enter submits, Esc posts ``Cancelled``, and leaving it
+    posts ``Left`` — focus-out saves, as Enter does."""
+
+    BINDINGS: ClassVar = [Binding("escape", "cancel_rename", "cancel", show=False)]
+
+    class Cancelled(Message):
+        """Esc in the field: close it and write nothing."""
+
+    class Left(Message):
+        """The field lost the focus while open."""
+
+    def action_cancel_rename(self) -> None:
+        self.post_message(self.Cancelled())
+
+    def on_blur(self) -> None:
+        self.post_message(self.Left())
+
+    def _on_paste(self, event: events.Paste) -> None:
+        """A paste longer than the room left keeps what fits: ``Input``'s own refuses one
+        that would pass ``max_length`` whole, without a word, and a long name pasted in
+        left the field as it was."""
+        line = event.text.splitlines()[0] if event.text else ""
+        limit = self.max_length or 0
+        room = limit - len(self.value) + len(self.selected_text)
+        if not limit or len(line) <= room:
+            return  # ``Input._on_paste`` takes it as it is
+        event.prevent_default()
+        event.stop()
+        fitted = line[: max(0, room)]
+        if self.selection.is_empty:
+            self.insert_text_at_cursor(fitted)
+        else:
+            self.replace(fitted, *self.selection)
+
+
+class CardChips(Static):
+    """What follows the name on the card's header: captured, agents alive, the 🔔 count.
+
+    A widget of its own so the name is what a narrow card cuts, never the chips. A
+    click on it is a click on the name.
+    """
+
+    DEFAULT_CSS = """
+    CardChips { width: auto; height: 1; }
+    """
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        card = next((node for node in self.ancestors if isinstance(node, ProjectCard)), None)
+        if card is not None:
+            card.query_one(ProjectTitle).activate()
+
+
+class CardMenuButton(Static):
+    """⋯ — the card's menu: Rename, Pin / Unpin, Open settings, Remove from fleet…"""
+
+    DEFAULT_CSS = """
+    CardMenuButton { width: 2; height: 1; content-align: right middle; color: $text-muted; }
+    CardMenuButton:hover { color: $accent; text-style: bold; }
+    """
+
+    def __init__(self) -> None:
+        super().__init__(Text("⋯"), classes="card-menu")
+        self.tooltip = "rename, pin, settings, remove (. or right-click)"
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        card = next((node for node in self.ancestors if isinstance(node, ProjectCard)), None)
+        sidebar = next((node for node in self.ancestors if isinstance(node, Sidebar)), None)
+        if card is not None and sidebar is not None:
+            sidebar.open_menu(card.project.id)
 
 
 class AgentRow(Activatable):
@@ -595,6 +723,13 @@ class ProjectCard(Vertical):
     Everything the card shows is held on the instance and (re)painted from
     there, so ``show`` can be called before the card has composed (the data is
     picked up by ``compose``) and after (the children are updated in place).
+
+    The name is renamed in place: double-click it, press F2 on the card, or
+    choose Rename in its menu, and it becomes a field prefilled with the name,
+    all selected. Enter or leaving the field saves (``RenameProject``; blank is
+    the folder's name again), Esc closes it untouched, and a frame never touches
+    what is being typed. The card shows the new name at once; the shell writes
+    it and says so if the store refused, reopening the field with what was typed.
     """
 
     DEFAULT_CSS = """
@@ -606,6 +741,9 @@ class ProjectCard(Vertical):
     ProjectCard.-dragging { opacity: 60%; }
     ProjectCard.-drop-before { border-top: solid $accent; }
     ProjectCard #card-header { height: 1; }
+    ProjectCard NicknameInput { width: 1fr; height: 1; }
+    ProjectCard .card-menu { visibility: hidden; }
+    ProjectCard:hover .card-menu, ProjectCard.-active .card-menu { visibility: visible; }
     ProjectCard .card-subtitle {
         height: 1; padding-left: 3; color: $text-muted;
         text-wrap: nowrap; text-overflow: ellipsis;
@@ -631,11 +769,21 @@ class ProjectCard(Vertical):
         self.collapsed = False
         self.scope: str | None = None
         """The group this card is shown under, or ``None`` at the top level / under Pinned."""
+        self.prefill = ""
+        """What the name field said when it opened: leaving it so is no change."""
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="card-header"):
             yield Disclosure(self.collapsed)
-            yield ProjectTitle(self.project, self.statuses)
+            yield ProjectTitle(self.project)
+            field = NicknameInput(
+                max_length=NICKNAME_MAX, compact=True, id=f"nickname-{self.project.id}"
+            )
+            field.tooltip = "any text · Enter saves, empty is the folder's name, Esc cancels"
+            field.display = False
+            yield field
+            yield CardChips(project_chips_text(self.project, self.statuses))
+            yield CardMenuButton()
         yield Static(Text(self.subtitle or "", style="dim"), classes="card-subtitle")
         with Vertical(id="agents"):
             for status in self.statuses:
@@ -662,7 +810,8 @@ class ProjectCard(Vertical):
         if not self.is_mounted:
             return  # compose() will read the fields above
         try:
-            self.query_one(ProjectTitle).update(project_title_text(project, statuses))
+            self.query_one(ProjectTitle).update(project_title_text(project))
+            self.query_one(CardChips).update(project_chips_text(project, statuses))
             holder = self.query_one("#agents", Vertical)
         except NoMatches:  # composing right now — compose reads the fields
             return
@@ -683,6 +832,75 @@ class ProjectCard(Vertical):
         """Collapse or expand the agent rows; the header stays."""
         self.collapsed = not self.collapsed
         self._paint_decorations()
+
+    # --- the name, renamed in place ---------------------------------------------------
+
+    @property
+    def name_field(self) -> NicknameInput:
+        return self.query_one(NicknameInput)
+
+    @property
+    def renaming(self) -> bool:
+        """Whether the name's field is open on this card."""
+        return self.name_field.display
+
+    def open_rename(self, typed: str | None = None) -> None:
+        """Open the field over the name, prefilled with it (or ``typed``), all selected.
+
+        Already open, it only takes the focus back: what was typed is kept.
+        """
+        field = self.name_field
+        if not field.display:
+            self.prefill = project_name(self.project)
+            field.value = self.prefill if typed is None else typed
+            self.query_one(ProjectTitle).display = False
+            self.query_one(CardChips).display = False
+            field.display = True
+        field.focus()
+        field.select_all()
+
+    def close_rename(self, *, refocus: bool) -> None:
+        """Close the field and show the name; ``refocus`` hands the keys back to the sidebar
+        (Enter, Esc) — not when the field closed because a click took the focus elsewhere."""
+        field = self.name_field
+        if not field.display:
+            return
+        field.display = False
+        self.query_one(ProjectTitle).display = True
+        self.query_one(CardChips).display = True
+        sidebar = next((node for node in self.ancestors if isinstance(node, Sidebar)), None)
+        if refocus and sidebar is not None:
+            sidebar.focus()
+
+    def _commit(self, typed: str, *, refocus: bool) -> None:
+        """Save what the field says — or, when it is the name it opened with, just close it.
+
+        The card says the new name at once; the shell writes it (``RenameProject``).
+        """
+        self.close_rename(refocus=refocus)
+        if typed.strip() == self.prefill.strip():
+            return
+        shown = self.project.model_copy(update={"nickname": typed.strip() or None})
+        self.query_one(ProjectTitle).update(project_title_text(shown))
+        self.post_message(RenameProject(self.project.id, typed))
+
+    @on(Input.Submitted, "NicknameInput")
+    def _submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        self._commit(event.value, refocus=True)
+
+    @on(NicknameInput.Left)
+    def _left(self, event: NicknameInput.Left) -> None:
+        """Focus-out saves, as Enter does — while the field is still open, and not when the
+        terminal itself lost the focus (Textual blurs the focused widget then)."""
+        event.stop()
+        if self.renaming and self.app.app_focus:
+            self._commit(self.name_field.value, refocus=False)
+
+    @on(NicknameInput.Cancelled)
+    def _cancelled(self, event: NicknameInput.Cancelled) -> None:
+        event.stop()
+        self.close_rename(refocus=True)
 
     def _paint_decorations(self) -> None:
         try:
@@ -811,6 +1029,9 @@ class Sidebar(Vertical):
         Binding("space", "toggle_collapse", "fold", show=False),
         Binding("u", "undo_layout", "undo", show=False),
         Binding("escape", "clear_marks", "clear marks", show=False),
+        # The card under the cursor: its name in place, and its menu (⋯).
+        Binding("f2", "rename", "rename", show=False),
+        Binding("full_stop", "project_menu", "menu", show=False, key_display="."),
     ]
 
     can_focus = True
@@ -1056,6 +1277,40 @@ class Sidebar(Vertical):
     def action_undo_layout(self) -> None:
         self.post_message(UndoLayout())
 
+    # a card's name and its menu
+
+    def _card(self, project_id: str) -> ProjectCard | None:
+        return next(
+            (card for card in self.query(ProjectCard) if card.project.id == project_id), None
+        )
+
+    def open_rename(self, project_id: str, typed: str | None = None) -> None:
+        """Open ``project_id``'s name field (``typed`` in it); another card's closes unsaved."""
+        for other in self.query(ProjectCard):
+            if other.project.id != project_id and other.renaming:
+                other.close_rename(refocus=False)
+        card = self._card(project_id)
+        if card is not None and card.display:
+            card.open_rename(typed)
+
+    def open_menu(self, project_id: str) -> None:
+        """Ask the shell for ``project_id``'s menu, under its card."""
+        card = self._card(project_id)
+        if card is not None:
+            self.post_message(OpenProjectMenu(project_id, card.region))
+
+    def action_rename(self) -> None:
+        """F2: rename the card under the cursor (or the card of the row under it)."""
+        target = self._cursor_target()
+        if target is not None and target[0] == "project":
+            self.open_rename(target[1])
+
+    def action_project_menu(self) -> None:
+        """``.``: the menu of the card under the cursor, as its ⋯ opens it."""
+        target = self._cursor_target()
+        if target is not None and target[0] == "project":
+            self.open_menu(target[1])
+
     # drag and drop: press on a title or a group header, move past its row, release on a target
 
     def begin_drag(self, state: DragState, source: DragHandle) -> None:
@@ -1241,6 +1496,16 @@ class Sidebar(Vertical):
     def _apply_selection(self) -> None:
         for row in self.query(Activatable):
             row.set_class(row.selection_key == self.selected_key, "selected")
+        self._show_active_menus()
+
+    def _show_active_menus(self) -> None:
+        """A card's ⋯ shows on hover, and while its name is selected or under the cursor."""
+        for card in self.query(ProjectCard):
+            try:
+                title = card.query_one(ProjectTitle)
+            except NoMatches:  # not composed yet: the next frame paints it
+                continue
+            card.set_class(title.has_class("selected") or title.has_class("cursor"), "-active")
 
     # --- bell -----------------------------------------------------------------------
 
@@ -1305,6 +1570,7 @@ class Sidebar(Vertical):
         self._cursor_key = row.selection_key
         row.add_class("cursor")
         row.scroll_visible()
+        self._show_active_menus()
 
     @staticmethod
     def _nearest_on_screen(

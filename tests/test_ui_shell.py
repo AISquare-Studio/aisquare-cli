@@ -52,6 +52,7 @@ from aisquare.cli.ui.sidebar import (
     RESIZE_STEP,
     Activatable,
     AgentRow,
+    CardChips,
     Disclosure,
     DoctorSection,
     DoctorTitle,
@@ -391,9 +392,9 @@ def test_agent_rows_show_role_icon_state_chip_and_exit_status(
     async def go(pilot: Pilot[None]) -> tuple[list[str], str]:
         app = fleet_app(pilot)
         rows = [shown(row) for row in card_for(app, "prj_a").query(AgentRow)]
-        return rows, shown(card_for(app, "prj_a").query_one(ProjectTitle))
+        return rows, shown(card_for(app, "prj_a").query_one(CardChips))
 
-    rows, title = drive(go)
+    rows, chips = drive(go)
     assert [r.split()[1] for r in rows] == ["manager", "coder-auth", "tester-1", "scout-1"]
     manager, coder, tester, scout = rows
     assert manager.startswith("🧭") and manager.rstrip().endswith("⏸")
@@ -403,10 +404,14 @@ def test_agent_rows_show_role_icon_state_chip_and_exit_status(
     assert "(3)" not in coder and "💤" not in coder and "exited" not in coder  # only on that row
     assert "🔔" not in manager and "▶" not in manager
     # The card's chips: three alive (the exited one is not), one needing the user.
-    assert title.rstrip().endswith("3 · 🔔1")
+    assert chips.rstrip().endswith("3 · 🔔1")
 
 
-def test_codename_badge_and_duplicate_basename_subtitle(tmp_path: Path, script: Script) -> None:
+def test_the_card_names_the_project_not_its_codename_and_a_path_tells_twins_apart(
+    tmp_path: Path, script: Script
+) -> None:
+    """The codename names the tmux session and the branches; the card says the name a
+    person knows the project by (its nickname, else its folder), and nothing else."""
     seed(
         tmp_path,
         ("prj_w", "work/api", "amber-otter"),
@@ -427,9 +432,11 @@ def test_codename_badge_and_duplicate_basename_subtitle(tmp_path: Path, script: 
         return out
 
     cards = drive(go)
-    assert "amber-otter" in cards["prj_w"][0] and "ruby-fox" in cards["prj_o"][0]
-    assert "amber-otter" not in cards["prj_o"][0]  # each card its own badge
-    assert "-" not in cards["prj_u"][0].replace("🗂 unique", "")  # no badge without a codename
+    assert [cards[pid][0] for pid in ("prj_w", "prj_o", "prj_u")] == [
+        "🗂 api",
+        "🗂 api",
+        "🗂 unique",
+    ]
     # The two `api` projects are told apart by their path; the unique one is not decorated.
     assert cards["prj_w"][1] and cards["prj_w"][2].endswith("work/api")
     assert cards["prj_o"][1] and cards["prj_o"][2].endswith("oss/api")
@@ -463,7 +470,7 @@ def test_a_long_project_name_is_cut_with_an_ellipsis_not_wrapped_out_of_sight(
     )
     script["prj_l"] = [status("prj_l", "manager", "manager", "waiting")]
 
-    async def go(pilot: Pilot[None]) -> tuple[str, str, str, bool, str]:
+    async def go(pilot: Pilot[None]) -> tuple[str, str, str, bool, str, str]:
         app = fleet_app(pilot)
         title = card_for(app, "prj_l").query_one(ProjectTitle)
         await pilot.click(title)  # the selected, highlighted row the report was about
@@ -474,15 +481,17 @@ def test_a_long_project_name_is_cut_with_an_ellipsis_not_wrapped_out_of_sight(
             composited(card_for(app, "prj_s").query_one(ProjectTitle)),
             title.has_class("selected"),
             composited(row_for(app, "agt_l_manager")),
+            composited(card_for(app, "prj_l").query_one(CardChips)),
         )
 
-    held, long_row, short_row, selected, manager_row = drive(go)
+    held, long_row, short_row, selected, manager_row, chips = drive(go)
     assert selected
-    assert held.startswith("🗂 AISquare-Explainability-SDK  cosmic-narwhal")  # the data, intact
-    assert long_row.startswith("🗂 AISquare-Explainabilit")  # the NAME reaches the row
+    assert held == "🗂 AISquare-Explainability-SDK"  # the data, intact
+    assert long_row.startswith("🗂 AISquare-Explainab")  # the NAME reaches the row
     assert long_row.rstrip().endswith("…")  # and the cut is declared, not silent
+    assert chips.strip() == "1", "the name is what is cut, never the chips after it"
     # Controls: a name that fits is shown whole and uncut; the agent row still renders.
-    assert short_row.rstrip() == "🗂 api  amber-otter"
+    assert short_row.rstrip() == "🗂 api"
     assert manager_row.split()[:2] == ["🧭", "manager"]
 
 
@@ -3779,7 +3788,7 @@ def test_the_sidebar_hides_captured_directories_until_a_shows_them(
         return before, with_captured, title, after, shown(app.screen.query_one(Static))
 
     def shown_text(app: FleetApp, project_id: str) -> str:
-        return shown(card_for(app, project_id).query_one(ProjectTitle))
+        return shown(card_for(app, project_id).query_one(CardChips))
 
     before, with_captured, title, after, keys = drive(go)
     assert before == ["prj_a"], "a captured directory is not a card"

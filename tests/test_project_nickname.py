@@ -189,4 +189,4 @@ def test_fleet_titles_and_the_sidebar_show_the_nickname(
     fleet_cli._emit_agents(project, [])
     assert capsys.readouterr().out.splitlines()[0] == "Q3 [launch]", "text, not markup"
     assert sidebar.project_name(project) == "Q3 [launch]"
-    assert "🗂 Q3 [launch]" in sidebar.project_title_text(project, []).plain
+    assert "🗂 Q3 [launch]" in sidebar.project_title_text(project).plain

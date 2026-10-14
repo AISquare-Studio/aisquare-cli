@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import shlex
 import threading
 import time
 from collections import Counter
@@ -67,13 +68,18 @@ from aisquare.cli.ui.groups import (
     TogglePin,
     UndoLayout,
 )
+from aisquare.cli.ui.project_menu import PIN, REMOVE, RENAME, SETTINGS, ConfirmRemove, ProjectMenu
 from aisquare.cli.ui.remote_control import SWITCHES, RemoteController, ngrok_ends_with
 from aisquare.cli.ui.sidebar import (
     AccountsSelected,
     AddProject,
     AgentSelected,
     DoctorSelected,
+    OpenProjectMenu,
+    ProjectCard,
+    ProjectRenamed,
     ProjectSelected,
+    RenameProject,
     ResizeSidebar,
     Sidebar,
     SpawnAgent,
@@ -95,11 +101,13 @@ from aisquare.models import (
     CheckStatus,
     DoctorCheck,
     FleetAgentStatus,
+    ProjectForgetReport,
     ProjectInfo,
 )
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import diagnostics, project_groups
 from aisquare.services import fleet as fleet_service
+from aisquare.services import project as project_service
 
 DoctorRunner = Callable[[], list[DoctorCheck]]
 """What the Doctor section runs: ``diagnostics.doctor`` in production, a stub in tests."""
@@ -113,6 +121,8 @@ _DoctorReport = tuple[Path | None, list[DoctorCheck]]
 _DOCTOR_WORKER = "doctor"
 ACCOUNTS_WORKER = "shell-accounts"
 """The thread worker that reads the Accounts section's frame (``FleetApp.refresh_accounts``)."""
+PROJECT_REMOVE_WORKER = "project-remove"
+"""The thread worker a card's *Remove from fleet…* forgets its project on (``project forget``)."""
 _QUIT_POLL = 0.1
 """Seconds between the looks a hand-over takes at the reads it waits out (``_exit_when_read``)."""
 _HAND_OFF_PATIENCE = 10.0
@@ -229,6 +239,8 @@ class HelpScreen(ModalScreen[None]):
             ("m", "mark the card under the cursor, as shift+click does"),
             ("shift+g", "group the marked cards; Esc clears the marks"),
             ("drag title", "move a card or a group header to a new place"),
+            ("F2 dblclick", "rename the card in place: Enter or a click away saves, Esc cancels"),
+            (". ⋯ r-click", "the card's menu: rename, pin, settings, remove from the fleet"),
             (self.escape_key.upper(), "hand focus from an agent's pane back to the sidebar"),
             ("wheel", "scroll an agent pane; shift/alt+PgUp/PgDn too, shift+Home/End"),
             ("drag", "select text in a pane (double-click: a word) — copied on release"),
@@ -1022,6 +1034,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """
         if not self.is_running:
             return
+        if event.worker.name == PROJECT_REMOVE_WORKER:
+            self._project_removal(event)
+            return
         if event.worker.name == ACCOUNTS_WORKER:
             # Every read's answer, not only the newest read's: a worker is finished
             # before its StateChanged is handled, so a tick handled in between
@@ -1303,6 +1318,134 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return
         self.refresh_data()
         self.notify(f"undid: {done}", timeout=4, markup=False)
+
+    # --- a card's name and menu ------------------------------------------------------------
+
+    def on_rename_project(self, event: RenameProject) -> None:
+        """A card's name field was saved: write the nickname, as ``aisquare project rename``.
+
+        On this thread, as every sidebar gesture's write is (:meth:`_layout`): one row,
+        and the card already says the new name. A refusal says why and reopens the
+        field with what was typed, to correct.
+        """
+        project = self.snapshot.project(event.project_id) if self.snapshot else None
+        if project is None:
+            self.notify("that project is no longer listed", severity="warning", timeout=4)
+            return
+        try:
+            renamed = project_service.set_nickname(project, event.typed)
+        except KeyError:
+            self.notify("that project is no longer listed", severity="warning", timeout=4)
+            self.refresh_data()
+            return
+        except Exception as exc:  # too long, a control character, or the store said no
+            self.notify(f"not renamed: {exc}", severity="error", timeout=6, markup=False)
+            self.refresh_data()  # the card says the stored name again
+            self.sidebar.open_rename(project.id, event.typed)
+            return
+        self.post_message(ProjectRenamed(renamed))
+
+    def on_project_renamed(self, event: ProjectRenamed) -> None:
+        """A nickname was written — a card, its menu, a Settings tab: every name says it now."""
+        self.refresh_data()
+
+    def on_open_project_menu(self, event: OpenProjectMenu) -> None:
+        """⋯, ``.`` or a right-click on a card: its menu, then what was chosen in it."""
+        project = self.snapshot.project(event.project_id) if self.snapshot else None
+        if project is None:
+            self.notify("that project is no longer listed", severity="warning", timeout=4)
+            return
+        project_id = project.id
+
+        def confirmed(yes: bool | None) -> None:
+            if yes:
+                self._remove_project(project_id)
+
+        def chosen(choice: str | None) -> None:
+            if choice == RENAME:
+                # Once the menu has gone: closing it hands the focus back to the sidebar.
+                self.call_after_refresh(self.sidebar.open_rename, project_id)
+            elif choice == PIN:
+                self.on_toggle_pin(TogglePin("project", project_id))
+            elif choice == SETTINGS:
+                self.call_later(self._open_settings, project_id)
+            elif choice == REMOVE:
+                self.push_screen(ConfirmRemove(project), confirmed)
+
+        self.push_screen(ProjectMenu(project, event.anchor), chosen)
+
+    async def _open_settings(self, project_id: str) -> None:
+        """The menu's *Open settings*: the project's page, on its Settings tab."""
+        await self.on_project_selected(ProjectSelected(project_id))
+        try:
+            view = self.content.get_child_by_id(f"project-{project_id}")
+        except NoMatches:
+            return
+        if isinstance(view, ProjectView):
+            view.active = "tab-settings"
+
+    def _remove_project(self, project_id: str) -> None:
+        """*Remove from fleet…*, confirmed: ``aisquare project forget``, off the UI thread.
+
+        Refused (``ProjectBusyError``) while the project has live agents; the toast
+        names them and the way out.
+        """
+        project = self.snapshot.project(project_id) if self.snapshot else None
+        if project is None:
+            self.notify("that project is no longer listed", severity="warning", timeout=4)
+            return
+        target = project
+        self.run_worker(
+            lambda: project_service.forget_project(target),
+            name=PROJECT_REMOVE_WORKER,
+            group=PROJECT_REMOVE_WORKER,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _project_removal(self, event: Worker.StateChanged) -> None:
+        result = event.worker.result
+        if event.state is WorkerState.SUCCESS and isinstance(result, ProjectForgetReport):
+            removed = result.project
+            back = f"aisquare project onboard {shlex.quote(str(removed.root))}"
+            self.notify(
+                f"✓ {project_service.display_name(removed)} removed from the fleet — "
+                f"its folder and history are kept; {back} brings it back",
+                timeout=8,
+                markup=False,
+            )
+            self.call_later(self._forget_views, removed.id)
+        elif event.state is WorkerState.ERROR:
+            error = event.worker.error
+            said = (
+                str(error)
+                if isinstance(error, project_service.ProjectBusyError)
+                else (f"could not remove it: {type(error).__name__}: {error}")
+            )
+            self.notify(said, title="not removed", severity="error", timeout=12, markup=False)
+
+    async def _forget_views(self, project_id: str) -> None:
+        """A removed project leaves the screen: its card with the next frame, its page and
+        its agents' panes now. What was open on it moves to the next project in the list,
+        else the one before it, else Welcome."""
+        order = [card.project.id for card in self.sidebar.query(ProjectCard)]
+        self.refresh_data()
+        views = [
+            view
+            for view in self.content.children
+            if view.id == f"project-{project_id}"
+            or (isinstance(view, AgentView) and view.status.agent.project_id == project_id)
+        ]
+        if self.current_view() in views:
+            at = order.index(project_id) if project_id in order else len(order)
+            nearby = [*order[at + 1 :], *reversed(order[:at])]
+            listed = [pid for pid in nearby if self.snapshot and self.snapshot.project(pid)]
+            if listed:
+                await self.on_project_selected(ProjectSelected(listed[0]))
+            else:
+                await self.action_welcome()
+        for view in views:
+            await view.remove()
 
     def on_spawn_agent(self, event: SpawnAgent) -> None:
         # The Spawn dialog is Phase 7 (§9); until it lands the CLI is the way.
@@ -1593,6 +1736,7 @@ def _writing_workers() -> dict[str, str]:
         accounts.REMOVE_WORKER: "an account's removal",
         accounts.ARRANGE_WORKER: "an account change",
         accounts.RENAME_WORKER: "an account's rename",
+        PROJECT_REMOVE_WORKER: "a project's removal",
     }
 
 

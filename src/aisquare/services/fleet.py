@@ -1098,14 +1098,23 @@ def _on_another_server(
 ) -> bool:
     """Whether the server that answered at ``agent``'s socket, started at ``server_started``,
     is not the one its row was started on, and that one may still run: it recorded its
-    server's start, which is another, and it is from this boot or from none known. Such a
-    row is held as unasked, not read as lost: its server lost its socket file to this one
-    and runs on where no client reaches it, as far as anything here can tell (follow-up of
-    #257). A row from another boot cannot be running, and its pane is simply gone.
+    server's start, which is another, and it is from this boot. Such a row is held as
+    unasked, not read as lost: its server lost its socket file to this one and runs on
+    where no client reaches it, as far as anything here can tell (follow-up of #257). A
+    row from another boot cannot be running, and its pane is simply gone.
+
+    With no boot id to compare (the BSDs, a macOS whose ``sysctl`` failed), the row is
+    from another boot when it was created before this one started, as
+    :func:`~aisquare.core.tmux.server_may_run` judges it: counted from this boot instead,
+    every row was held after a reboot against the server the next spawn started, and
+    ``reap``, ``shutdown`` and ``uninstall`` could not end it (review of #259, round 1).
     """
     if agent.server_started_at is None or not _outlived(agent, server_started):
         return False
-    return agent.boot_id is None or this_boot is None or agent.boot_id == this_boot
+    if agent.boot_id is not None and this_boot is not None:
+        return agent.boot_id == this_boot
+    booted_at = tmux_core.boot_started()
+    return booted_at is None or agent.created_at >= booted_at
 
 
 def _observe(

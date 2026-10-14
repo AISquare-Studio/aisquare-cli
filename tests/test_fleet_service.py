@@ -2691,6 +2691,36 @@ def test_a_row_whose_socket_another_server_took_is_held_not_ended(
     assert newcomer.killed == [] and newcomer.typed == []
 
 
+def test_with_no_boot_id_a_row_from_before_the_boot_is_lost_not_held_by_the_next_server(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 1: on a host with no boot id (the BSDs, a macOS whose `sysctl`
+    failed) every row counted as from this boot, so after a reboot a row that recorded its
+    server's start was held against the server the next spawn started: `unknown (another
+    tmux server on its socket)` for good, which `reap` could not end, `stop` refused and
+    `shutdown` held until `--forget`. Created before this boot started, it is lost and
+    ended as before; one created since is still held, as its server may run."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: None)
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    coder = _coder(project)
+    assert coder.boot_id is None and coder.server_started_at == tmux.started
+    newcomer = FakeTmux()  # the server the first spawn after the reboot started
+    newcomer.started = tmux.started + timedelta(hours=2)
+    newcomer.spawn_window(f"asq-{_codename(project)}", name="m", cwd=project.root, command=["c"])
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: newcomer)
+
+    monkeypatch.setattr(tmux_core, "boot_started", lambda: coder.created_at - timedelta(hours=1))
+    [since] = fleet_service.list_agents(project)
+    assert (since.state, since.held) == ("unknown", True), "since the boot: its server may run"
+
+    booted = coder.created_at + timedelta(hours=1)  # the reboot came after the row
+    monkeypatch.setattr(tmux_core, "boot_started", lambda: booted)
+    [before] = fleet_service.list_agents(project)
+    assert (before.state, before.detail, before.held) == ("lost", "pane gone", False)
+    assert [row.id for row in fleet_service.reap(project).lost] == [coder.id]
+    assert newcomer.typed == [] and newcomer.killed == []
+
+
 def test_stop_leaves_the_row_live_when_a_denied_socket_cannot_confirm_the_pane_died(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

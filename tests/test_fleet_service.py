@@ -3530,6 +3530,11 @@ def test_a_listing_asks_for_the_boot_only_for_rows_that_may_be_held_and_once_per
     monkeypatch.setattr(fleet_service, "server", lambda config=None: newcomer)
     assert all(status.held for status in fleet_service.list_agents(project))
     assert asked == {"id": 1, "started": 1}, "once each for the read, not once per row"
+    # Review of #259, round 6, 9/10: one cache of the boot per read, the one the rule asks
+    # (`SocketReads`), so a sweep's listing and its rule share the answer.
+    asked.update(id=0, started=0)
+    fleet_service.reap(project, server_down=True)
+    assert asked["id"] == 1, asked
 
 
 def test_the_one_rule_asks_each_server_once_per_read_not_once_per_row(

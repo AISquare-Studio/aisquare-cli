@@ -4477,9 +4477,9 @@ def test_under_a_team_hub_a_projects_rows_are_derived_again_in_one_look_at_tmux(
     looks: list[list[str]] = []
     observe = fleet_service._observe
 
-    def looked(srv: Any, tmux_session: str | None, agents: Any) -> Any:
+    def looked(srv: Any, tmux_session: str | None, agents: Any, reads: Any = None) -> Any:
         looks.append(sorted(agent.label for agent in agents))
-        return observe(srv, tmux_session, agents)
+        return observe(srv, tmux_session, agents, reads)
 
     tmux = FakeTmux()
     monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)

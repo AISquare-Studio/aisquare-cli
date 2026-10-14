@@ -472,8 +472,8 @@ def socket_answer(path: Path | None) -> SocketAnswer | None:
 
 class SocketReads:
     """What :func:`server_may_run` asks of the machine for one read of the fleet (a plan, a
-    run, a sweep), each asked at most once: a socket's listener, and when the server that
-    answers there started, per socket; and when this boot started.
+    run, a sweep, a listing), each asked at most once: a socket's listener, and when the
+    server that answers there started, per socket; and this boot's identity and start.
 
     The answers belong to the server, not to the row, and every caller asks them row by row
     over rows that share a server. With ten live agents on one answering server, a plan ran
@@ -486,6 +486,7 @@ class SocketReads:
         self._listeners: dict[object, SocketAnswer | None] = {}
         self._starts: dict[object, datetime | None] = {}
         self._booted: tuple[datetime | None] | None = None
+        self._boot: tuple[str | None] | None = None
 
     @staticmethod
     def _key(srv: TmuxServer, recorded: Path | None) -> object:
@@ -520,6 +521,13 @@ class SocketReads:
         if self._booted is None:
             self._booted = (boot_started(),)
         return self._booted[0]
+
+    def boot_id(self) -> str | None:
+        """:func:`boot_id`, asked once: it keeps only an id it found (round 28 of #257), so
+        where ``sysctl`` fails each question is another ``sysctl`` run, with a 5 s timeout."""
+        if self._boot is None:
+            self._boot = (boot_id(),)
+        return self._boot[0]
 
 
 def server_may_run(

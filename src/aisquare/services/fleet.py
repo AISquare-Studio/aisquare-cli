@@ -1124,7 +1124,9 @@ def _outlived(agent: FleetAgent, server_started: datetime | None) -> bool:
 
 
 def _on_another_server(
-    agent: FleetAgent, server_started: datetime | None, boot: _Boot | None = None
+    agent: FleetAgent,
+    server_started: datetime | None,
+    reads: tmux_core.SocketReads | None = None,
 ) -> bool:
     """Whether the server that answered at ``agent``'s socket, started at ``server_started``,
     is not the one its row was started on, and that one may still run: it recorded its
@@ -1139,47 +1141,29 @@ def _on_another_server(
     every row was held after a reboot against the server the next spawn started, and
     ``reap``, ``shutdown`` and ``uninstall`` could not end it (review of #259, round 1).
 
-    The boot is asked only here, once a row has passed the test that makes it matter
-    (``boot``: :class:`_Boot`, once per read).
+    The boot is asked only here, once a row has passed the test that makes it matter, and
+    once per read of the fleet (``reads``, :class:`~aisquare.core.tmux.SocketReads`, which
+    :func:`~aisquare.core.tmux.server_may_run` asks it of too). :func:`_observe` asked it of
+    every read with live rows, asq's 2 s tick, needs-you's 3 s scan and every ``status_of``,
+    though only a row that may be held needs it, which is rare; and ``boot_started`` once
+    more per such row (review of #259, round 2). A cache of its own for it was a second
+    one of one machine fact (review of #259, round 6, 9/10).
     """
     if agent.server_started_at is None or not _outlived(agent, server_started):
         return False
-    boot = boot or _Boot()
-    this_boot = boot.id()
+    reads = reads or tmux_core.SocketReads()
+    this_boot = reads.boot_id()
     if agent.boot_id is not None and this_boot is not None:
         return agent.boot_id == this_boot
-    booted_at = boot.started()
+    booted_at = reads.boot_started()
     return booted_at is None or agent.created_at >= booted_at
 
 
-class _Boot:
-    """This boot's identity and start (``tmux_core.boot_id``, ``boot_started``), each asked
-    of the machine at most once, and only when asked for: one per read of the fleet.
-
-    ``boot_id`` keeps only an id it found (round 28 of #257), so where ``sysctl`` fails each
-    question is another ``sysctl`` run, with a 5 s timeout. :func:`_observe` asked it of
-    every read with live rows, asq's 2 s tick, needs-you's 3 s scan and every
-    ``status_of``, though only a row that may be held needs it, which is rare; and
-    ``boot_started`` once more per such row (review of #259, round 2).
-    """
-
-    def __init__(self) -> None:
-        self._id: tuple[str | None] | None = None
-        self._started: tuple[datetime | None] | None = None
-
-    def id(self) -> str | None:
-        if self._id is None:
-            self._id = (tmux_core.boot_id(),)
-        return self._id[0]
-
-    def started(self) -> datetime | None:
-        if self._started is None:
-            self._started = (tmux_core.boot_started(),)
-        return self._started[0]
-
-
 def _observe(
-    srv: TmuxServer, tmux_session: str | None, agents: Sequence[FleetAgent]
+    srv: TmuxServer,
+    tmux_session: str | None,
+    agents: Sequence[FleetAgent],
+    reads: tmux_core.SocketReads | None = None,
 ) -> _Observed | None:
     """Row id → the facts of that row's pane, or ``None`` when tmux cannot be asked at all.
 
@@ -1255,12 +1239,12 @@ def _observe(
         started = None
         if seen or live:  # one server, one start: any answer that carried it says it
             started = said[0] if said else srv.started_at()
-        boot = _Boot()  # asked only for a row that may be held
+        reads = reads or tmux_core.SocketReads()  # the boot: only for a row that may be held
         views: _Observed = {}
         for agent in agents:
             if agent.id in seen and not _outlived(agent, started):
                 views[agent.id] = seen[agent.id]
-            elif agent.ended_at is None and _on_another_server(agent, started, boot):
+            elif agent.ended_at is None and _on_another_server(agent, started, reads):
                 views[agent.id] = HELD
         return views
     except TmuxError:
@@ -1272,6 +1256,7 @@ def _observe_sockets(
     tmux_session: str | None,
     config: FleetSettings | None = None,
     addresses: Mapping[str, _Address] | None = None,
+    reads: tmux_core.SocketReads | None = None,
 ) -> dict[_Address, _Observed | None]:
     """Server → what THAT server says about the live agents recorded on it.
 
@@ -1283,14 +1268,16 @@ def _observe_sockets(
     that could not be asked at all, which is per server and not per fleet: an
     unreachable server must not make the agents on a reachable one read as
     gone, nor the reverse. Looked up with :func:`_view`. ``addresses`` is each row's
-    address as the caller worked it out once (:func:`_where`).
+    address as the caller worked it out once (:func:`_where`). ``reads`` is the caller's for
+    the whole read, so the boot is asked once for it (:func:`_on_another_server`).
     """
     config = config or settings()
+    reads = reads or tmux_core.SocketReads()
     groups: dict[_Address, list[FleetAgent]] = {}
     for agent in agents:
         groups.setdefault(_where(agent, config, addresses), []).append(agent)
     return {
-        address: _observe(_server_at(address, config), tmux_session, group)
+        address: _observe(_server_at(address, config), tmux_session, group, reads)
         for address, group in groups.items()
     }
 
@@ -5601,8 +5588,8 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
     config = settings()
     report = ReapReport()
     absent: dict[_Address, bool] = {}
-    this_boot = tmux_core.boot_id() if server_down else None
     reads = tmux_core.SocketReads()  # one per server for the sweep, not per row
+    this_boot = reads.boot_id() if server_down else None
     now = _now()
     with store_session() as store:
         if project is not None:
@@ -5613,7 +5600,7 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
             live = store.fleet_agents(current.id, live_only=True)
             if live:
                 tmux_session = session_name(current.codename) if current.codename else None
-                views = _observe_sockets(live, tmux_session, config)
+                views = _observe_sockets(live, tmux_session, config, reads=reads)
                 _hold_on_another_server(live, views, config, report)
                 if server_down:
                     for address, view in views.items():

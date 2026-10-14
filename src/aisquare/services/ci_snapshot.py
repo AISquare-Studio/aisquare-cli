@@ -28,6 +28,7 @@ from __future__ import annotations
 import re
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,6 +36,9 @@ from aisquare.core.spawn import untraced_env
 
 GIT_BUDGET_SECONDS = 2.0
 """Total wall clock one capture (or one project_ref) may spend in git."""
+
+_monotonic: Callable[[], float] = time.monotonic
+"""The clock a budget runs on unless given another (:class:`_Budget`)."""
 
 WIP_REF_PREFIX = "refs/aisquare/wip/"
 
@@ -200,11 +204,21 @@ def _prune(root: Path, budget: _Budget, *, now: float | None = None) -> int:
 
 
 class _Budget:
-    def __init__(self, seconds: float) -> None:
-        self._deadline = time.monotonic() + seconds
+    """``seconds`` of git from now, by ``clock``.
+
+    The clock is the budget's own, the monotonic one unless given another, so a test
+    judges the budget by a clock it controls and not by how loaded its runner is: on a
+    loaded Windows runner the product's two seconds went on four git spawns, the capture
+    failed open as designed, and the suite read that as a failure of its own (CI of #259,
+    run 38482592483).
+    """
+
+    def __init__(self, seconds: float, *, clock: Callable[[], float] | None = None) -> None:
+        self._clock = clock if clock is not None else _monotonic
+        self._deadline = self._clock() + seconds
 
     def remaining(self) -> float:
-        return max(0.05, self._deadline - time.monotonic())
+        return max(0.05, self._deadline - self._clock())
 
     def spent(self) -> bool:
         """Whether the budget is gone.
@@ -215,7 +229,7 @@ class _Budget:
         thousands of refs took 6.6 s of a 2 s budget that way, in front of a
         developer who had just hit enter.
         """
-        return time.monotonic() >= self._deadline
+        return self._clock() >= self._deadline
 
 
 def _git(root: Path, *args: str, timeout: float) -> str | None:

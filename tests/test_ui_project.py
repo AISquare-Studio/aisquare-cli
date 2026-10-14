@@ -763,6 +763,34 @@ def test_a_hidden_board_tab_stops_polling_and_catches_up_when_shown(
     assert after_show >= hidden + 2  # shown: on_show, then the ticks resume
 
 
+def test_b_on_the_board_tab_hides_and_brings_back_the_column_every_time(
+    project: ProjectInfo,
+) -> None:
+    """The fleet UI's Board tab is the same panel as ``board -w``: ``b`` hides the column with
+    focus on the tasks, and the next ``b`` still reaches the panel to bring it back."""
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[bool, str | None]]:
+        host.query_one(ProjectView).active = "tab-board"
+        await pilot.pause()
+        panel = host.query_one("#board-panel", BoardPanel)
+        panel.query_one("#tasks").focus()
+        await pilot.pause()
+        states = []
+        for _ in range(3):
+            await pilot.press("b")
+            await pilot.pause()
+            focused = host.focused
+            states.append(
+                (
+                    panel.query_one("#board-side").display,
+                    focused.id if focused is not None else None,
+                )
+            )
+        return states
+
+    assert drive(project, scenario) == [(False, "feed"), (True, "tasks"), (False, "feed")]
+
+
 class TwoProjects(App[None]):
     """Two Project views mounted at once, the second shown — the fleet UI keeps one per project
     ever selected, so every id inside a board is on the screen once per project."""

@@ -631,15 +631,30 @@ class BoardPanel(Vertical):
         self.notify(f"copied {len(selected)} chars", timeout=3, markup=False)
 
     def action_toggle_board(self) -> None:
-        self._collapse(not self.query_one("#board-side").has_class("collapsed"))
+        """``b``: the board column off or on, and focus with it when it comes back."""
+        shown = self.query_one("#board-side").has_class("collapsed")
+        self._collapse(not shown)
+        if shown:
+            self.query_one("#tasks").focus()
 
     def action_refresh_now(self) -> None:
         self.refresh_data()
 
     def _collapse(self, collapsed: bool) -> None:
-        """Hide (or show) the board column and the line that resizes it, together."""
-        self.query_one("#board-side").set_class(collapsed, "collapsed")
+        """Hide (or show) the board column and the line that resizes it, together.
+
+        Focus inside a column going out of sight moves to the feed beside it, as it is
+        shown (the live list, or its frozen text in select mode). Left on the hidden
+        tasks table it went to nothing, and with nothing focused no key reaches this
+        panel: the next ``b`` could not bring the column back.
+        """
+        side = self.query_one("#board-side")
+        side.set_class(collapsed, "collapsed")
         self.query_one("#side-divider").set_class(collapsed, "collapsed")
+        focused = self.app.focused
+        if collapsed and focused is not None and side in focused.ancestors_with_self:
+            feed = self.query_one("#feed")
+            (self.query_one("#feedtext") if feed.has_class("hidden") else feed).focus()
 
     def on_resize(self, event: events.Resize) -> None:
         self._collapse(event.size.width < COLLAPSE_BELOW)

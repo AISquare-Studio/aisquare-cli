@@ -688,6 +688,58 @@ def test_a_double_click_on_a_board_line_puts_the_stylesheet_size_back_and_forget
     )
 
 
+def test_b_hides_and_brings_back_the_board_column_every_time(
+    runner: CliRunner, work_dir: Path
+) -> None:
+    """``b`` with the tasks table focused hid the column the table is in, focus went to
+    nothing, and no later key reached the panel whose binding ``b`` is: the column stayed
+    hidden until a restart (found verifying the splitters). Focus now goes to the feed as
+    the column hides and back to the tasks as it returns — in select mode, to the frozen
+    feed that stands in for the live one."""
+    pytest.importorskip("textual", reason="the [tui] extra is not installed")
+    from aisquare.cli import watch as watch_mod
+
+    team_service.activate()
+    app_cls = watch_mod._build_app_class(interval=60.0)
+
+    async def press_b() -> list[tuple[bool, bool, str | None]]:
+        async with app_cls().run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app = pilot.app
+            app.query_one("#tasks").focus()
+            await pilot.pause()
+
+            def seen() -> tuple[bool, bool, str | None]:
+                focused = app.focused
+                return (
+                    app.query_one("#board-side").display,
+                    app.query_one("#side-divider").display,
+                    focused.id if focused is not None else None,
+                )
+
+            states = [seen()]
+            for _ in range(4):
+                await pilot.press("b")
+                await pilot.pause()
+                states.append(seen())
+            await pilot.press("v")  # select mode: the live feed gives way to its text
+            await pilot.pause()
+            await pilot.press("b")
+            await pilot.pause()
+            states.append(seen())
+            return states
+
+    states = asyncio.run(press_b())
+    assert states == [
+        (True, True, "tasks"),
+        (False, False, "feed"),
+        (True, True, "tasks"),
+        (False, False, "feed"),
+        (True, True, "tasks"),
+        (False, False, "feedtext"),
+    ]
+
+
 def test_the_board_lines_keep_the_feed_and_the_tasks_on_screen_whatever_the_size(
     runner: CliRunner, work_dir: Path
 ) -> None:

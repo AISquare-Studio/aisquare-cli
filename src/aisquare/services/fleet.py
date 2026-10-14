@@ -5850,9 +5850,10 @@ def nudge_manager(project_id: str, *, reason: str) -> bool:
     (``_STALE_AFTER``). A row frozen at ``waiting`` while the pane keeps
     printing (hooks that stopped firing: a Stop that never ran, a session id
     that no longer matches) is ``working`` everywhere else, and typing into it
-    is the interleaving ``tell`` refuses to cause. Agreeing costs one extra
-    ``list-panes`` for the pane's last-output time, on a path the debounce
-    already bounds to one pass per :data:`NUDGE_DEBOUNCE`.
+    is the interleaving ``tell`` refuses to cause. The pane's last-output time it needs for
+    that comes with the pane's facts (``PaneFacts.last_output``, ``#{window_activity}``),
+    in the one ``display-message``. A ``list-panes -a`` over every pane on the server for it
+    was one more tmux process per nudge (review of #259, round 5).
     """
     try:
         with store_session() as store:
@@ -5872,10 +5873,7 @@ def nudge_manager(project_id: str, *, reason: str) -> bool:
             if facts is None or not _its_agent(manager, facts):
                 return False  # not the agent, or the id is another agent's on another server
             pane = _PaneView(
-                facts.dead,
-                facts.dead_status,
-                facts.current_command,
-                _activity_times(srv).get(manager.pane_id),
+                facts.dead, facts.dead_status, facts.current_command, facts.last_output
             )
             state, _ = _derive(manager, session, pane, observed=True, now=now)
             if state != "waiting":

@@ -376,9 +376,14 @@ class FakeTmux(TmuxServer):
         )
 
     def pane_facts(self, pane_id: str) -> PaneFacts | None:
-        """As the real one, which asks ``#{start_time}`` in the same ``display-message``."""
+        """As the real one, which asks ``#{start_time}`` and ``#{window_activity}`` (to the
+        second, rounded down) in the same ``display-message``."""
         facts = self.facts.get(pane_id) if self._read() else None
-        return None if facts is None else replace(facts, server_started=self.started)
+        if facts is None:
+            return None
+        printed = self.output_at.get(pane_id)
+        last = None if printed is None else datetime.fromtimestamp(int(printed.timestamp()), UTC)
+        return replace(facts, server_started=self.started, last_output=last)
 
     # The strict twins the shutdown paths use: each is the lenient answer UNLESS
     # the server could not be asked, and that single distinction is `reachable()`
@@ -7394,6 +7399,34 @@ def test_nudge_refuses_a_stale_waiting_row_that_ls_and_tell_call_working(
         (manager.pane_id, "literal", NUDGE_TEXT),
         (manager.pane_id, "key", "Enter"),
     ]
+
+
+def test_nudge_reads_the_panes_last_output_in_its_facts(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 5: the nudge ran `list-panes -a`, every pane on the server, for
+    one pane's last output, which the facts it had just read carry (`PaneFacts.last_output`):
+    one more tmux process per nudge, in a sub-agent's CLI process. It reads it there, and
+    still tells a pane that printed just now (working) from a quiet one (waiting)."""
+    manager = fleet_service.spawn(project, "manager").agent
+    tmux.set_command(manager.pane_id, "claude")
+    _stale_board_session(
+        manager, "waiting", seen_ago=team_service._STALE_AFTER + timedelta(minutes=1)
+    )
+    ran: list[tuple[str, ...]] = []
+
+    def run(*args: str, stdin: bytes | None = None) -> str:
+        ran.append(args)
+        return ""
+
+    monkeypatch.setattr(tmux, "run", run)
+
+    tmux.printed(manager.pane_id)  # mid-turn
+    assert fleet_service.nudge_manager(project.id, reason="task_review") is False
+    tmux.printed(manager.pane_id, ago=ACTIVITY_WINDOW + timedelta(seconds=2))
+    assert fleet_service.nudge_manager(project.id, reason="task_review") is True
+
+    assert ran == [], "no list-panes"
 
 
 @pytest.mark.parametrize("command", ["bash", PYTHON_LAUNCHER, "zsh"])

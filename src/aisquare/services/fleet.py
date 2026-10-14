@@ -1211,7 +1211,8 @@ def _derive(
     fired — and a killed agent fires no ``SessionEnd``, so its row would say
     ``waiting`` for ``_STALE_AFTER`` otherwise. So death and absence are read
     first; then a fresh ``team_session`` row (not ended, seen within
-    ``_STALE_AFTER``) decides between working, waiting and attention; then
+    ``_STALE_AFTER``) decides between working, waiting and attention, and the
+    attention of an agent that redraws while it asks (Codex) holds, fresh or not; then
     recent output (:data:`ACTIVITY_WINDOW`) means working; and when tmux cannot
     be asked at all the answer is ``unknown``, never a guess.
     """
@@ -1235,6 +1236,13 @@ def _derive(
             parked = until is not None and now <= until + _LIMIT_GRACE
             if fresh or parked:
                 return "limited", _limit_detail(until, now)
+        elif board_state == "attention" and _redraws_while_asking(agent, session):
+            # Codex redraws its approval view every second, the screen unchanged, for
+            # as long as it waits (0.162.1), so its pane's output answers nothing and
+            # a wait past the stale window fires no hook either: the bell holds until
+            # a hook moves the row — PostToolUse once allowed, Interrupt on Esc, Stop,
+            # the next prompt.
+            return "attention", None
         elif fresh and board_state == "attention":
             # The bell clears when the pane moves on, not only on the next human
             # prompt (#153): a permission that was granted — or an action the
@@ -1272,6 +1280,13 @@ def _derive(
         return "unknown", "tmux unavailable" if hooks is None else f"tmux unavailable; {hooks}"
     busy = pane.last_output is not None and now - pane.last_output <= ACTIVITY_WINDOW
     return ("working" if busy else "waiting"), hooks
+
+
+def _redraws_while_asking(agent: FleetAgent, session: TeamSession) -> bool:
+    """Whether the agent whose hook wrote ``session`` keeps drawing while it waits on the
+    human (``AgentCapabilities.redraws_while_asking``)."""
+    adapter = recorded_adapter(_family(session) or agent.agent)
+    return adapter is not None and adapter.capabilities.redraws_while_asking
 
 
 _LIMIT_GRACE = timedelta(minutes=10)

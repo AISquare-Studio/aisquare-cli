@@ -678,6 +678,39 @@ def test_an_approval_codex_reviews_itself_rings_no_bell(
     assert _events(codex.project, "attention") == ["Codex needs your approval"]
 
 
+def test_an_unanswered_codex_approval_holds_the_bell_through_its_redraws(
+    codex_agent: tuple[Codex, TeamTask],
+    tmux: FakeTmux,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex redraws its approval view every second while it waits (0.162.1: the pane's
+    activity advanced each second, the screen unchanged), which read as the prompt
+    answered: '▶ working' for the whole wait. Only a hook moves it: PostToolUse after
+    'y', Interrupt after Esc."""
+    codex, _ = codex_agent
+    codex.start("thread-one")
+    _turn_under(codex, "thread-one", "user")
+    codex.hook("PermissionRequest", "thread-one", **APPROVAL)
+    tmux.printed(codex.agent.pane_id, ago=timedelta(seconds=-2))  # a redraw after the hook
+
+    assert _state(codex) == "attention"
+
+    # Past the board's stale window, no hook has fired and the view still redraws.
+    now = fleet_service._now
+    later = datetime.now(tz=UTC) + timedelta(hours=1)
+    monkeypatch.setattr(fleet_service, "_now", lambda: later)
+    tmux.printed(codex.agent.pane_id, ago=-timedelta(hours=1))
+    assert _state(codex) == "attention"
+    monkeypatch.setattr(fleet_service, "_now", now)
+
+    codex.hook("PostToolUse", "thread-one", turn_id="turn-1", tool_name="Bash")  # 'y'
+    assert _state(codex) == "working"
+
+    codex.hook("PermissionRequest", "thread-one", **APPROVAL)
+    codex.hook("Interrupt", "thread-one", turn_id="turn-1")  # Esc
+    assert _state(codex) == "waiting"
+
+
 # --- a replacement runs the row's own agent (review r1 of #113, finding 1) ---------------
 
 

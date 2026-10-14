@@ -209,6 +209,7 @@ class CodexAdapter:
         first_context_file_only=True,
         sandbox_permissions=True,
         sandboxes_tools=True,
+        redraws_while_asking=True,
         tool_shell_env="CODEX_THREAD_ID",
         # -c and -a as well: `fleet spawn` owns neither. `launch` owns both, and keeps
         # -c KEY=VALUE for Codex by its shape; its -a is --account (`launch --help`).

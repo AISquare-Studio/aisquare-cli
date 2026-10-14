@@ -132,6 +132,11 @@ class AgentCapabilities:
     a read included: its permission flags make the store reachable from the sandbox
     (:meth:`AgentAdapter.store_access`), or each ``aisquare`` call is an escalation.
     Claude Code runs its tools unsandboxed."""
+    redraws_while_asking: bool = False
+    """The agent's UI keeps redrawing while it waits on the human (Codex's approval view,
+    every second, the screen unchanged: 0.162.1), so output in its pane answers nothing:
+    an ``attention`` row holds until one of its hooks moves the row (``services.fleet.
+    _derive``). Claude Code's prompt sits still until it is answered."""
     legacy_fleet_args: bool = False
     """``fleet.roles.<role>.extra_args`` and ``permission_mode`` are in this agent's
     vocabulary (they predate adapters and are Claude Code's); another agent takes only

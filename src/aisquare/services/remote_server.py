@@ -2586,7 +2586,8 @@ def remote_agent_held(
     """Hold the agent's action lock (:func:`remote_agent_lock`) for the block: at once, or 409
     ``busy`` while another action has it; with ``wait``, within that many seconds of when the
     request reached the server (:data:`_WRITE_ARRIVED`). ``nothing`` says, in a refusal, what
-    was not done for it.
+    was not done for it; without it, a refusal says only why (a wait's said ``— None to``,
+    review of #259, round 7, 9/9).
 
     Counted from when a thread was free to run it, keys tapped in a burst during an
     action waited their 2 s each in turn, a pool's worth at a time, and the last ones
@@ -2606,7 +2607,8 @@ def remote_agent_held(
         left = wait if arrived is None else wait - (time.monotonic() - arrived)
         if left <= 0:
             busy = f"the machine was busy with other actions for {wait:g} s"
-            raise RequestError(409, "busy", f"{busy} — {nothing} to {label}")
+            said = busy if nothing is None else f"{busy} — {nothing} to {label}"
+            raise RequestError(409, "busy", said)
         held = lock.acquire(timeout=left)
     if not held:
         busy = f"another action on {label} is still running"

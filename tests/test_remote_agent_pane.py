@@ -503,6 +503,28 @@ def test_keys_wait_for_a_busy_agent_only_what_is_left_of_their_wait_since_they_a
     assert tmux.sent == [("keys", "%2", "Down")], "a key on time takes a free lock at once"
 
 
+def test_a_wait_that_ran_out_says_what_was_not_done_only_when_it_is_told() -> None:
+    """Review of #259, round 7, 9/9: the busy sentence of a wait that had run out was
+    ``f"{busy} — {nothing} to {label}"``, and ``nothing`` is ``None`` unless given: a caller
+    of the public helper that waits but says nothing (the quick answers', should they wait)
+    put "— None to coder-1" on the phone. It says only why then, as a held lock does."""
+    late = contextvars.copy_context()
+    late.run(remote_server._WRITE_ARRIVED.set, time.monotonic() - 5)
+
+    def held(**said: Any) -> str:
+        with (
+            pytest.raises(RequestError) as refused,
+            remote_server.remote_agent_held("prj_p", "coder-1", wait=2.0, **said),
+        ):
+            pass
+        return refused.value.message
+
+    assert late.run(held) == "the machine was busy with other actions for 2 s"
+    assert late.run(held, nothing="nothing was sent") == (
+        "the machine was busy with other actions for 2 s — nothing was sent to coder-1"
+    )
+
+
 def test_a_burst_of_keys_waiting_on_a_busy_agent_holds_up_no_read(
     project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

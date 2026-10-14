@@ -59,8 +59,7 @@ dependencies = [
   # Linux and macOS read /usr/share/zoneinfo and do not install it.
   "tzdata; sys_platform == 'win32'",
   # The Remote modal's QR (cli/ui/views/remote.py). Pure python, typed, one
-  # module; imported lazily by the QR renderer only. PLAN §4-G names it as the
-  # modal task's one new dependency — flagged for Anmol in the PR body.
+  # module; imported lazily by the QR renderer only.
   "segno>=1.6",
 ]
 
@@ -109,16 +108,15 @@ remote = [
   # uvicorn are the SAME two the serve extra already resolves through mcp;
   # websockets is the ONE addition (uvicorn's WebSocket backend — without it
   # the /ws stream answers "No supported WebSocket library detected").
-  # Flagged for Anmol in the PR body, per the hackathon plan §4-G.
   "starlette>=0.40",
   "uvicorn>=0.30",
   "websockets>=12",
   # Web Push (services/remote_push.py): the RFC 8291 encryption and the RFC 8292
   # VAPID signature are P-256 ECDH, AES-GCM and ES256, none of which the stdlib
   # has. Until now it arrived only through mcp -> pyjwt[crypto], declared by
-  # nothing here. Optional inside the extra: without it the page says how to get
-  # it, and Remote serves everything else. A floor, not a pin: every call used
-  # (ECDH, AESGCM, from_encoded_point, decode_dss_signature) is far older.
+  # nothing here. Required by this extra; Remote still runs without it, minus
+  # Web Push, and the page says how to get it. A floor, not a pin: every call
+  # used (ECDH, AESGCM, from_encoded_point, decode_dss_signature) is far older.
   "cryptography>=42",
 ]
 tui = [

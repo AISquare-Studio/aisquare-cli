@@ -2974,6 +2974,46 @@ def test_a_stop_and_a_restart_read_the_servers_start_in_the_answer_that_names_th
     assert fleet_service._pane_alive(other) is False
 
 
+def test_a_look_at_the_fleet_reads_the_servers_start_in_the_answers_that_named_its_panes(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 4: `_observe` asked `srv.started_at()` in a `display-message` of
+    its own though the window list and a pane's facts it had just read carry the start
+    (`#{start_time}`): one more tmux process per server on asq's 2 s tick, every needs-you
+    scan, every `status_of` and `tell`. It reads the start there, and asks only when no
+    answer carried it (live rows, no pane seen), as it must to tell a lost row from a held
+    one."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    coder = _coder(project)
+    tmux.set_command(coder.pane_id, "claude")
+    session = f"asq-{_codename(project)}"
+    asked: list[datetime | None] = []
+    started_at = tmux.started_at
+
+    def counted() -> datetime | None:
+        asked.append(started_at())
+        return asked[-1]
+
+    monkeypatch.setattr(tmux, "started_at", counted)
+
+    assert coder.id in (fleet_service._observe(tmux, session, [coder]) or {}), "the window list"
+    # A session renamed under it: the pane answers to `pane_facts` alone.
+    assert coder.id in (fleet_service._observe(tmux, "asq-renamed", [coder]) or {}), "facts"
+    assert fleet_service.status_of(coder).state != "lost"
+    assert asked == [], "not one display-message for the start"
+    # On a server that took the socket, a start read there still holds the row's pane.
+    tmux.started += timedelta(minutes=5)
+    assert fleet_service._observe(tmux, session, [coder]) == {coder.id: fleet_service.HELD}
+    assert asked == []
+    # Control: a live row and no pane seen, so no answer carried the start: asked, once.
+    tmux.facts.pop(coder.pane_id)
+    tmux.sessions[session] = []
+    tmux.started -= timedelta(minutes=5)
+    assert fleet_service._observe(tmux, session, [coder]) == {}
+    assert asked == [tmux.started]
+
+
 def _planned_ends(plan: fleet_service.ShutdownPlan) -> dict[str, str]:
     """What a shutdown plan says it does with each row."""
     return {

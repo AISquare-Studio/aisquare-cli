@@ -1198,7 +1198,10 @@ def _observe(
     a view — a listing's reconcile, ``reap``, a restart — takes that agent's
     pane for the row's. The server is asked when it started once a pane has
     answered, or once it has answered for live rows it holds no pane of: the
-    answer says whether the rows' server is this one (:func:`_outlived`).
+    answer says whether the rows' server is this one (:func:`_outlived`). Read
+    where tmux already said it, in the window list or a pane's facts
+    (``#{start_time}``); asked in a ``display-message`` of its own only when no
+    answer carried it (review of #259, round 4).
 
     A live row the answering server is NOT the server of — one that recorded its
     server's start, and this one started at another time, in the same boot — is
@@ -1215,6 +1218,7 @@ def _observe(
         )
         live = [agent for agent in agents if agent.ended_at is None]
         output_at = _activity_times(srv) if live else {}
+        said = [w.server_started for w in windows.values() if w.server_started is not None]
         seen: dict[str, _PaneView] = {}
         for agent in agents:
             window = windows.get(agent.pane_id)
@@ -1240,9 +1244,13 @@ def _observe(
                     facts.current_command,
                     output_at.get(agent.pane_id),
                 )
+                if facts.server_started is not None:
+                    said.append(facts.server_started)
         if live and not seen and not _server_answers(srv):
             return None
-        started = srv.started_at() if seen or live else None
+        started = None
+        if seen or live:  # one server, one start: any answer that carried it says it
+            started = said[0] if said else srv.started_at()
         boot = _Boot()  # asked only for a row that may be held
         views: _Observed = {}
         for agent in agents:

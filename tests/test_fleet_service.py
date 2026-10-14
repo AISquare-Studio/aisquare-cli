@@ -7181,7 +7181,7 @@ def test_switch_moves_a_limited_agent_to_the_account_with_headroom_and_resumes_i
         kept = store.get_task(task.id)
         ended = store.get_session(agent.session_id or "")
     [switched] = [text for kind, text in kinds if kind == "switched"]
-    assert "moved from slot 2 to account 3 (slot 3) (session limit)" in switched
+    assert "moved from account 2 (slot 2) to account 3 (slot 3) (session limit)" in switched
     assert switched.endswith("— resumed its session")
     assert any("headroom:" in note for note in receipt.notes)  # the pick is explained
     # A hand-over is not an exit (finding 6): the claim stays with the session that resumes,
@@ -7969,7 +7969,10 @@ def test_fleet_switch_command_reports_the_move_and_its_json(
         app, ["fleet", "switch", agent.label, "--project", project.id, "--reason", "limit"]
     )
     assert result.exit_code == 0, result.output
-    assert f"✓ {agent.label}: moved from slot 2 to slot 3 — started fresh" in result.stdout
+    assert (
+        f"✓ {agent.label}: moved from account 2 (slot 2) to account 3 (slot 3) — started fresh"
+        in result.stdout
+    )
 
     second = runner.invoke(
         app, ["--json", "fleet", "switch", agent.label, "--project", project.id, "--to", "2"]
@@ -7979,6 +7982,16 @@ def test_fleet_switch_command_reports_the_move_and_its_json(
     assert (payload["from_slot"], payload["to_slot"], payload["resumed"]) == (3, 2, False)
     assert payload["started"]["label"] == agent.label and payload["started"]["account_slot"] == 2
     assert payload["stopped"]["ended_at"] is not None
+
+    # A renamed account is that name in the line, as on the board and in `fleet ls`.
+    from aisquare.services import claude_accounts as accounts_service
+
+    accounts_service.set_alias("3", "Side project")
+    third = runner.invoke(
+        app, ["fleet", "switch", agent.label, "--project", project.id, "--to", "side project"]
+    )
+    assert third.exit_code == 0, third.output
+    assert "moved from account 2 (slot 2) to Side project (slot 3)" in third.stdout
 
     refused = runner.invoke(app, ["--json", "fleet", "switch", "ghost", "--project", project.id])
     assert refused.exit_code == 1

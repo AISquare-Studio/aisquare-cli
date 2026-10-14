@@ -415,9 +415,16 @@ def switch(
         )
         return
     console = stdout_console()
-    origin = f"slot {receipt.from_slot}" if receipt.from_slot is not None else "its shell's claude"
+    # By name, as the feed's `switched` line and `fleet ls` say it, with the slot beside it.
+    labels = accounts_service.slot_labels()
+    origin = (
+        f"{slot_label(receipt.from_slot, labels)} (slot {receipt.from_slot})"
+        if receipt.from_slot is not None
+        else "its shell's claude"
+    )
+    target_name = f"{slot_label(receipt.to_slot, labels)} (slot {receipt.to_slot})"
     console.print(
-        f"✓ {label}: moved from {origin} to slot {receipt.to_slot} — {receipt.how} "
+        f"✓ {label}: moved from {origin} to {target_name} — {receipt.how} "
         f"({receipt.started.pane_id} in {receipt.tmux_session})",
         markup=False,
     )

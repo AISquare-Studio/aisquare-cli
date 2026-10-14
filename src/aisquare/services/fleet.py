@@ -4595,7 +4595,13 @@ def switch(
         raise
     notes.extend(more)
     failures.extend(receipt.failures)
-    from_name = f"slot {current}" if current is not None else "its shell's claude"
+    labels = claude_accounts_service.slot_labels() if current is not None else {}
+    if current is None:
+        from_name = "its shell's claude"
+    else:  # by name, as the target is: an account renamed is that name here too
+        from_name = (
+            f"{labels[current]} (slot {current})" if current in labels else f"slot {current}"
+        )
     how = _how_started(resumed, typed=bool(receipt.prompt_typed))
     why = f" ({reason})" if reason else ""
     # The suppression is entered FIRST: a store that cannot be opened is the courtesy

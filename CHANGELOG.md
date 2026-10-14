@@ -102,6 +102,10 @@ adapter.**
   the sandbox can only read, and only a spec whose digest matches is replayed. Its `aisquare` calls
   succeed on the first, sandboxed attempt instead of each needing an approval,
   and a reviewer's verdict reaches the board while its worktree stays read-only.
+  The fleet's tmux stays out of the sandbox's reach, so a result, question,
+  task review, done, block or reopen written there cannot type the manager's
+  wake-up nudge itself: it leaves the nudge owed in the store, and the agent's
+  own hook, which Codex runs outside the sandbox, sends it as the command ends.
   A `--sandbox` in a role's own native arguments replaces the profile. See
   [the sandbox and the store](docs/coding-agents.md#the-sandbox-and-the-aisquare-store).
 - **One permission per role, for every agent.** `fleet.roles.<role>.permission`
@@ -207,6 +211,12 @@ adapter.**
   session's newest five board entries that are not for the human. It used to
   quote the newest five of any kind, so a run of 🔔 `attention` or `notice`
   lines could push the agent's own work out of it.
+- A fresh Claude Code fleet agent reads ⏸ waiting from its `SessionStart`, which
+  fires once it sits at its prompt past the folder-trust dialog. It read ▶
+  working until a first prompt, so `fleet tell` filed a note instead of typing
+  and the manager's nudge passed over a fresh manager. Before that start,
+  `fleet tell` files a note: the trust dialog fires no hook, and an Enter there
+  picks its default, *No, exit*.
 
 ## [0.8.0] - 2026-10-12
 

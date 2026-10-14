@@ -185,7 +185,12 @@ The manager talks to its agents only through the board — tasks, notes, signals
 manager is woken (a fixed one-line nudge typed into its pane, only while it is
 *waiting*) and reads the update on its next turn; when the manager stops with
 new board events pending, its `Stop` hook lets it continue. No daemon, no poll
-loop, and it works with the UI closed (Phase 5).
+loop, and it works with the UI closed (Phase 5). A Codex agent's board write
+runs in Codex's sandbox, where the fleet's tmux socket is refused (and stays
+refused: from there it could type into any pane), so the write leaves the nudge
+owed in the store and the agent's own `PostToolUse` hook, which Codex runs
+outside the sandbox, sends it as the command ends (its `Stop` hook, if that one
+could not), only while the manager has not yet read the news.
 
 Standalone use is unchanged: `aisquare launch planner` and `aisquare launch
 runner` keep working outside any fleet.
@@ -320,6 +325,13 @@ Types the text into the agent — **only** when it is *waiting* and its pane is
 alive. Otherwise the message is filed as a board note addressed to that agent,
 and the output says which happened (`✓` typed, `→` noted). Never interrupts an
 agent that is working or sitting on a permission prompt. Takes `--as SESSION`.
+
+A **Claude Code** agent is *waiting* from its `SessionStart` on: Claude Code fires
+it once the agent sits at its prompt, past the folder-trust dialog, so a fresh
+agent is typed into before its first prompt (a compaction's `SessionStart` comes
+mid-turn and changes nothing). Until it has started, the message is a board
+note: the folder-trust dialog fires no hook and is as quiet as a prompt, and an
+Enter there picks its default, *No, exit* (measured on Claude Code 2.1.300).
 
 A **Codex** agent's pane going quiet does not show that it sits at its prompt —
 its folder-trust and hook-review dialogs are as quiet — so its own hooks decide:

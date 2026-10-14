@@ -13,17 +13,26 @@ Model, effort and binary per role are NOT here on purpose: they live in
 ``team harness`` / ``team bind`` / ``AISQUARE_MODEL_<ROLE>`` — one home per
 concept, which is the rule that deleted ``bins`` in #56.
 
-The one ``[team]`` value on this form is the ACCOUNT per role (#145): the
-select beside each role writes ``team.profiles.<role>.account`` — exactly what
-``aisquare team bind <role> --account`` writes — through the same one writer.
-It is here rather than on the Accounts page because it is a property of the
-role, and it is the middle rung of the account ladder a launch walks
-(``--account`` > role binding > project default > machine default).
+The ``[team]`` values on this form are the AGENT and the ACCOUNT per role
+(#145): the selects beside each role write ``team.profiles.<role>.agent`` and
+``.account`` — exactly what ``aisquare team bind <role> --agent/--account``
+write — through the same one writer. They are here rather than on the Accounts
+page because they are properties of the role; the account is the middle rung of
+the account ladder a launch walks (``--account`` > role binding > project
+default > machine default), and it is an account of the role's agent.
+
+Permission is each agent's own vocabulary until a neutral one lands: Claude
+Code's ``permission_mode``, Codex's ``sandbox``, ``approval_policy`` and
+``approve_for_me``. Under each role, the flags its next ``fleet spawn`` passes
+(:func:`launch_line`, the adapter's own ``fleet_args``), for the agent the form
+says it runs on, so a value is never saved without its meaning shown — or the
+refusal a spawn would meet.
 """
 
 from __future__ import annotations
 
 import re
+import shlex
 from typing import ClassVar
 
 from rich.text import Text
@@ -35,7 +44,9 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import codenames, paths
-from aisquare.core.agent_adapters import adapters
+from aisquare.core.agent_adapters import adapters, get_adapter
+from aisquare.core.agent_adapters.codex import APPROVAL_POLICIES
+from aisquare.core.agent_adapters.types import fleet_extra_args
 from aisquare.core.config import (
     CLAUDE_PERMISSION_MODES,
     AccountsSettings,
@@ -74,7 +85,17 @@ SANDBOX_OPTIONS = [
     ("Role default", ""),
     *[(s, s) for s in ("read-only", "workspace-write", "danger-full-access")],
 ]
-APPROVAL_OPTIONS = [("Native default", ""), *[(s, s) for s in ("on-request", "untrusted", "never")]]
+APPROVAL_OPTIONS = [("Native default", ""), *[(s, s) for s in APPROVAL_POLICIES]]
+"""Codex's ``--ask-for-approval`` values (0.162.1 has no ``untrusted``; one saved by an
+older version still shows, as ``(custom)``, and a spawn names why it refuses it)."""
+APPROVE_FOR_ME_OPTIONS: list[tuple[str, str]] = [
+    ("approve-for-me: role default", ""),
+    ("approve-for-me: on", "on"),
+    ("approve-for-me: off", "off"),
+]
+"""``fleet.roles.<role>.approve_for_me``: unset (on for every role but a reviewer's seats,
+unless a sandbox or approval is chosen), or set either way."""
+_APPROVE_VALUES: dict[str, bool | None] = {"": None, "on": True, "off": False}
 ACCOUNTS_WORKER = "settings-accounts"
 
 
@@ -106,12 +127,60 @@ def _agent_options(current: str) -> list[tuple[str, str]]:
     return _options(current, [("Use default", ""), *((a.label, a.id) for a in adapters())])
 
 
+def approve_value(setting: bool | None) -> str:
+    """``approve_for_me`` as its select's value."""
+    return "" if setting is None else "on" if setting else "off"
+
+
+def launch_line(role: str, agent: str, settings: FleetRoleSettings) -> Text:
+    """What ``fleet spawn <role>`` passes for permission on ``agent`` with ``settings``.
+
+    The adapter's own ``fleet_args``, given what ``services.fleet.spawn`` gives it with no
+    per-spawn flag: Claude Code the role's ``permission_mode``; an agent with sandboxed
+    permissions (Codex) its ``sandbox``, ``approval_policy`` and ``approve_for_me``,
+    never Claude's mode. ``--name`` is left out (it is the agent's label, not its
+    permission). A combination the adapter refuses reads as that refusal, which is what
+    the spawn would say.
+    """
+    text = Text(f"  {role} → ", style="dim")
+    try:
+        adapter = get_adapter(agent)
+    except ValueError:
+        text.append(f"{agent} is not an agent this version knows", style="yellow")
+        return text
+    sandboxed = adapter.capabilities.sandbox_permissions
+    try:
+        flags = adapter.fleet_args(
+            role,
+            role,
+            None if sandboxed else (settings.permission_mode or None),
+            sandbox=settings.sandbox if sandboxed else None,
+            approval=settings.approval_policy if sandboxed else None,
+            approve_for_me=settings.approve_for_me if sandboxed else None,
+        )
+    except ValueError as exc:
+        text.append(f"{adapter.label}: refused at spawn — {exc}", style="red")
+        return text
+    if "--name" in flags:
+        at = flags.index("--name")
+        flags = flags[:at] + flags[at + 2 :]
+    flags += fleet_extra_args(adapter, settings.extra_args, settings.agent_args)
+    text.append(f"{adapter.label} ", style="dim")
+    text.append(shlex.join(flags) if flags else "(no permission flag)", style="dim")
+    return text
+
+
 NO_ACCOUNT = ""
 """The select's value for "this role expresses no preference" — the binding's ``account = None``."""
 
 
-def account_options(accounts: list[ClaudeAccount], current: str | None) -> list[tuple[str, str]]:
+def account_options(
+    accounts: list[ClaudeAccount], current: str | None, agent: str = accounts_core.AGENT
+) -> list[tuple[str, str]]:
     """``(label, value)`` per account, plus the no-binding row first; ``current`` always shows.
+
+    ``agent`` is the role's: a slot of another agent says whose it is, because a launch
+    refuses it for this role.
 
     Values are SLOT NUMBERS as strings: the binding stores a reference the
     resolver reads, and the slot is the one spelling that cannot be renamed
@@ -124,7 +193,7 @@ def account_options(accounts: list[ClaudeAccount], current: str | None) -> list[
         identity = accounts_core.identity(account)
         who = f" · {identity.email}" if identity else " · not signed in"
         # Another agent's slot says whose it is: a launch refuses one for the wrong agent.
-        if account.agent != accounts_core.AGENT:
+        if account.agent != agent:
             who += f" · {accounts_core.agent_label(account.agent)}"
         options.append((f"{account.slot} · {accounts_core.label(account)}{who}", str(account.slot)))
     if current and current not in {value for _, value in options}:
@@ -145,10 +214,13 @@ class SettingsView(VerticalScroll):
     SettingsView .row Switch { margin-left: 1; }
     SettingsView .row .worktree-label { width: 10; margin-left: 2; }
     SettingsView .section { text-style: bold; margin-top: 1; }
+    SettingsView .launch-line { height: auto; margin-bottom: 1; }
     SettingsView #settings-buttons Button { margin-right: 1; }
     SettingsView #settings-note { color: $text-muted; margin-top: 1; height: auto; }
     """
-    ROLE_SECTION: ClassVar[str] = "roles — permission mode, worktree and account per role"
+    ROLE_SECTION: ClassVar[str] = (
+        "roles — agent, permission, worktree and account per role (→ the flags a spawn passes)"
+    )
     ACCOUNTS_SECTION: ClassVar[str] = "accounts — how launches pick one; what a usage limit does"
 
     def __init__(self, project: ProjectInfo, *, id: str | None = None) -> None:
@@ -235,7 +307,7 @@ class SettingsView(VerticalScroll):
                 continue
             shown = select.value
             bound = self._account_bindings.get(role)
-            options = account_options(self._accounts, bound)
+            options = account_options(self._accounts, bound, self._role_agent(role))
             select.set_options(options)
             offered = {value for _label, value in options}
             select.value = shown if shown in offered else (bound or NO_ACCOUNT)
@@ -306,6 +378,14 @@ class SettingsView(VerticalScroll):
                     allow_blank=False,
                     id=f"approval-{suffix}",
                 )
+                yield Select(
+                    APPROVE_FOR_ME_OPTIONS,
+                    value=approve_value(settings.approve_for_me),
+                    allow_blank=False,
+                    id=f"afm-{suffix}",
+                    classes="account-select",
+                )
+            yield Static(id=f"launch-{suffix}", classes="launch-line")
         yield Static("fleet", classes="section")
         with Horizontal(classes="row"):
             yield Label("escape key")
@@ -366,6 +446,68 @@ class SettingsView(VerticalScroll):
 
     def on_mount(self) -> None:
         self._load_accounts()
+        self._paint_launch_lines()
+
+    # --- what a spawn would pass -------------------------------------------------------
+
+    def _selected(self, selector: str) -> str | None:
+        """A select's value, ``None`` when it has none (blank, or not on the form)."""
+        try:
+            value = self.query_one(selector, Select).value
+        except Exception:
+            return None
+        return value if isinstance(value, str) else None
+
+    def _role_agent(self, role: str) -> str:
+        """The agent the form says ``role`` runs on: its own pick, the user default, or
+        Claude Code. (A project default or ``AISQUARE_CODING_AGENT`` can still say otherwise
+        at a launch; ``aisquare team harness`` shows the whole ladder.)"""
+        family = self._selected(f"#family-{widget_suffix(role)}")
+        if family is None:
+            family = self._config.team.profiles.get(role, RoleLaunchProfile()).agent or ""
+        default = self._selected("#default-agent")
+        if default is None:
+            default = self._config.agents.default or ""
+        return family or default or accounts_core.AGENT
+
+    def _form_role(self, role: str) -> FleetRoleSettings:
+        """``role``'s settings as the form holds them now."""
+        suffix = widget_suffix(role)
+        settings = self.fleet.roles.get(role, FleetRoleSettings())
+        mode = self._selected(f"#perm-{suffix}")
+        sandbox = self._selected(f"#sandbox-{suffix}")
+        approval = self._selected(f"#approval-{suffix}")
+        approve = self._selected(f"#afm-{suffix}")
+        return settings.model_copy(
+            update={
+                "permission_mode": settings.permission_mode if mode is None else mode,
+                "sandbox": settings.sandbox if sandbox is None else (sandbox or None),
+                "approval_policy": (
+                    settings.approval_policy if approval is None else (approval or None)
+                ),
+                "approve_for_me": (
+                    settings.approve_for_me if approve is None else _APPROVE_VALUES.get(approve)
+                ),
+            }
+        )
+
+    def _paint_launch_lines(self) -> None:
+        for role in self._roles:
+            try:
+                line = self.query_one(f"#launch-{widget_suffix(role)}", Static)
+            except Exception:  # a role bound since this form was composed
+                continue
+            line.update(launch_line(role, self._role_agent(role), self._form_role(role)))
+
+    @on(Select.Changed)
+    def _form_changed(self, event: Select.Changed) -> None:
+        """A pick changes what a spawn passes; an agent pick changes whose accounts fit."""
+        if not self.is_mounted:
+            return
+        self._paint_launch_lines()
+        control = event.select.id or ""
+        if control == "default-agent" or control.startswith("family-"):
+            self._fill_account_selects()
 
     # --- reading -----------------------------------------------------------------------
 
@@ -411,13 +553,15 @@ class SettingsView(VerticalScroll):
                 ("family", family, _agent_options(family)),
                 ("sandbox", settings.sandbox or "", SANDBOX_OPTIONS),
                 ("approval", settings.approval_policy or "", APPROVAL_OPTIONS),
+                ("afm", approve_value(settings.approve_for_me), APPROVE_FOR_ME_OPTIONS),
             ):
                 control = self.query_one(f"#{field}-{suffix}", Select)
                 control.set_options(_options(value, options))
                 control.value = value
             bound = self._account_bindings.get(role)
-            account.set_options(account_options(self._accounts, bound))
+            account.set_options(account_options(self._accounts, bound, self._role_agent(role)))
             account.value = bound or NO_ACCOUNT
+        self._paint_launch_lines()
         self._load_accounts()  # the slots as they are now, off the UI thread
 
     # --- writing -----------------------------------------------------------------------
@@ -548,6 +692,9 @@ class SettingsView(VerticalScroll):
             config.fleet.roles[role].approval_policy = self._optional_selection(
                 f"#approval-{suffix}", config.fleet.roles[role].approval_policy
             )
+            approve = self._selected(f"#afm-{suffix}")
+            if approve is not None:  # a select with no value keeps the file's
+                config.fleet.roles[role].approve_for_me = _APPROVE_VALUES.get(approve)
         self._apply_account_bindings(config)
         accounts = self._form_accounts(config.accounts)
         if isinstance(accounts, str):

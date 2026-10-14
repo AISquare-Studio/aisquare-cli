@@ -52,6 +52,10 @@ class CodexPlugin:
     only once ``/hooks`` trusts its hooks. A plugin belongs to one Codex home, at no other
     scope. Read-only; never raises."""
 
+    #: Its launcher stands down beside ANY aisquare hook in hooks.json whose program can
+    #: start, every event sharing one command there: a partial hooks.json is not covered.
+    stands_down_per_event = False
+
     def supported(self) -> bool:
         from aisquare.core import agents
 

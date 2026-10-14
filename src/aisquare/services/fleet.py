@@ -269,10 +269,13 @@ class ReapReport:
     agents, every later project, the worktree pass and the manager nudges, and
     a traceback instead of a report (round 5)."""
     held: list[ShutdownRow] = field(default_factory=list)
-    """Rows ``--server-down`` left live, each with why: tmux reports no server on their
-    socket, but their agent may still be running (:func:`_hold_on_absent_server`), as the
-    one rule says — a socket file taken from under its server, a socket that could not be
-    asked. Said as ``shutdown`` says a row it left live (follow-up of #257)."""
+    """Rows the sweep left live whose agent may still be running where no tmux client
+    reaches it, each with why and the way out. On every ``reap``: a row whose socket another
+    tmux server answers on (:func:`_hold_on_another_server`). Under ``--server-down`` also:
+    a row on a socket tmux reports no server for, which the one rule says may still run, a
+    socket file taken from under its server or a socket that could not be asked
+    (:func:`_hold_on_absent_server`). The reason says which. Said as ``shutdown`` says a row
+    it left live (follow-up of #257; review of #259, round 5)."""
 
 
 @dataclass(frozen=True)

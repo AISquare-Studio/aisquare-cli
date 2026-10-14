@@ -54,6 +54,7 @@ from aisquare.core.agent_adapters.types import (
     PermissionIntent,
     WriteScope,
     fleet_extra_args,
+    store_dir,
 )
 from aisquare.core.config import (
     CLAUDE_PERMISSION_MODES,
@@ -194,9 +195,24 @@ def _append_flags(
     labelled = adapter.label_args(role)
     if labelled and flags[-len(labelled) :] == labelled:
         flags = flags[: -len(labelled)]
-    flags += role_args
+    shown, store = _without_store_access(adapter, flags)
+    shown += role_args
     text.append(f"{adapter.label} ", style="dim")
-    text.append(shlex.join(flags) if flags else "(no permission flag)", style="dim")
+    text.append(shlex.join(shown) if shown or store else "(no permission flag)", style="dim")
+    if store:
+        text.append(f" + the aisquare store, writable in its {store} sandbox", style="dim")
+
+
+def _without_store_access(adapter: AgentAdapter, flags: list[str]) -> tuple[list[str], str]:
+    """``flags`` less the run that opens the agent's sandbox to the aisquare store
+    (``AgentAdapter.store_access``: long, and the same for every role), and the write
+    scope it was for, ``""`` when there is none."""
+    for write in get_args(WriteScope):
+        access = adapter.store_access(write, store_dir())
+        for at in range(len(flags) - len(access) + 1) if access else ():
+            if flags[at : at + len(access)] == access:
+                return flags[:at] + flags[at + len(access) :], write
+    return flags, ""
 
 
 NO_ACCOUNT = ""

@@ -81,14 +81,13 @@ def test_settings_offer_codexs_approval_policies_and_keep_an_old_untrusted_shown
 def test_launch_lines_show_each_agents_flags_and_a_refusal() -> None:
     coder, reviewer = FleetRoleSettings(worktree=True), FleetRoleSettings()
     assert "Codex --approve-for-me" in launch_line("coder", "codex", coder).plain
-    assert (
-        "--sandbox read-only --ask-for-approval on-request"
-        in launch_line("reviewer", "codex", reviewer).plain
-    )
+    seat = launch_line("reviewer", "codex", reviewer).plain
+    assert "--ask-for-approval on-request -c 'approvals_reviewer=\"auto_review\"'" in seat
+    assert "+ the aisquare store, writable in its read_only sandbox" in seat
     claude = launch_line("coder", "claude-code", coder).plain
     assert "Claude Code --permission-mode auto" in claude and "--name" not in claude
     off = coder.model_copy(update={"approve_for_me": False})
-    assert "--sandbox workspace-write" in launch_line("coder", "codex", off).plain
+    assert "writable in its workspace sandbox" in launch_line("coder", "codex", off).plain
     clash = coder.model_copy(update={"approve_for_me": True, "sandbox": "read-only"})
     refused = launch_line("coder", "codex", clash).plain
     assert "refused at spawn" in refused and "approve_for_me" in refused
@@ -115,7 +114,7 @@ def test_settings_save_approve_for_me_and_follow_the_roles_agent(tmp_path: Path)
 
     codex, off, claude = drive(team_project(tmp_path), scenario)
     assert "--approve-for-me" in codex  # the user default is Codex
-    assert "--approve-for-me" not in off and "--sandbox workspace-write" in off
+    assert "--approve-for-me" not in off and "writable in its workspace sandbox" in off
     assert "Claude Code --permission-mode auto" in claude
     saved = load_config()
     assert saved.fleet.roles["coder"].approve_for_me is False
@@ -192,7 +191,7 @@ def test_the_spawn_dialog_passes_account_and_permission_in_the_agents_words(
         assert sandbox_shown and not mode_shown
         assert (kwargs["sandbox"], kwargs["approval_policy"]) == ("read-only", "on-request")
         assert kwargs["permission_mode"] is None
-        assert "--sandbox read-only --ask-for-approval on-request" in line
+        assert "--ask-for-approval on-request" in line and "its read_only sandbox" in line
     else:
         assert mode_shown and not sandbox_shown
         assert kwargs["permission_mode"] == "plan"

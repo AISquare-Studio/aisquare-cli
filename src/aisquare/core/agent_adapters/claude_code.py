@@ -16,6 +16,7 @@ from aisquare.core.agent_adapters.types import (
     NativeChoice,
     PermissionIntent,
     PluginInstall,
+    WriteScope,
     block_reply,
     option_occurrences,
     option_values,
@@ -334,6 +335,9 @@ class ClaudeCodeAdapter:
         return (["--permission-mode", mode] if not chosen else []) + (
             denied if intent.write == "read_only" else []
         )
+
+    def store_access(self, write: WriteScope, store: Path) -> list[str]:
+        return []  # no sandbox: its tools write wherever the user can, the store included
 
     def fleet_args(
         self,

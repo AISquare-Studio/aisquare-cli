@@ -25,10 +25,13 @@ from aisquare.core.agent_adapters.types import (
     HooksSwitch,
     NativeChoice,
     PermissionIntent,
+    WriteScope,
     config_home,
     option_occurrences,
     option_values,
     payload_text,
+    store_dir,
+    store_read_only,
 )
 
 #: Its native event names, each the kind it decodes to.
@@ -66,7 +69,10 @@ class FakeAgentAdapter:
         ),
         hook_names_home=True,
         strict_hooks_file=True,
-        value_options=frozenset({"--model", "--effort", "--title", "--write", "--approvals"}),
+        sandboxes_tools=True,
+        value_options=frozenset(
+            {"--model", "--effort", "--title", "--write", "--approvals", "--writable", "--readonly"}
+        ),
         switch_options=frozenset({"--no-subagents"}),
     )
 
@@ -174,7 +180,21 @@ class FakeAgentAdapter:
     ) -> list[str]:
         if "--write" in native or "--approvals" in native:
             return []
-        return ["--write", intent.write, "--approvals", intent.approvals]
+        return [
+            "--write",
+            intent.write,
+            "--approvals",
+            intent.approvals,
+            *self.store_access(intent.write, store_dir()),
+        ]
+
+    def store_access(self, write: WriteScope, store: Path) -> list[str]:
+        # Its sandbox takes more writable directories, and read-only ones within them;
+        # with `full` it has none.
+        if write == "full":
+            return []
+        kept = [arg for path in store_read_only(store) for arg in ("--readonly", str(path))]
+        return ["--writable", str(store), *kept]
 
     def fleet_args(
         self,

@@ -126,6 +126,12 @@ class AgentCapabilities:
     first_context_file_only: bool = False
     sandbox_permissions: bool = False
     """``fleet.roles.<role>.sandbox``/``approval_policy``/``approve_for_me`` apply."""
+    sandboxes_tools: bool = False
+    """The agent runs its tools' commands in an OS sandbox that confines their writes
+    (Codex's), and every board call an agent makes opens the aisquare store for writing,
+    a read included: its permission flags make the store reachable from the sandbox
+    (:meth:`AgentAdapter.store_access`), or each ``aisquare`` call is an escalation.
+    Claude Code runs its tools unsandboxed."""
     legacy_fleet_args: bool = False
     """``fleet.roles.<role>.extra_args`` and ``permission_mode`` are in this agent's
     vocabulary (they predate adapters and are Claude Code's); another agent takes only
@@ -251,6 +257,34 @@ class PermissionIntent:
         return f"{self.write}:{self.approvals}"
 
 
+def store_dir() -> Path:
+    """The aisquare home a launch from this process gives its agent, and so the store the
+    agent's ``aisquare`` calls open: what :meth:`AgentAdapter.store_access` makes reachable."""
+    home = paths.expand_user(paths.aisquare_home())
+    try:
+        return home.resolve()
+    except (OSError, RuntimeError):
+        return home.absolute()
+
+
+def store_read_only(store: Path) -> tuple[Path, ...]:
+    """What under the aisquare home ``store`` a sandboxed agent may read and not write:
+    every agent's account homes and their temporary directories (their hooks, settings
+    and logins run outside any sandbox, so a write there is a way out of it), the
+    credentials, and the config (which chooses every later launch's flags). Everything
+    else there, the store's database first, is the board's to write."""
+    from aisquare.core.agent_adapters import adapters
+
+    homes = sorted({adapter.accounts.dir_name for adapter in adapters() if adapter.accounts})
+    cache = paths.cache_dir().relative_to(paths.aisquare_home())
+    return (
+        *(store / name for name in homes),
+        *(store / cache / name for name in homes),
+        store / paths.credentials_path().name,
+        store / paths.config_path().name,
+    )
+
+
 # --- version probe, hooks switch, plugin route ---------------------------------------------
 
 
@@ -337,8 +371,8 @@ class AgentAdapter(Protocol):
     the config dir), ``capabilities.hooks`` with :func:`hook_args`, ``hooks_off_setting``
     with :meth:`hooks_switch`, ``plugin``. Events: :meth:`decode_event` and
     :meth:`encode_reply`. Launch: :meth:`model_args`, :meth:`permission_args`,
-    :meth:`fleet_args`, :meth:`label_args`, :meth:`resume_args`, ``exit_command``,
-    :meth:`queue_args`,
+    :meth:`store_access`, :meth:`fleet_args`, :meth:`label_args`, :meth:`resume_args`,
+    ``exit_command``, :meth:`queue_args`,
     :meth:`mcp_args`, :meth:`context_files`, :meth:`disable_native_teams`,
     :meth:`telemetry_args`. Accounts: ``accounts``. ``capabilities`` says the rest.
     """
@@ -451,8 +485,17 @@ class AgentAdapter(Protocol):
         self, intent: PermissionIntent, role: str, native: Sequence[str] = ()
     ) -> list[str]:
         """The native flags for ``intent``, less what the ``native`` arguments the launch
-        already carries settle (they win, as an explicit native flag always does). Raises
-        ``ValueError`` for an intent the agent cannot express."""
+        already carries settle (they win, as an explicit native flag always does), with
+        :meth:`store_access` for its write scope wherever its flags choose the sandbox.
+        Raises ``ValueError`` for an intent the agent cannot express."""
+        ...
+
+    def store_access(self, write: WriteScope, store: Path) -> list[str]:
+        """Launch arguments through which a session sandboxed at ``write`` reaches the
+        aisquare store in ``store`` (:func:`store_dir`), its board, with what else lives
+        there read-only (:func:`store_read_only`). ``[]`` without
+        ``capabilities.sandboxes_tools`` (nothing stands between them) and for a scope the
+        agent runs unsandboxed (``full``)."""
         ...
 
     def fleet_args(

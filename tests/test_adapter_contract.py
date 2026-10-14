@@ -43,6 +43,8 @@ from aisquare.core.agent_adapters.types import (
     WriteScope,
     executable_name,
     hook_args,
+    store_dir,
+    store_read_only,
     version_in,
 )
 from aisquare.core.config import FleetRoleSettings, load_config, save_config
@@ -58,6 +60,9 @@ FIXTURES = Path(__file__).parent / "fixtures" / "agent_events"
 REGISTERED = tuple(adapter.id for adapter in adapters())
 ALL = (*REGISTERED, FakeAgentAdapter.id)
 
+#: Stands, in :data:`EXPECTED_PERMISSIONS`, for the adapter's own ``store_access`` for the
+#: intent's write scope, the aisquare home it is given being the test's.
+STORE = "<store_access>"
 #: Each adapter's flags for a coder's and a reviewer's built-in intent
 #: (``PermissionIntent.for_role``): the reviewer's seats are read-only on every agent.
 EXPECTED_PERMISSIONS: dict[str, dict[str, list[str]]] = {
@@ -66,14 +71,25 @@ EXPECTED_PERMISSIONS: dict[str, dict[str, list[str]]] = {
         "reviewer": ["--permission-mode", "auto", "--disallowedTools=Edit Write NotebookEdit"],
     },
     "codex": {
-        "coder": ["--approve-for-me"],
-        "reviewer": ["--sandbox", "read-only", "--ask-for-approval", "on-request"],
+        "coder": ["--approve-for-me", STORE],
+        "reviewer": [
+            "--ask-for-approval",
+            "on-request",
+            "-c",
+            'approvals_reviewer="auto_review"',
+            STORE,
+        ],
     },
     "fake-agent": {
-        "coder": ["--write", "workspace", "--approvals", "auto"],
-        "reviewer": ["--write", "read_only", "--approvals", "auto"],
+        "coder": ["--write", "workspace", "--approvals", "auto", STORE],
+        "reviewer": ["--write", "read_only", "--approvals", "auto", STORE],
     },
 }
+
+
+def _expected(adapter: AgentAdapter, intent: PermissionIntent, flags: list[str]) -> list[str]:
+    store = adapter.store_access(intent.write, store_dir())
+    return [arg for flag in flags for arg in (store if flag == STORE else [flag])]
 
 
 @pytest.fixture(autouse=True)
@@ -350,10 +366,46 @@ def test_permission_intent_maps_every_combination(adapter: AgentAdapter) -> None
             assert args and all(isinstance(arg, str) for arg in args)
     expected = EXPECTED_PERMISSIONS[adapter.id]
     for role, flags in expected.items():
-        assert adapter.permission_args(PermissionIntent.for_role(role), role) == flags
+        intent = PermissionIntent.for_role(role)
+        assert adapter.permission_args(intent, role) == _expected(adapter, intent, flags)
     assert expected["reviewer"] != expected["coder"], "the reviewer's seats are read-only"
     with pytest.raises(ValueError):
         PermissionIntent.parse("everything:yes")
+
+
+def _runs_within(inner: list[str], outer: list[str]) -> bool:
+    return any(outer[at : at + len(inner)] == inner for at in range(len(outer) - len(inner) + 1))
+
+
+def test_a_sandboxed_agent_reaches_the_store(adapter: AgentAdapter, tmp_path: Path) -> None:
+    """Every board call an agent makes (``aisquare note``, ``task claim``, a read too) opens
+    the aisquare store for writing: an agent whose sandbox confines its tools' writes
+    declares how its launch reaches the store (``store_access``), with the account homes,
+    the credentials and the config read-only within it, and every permission the fleet
+    maps for it carries that, the role's built-in ones included."""
+    store = tmp_path / "aisquare-home"
+    for write in get_args(WriteScope):
+        access = adapter.store_access(write, store)
+        assert all(isinstance(arg, str) for arg in access)
+        if not adapter.capabilities.sandboxes_tools:
+            assert access == [], "no sandbox stands between the agent and the store"
+        elif write != "full":
+            named = " ".join(access)
+            assert str(store) in named, f"{adapter.id}'s {write} sandbox leaves the store out"
+            for kept in store_read_only(store):
+                assert str(kept) in named, f"{kept} must stay read-only in the sandbox"
+    for write in get_args(WriteScope):
+        for approvals in get_args(Approvals):
+            intent = PermissionIntent(write, approvals)
+            try:
+                args = adapter.permission_args(intent, "coder")
+            except ValueError:
+                continue
+            assert _runs_within(adapter.store_access(write, store_dir()), args), intent
+    for role in harness.ROLE_PROFILES:
+        write = PermissionIntent.for_role(role).write
+        launched = adapter.fleet_args(role, f"{role}-1", None)
+        assert _runs_within(adapter.store_access(write, store_dir()), launched), role
 
 
 def test_resume_exit_mcp_context_teams_and_telemetry(adapter: AgentAdapter, tmp_path: Path) -> None:
@@ -378,7 +430,10 @@ def test_resume_exit_mcp_context_teams_and_telemetry(adapter: AgentAdapter, tmp_
 
 
 def test_the_fake_agent_runs_through_the_fleet_like_any_other(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+    fake_agent: FakeAgentAdapter,
 ) -> None:
     config = load_config()
     config.fleet.roles["coder"] = FleetRoleSettings(worktree=False)
@@ -399,7 +454,16 @@ def test_the_fake_agent_runs_through_the_fleet_like_any_other(
     assert isinstance(command, list)
     native = command[command.index("--") + 1 :]
     label = receipt.agent.label
-    assert native[:6] == ["--write", "workspace", "--approvals", "auto", "--title", label]
+    store = fake_agent.store_access("workspace", store_dir())
+    assert native[: 6 + len(store)] == [
+        "--write",
+        "workspace",
+        "--approvals",
+        "auto",
+        *store,
+        "--title",
+        label,
+    ]
     env = spawned["env"]
     assert isinstance(env, dict) and env["FAKE_AGENT_TEAMS"] == "off"
     assert "--no-subagents" in native

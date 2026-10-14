@@ -31,7 +31,7 @@ from aisquare.cli.ui.views.settings import launch_line
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import harness
 from aisquare.core.agent_adapters import get_adapter
-from aisquare.core.agent_adapters.types import AgentAdapter
+from aisquare.core.agent_adapters.types import AgentAdapter, store_dir
 from aisquare.core.config import (
     REVIEWER_ARGS,
     AgentModelDefault,
@@ -705,19 +705,38 @@ def _spawn_native(server: FakeTmux) -> list[str]:
     return native[: native.index("--")] if "--" in native else native
 
 
+#: Who answers Codex's approvals, pinned (``approvals_reviewer``).
+HUMAN = ["-c", 'approvals_reviewer="user"']
+REVIEWED = ["-c", 'approvals_reviewer="auto_review"']
+
+
+def _codex_flags(*flags: str) -> list[str]:
+    """``flags`` with ``STORE:<write scope>`` standing for Codex's store profile for that
+    scope, the aisquare home being this test's (known only once the test runs)."""
+    return [
+        arg
+        for flag in flags
+        for arg in (
+            CODEX.store_access(flag.partition(":")[2], store_dir())  # type: ignore[arg-type]
+            if flag.startswith("STORE:")
+            else [flag]
+        )
+    ]
+
+
 @pytest.mark.parametrize(
     ("intent", "claude", "codex"),
     [
-        ("workspace:auto", ["--permission-mode", "auto"], ["--approve-for-me"]),
+        ("workspace:auto", ["--permission-mode", "auto"], ["--approve-for-me", "STORE:workspace"]),
         (
             "workspace:ask",
             ["--permission-mode", "manual"],
-            ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"],
+            ["--ask-for-approval", "on-request", *HUMAN, "STORE:workspace"],
         ),
         (
             "full:never",
             ["--permission-mode", "bypassPermissions"],
-            ["--sandbox", "danger-full-access", "--ask-for-approval", "never"],
+            ["--ask-for-approval", "never", "--sandbox", "danger-full-access"],
         ),
     ],
 )
@@ -740,6 +759,7 @@ def test_one_role_permission_maps_to_each_agents_flags(
     codex_native = _spawn_native(tmux)
 
     assert claude_native[: len(claude)] == claude and "--sandbox" not in claude_native
+    codex = _codex_flags(*codex)
     assert codex_native[: len(codex)] == codex and "--permission-mode" not in codex_native
     for row in (on_claude, on_codex):
         assert row.launch_spec is not None and row.launch_spec.permission_mode == intent
@@ -765,7 +785,8 @@ def test_the_reviewers_read_only_seat_is_denied_its_editing_tools_once(
     codex = _spawn_native(tmux)
 
     assert claude.count(REVIEWER_ARGS[0]) == 1 and _flag(claude, "--permission-mode") == "auto"
-    assert codex[:4] == ["--sandbox", "read-only", "--ask-for-approval", "on-request"]
+    seat = _codex_flags("--ask-for-approval", "on-request", *REVIEWED, "STORE:read_only")
+    assert codex[: len(seat)] == seat
 
 
 def test_a_spawns_intent_wins_over_the_roles_and_a_restart_maps_it_again(
@@ -779,11 +800,12 @@ def test_a_spawns_intent_wins_over_the_roles_and_a_restart_maps_it_again(
     agent = fleet_service.spawn(
         project, "coder", agent="codex", permission_mode="read_only:never"
     ).agent
-    assert _spawn_native(tmux)[:4] == ["--sandbox", "read-only", "--ask-for-approval", "never"]
+    flags = _codex_flags("--ask-for-approval", "never", "STORE:read_only")
+    assert _spawn_native(tmux)[: len(flags)] == flags
 
     fleet_service.restart(project, agent.label)
 
-    assert _spawn_native(tmux)[:4] == ["--sandbox", "read-only", "--ask-for-approval", "never"]
+    assert _spawn_native(tmux)[: len(flags)] == flags
 
 
 def test_an_intent_is_refused_before_a_window_beside_a_native_flag_or_where_an_agent_cannot(
@@ -806,7 +828,8 @@ def test_an_intent_is_refused_before_a_window_beside_a_native_flag_or_where_an_a
     save_config(config)
     fleet_service.spawn(project, "coder", agent="codex", sandbox="read-only")
     native = _spawn_native(tmux)
-    assert "--approve-for-me" not in native and _flag(native, "--sandbox") == "read-only"
+    flags = _codex_flags(*HUMAN, "STORE:read_only")
+    assert "--approve-for-me" not in native and native[: len(flags)] == flags
 
 
 def test_a_restart_refuses_a_permission_the_rows_agent_cannot_take_before_stopping_it(
@@ -825,12 +848,11 @@ def test_a_restart_refuses_a_permission_the_rows_agent_cannot_take_before_stoppi
         codex.project, codex.agent.label, permission_mode="workspace:ask"
     )
 
-    assert _spawn_native(tmux)[:4] == [
-        "--sandbox",
-        "workspace-write",
-        "--ask-for-approval",
-        "on-request",
-    ]
+    # The human answers on the resumed thread, which kept Codex's reviewer otherwise
+    # (t8 smoke: the restarted coder's /permissions still read "Approve for me").
+    flags = _codex_flags("--ask-for-approval", "on-request", *HUMAN, "STORE:workspace")
+    assert _spawn_native(tmux)[: len(flags)] == flags
+    assert "--approve-for-me" not in _spawn_native(tmux)
     spec = receipt.started.launch_spec
     assert spec is not None and spec.permission_mode == "workspace:ask"
 
@@ -840,6 +862,11 @@ def test_the_settings_line_shows_one_permission_for_every_agent() -> None:
     line = launch_line("coder", "codex", settings).plain
     assert line.index("Codex --approve-for-me") < line.index("Claude Code --permission-mode auto")
     assert "workspace:auto" in line and "--name" not in line
+    # The store's profile is the same long run for every role: named, not spelled out.
+    assert "+ the aisquare store, writable in its workspace sandbox" in line
+    assert "permissions.aisquare" not in line
+    reviewer = launch_line("reviewer", "codex", FleetRoleSettings()).plain
+    assert 'approvals_reviewer="auto_review"' in reviewer and "its read_only sandbox" in reviewer
     refused = launch_line("coder", "claude-code", FleetRoleSettings(permission="full:auto")).plain
     assert "Claude Code --permission-mode auto" in refused
     assert "Codex: refused at spawn" in refused

@@ -22,6 +22,7 @@ from aisquare.core.agent_adapters.types import (
     NativeChoice,
     PermissionIntent,
     PluginInstall,
+    WriteScope,
     block_reply,
     config_assignment,
     config_home,
@@ -29,6 +30,8 @@ from aisquare.core.agent_adapters.types import (
     option_values,
     payload_cwd,
     payload_text,
+    store_dir,
+    store_read_only,
 )
 from aisquare.core.codex_accounts import CodexAccounts
 
@@ -129,12 +132,30 @@ class CodexPlugin:
         return f"CODEX_HOME={shlex.quote(str(config_dir))} {command}"
 
 
-#: ``--sandbox`` for each write scope of a :class:`PermissionIntent`.
+#: Each write scope of a :class:`PermissionIntent` in ``--sandbox``'s words, and back.
 _SANDBOXES = {
     "read_only": "read-only",
     "workspace": "workspace-write",
     "full": "danger-full-access",
 }
+_SCOPES: dict[str, WriteScope] = {"read-only": "read_only", "workspace-write": "workspace"}
+#: The permission profile (``[permissions.<name>]``, chosen by ``default_permissions``) a
+#: fleet launch defines for its sandbox: Codex's built-in profile for the write scope with
+#: the aisquare store added (:meth:`CodexAdapter.store_access`).
+PERMISSION_PROFILE = "aisquare"
+_BUILT_IN_PROFILES = {"read_only": ":read-only", "workspace": ":workspace"}
+#: ``-c`` keys (and their tables) that choose the sandbox: given natively, the sandbox is
+#: the operator's, and Codex refuses ``sandbox_mode`` beside ``default_permissions``.
+_SANDBOX_SETTINGS = (
+    "sandbox_mode",
+    "sandbox_workspace_write",
+    "default_permissions",
+    "permission_profile",
+)
+#: Who answers an approval request (``approvals_reviewer``): the human, or Codex's
+#: automatic reviewer (``--approve-for-me``; its old name ``guardian_subagent`` is
+#: recorded as this one).
+REVIEWERS = {"ask": "user", "auto": "auto_review"}
 #: The hook events AISquare installs (``capabilities.hooks``) and decodes.
 _EVENTS = {
     "SessionStart": "session_start",
@@ -187,6 +208,7 @@ class CodexAdapter:
         idle_prompt_mark="? for shortcuts",
         first_context_file_only=True,
         sandbox_permissions=True,
+        sandboxes_tools=True,
         tool_shell_env="CODEX_THREAD_ID",
         # -c and -a as well: `fleet spawn` owns neither. `launch` owns both, and keeps
         # -c KEY=VALUE for Codex by its shape; its -a is --account (`launch --help`).
@@ -458,16 +480,20 @@ class CodexAdapter:
         approve_for_me: bool | None = None,
         native: Sequence[str] = (),
     ) -> list[str]:
-        """The fleet's sandbox and approval flags for ``role``.
+        """The fleet's sandbox and approval flags for ``role``, from its settings in Codex's
+        words.
 
-        ``--approve-for-me`` (Codex's automatic reviewer, in the workspace-write
-        sandbox) is the analogue of Claude Code's ``auto`` mode, which the fleet
-        gives every role but a reviewer's seats; Codex refuses it beside
-        ``--sandbox`` or ``--ask-for-approval``, so it replaces both. Unset
-        (``None``) it is on unless a sandbox or an approval policy is chosen, by the
-        role's settings, this spawn or its ``native`` arguments.
-        A reviewer is ``--sandbox read-only --ask-for-approval on-request``.
-        What the ``native`` arguments already choose is not given a second time.
+        With none chosen (``sandbox``, ``approval`` and ``approve_for_me`` unset), the
+        role's built-in permission (``PermissionIntent.for_role``, :meth:`permission_args`):
+        ``--approve-for-me`` (Codex's automatic reviewer, in the workspace-write sandbox),
+        the analogue of Claude Code's ``auto`` mode, and for a reviewer's seats the
+        read-only sandbox with that same reviewer. Codex refuses ``--approve-for-me``
+        beside ``--sandbox`` or ``--ask-for-approval``, so a chosen sandbox or policy runs
+        without it (``approve_for_me = true`` beside one is refused). A chosen sandbox is
+        the store's profile for it (:meth:`store_access`; ``danger-full-access`` is
+        ``--sandbox``), and ``on-request`` without ``--approve-for-me`` is the human's to
+        answer (``approvals_reviewer="user"``). What the ``native`` arguments already
+        choose is not given a second time.
         """
         # Native modes are deliberately distinct from Claude's approval vocabulary.
         if sandbox is not None and permission_mode is not None:
@@ -487,16 +513,10 @@ class CodexAdapter:
             raise ValueError(
                 f"Codex approval policy must be {' or '.join(APPROVAL_POLICIES)}, not {approval!r}"
             )
+        if approve_for_me is None and sandbox is None and approval is None:
+            return self.permission_args(PermissionIntent.for_role(role), role, native)
         reviewer = harness.base_role(role) == "reviewer"
         native_sandbox, native_approval = _native_approvals(native)
-        if approve_for_me is None:
-            approve_for_me = (
-                not reviewer
-                and sandbox is None
-                and approval is None
-                and native_sandbox is None
-                and native_approval is None
-            )
         if approve_for_me:
             clash = (
                 f"--sandbox {sandbox}"
@@ -511,37 +531,109 @@ class CodexAdapter:
                     f"and cannot run with {clash}; set fleet.roles.{role}.approve_for_me = "
                     "false to use it"
                 )
-            return ["--approve-for-me"]
+            return ["--approve-for-me", *self._sandbox("workspace", native)]
         if sandbox is None:
             sandbox = "read-only" if reviewer else "workspace-write"
         if approval is None and reviewer:
             approval = "on-request"
-        return (["--sandbox", sandbox] if sandbox and native_sandbox is None else []) + (
-            ["--ask-for-approval", approval] if approval and native_approval is None else []
-        )
+        return [
+            *(["--ask-for-approval", approval] if approval and native_approval is None else []),
+            *(self._reviewer("ask", native) if approval != "never" else []),
+            *(self._sandbox(_SCOPES.get(sandbox, "full"), native) if sandbox else []),
+        ]
 
     def permission_args(
         self, intent: PermissionIntent, role: str, native: Sequence[str] = ()
     ) -> list[str]:
-        """``workspace:auto`` is ``--approve-for-me`` (the automatic reviewer, which runs
-        only in workspace-write, so ``full:auto`` is refused); every other intent is
-        ``--sandbox`` with ``--ask-for-approval``, ``ask`` and a read-only ``auto`` being
-        ``on-request`` (a reviewer's seats, as :meth:`fleet_args` gives them). What
-        ``native`` already chooses wins: ``--approve-for-me`` cannot sit beside a native
-        sandbox or policy (Codex refuses the launch), so it is left to them, and a native
-        ``--sandbox`` or ``--ask-for-approval`` is not given a second time."""
+        """The write scope is the sandbox, the approvals who answers what it does not
+        allow (measured on 0.162.1):
+
+        - ``read_only`` and ``workspace`` are the store's profile (:meth:`store_access`),
+          never ``--sandbox``, which would replace it; ``full`` is ``--sandbox
+          danger-full-access``.
+        - ``auto`` is Codex's automatic reviewer: ``--approve-for-me`` in the workspace,
+          ``on-request`` with ``approvals_reviewer="auto_review"`` read-only (a reviewer's
+          seats); ``full:auto`` is refused, as ``--approve-for-me`` runs only in
+          workspace-write.
+        - ``ask`` is ``on-request`` with ``approvals_reviewer="user"``: the human answers,
+          on a resumed thread too, which keeps the reviewer it ran under otherwise, and
+          whatever config.toml names.
+        - ``never`` is ``--ask-for-approval never``.
+
+        What ``native`` already chooses wins and is not given twice: ``--approve-for-me``
+        cannot sit beside a native sandbox or policy (Codex refuses the launch), so it is
+        left to them, and a native sandbox or reviewer is the operator's
+        (:meth:`_sandbox`)."""
         if intent.approvals == "auto" and intent.write == "full":
             raise ValueError(
                 "Codex reviews approvals automatically only in the workspace-write sandbox; "
                 "use full:ask or full:never"
             )
         native_sandbox, native_approval = _native_approvals(native)
+        sandbox = self._sandbox(intent.write, native)
         if intent.approvals == "auto" and intent.write == "workspace":
-            return [] if native_sandbox or native_approval else ["--approve-for-me"]
+            return sandbox if native_sandbox or native_approval else ["--approve-for-me", *sandbox]
         approval = "never" if intent.approvals == "never" else "on-request"
-        return (["--sandbox", _SANDBOXES[intent.write]] if native_sandbox is None else []) + (
-            ["--ask-for-approval", approval] if native_approval is None else []
+        return [
+            *(["--ask-for-approval", approval] if native_approval is None else []),
+            *(self._reviewer(intent.approvals, native) if approval != "never" else []),
+            *sandbox,
+        ]
+
+    def store_access(self, write: WriteScope, store: Path) -> list[str]:
+        """``-c`` settings that run the session under the profile :data:`PERMISSION_PROFILE`:
+        Codex's built-in one for ``write`` (``:read-only``, ``:workspace``) with ``store``
+        writable and :func:`store_read_only` read-only within it, the more specific path
+        winning. ``full`` runs unsandboxed: nothing to add.
+
+        Measured on 0.162.1, with the store outside ``/tmp`` (which every sandbox may
+        write): ``aisquare note`` and ``aisquare board`` succeed on their first, sandboxed
+        attempt in the TUI, ``exec`` and ``resume``; the profile holds beside
+        ``--approve-for-me`` and over a ``sandbox_mode`` in config.toml, and gives way to
+        ``--sandbox`` and to a pick in Codex's own ``/permissions``, which drops it until
+        the next launch. Codex's guards in the workspace (``.git``, ``.codex``,
+        ``.agents``) still hold, and a read-only path that does not exist cannot be made.
+        """
+        if write == "full":
+            return []
+        entries = {store: "write", **dict.fromkeys(store_read_only(store), "read")}
+        table = ", ".join(
+            f"{json.dumps(str(path))} = {json.dumps(at)}" for path, at in entries.items()
         )
+        profile = f"permissions.{PERMISSION_PROFILE}"
+        return [
+            "-c",
+            f"default_permissions={json.dumps(PERMISSION_PROFILE)}",
+            "-c",
+            f"{profile}.extends={json.dumps(_BUILT_IN_PROFILES[write])}",
+            "-c",
+            f"{profile}.filesystem={{{table}}}",
+        ]
+
+    def _sandbox(self, write: WriteScope, native: Sequence[str]) -> list[str]:
+        """The sandbox for ``write``, unless ``native`` chose one: a native ``--sandbox``
+        replaces any profile (the store is then the operator's to reach) and a sandbox
+        setting (``-c sandbox_mode=…``) cannot sit beside one, while ``--approve-for-me``
+        runs in the workspace's, the store with it."""
+        chosen, _ = _native_approvals(native)
+        if _native_setting(native, _SANDBOX_SETTINGS):
+            return []
+        if chosen == "--approve-for-me":
+            return self.store_access("workspace", store_dir())
+        if chosen is not None:
+            return []
+        if write == "full":
+            return ["--sandbox", _SANDBOXES["full"]]
+        return self.store_access(write, store_dir())
+
+    @staticmethod
+    def _reviewer(approvals: str, native: Sequence[str]) -> list[str]:
+        """``approvals_reviewer`` for ``ask`` or ``auto``, unless ``native`` chose one, or
+        chose a switch that settles it (``--approve-for-me``, ``--yolo``)."""
+        chosen, _ = _native_approvals(native)
+        if chosen in _APPROVAL_SWITCHES or _native_setting(native, ("approvals_reviewer",)):
+            return []
+        return ["-c", f"approvals_reviewer={json.dumps(REVIEWERS[approvals])}"]
 
     def label_args(self, label: str) -> list[str]:
         return []
@@ -684,3 +776,13 @@ def _native_approvals(args: Sequence[str]) -> tuple[str | None, str | None]:
         for value in option_values(args, option):
             approval = approval or f"{option} {value}"
     return sandbox, approval
+
+
+def _native_setting(args: Sequence[str], keys: Sequence[str]) -> str | None:
+    """The first ``-c`` in ``args`` that sets one of ``keys`` or a key of its table, as
+    written, else ``None``."""
+    for item in option_occurrences(args, "-c", "--config"):
+        key = item.value.partition("=")[0].strip()
+        if any(key == name or key.startswith(f"{name}.") for name in keys):
+            return item.value
+    return None

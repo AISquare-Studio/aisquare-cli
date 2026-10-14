@@ -8,6 +8,7 @@ configuration reference, and the flag conflicts from the binary itself (it refus
 from __future__ import annotations
 
 import json
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,12 @@ from aisquare.core import agents
 from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.agent_adapters import get_adapter as _get_adapter
 from aisquare.core.agent_adapters.codex import CodexAdapter
-from aisquare.core.agent_adapters.types import BadEffortError
+from aisquare.core.agent_adapters.types import (
+    BadEffortError,
+    PermissionIntent,
+    WriteScope,
+    store_dir,
+)
 from aisquare.core.config import (
     AgentModelSettings,
     FleetRoleSettings,
@@ -104,44 +110,70 @@ def test_untrusted_is_refused_naming_the_policies_codex_takes() -> None:
         codex.fleet_args("coder", "coder-1", None, approval="untrusted")
 
 
+#: Who answers Codex's approvals, pinned (``approvals_reviewer``).
+HUMAN = ["-c", 'approvals_reviewer="user"']
+REVIEWED = ["-c", 'approvals_reviewer="auto_review"']
+
+
+def _store(write: WriteScope) -> list[str]:
+    """Codex's store profile for ``write``, the aisquare home being this test's."""
+    return codex.store_access(write, store_dir())
+
+
 @pytest.mark.parametrize("approval", ["on-request", "never"])
 def test_the_supported_policies_are_passed(approval: str) -> None:
     assert codex.fleet_args("coder", "coder-1", None, approval=approval) == [
-        "--sandbox",
-        "workspace-write",
         "--ask-for-approval",
         approval,
+        *(HUMAN if approval == "on-request" else []),
+        *_store("workspace"),
     ]
 
 
 @pytest.mark.parametrize("role", ["coder", "manager", "tester", "validator", "coder2"])
 def test_approve_for_me_is_the_default_for_every_role_but_a_reviewer(role: str) -> None:
-    assert codex.fleet_args(role, role, None) == ["--approve-for-me"]
+    assert codex.fleet_args(role, role, None) == ["--approve-for-me", *_store("workspace")]
 
 
 @pytest.mark.parametrize("role", ["reviewer", "reviewer2"])
-def test_a_reviewer_stays_read_only_on_request(role: str) -> None:
+def test_a_reviewer_stays_read_only_with_codexs_own_reviewer(role: str) -> None:
+    """``read_only:auto``, as the intent maps it: on-request, answered by Codex's reviewer
+    as every other role's ``--approve-for-me`` is, in the read-only sandbox."""
     assert codex.fleet_args(role, role, None) == [
-        "--sandbox",
-        "read-only",
         "--ask-for-approval",
         "on-request",
+        *REVIEWED,
+        *_store("read_only"),
     ]
+    assert codex.fleet_args(role, role, None) == codex.permission_args(
+        PermissionIntent.for_role(role), role
+    )
 
 
 def test_a_chosen_sandbox_or_policy_turns_the_default_off() -> None:
+    """Without ``--approve-for-me`` the human answers: ``approve_for_me = false`` says so,
+    and config.toml's reviewer must not say otherwise."""
     assert codex.fleet_args("coder", "c", None, sandbox="workspace-write") == [
-        "--sandbox",
-        "workspace-write",
+        *HUMAN,
+        *_store("workspace"),
     ]
-    assert codex.fleet_args("coder", "c", None, sandbox="") == []
+    assert codex.fleet_args("coder", "c", None, sandbox="") == HUMAN
+    assert codex.fleet_args("coder", "c", None, sandbox="danger-full-access") == [
+        *HUMAN,
+        "--sandbox",
+        "danger-full-access",
+    ]
     assert codex.fleet_args("coder", "c", None, approve_for_me=False) == [
-        "--sandbox",
-        "workspace-write",
+        *HUMAN,
+        *_store("workspace"),
     ]
-    assert codex.fleet_args("reviewer", "r", None, approve_for_me=True) == ["--approve-for-me"]
+    assert codex.fleet_args("reviewer", "r", None, approve_for_me=True) == [
+        "--approve-for-me",
+        *_store("workspace"),
+    ]
     assert codex.fleet_args("coder", "c", None, sandbox="workspace-write", approve_for_me=True) == [
-        "--approve-for-me"
+        "--approve-for-me",
+        *_store("workspace"),
     ]
 
 
@@ -164,20 +196,82 @@ def test_approve_for_me_asked_for_beside_a_clash_is_refused(
 @pytest.mark.parametrize(
     "native, expected",
     [
-        (["--no-alt-screen"], ["--approve-for-me"]),
-        (["-a", "never"], ["--sandbox", "workspace-write"]),
-        (["--ask-for-approval=on-request"], ["--sandbox", "workspace-write"]),
+        (["--no-alt-screen"], ["--approve-for-me", "STORE"]),
+        (["-a", "never"], ["STORE"]),
+        (["--ask-for-approval=on-request"], ["STORE"]),
         (["--sandbox", "danger-full-access"], []),
         (["-sread-only"], []),
-        (["--approve-for-me"], []),
+        (["--approve-for-me"], ["STORE"]),
         (["--dangerously-bypass-approvals-and-sandbox"], []),
-        (["--", "--approve-for-me"], ["--approve-for-me"]),
+        (["--", "--approve-for-me"], ["--approve-for-me", "STORE"]),
+        (["-c", 'sandbox_mode="read-only"'], ["--approve-for-me"]),
+        (["-c", 'default_permissions="mine"'], ["--approve-for-me"]),
+        (["--config=sandbox_workspace_write.network_access=true"], ["--approve-for-me"]),
     ],
 )
 def test_the_launch_arguments_own_choices_are_not_given_twice(
     native: list[str], expected: list[str]
 ) -> None:
-    assert codex.fleet_args("coder", "c", None, native=native) == expected
+    """A native ``--sandbox`` replaces any profile and a native sandbox setting cannot sit
+    beside one (Codex: "cannot both be set"), so the store is left to them; beside a native
+    ``--approve-for-me`` (workspace-write) the store's profile still goes."""
+    store = _store("workspace")
+    flags = [arg for flag in expected for arg in (store if flag == "STORE" else [flag])]
+    assert codex.fleet_args("coder", "c", None, native=native) == flags
+
+
+def test_ask_and_auto_pin_who_answers_unless_the_launch_says() -> None:
+    """``ask`` is the human, ``auto`` Codex's reviewer, on a spawn, a restart and a resume
+    alike (a resumed thread keeps its reviewer unless told: t8 smoke on 0.162.1)."""
+    ask = codex.permission_args(PermissionIntent("workspace", "ask"), "coder")
+    assert ask[:4] == ["--ask-for-approval", "on-request", *HUMAN]
+    auto = codex.permission_args(PermissionIntent("read_only", "auto"), "reviewer")
+    assert auto[:4] == ["--ask-for-approval", "on-request", *REVIEWED]
+    never = codex.permission_args(PermissionIntent("workspace", "never"), "coder")
+    assert "approvals_reviewer" not in " ".join(never)
+    mine = ["-c", 'approvals_reviewer="auto_review"']
+    assert "user" not in " ".join(
+        codex.permission_args(PermissionIntent("workspace", "ask"), "coder", mine)
+    )
+
+
+def test_the_store_profile_keeps_what_runs_outside_the_sandbox_read_only(tmp_path: Path) -> None:
+    """Codex's built-in profile for the scope with the aisquare home writable and, within
+    it, every account home, the credentials and the config read-only: a hook or a setting
+    written there would run outside the sandbox (measured on 0.162.1: a blanket
+    ``--add-dir`` of the home let a sandboxed command rewrite its own CODEX_HOME)."""
+    home = tmp_path / "aisquare home"
+    scopes: tuple[tuple[WriteScope, str], ...] = (
+        ("workspace", ":workspace"),
+        ("read_only", ":read-only"),
+    )
+    for write, built_in in scopes:
+        args = codex.store_access(write, home)
+        assert args[:4] == [
+            "-c",
+            'default_permissions="aisquare"',
+            "-c",
+            f'permissions.aisquare.extends="{built_in}"',
+        ]
+        key, _, table = args[5].partition("=")
+        assert args[4] == "-c" and key == "permissions.aisquare.filesystem"
+        entries = tomllib.loads(f"t = {table}")["t"]
+        assert entries[str(home)] == "write"
+        for name in ("codex-accounts", "claude-accounts", "credentials", "config.toml"):
+            assert entries[str(home / name)] == "read", name
+        assert set(entries.values()) == {"write", "read"}
+    assert codex.store_access("full", home) == []
+
+
+def _sandbox_of(command: list[str]) -> str | None:
+    """The Codex sandbox a launch chooses: ``--sandbox``'s value, or the built-in profile
+    the store's profile extends (``:read-only``, ``:workspace``)."""
+    if "--sandbox" in command:
+        return command[command.index("--sandbox") + 1]
+    for arg in command:
+        if arg.startswith("permissions.aisquare.extends="):
+            return str(json.loads(arg.partition("=")[2]))
+    return None
 
 
 def _spawned(
@@ -207,7 +301,7 @@ def test_a_fleet_reviewer_runs_codex_read_only(
 ) -> None:
     command = _spawned(tmp_path, monkeypatch, role)
     assert "--approve-for-me" not in command
-    assert command[command.index("--sandbox") + 1] == "read-only"
+    assert _sandbox_of(command) == ":read-only"
     assert command[command.index("--ask-for-approval") + 1] == "on-request"
 
 
@@ -219,7 +313,7 @@ def test_the_role_setting_and_a_spawn_choice_turn_it_off(
     save_config(config)
     command = _spawned(tmp_path, monkeypatch, "coder")
     assert "--approve-for-me" not in command
-    assert command[command.index("--sandbox") + 1] == "workspace-write"
+    assert _sandbox_of(command) == ":workspace"
     # A numbered seat inherits the base role's choice, as it does the sandbox's.
     assert fleet.role_settings("coder2", config.fleet).approve_for_me is False
     config.fleet.roles["coder"] = FleetRoleSettings(approve_for_me=True)
@@ -230,7 +324,7 @@ def test_the_role_setting_and_a_spawn_choice_turn_it_off(
     # Codex reads a spawn's --permission-mode as its sandbox, a choice of this spawn too.
     command = _spawned(tmp_path, monkeypatch, "coder", permission_mode="read-only")
     assert "--approve-for-me" not in command
-    assert command[command.index("--sandbox") + 1] == "read-only"
+    assert _sandbox_of(command) == ":read-only"
 
 
 def test_a_role_policy_codex_refuses_refuses_the_spawn(

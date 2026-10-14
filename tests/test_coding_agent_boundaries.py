@@ -15,13 +15,24 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import agents, harness, paths
 from aisquare.core.agent_adapters import get_adapter
-from aisquare.core.agent_adapters.types import config_home
+from aisquare.core.agent_adapters.types import config_home, store_dir
 from aisquare.core.config import FleetRoleSettings, RoleLaunchProfile, load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
 from aisquare.models import CheckStatus, TeamSession
 from aisquare.services import agent_launch, diagnostics, fleet, mcp_server, native_telemetry
 from tests.test_fleet_service import FakeTmux
+
+
+def _sandbox_of(command: list[str]) -> str | None:
+    """The Codex sandbox a launch chooses: ``--sandbox``'s value, or the built-in profile
+    the store's profile extends (``:read-only``, ``:workspace``)."""
+    if "--sandbox" in command:
+        return command[command.index("--sandbox") + 1]
+    for arg in command:
+        if arg.startswith("permissions.aisquare.extends="):
+            return str(json.loads(arg.partition("=")[2]))
+    return None
 
 
 @pytest.mark.parametrize("role", ["coder", "reviewer", "reviewer2"])
@@ -50,13 +61,13 @@ def test_saved_codex_permissions_do_not_prevent_a_claude_spawn(
         with pytest.raises(fleet.FleetError, match="Claude Code uses"):
             fleet.spawn(project, role, agent=agent, sandbox="read-only")
     else:
-        assert command[command.index("--sandbox") + 1] == "read-only"
+        assert _sandbox_of(command) == ":read-only"
         assert command[command.index("--ask-for-approval") + 1] == "on-request"
         assert "--permission-mode" not in command
         fleet.spawn(project, role, agent=agent, sandbox="workspace-write", approval_policy="never")
         override = tmux.spawned[-1]["command"]
         assert isinstance(override, list)
-        assert override[override.index("--sandbox") + 1] == "workspace-write"
+        assert _sandbox_of(override) == ":workspace"
         assert override[override.index("--ask-for-approval") + 1] == "never"
 
 
@@ -64,10 +75,11 @@ def test_saved_codex_permissions_do_not_prevent_a_claude_spawn(
 def test_numbered_reviewers_inherit_read_only_defaults(role: str) -> None:
     adapter = get_adapter("codex")
     assert adapter.fleet_args(role, "seat", None) == [
-        "--sandbox",
-        "read-only",
         "--ask-for-approval",
         "on-request",
+        "-c",
+        'approvals_reviewer="auto_review"',
+        *adapter.store_access("read_only", store_dir()),
     ]
     config = load_config()
     config.fleet.roles["reviewer"].sandbox = "read-only"

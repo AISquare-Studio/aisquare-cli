@@ -114,7 +114,9 @@ def test_numbered_seats_do_not_inherit_base_worktrees_or_claude_flags(
     if family == "claude-code":
         assert command[command.index("--permission-mode") + 1] == "auto"
     else:
-        assert command[command.index("--sandbox") + 1] == "read-only"
+        # The sandbox is the store's profile over Codex's own read-only one.
+        assert "--sandbox" not in command
+        assert 'permissions.aisquare.extends=":read-only"' in command
         assert command[command.index("--ask-for-approval") + 1] == "on-request"
 
 

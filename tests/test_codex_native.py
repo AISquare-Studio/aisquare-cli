@@ -83,6 +83,41 @@ def _message(text: str) -> dict[str, Any]:
     }
 
 
+#: What bwrap says when it may not bring up the loopback of the network namespace it gave
+#: a sandboxed command: a GitHub-hosted runner's unprivileged user namespace refuses it.
+_LOOPBACK_REFUSED = "bwrap: loopback:"
+
+
+def _sandbox_refused(binary: str, where: Path) -> str | None:
+    """bwrap's refusal when Codex's sandbox cannot start a command on this host; ``None``
+    when ``codex sandbox -- true`` runs.
+
+    The probe is the sandbox the agent's commands run in (measured on 0.162.1: its own
+    network namespace, with only ``lo``), and the refusal is the one that failed every
+    sandboxed command on the runner, ``bwrap: loopback: Failed RTM_NEWADDR: Operation not
+    permitted``. Only that is a reason to skip: any other failure is the sandbox the test
+    is about, and fails it here.
+    """
+    home = where / "sandbox-probe"
+    home.mkdir()
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("OPENAI_", "CODEX_"))}
+    probe = subprocess.run(
+        [binary, "sandbox", "--", "true"],
+        cwd=where,
+        env={**env, "CODEX_HOME": str(home)},
+        capture_output=True,
+        text=True,
+        timeout=60,
+        stdin=subprocess.DEVNULL,
+    )
+    said = [line.strip() for line in (probe.stdout + probe.stderr).splitlines()]
+    refusal = next((line for line in said if line.startswith(_LOOPBACK_REFUSED)), None)
+    if probe.returncode != 0 and refusal is not None:
+        return refusal
+    assert probe.returncode == 0, "\n".join(said)
+    return None
+
+
 @pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
 def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     binary = shutil.which("codex")
@@ -666,6 +701,9 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
     """
     binary = shutil.which("codex")
     assert binary, "AISQUARE_TEST_CODEX requires an installed Codex"
+    refused = _sandbox_refused(binary, tmp_path)
+    if refused is not None:
+        pytest.skip(f"Codex's sandbox cannot start a command on this host: {refused}")
     outside = Path(tempfile.mkdtemp(prefix="asq-", dir="/var/tmp"))
     store, native_home = outside / "h", outside / "c"
     native_home.mkdir()

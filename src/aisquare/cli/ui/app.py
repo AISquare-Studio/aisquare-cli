@@ -597,7 +597,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             yield Sidebar(id="sidebar")
             # The partition is a widget, not a border: drag it, or step it with
             # < > = from the sidebar; the width is remembered (#137).
-            yield Divider("#sidebar", state_key=SIDEBAR_WIDTH_KEY, id="divider")
+            yield Divider(
+                "#sidebar", state_key=SIDEBAR_WIDTH_KEY, what="the navigator's width", id="divider"
+            )
             with ContentSwitcher(id="content", initial="welcome"):
                 yield WelcomeView(escape_key=self.escape_key, id="welcome")
                 # The Onboard view is built on the first `+` (on_add_project): its

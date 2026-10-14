@@ -3438,7 +3438,7 @@ def test_the_ceiling_rule_reads_what_the_saver_was_last_asked_not_the_last_confi
         await _settled(pilot)
         return (
             app.sidebar.outer_size.width,
-            app.query_one(Divider)._width,
+            app.query_one(Divider)._ask,
             _state(isolated_home)[SIDEBAR_WIDTH_KEY],
         )
 

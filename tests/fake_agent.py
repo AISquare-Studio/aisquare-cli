@@ -228,5 +228,5 @@ class FakeAgentAdapter:
     def disable_native_teams(self) -> tuple[list[str], dict[str, str]]:
         return ["--no-subagents"], {"FAKE_AGENT_TEAMS": "off"}
 
-    def telemetry_args(self, endpoint: str) -> list[str]:
+    def telemetry_args(self, endpoint: str, *, keep_out: Sequence[str] = ()) -> list[str]:
         return []

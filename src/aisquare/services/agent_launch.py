@@ -419,6 +419,21 @@ def telemetry_args(
                 [],
                 f"{adapter.label} keeps your configured exporter; AISquare native tracing is off",
             )
-        return native_telemetry.start_receiver(env, adapter)
+        if env.get(native_telemetry.HEADERS_ENV):
+            # The operator's own (ours was disowned above): the receiver's would replace
+            # it in the agent's environment, and so in every process its tools start.
+            return (
+                [],
+                f"{adapter.label} keeps your {native_telemetry.HEADERS_ENV}; "
+                "AISquare native tracing is off",
+            )
+        excluded = native_telemetry.tool_shell_excludes(home, raw_args or [], Path.cwd())
+        if excluded is None:
+            return (
+                [],
+                f"{adapter.label} keeps your -c {native_telemetry.TOOL_SHELL_POLICY}, which "
+                "would hand AISquare's tracing token to every tool; native tracing is off",
+            )
+        return native_telemetry.start_receiver(env, adapter, excluded)
     except Exception as exc:
         return [], f"{adapter.label} launched without native telemetry: {exc}"

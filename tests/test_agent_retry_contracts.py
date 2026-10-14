@@ -770,6 +770,98 @@ def test_the_receivers_token_is_in_the_launch_environment_never_on_a_command_lin
             child.wait(timeout=10)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Native receiver is POSIX/WSL only")
+def test_the_receivers_header_is_kept_out_of_the_tools_shells_with_the_operators_patterns(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shipping: None,
+) -> None:
+    """Review r2 of #113, finding 5: the header in Codex's environment reached every
+    process its tools start, whose OpenTelemetry SDK sends the signal-specific variable
+    in place of the app's own headers. It is excluded from the tools' shells, and since
+    that ``-c`` replaces the operator's ``exclude`` (0.162.1, measured), theirs, from
+    every layer, go in it too."""
+    monkeypatch.setattr(native_telemetry, "SYSTEM_CONFIG", tmp_path / "system.toml")
+    (tmp_path / "system.toml").write_text(
+        '[shell_environment_policy]\nexclude = ["SYSTEM_*"]\n', encoding="utf-8"
+    )
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "config.toml").write_text(
+        '[shell_environment_policy]\nexclude = ["USER_*", "SYSTEM_*"]\n', encoding="utf-8"
+    )
+    project = tmp_path / "repo" / "sub"
+    (tmp_path / "repo" / ".codex").mkdir(parents=True)
+    (tmp_path / "repo" / ".codex" / "config.toml").write_text(
+        '[shell_environment_policy]\nexclude = ["PROJECT_X"]\n', encoding="utf-8"
+    )
+    project.mkdir()
+    monkeypatch.chdir(project)
+    children: list[subprocess.Popen[bytes]] = []
+    popen = subprocess.Popen
+
+    def receiver(argv: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:
+        child = popen(argv, **kwargs)
+        if "--ready" in argv:
+            children.append(child)
+        return child
+
+    monkeypatch.setattr(subprocess, "Popen", receiver)
+    execute = Mock()
+    monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
+    try:
+        result = runner.invoke(app, ["launch", "coder", "--agent", "codex"])
+        assert result.exit_code == 0, result.output
+        assert "native telemetry enabled" in result.output, result.output
+        _, argv, env = execute.call_args.args
+        key = "shell_environment_policy.exclude="
+        [excluded] = [json.loads(arg.removeprefix(key)) for arg in argv if arg.startswith(key)]
+        assert excluded == ["SYSTEM_*", "USER_*", "PROJECT_X", native_telemetry.HEADERS_ENV]
+        assert env[native_telemetry.HEADERS_ENV]
+    finally:
+        for child in children:
+            child.send_signal(signal.SIGINT)
+            child.wait(timeout=10)
+
+
+def test_the_operators_own_tool_shell_exclude_or_header_leaves_native_tracing_off(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shipping: None,
+) -> None:
+    """An ``exclude`` the operator passes with ``-c`` comes after ours and replaces it, and
+    a header variable of the operator's own the receiver's would replace for every tool:
+    both keep tracing off rather than hand the token on, and the operator's value stays."""
+    monkeypatch.setattr(native_telemetry, "SYSTEM_CONFIG", tmp_path / "system.toml")
+    started = Mock(side_effect=AssertionError("a receiver started"))
+    monkeypatch.setattr(native_telemetry, "start_receiver", started)
+    for args in (
+        ["-c", 'shell_environment_policy.exclude=["MINE"]'],
+        ["-c", 'shell_environment_policy={inherit="all"}'],
+    ):
+        assert native_telemetry.tool_shell_excludes(tmp_path, args, tmp_path) is None
+    assert (
+        native_telemetry.tool_shell_excludes(
+            tmp_path, ["-c", 'shell_environment_policy.inherit="core"'], tmp_path
+        )
+        == []
+    ), "a sibling key merges with ours"
+    selected = agent_launch.resolve(agent="codex")
+    env = {"AISQUARE_LAUNCH_ID": "launch-1"}
+
+    args, note = agent_launch.telemetry_args(
+        selected, env, ["-c", 'shell_environment_policy.exclude=["MINE"]']
+    )
+    assert args == [] and "native tracing is off" in note
+
+    theirs = "x-honeycomb-team=abc"
+    env[native_telemetry.HEADERS_ENV] = theirs
+    args, note = agent_launch.telemetry_args(selected, env, [])
+    assert args == [] and native_telemetry.HEADERS_ENV in note
+    assert env[native_telemetry.HEADERS_ENV] == theirs
+
+
 @pytest.mark.parametrize("inherited", ["ours", "the operator's"])
 def test_a_launch_drops_only_a_receiver_header_it_inherited(
     inherited: str,

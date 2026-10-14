@@ -25,7 +25,7 @@ import subprocess
 import tempfile
 import time
 import tomllib
-from collections.abc import Callable, Iterator, MutableMapping
+from collections.abc import Callable, Iterator, MutableMapping, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -75,13 +75,10 @@ def _read_config(path: Path, layer: str) -> dict[str, Any]:
     ) from cause
 
 
-def operator_configured(config_dir: Path, args: list[str]) -> bool:
-    """Preserve exporters in native user/system config and the selected profile.
-
-    Codex ignores `otel` in project-local config. Other account homes and
-    unselected profile files are not layers of this launch either.
-    """
-    overrides: list[dict[str, Any]] = []
+def _overrides(args: list[str]) -> list[tuple[str, dict[str, Any]]]:
+    """Each ``-c``/``--config`` override in ``args``: its key as written, and its value parsed
+    as Codex parses it; one that does not parse is Codex's to refuse, and skipped."""
+    overrides: list[tuple[str, dict[str, Any]]] = []
     for value in option_values(args, "-c", "--config"):
         key, separator, raw = value.partition("=")
         if not separator:
@@ -94,11 +91,17 @@ def operator_configured(config_dir: Path, args: list[str]) -> bool:
                 parsed = tomllib.loads(f"{key}={json.dumps(raw)}")
         except (tomllib.TOMLDecodeError, RecursionError):
             continue  # Native argument validation belongs to Codex.
-        if "otel" in parsed:
-            return True
         # Keep each dotted override: a shallow update would erase sibling keys
         # under profiles when a later -c configures something else there.
-        overrides.append(parsed)
+        overrides.append((key.strip(), parsed))
+    return overrides
+
+
+def _layers(
+    config_dir: Path, args: list[str], overrides: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], str | None]:
+    """The user and system config of ``config_dir``'s launch, ``overrides``, and the
+    selected profile's file, in Codex's order; with the profile that selects."""
     configs = [
         _read_config(SYSTEM_CONFIG, "system"),
         _read_config(config_dir / "config.toml", "user"),
@@ -116,15 +119,69 @@ def operator_configured(config_dir: Path, args: list[str]) -> bool:
         profile = None
     if profile:
         configs.append(_read_config(config_dir / f"{profile}.config.toml", f"profile {profile!r}"))
+    return configs, profile
+
+
+def _selected(config: dict[str, Any], profile: str | None) -> list[dict[str, Any]]:
+    """``config``, and the legacy ``[profiles.<profile>]`` table in it when one is selected."""
+    legacy_profiles = config.get("profiles", {})
+    if profile and isinstance(legacy_profiles, dict):
+        selected = legacy_profiles.get(profile, {})
+        if isinstance(selected, dict):
+            return [config, selected]
+    return [config]
+
+
+def operator_configured(config_dir: Path, args: list[str]) -> bool:
+    """Preserve exporters in native user/system config and the selected profile.
+
+    Codex ignores `otel` in project-local config. Other account homes and
+    unselected profile files are not layers of this launch either.
+    """
+    overrides = [parsed for _, parsed in _overrides(args)]
+    if any("otel" in parsed for parsed in overrides):
+        return True
+    configs, profile = _layers(config_dir, args, overrides)
+    return any("otel" in table for config in configs for table in _selected(config, profile))
+
+
+TOOL_SHELL_POLICY = "shell_environment_policy"
+"""Codex's setting for the environment the shells its tools run in inherit, whose
+``exclude`` keeps :data:`HEADERS_ENV` out of them (:func:`tool_shell_excludes`)."""
+
+
+def tool_shell_excludes(config_dir: Path, args: list[str], cwd: Path) -> list[str] | None:
+    """The patterns the operator's config keeps out of the shells Codex's tools run in
+    (``shell_environment_policy.exclude``), which the receiver's must join.
+
+    An ``exclude`` given with ``-c`` replaces the one in config (measured on 0.162.1),
+    and ours comes first: without the operator's patterns in it, every variable their
+    config kept from the tools reached them again. Every layer this launch may read is
+    asked, the project's ``.codex/config.toml`` from ``cwd`` up included (0.162.1 reads
+    it), and the patterns are their union: a superset of the list Codex applies, so a
+    pattern a higher layer dropped stays out, the safe side. ``None`` when an override
+    of the operator's own sets the list (or the whole table): it comes after ours on the
+    command line and wins, which would hand the receiver's header to every tool.
+    """
+    overrides = _overrides(args)
+    for key, parsed in overrides:
+        policy = parsed.get(TOOL_SHELL_POLICY)
+        if key == TOOL_SHELL_POLICY or (isinstance(policy, dict) and "exclude" in policy):
+            return None
+    configs, profile = _layers(config_dir, args, [parsed for _, parsed in overrides])
+    for value in option_values(args, "-C", "--cd"):
+        cwd = cwd / value
+    for directory in (cwd, *cwd.parents):
+        if (directory / ".codex").is_dir():
+            configs.append(_read_config(directory / ".codex" / "config.toml", "project"))
+    patterns: list[str] = []
     for config in configs:
-        if "otel" in config:
-            return True
-        legacy_profiles = config.get("profiles", {})
-        if profile and isinstance(legacy_profiles, dict):
-            selected = legacy_profiles.get(profile, {})
-            if isinstance(selected, dict) and "otel" in selected:
-                return True
-    return False
+        for table in _selected(config, profile):
+            policy = table.get(TOOL_SHELL_POLICY)
+            excluded = policy.get("exclude") if isinstance(policy, dict) else None
+            if isinstance(excluded, list):
+                patterns += [item for item in excluded if isinstance(item, str)]
+    return list(dict.fromkeys(patterns))
 
 
 _FIELDS = frozenset(
@@ -416,8 +473,16 @@ def disown_headers(env: MutableMapping[str, str]) -> None:
         del env[HEADERS_ENV]
 
 
-def start_receiver(env: dict[str, str], adapter: AgentAdapter) -> tuple[list[str], str]:
-    """Start only for an opted-in launch. Failure costs telemetry, never launch."""
+def start_receiver(
+    env: dict[str, str], adapter: AgentAdapter, keep_out: Sequence[str] = ()
+) -> tuple[list[str], str]:
+    """Start only for an opted-in launch. Failure costs telemetry, never launch.
+
+    The receiver's header (:data:`HEADERS_ENV`) is kept out of the shells the agent's
+    tools run in, beside ``keep_out``, the patterns the operator's config already keeps
+    out (:func:`tool_shell_excludes`): every OpenTelemetry SDK in a process a tool starts
+    reads that variable, where it would send the token to the app's own collector in
+    place of the app's headers (review r2 of #113, finding 5)."""
     if os.name != "posix":
         return (
             [],
@@ -453,7 +518,7 @@ def start_receiver(env: dict[str, str], adapter: AgentAdapter) -> tuple[list[str
         state = json.loads(ready.read_text())
         # Native exporter does asynchronous delivery. No model routing or auth changes.
         endpoint = f"http://127.0.0.1:{state['port']}/v1/logs"
-        args = adapter.telemetry_args(endpoint)
+        args = adapter.telemetry_args(endpoint, keep_out=[*keep_out, HEADERS_ENV])
         env[HEADERS_ENV] = "Authorization=" + quote("Bearer " + state["token"], safe="")
         env["AISQUARE_PIPELINE_ID"] = env["AISQUARE_LAUNCH_ID"]
         env["AISQUARE_TRACE_AGENT_NAME"] = "aisquare-" + env.get("AISQUARE_ROLE", "coder")

@@ -157,7 +157,9 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
                     "call_id": "call_local",
                     "name": "exec_command",
                     "namespace": "functions",
-                    "arguments": json.dumps({"cmd": "printf local-tool-output"}),
+                    "arguments": json.dumps(
+                        {"cmd": f'printf "local-tool-output[%s]" "${native_telemetry.HEADERS_ENV}"'}
+                    ),
                 }
             elif len(requests) == 2:
                 item = {
@@ -275,7 +277,10 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
                 assert store.get_meta("launch-session:native-fixture") == bound
                 assert len(store.recent_prompts(session.project_id)) == 2
             assert len(requests) == 4
-            assert "local-tool-output" in json.dumps(requests[1])
+            # The receiver's token is Codex's exporter's alone: the shells its tools run in
+            # never see it, where an app's OpenTelemetry SDK would send it on.
+            assert "local-tool-output[]" in json.dumps(requests[1])
+            assert token not in json.dumps(requests[1])
             assert "mcp:remote" not in json.dumps(requests[2])
             assert "unknown tool" not in json.dumps(requests[2]).lower()
             board_result = next(

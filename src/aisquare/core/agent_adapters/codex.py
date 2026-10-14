@@ -670,11 +670,15 @@ class CodexAdapter:
     def disable_native_teams(self) -> tuple[list[str], dict[str, str]]:
         return ["-c", "agents.enabled=false"], {}
 
-    def telemetry_args(self, endpoint: str) -> list[str]:
+    def telemetry_args(self, endpoint: str, *, keep_out: Sequence[str] = ()) -> list[str]:
         """Codex's own OTLP/HTTP log exporter (asynchronous; no model routing or auth
         change), without the user's prompts. Its headers come from the launch environment:
-        0.162.1's exporter sends OTLP's ``OTEL_EXPORTER_OTLP_LOGS_HEADERS`` (measured)."""
+        0.162.1's exporter sends OTLP's ``OTEL_EXPORTER_OTLP_LOGS_HEADERS`` (measured).
+        ``keep_out`` is the tools' shells' ``shell_environment_policy.exclude``, which
+        keeps a variable from every command the agent runs while Codex's own process and
+        its exporter keep it (measured on 0.162.1)."""
         config = "otel.exporter.otlp-http"
+        excluded = ["-c", f"shell_environment_policy.exclude={json.dumps(list(keep_out))}"]
         return [
             "-c",
             f"{config}.endpoint={json.dumps(endpoint)}",
@@ -682,6 +686,7 @@ class CodexAdapter:
             f'{config}.protocol="json"',
             "-c",
             "otel.log_user_prompt=false",
+            *(excluded if keep_out else []),
         ]
 
 

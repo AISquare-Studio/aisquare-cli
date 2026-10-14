@@ -372,5 +372,5 @@ class ClaudeCodeAdapter:
     def disable_native_teams(self) -> tuple[list[str], dict[str, str]]:
         return [], {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0"}
 
-    def telemetry_args(self, endpoint: str) -> list[str]:
+    def telemetry_args(self, endpoint: str, *, keep_out: Sequence[str] = ()) -> list[str]:
         return []

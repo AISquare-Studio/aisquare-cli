@@ -918,6 +918,46 @@ def test_a_row_whose_socket_another_server_took_still_counts_and_is_named_unreac
     assert plan.listening == ("coder-1 (repo)",) and plan.unreached == ()
 
 
+def test_the_plan_asks_each_server_once_not_once_per_row(
+    tool: Tool,
+    runner: CliRunner,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 3: whether a row's agent may run asked its socket, and the
+    server answering there when it started, a `display-message` each, row by row, though
+    both answers are the server's: three agents on one server cost three of each, for the
+    upgrade plan and the uninstall plan alike. Now one of each per server."""
+    then = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    asked = {"listener": 0, "started": 0}
+
+    def listener(_self: TmuxServer, _recorded: Path | None = None) -> str:
+        asked["listener"] += 1
+        return "answers"
+
+    def started_at(_self: TmuxServer) -> datetime:
+        asked["started"] += 1
+        return then
+
+    monkeypatch.setattr(TmuxServer, "listener", listener)
+    monkeypatch.setattr(TmuxServer, "started_at", started_at)
+    _initialised(runner, tmp_path)
+    for label in ("manager", "coder-1", "coder-2"):
+        _live_agent(
+            tmp_path / "repo",
+            label,
+            socket_path=tmp_path / "asq",
+            server_started_at=then,
+            agent_id=f"agt_{label}",
+        )
+
+    plan = lifecycle.uninstall_plan()
+
+    assert len(plan.listening) == 3 and plan.unreached == ()
+    assert asked == {"listener": 1, "started": 1}, "once for the server, not once per row"
+
+
 @pytest.mark.parametrize("listening", [True, False], ids=["server-listening", "no-server"])
 def test_a_live_row_blocks_only_while_its_server_listens(
     tool: Tool,

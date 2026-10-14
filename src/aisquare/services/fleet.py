@@ -3489,6 +3489,7 @@ def _unreached(
     unusable: bool = False,
     answering: bool = False,
     forget: str = "--forget",
+    reads: tmux_core.SocketReads | None = None,
 ) -> tuple[SocketAnswer, str, str] | None:
     """``(what its socket said, why, what to do)`` for a row whose server did not answer
     through tmux, or could not be asked as tmux is ``unusable`` here, but whose agent may
@@ -3506,7 +3507,8 @@ def _unreached(
     recorded, which lost its socket file to it and may run on, follow-up of #257). A server
     that is the row's is then ``None`` here: the row is stopped as any other. ``forget``
     is how the way out spells the operator's word: ``shutdown``'s own flag, or the command
-    for ``reap``.
+    for ``reap``. ``reads`` is the caller's for every row it asks, so rows on one server ask
+    it once (:class:`~aisquare.core.tmux.SocketReads`).
     """
     srv = server_of(agent, config)
     answer = tmux_core.server_may_run(
@@ -3516,6 +3518,7 @@ def _unreached(
         this_boot,
         agent.created_at,
         agent.server_started_at,
+        reads=reads,
     )
     if answer is None or (answering and answer == "answers"):
         return None
@@ -3551,13 +3554,14 @@ def _held_rows(
     agent: its pane read as gone, and the socket answered.
     """
     this_boot = tmux_core.boot_id()
+    reads = tmux_core.SocketReads()  # one per server, not per row
     held: dict[str, tuple[SocketAnswer, str, str]] = {}
     for _, agents in targets:
         for agent in agents:
             if unusable or not answering.get(_address(agent, config)):
-                unreached = _unreached(agent, config, this_boot, unusable=unusable)
+                unreached = _unreached(agent, config, this_boot, unusable=unusable, reads=reads)
             elif agent.server_started_at is not None:
-                unreached = _unreached(agent, config, this_boot, answering=True)
+                unreached = _unreached(agent, config, this_boot, answering=True, reads=reads)
             else:
                 continue
             if unreached is not None:
@@ -5376,6 +5380,7 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
     report = ReapReport()
     absent: dict[_Address, bool] = {}
     this_boot = tmux_core.boot_id() if server_down else None
+    reads = tmux_core.SocketReads()  # one per server for the sweep, not per row
     now = _now()
     with store_session() as store:
         if project is not None:
@@ -5414,6 +5419,7 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
                                     config,
                                     this_boot,
                                     report,
+                                    reads,
                                 )
                 for agent in live:
                     observed = _view(agent, views, config)
@@ -5461,7 +5467,11 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
 
 
 def _hold_on_absent_server(
-    agents: Sequence[FleetAgent], config: FleetSettings, this_boot: str | None, report: ReapReport
+    agents: Sequence[FleetAgent],
+    config: FleetSettings,
+    this_boot: str | None,
+    report: ReapReport,
+    reads: tmux_core.SocketReads | None = None,
 ) -> _Observed:
     """The view ``reap --server-down`` takes of a server tmux reports absent: no pane for a
     row whose agent cannot be running, which reads lost; every other row held, as a row of
@@ -5474,12 +5484,12 @@ def _hold_on_absent_server(
     only what the one rule says cannot be running
     (:func:`~aisquare.core.tmux.server_may_run`): a row from another boot, or one whose
     socket file is there with nothing listening. The way out names ``fleet shutdown
-    --forget``, the operator's word that ends a held row.
+    --forget``, the operator's word that ends a held row. ``reads`` is the sweep's.
     """
     view: _Observed = {}
     for agent in agents:
         unreached = _unreached(
-            agent, config, this_boot, forget="`aisquare fleet shutdown --forget`"
+            agent, config, this_boot, forget="`aisquare fleet shutdown --forget`", reads=reads
         )
         if unreached is not None:
             view[agent.id] = None

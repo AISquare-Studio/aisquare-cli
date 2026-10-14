@@ -463,6 +463,53 @@ def socket_answer(path: Path | None) -> SocketAnswer | None:
     return "answers"
 
 
+class SocketReads:
+    """What :func:`server_may_run` asks of the machine for one read of the fleet (a plan, a
+    run, a sweep), each asked at most once: a socket's listener, and when the server that
+    answers there started, per socket; and when this boot started.
+
+    The answers belong to the server, not to the row, and every caller asks them row by row
+    over rows that share a server. With ten live agents on one answering server, a plan ran
+    ten ``display-message`` processes and ten socket connects for one answer, and its run
+    as many again (review of #259, round 3). A start that could not be asked is ``None``
+    here too, as :func:`server_may_run` has always judged it.
+    """
+
+    def __init__(self) -> None:
+        self._listeners: dict[object, SocketAnswer | None] = {}
+        self._starts: dict[object, datetime | None] = {}
+        self._booted: tuple[datetime | None] | None = None
+
+    @staticmethod
+    def _key(srv: TmuxServer, recorded: Path | None) -> object:
+        """The socket asked: the path a row recorded, else where ``-L`` finds ``srv``'s."""
+        return recorded if recorded is not None else (srv.socket, srv.path)
+
+    def listener(self, srv: TmuxServer, recorded: Path | None) -> SocketAnswer | None:
+        """:meth:`TmuxServer.listener` at ``recorded``, asked once per socket."""
+        key = self._key(srv, recorded)
+        if key not in self._listeners:
+            self._listeners[key] = srv.listener(recorded)
+        return self._listeners[key]
+
+    def started(self, srv: TmuxServer, recorded: Path | None) -> datetime | None:
+        """When the server answering at ``recorded`` started, asked once per socket; ``None``
+        when it could not be asked (no usable tmux, a denied socket)."""
+        key = self._key(srv, recorded)
+        if key not in self._starts:
+            try:
+                self._starts[key] = (srv if recorded is None else srv.at(recorded)).started_at()
+            except TmuxError:  # TmuxUnavailable included: a server listens, and may be the row's
+                self._starts[key] = None
+        return self._starts[key]
+
+    def boot_started(self) -> datetime | None:
+        """:func:`boot_started`, asked once."""
+        if self._booted is None:
+            self._booted = (boot_started(),)
+        return self._booted[0]
+
+
 def server_may_run(
     srv: TmuxServer,
     recorded: Path | None,
@@ -470,6 +517,8 @@ def server_may_run(
     this_boot: str | None,
     created: datetime | None = None,
     started: datetime | None = None,
+    *,
+    reads: SocketReads | None = None,
 ) -> SocketAnswer | None:
     """Whether the agent of a live fleet row may still be running on ``srv``, and why; ``None``
     when it cannot be. The one rule ``upgrade``, ``uninstall``, ``fleet shutdown``, ``stop``
@@ -503,20 +552,21 @@ def server_may_run(
     start moves with the clock, so it explains only a socket the row's server lost, never
     one that answers as the row's or could not be asked: a row misjudged by a stepped
     clock is ended only when its server's socket is gone as well.
+
+    ``reads`` is the caller's :class:`SocketReads` for one read of the fleet, so rows on
+    one server ask it once; each call asks afresh without one.
     """
     if booted is not None and this_boot is not None and booted != this_boot:
         return None
-    answer = srv.listener(recorded)
+    reads = reads or SocketReads()
+    answer = reads.listener(srv, recorded)
     if answer == "answers" and started is not None:
-        try:
-            now = (srv if recorded is None else srv.at(recorded)).started_at()
-        except TmuxError:  # TmuxUnavailable included: a server listens, and may be the row's
-            now = None
+        now = reads.started(srv, recorded)
         if now is not None and now != started:
             answer = "another"
     unbooted = booted is None or this_boot is None
     if answer in ("gone", "another") and unbooted and created is not None:
-        booted_at = boot_started()
+        booted_at = reads.boot_started()
         if booted_at is not None and created < booted_at:
             return None
     return answer

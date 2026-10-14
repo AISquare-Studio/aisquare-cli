@@ -2957,6 +2957,47 @@ def test_a_listing_asks_for_the_boot_only_for_rows_that_may_be_held_and_once_per
     assert asked == {"id": 1, "started": 1}, "once each for the read, not once per row"
 
 
+def test_the_one_rule_asks_each_server_once_per_read_not_once_per_row(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 3: `server_may_run` asked the server answering at a row's socket
+    when it started, a `display-message` each time, and connected to the socket, for every
+    row, though both answers are the server's. A shutdown plan over ten agents on one server
+    ran ten of each, its run as many again, and so did `reap --server-down`. Now once per
+    server for one read, however many rows it holds."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    coders = [_coder(project) for _ in range(3)]
+    newcomer = FakeTmux()  # took the socket: every row asks it whether it is theirs
+    newcomer.started = tmux.started + timedelta(minutes=5)
+    asked = {"started": 0, "listener": 0}
+    started_at, listener = newcomer.started_at, newcomer.listener
+
+    def counted_start() -> datetime | None:
+        asked["started"] += 1
+        return started_at()
+
+    def counted_listener(recorded: Path | None = None) -> SocketAnswer | None:
+        asked["listener"] += 1
+        return listener(recorded)
+
+    monkeypatch.setattr(newcomer, "started_at", counted_start)
+    monkeypatch.setattr(newcomer, "listener", counted_listener)
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: newcomer)
+
+    plan = fleet_service.shutdown_plan(project)
+
+    assert set(plan.held) == {coder.id for coder in coders}
+    assert asked == {"started": 1, "listener": 1}, "once for the server, not once per row"
+    # And a sweep that holds every row of a server tmux reports absent.
+    newcomer.running, newcomer.socket_file = False, False  # its socket file taken too
+    monkeypatch.setattr(newcomer, "server_absent", lambda: True)  # as tmux says for that
+    asked.update(started=0, listener=0)
+    swept = fleet_service.reap(project, server_down=True)
+    assert {row.agent.id for row in swept.held} == {coder.id for coder in coders}
+    assert asked["listener"] == 1, asked
+
+
 def test_with_no_boot_id_a_row_from_before_the_boot_is_lost_not_held_by_the_next_server(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

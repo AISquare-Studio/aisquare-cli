@@ -5237,10 +5237,11 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
     rows lost under their agents, on another server under another
     ``TMUX_TMPDIR`` as well (round 29 of #257 had only the doctor warn). The
     rest are HELD and named on the report (:func:`_hold_on_absent_server`), and
-    ``shutdown --forget`` is the word that ends them. For the rows the word may
-    act on the socket is then a server with no panes — no view for them, and
-    the ordinary "pane is gone → lost" branch does the rest. A missing tmux
-    binary marks nothing: that is a question that could not be put.
+    ``shutdown --forget`` is the word that ends them. So is a row the listing holds as
+    another server's, with the word or without it (:func:`_hold_on_another_server`).
+    For the rows the word may act on the socket is then a server with no panes —
+    no view for them, and the ordinary "pane is gone → lost" branch does the rest.
+    A missing tmux binary marks nothing: that is a question that could not be put.
 
     A row a hand-over is stopping (:func:`_handed_over`) is left to it, dead or
     gone, as every listing leaves it.
@@ -5260,6 +5261,7 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
             if live:
                 tmux_session = session_name(current.codename) if current.codename else None
                 views = _observe_sockets(live, tmux_session, config)
+                _hold_on_another_server(live, views, config, report)
                 if server_down:
                     for address, view in views.items():
                         if view is None:
@@ -5357,6 +5359,32 @@ def _hold_on_absent_server(
             view[agent.id] = None
             report.held.append(ShutdownRow(agent, f"{unreached[1]} — left live: {unreached[2]}"))
     return view
+
+
+def _hold_on_another_server(
+    agents: Sequence[FleetAgent],
+    views: Mapping[_Address, _Observed | None],
+    config: FleetSettings,
+    report: ReapReport,
+) -> None:
+    """Name on ``report`` each row ``views`` holds as another server's (:func:`_observe`),
+    with why and the way out, as :func:`_hold_on_absent_server` names the rows it holds.
+
+    ``reap`` leaves such a row live, as it leaves a row whose server could not be asked,
+    and said nothing of it: ``0 ended, 0 lost``, while the row still counted toward
+    ``max_agents_per_project`` and the one-manager rule, and ``stop`` refused it (review
+    of #259, round 1). The way out names ``fleet shutdown --forget``.
+    """
+    for agent in agents:
+        address = _address(agent, config)
+        if not _held_by_another(agent, views.get(address)):
+            continue
+        try:
+            path = agent.socket_path or _server_at(address, config).socket_path()
+        except TmuxUnavailable:
+            continue  # no POSIX uid: no tmux server can exist here
+        why, way = _unreachable_why("another", path, forget="`aisquare fleet shutdown --forget`")
+        report.held.append(ShutdownRow(agent, f"{why} — left live: {way[0].lower() + way[1:]}"))
 
 
 def _emit_exit(store: ContextStore, agent: FleetAgent, *, why: str | None = None) -> None:

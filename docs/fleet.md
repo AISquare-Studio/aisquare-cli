@@ -470,6 +470,8 @@ taken from under its server in this boot (tmux says `No such file or directory`
 for that too), or whose socket could not be asked, is **left live** and named,
 with `SIGUSR1` as the way back to its server and `fleet shutdown --forget` as
 your word that it is not running; under `--json` they are listed as `held`.
+`reap` names a row whose socket another tmux server answers on the same way, with
+`--server-down` or without it (see *The server was stopped outside the CLI*).
 
 `--all` and `--project` are refused together (a usage error, exit 2, JSON under
 `--json`). The claims of the rows it ends
@@ -1292,11 +1294,12 @@ server started, and this one started at another time, so they read `unknown
 (another tmux server on its socket)` — never the state of the agent that got
 their id, whose pane the UI does not show under them either. From outside, a
 server killed by hand looks like one that lost its socket file and runs on, so
-`reap` leaves those rows, `stop` and `restart` refuse them, and `shutdown` leaves
-them live; once you know the old server is gone, `fleet shutdown --forget` ends
-their rows on your word. (A row started before 0.8.1 recorded no start, reads
-`✗ lost` as before, and a plain `reap` records it.) `shutdown` records them as
-lost on your word, at any point, scoped to one project or over all of them:
+`reap` leaves those rows and names them, `stop` and `restart` refuse them, and
+`shutdown` leaves them live; once you know the old server is gone, `fleet
+shutdown --forget` ends their rows on your word. (A row started before 0.8.1
+recorded no start, reads `✗ lost` as before, and a plain `reap` records it.)
+`shutdown` records them as lost on your word, at any point, scoped to one
+project or over all of them:
 
 ```sh
 aisquare fleet shutdown --project amber-otter --yes

@@ -2649,9 +2649,17 @@ def test_a_row_whose_socket_another_server_took_is_held_not_ended(
     _board_session(coder, "waiting")  # its hooks still fire: the board decides, as for any
     [fresh] = fleet_service.list_agents(project)  # server not asked
     assert fresh.state == "waiting" and fresh.held, "held whatever the board says"
-    assert fleet_service.reap(project).lost == [] and fleet_service.reap(project).ended == []
+    reaped = fleet_service.reap(project)
     swept = fleet_service.reap(project, server_down=True)
-    assert swept.lost == [] and swept.ended == []
+    assert reaped.lost == reaped.ended == swept.lost == swept.ended == []
+    # Left live, and said so, with the way out (review of #259, round 1): unnamed, `reap`
+    # printed `0 ended, 0 lost` while the row still counted toward the cap and stop refused.
+    for said in (reaped, swept):
+        [named] = said.held
+        assert named.agent.id == coder.id, said
+        assert named.reason.startswith("another tmux server answers on its socket "), named
+        assert "— left live: if it is, send that server SIGUSR1" in named.reason
+        assert "`aisquare fleet shutdown --forget` ends its row on your word" in named.reason
     with pytest.raises(FleetError, match="another tmux server answers on its socket") as stop:
         fleet_service.stop(project, "coder-1")
     assert "SIGUSR1" in str(stop.value) and "shutdown --forget" in str(stop.value)

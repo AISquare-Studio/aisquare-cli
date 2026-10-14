@@ -183,7 +183,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   started (`fleet_agent.server_started_at`, schema v26), and a server at the
   row's socket that started at another time is not the row's: `fleet ls` and
   asq show the row as `unknown (another tmux server on its socket)`, `reap`
-  leaves it (with `--server-down` too), `fleet stop` and `restart` refuse it
+  leaves it and names it with the way out (with `--server-down` too, and under
+  `held` in `--json`), `fleet stop` and `restart` refuse it
   with the way back, `fleet shutdown` leaves it live until `--forget`, and
   `upgrade` and `uninstall` count it as running and name `--forget`. Before,
   the newcomer's missing pane read as the row's pane gone, and `stop`,

@@ -2178,6 +2178,19 @@ def test_the_first_socket_after_an_unlock_that_fails_is_tried_again_after_a_seco
     assert across == {"waits": [1, 2, 4, 1], "locked": True}
 
 
+def test_a_socket_the_machine_accepts_and_then_closes_backs_off_until_one_is_healthy(
+    boot_report: dict[str, Any],
+) -> None:
+    """Review of #259, remote focus, 9/12: an open reset the backoff, so a socket the machine
+    accepted and then closed with 1011 (an error every tick meets) waited the first step,
+    1 s, every time: the page reconnected about once a second for as long as it lasted,
+    asking again for the fleet, the board and every pane each time, where the server's
+    1011 counts on the page backing off. It backs off, and a socket that heard its
+    heartbeat is a healthy one: the next drop waits the first step again."""
+    after = boot_report["backoffAfterOpens"]
+    assert after == {"waits": [1, 2, 4, 8, 1, 2], "sockets": 7}
+
+
 def test_the_live_tabs_keys_wait_from_the_moment_its_socket_is_lost(
     boot_report: dict[str, Any],
 ) -> None:

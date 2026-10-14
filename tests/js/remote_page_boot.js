@@ -2618,6 +2618,31 @@ async function backoffAcrossAnUnlock() {
   return { waits, locked };
 }
 
+/* Sockets the machine accepts and then closes with 1011, as a tick that meets the same error
+ * every time does: four in a row, then one that heard its heartbeat first, then one more. Each
+ * is how long the reconnect it set waits, in s before the jitter. */
+async function backoffAfterOpens() {
+  const page = bootPage("#/", signedIn());
+  await settle();
+  const waits = [];
+  const opensThenFails = async (heartbeat) => {
+    page.acceptSockets();
+    page.live().frame("remote", { allow_write: true, auto_off_at: null, version: "test" });
+    if (heartbeat) page.live().frame("heartbeat", { needs_scanned_at: null }, { ts: "2026-10-07T10:00:00+00:00" });
+    await settle();
+    page.live().readyState = 3;
+    page.live().fire("close", { code: 1011 });
+    await settle();
+    waits.push(page.timers().includes("connect") ? page.run("BACKOFF_SECONDS[S.backoff - 1]") : null);
+    page.fireTimer("connect");
+    await settle();
+  };
+  for (let i = 0; i < 4; i++) await opensThenFails(false);
+  await opensThenFails(true);
+  await opensThenFails(false);
+  return { waits, sockets: page.sockets.length };
+}
+
 /* The columns the Transcript asks the machine to wrap to, on 360, 390 and 412 px phones,
  * whose transcript box is 334, 364 and 386 px inside its border; and a 340 px box, exactly 45
  * columns inside its padding by clientWidth, which is whole pixels and may have rounded up. */
@@ -3839,6 +3864,7 @@ async function main() {
     silentSocket: await silentSocket(),
     staleBeforeASocket: await staleBeforeASocket(),
     backoffAcrossAnUnlock: await backoffAcrossAnUnlock(),
+    backoffAfterOpens: await backoffAfterOpens(),
     transcriptSend: await transcriptSend(),
     transcriptSendGuarded: await transcriptSendGuarded(),
     transcriptPad: await transcriptPad(),

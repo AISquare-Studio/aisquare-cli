@@ -148,7 +148,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `team bind` reads the file when it binds. A key lives in `env` or
   `env_files`, never both, and `--unset` removes it from either. `team
   harness` names the key, and `team harness --json` carries `env_files`, each
-  key to its path, on every role.
+  key to its path, on every role. `aisquare upgrade --version` to a release
+  before 0.8.1, which ignores `env_files`, names each role bound to a file and
+  its variables before it moves back (`env_files_dropped` in `--json`): there
+  those roles launch with whatever value the launching shell has.
 
 ### Changed
 - **`aisquare upgrade` warns, and `aisquare uninstall` refuses, while Remote is

@@ -332,6 +332,10 @@ class UpgradePlan:
     reinstall's Python, or the uv cutoff, excludes it, or PyPI does not list it. The first
     two are :attr:`reason` too when the route is otherwise one ``aisquare upgrade`` runs;
     an index set up for it may list what PyPI does not."""
+    env_files_dropped: tuple[str, ...] = ()
+    """The roles bound to a file (``RoleLaunchProfile.env_files``) that a move back to a
+    release before :data:`FIRST_ENV_FILES` ignores, each with its variables:
+    ``reviewer (GH_TOKEN)``."""
 
     @property
     def runnable(self) -> bool:
@@ -377,6 +381,29 @@ class UpgradePlan:
             f"what phones ask of it can fail, and after that it runs {self.current} over the new "
             f"install's files until it is started again. To be safe, turn it off first: "
             f"{REMOTE_OFF}"
+        )
+
+    @property
+    def env_files_warning(self) -> str | None:
+        """What a move back costs the roles bound to a file, or ``None`` when it costs none.
+
+        A release before :data:`FIRST_ENV_FILES` ignores the keys its config does not know,
+        so such a role launches there with whatever value the launching shell has: for a
+        reviewer bound to a token that cannot push, often one that can. 0.8.1 refuses an
+        unreadable file to prevent exactly that, and the move back said nothing of it
+        (review of #259, round 2). Said, as :attr:`fleet_warning` is, rather than refused:
+        the bindings stay in config.toml for the way forward again.
+        """
+        if not self.env_files_dropped:
+            return None
+        one = len(self.env_files_dropped) == 1
+        return (
+            f"{self.target} predates `team bind --env-file` (new in {FIRST_ENV_FILES}) and "
+            f"ignores {'that binding' if one else 'those bindings'}: "
+            f"{', '.join(self.env_files_dropped)} would launch there with whatever value the "
+            "launching shell has, such as a GH_TOKEN that can push. The "
+            f"{'binding stays' if one else 'bindings stay'} in config.toml, read again from "
+            f"{FIRST_ENV_FILES} on"
         )
 
     @property
@@ -487,6 +514,7 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
             reason = reason or pin_unmet
     refresh: tuple[HookSite, ...] = ()
     left: tuple[HookSite, ...] = ()
+    dropped: tuple[str, ...] = ()
     live: tuple[str, ...] = ()
     fleet_error: str | None = None
     remote: str | None = None
@@ -499,6 +527,8 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
             # here, with the remedy: a note in the report said it again.
             left = (*left, *(_left_by_move_back(site, target) for site in refresh))
             refresh = ()
+        if target is not None and lacks_env_files(target):
+            dropped = _env_file_bindings()
         live, _unlistened, fleet_error = running_fleet()
         remote = running_remote()
     return UpgradePlan(
@@ -516,6 +546,7 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
         live_agents=live,
         fleet_error=fleet_error,
         remote=remote,
+        env_files_dropped=dropped,
     )
 
 
@@ -545,6 +576,26 @@ def lacks_refresh_hooks(release: str) -> bool:
     release, not on the direction: from 0.8.1, a move back to 0.8.0 left every site and
     advised `agents connect` (review of #257)."""
     return install_route.is_newer(FIRST_REFRESH_HOOKS, release) is True
+
+
+def lacks_env_files(release: str) -> bool:
+    """Whether ``release`` predates ``env_files`` bindings (:data:`FIRST_ENV_FILES`), whose
+    keys its config then ignores."""
+    return install_route.is_newer(FIRST_ENV_FILES, release) is True
+
+
+def _env_file_bindings() -> tuple[str, ...]:
+    """Each role bound to a file, with its variables (:attr:`UpgradePlan.env_files_dropped`);
+    none when the config cannot be read, which says nothing either way."""
+    try:
+        profiles = load_config().team.profiles
+    except Exception:
+        return ()
+    return tuple(
+        f"{role} ({', '.join(sorted(profile.env_files))})"
+        for role, profile in sorted(profiles.items())
+        if profile.env_files
+    )
 
 
 def _left_by_move_back(site: HookSite, target: str) -> HookSite:
@@ -972,6 +1023,8 @@ def _verify(plan: UpgradePlan, ran: install_route.InstallRoute) -> tuple[str | N
 REFRESH_HOOKS = ("agents", "refresh-hooks", HOOK_AGENT)
 #: The first release with ``agents refresh-hooks``: 0.7.0, on PyPI, has none.
 FIRST_REFRESH_HOOKS = "0.8.0"
+#: The first release that reads ``env_files`` (``team bind --env-file``): 0.8.0 ignores it.
+FIRST_ENV_FILES = "0.8.1"
 
 
 def _refresh(site: HookSite, found: install_route.Facts) -> HookRefresh:

@@ -160,9 +160,9 @@ def test_on_windows_a_key_is_spelled_with_forward_slashes(monkeypatch: pytest.Mo
     """Claude Code's path normaliser turns every backslash into ``/`` on Windows, so its
     ``projects`` keys read ``C:/Users/me/work``; an entry spelled the native way is none."""
     native = Path("C:\\Users\\me\\work")  # a Windows path's text, built on any platform
-    monkeypatch.setattr(sharing.os, "name", "nt")
+    monkeypatch.setattr(os, "name", "nt")
     assert sharing.project_key(native) == "C:/Users/me/work"
-    monkeypatch.setattr(sharing.os, "name", "posix")
+    monkeypatch.setattr(os, "name", "posix")
     assert sharing.project_key(native) == str(native)  # elsewhere, the path as it is
 
 

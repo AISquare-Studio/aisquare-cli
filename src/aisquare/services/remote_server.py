@@ -6370,8 +6370,10 @@ SERVE_LOCK_NAME = "remote-serve.lock"
 SERVE_NOTE_NAME = "remote-serve.json"
 """Beside :data:`SERVE_LOCK_NAME`: which process holds it, ``{"pid", "by", "port"}``, written by
 :func:`_claim_remote_home` once it holds the lock, so ``upgrade`` and ``uninstall`` can name the
-Remote that is on (:func:`remote_served_by`). Believed only while the lock is held: a note a
-process left as it ended names nobody, and the next claim writes its own over it."""
+Remote that is on (:func:`remote_served_by`), and again by every claim of a home this process
+holds already. Removed as the lock is let go, and when it cannot be written. Believed only
+while the lock is held: a note a process killed left names nobody, and the next claim writes
+its own over it."""
 SERVED_BY = {"serve": "`aisquare remote serve`", "panel": "asq's R panel"}
 """What :data:`SERVE_NOTE_NAME`'s ``by`` names: the process that claimed the home."""
 SERVED_BY_SOMEONE = "asq's R panel, or `aisquare remote serve` in another shell"
@@ -6434,7 +6436,11 @@ def _claim_remote_home(state: Runtime, *, by: str, port: int) -> bool:
     global _home_claim
     path = state._state_path.with_name(SERVE_LOCK_NAME)
     if _home_claim is not None and _home_claim[0] == path:
-        return False  # this process serves from here already
+        # This process serves from here already, and says so of this server: left as the
+        # last claim wrote it, the note named the port that server was on (review of #259,
+        # round 3).
+        _note_remote_claim(path.with_name(SERVE_NOTE_NAME), by=by, port=port)
+        return False
     with _claiming:
         try:
             fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
@@ -6457,7 +6463,7 @@ def _claim_remote_home(state: Runtime, *, by: str, port: int) -> bool:
                 return False
         previous, _home_claim = _home_claim, (path, fd)
     if previous is not None:  # another home's, which this process serves no more
-        _release_remote_claim(previous[1])
+        _release_remote_claim(previous)
     _note_remote_claim(path.with_name(SERVE_NOTE_NAME), by=by, port=port)
     return True
 
@@ -6467,12 +6473,26 @@ def _note_remote_claim(note: Path, *, by: str, port: int) -> None:
 
     Replaced whole, so a reader never sees half of one. A note that cannot be written costs
     the name ``upgrade`` and ``uninstall`` give it, never the claim: they still see the lock,
-    and say who may hold it (:data:`SERVED_BY_SOMEONE`)."""
+    and say who may hold it (:data:`SERVED_BY_SOMEONE`). So the note there is removed, as
+    the process it names no longer holds the lock: left, it named a process that had
+    ended, or the wrong port, as this one's (review of #259, round 3)."""
     body = json.dumps({"pid": os.getpid(), "by": by, "port": port}) + "\n"
     try:
         write_replacing(note, body, keep_mode=False, durable=False)
     except OSError as exc:
         log.warning("remote: %s could not be written (%s)", note, exc)
+        _forget_remote_note(note)
+
+
+def _forget_remote_note(note: Path) -> None:
+    """Remove ``note`` (:data:`SERVE_NOTE_NAME`), while this process holds the lock it is
+    about: none it would name serves then. Fails open, logged: a note left is believed only
+    while the lock is held, and never names a process that does not hold it once the next
+    claim writes its own."""
+    try:
+        note.unlink(missing_ok=True)
+    except OSError as exc:
+        log.warning("remote: %s could not be removed (%s)", note, exc)
 
 
 def remote_served_by() -> str | None:
@@ -6557,7 +6577,7 @@ def _release_remote_home() -> None:
             return
         claim, _home_claim = _home_claim, None
     if claim is not None:
-        _release_remote_claim(claim[1])
+        _release_remote_claim(claim)
 
 
 def _release_remote_home_once_wound_down(server: _Server) -> None:
@@ -6567,7 +6587,12 @@ def _release_remote_home_once_wound_down(server: _Server) -> None:
     _release_remote_home()
 
 
-def _release_remote_claim(fd: int) -> None:
+def _release_remote_claim(claim: tuple[Path, int]) -> None:
+    """Let one claim's lock go (:data:`_home_claim`), its note (:data:`SERVE_NOTE_NAME`) removed
+    first, while the lock still keeps any other process's claim, and so its note, from it:
+    a note left named a process that served no more."""
+    path, fd = claim
+    _forget_remote_note(path.with_name(SERVE_NOTE_NAME))
     with contextlib.suppress(OSError):
         unlock(fd)
     os.close(fd)

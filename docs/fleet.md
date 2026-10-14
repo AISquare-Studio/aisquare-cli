@@ -301,7 +301,9 @@ have ended. `status` is the same data, always live only.
 
 State is **derived, never stored**: a fresh board session row wins (working ·
 waiting · attention · limited — the last one trusted until the reset it names
-has passed, since a parked agent fires no hook); otherwise tmux's facts (a dead
+has passed, since a parked agent fires no hook; and a Codex agent's attention
+until one of its hooks moves it, since Codex redraws its approval view every
+second it waits); otherwise tmux's facts (a dead
 pane → exited with its code; activity → working; else waiting); no pane at all → lost; `· unknown`
 when neither source can answer. The detail beside the chip says why when that
 is not obvious — an exit code, `no hooks` for a binary without our lifecycle
@@ -774,20 +776,34 @@ was launched with.
 
 | Permission | Claude Code | Codex |
 | --- | --- | --- |
-| `workspace:auto` | `--permission-mode auto` | `--approve-for-me` |
-| `read_only:auto` | `--permission-mode auto --disallowedTools=Edit Write NotebookEdit` | `--sandbox read-only --ask-for-approval on-request` |
-| `workspace:ask` | `--permission-mode manual` | `--sandbox workspace-write --ask-for-approval on-request` |
-| `workspace:never` | `--permission-mode dontAsk` | `--sandbox workspace-write --ask-for-approval never` |
-| `read_only:ask` | `--permission-mode manual --disallowedTools=Edit Write NotebookEdit` | `--sandbox read-only --ask-for-approval on-request` |
-| `read_only:never` | `--permission-mode dontAsk --disallowedTools=Edit Write NotebookEdit` | `--sandbox read-only --ask-for-approval never` |
-| `full:ask` | `--permission-mode manual` | `--sandbox danger-full-access --ask-for-approval on-request` |
-| `full:never` | `--permission-mode bypassPermissions` | `--sandbox danger-full-access --ask-for-approval never` |
+| `workspace:auto` | `--permission-mode auto` | `--approve-for-me`, store profile over `:workspace` |
+| `read_only:auto` | `--permission-mode auto --disallowedTools=Edit Write NotebookEdit` | `--ask-for-approval on-request -c approvals_reviewer="auto_review"`, store profile over `:read-only` |
+| `workspace:ask` | `--permission-mode manual` | `--ask-for-approval on-request -c approvals_reviewer="user"`, store profile over `:workspace` |
+| `workspace:never` | `--permission-mode dontAsk` | `--ask-for-approval never`, store profile over `:workspace` |
+| `read_only:ask` | `--permission-mode manual --disallowedTools=Edit Write NotebookEdit` | `--ask-for-approval on-request -c approvals_reviewer="user"`, store profile over `:read-only` |
+| `read_only:never` | `--permission-mode dontAsk --disallowedTools=Edit Write NotebookEdit` | `--ask-for-approval never`, store profile over `:read-only` |
+| `full:ask` | `--permission-mode manual` | `--ask-for-approval on-request -c approvals_reviewer="user" --sandbox danger-full-access` |
+| `full:never` | `--permission-mode bypassPermissions` | `--ask-for-approval never --sandbox danger-full-access` |
 | `full:auto` | `--permission-mode auto` | refused at spawn: Codex's reviewer runs only in workspace-write |
 
 The built-in roles are `workspace:auto` and, for the reviewer, `read_only:auto`:
-exactly what both agents get today with nothing set. Claude Code has no sandbox,
+exactly what each agent gets with nothing set. Claude Code has no sandbox,
 so its read-only is the reviewer's denial of the tools that edit files, given once
 even where the role's own arguments carry it too.
+
+Codex runs its tools in a sandbox, and every `aisquare` call an agent makes writes the
+store in the aisquare home, a board read included. The **store profile** is the
+fleet's own Codex permission profile: Codex's built-in `:workspace` or `:read-only`,
+with the aisquare home writable and, within it, the account homes, the credentials
+and the config read-only, since what is written there runs outside any sandbox. So a
+Codex agent's board calls succeed on their first, sandboxed attempt, a reviewer's
+verdict included, while its worktree stays read-only
+([the sandbox and the store](coding-agents.md#the-sandbox-and-the-aisquare-store)).
+`ask` is the human's to answer on Codex as on Claude Code: the reviewer is pinned on
+every spawn and restart, as a resumed thread keeps its own otherwise, so `fleet
+restart <label> --permission-mode workspace:ask` turns an agent's `--approve-for-me`
+into Codex's approval prompts in its pane. A pick in Codex's own `/permissions`
+replaces the store profile until the next restart.
 
 **`auto` behind the explainability proxy.** The classifier auto mode relies on
 makes a separate, non-streaming request the proxy currently cuts short once the
@@ -1452,6 +1468,8 @@ terminal — or `aisquare fleet attach` and answer there. If prompts are routine
 for that project, the role's `permission_mode` is the knob — per spawn
 (`--permission-mode`) or in `[fleet.roles.<role>]`; there is no project
 allowlist in this checkout. `bypassPermissions` exists and is never a default.
+A Codex agent rings only for a request you answer: under `--approve-for-me`
+Codex's own reviewer answers, with no prompt in the pane and no bell.
 
 **The manager needs you.** 🔔 on the project, and a `question` note on the
 board (the manager asks after being blocked twice on one task). Open the

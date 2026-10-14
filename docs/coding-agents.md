@@ -159,8 +159,9 @@ minutes](fleet.md#the-first-five-minutes)):
   `never`) and `approve_for_me`, the worktree switch and the account binding (whose
   list names any slot of another agent, which a launch would refuse). Under each
   role is the line its next `fleet spawn` passes for permission — the adapter's own
-  flags (`--approve-for-me`, `--sandbox read-only --ask-for-approval on-request`,
-  `--permission-mode auto`) — or the refusal the spawn would meet. The role's
+  flags (`--approve-for-me` with the store's profile, `--ask-for-approval on-request
+  -c approvals_reviewer="auto_review"` read-only, `--permission-mode auto`) — or the
+  refusal the spawn would meet. The role's
   one permission for every agent (`fleet.roles.<role>.permission`,
   `WRITE:APPROVALS`) is a select of its own, and the line shows what each agent
   would be passed under it ([the table](fleet.md#one-permission-for-every-agent)).
@@ -369,10 +370,13 @@ Native sandbox and approval policies stay separate.
 Codex fleet roles run with `--approve-for-me` (Codex's automatic reviewer, in the
 workspace-write sandbox), the counterpart of the `auto` permission mode Claude
 Code fleet roles get; reviewers, including numbered seats such as `reviewer2`,
-run `--sandbox read-only --ask-for-approval on-request` instead. Codex refuses
+run read-only with `--ask-for-approval on-request` and that same automatic reviewer
+(`read_only:auto`) instead. Every sandbox the fleet gives Codex is the store's
+profile below, never `--sandbox`, except `danger-full-access`. Codex refuses
 `--approve-for-me` beside `--sandbox` or `--ask-for-approval`, so a role (or a
 spawn) that chooses a sandbox or an approval policy, in its settings or its
-native arguments, runs without it; `approve_for_me = false` turns it off, and
+native arguments, runs without it, and its approvals are the human's
+(`-c approvals_reviewer="user"`); `approve_for_me = false` turns it off, and
 `approve_for_me = true` beside a conflicting choice is refused at spawn. The
 approval policies are `on-request` and `never`: Codex no longer supports
 `untrusted`, `on-failure` is deprecated, and the granular table is native
@@ -388,6 +392,65 @@ forward `--restricted` or `--verbose` into a Codex fleet launch.
 No approval bypass is added: `--approve-for-me` reviews each request.
 Native subagents are disabled in fleet sessions when
 `fleet.disable_native_agent_teams` is enabled.
+
+### The sandbox and the aisquare store
+
+Every board call an agent makes opens the store (`context.db` in the aisquare home)
+for writing, a read such as `aisquare board` included, and Codex's sandbox lets its
+commands write the workspace and the temporary directories only. Measured on 0.162.1
+with the home in `~/.aisquare`: each `aisquare` call failed in the sandbox ("unable
+to open database file") and was re-run as an escalation, so under `--approve-for-me`
+every board read and write was a round trip through Codex's reviewer, and under a
+human's approvals every one asked the human. A home under `/tmp` hides this, as every
+sandbox may write there.
+
+So the fleet runs a sandboxed Codex agent under a permission profile of its own,
+`aisquare`, which its launch defines (`CodexAdapter.store_access`):
+
+```text
+-c default_permissions="aisquare"
+-c permissions.aisquare.extends=":workspace"        # ":read-only" for a reviewer's seat
+-c permissions.aisquare.filesystem={"<aisquare home>" = "write",
+     "<aisquare home>/codex-accounts" = "read", "<aisquare home>/claude-accounts" = "read",
+     "<aisquare home>/cache/codex-accounts" = "read", "<aisquare home>/cache/claude-accounts" = "read",
+     "<aisquare home>/credentials" = "read", "<aisquare home>/config.toml" = "read"}
+```
+
+Codex's built-in profile for the write scope, with the aisquare home writable and,
+within it, what runs outside any sandbox read-only: the account homes (a Codex home's
+`config.toml` holds its hook trust and its hooks run unsandboxed; a Claude Code home's
+settings and hooks likewise), the credentials, and aisquare's config (which chooses
+every later launch's flags). Codex's own guards in the workspace (`.git`, `.codex`,
+`.agents`) still hold, and a read-only path that does not exist yet cannot be made.
+Measured: `aisquare note`, `task claim` and `board` succeed on their first, sandboxed
+attempt in the TUI, `exec` and `resume`; the profile holds beside `--approve-for-me`
+and over a `sandbox_mode` in `config.toml`. A plain `--add-dir <aisquare home>` (or
+`sandbox_workspace_write.writable_roots`) reaches the store too, but a sandboxed command
+could then rewrite its own `CODEX_HOME`, so the fleet does not use it.
+
+The reviewer's seat is the same profile over `:read-only`: its board writes (its
+verdict) reach the store, and the worktree stays read-only to the sandbox, which is a
+filesystem guard where Claude Code's reviewer has only `--disallowedTools`. What the
+profile does not cover:
+
+- `--sandbox` (and `-c sandbox_mode=…`, `default_permissions`, `permission_profile`,
+  `sandbox_workspace_write.*`) given in the native arguments chooses the sandbox the
+  older way, which replaces any profile: the fleet adds none, and the store is then the
+  operator's to reach.
+- A pick in Codex's own `/permissions` swaps the profile for a built-in one until the
+  agent is launched again; `aisquare fleet restart <label> --permission-mode
+  workspace:ask` (or any `WRITE:APPROVALS`) restores it, with the reviewer that says.
+- A Codex started by hand (`codex`, or `aisquare launch` without the fleet) runs in
+  the sandbox its own config chooses. Inside one, a board call that cannot open the
+  store says so and names the directory, and never tells the agent to move the store
+  aside: nothing in it is damaged.
+- `danger-full-access` (`full:*`) has no sandbox, and so nothing to add.
+
+Who answers an approval is pinned with it: `ask` is `-c approvals_reviewer="user"`
+(Codex's "Would you like to run the following command?" in the pane), `auto` is
+`--approve-for-me` or `approvals_reviewer="auto_review"` (Codex's reviewer, no prompt),
+on a spawn, a restart and a resume alike. A resumed thread otherwise keeps the reviewer
+it ran under, and `config.toml` may name either.
 
 ## Identity, MCP and telemetry
 
@@ -413,8 +476,14 @@ hook has fired (no first prompt yet), whose quiet pane shows Codex's empty promp
 — queues the message for the next turn of one they say is working (`codex queue
 --thread <id> --message <text>` under its own `CODEX_HOME`), and otherwise files a
 board note ([`fleet tell`](fleet.md#fleet-tell)); the manager's wake-up nudge
-goes in by the same rule, its Enter apart. Permission and user-input hooks mark
-attention, tools restore working state, and end hooks release claims. The
+goes in by the same rule, its Enter apart. A permission request the human answers,
+and a `request_user_input`, mark attention; one Codex's automatic reviewer answers
+does not, though Codex fires its `PermissionRequest` hook for both with the same
+payload: the reviewer comes from the session's rollout (its newest `turn_context`, or
+a `/permissions` change since). Codex redraws its approval view every second while
+it waits, so pane output does not clear the bell: it holds until `PostToolUse` (the
+command was allowed and ran), `Interrupt` (Esc), `Stop` or the next prompt. Tools
+restore working state, and end hooks release claims. The
 existing fleet pause, resume, attach, stop, reap and worktree operations remain
 shared; `fleet stop` types `/exit` and its Enter apart, because Codex reads one
 burst of keys as a paste. `fleet restart` (and Restart in asq) resumes the
@@ -561,7 +630,8 @@ attributes and config layers, which a second telemetry agent extends there).
 | `decode_event(payload)` | The payload as an `AgentEvent` of one kind: `session_start`, `prompt`, `stop`, `session_end`, `interrupt`, `attention`, `tool_done`, `turn_failed`, `notification`; `None` for one AISquare ignores. |
 | `encode_reply(kind, reply)` | What the hook prints: context for `session_start`/`prompt`, a "keep going" decision for `stop`, `""` for nothing. |
 | `model_args`, `resolve_model`, `native_args`, `native_choice`, `validate`, `effort_alias` | Model and reasoning effort: the flags, the configured choice, the native spelling, what a native argv already chose. |
-| `permission_args(intent, role, native)` | The flags for a `PermissionIntent` (below), less what the `native` arguments already settle; `ValueError` for one it cannot express. `fleet.roles.<role>.permission` and `--permission-mode WRITE:APPROVALS` reach every agent through it (`services.fleet.permission_flags`). |
+| `permission_args(intent, role, native)` | The flags for a `PermissionIntent` (below), less what the `native` arguments already settle, with `store_access` for its write scope; `ValueError` for one it cannot express. `fleet.roles.<role>.permission` and `--permission-mode WRITE:APPROVALS` reach every agent through it (`services.fleet.permission_flags`). |
+| `store_access(write, store)` | How a session sandboxed at `write` reaches the aisquare store in `store` (`types.store_dir()`), with `types.store_read_only(store)` read-only within it ([the sandbox and the store](#the-sandbox-and-the-aisquare-store)). `[]` without `sandboxes_tools` and for a scope run unsandboxed. |
 | `fleet_args(role, label, mode, ...)` | A fleet spawn's flags from the role's native permission settings, then `label_args(label)`. |
 | `resume_args(native_id, transcript)` | The arguments that resume a session, put first: `fleet restart`, `fleet switch` and Restart resume the native id the first hook bound (Codex: `codex <options> resume <id> -- <continue line>`). |
 | `exit_command` | What `fleet stop` types to end the session so its `SessionEnd` runs. |
@@ -585,7 +655,10 @@ tells its agent's own process from a nested child, across a `/clear` or a `/resu
 Codex's `? for shortcuts`: where a pane its hooks say nothing fresh about is typed into),
 `resumes_across_homes`, `exports_home_env`, `own_doctor_check`, `model_ladders`,
 `model_proxy`, `positional_prompt`, `first_context_file_only`, `sandbox_permissions`,
-`legacy_fleet_args`, `value_options`, `switch_options`.
+`sandboxes_tools` (its tools run in an OS sandbox, which `store_access` must open to
+the store), `redraws_while_asking` (its UI redraws while it waits on the human, so an
+attention row holds until a hook moves it), `legacy_fleet_args`, `value_options`,
+`switch_options`.
 
 A `PermissionIntent` is a write scope (`read_only`, `workspace`, `full`) and an
 approvals policy (`ask`, `auto`, `never`), written `workspace:auto`. A reviewer's seats
@@ -594,15 +667,17 @@ wins.
 
 | Intent | Claude Code | Codex |
 |--------|-------------|-------|
-| `read_only:ask` | `--permission-mode manual --disallowedTools=Edit Write NotebookEdit` | `--sandbox read-only --ask-for-approval on-request` |
-| `read_only:auto` (reviewer) | `--permission-mode auto --disallowedTools=Edit Write NotebookEdit` | `--sandbox read-only --ask-for-approval on-request` |
-| `read_only:never` | `--permission-mode dontAsk --disallowedTools=Edit Write NotebookEdit` | `--sandbox read-only --ask-for-approval never` |
-| `workspace:ask` | `--permission-mode manual` | `--sandbox workspace-write --ask-for-approval on-request` |
-| `workspace:auto` (default) | `--permission-mode auto` | `--approve-for-me` |
-| `workspace:never` | `--permission-mode dontAsk` | `--sandbox workspace-write --ask-for-approval never` |
-| `full:ask` | `--permission-mode manual` | `--sandbox danger-full-access --ask-for-approval on-request` |
+| `read_only:ask` | `--permission-mode manual --disallowedTools=Edit Write NotebookEdit` | `--ask-for-approval on-request -c approvals_reviewer="user"`, store profile over `:read-only` |
+| `read_only:auto` (reviewer) | `--permission-mode auto --disallowedTools=Edit Write NotebookEdit` | `--ask-for-approval on-request -c approvals_reviewer="auto_review"`, store profile over `:read-only` |
+| `read_only:never` | `--permission-mode dontAsk --disallowedTools=Edit Write NotebookEdit` | `--ask-for-approval never`, store profile over `:read-only` |
+| `workspace:ask` | `--permission-mode manual` | `--ask-for-approval on-request -c approvals_reviewer="user"`, store profile over `:workspace` |
+| `workspace:auto` (default) | `--permission-mode auto` | `--approve-for-me`, store profile over `:workspace` |
+| `workspace:never` | `--permission-mode dontAsk` | `--ask-for-approval never`, store profile over `:workspace` |
+| `full:ask` | `--permission-mode manual` | `--ask-for-approval on-request -c approvals_reviewer="user" --sandbox danger-full-access` |
 | `full:auto` | `--permission-mode auto` | refused: `--approve-for-me` runs only in workspace-write |
-| `full:never` | `--permission-mode bypassPermissions` | `--sandbox danger-full-access --ask-for-approval never` |
+| `full:never` | `--permission-mode bypassPermissions` | `--ask-for-approval never --sandbox danger-full-access` |
+
+The store profile is [the sandbox and the store](#the-sandbox-and-the-aisquare-store)'s.
 
 ### What the conformance suite fails on
 
@@ -621,6 +696,11 @@ wins.
   bare reason rather than a decision;
 - `version_in` misreads its version line, or `config_dir` ignores `home_env` or an
   explicit dir;
+- an agent that sandboxes its tools (`sandboxes_tools`) has a write scope whose
+  `store_access` does not name the store, or leaves out an account home, the
+  credentials or the config to keep read-only; a permission the fleet maps for it,
+  a role's built-in one included, does not carry its `store_access`; or an agent
+  without a sandbox declares any;
 - an intent maps to neither flags nor a refusal with a reason; resume arguments are
   empty; the exit command is not a slash command; the MCP arguments do not name the
   server; nothing keeps native teams off; telemetry arguments come without the

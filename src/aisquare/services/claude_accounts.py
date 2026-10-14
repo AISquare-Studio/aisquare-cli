@@ -51,6 +51,7 @@ from aisquare.core import claude_accounts as core
 from aisquare.core import claude_sharing as sharing
 from aisquare.core import paths
 from aisquare.core.config import AccountsSettings, load_config
+from aisquare.core.names import name_key
 from aisquare.core.spawn import untraced_env
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.tmux import TmuxServer, WindowInfo
@@ -333,8 +334,9 @@ def _resolve_in(
 
 
 def _same_alias(alias: str | None, typed: str) -> bool:
-    """Whether ``typed`` names ``alias``: an alias keeps its case, and is matched without it."""
-    return alias is not None and alias.casefold() == typed.strip().casefold()
+    """Whether ``typed`` names ``alias``: an alias keeps its case and its variation selectors,
+    and is matched without either (``core.names.name_key``), so ``work`` U+FE00 is ``work``."""
+    return alias is not None and name_key(alias) == name_key(typed.strip())
 
 
 def slot_labels(store: ContextStore | None = None) -> dict[int, str]:

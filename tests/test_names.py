@@ -27,6 +27,8 @@ RAINBOW_FLAG = f"\U0001f3f3\ufe0f{ZWJ}\U0001f308"
 FAMILY = f"\U0001f468{ZWJ}\U0001f469{ZWJ}\U0001f467"
 SCOTLAND = "\U0001f3f4\U000e0067\U000e0062\U000e0073\U000e0063\U000e0074\U000e007f"
 GEAR_OPS = "\u2699\ufe0e ops"
+HEAD_SHAKING = f"\U0001f642{ZWJ}\u2194\ufe0f"
+"""RGI since Emoji 15.1: the part after its joiner is an arrow (Sm) made an emoji by U+FE0F."""
 
 ACCEPTED = [
     pytest.param(TECHNOLOGIST, id="technologist"),
@@ -38,6 +40,10 @@ ACCEPTED = [
     pytest.param(f"{TECHNOLOGIST} payments {RAINBOW_FLAG}", id="in words"),
     pytest.param(f"\u0dc1\u0dca{ZWJ}\u0dbb\u0dd3", id="sinhala conjunct"),
     pytest.param("\u0645\u06cc\u200c\u0634\u0648\u062f", id="persian non-joiner"),
+    pytest.param(HEAD_SHAKING, id="head shaking"),
+    pytest.param("1\ufe0f\u20e3 ops", id="keycap"),
+    pytest.param("\u203c\ufe0f urgent", id="double exclamation"),
+    pytest.param("\u2764\ufe0f", id="red heart"),
 ]
 REFUSED = [
     pytest.param("evil\u202egnp.exe", id="right-to-left override"),
@@ -52,6 +58,12 @@ REFUSED = [
     pytest.param("co\u00adop", id="soft hyphen"),
     pytest.param("work\U000e0067", id="tag outside a flag"),
     pytest.param("\u3164", id="hangul filler"),
+    # A presentation selector after what has no emoji presentation prints as nothing:
+    # `work` U+FE0F reads `work` (review of #261, N3).
+    pytest.param("work\ufe0f", id="emoji selector after a letter"),
+    pytest.param("work\ufe0e", id="text selector after a letter"),
+    pytest.param("1\ufe0f", id="digit without its keycap"),
+    pytest.param("!\ufe0f", id="punctuation with no emoji"),
 ]
 
 
@@ -93,3 +105,19 @@ def test_a_character_that_hides_or_turns_the_text_is_refused(
 )
 def test_the_rule_names_what_is_wrong(name: str, flaw: str | None) -> None:
     assert name_flaw(name) == flaw
+
+
+def test_a_name_that_differs_only_by_a_variation_selector_is_taken(fake_home: Path) -> None:
+    """A standardized variation selector (U+FE00) after a letter is not refused — it is how
+    some scripts pick a glyph — but it changes how a character is drawn, never which one it
+    is: ``work`` U+FE00 beside ``work`` printed as one name, and ``resolve("work")`` picked
+    slot 3 (review of #261, N3). Compared without it (``core.names.name_key``), it is taken."""
+    from aisquare.services import claude_accounts as accounts_service
+
+    accounts_core.create_account()  # slot 2
+    accounts_core.create_account()  # slot 3
+    accounts_service.set_alias("2", "work")
+    with pytest.raises(accounts_service.AccountsError, match="already taken"):
+        accounts_service.set_alias("3", "work\ufe00")
+    assert accounts_service.resolve("work").slot == 2
+    assert accounts_service.resolve("WORK\ufe00").slot == 2  # typed with one, found all the same

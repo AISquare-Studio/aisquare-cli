@@ -17,9 +17,14 @@ refuse, so the two never drift apart:
 
 What an emoji is made of is kept: the zero-width joiner between its parts (woman +
 U+200D + laptop is the technologist, the white flag + U+FE0F + U+200D + rainbow is the
-rainbow flag), variation selectors, skin tones, and the tag characters of a subdivision
-flag. So is a joiner where a script draws with it: after a virama (Sinhala's "Sri") and
-between the letters of a cursive script (the non-joiner in Persian). Between two letters
+rainbow flag, the slightly smiling face + U+200D + left-right arrow + U+FE0F is the head
+shaking), the emoji and text variation selectors after a character that has the two
+presentations (a symbol, ‼ and ⁉, a keycap's digit), skin tones, and the tag characters
+of a subdivision flag. After a letter a variation selector draws nothing — ``work``
+U+FE0F prints as ``work`` — and is refused; any variation selector is left out when two
+names are compared (:func:`name_key`). A joiner is kept, too, where a script draws
+with it: after a virama (Sinhala's "Sri") and between the letters of a cursive script
+(the non-joiner in Persian). Between two letters
 that draw the same either way a joiner is an invisible look-alike, and refused.
 """
 
@@ -36,6 +41,13 @@ _JOINERS = frozenset({"\u200c", "\u200d"})
 """The zero-width non-joiner and joiner: kept where they change what is drawn."""
 _SKIN_TONES = range(0x1F3FB, 0x1F400)
 _VARIATION_SELECTORS = frozenset({"\ufe0e", "\ufe0f"})
+"""The text and emoji presentation selectors (VS15, VS16)."""
+_EMOJI_PUNCTUATION = frozenset({"\u203c", "\u2049"})
+"""‼ and ⁉: punctuation with an emoji presentation."""
+_KEYCAP_BASES = frozenset("#*0123456789")
+_KEYCAP = "\u20e3"
+_ANY_VARIATION_SELECTOR = (range(0xFE00, 0xFE10), range(0xE0100, 0xE01F0), range(0x180B, 0x1810))
+"""Every variation selector: the standardized ones, the ideographic ones, Mongolian's."""
 _TAGS = range(0xE0020, 0xE0080)
 _BLACK_FLAG = "\U0001f3f4"
 _CANCEL_TAG = "\U000e007f"
@@ -64,11 +76,23 @@ def name_flaw(text: str) -> NameFlaw | None:
     return None
 
 
+def name_key(text: str) -> str:
+    """``text`` as two names are compared: without case, and without any variation selector,
+    which changes how a character is drawn and never which one it is."""
+    return "".join(
+        char
+        for char in text
+        if not any(ord(char) in selectors for selectors in _ANY_VARIATION_SELECTOR)
+    ).casefold()
+
+
 def _hidden(text: str, at: int) -> bool:
     """Whether the character at ``at`` prints nothing or turns the text round, where it is."""
     char = text[at]
     if char in _BLANK_LETTERS:
         return True
+    if char in _VARIATION_SELECTORS:
+        return not _selects_a_presentation(text, at)
     if unicodedata.category(char) != "Cf":
         return False
     if char in _JOINERS:
@@ -84,7 +108,7 @@ def _joins(text: str, at: int) -> bool:
     if at == 0 or at == len(text) - 1:
         return False
     before, after = text[at - 1], text[at + 1]
-    if _ends_an_emoji_part(before) and unicodedata.category(after) == "So":
+    if _ends_an_emoji_part(before) and _starts_an_emoji_part(text, at + 1):
         return True
     if unicodedata.combining(before) == _VIRAMA:
         return unicodedata.category(after).startswith("L")
@@ -98,6 +122,27 @@ def _ends_an_emoji_part(char: str) -> bool:
         or ord(char) in _SKIN_TONES
         or char in _VARIATION_SELECTORS
     )
+
+
+def _starts_an_emoji_part(text: str, at: int) -> bool:
+    """A pictograph (So), or a symbol (Sm) drawn as an emoji by the U+FE0F after it: the
+    arrow in the head shaking (U+2194 U+FE0F)."""
+    category = unicodedata.category(text[at])
+    if category == "So":
+        return True
+    return category == "Sm" and text[at + 1 : at + 2] == "\ufe0f"
+
+
+def _selects_a_presentation(text: str, at: int) -> bool:
+    """Whether the VS15 or VS16 at ``at`` follows a character with a text and an emoji
+    presentation to choose between: a symbol, ‼ or ⁉, or a keycap's ``#``, ``*`` or digit
+    (then U+20E3). After anything else it draws nothing."""
+    if at == 0:
+        return False
+    base = text[at - 1]
+    if unicodedata.category(base) in ("So", "Sm") or base in _EMOJI_PUNCTUATION:
+        return True
+    return base in _KEYCAP_BASES and text[at + 1 : at + 2] == _KEYCAP
 
 
 def _cursive(char: str) -> bool:

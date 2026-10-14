@@ -3588,7 +3588,8 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
         for directory in sorted(sites):
             state, detail = agent_core.integration_readiness(adapter.id, directory)
             site = sites.get(directory)
-            fix = f"aisquare agents connect {adapter.id} --config-dir {shlex.quote(str(directory))}"
+            # Quoted for this shell, as the doctor's button reads it back (onboarding).
+            fix = agents_service.config_dir_command("connect", adapter.id, directory)
             if state == "unreadable" or (site and site.error):
                 checks.append(
                     _warn(

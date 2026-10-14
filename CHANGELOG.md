@@ -187,7 +187,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   asq show the row as `unknown (another tmux server on its socket)`, `reap`
   leaves it and names it with the way out (with `--server-down` too, and under
   `held` in `--json`), `fleet stop` and `restart` refuse it
-  with the way back, `fleet shutdown` leaves it live until `--forget`, and
+  with the way back, `fleet tell` and the phone's Tell file a board note to it
+  rather than type into the pane the newcomer gave its id, `fleet shutdown`
+  leaves it live until `--forget`, and
   `upgrade` and `uninstall` count it as running and name `--forget`. Before,
   the newcomer's missing pane read as the row's pane gone, and `stop`,
   `shutdown` and `reap` ended the row while its agent ran on, where nothing

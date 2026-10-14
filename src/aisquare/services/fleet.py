@@ -2770,19 +2770,34 @@ def tell(
     ``agent_id`` pins the row, as for :func:`stop`: the phone's tell means the
     agent it showed, and a replacement that took the label since (a manager's
     restart or switch, in another process) is refused, not typed into.
+
+    And the pane must be the row's own (:func:`_its_agent`): a row whose server lost its
+    socket to another reads its board's ``waiting`` while that is fresh, and its pane id
+    on the server that answers there is another agent's. Pasted into, that agent got the
+    text and an Enter (review of #259, round 2).
     """
     with store_session() as store:
         agent = _live_agent(store, project, label, agent_id=agent_id)
     status = status_of(agent)
     if status.state == "waiting":
         srv = server_of(agent)
-        if not _pane_is_the_agent(srv, agent.pane_id):
+        try:
+            facts = srv.pane_facts(agent.pane_id)
+        except TmuxError:
+            facts = None  # tmux that cannot answer is not a pane to type into either
+        if not _its_agent(agent, facts):
             how = _file_note(project, label, text, sender)
-            return TellResult(
-                False,
-                "it reads as waiting, but its pane is not running the agent yet (the "
-                f"launcher or a shell is in the foreground) — {how}",
-            )
+            if facts is not None and _outlived(agent, facts.server_started):
+                why = (
+                    "it reads as waiting, but the tmux server at its socket is not the one it "
+                    "was started on, and its pane id there is another agent's"
+                )
+            else:
+                why = (
+                    "it reads as waiting, but its pane is not running the agent yet (the "
+                    "launcher or a shell is in the foreground)"
+                )
+            return TellResult(False, f"{why} — {how}")
         try:
             srv.paste(agent.pane_id, text)
             srv.send_keys(agent.pane_id, "Enter")
@@ -2794,21 +2809,24 @@ def tell(
     return TellResult(False, f"it is {status.state} — {how}")
 
 
-def _pane_is_the_agent(srv: TmuxServer, pane_id: str) -> bool:
-    """Whether the pane's foreground process is the agent right now.
+def _its_agent(agent: FleetAgent, facts: PaneFacts | None) -> bool:
+    """Whether the pane these facts are of runs ``agent``'s own agent now: the agent is in its
+    foreground (:func:`_runs_the_agent`), on the server the row was started on
+    (:func:`_outlived`), from one ``display-message`` (``PaneFacts.server_started``).
 
-    Never raises: tmux that cannot answer is not a pane to type into either
-    (and :func:`_derive` has already called such an agent ``unknown``).
+    The one test every path that types into a row's pane puts: :func:`tell`, the manager's
+    nudge (:func:`nudge_manager`), and the remote's keys, quick answers and agent actions
+    (``remote_server._remote_facts_refusal``). ``tell`` asked only the first, and pasted
+    into the pane another server gave a held row's id (review of #259, round 2).
     """
-    try:
-        facts = srv.pane_facts(pane_id)
-    except TmuxError:
-        return False
-    return _runs_the_agent(facts)
+    return (
+        facts is not None and _runs_the_agent(facts) and not _outlived(agent, facts.server_started)
+    )
 
 
 def _runs_the_agent(facts: PaneFacts | None) -> bool:
-    """:func:`_pane_is_the_agent`'s answer, for a caller that holds the pane's facts already."""
+    """Whether the pane's foreground process is the agent right now: not dead, and not a
+    shell or the launcher (:func:`_agent_running`). Half of :func:`_its_agent`."""
     return facts is not None and not facts.dead and _agent_running(facts.current_command)
 
 
@@ -5527,10 +5545,8 @@ def nudge_manager(project_id: str, *, reason: str) -> bool:
                 return False
             srv = server_of(manager)
             facts = srv.pane_facts(manager.pane_id)
-            if facts is None or facts.dead or not _agent_running(facts.current_command):
-                return False
-            if _outlived(manager, srv.started_at()):
-                return False  # the id is another agent's on a newer server
+            if facts is None or not _its_agent(manager, facts):
+                return False  # not the agent, or the id is another agent's on another server
             pane = _PaneView(
                 facts.dead,
                 facts.dead_status,

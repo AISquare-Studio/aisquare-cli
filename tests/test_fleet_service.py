@@ -366,7 +366,9 @@ class FakeTmux(TmuxServer):
         )
 
     def pane_facts(self, pane_id: str) -> PaneFacts | None:
-        return self.facts.get(pane_id) if self._read() else None
+        """As the real one, which asks ``#{start_time}`` in the same ``display-message``."""
+        facts = self.facts.get(pane_id) if self._read() else None
+        return None if facts is None else replace(facts, server_started=self.started)
 
     # The strict twins the shutdown paths use: each is the lenient answer UNLESS
     # the server could not be asked, and that single distinction is `reachable()`
@@ -2366,6 +2368,39 @@ def test_tell_does_not_type_into_a_pane_that_is_not_the_agent_yet(
         (agent.pane_id, "key", "Enter"),
     ]
     assert _events(project, "note") == [message], "no second note was filed"
+
+
+def test_tell_files_a_note_for_a_held_row_rather_than_type_into_the_pane_under_its_id(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 2: after a `kill-server` and any respawn, a row whose board still
+    reads `waiting` (a killed agent fires no SessionEnd) is held as another server's, and
+    `tell` asked only whether the pane under its id ran an agent. On the server that took
+    its socket that id is another agent's, here another project's manager at its prompt,
+    which got the text and an Enter. The pane must be the row's own, on its own server."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    coder = _coder(project)
+    _board_session(coder, "waiting")
+    newcomer = FakeTmux()  # at the same path, so `-L` reaches it
+    newcomer.started = tmux.started + timedelta(minutes=5)
+    newcomer.spawn_window("asq-elsewhere", name="manager", cwd=project.root, command=["claude"])
+    newcomer.set_command(coder.pane_id, "claude")  # its %1 runs an agent: someone else's
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: newcomer)
+
+    result = fleet_service.tell(project, "coder-1", "please rebase")
+
+    assert not result.delivered and "board note" in result.how, result.how
+    assert newcomer.typed == [], "nothing pasted into the pane that took its id"
+    assert _events(project, "note") == ["please rebase"]
+    # Negative control: on its own server, the same waiting row is typed into.
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: tmux)
+    tmux.set_command(coder.pane_id, "claude")
+    assert fleet_service.tell(project, "coder-1", "please rebase").delivered
+    assert tmux.typed == [
+        (coder.pane_id, "paste", "please rebase"),
+        (coder.pane_id, "key", "Enter"),
+    ]
 
 
 def test_tell_an_unknown_label_is_no_such_agent(tmux: FakeTmux, project: ProjectInfo) -> None:

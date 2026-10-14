@@ -2446,8 +2446,9 @@ def _remote_facts_refusal(agent: FleetAgent, facts: PaneFacts | None) -> str | N
     """Why nothing may be typed into the pane these facts are of, as :func:`_remote_pane_refusal`
     says it; ``None`` when it is the row's agent.
 
-    It must run the agent (``fleet._runs_the_agent``), on the server the row was recorded
-    on, asked in that order. A reboot or a hand-run ``tmux -L asq kill-server`` leaves live
+    It must be the row's own agent (``fleet._its_agent``, the test ``fleet tell`` and the
+    manager's nudge put too): running the agent, on the server the row was recorded on,
+    refused in that order. A reboot or a hand-run ``tmux -L asq kill-server`` leaves live
     rows behind (the listing reads them ``lost`` and ends none of them), and the next
     server, started by a spawn in any project, numbers its panes from ``%0`` again: asked
     about by id, that agent's pane answered for the row, the phone showed its screen under
@@ -2464,11 +2465,9 @@ def _remote_facts_refusal(agent: FleetAgent, facts: PaneFacts | None) -> str | N
     """
     from aisquare.services import fleet as fleet_service
 
-    if facts is None or not fleet_service._runs_the_agent(facts):
-        return PANE_NOT_AGENT
-    if fleet_service._outlived(agent, facts.server_started):
-        return PANE_OUTLIVED
-    return None
+    if fleet_service._its_agent(agent, facts):
+        return None
+    return PANE_OUTLIVED if fleet_service._runs_the_agent(facts) else PANE_NOT_AGENT
 
 
 def _remote_keys_row(target: ProjectInfo, label: str, pin: str | None) -> FleetAgent:

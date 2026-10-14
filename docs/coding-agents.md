@@ -552,15 +552,23 @@ attributes and config layers, which a second telemetry agent extends there).
 | `decode_event(payload)` | The payload as an `AgentEvent` of one kind: `session_start`, `prompt`, `stop`, `session_end`, `interrupt`, `attention`, `tool_done`, `turn_failed`, `notification`; `None` for one AISquare ignores. |
 | `encode_reply(kind, reply)` | What the hook prints: context for `session_start`/`prompt`, a "keep going" decision for `stop`, `""` for nothing. |
 | `model_args`, `resolve_model`, `native_args`, `native_choice`, `validate`, `effort_alias` | Model and reasoning effort: the flags, the configured choice, the native spelling, what a native argv already chose. |
-| `permission_args(intent, role)` | The flags for a `PermissionIntent` (below); `ValueError` for one it cannot express. |
+| `permission_args(intent, role, native)` | The flags for a `PermissionIntent` (below), less what the `native` arguments already settle; `ValueError` for one it cannot express. `fleet.roles.<role>.permission` and `--permission-mode WRITE:APPROVALS` reach every agent through it (`services.fleet.permission_flags`). |
 | `fleet_args(role, label, mode, ...)` | A fleet spawn's flags from the role's native permission settings, then `label_args(label)`. |
-| `resume_args(native_id, transcript)` | The arguments that resume a session, put first. |
+| `resume_args(native_id, transcript)` | The arguments that resume a session, put first: `fleet restart`, `fleet switch` and Restart resume the native id the first hook bound (Codex: `codex <options> resume <id> -- <continue line>`). |
 | `exit_command` | What `fleet stop` types to end the session so its `SessionEnd` runs. |
+| `queue_args(native_id, message)` | The arguments that queue a message for a RUNNING session's next turn (Codex: `queue --thread <id> --message <text>`), run with `home_env` set to the session's dir: what `fleet tell` does for a busy agent. `None` for none (a board note). |
+| `key_spellings` | tmux key names the agent reads under another one, which the fleet UI's pane sends instead (Codex: `S-Enter` → `C-j`, its newline). |
+| `role_defaults(role, binary, args)` | The flags a role needs on this agent wherever it starts (Claude Code's ui-tester `--chrome`), less what `args` says. |
+| `browser_tools(home)` | The browser the agent brings itself, as the doctor's browser-tools line names it (Codex's `browser_use` feature and bundled browser plugin); `None` where the doctor finds it another way. |
 | `mcp_args`, `context_files`, `disable_native_teams` | AISquare's MCP server for this session; the instruction files it reads; the arguments and environment that keep its own sub-agent teams off. |
 | `telemetry_args(endpoint, authorization)` | Its OpenTelemetry exporter, with `native_telemetry`. |
 
 `AgentCapabilities` holds the rest as flags, each documented in `types.py` with the
-service that reads it: `assigns_session_id` (AISquare names the session at launch),
+service that reads it: `pid_env` (the variable that hands a hook the agent's own pid,
+Claude Code's `CLAUDE_PID`) or `tool_shell_env` (the variable the agent sets in its
+tools' shells and never in its own hooks, Codex's `CODEX_THREAD_ID`) — how a fleet row
+tells its agent's own process from a nested child, across a `/clear` or a `/resume` —
+`assigns_session_id` (AISquare names the session at launch),
 `requires_hook_trust`, `hook_names_home`, `strict_hooks_file`, `stop_reason_as_prompt`,
 `limits_in_transcript` (no turn-failed event), `ambient_first_run`,
 `reads_pane_readiness` (`fleet tell` may type into a pane that looks idle),

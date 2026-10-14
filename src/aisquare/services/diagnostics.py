@@ -2652,6 +2652,9 @@ def _check_browser_tools(cwd: Path | None = None) -> DoctorCheck:
     # disagree with itself between the CLI and the fleet UI, and the CLI was
     # the surface telling operators to install what their repo declares.
     cwd = Path.cwd() if cwd is None else cwd
+    own = _agents_own_browser(cwd)
+    if own is not None:
+        return own
     dirs = agent_core.claude_config_dirs()
     # Every `.claude.json` parsed ONCE for both scans below; see `_browser_tools_in`.
     parsed = _claude_jsons(dirs)
@@ -2689,6 +2692,38 @@ def _check_browser_tools(cwd: Path | None = None) -> DoctorCheck:
         "rather than passing them on code alone — add the Chrome DevTools MCP with "
         "`claude mcp add -s user chrome-devtools npx chrome-devtools-mcp`, or install the "
         "Claude in Chrome extension (claude.ai/chrome)",
+    )
+
+
+def _agents_own_browser(cwd: Path) -> DoctorCheck | None:
+    """The browser-tools row for a ui-tester whose agent brings its own browser
+    (``AgentAdapter.browser_tools``: Codex's ``browser_use`` feature and bundled browser
+    plugin, read from the config dir it launches with); ``None`` for an agent whose
+    browser this row finds by its own scan (Claude Code), or a role that cannot be
+    resolved (its launch says why). OK either way, as the row always is."""
+    from aisquare.services import agent_launch
+
+    name = "browser tools"
+    try:
+        selected = agent_launch.resolve("ui-tester", cwd=cwd)
+        tools = selected.adapter.browser_tools(selected.config_dir)
+    except Exception:
+        return None
+    if tools is None:
+        return None
+    where = f"{selected.adapter.label}, {_short_path(selected.config_dir)}"
+    if tools:
+        return _ok(
+            name,
+            f"the ui-tester runs {where}: {' and '.join(tools)} — it browses with "
+            f"{selected.adapter.label}'s own browser (no --chrome)",
+        )
+    config = selected.config_dir / "config.toml"
+    return _ok(
+        name,
+        f"the ui-tester runs {where} with no browser of its own (browser_use is off in "
+        f"{_short_path(config)}) — it reopens UI tasks as 'not browser-verified' rather "
+        "than passing them on code alone; set `browser_use = true` under [features] there",
     )
 
 

@@ -8,6 +8,7 @@ import sys
 import tomllib
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from aisquare.core import harness
@@ -159,6 +160,10 @@ class CodexAdapter:
     hooks_off_setting = "`features.hooks = false`"
     #: Typed, then its Enter 0.2 s later: the paste-burst guard ate an Enter sent with it.
     exit_command = "/exit"
+    #: Measured on 0.162.1 under tmux 3.7c: shift+enter submits the prompt (it arrives
+    #: as Enter), ctrl+J inserts the newline. Esc interrupts a turn and shift+tab cycles
+    #: Default/Plan mode, as their names are sent.
+    key_spellings: Mapping[str, str] = MappingProxyType({"S-Enter": "C-j"})
     accounts = CodexAccounts()
     plugin = CodexPlugin()
     capabilities = AgentCapabilities(
@@ -391,8 +396,31 @@ class CodexAdapter:
     def context_files(self, home: Path) -> tuple[Path, ...]:
         return (home / "AGENTS.override.md", home / "AGENTS.md")
 
+    def browser_tools(self, home: Path) -> list[str] | None:
+        """Codex's own browser, as ``config.toml`` in ``home`` has it: the ``browser_use``
+        feature (stable and on unless ``[features] browser_use = false``, 0.162.1) and each
+        enabled ``browser@<marketplace>`` plugin (``browser@openai-bundled``)."""
+        config = _read_toml(home / "config.toml")
+        features = config.get("features")
+        found = []
+        if not (isinstance(features, dict) and features.get("browser_use") is False):
+            found.append("the browser_use feature")
+        plugins = config.get("plugins")
+        for plugin_id, table in plugins.items() if isinstance(plugins, dict) else ():
+            if str(plugin_id).partition("@")[0] != "browser":
+                continue
+            if isinstance(table, dict) and table.get("enabled", True) is not False:
+                found.append(f"the {plugin_id} plugin")
+        return found
+
     def validate(self, model: str | None, effort: str | None) -> None:
         self.reasoning_effort(effort)
+
+    def role_defaults(self, role: str, *, binary: str, args: Sequence[str]) -> harness.RoleDefaults:
+        """None: the ui-tester's browser is Codex's ``browser_use`` feature (stable and on
+        in 0.162.1) and its bundled browser plugin, read by ``aisquare doctor``
+        (:meth:`browser_tools`), not a flag; Claude Code's ``--chrome`` is not Codex's."""
+        return harness.RoleDefaults()
 
     def model_args(self, model: str | None, effort: str | None) -> list[str]:
         effort = self.reasoning_effort(effort)

@@ -56,6 +56,7 @@ class FakeAgentAdapter:
     version_args: tuple[str, ...] = ("version",)
     hooks_off_setting = '"hooks_off": true'
     exit_command = "/quit"
+    key_spellings: Mapping[str, str] = {"M-Enter": "C-o"}
     accounts = None
     plugin = None
     capabilities = AgentCapabilities(
@@ -157,6 +158,12 @@ class FakeAgentAdapter:
 
     def context_files(self, home: Path) -> tuple[Path, ...]:
         return (home / "FAKE.md",)
+
+    def browser_tools(self, home: Path) -> list[str] | None:
+        return []
+
+    def role_defaults(self, role: str, *, binary: str, args: Sequence[str]) -> harness.RoleDefaults:
+        return harness.RoleDefaults()
 
     def model_args(self, model: str | None, effort: str | None) -> list[str]:
         self.validate(model, effort)

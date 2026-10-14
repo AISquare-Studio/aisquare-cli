@@ -26,19 +26,26 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
+from aisquare.cli.ui.views.agent import key_spellings
 from aisquare.cli.ui.views.settings import launch_line
+from aisquare.core import claude_accounts as accounts_core
+from aisquare.core import harness
 from aisquare.core.agent_adapters import get_adapter
+from aisquare.core.agent_adapters.types import AgentAdapter
 from aisquare.core.config import (
     REVIEWER_ARGS,
+    AgentModelDefault,
+    AgentModelSettings,
     FleetRoleSettings,
     FleetSettings,
     RoleLaunchProfile,
     load_config,
     save_config,
 )
+from aisquare.core.keys import Drop, Translation, translate
 from aisquare.core.store import SqliteStore, store_session
-from aisquare.models import FleetAgent, ProjectInfo, TeamSession, TeamTask
-from aisquare.services import agent_events, agent_launch, auto_mode
+from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession, TeamTask
+from aisquare.services import agent_events, agent_launch, auto_mode, diagnostics
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from tests import fakebin
@@ -735,3 +742,174 @@ def test_every_read_of_a_row_names_its_own_session_over_its_launch_binding(
         stale = store.fleet_agent_for_session(codex.project.id, "a-stale-binding")
     assert listed == ["its-own-id"] and got is not None and got.session_id == "its-own-id"
     assert by_session is not None and by_session.id == codex.agent.id and stale is None
+
+
+# --- the role's model and effort at fleet spawn and launch (acceptance 5) ----------------
+
+
+def _pair(argv: list[str], option: str) -> str | None:
+    return argv[argv.index(option) + 1] if option in argv else None
+
+
+def test_fleet_spawn_passes_the_roles_model_and_effort_for_both_agents(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """Claude Code on its role's ladder, as ``team spawn`` resolves it (no paid probe at a
+    spawn: the first rung), and Codex on ``[agents.models.codex]``; then
+    ``[agents.models.claude-code]`` over the ladder."""
+    config = load_config()
+    config.fleet.roles["coder"] = FleetRoleSettings(worktree=False)
+    config.agents.models["codex"] = AgentModelSettings(model="gpt-test", effort="high")
+    save_config(config)
+    level, _source = harness.resolve_effort("coder")
+
+    fleet_service.spawn(project, "coder", agent="claude-code")
+    claude = _spawn_native(tmux)
+    fleet_service.spawn(project, "coder", agent="codex")
+    codex = _spawn_native(tmux)
+
+    assert (_pair(claude, "--model"), _pair(claude, "--effort")) == ("sonnet", level)
+    assert _pair(codex, "--model") == "gpt-test"
+    assert 'model_reasoning_effort="high"' in codex and "--effort" not in codex
+
+    config = load_config()
+    config.agents.models["claude-code"] = AgentModelSettings(
+        roles={"coder": AgentModelDefault(model="opus", effort="xhigh")}
+    )
+    save_config(config)
+    fleet_service.spawn(project, "coder", agent="claude-code")
+    pinned = _spawn_native(tmux)
+    assert (_pair(pinned, "--model"), _pair(pinned, "--effort")) == ("opus", "xhigh")
+
+
+def test_a_hand_launch_keeps_claude_codes_argv_and_gives_codex_its_pins(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+) -> None:
+    """``aisquare launch`` by hand is ``AISQUARE_ROLE=<role> <agent>``: Claude Code's argv
+    as it always was (tests/test_agent_config_regressions.py), Codex's with what is
+    configured for it. The ladder and Claude Code's pins are the fleet's (above)."""
+    execute = Mock()
+    monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
+    monkeypatch.setattr("aisquare.cli.launch._await_fleet_row", lambda: None)
+
+    def argv(*args: str) -> list[str]:
+        result = runner.invoke(app, ["launch", "coder", *args])
+        assert result.exit_code == 0, result.output
+        launched: list[str] = execute.call_args.args[1]
+        return launched
+
+    config = load_config()
+    config.agents.models["claude-code"] = AgentModelSettings(model="opus")
+    config.agents.models["codex"] = AgentModelSettings(effort="low")
+    save_config(config)
+    assert "--model" not in argv("--agent", "claude-code")
+    assert 'model_reasoning_effort="low"' in argv("--agent", "codex")
+
+
+def test_a_codex_ui_tester_spawns_without_claude_codes_flags(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    on_codex = fleet_service.spawn(project, "ui-tester", agent="codex")
+    codex = _command(tmux)
+    fleet_service.spawn(project, "ui-tester", agent="claude-code")
+    claude = _command(tmux)
+
+    assert "--chrome" not in codex and "--name" not in codex
+    assert not any("--chrome" in note for note in on_codex.notes), on_codex.notes
+    assert "--chrome" in claude, "Claude Code's ui-tester keeps its browser flag"
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        (
+            '[plugins."browser@openai-bundled"]\nenabled = true\n',
+            "the browser_use feature and the browser@openai-bundled plugin",
+        ),
+        ("[features]\nbrowser_use = false\n", "no browser of its own"),
+    ],
+)
+def test_the_doctors_browser_row_reads_a_codex_ui_testers_own_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config: str, expected: str
+) -> None:
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    (home / "config.toml").write_text(config, encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    settings = load_config()
+    settings.team.profiles["ui-tester"] = RoleLaunchProfile(agent="codex")
+    save_config(settings)
+
+    row = diagnostics._check_browser_tools(tmp_path)
+
+    assert row.status.value == "ok" and "the ui-tester runs Codex" in row.detail
+    assert expected in row.detail and "Claude in Chrome" not in row.detail
+
+
+def test_key_chords_are_sent_in_the_shown_agents_own_spelling() -> None:
+    codex, claude = get_adapter("codex"), get_adapter("claude-code")
+
+    def sent(key: str, adapter: AgentAdapter, *, extended: bool = True) -> Translation | Drop:
+        return translate(
+            key,
+            None,
+            printable=False,
+            extended_keys=extended,
+            spellings=adapter.key_spellings,
+        )
+
+    # Codex submits on shift+enter and takes ctrl+J as its newline (0.162.1).
+    assert sent("shift+enter", codex) == Translation("key", "C-j")
+    assert sent("shift+enter", claude) == Translation("key", "S-Enter")
+    assert sent("shift+enter", claude, extended=False) == Translation("key", "C-j")
+    for adapter in (codex, claude):
+        # Esc interrupts a turn, shift+tab cycles the mode, alt+p is forwarded as is.
+        assert sent("escape", adapter) == Translation("key", "Escape")
+        assert sent("shift+tab", adapter) == Translation("key", "BTab")
+        assert translate(
+            "alt+p", "p", printable=True, spellings=adapter.key_spellings
+        ) == Translation("key", "M-p")
+    row = FleetAgent(
+        id="row",
+        project_id="prj",
+        label="coder-1",
+        role="coder",
+        agent="codex",
+        binary="codex",
+        cwd=Path("."),
+        tmux_socket="test",
+        pane_id="%1",
+        created_at=datetime.now(UTC),
+    )
+    status = FleetAgentStatus(agent=row)
+    assert key_spellings(status) == {"S-Enter": "C-j"}
+    assert key_spellings(None) == {}
+
+
+def test_a_codex_row_on_a_codex_slot_restarts_on_that_slot(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """The restart resolved the row's slot as a Claude Code account, and refused the
+    plain codex (slot 0) as "a Codex account, and this launch runs Claude Code" (caught
+    against the real binary by tests/test_codex_native.py)."""
+    slot = accounts_core.create_account("codex")
+    agent = fleet_service.spawn(
+        project, "coder", agent="codex", worktree=False, account=str(slot.slot)
+    ).agent
+    assert agent.account_slot == slot.slot
+
+    receipt = fleet_service.restart(project, agent.label)
+
+    assert receipt.started.account_slot == slot.slot and receipt.started.agent == "codex"
+    assert _flag(_command(tmux), "--account") == str(slot.slot)

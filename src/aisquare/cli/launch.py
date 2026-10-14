@@ -384,7 +384,7 @@ def launch(
     # Managed role defaults precede saved and forwarded arguments so a native
     # literal separator cannot turn them into prompt text. Explicit opt-outs
     # still win: role_defaults stands down when either spelling is present.
-    defaults = harness.role_defaults(
+    defaults = selected.adapter.role_defaults(
         role, binary=resolution.binary, args=[*profile.args, *ctx.args]
     )
     role_args = defaults.args

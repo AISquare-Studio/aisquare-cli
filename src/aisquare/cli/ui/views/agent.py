@@ -26,6 +26,7 @@ from textual.worker import Worker, WorkerState
 from aisquare.cli import fleet as fleet_cli
 from aisquare.cli.ui.sidebar import ROLE_ICON, STATE_CHIP
 from aisquare.cli.ui.terminal import PANE_GONE, TerminalPane
+from aisquare.core.agent_adapters import recorded_adapter
 from aisquare.core.tmux import TmuxServer
 from aisquare.models import FleetAgent, FleetAgentStatus
 from aisquare.services import claude_accounts as accounts_service
@@ -86,6 +87,13 @@ def header_text(status: FleetAgentStatus, labels: Mapping[int, str] | None = Non
     if agent.exit_status is not None:
         text.append(SEPARATOR + f"exited {agent.exit_status}", style="bold red")
     return text
+
+
+def key_spellings(status: FleetAgentStatus | None) -> Mapping[str, str]:
+    """The key names the agent in ``status``'s pane reads its own way
+    (``AgentAdapter.key_spellings``); none for a row this install has no adapter for."""
+    adapter = recorded_adapter(status.agent.agent) if status is not None else None
+    return adapter.key_spellings if adapter is not None else {}
 
 
 def shown_pane(status: FleetAgentStatus) -> str | None:
@@ -197,6 +205,7 @@ class AgentView(Vertical):
             server=self.server,
             escape_key=self.escape_key,
             placeholder=PANE_GONE,
+            key_spellings=key_spellings(self.status),
             id="agent-pane",
         )
 
@@ -220,6 +229,7 @@ class AgentView(Vertical):
         self.query_one("#agent-header", Static).update(header_text(status, self._labels))
         self._paint_actions()
         self._refresh_labels()
+        self.pane.key_spellings = key_spellings(status)
         if (wanted := shown_pane(status)) != self.pane.pane_id:
             self.pane.attach(wanted)
 

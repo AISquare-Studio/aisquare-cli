@@ -350,6 +350,10 @@ class AgentAdapter(Protocol):
     exit_command: str
     """What the fleet types into the agent's prompt to end the session gracefully, so its
     ``SessionEnd`` hook runs (``/exit``)."""
+    key_spellings: Mapping[str, str]
+    """tmux key names this agent reads under another spelling, which the fleet UI's pane
+    sends instead (``core.keys.translate``): Codex submits on ``S-Enter`` and takes
+    ``C-j`` as its newline. Empty where every key means what tmux names it."""
 
     @property
     def accounts(self) -> AgentAccounts | None:
@@ -422,7 +426,19 @@ class AgentAdapter(Protocol):
         """The instruction files the agent reads from its config dir, in its precedence."""
         ...
 
+    def browser_tools(self, home: Path) -> list[str] | None:
+        """The browser tooling the agent brings itself in config dir ``home``, as the
+        doctor names it (empty: none, or switched off); ``None`` for an agent whose
+        browser the doctor finds another way (Claude Code's MCP servers and plugins,
+        ``services.diagnostics``). Read-only; never raises."""
+        ...
+
     def model_args(self, model: str | None, effort: str | None) -> list[str]: ...
+    def role_defaults(self, role: str, *, binary: str, args: Sequence[str]) -> harness.RoleDefaults:
+        """The flags ``role`` needs on this agent wherever it starts (the ui-tester's
+        browser), less what ``args`` already says, with a note for each it withholds."""
+        ...
+
     def permission_args(
         self, intent: PermissionIntent, role: str, native: Sequence[str] = ()
     ) -> list[str]:

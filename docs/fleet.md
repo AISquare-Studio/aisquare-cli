@@ -161,7 +161,14 @@ manager's loop. Model ladders and effort come from the existing harness
 (`aisquare team harness` shows the matrix): the manager rides the planner's
 ladder (`fable → opus → sonnet`); coder, tester, ui-tester and reviewer start on `sonnet`
 with `opus` as the fallback rung; the validator runs `fable → opus`, one effort
-tier above the work it gates.
+tier above the work it gates. `fleet spawn` passes the role's model and effort as
+`team spawn` resolves them, without a paid probe at the spawn (the cached verdicts,
+else the first rung; Claude Code runs its own default where the account lacks the
+model). A Codex role takes `[agents.models.codex]` (and `[agents.models.codex.roles.
+<role>]`), else Codex's own default; `[agents.models.claude-code]` pins Claude Code's
+over the ladder, and `AISQUARE_MODEL_<ROLE>`/`AISQUARE_EFFORT_<ROLE>` pin either. A
+hand `aisquare launch <role>` leaves Claude Code's argv as it always was (its own
+default), and gives Codex its configured pins.
 
 | Fleet role | Repo role | Job in the loop | Runs in |
 | --- | --- | --- | --- |
@@ -170,7 +177,7 @@ tier above the work it gates.
 | **tester** | `runner` (`tester` is the fleet's name for it; `runner` still works everywhere) | adversarial verification: runs the *full* check the contract names, tries to break the change, then `task done` with evidence or `task reopen` with the reason | the repo root. It gets no worktree of its own and **nothing moves it into the coder's** — so whoever spawns it names the branch or the tree to check, in the tester's `--prompt` or a later `fleet tell`, or its "full check" runs against an unchanged root |
 | **reviewer** | new | reads the PR as the stranger who will maintain it; findings on the PR via `gh pr review`. Launched without the tools that edit files (`--disallowedTools=Edit Write NotebookEdit`) and with its shell: Claude Code's `--restricted` removes the Bash that `gh pr diff`, `gh pr review` and its `aisquare` cycle need (0.6.0 and 0.7.0 launched it so, and it could do none of them). Its shell could still push or merge: its briefing forbids both and `auto` mode checks each action, but only the credentials it runs with can refuse them (see the table below) | its own worktree |
 | **validator** | `validator` | one final gate over the assembled deliverable before the manager says READY | the repo root |
-| **ui-tester** | new | verifies tasks titled `UI: …` in a **real browser** — Claude in Chrome, the Chrome DevTools MCP or a Playwright MCP, whichever this window has — and measures (screenshots, computed sizes, console, network) instead of eyeballing; `task done` names the branch or commit and the URL it verified, or `task reopen` carries a screenshot. With no browser tool it runs the non-browser checks and reopens the task as "not browser-verified", never passes it. **Asked to be read-only, not made read-only** — its briefing says never edit and never push, and nothing enforces that (see the permission-mode table below: no allowed-tools list is written or passed, and `--restricted` would remove the Bash its own `task done`/`task reopen` need). Launched with `--chrome` by the role itself (`RoleProfile.default_args`), on any machine, unless `--no-chrome` is given | the repo root. Like the tester it gets no worktree and **nothing moves it into the coder's** — worse here, because it fails silently: it opens the URL, sees a working page and measures the PRE-change build honestly. So whoever spawns it names the branch or tree and the URL in its `--prompt` (the manager's loop does), and its verdict says which build it measured |
+| **ui-tester** | new | verifies tasks titled `UI: …` in a **real browser** — Claude in Chrome, the Chrome DevTools MCP or a Playwright MCP, whichever this window has — and measures (screenshots, computed sizes, console, network) instead of eyeballing; `task done` names the branch or commit and the URL it verified, or `task reopen` carries a screenshot. With no browser tool it runs the non-browser checks and reopens the task as "not browser-verified", never passes it. **Asked to be read-only, not made read-only** — its briefing says never edit and never push, and nothing enforces that (see the permission-mode table below: no allowed-tools list is written or passed, and `--restricted` would remove the Bash its own `task done`/`task reopen` need). Launched with `--chrome` by the role itself (`RoleProfile.default_args`), on any machine, unless `--no-chrome` is given; on Codex it gets no flag and browses with Codex's own `browser_use` feature and bundled browser plugin, which `aisquare doctor`'s browser-tools line reads from its `config.toml` | the repo root. Like the tester it gets no worktree and **nothing moves it into the coder's** — worse here, because it fails silently: it opens the URL, sees a working page and measures the PRE-change build honestly. So whoever spawns it names the branch or tree and the URL in its `--prompt` (the manager's loop does), and its verdict says which build it measured |
 
 The manager talks to its agents only through the board — tasks, notes, signals
 — and `fleet tell` nudges. When a sub-agent writes a result to the board, the
@@ -216,8 +223,10 @@ follows as a `⚠` line.
 | `--label L` / `-l L` | the agent's label (see [Naming](#naming)) | `<role>-<task short id>` with `--task`, else `<role>-<n>` |
 | `--task ID` | the board task this agent is for (id or prefix) | none |
 | `--worktree` / `--no-worktree` | run in its own git worktree | the role's setting: on for coder and reviewer |
-| `--permission-mode M` | Claude Code permission mode | the role's setting: `auto` |
-| `--bin B` | the agent executable | the role's binding, else `claude` |
+| `--permission-mode M` | one permission for any agent, `WRITE:APPROVALS` (`workspace:auto`, `read_only:auto`, `workspace:ask`, `full:never`…), mapped to the agent's own flags ([the table](#one-permission-for-every-agent)); or a value in the agent's own words (Claude Code's `auto`, `acceptEdits`, …; Codex's sandbox) | the role's setting: `permission`, else the agent's own (`auto` on Claude Code, `--approve-for-me` on Codex) |
+| `--agent A` | the coding agent (`claude-code`, `codex`) | the role's binding, the project's, the user's default |
+| `--sandbox S` / `--approval P` | Codex's own sandbox and approval policy for this spawn; not beside a `WRITE:APPROVALS` `--permission-mode` | the role's setting |
+| `--bin B` | the agent executable | the role's binding, else the agent's (`claude`, `codex`) |
 | `--prompt TEXT` | first message typed once the agent is up | none |
 | `--as SESSION` | the acting session — a manager passes its own, so the row records who spawned it | `user` |
 | `-- <agent args>` | everything after the options goes to the agent, as with `aisquare launch` | — |
@@ -264,6 +273,18 @@ task and never takes its row, whatever start it reports. A binary that exports
 no `CLAUDE_PID` binds its row on first arrival and keeps that session; a
 `/clear` there releases its claims, as any session end does.
 
+A **Codex** agent hands its hooks no pid of its own (the `CLAUDE_PID` one finds
+is whoever started the tmux server's). It is told apart the other way round:
+Codex sets `CODEX_THREAD_ID` in the shells its tools run in and never in its own
+hooks (measured on 0.162.1), so a `codex exec` one of its tools starts fires every
+hook with its parent's thread there, and is never briefed on the parent's task
+and never takes its row; `aisquare launch` clears the variable for the agent it
+starts. Codex's `/clear` (and `/new`) fires no `SessionEnd` for the thread it
+leaves, only a `SessionStart` with source `clear` for a new id, which comes with the
+new thread's first prompt: the row and every claim move to that id there. A `/resume` to an earlier thread takes the row, the
+claims and the MCP server's identity back to it; a fresh hand-over's replacement
+takes over the parked claims at its first start.
+
 ### `fleet ls` / `fleet status`
 
 ```sh
@@ -296,6 +317,13 @@ alive. Otherwise the message is filed as a board note addressed to that agent,
 and the output says which happened (`✓` typed, `→` noted). Never interrupts an
 agent that is working or sitting on a permission prompt. Takes `--as SESSION`.
 
+A **Codex** agent's pane does not show whether it sits at its prompt, so its
+own hooks decide: typed when they freshly say *waiting*; when they freshly say
+*working*, queued for its next turn with `codex queue --thread <its thread>
+--message <text>` under its own `CODEX_HOME` (`✓ queued for its next turn`;
+measured on 0.162.1: the message ran as the next turn of an interactive session
+busy with one); anything else, or a queue that fails, is the board note.
+
 ### `fleet stop`
 
 ```sh
@@ -303,7 +331,8 @@ aisquare fleet stop coder-auth
 aisquare fleet stop coder-auth --force
 ```
 
-Sends `/exit`, waits a grace period, then kills the window. The agent's own
+Sends the agent's exit command (`/exit` for Claude Code and Codex, typed with its
+Enter a moment later), waits a grace period, then kills the window. The agent's own
 `SessionEnd` hook releases its task claims on the way out; whatever the ended
 session still held (a killed process fires no hook) is released here and named
 in the output — `🔓 N claimed task(s) released back to the board`, each task
@@ -637,9 +666,15 @@ details):
 - **A usage limit** is read off the end of the session's rollout when its turn
   stops (Codex has no `StopFailure`), and the row turns **⏳ limited** the same
   way. A Codex agent's `fleet switch`, by hand or by `on_limit = "switch"`, is
-  always **fresh**: its thread lives under the old `CODEX_HOME` and cannot be
-  resumed from another, so the replacement starts with the hand-off prompt and
-  takes the claims over.
+  **fresh** onto another account: its thread lives under the old `CODEX_HOME` and
+  cannot be resumed from another, so the replacement starts with the hand-off
+  prompt and takes the claims over at its first start. A target on the home the
+  thread ran under resumes it.
+- **Restart resumes the thread.** `fleet restart` (and the agent view's Restart)
+  relaunches a Codex agent as `codex <options> resume <thread id> -- <continue
+  line>`, the thread its first hook bound, on the same account; a row whose agent
+  never reached a hook, or whose session has no thread id, starts fresh with the
+  hand-off prompt and the receipt says which.
 
 Everything the page does is a command, and every reporting one takes `--json`:
 
@@ -672,6 +707,7 @@ aisquare fleet restart manager         # an exited (or stuck) agent, back under 
                                        # …launched as it was first launched: the row records the
                                        # binary, permission mode, arguments and account (#144)
 aisquare fleet restart coder-auth --permission-mode acceptEdits   # …another mode; later restarts keep it
+aisquare fleet restart coder-auth --permission-mode workspace:ask # …or one for any agent (below)
 aisquare fleet switch coder-auth --to personal --fresh   # a named account; a new session + hand-off
 ```
 
@@ -710,6 +746,39 @@ that agent's own pane and the spawn does not fall back: pick another mode
 yourself, per spawn (`--permission-mode acceptEdits`) or for the role
 (`aisquare config set fleet.roles.coder.permission_mode acceptEdits`).
 `bypassPermissions` is available and is never a default.
+
+### One permission for every agent
+
+`fleet.roles.<role>.permission` holds the role's permission once, for whichever
+agent it runs on: `WRITE:APPROVALS`, where WRITE is `read_only`, `workspace` (the
+project and its worktree) or `full`, and APPROVALS is `ask` (the human), `auto`
+(the agent's own reviewer decides) or `never` (what is not allowed fails). Each
+agent's adapter maps it to its own flags; the same value works as `fleet spawn
+--permission-mode` and `fleet restart --permission-mode`, and the Settings tab
+offers it per role, with what each agent would be passed under it. Set, it wins
+over the agent-specific settings (`permission_mode` for Claude Code; `sandbox`,
+`approval_policy`, `approve_for_me` for Codex); unset — the default, so an
+existing config means what it always meant — those apply. A native flag passed for
+one spawn (`--sandbox`, `--approval`, or the agent's own in its arguments) still
+wins, as a per-spawn flag always does, and the restart replays the value the agent
+was launched with.
+
+| Permission | Claude Code | Codex |
+| --- | --- | --- |
+| `workspace:auto` | `--permission-mode auto` | `--approve-for-me` |
+| `read_only:auto` | `--permission-mode auto --disallowedTools=Edit Write NotebookEdit` | `--sandbox read-only --ask-for-approval on-request` |
+| `workspace:ask` | `--permission-mode manual` | `--sandbox workspace-write --ask-for-approval on-request` |
+| `workspace:never` | `--permission-mode dontAsk` | `--sandbox workspace-write --ask-for-approval never` |
+| `read_only:ask` | `--permission-mode manual --disallowedTools=Edit Write NotebookEdit` | `--sandbox read-only --ask-for-approval on-request` |
+| `read_only:never` | `--permission-mode dontAsk --disallowedTools=Edit Write NotebookEdit` | `--sandbox read-only --ask-for-approval never` |
+| `full:ask` | `--permission-mode manual` | `--sandbox danger-full-access --ask-for-approval on-request` |
+| `full:never` | `--permission-mode bypassPermissions` | `--sandbox danger-full-access --ask-for-approval never` |
+| `full:auto` | `--permission-mode auto` | refused at spawn: Codex's reviewer runs only in workspace-write |
+
+The built-in roles are `workspace:auto` and, for the reviewer, `read_only:auto`:
+exactly what both agents get today with nothing set. Claude Code has no sandbox,
+so its read-only is the reviewer's denial of the tools that edit files, given once
+even where the role's own arguments carry it too.
 
 **`auto` behind the explainability proxy.** The classifier auto mode relies on
 makes a separate, non-streaming request the proxy currently cuts short once the
@@ -754,8 +823,9 @@ Three places to change one:
 
 - **per spawn** — `fleet spawn … --agent claude-code --permission-mode acceptEdits --no-worktree --bin claude2`;
 - **in config** — `aisquare config set fleet.max_agents_per_project 6`, or
-  `aisquare config set fleet.roles.coder.permission_mode acceptEdits`, or edit
-  the file directly;
+  `aisquare config set fleet.roles.coder.permission workspace:ask` (any agent), or
+  `aisquare config set fleet.roles.coder.permission_mode acceptEdits` (Claude
+  Code's own words), or edit the file directly;
 - **in the UI** — the project's *Settings* tab writes the same config (Phase 6).
 
 The whole `[fleet]` section of `~/.aisquare/config.toml` at its defaults, as
@@ -771,6 +841,7 @@ disable_native_agent_teams = true         # exports CLAUDE_CODE_EXPERIMENTAL_AGE
 max_continuations_per_hour = 30           # cap on the manager's Stop-hook continuations
 
 [fleet.roles.manager]
+# permission = "workspace:auto"           # one value for every agent (WRITE:APPROVALS); unset = the agent's own below
 permission_mode = "auto"                  # any Claude Code mode; "" = pass no flag
 worktree = false
 extra_args = []
@@ -1116,6 +1187,13 @@ whether the running fleet server still has a prefix key.
 | ctrl+Z | `C-z` — suspends Claude Code *inside the pane*; type `fg` there to resume | same | every terminal |
 | ctrl+D | `C-d` — exits Claude Code; the pane reads 💤 exited and offers Restart | same | every terminal |
 | `[` in the transcript viewer | the character — inside tmux "native scrollback" is the pane's 50 000-line history, which shift+PgUp already reads | same | every terminal |
+
+**A Codex pane** gets the same keys, in Codex's own spelling where it has one
+(`AgentAdapter.key_spellings`, measured on Codex 0.162.1 under tmux 3.7c):
+**shift+Enter is sent as ctrl+J on every tmux**, because Codex submits the prompt on
+`S-Enter` and takes `C-j` as its newline (alt+Enter is a newline too). Esc
+interrupts a running turn (`esc to interrupt`), shift+Tab (`BTab`) cycles Codex's
+Default and Plan modes, and ctrl+C reaches Codex as it is.
 
 **tmux pitfalls the fleet engineers around.** *Prefix:* the private server runs
 with `prefix None`, so in `fleet attach` ctrl+B is Claude Code's

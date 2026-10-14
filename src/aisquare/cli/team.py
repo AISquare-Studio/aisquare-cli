@@ -316,7 +316,7 @@ def spawn(
             env_overrides=_parse_env(env_pairs or []),
             extra_args=extra_args or [],
         )
-        defaults = harness.role_defaults(
+        defaults = selected.adapter.role_defaults(
             role_name, binary=selected.binary.binary, args=selected.profile.args
         )
         arguments = agent_launch.prepare_arguments(
@@ -569,7 +569,7 @@ def _fleet_model_status(selected: agent_launch.ResolvedAgent, role: str) -> dict
         args = fleet_extra_args(selected.adapter, settings.extra_args, settings.agent_args)
         row["agent_args"] = args
         arguments = agent_launch.prepare_arguments(selected, [*selected.profile.args, *args])
-        resolution = agent_launch.launch_model_for(selected, role, arguments)
+        resolution = agent_launch.launch_model_for(selected, role, arguments, ladder=True)
         if resolution is None:
             row.update(
                 resolves_to=arguments.model or "",
@@ -646,8 +646,11 @@ def harness_status() -> None:
                 # debugged that concluded the flag came from their alias — the
                 # confusion this feature exists to end. Declared, not resolved:
                 # `binary`/`binary_source` in this same row say whether the
-                # binary gate (`harness.is_default_agent`) will pass them on.
-                "default_args": profile.default_args,
+                # binary gate (`harness.is_default_agent`) will pass them on. The
+                # role's AGENT declares them: Codex's ui-tester has no `--chrome`.
+                "default_args": selected.adapter.role_defaults(
+                    name, binary=selected.adapter.binary, args=[]
+                ).args,
                 "fleet": _fleet_model_status(selected, name),
             }
         )

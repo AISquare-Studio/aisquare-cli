@@ -345,11 +345,24 @@ def mcp_args(selected: ResolvedAgent) -> list[str]:
 
 
 def launch_model_for(
-    selected: ResolvedAgent, role: str, raw_args: list[str] | NativeArguments
+    selected: ResolvedAgent,
+    role: str,
+    raw_args: list[str] | NativeArguments,
+    *,
+    ladder: bool = False,
 ) -> harness.ModelResolution | None:
-    """Plain launch preserves Claude's native default; Codex honors saved pins."""
+    """The model and effort a launch passes, never probing (no paid call at a launch).
+
+    ``ladder`` is ``fleet spawn``'s, which resolves the role as ``team spawn`` does
+    (``team harness`` reports it) for every agent: one with AISquare's ladders (Claude
+    Code) walks its role's ladder on the cached probe verdicts, else takes its first
+    rung (Claude Code runs its own default in place of a model the account lacks), under
+    its pins (``AISQUARE_MODEL_<ROLE>``, ``[agents.models.<agent>]``). A hand ``aisquare
+    launch`` of such an agent passes nothing, its argv as it always was; another agent
+    takes its configured pins there too. What the native arguments already choose wins
+    (:func:`resolved_model_args`)."""
     arguments = _arguments(selected, raw_args)
-    if selected.adapter.capabilities.model_ladders:
+    if selected.adapter.capabilities.model_ladders and not ladder:
         return None
     return model_for(selected, role, probe=False, raw_args=arguments)
 

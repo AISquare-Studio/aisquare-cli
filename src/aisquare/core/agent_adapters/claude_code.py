@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from aisquare.core import harness, paths
@@ -81,6 +82,9 @@ class ClaudeCodeAdapter:
     version_args: tuple[str, ...] = ("--version",)
     hooks_off_setting = '"disableAllHooks": true'
     exit_command = "/exit"
+    #: Every key means what tmux names it: shift+tab cycles the permission mode, alt+p
+    #: switches the model, shift+enter is a newline (``C-j`` on a tmux too old for it).
+    key_spellings: Mapping[str, str] = MappingProxyType({})
     accounts = ClaudeCodeAccounts()
     plugin = ClaudeCodePlugin()
     capabilities = AgentCapabilities(
@@ -225,13 +229,39 @@ class ClaudeCodeAdapter:
         refresh: bool,
         effort: str | None,
     ) -> harness.ModelResolution | None:
-        return harness.resolve_model(
+        """The role's ladder (``harness.resolve_model``), under the pins of
+        ``[agents.models.claude-code]``: its model over the ladder's choice and its
+        effort over the base and offset, each below the ``AISQUARE_MODEL_<ROLE>`` /
+        ``AISQUARE_EFFORT_<ROLE>`` pins and an explicit ``--effort``."""
+        from aisquare.core.agent_adapters.native_models import configured
+
+        model, level = configured(self.id, role)
+        if level is not None and effort is None and harness.role_effort_override(role, env) is None:
+            self.validate(None, level)
+            effort, effort_source = level, "configured"
+        else:
+            effort_source = None
+        result = harness.resolve_model(
             role,
-            probe=probe,
+            probe=probe if model is None else False,
             refresh=refresh,
             effort=effort,
             context=harness.ProbeContext(binary=binary, env=env),
         )
+        if result is None and model is None:
+            return None
+        if result is None:
+            level, source = harness.resolve_effort(role, explicit=effort)
+            result = harness.ModelResolution(
+                role=role, model=model, effort=level, effort_source=source, source="configured"
+            )
+        elif model is not None and harness.role_model_override(role, env) is None:
+            result = result.model_copy(
+                update={"model": model, "source": "configured", "skipped": []}
+            )
+        if effort_source is not None:
+            result = result.model_copy(update={"effort_source": effort_source})
+        return result
 
     def mcp_args(
         self,
@@ -248,6 +278,9 @@ class ClaudeCodeAdapter:
 
     def context_files(self, home: Path) -> tuple[Path, ...]:
         return (home / "CLAUDE.md",)
+
+    def browser_tools(self, home: Path) -> list[str] | None:
+        return None  # MCP servers and plugins across its config dirs: the doctor's own scan
 
     def native_args(self, args: list[str]) -> list[str]:
         return list(args)
@@ -271,6 +304,11 @@ class ClaudeCodeAdapter:
                 f"Claude Code does not support effort {effort!r}; use one of: "
                 + ", ".join((*harness.EFFORT_SCALE, harness.ULTRACODE))
             )
+
+    def role_defaults(self, role: str, *, binary: str, args: Sequence[str]) -> harness.RoleDefaults:
+        """``RoleProfile.default_args`` (the ui-tester's ``--chrome``), for ``claude`` and
+        not a wrapper of another name (``harness.role_defaults``)."""
+        return harness.role_defaults(role, binary=binary, args=args)
 
     def model_args(self, model: str | None, effort: str | None) -> list[str]:
         self.validate(model, effort)

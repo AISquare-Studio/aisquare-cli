@@ -1584,13 +1584,14 @@ def spawn(
     # Validate native model pins before creating a worktree/window or live row.
     model_resolution = None
     try:
-        defaults = harness.role_defaults(
+        defaults = selected.adapter.role_defaults(
             role, binary=resolution.binary, args=[*selected.profile.args, *role_args, *extra]
         )
         arguments = agent_launch.prepare_arguments(
             selected, [*defaults.args, *selected.profile.args, *role_args], extra
         )
-        model_resolution = agent_launch.launch_model_for(selected, role, arguments)
+        # The role's ladder and pins, as `team spawn` resolves them (`team harness`).
+        model_resolution = agent_launch.launch_model_for(selected, role, arguments, ladder=True)
         model_args = agent_launch.resolved_model_args(selected, model_resolution, arguments)
     except ValueError as exc:
         raise FleetError(str(exc)) from exc
@@ -5003,11 +5004,21 @@ def restart(
     # slot, else the one its session ran under, whose number outlives a removed
     # slot — and the replacement is started on what was resolved here.
     slot = _account_slot_of(agent, session)
+    # An account of the agent the replacement runs: a Codex row's slot is a Codex
+    # slot, which the resolver refused as "not a Claude Code account" for want of it.
+    replays = recorded_adapter(_replayed_agent(agent, session))
     try:
         _require_role(agent.role)
         _refuse_a_replay_that_cannot_start(project, agent, session)
-        choice = claude_accounts_service.choose(
-            str(slot) if slot is not None else None, role=agent.role, project=project
+        choice = (
+            claude_accounts_service.choose(
+                str(slot) if slot is not None else None,
+                role=agent.role,
+                project=project,
+                agent=replays.id if replays is not None else claude_accounts_core.AGENT,
+            )
+            if replays is None or replays.accounts is not None
+            else claude_accounts_service.AccountChoice(account=None, source=None)
         )
     except (FleetError, claude_accounts_service.NoSuchAccount) as exc:
         raise FleetError(f"cannot restart {label!r}: {exc}") from exc

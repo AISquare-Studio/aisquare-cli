@@ -853,12 +853,20 @@ def test_ws_fleet_frames_follow_subscribe_fleet(runtime: Runtime, tmp_path: Path
 def test_ws_survives_a_subscribe_fleet_for_a_project_that_is_gone(
     runtime: Runtime, tmp_path: Path
 ) -> None:
-    """A bad name costs that frame, not the socket — board and remote keep arriving."""
+    """A bad name costs that frame, not the socket — board and remote keep arriving.
+
+    The bad name's frame is waited for before the next subscription: on a slow runner its
+    read outlived the tick, so the remote frame went out first, and the late `no project
+    matches 'nope'` frame was taken for `prj_other`'s (CI of #259, round 4). Once it is
+    read, the stream sends no other for that name (`push_if_changed`), and drops a read
+    of it that lands after the switch."""
     client = _client(runtime, _sources(FLEETS), tmp_path, tick=0.02)
     with client.websocket_connect(f"/r/{runtime.token}/ws") as ws:
         ws.send_text(json.dumps({"subscribe_fleet": ""}))
         _frame(ws, "fleet")
         ws.send_text(json.dumps({"subscribe_fleet": "nope"}))
+        refused = _frame(ws, "fleet")["payload"]  # its own frame, saying why
+        assert refused["agents"] == [] and "no project matches 'nope'" in refused["error"]
         runtime.set_allow_write(True)
         assert _frame(ws, "remote")["payload"]["allow_write"] is True
         ws.send_text(json.dumps({"subscribe_fleet": "prj_other"}))

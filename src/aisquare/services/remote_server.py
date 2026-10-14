@@ -3271,25 +3271,30 @@ class _ExitKeyGuard:
     refused as a second press of a Ctrl-C never delivered (review of #259, round 6, 5/10).
     The check and the send run in one turn of the agent's lock (``remote_agent_turn``), so
     no other press comes between them.
+
+    Timed by ``clock``, the monotonic one: on the wall clock, a step back (NTP, a VM's
+    snapshot restored) made every Ctrl-C to that agent a second press for as long as the
+    step, and a step forward let a real second press through (review of #259, round 7, 3/9).
     """
 
-    def __init__(self) -> None:
-        self._sent: dict[tuple[str, str], datetime] = {}
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._sent: dict[tuple[str, str], float] = {}
         self._lock = threading.Lock()
 
     def exit_keys_allowed(self, agent: tuple[str, str], exits: int, *, confirmed: bool) -> bool:
         """Whether ``exits`` exit keys may go to ``agent``: ``False`` when they would be a
         second press and are not ``confirmed``. Notes nothing."""
-        now = _remote_now()
+        now = self._clock()
         with self._lock:
             last = self._sent.get(agent)
-            recent = last is not None and (now - last).total_seconds() < EXIT_KEY_REPEAT_SECONDS
+            recent = last is not None and now - last < EXIT_KEY_REPEAT_SECONDS
             return confirmed or (exits <= 1 and not recent)
 
     def exit_keys_sent(self, agent: tuple[str, str]) -> None:
         """Note that exit keys reached ``agent``'s pane just now."""
         with self._lock:
-            self._sent[agent] = _remote_now()
+            self._sent[agent] = self._clock()
 
 
 @contextlib.contextmanager
@@ -3397,11 +3402,12 @@ def _remote_author(ref: str | None, reach: Callable[[], set[str]]) -> str | None
     return session.id
 
 
-def live_writes() -> Writes:
-    """The write endpoints over the services the CLI commands call, then the agent actions."""
+def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
+    """The write endpoints over the services the CLI commands call, then the agent actions.
+    ``clock`` is the monotonic clock the Ctrl-C double-press guard counts (a test's own)."""
     from aisquare.services import remote_actions
 
-    exit_keys = _ExitKeyGuard()
+    exit_keys = _ExitKeyGuard(clock)
 
     def task_claim(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         from aisquare.services import team as team_service

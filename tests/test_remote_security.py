@@ -121,14 +121,25 @@ def app(runtime: Runtime, tmp_path: Path) -> Any:
 
 
 class Clock:
-    """The wall clock every expiry and budget reads (``remote_server._remote_now``)."""
+    """The wall clock every expiry and budget reads (``remote_server._remote_now``), and a
+    monotonic one beside it (:meth:`monotonic`, for ``live_writes(clock=…)``)."""
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.now = datetime(2026, 10, 7, 9, 0, tzinfo=UTC)
+        self.elapsed = 0.0
         monkeypatch.setattr(remote_server, "_remote_now", lambda: self.now)
 
     def advance(self, **delta: float) -> None:
+        """Time passes: both clocks move."""
         self.now += timedelta(**delta)
+        self.elapsed += timedelta(**delta).total_seconds()
+
+    def step(self, **delta: float) -> None:
+        """The wall clock alone is set (NTP, a VM's snapshot restored): no time passed."""
+        self.now += timedelta(**delta)
+
+    def monotonic(self) -> float:
+        return self.elapsed
 
 
 @pytest.fixture
@@ -266,7 +277,7 @@ def test_a_second_ctrl_c_to_one_agent_within_3_s_is_a_double_press(
 ) -> None:
     """Claude Code exits on a second Ctrl-C ("Press Ctrl-C again to exit"), and an exit ends
     the row, releases its claims and wakes the manager."""
-    send = live_writes().handlers["send-keys"]
+    send = live_writes(clock=clock.monotonic).handlers["send-keys"]
     send({"agent": "coder-1", "keys": ["C-c"]})
     clock.advance(seconds=EXIT_KEY_REPEAT_SECONDS - 0.5)
     for key in ("C-c", "C-d"):
@@ -288,7 +299,7 @@ def test_a_ctrl_c_whose_send_failed_is_no_first_press_for_the_double_press_guard
     a send that failed (400 ``write_failed``, nothing reached the pane) made the next tap
     within 3 s a 409 ``double_press``, a second Ctrl-C "that exits Claude Code" though no
     first one was ever delivered."""
-    send = live_writes().handlers["send-keys"]
+    send = live_writes(clock=clock.monotonic).handlers["send-keys"]
     pane.fail_keys = True
     with pytest.raises(RequestError) as failed:
         send({"agent": "coder-1", "keys": ["C-c"]})
@@ -300,6 +311,25 @@ def test_a_ctrl_c_whose_send_failed_is_no_first_press_for_the_double_press_guard
     with pytest.raises(RequestError) as again:  # the control: a delivered one still counts
         send({"agent": "coder-1", "keys": ["C-c"]})
     assert again.value.error == "double_press"
+
+
+@pytest.mark.parametrize("hours", [-1, 1], ids=["back", "forward"])
+def test_the_double_press_window_is_timed_on_the_monotonic_clock_not_the_wall_clock(
+    pane: FakePane, clock: Clock, hours: int
+) -> None:
+    """Review of #259, round 7, 3/9: timed on the wall clock, a step back (NTP, a VM's
+    snapshot restored) made every Ctrl-C to that agent a 409 ``double_press`` for as long as
+    the step, and a step forward of more than 3 s let a real second press through."""
+    send = live_writes(clock=clock.monotonic).handlers["send-keys"]
+    send({"agent": "coder-1", "keys": ["C-c"]})
+    clock.step(hours=hours)
+    with pytest.raises(RequestError) as refused:  # a second press, a second after the first
+        clock.advance(seconds=1)
+        send({"agent": "coder-1", "keys": ["C-c"]})
+    assert refused.value.error == "double_press"
+    clock.advance(seconds=EXIT_KEY_REPEAT_SECONDS)
+    send({"agent": "coder-1", "keys": ["C-c"]})  # a press long after the last
+    assert pane.sent == [("keys", "C-c"), ("keys", "C-c")]
 
 
 def test_two_exit_keys_in_one_body_are_a_double_press_unless_confirmed(pane: FakePane) -> None:

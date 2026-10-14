@@ -561,8 +561,16 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   kept, never listed again, deletable by hand — and the number is free for the
   next add. Slot 1 cannot be removed; sign out of it inside Claude Code.
 - Usage comes from the endpoint Claude Code's own `/usage` reads, called with
-  the token in the account's credentials file, once a minute while the page is
-  open. It is not a documented API; when it does not answer, the row's status
+  the token in the account's credentials file — at most once every five minutes
+  per account, and only while the page is open. The page shares one five-minute
+  cache with `aisquare accounts usage` and `accounts list --usage`, so opening
+  it again, or its minute tick, asks nothing while the readings are fresh.
+  **↻ Refresh usage** above the table asks every account now. Beside it a dim
+  line says how old the readings are: `last refreshed 3m ago`, from the oldest
+  reading actually read, and `· last try failed 2m ago` when the endpoint did
+  not answer for an account (`never` before the first). An account that needs a
+  login counts in neither half; its own row says so. The endpoint is not a
+  documented API; when it does not answer, the row's status
   says why (`usage: HTTP 503 …`, `⚠ token expired`, `⚠ token rejected`) and
   nothing else on the page is affected. On macOS the token lives in the
   Keychain, which the CLI does not read, so the row says so. A reset reads as a
@@ -586,14 +594,14 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
 - Which account an agent runs on is decided in one order, for `fleet spawn`,
   `aisquare launch` and a manager spawning a coder alike: `--account` on the
   command line, then the role's binding (the **account** select beside each
-  role on the Settings tab, or `aisquare team bind <role> --account`), then the
+  role in *⚙ Settings ▸ App settings*, or `aisquare team bind <role> --account`), then the
   project's default (`aisquare accounts default <slot> --project .`), then the
   machine default, which with one login only is whatever `claude` the shell
   already has — exactly what it ran on before any of this existed; with several,
   the one with room comes before it (*Headroom*, below). The
   agent's header and `fleet ls` show the slot it was resolved to.
-- **Headroom.** By default — `[accounts] pick = "headroom"`, the Settings tab's
-  *launches pick* — the machine default gives way to the account with room
+- **Headroom.** By default — `[accounts] pick = "headroom"`, *launches pick* in
+  App settings — the machine default gives way to the account with room
   (`aisquare config set accounts.pick default` keeps it): every enabled, signed-in account's
   usage is read once, and the first one in priority order under `switch_at`
   (85 % by default) is taken — or, when all are over it, the one with the most
@@ -623,7 +631,7 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   agent whose role, task (done or dropped) or binary would refuse the
   replacement is refused before it is stopped, and a task that closes while
   it is being stopped is left off the replacement.
-  With `on_limit = "switch"`, the default (*on a usage limit* on the Settings tab;
+  With `on_limit = "switch"`, the default (*on a usage limit* in App settings;
   `wait` leaves the agent parked for you or the manager), the fleet
   does this by itself when the limit lifts more than
   `wait_if_reset_within_minutes` away, in a worker detached from the agent's
@@ -642,11 +650,11 @@ Everything the page does is a command, and every reporting one takes `--json`:
 
 ```sh
 aisquare accounts list                 # slots, who is signed in, plan, hooks
-aisquare accounts list --usage         # …plus the two windows (one request per account)
+aisquare accounts list --usage         # …plus the two windows, percent USED (read at most every 5 min)
 aisquare accounts add                  # a fresh slot; Claude Code opens for the sign-in, then exits
 aisquare accounts run 2                # a plain Claude Code session on account 2
 aisquare accounts run 2 --model opus   # arguments after the slot go to claude
-aisquare accounts usage                # the windows, per signed-in account
+aisquare accounts usage                # the windows, per signed-in account; --refresh reads now
 aisquare accounts remove 2             # the directory is kept as 2.removed-<stamp>
 aisquare launch coder --account 2      # a board role on account 2
 aisquare fleet spawn coder --account 2 # a fleet agent on account 2
@@ -749,7 +757,9 @@ Three places to change one:
 - **in config** — `aisquare config set fleet.max_agents_per_project 6`, or
   `aisquare config set fleet.roles.coder.permission_mode acceptEdits`, or edit
   the file directly;
-- **in the UI** — the project's *Settings* tab writes the same config (Phase 6).
+- **in the UI** — *⚙ Settings ▸ App settings* writes the same config, and its
+  *Reset all settings to default* is `config reset`. A project's own *Settings*
+  tab holds only that project's nickname.
 
 **Your file holds your changes and nothing else.** The defaults are built in, and
 `~/.aisquare/config.toml` is your layer over them: a save writes only the keys
@@ -886,9 +896,24 @@ directory name; and tmux will *create* a session named `a.b` or `a:b` but
 cannot *target* it, because `.` and `:` are its separators. So the fleet has a
 display name for people and a slug-safe token for machines.
 
-**Project display name.** The directory's basename — `aisquare-cli` — for git
-repos and plain directories alike. Two projects sharing a basename also show
-their parent as a dim subtitle (`~/work/api`, `~/oss/api`).
+**Project display name.** Its nickname when you have given it one, else the
+directory's basename — `aisquare-cli` — for git repos and plain directories
+alike. Two projects sharing a basename also show their parent as a dim subtitle
+(`~/work/api`, `~/oss/api`).
+
+**Nickname.** Free text on one line, up to 255 characters — `API: auth rewrite
+🚀` — like naming a browser tab for what you are doing there. Double-click a
+card's title (or press `F2` on it) and type: Enter or a click away saves, Esc
+cancels, and an empty name brings the folder's back. The project's *Settings*
+tab and `aisquare project rename "API: auth rewrite"` (`--clear` drops it) set
+the same name, which the sidebar, `project list` and `fleet ls` all show.
+`--project` takes it too, when no id prefix, folder name or codename matches
+first. A card's **⋯** (shown on hover or on the selected card; `.` or a
+right-click too) opens its menu: *Rename*, *Pin*, *Open settings* and *Remove
+from fleet…*, which asks first, then forgets the project as `aisquare project
+forget` does. Its folder and history are kept, and `aisquare project onboard
+<root>` brings it back. A project with live agents is refused, naming them and
+`fleet shutdown`.
 
 **Codename.** Every project that enters the fleet gets an `adjective-animal`
 codename — `amber-otter` — matching `^[a-z]{3,7}-[a-z]{3,7}$`, from two
@@ -899,8 +924,9 @@ same name on every machine and after a `context.db` loss, and two projects on
 one machine never share one. It is assigned lazily, the first time the project
 touches the fleet — never at `init`, so a memory-only user never sees one. The
 codename is primary only where a stable token is needed: the tmux session, the
-attach hint, branch names, `fleet` command arguments. Elsewhere it is a dim
-badge beside the name. `fleet rename` changes it; `aisquare project switch
+attach hint, branch names, `fleet` command arguments. A card does not show it;
+the project's *Settings* tab names it (`fleet id: amber-otter — tmux session
+asq-amber-otter, branches fleet/amber-otter/…`). `fleet rename` changes it; `aisquare project switch
 amber-otter` and `--project amber-otter` both resolve it, and the "matches
 several projects" error lists codenames, because basenames are what collide.
 
@@ -1015,7 +1041,7 @@ codename `amber-otter`, session `asq-amber-otter`, branches
  ┌────────────────────────────────────────────┐          ┌───────────────────────────────────────────────┐
  │ left : Fleet ▸ projects ▸ agents · Settings│ capture  │ session asq-amber-otter                        │
  │ right: onboard · manager · agent · board · │◄─────────│  ├─ window manager    : aisquare launch manager│
- │        doctor · explainability · settings  │ send-keys│  ├─ window coder-auth : aisquare launch coder …│
+ │        doctor · AISquare · settings        │ send-keys│  ├─ window coder-auth : aisquare launch coder …│
  └───────────────────┬────────────────────────┘─────────►│  └─ window tester-1   : aisquare launch tester │
                      │ reads (polls, like board -w)      │ session asq-quiet-lynx …                       │
                      ▼                                   └──────────────────────┬────────────────────────┘
@@ -1048,8 +1074,14 @@ Settings hub or a page under it — comes back at the next launch if its row is 
 there (an agent that has gone falls back to its project), and so does the
 captured-directories toggle; both live in the store's `ui_state` table (#144),
 the theme in `state.json` because the board shares it, the navigator width
-beside the theme. Nothing else is kept: the panes are tmux's and the rows are
-the store's.
+and the board's line sizes beside the theme. Nothing else is kept: the panes are
+tmux's and the rows are the store's.
+
+**When the doctor runs.** Once when `asq` starts, about the project it reopens,
+and each time its page opens (*⚙ Settings ▸ Doctor*), about the project selected
+last; then again on the page's *Re-run checks*, after one of its fixes, and when
+Welcome connects Claude Code. Selecting a project, opening a tab or pressing `r`
+(which refreshes the fleet) runs nothing, so moving around the UI stays quick.
 
 **The UI holds no state that matters.** What must keep running lives in tmux
 (the processes) and `~/.aisquare/context.db` (the `fleet_agent` rows, the

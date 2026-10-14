@@ -189,10 +189,25 @@ An interactive [Textual](https://textual.textualize.io/) TUI with the
 `[tui]` extra (full-screen Rich fallback without it): every session with a
 live state chip — **▶ working**, **⏸ waiting for input**, **🔔 NEEDS YOU**
 (with a terminal bell) — the open tasks, and a bot-style feed of everything
-the team does. Click any task or feed line for its full detail.
+the team does. A task is one line: its number on the board, a status icon and
+the title, cut with `…` to the width there is, so the table never scrolls
+sideways. Click any task or feed line for its full detail, which starts
+`#12 · doing · tsk_… · claimed by <who> (lease until 14:05) · for coder`.
+The same board is a project's *Board* tab in `asq`.
+
+| Icon | Task |
+| --- | --- |
+| `○` | to do — nobody has it yet |
+| `⧗` | to do, waiting on a task it needs |
+| `▶` | doing — claimed and being worked on |
+| `👀` | in review — waiting to be checked |
+| `⛔` | blocked — the detail says on what |
+| `✓` | done |
+| `✗` | dropped — no longer worth doing |
 
 | Key | Action |
 | --- | --- |
+| `?` | the keys and this icon legend (in `asq` too) |
 | `d` | flip to the done/dropped archive — when it closed, who closed it |
 | `o` | open the author session's transcript at that exact moment |
 | `t` | theme browser — applies live, autosaves |
@@ -201,6 +216,11 @@ the team does. Click any task or feed line for its full detail.
 | `s` | save an SVG screenshot to `~/.aisquare/screenshots/` |
 | `b` | show/hide the board pane |
 | `r` / `q` | refresh now / quit |
+
+Every line between the board's parts drags to resize — the one beside the tasks
+column, the one above the detail, the one between the sessions and the tasks — and
+a double-click puts it back. The sizes are kept in `~/.aisquare/state.json`, one
+for every project's board, and come back at the next launch.
 
 ### Long-term memory (optional, via gbrain)
 
@@ -333,7 +353,7 @@ launched by number — the c1/c2/c3 shell aliases, without the aliases:
 aisquare accounts list             # who is signed in where, plan, hooks
 aisquare accounts add              # a fresh slot: Claude Code opens, you sign in, it is recorded
 aisquare accounts run 2            # a plain session on account 2 (what a c2 alias did)
-aisquare accounts usage            # the 5-hour and weekly windows, per account
+aisquare accounts usage            # the 5-hour and weekly windows, percent USED, per account
 aisquare accounts remove 2         # forget it; the directory is kept as 2.removed-<stamp>
 
 aisquare launch coder --account 2  # a board role on account 2
@@ -378,7 +398,7 @@ longer has.
 
 **Spending several accounts.** With more than one login the interesting
 questions are *where is there room* and *what happens when one runs out*. Both
-are `[accounts]` settings (on the Settings tab, or `aisquare config set`), and both
+are `[accounts]` settings (in *⚙ Settings ▸ App settings*, or `aisquare config set`), and both
 default to using the room there is:
 
 ```sh

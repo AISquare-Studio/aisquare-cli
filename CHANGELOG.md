@@ -6,6 +6,185 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+**A quieter `asq`: projects you can name, one ⚙ Settings, and an Accounts page
+that reads at a glance.**
+- A project has a nickname, which you rename in place on its card. The card's
+  **⋯** menu holds *Rename*, *Pin*, *Open settings* and *Remove from fleet…*.
+- The sidebar is your projects, then **⚙ Settings** (App settings, Accounts,
+  Doctor) and a status line with two dots: your AISquare sign-in, and the room
+  left across your Claude accounts.
+- The Accounts page is an aligned table with the usage **used** per window.
+  You rename an account in place, **Log in** shows where a login is due, and
+  usage is read at most every five minutes, with **↻ Refresh usage** and how old
+  the readings are.
+- Tasks are numbered on their board, `#1`, `#2`, …, and every task command takes
+  the number. The board's tasks table is the number, a status icon and the
+  title, `?` explains the icons, and every line in the board drags to resize.
+- Your `config.toml` holds only what you changed. New launches go where there
+  is room (`pick = "headroom"`), and an agent that hits its limit moves
+  (`on_limit = "switch"`). `aisquare config reset` puts every setting back.
+
+**Upgrading:**
+- From 0.8.1, run `aisquare upgrade`.
+- **`config.toml` is now only your changes** (`config_version = 2`). On first
+  load, a value equal to 0.8's default for that key is dropped and follows
+  today's default; every other value stays yours. The next save writes the file
+  down to those. 0.8 wrote every setting into the file, so a value you chose
+  that happens to be 0.8's default cannot be told apart from one it wrote for
+  you. **An explicit `pick = "default"` or `on_limit = "wait"` therefore moves to
+  the new defaults, `headroom` and `switch`.** To keep the old behaviour, set
+  them again after upgrading: `aisquare config set accounts.pick default` and
+  `aisquare config set accounts.on_limit wait`. **Moving back to 0.8.1 or
+  earlier** once the file has been saved this way: when the file names any fleet
+  role, that release fills in whatever it leaves out with `auto`, no worktree and
+  no extra arguments, so coders lose their worktrees and the reviewer its
+  `--disallowedTools`. If you may move back, copy `config.toml` aside before you
+  upgrade, or set those values again there with `config set`.
+- The store migrates to schema v30 on first open, from 0.8.1's v26, in four
+  steps:
+  - v27: a project nickname column.
+  - v28: `claude_usage.token_fingerprint`, a digest of the login a reading was
+    taken with, never the token. A reading recorded before it is served to no
+    login, so each account is asked once after the upgrade.
+  - v29: `team_task.number`, backfilled per board in creation order.
+  - v30: a unique index on (project, number).
+
+  0.8.1 opens a v30 store as it is. A task it adds has no number and shows its
+  id.
+- **`"name"` in `project list --json` is now the project's nickname** when it
+  has one, where it was always the folder's name; so is `name` in `fleet ls
+  --json` and Remote's project list. A script that wants the folder reads `root`.
+  Each project also carries `nickname` (`null` when unset). Task JSON carries
+  `number`. Usage JSON adds `session_used_percent`,
+  `week_used_percent`, `session_left_percent`, `week_left_percent` and
+  `needs_login`. `session_percent` and `week_percent` stay, and mean percent
+  used, as they always did.
+
+### Added
+- **Project nicknames.** Free text on one line, up to 255 characters:
+  `aisquare project rename "API: auth rewrite"` (`--clear` drops it), or
+  double-click a card's title (or `F2`) and type, where Enter or a click away
+  saves and Esc cancels. The project's *Settings* tab sets it too. The sidebar,
+  `project list`, `fleet ls` and `project info` show it, and `--project`
+  accepts it when no id prefix, folder name or codename matches first. Cards no
+  longer show the codename; the *Settings* tab names it, beside the tmux session
+  and branch prefix it gives.
+- **A card's menu**: **⋯** on hover or on the selected card, `.`, or a
+  right-click. It holds *Rename*, *Pin* / *Unpin*, *Open settings* and *Remove
+  from fleet…*, which asks first and then forgets the project as `project
+  forget` does. Its folder and history are kept, and `aisquare project onboard
+  <root>` brings it back. A project with live agents is refused, naming them.
+- **⚙ Settings in the sidebar** opens a hub with **App settings**,
+  **Accounts** and **Doctor**. Under it is a dim status line,
+  `● aisquare  ● 2× claude ⚠`:
+  - The aisquare dot is green when signed in, red when signed out, grey when
+    not known.
+  - The claude dot is the room **left** across your usable accounts. Each
+    account is `100 − max(session % used, week % used)`, and the dot shows the
+    average: green over 50 %, yellow 25–50 %, orange 5–25 %, red under 5 %,
+    💀 none left, grey not read yet.
+  - `N×` counts the usable accounts, and ⚠ says one needs a login.
+
+  It reads through the usage cache every minute, never on the UI's two-second
+  tick. A click on it opens Accounts, and `?` explains it.
+- **App settings**: the machine-wide settings that were on every project's
+  *Settings* tab (each role's permission mode, worktree and account, the escape
+  key, the agent cap, the worktree directory, native agent teams, and the
+  `[accounts]` settings). It also has **Reset all settings to default**, which
+  asks first.
+- **`aisquare config reset [--yes]`** moves `config.toml` aside to
+  `config.toml.bak-<stamp>` beside it, so moving it back undoes the reset, and
+  every setting is its default again. Through a symlink, the file it points at
+  is copied aside and emptied. It asks at a terminal, does a dry run off one,
+  and never prunes earlier backups. **`config list --overrides`** shows what you
+  changed, and nothing else.
+- **Rename a Claude account in place** on the Accounts page: double-click its
+  name, or press Enter or F2 on its row. An account's name is free text up to 64
+  characters (`Work laptop`), with case kept and matched ignoring case. A name
+  is refused if it is only digits, has an `@`, has an invisible character, or
+  is another slot's own name (`account 3`, `plain claude`). `aisquare accounts
+  alias 2 "Work laptop"` sets the same name, and `--account "work laptop"`
+  takes it.
+- **Log in** on an account's row whose login is missing, expired or rejected.
+  The status beside it says which. The sign-in pane waits for a fresh login,
+  not the stale one on disk, then the row reads its usage again.
+- **↻ Refresh usage** on the Accounts page asks every account now. Beside it, a
+  dim line says how old the readings are:
+  - `last refreshed 3m ago`, from the oldest reading actually read.
+  - `· last try failed 2m ago` when the endpoint did not answer.
+  - An account that needs a login counts in neither part.
+- **`--refresh`** on `aisquare accounts usage` and `accounts list --usage`
+  fetches now. Otherwise both share a five-minute cache with the Accounts page
+  and say how old their figures are (`usage as of 3m ago (percent USED;
+  refreshed at most every 5 min)`).
+- **Task numbers.** Every task has a number on its board, `#1`, `#2`, … in the
+  order tasks were added there. It shows on the board, in `task list` and
+  `task show`, in every receipt (`✓ claimed: #12 tsk_… [doing] …`), and in the
+  briefing and the wake-ups. Any task command, `--needs`, `--task` and the MCP
+  task tools take `12` or `#12` for the caller's board, or the id as before.
+  `#12` is only ever a number: a board with no task #12 says so.
+- **The board explains itself.** The tasks table is `#`, a status icon and the
+  title, cut to the width there is, so it never scrolls sideways:
+  - ○ to do
+  - ⧗ waiting on a task it needs
+  - ▶ doing
+  - 👀 in review
+  - ⛔ blocked
+  - ✓ done
+  - ✗ dropped
+
+  The detail opens with `#12 · doing · tsk_… · claimed by <who> (lease until
+  14:05) · for <role>`. `?` lists the board's keys and the icons, in `board -w` and in
+  `asq`, where it now opens from the board too.
+- **Every line in the board drags to resize**: beside the tasks column, above
+  the detail, and between the sessions and the tasks. A double-click puts a
+  line back. The sizes are kept in `state.json`, one for every project's board.
+- The Doctor page has **Re-run checks**.
+
+### Changed
+- **The defaults**: `[accounts] pick = "headroom"` (a launch takes the first
+  account in priority order with room) and `on_limit = "switch"` (an agent
+  that hits its limit is moved to one with room). See Upgrading.
+- **The sidebar** is your projects, then ⚙ Settings and its status line. The
+  Accounts and Doctor sections and the doctor summary at the bottom are gone;
+  both pages live under ⚙ Settings. A page you had open under them comes back
+  there at the next launch.
+- **A project's *Settings* tab** holds only that project: its nickname, and
+  its fleet id. The machine-wide settings moved to App settings.
+- **The doctor runs** once when `asq` starts, about the project it reopens, and
+  when its page opens, about the project selected last. It also runs on *Re-run
+  checks*, after one of its fixes, and when Welcome connects Claude Code. It
+  never runs on a selection, a tab or `r`, which now refreshes the fleet only.
+  A project page has no Doctor tab.
+- **A project's Explainability tab is *AISquare*.** It opens on an
+  *Explainability* heading; nothing in it changed.
+- **The Accounts page is an aligned table**, one row per account:
+  - its columns are ★, the slot, the name, who is signed in, the plan, the
+    session and week windows (a bar and the percent **used**), the status with
+    *Log in* beside it, then when each window resets.
+  - a value too long for its column ends in `…`, and hovering shows the rest.
+  - on a narrow page, the table scrolls sideways as one, header included.
+  - every button can be reached at any width.
+
+  The page reads usage through the shared five-minute cache, where it used to
+  ask once a minute.
+- **Usage says "used".** Every figure is percent USED (40 % used is 60 % left),
+  and says so:
+  - `accounts usage` and `list --usage` head their columns `session used` and
+    `week used`.
+  - the headroom notes read `account 2 20% used (80% left)`.
+  - `doctor --live` says `85% used is the line`.
+  - the manager's cycle says it too.
+- `fleet switch` names both accounts as the board does, a renamed one by its
+  name.
+- A launch on a machine with no signed-in account no longer prints `headroom:
+  no enabled, signed-in account to pick from` every time. A hand-over still
+  says it.
+
+### Fixed
+- `b` on the board brings the tasks column back however often it is pressed.
+  Hiding the column took the keyboard with it, so the next `b` went nowhere.
+
 ## [0.8.1] - 2026-10-13
 
 **The fleet on your phone: `aisquare remote`, through your own ngrok tunnel.**

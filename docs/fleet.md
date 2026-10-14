@@ -66,9 +66,10 @@ aisquare doctor                           # is everything wired? (and how to fix
 Textual, the UI toolkit, becomes a core dependency of `aisquare-cli` with the
 fleet (plan §3.7); `[tui]` stays as a no-op alias for one release, so the line
 above is right on either side of that change. The hooks matter: an agent's
-state chip (working · waiting · needs you) comes from the same five Claude Code
-hooks the board already uses, so an agent launched without them shows only what
-tmux can see and its row says so (`no hooks`).
+state chip (working · waiting · needs you) comes from the lifecycle hooks the
+board already uses (Claude Code's, or Codex's once you trust them in its
+`/hooks`), so an agent launched without them shows only what tmux can see and
+its row says so (`no hooks`).
 
 ---
 
@@ -1475,12 +1476,11 @@ issue with your terminal's name.
 
 ## Later
 
-- **Other agents, Codex first.** The substrate is agent-agnostic — a fleet
-  window runs whatever binary the role is bound to, and `--bin` already takes
-  one — so *surfacing* a Codex session needs nothing new. What Codex lacks is
-  our lifecycle hooks: until an equivalent exists it would have no board state
-  and no wake-ups, and its row would say `no hooks`. v1 is Claude Code only
-  (plan §8.5); nothing in the schema blocks the rest.
+- **Other terminal agents.** Claude Code and Codex both run the fleet now
+  ([coding agents](coding-agents.md)). Another terminal agent (Gemini CLI, …)
+  is one adapter and its fixtures
+  ([Adding a terminal agent](coding-agents.md#adding-a-terminal-agent)), with
+  no change to the fleet.
 - **Auto-merge on green** as an opt-in policy. In v1 a human merges (plan §3.5).
 - **Remote or multi-machine fleets** — the cloud roadmap is unchanged.
 - **A tmux-less backend** for hosts without tmux (plan §3.1, option A).

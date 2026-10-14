@@ -6,8 +6,113 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+**Codex beside Claude Code: the same memory, board, fleet, accounts, Welcome
+and doctor, each agent with its own hooks, flags and sign-in behind one
+adapter.**
+- Tested against Codex CLI 0.162.1. The CI job "Codex native integration
+  (0.162.1)" installs exactly that release and runs the native fixture on it;
+  older releases lack `--approve-for-me` and the hook trust review this relies
+  on. Claude Code stays the default agent and nothing changes for a machine
+  without Codex.
+- On a machine with Codex alone, every step has a Codex path:
+  `install.sh --agent codex`, Welcome, a manager and two coders on Codex,
+  restart, switch, tell, stop, accounts and usage limits.
+- [Adding a terminal agent](docs/coding-agents.md#adding-a-terminal-agent):
+  one adapter file and one registration line, held to a conformance suite
+  that a synthetic third agent passes.
+
+**Upgrading:**
+- The store migrates to schema v29 on first open, from 0.8.0's v25. The steps
+  only add, but for one repair: v26 adds `team_session.agent`, `team_session.native_session_id`
+  and `fleet_agent.agent` (rows Claude Code made are marked `claude-code`); v27
+  adds `team_meta.updated_at`, dated by a trigger on every write, for the
+  launch-metadata cleanup; v28 repairs rows dated 0 by stores made from this
+  branch while it was in review; v29 adds the `agent_account` table for Codex
+  account slots, kept apart from `claude_account` so an older build never
+  prunes them. 0.8.0 opens a v29 store as it is.
+- Codex runs no hook until you trust it. After `agents connect codex`,
+  `install.sh --agent codex`, a Codex account's sign-in, or an `aisquare
+  upgrade` that changes the hook definition, open `/hooks` in Codex and trust
+  aisquare's hooks; until then the doctor row reads `unverified` and the board
+  sees nothing from that Codex. AISquare never writes Codex's trust records
+  and never adds a trust-bypass flag.
+- `agents connect codex` no longer exits 1 with "can't connect … yet" (0.8.0):
+  it installs the hooks. Cursor stays detection-only and still refuses.
+- `fleet.roles.<role>.permission` is new and unset; an existing
+  `permission_mode` (or Codex `sandbox` / `approval_policy` / `approve_for_me`)
+  means what it did.
+
+### Added
+- Terminal Codex integration through a shared coding-agent adapter registry:
+  native hooks, memory, board identity, fleet launches, permissions, optional
+  MCP and native telemetry. User/project defaults and role bindings support
+  mixed Claude Code/Codex teams; setup, status and the UI expose agent choice.
+  See [coding-agent support](docs/coding-agents.md) for native trust and the
+  tested compatibility boundary.
+- **Codex accounts.** `aisquare accounts add --agent codex` makes a numbered
+  slot under `~/.aisquare/codex-accounts/` and runs `codex login` in it; slot 0
+  is the plain `codex` of your shell. One ladder numbers both agents' slots,
+  defaults are per agent, and a Claude slot named for a Codex role (or the
+  reverse) is refused. Identity comes from `auth.json`'s claims, read locally;
+  usage comes from the account's own rollouts, offline and labelled with its
+  age. A usage limit read off the rollout when a turn stops parks the row
+  **limited** and, with `on_limit = "switch"`, hands it to the Codex account
+  with the most headroom.
+- **Codex in the fleet.** `fleet restart`, Restart and a switch onto the same
+  account resume the thread the agent's first hook bound (`codex … resume
+  <thread>`); a switch onto another account starts fresh with the hand-off
+  prompt. `fleet stop` types `/exit`, so Codex's own `SessionEnd` releases the
+  claims. `fleet tell` to a busy Codex agent queues the message for its next
+  turn with `codex queue`. `/clear` keeps the row and moves the claims to the new
+  thread, and a `codex exec` a tool starts never takes its parent's row.
+  `fleet spawn` gives a Codex role its `[agents.models.codex]` model and effort,
+  a ui-tester on Codex gets no `--chrome`, and asq's pane sends shift+Enter to
+  Codex as ctrl+J, its newline.
+- **One permission per role, for every agent.** `fleet.roles.<role>.permission`
+  and `fleet spawn` / `fleet restart --permission-mode` take `WRITE:APPROVALS`
+  (`workspace:auto`, `read_only:auto`, `full:never`, …), which each agent's
+  adapter maps to its own flags; Settings offers it per role and shows what
+  each agent would be passed. See [the table](docs/fleet.md#one-permission-for-every-agent).
+- **asq for Codex.** Welcome's step 2 is the agent the manager will launch on,
+  Codex where it is the only one installed, with its version, sign-in, Connect
+  and the `/hooks` trust step; with both installed it offers *Use Claude Code* /
+  *Use Codex*. Doctor has a row per Codex home (partial, stale, hooks off,
+  unverified, plugin route) with one-click Connect and *Sign in account N*.
+  Settings and the spawn dialog show each role's agent, account and the flags
+  its next spawn passes.
+- **The Codex plugin**: `codex plugin marketplace add AISquare-Studio/aisquare-cli`,
+  then `codex plugin add aisquare@aisquare-cli`, then trust its hooks in
+  `/hooks`. It stands down while `$CODEX_HOME/hooks.json` runs aisquare's own,
+  and `agents status codex` names the route. See
+  [the Codex plugin](docs/codex-plugin.md).
+- **Codex's own switches are read.** `[features] hooks = false` (or the
+  `codex_hooks` alias) in a Codex home, a profile or a role's launch arguments
+  is named by the doctor and `agents status` instead of reading as connected.
+- **Any terminal agent through one hook entry**: `aisquare hook event --agent
+  <id>` decodes the payload with that agent's adapter (`aisquare hook codex`
+  keeps working). Shared services ask the adapter and never compare an agent's
+  name, which `tests/test_no_agent_literals.py` enforces;
+  `tests/test_adapter_contract.py` runs every case for Claude Code, Codex and a
+  synthetic third agent.
+- `aisquare upgrade` re-connects Codex's hooks in every connected Codex home and
+  Codex account home, and says when Codex asks for them to be reviewed again;
+  `aisquare uninstall` takes them out and names each Codex MCP server and plugin
+  that runs aisquare with the `codex mcp remove` / `codex plugin remove` for it.
+- `install.sh --agent codex` installs a missing Codex with its own installer and
+  connects it alone; `--agent both` (or `--agent` twice) installs both agents.
+  `install.ps1` takes the agent from `AISQUARE_INSTALL_AGENT`.
+
 ### Changed
 
+- Codex reasoning levels (`minimal` to `ultra`) pass to Codex unchanged; the
+  shared name `ultracode` becomes Codex's `max`, with a note. Codex fleet roles
+  run `--approve-for-me` by default (Codex's own reviewer, in the
+  workspace-write sandbox) and reviewers `--sandbox read-only
+  --ask-for-approval on-request`; `fleet.roles.<role>.approve_for_me = false`
+  turns it off. Codex's approval policies are `on-request` and `never`, as in
+  0.162.1.
+- `fleet spawn --agent codex` forwards Codex's own `-c KEY=VALUE` and `-a`;
+  on `launch`, `-a` stays AISquare's `--account` and its help says so.
 - Harden coding-agent argument ownership, native effort mapping, and inherited
   family selection; both printed spawn commands now use the shared launcher.
 - Preserve resumed session bindings, rate-limit cleanup for manually started
@@ -19,6 +124,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   This works inside AISquare-launched panes too. With a non-Claude user, project, or
   operator-exported agent default, explicitly bind the wrapper's
   family using `team bind ROLE --agent claude-code --bin PATH` (or `--agent codex`).
+  `--agent` vouches only for a `--bin` on the same command: a wrapper bound by
+  `AISQUARE_BIN_<ROLE>` or `team.profiles.<role>.bin` keeps its binding's agent.
 - Fleet `extra_args` retain their existing Claude ownership. Other agents use
   `agent_args.<agent>`; spawn reports when legacy arguments are skipped.
 - Native hook settings are replaced atomically, and only when they change. Symlink
@@ -28,21 +135,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Launch metadata cleanup is rate-limited across processes. Existing metadata
   gets a full retention period on upgrade; active bindings and durable board
   history remain available.
-
-### Added
-- Terminal Codex integration through a shared coding-agent adapter registry:
-  native hooks, memory, board identity, fleet launches, permissions, optional
-  MCP and native telemetry. User/project defaults and role bindings support
-  mixed Claude Code/Codex teams; setup, status and the UI expose agent choice.
-  See [coding-agent support](docs/coding-agents.md) for native trust and the
-  tested compatibility boundary.
-- `aisquare upgrade` re-connects Codex's hooks in every connected Codex home and
-  Codex account home, and says when Codex asks for them to be reviewed again;
-  `aisquare uninstall` takes them out and names each Codex MCP server and plugin
-  that runs aisquare with the `codex mcp remove` / `codex plugin remove` for it.
-- `install.sh --agent codex` installs a missing Codex with its own installer and
-  connects it alone; `--agent both` (or `--agent` twice) installs both agents.
-  `install.ps1` takes the agent from `AISQUARE_INSTALL_AGENT`.
 
 ## [0.8.0] - 2026-10-12
 

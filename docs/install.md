@@ -19,8 +19,9 @@ macOS, Linux and WSL2. It installs [uv](https://docs.astral.sh/uv/), a Python
 ran it from and wires Claude Code's hooks. Running it again is a no-op: it
 reports what is current and installs nothing.
 
-Claude Code is the compatibility default. For Codex, add `--agent codex`
-(`--agent both` for the two together):
+Claude Code is the compatibility default. For Codex (CLI 0.162.1 or newer,
+the release CI tests), add `--agent codex` (`--agent both` for the two
+together):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.sh | sh -s -- --agent codex
@@ -36,7 +37,10 @@ One step is yours, and the summary names it: run `codex`, sign in if it asks,
 open `/hooks` and trust aisquare's hooks. Codex runs no hook it has not been
 told to trust, and nothing installs that trust for you. On an existing
 installation, `asq agents connect codex` and `asq agents use codex` do the
-same. [Coding-agent setup, mixed teams and compatibility](coding-agents.md).
+same. Each further Codex login is a numbered account (`aisquare accounts add
+--agent codex`, see [Codex accounts](coding-agents.md#codex-accounts)), and
+Codex can take the hooks from [the Codex plugin](codex-plugin.md) instead.
+[Coding-agent setup, mixed teams and compatibility](coding-agents.md).
 
 On **Windows**, everything runs inside WSL2 — the UI gives each agent a real
 tmux pane and Windows has no tmux. This does both steps for you, in PowerShell:

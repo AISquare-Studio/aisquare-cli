@@ -1,7 +1,9 @@
 # Terminal coding agent support: shared core, Claude Code and Codex
 
-Status: implemented for draft review in `feat/coding-agent-adapters`.
-The audit below describes `main` at `711fd61` on 2026-09-09, before this change.
+Status: implemented for draft review in `feat/coding-agent-adapters` (PR #113);
+[What shipped (2026-10)](#what-shipped-2026-10) at the end compares it with
+this plan. The plan and the audit below are kept as written: the audit
+describes `main` at `711fd61` on 2026-09-09, before this change.
 See [the implementation guide](../coding-agents.md) for shipped behavior,
 local validation and external release smoke tests. Scope: terminal coding
 agents, including interactive fleet panes.
@@ -85,7 +87,7 @@ agent-specific instructions can be appended by the adapter.
 
 ## Selection and configuration
 
-Proposed user-facing commands, not available yet:
+Proposed user-facing commands (proposed here in 2026-09; all of them exist now):
 
 ```sh
 asq agents connect codex
@@ -279,3 +281,83 @@ documented. Detection or a running tmux pane alone is insufficient.
 Gemini CLI or another terminal agent can follow by satisfying this contract.
 Antigravity support is conditional on a usable terminal interface; desktop/IDE
 automation is outside this scope. No support claim for either is made here.
+
+## What shipped (2026-10)
+
+One PR, #113 (`feat/coding-agent-adapters`), rather than the five phases'
+several, with `main` through 0.8.0 merged in. The Codex target moved from
+0.153.4 (the September draft) to **0.162.1**, which CI installs and pins. What
+users see is in [coding agents](../coding-agents.md) and the
+[changelog](../../CHANGELOG.md); this section compares it with the plan above.
+
+**Architecture, as planned.** `src/aisquare/core/agent_adapters/` holds
+`types.py`, `claude_code.py`, `codex.py` and `native_models.py`; the registry
+is the package's `__init__.py` (`register`, `get_adapter`,
+`adapter_for_binary`, `DEFAULT_AGENT = "claude-code"`), not a `registry.py`.
+The contract is one `AgentAdapter` protocol with `AgentCapabilities`,
+`AgentEvent` (nine kinds, through `decode_event` / `encode_reply`),
+`PermissionIntent`, `HooksSwitch` and `NativeChoice`, plus two optional slots
+the plan did not name: `AgentAccounts` (numbered login slots) and
+`AgentPlugin` (a plugin route). Launch planning is `services/agent_launch.py`,
+shared by `launch`, `team spawn` and `fleet spawn`. Every hook reaches the
+shared services through `services/agent_events.py`; a new agent needs no hook
+subcommand of its own (`aisquare hook event --agent <id>`).
+
+**Contracts and tests, as planned.** `tests/test_adapter_contract.py` runs 63
+cases over Claude Code, Codex and `tests/fake_agent.py`, a synthetic third
+agent written from the guide alone and spawned through `services.fleet.spawn`.
+`tests/test_no_agent_literals.py` fails on any comparison with an agent's name
+outside the adapter package (25 such branches were removed). The guide is
+[Adding a terminal agent](../coding-agents.md#adding-a-terminal-agent).
+
+**Shipped, against the plan's parity requirements:**
+
+| Plan item | Shipped |
+| --- | --- |
+| Installation and instructions | `--config-dir`, profile and ambient `CODEX_HOME`, then `~/.codex`; the effective global `AGENTS.override.md` / `AGENTS.md` imported to the user pool; project files left to Codex. |
+| Lifecycle | Eight Codex events in `CODEX_HOME/hooks.json`, foreign entries kept, atomic writes, owned entries removed on disconnect and uninstall. Status separates configured, `unverified` (awaiting `/hooks` trust) and observed; AISquare never writes trust. Hooks switched off (`[features] hooks = false`) are named, not counted as connected. |
+| Identity | Launch and fleet tokens bind the native thread at its first hook. A Codex agent's own hooks are told from a nested child's by `CODEX_THREAD_ID`, which Codex sets only in its tools' shells (measured); `/clear`, `/resume` and hand-overs move the row and its claims. |
+| Launch and permissions | `PermissionIntent` (`WRITE:APPROVALS`) per role, mapped by each adapter; Codex's `--approve-for-me` is the `workspace:auto` counterpart of Claude Code's `auto`. Native flags stay an escape hatch. |
+| Models | Per-agent pins (`[agents.models.<agent>]`) at `team spawn` and `fleet spawn`. Claude Code keeps its ladder and probe, now keyed to the selected executable and account; Codex has no AISquare probe, so availability is Codex's to settle and no paid request is made. |
+| Fleet control | Spawn, attach, pause, resume, reap and worktrees unchanged; `fleet stop` types the adapter's exit command; `fleet restart` and a same-home switch resume the bound thread (`codex … resume <id>`); `fleet tell` types into a waiting Codex and queues for a busy one with `codex queue`, else files a board note. |
+| MCP and CI | `agents.mcp = true` adds the stdio server per launch, never written to Codex's config; MCP calls adopt the launch's board session. The CI contract runs in the shared hook services both agents' events go through. |
+| Setup and release | `install.sh --agent codex` (or `both`), `install.ps1` via `AISQUARE_INSTALL_AGENT`, `init --agent codex`, `upgrade` and `uninstall` for Codex homes, Welcome, Doctor, Settings and the spawn dialog. A CI cell installs Codex alone on `debian:12` and reaches a doctor whose only amber row is the trust step. |
+| Accounts (beyond the plan) | Numbered Codex slots on Claude Code's ladder, identity from `auth.json` read locally, usage from the account's own rollouts (offline), limit detection and the `on_limit = "switch"` hand-over. |
+| Plugin (beyond the plan) | A Codex plugin with the same hooks, standing down while `hooks.json` runs aisquare's ([the Codex plugin](../codex-plugin.md)). |
+
+**Where the plan's assumptions changed.** Codex 0.162.1 names `max` and
+`ultra`, so effort levels pass unchanged and only `ultracode` maps (to `max`),
+not `max`/`ultracode` to `xhigh`. "Claude permission `auto` has no Codex
+equivalent" no longer holds: `--approve-for-me` is used for it, and Codex
+refuses it beside `--sandbox` or `--ask-for-approval`, and in `full` scope.
+Approval policy `untrusted` is gone in 0.162.1. `codex queue` is used only as
+measured on 0.162.1, against a busy interactive session. A Codex thread lives
+under its `CODEX_HOME`, so a switch onto another account starts fresh.
+
+**Not shipped, or not evidenced:**
+
+- No AISquare parser for `codex exec --json`: scripted runs pass through to
+  Codex (`launch … -- exec --json …`).
+- Explainability exports Codex's own OTLP logs to a per-launch loopback
+  receiver (POSIX/WSL) and replays them through the SDK. Gateway support for
+  OpenAI Responses traffic was not built, and tracing with live ChatGPT or
+  API-key logins against a deployed gateway is not claimed.
+- Codex usage limits are detected from synthetic rollout fixtures: no real
+  limit was available to record, and whether 0.162.1 writes the error event
+  and fires `Stop` after a failed turn is unverified (both signals are read).
+  Codex has no wait-and-continue at the reset; usage is per home and only as
+  fresh as its last turn.
+- The Codex plugin's `uvx` fallback needs the next release pinned (0.8.0 has
+  no `aisquare hook codex`); native Windows keeps `hooks.json`, since the
+  plugin's launcher is `sh`.
+- Cursor remains detection-only. No Gemini CLI or Antigravity adapter.
+- Acceptance item 4's real-terminal smoke: the native fixture drives real Codex
+  0.162.1 against a loopback provider in CI (hooks, exec/resume, MCP, usage
+  export, fleet startup, tell through `codex queue`, restart with history,
+  `/clear`, graceful stop). The live smoke with a signed-in Codex 0.162.1
+  (Claude Code 2.1.299 for the mixed team, at 273652fc) passed 16 of its 18
+  items. The two that failed were the attention chip (set for approvals
+  Codex's own reviewer decides, missed for a real one) and waking a waiting
+  Codex manager. It filed eight defects, the sandbox's reach to the store
+  among them; the parity matrix in [coding agents](../coding-agents.md)
+  records what they became.

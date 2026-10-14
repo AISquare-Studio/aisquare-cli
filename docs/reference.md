@@ -20,6 +20,15 @@ Code stops a hook after 60 seconds by default, and these two can wait that
 long. If you declare the hooks yourself (home-manager, for example), give
 those two the same timeout.
 
+`agents connect codex` merges eight hooks into `$CODEX_HOME/hooks.json`, each
+running `aisquare hook codex`: the same work under Codex's own events
+(`SessionStart`, `UserPromptSubmit`, `Stop`, `SessionEnd`, `Interrupt`,
+`PermissionRequest`, `PreToolUse` for its user-input tool, `PostToolUse`).
+Codex runs them only once you trust them in its `/hooks`, and it has no
+`StopFailure`: a usage limit is read off the session's rollout when the turn
+stops. [Coding agents](coding-agents.md) has the details and the
+`aisquare hook event --agent <id>` entry another agent's adapter installs.
+
 Every hook is **fail-open**: any error is swallowed and the session
 continues untouched. State lives in one SQLite database (WAL mode,
 concurrency-tested against racing parallel sessions):
@@ -31,6 +40,8 @@ concurrency-tested against racing parallel sessions):
 ├── fleet-tmux.conf  # the fleet's private tmux server config (regenerated, not yours)
 ├── state.json    # small runtime state (e.g. the pinned active project)
 ├── agents.json   # registry of connected agents
+├── claude-accounts/  # Claude Code account slots the CLI owns (docs/fleet.md)
+├── codex-accounts/   # Codex account slots, on the same numbering (docs/coding-agents.md)
 ├── projects/     # per-project data — snapshot/ (Repomix pack), brain/ (gbrain)
 ├── cache/        # disposable (e.g. last_injection.json)
 └── log/          # capture and diagnostic logs
@@ -51,35 +62,38 @@ aisquare
 │                   promote · import · export · —  your persistent memory
 ├── inject · why · log · status · doctor
 ├── upgrade [--check] [--version V] [--dry-run] [-y]   update this install in place
-├── uninstall [--purge] [--dry-run] [-y]   hooks out of Claude Code, then the package
+├── uninstall [--purge] [--dry-run] [-y]   hooks out of Claude Code and Codex, then the package
 ├── project (workspace)  info · list · switch · link · onboard [--refresh] · forget <id|path> [--purge]
 │                   prune [--missing] [--worktrees] [--purge] [--yes]
 ├── agents          scan · list · status [name] · connect <name> · disconnect <name>
 │                                                  [--config-dir DIR]
-├── accounts        list [--usage] · add · run <slot> [… claude args] · usage [slot]
-│                   remove <slot>            — Claude Code accounts the CLI owns (docs/fleet.md)
-│                   default [<slot|alias|email>] [--project P] [--role R] [--clear]
+│                   use <name> [--project] · refresh-hooks <name>
+│                                                  — name: claude-code or codex
+├── accounts        list [--usage] · add [--agent A] · run <slot> [… agent args] · usage [slot]
+│                   remove <slot>            — Claude Code and Codex accounts the CLI owns (docs/fleet.md)
+│                   default [<slot|alias|email>] [--project P] [--role R] [--clear] [--agent A]
 │                   alias <slot> <name> [--clear] · order <slot>… · move <slot> up|down|top|bottom
 │                   disable <slot> · enable <slot>   — the default, the order, the names
 │                   usage also shows the pace (≈ N min to the limit) — see [accounts] in config
 ├── team            on · status · focus <text> · role <name> · log [-n N] · distill [--all]
 │                   spawn <role> [--exec] [--probe/--no-probe] [--refresh]
 │                                 [--effort LEVEL] · harness
-│                   bind <role> [--bin CMD] [--env KEY=VALUE]… [--arg A]…
+│                   bind <role> [--agent A] [--bin CMD] [--env KEY=VALUE]… [--arg A]…
 │                               [--unset KEY] [--account A] [--clear-account] [--clear]
 ├── task            add · list · show · next [--role R] [--status S] [--claim]
 │                   claim · review [--note] · reopen --reason · done [--note]
 │                   block --reason · drop · release        (all with [--as SESSION])
 ├── note <text> [--task T] [--to ROLE] [--kind note|decision|question|result]
 ├── board [-w] [-i SECONDS] · recall <query>
-├── launch <role> [--command CMD] [--env KEY=VALUE]… [--account SLOT] [… agent args]
+├── launch <role> [--agent A] [--command CMD] [--env KEY=VALUE]… [--account SLOT] [… agent args]
 │                   role = planner|coder|runner|validator, a fleet role (manager,
 │                   tester, reviewer, ui-tester), a numbered seat (coder1), or any role you
 │                   have bound; env merges over `team bind`
 ├── serve [--stdio | --port N --bind H] [--show-token]
 ├── ui              the fleet UI — what bare `asq` opens at a terminal (docs/fleet.md)
 ├── fleet           spawn <role> [--label L] [--task ID] [--worktree/--no-worktree]
-│                             [--permission-mode M] [--bin B] [--prompt TEXT] [--account SLOT]
+│                             [--permission-mode M] [--agent A] [--sandbox S] [--approval P]
+│                             [--bin B] [--prompt TEXT] [--account SLOT]
 │                             [-- agent args]
 │                   ls [--all] · status · tell <label> <text> · stop <label> [--force]
 │                   restart <label> [--fresh] [--permission-mode M]

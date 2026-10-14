@@ -160,9 +160,10 @@ minutes](fleet.md#the-first-five-minutes)):
   list names any slot of another agent, which a launch would refuse). Under each
   role is the line its next `fleet spawn` passes for permission — the adapter's own
   flags (`--approve-for-me`, `--sandbox read-only --ask-for-approval on-request`,
-  `--permission-mode auto`) — or the refusal the spawn would meet. A per-role
-  agent-neutral permission value is the fleet-parity task's; until it lands, each
-  agent keeps its own words here.
+  `--permission-mode auto`) — or the refusal the spawn would meet. The role's
+  one permission for every agent (`fleet.roles.<role>.permission`,
+  `WRITE:APPROVALS`) is a select of its own, and the line shows what each agent
+  would be passed under it ([the table](fleet.md#one-permission-for-every-agent)).
 - **The spawn dialog** (`＋ spawn agent`) is `fleet spawn` with the role, agent,
   account (the launching agent's slots only) and permission (Claude Code's
   `--permission-mode`, or Codex's `--sandbox` and `--approval`), and shows the
@@ -263,10 +264,11 @@ on a usage limit.
   headroom. A limit found when the session ends is recorded without a move.
   AISquare relies on no wait-and-continue from Codex at the reset (Claude
   Code's): a parked Codex agent that is not switched waits for its next prompt.
-- **Switching is always fresh.** A Codex thread lives under the old
+- **Switching to another account is fresh.** A Codex thread lives under its
   `CODEX_HOME` and cannot be resumed from another, so `fleet switch` of a Codex
-  agent (by hand or automatic) starts it fresh with the board-built hand-off
-  prompt and moves its claims onto the new session, as `--fresh` does.
+  agent onto another account (by hand or automatic) starts it fresh with the
+  board-built hand-off prompt and moves its claims onto the new session, as
+  `--fresh` does. A target on the home the thread ran under resumes it.
 - **Doctor** lists Codex slots and their headroom beside Claude's; reading
   Codex headroom needs no network, so it does not wait for `--live`.
 
@@ -405,13 +407,18 @@ Cleanup runs on all native session starts and receiver maintenance, at most once
 per minute across processes sharing the store. Ordinary starts between cleanup
 runs use an indexed timestamp read.
 
-Initial fleet tasks use Codex's positional prompt. Subsequent automated input
-requires a linked waiting session; otherwise `fleet tell` files a board note.
-Permission and user-input hooks mark attention, tools restore working state,
-and end hooks release claims. The existing fleet pause, resume, attach, stop,
-reap and worktree operations remain shared; `fleet stop` types `/exit` and its
-Enter apart, because Codex reads one burst of keys as a paste. Restart a stopped role with
-`fleet spawn`; resume a native thread with its explicit native ID.
+Initial fleet tasks use Codex's positional prompt. After that, `fleet tell`
+types into a Codex agent whose hooks freshly say it is waiting, queues the
+message for the next turn of one they say is working (`codex queue --thread
+<id> --message <text>` under its own `CODEX_HOME`), and otherwise files a board
+note ([`fleet tell`](fleet.md#fleet-tell)). Permission and user-input hooks mark
+attention, tools restore working state, and end hooks release claims. The
+existing fleet pause, resume, attach, stop, reap and worktree operations remain
+shared; `fleet stop` types `/exit` and its Enter apart, because Codex reads one
+burst of keys as a paste. `fleet restart` (and Restart in asq) resumes the
+thread the agent's first hook bound, as `codex <options> resume <id> -- <continue
+line>`, on the same account; with no bound thread it starts fresh and says so.
+`/clear` keeps the row and moves its claims to the new thread.
 
 Set `agents.mcp = true` to add AISquare's stdio server to launched sessions.
 Install the `serve` extra first. This is ephemeral launch configuration;

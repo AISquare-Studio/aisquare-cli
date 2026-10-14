@@ -88,7 +88,9 @@ ngrok announces late (a network still coming up) is shown, and used for
 notifications, as soon as it comes. A Remote that was on when the UI last
 closed comes back on as it starts, with writes off: a notice says it is back,
 and when auto-off comes (or that it never does, as a warning); switch writes on
-again in the panel if you want them. With the
+again in the panel if you want them. One whose auto-off time passed while the UI
+was gone without turning it off (a closed terminal, a kill, a crash) stays off,
+its switch saved off, and a notice says so. With the
 panel closed, a notice also says when a Remote that was on could not come back on as
 the UI started, when phones cannot reach it (ngrok missing or not up, and once it
 is up after all), when ngrok came back on a new link, and when auto-off turned
@@ -555,7 +557,8 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   stopping. Closing the UI or stopping `serve` with Ctrl-C does not; expiry
   bounds them. Either, once the auto-off time has come, is auto-off. A Remote that
   ended with no way out at all (killed, or a fleet UI ended by a signal) has its
-  auto-off run when Remote next comes on, if its time came meanwhile. Its ngrok
+  auto-off run when Remote next comes on, if its time came meanwhile, and a fleet
+  UI's start then leaves it off rather than bring it back. Its ngrok
   does not outlive it, so nothing reaches `127.0.0.1:8750` through the link while
   Remote is gone; but nothing signed the phones out either, so their cookies open
   the next Remote. Turn Remote off in the panel, or run

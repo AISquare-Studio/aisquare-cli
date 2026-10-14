@@ -70,7 +70,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   beside the theme; the write switch is the server's, in `remote.json`, the one
   `asq remote allow-write` sets. No ngrok outlives the UI, however it ends. A
   Remote that was on comes back on at the next start, with writes off and a
-  notice that it is back and when auto-off comes; a dead ngrok is restarted
+  notice that it is back and when auto-off comes, unless its auto-off time
+  passed while the UI was gone (a closed terminal, a kill): then it stays off
+  and the notice says so; a dead ngrok is restarted
   within 30 s. With `AISQUARE_REMOTE_NGROK_URL`
   set, ngrok runs on that static domain (`--url=`), so the link survives.
 - **`asq remote serve [--port] [--auto-off MINUTES] [--public-url URL] [--dist DIR]`**,

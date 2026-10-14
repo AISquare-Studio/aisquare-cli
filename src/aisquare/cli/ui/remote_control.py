@@ -104,6 +104,9 @@ ELSEWHERE_EVERY_SECONDS = 3.0
 taken for a moment each time (``remote_server.remote_served_elsewhere``)."""
 ALREADY_ON = f"Remote could not start — {remote_server.REMOTE_ALREADY_ON}"
 """What a start says that another Remote, on this home, kept off."""
+AUTO_OFF_MISSED = "Remote stayed off — its auto-off time passed while asq was not running"
+"""What a TUI start says of a Remote left on whose auto-off time has passed meanwhile
+(:meth:`RemoteController._auto_off_missed`)."""
 
 LASTING_TUNNEL_ERRORS = (AUTHTOKEN_HINT, TOO_OLD_HINT)
 """Why an ngrok ended before it announced a URL that a restart would hit again, until the
@@ -744,12 +747,36 @@ class RemoteController:
         switch turned off, meanwhile."""
         if not self.state.remote_enabled or self.running:
             return
+        if self._auto_off_missed():
+            return
         if self._turn_on(wait=wait, restoring=True):
             return  # what came after the server is said as it ends
         if self.message == ALREADY_ON:
             self.message = None  # on elsewhere: the panel's state says so (served_elsewhere)
             return
         self._remote_news(self.message)
+
+    def _auto_off_missed(self) -> bool:
+        """Whether the Remote a TUI start would bring back had its auto-off time pass while no
+        Remote kept it; then its switch is saved off, and that is news, instead of a start.
+
+        A quit after the deadline turns Remote off as auto-off does (:meth:`shutdown_for_exit`)
+        and saves the switch off, and a quit before it clears the deadline. A fleet UI that
+        never got that far (a closed terminal's SIGHUP, a SIGKILL, a crash) left both, and the
+        next ``asq`` put the public link back up with a fresh deadline: the auto-off the human
+        had picked had run out, yet the Remote came back (review of #259, round 6, 1/10). The
+        next start of a Remote still signs every phone out (``_remote_auto_off_missed``).
+        """
+        try:
+            deadline = self._server.remote_auto_off_at()
+        except Exception:  # unreadable: the start says why, as it would have
+            return False
+        if deadline is None or _aware(self._now()) < _aware(deadline):
+            return False
+        self._set_state(remote_enabled=False)
+        self.message = AUTO_OFF_MISSED
+        self._remote_news(AUTO_OFF_MISSED)
+        return True
 
     def shutdown_for_exit(self, *, wait: bool = True) -> None:
         """At TUI exit: end the processes, keep the saved switches for ``restore``.

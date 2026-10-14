@@ -1256,6 +1256,40 @@ def test_install_page_leaves_behind_what_a_server_would_not_serve(
     assert all(SECRET not in path.read_text() for path in destination.rglob("*.*"))
 
 
+def test_install_page_copies_a_link_back_into_the_build_once_never_into_itself(
+    isolated_home: Path, built: Path
+) -> None:
+    """Review of #259, remote focus, 5/12: ``assets/up -> ..`` leads inside the build, so it
+    was kept, and ``copytree`` followed it, copying the build into itself at every level,
+    some 40 deep, until the path could not be looked up: a 1 MB build wrote 82 directories,
+    then raised an ``OSError`` the CLI told to make ``~/.aisquare`` writable or free some
+    space. A link back into a directory the copy is in is left behind, as one out of the
+    build is; two links into each other are each copied once. A link to a directory beside
+    it is copied as ever."""
+    (built / "pages").mkdir()
+    (built / "pages" / "home.html").write_text("<p>home</p>")
+    try:
+        (built / "assets" / "up").symlink_to("..")
+        (built / "assets" / "here").symlink_to(".")
+        (built / "a").mkdir()
+        (built / "b").mkdir()
+        (built / "a" / "x").symlink_to(built / "b")
+        (built / "b" / "y").symlink_to(built / "a")
+        (built / "assets" / "pages").symlink_to(built / "pages")
+    except OSError:
+        pytest.skip("this platform cannot make the symlink")
+    destination = remote_server.install_page(built)
+    copied = sorted(path.relative_to(destination).as_posix() for path in destination.rglob("*"))
+    assert copied == [
+        "a", "a/x",
+        "assets", "assets/app.js", "assets/pages", "assets/pages/home.html",
+        "b", "b/y",
+        "index.html",
+        "pages", "pages/home.html",
+    ]  # fmt: skip
+    assert not any(path.is_symlink() for path in destination.rglob("*")), "what each named"
+
+
 @pytest.mark.parametrize("installed", [False, True], ids=["dist", "install-page"])
 @pytest.mark.parametrize(
     "path", [".env", ".git/config", "assets/.secret.js", "assets/../.env", "linked.js"]

@@ -7119,16 +7119,41 @@ def _page_project_not_build(source: Path) -> str | None:
 def _page_copy_skips(source: Path, directory: str, names: list[str]) -> set[str]:
     """What :func:`install_page` leaves behind of ``names`` in ``directory`` of ``source``,
     what a server would not serve from ``source`` (:func:`_built_page_target`): a hidden
-    name, and a link that leads out of ``source`` or to a hidden file there."""
-    return {
-        name
-        for name in names
-        if name.startswith(".")
-        or (
-            (Path(directory) / name).is_symlink()
-            and _built_page_target(source, Path(directory) / name) is None
-        )
-    }
+    name, and a link that leads out of ``source`` or to a hidden file there. And a link back
+    into a directory the copy is inside of (:func:`_page_copy_loops`), which serves nothing
+    the build does not hold already."""
+    skipped: set[str] = set()
+    for name in names:
+        path = Path(directory) / name
+        if name.startswith("."):
+            skipped.add(name)
+        elif path.is_symlink():
+            target = _built_page_target(source, path)
+            if target is None or _page_copy_loops(source, Path(directory), target):
+                skipped.add(name)
+    return skipped
+
+
+def _page_copy_loops(source: Path, directory: Path, target: Path) -> bool:
+    """Whether a link in ``directory`` of ``source`` to ``target`` leads back to where the copy
+    already is: ``target`` is ``directory`` or holds it, or holds where one of the
+    directories above it in ``source`` resolves, a link the copy came through.
+
+    ``copytree`` follows a link to a directory and copies what is there, so ``assets/up ->
+    ..`` copied the whole build into itself at every level, some 40 deep, until the path
+    was one the system could not look up: a 1 MB build wrote 82 directories, a 100 MB one
+    about 4 GB, before the clean-up; and the ``shutil.Error`` it raised, an ``OSError``, was
+    told to make ``~/.aisquare`` writable or free some space (review of #259, remote focus,
+    5/12). Two links leading into each other (``a/x -> b``, ``b/y -> a``) loop as well:
+    each is copied once, and stops where it would come round again.
+    """
+    for walked in (directory, *directory.parents):
+        here = _remote_resolved(walked)
+        if here is not None and here.is_relative_to(target):
+            return True
+        if walked == source:
+            return False
+    return False
 
 
 def _page_copy_narrowed(root: Path) -> None:

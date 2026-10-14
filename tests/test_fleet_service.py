@@ -48,6 +48,7 @@ from aisquare.core.orchestrator import team_project
 from aisquare.core.store import ContextStore, SqliteStore, store_session
 from aisquare.core.tmux import (
     _FACTS_FIELDS,
+    Capture,
     Completed,
     PaneFacts,
     Runner,
@@ -2776,6 +2777,84 @@ def test_a_held_row_reads_unknown_saying_why_whatever_its_fresh_board_says(
     monkeypatch.setattr(fleet_service, "server", lambda config=None: tmux)
     [own] = fleet_service.list_agents(project)
     assert (own.state, own.held) == (board, False)
+
+
+def test_every_path_that_types_into_or_shows_a_pane_refuses_a_held_rows_id(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reviews of #259, rounds 1 and 2: each found another path that acted on a row held as
+    another tmux server's as if its pane id were its own: asq's tabs, needs-you's server,
+    `tell`, needs-you's cards, the status detail. On the server that took the socket those
+    ids are other agents', here each at its prompt. Every path that types into a pane or
+    shows one goes through the one derivation (`_derive`, held: `unknown`) or the one pane
+    predicate (`_its_agent`); this asks each of them, so the next path is one more line."""
+    from aisquare.cli.ui.views.agent import shown_pane
+    from aisquare.services import remote_needs, remote_server
+
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    manager = fleet_service.spawn(project, "manager").agent
+    coder = _coder(project)
+    for row in (manager, coder):
+        _board_session(row, "waiting")  # fresh: a killed agent fires no SessionEnd
+    newcomer = FakeTmux()  # at the same path, so `-L` reaches it
+    newcomer.started = tmux.started + timedelta(minutes=5)
+    for name in ("manager", "coder-1"):
+        newcomer.spawn_window("asq-elsewhere", name=name, cwd=project.root, command=["claude"])
+    assert newcomer.facts.keys() == {manager.pane_id, coder.pane_id}, "their ids, others' panes"
+    for row in (manager, coder):
+        newcomer.set_command(row.pane_id, "claude")  # agents at their prompts: not theirs
+
+    def capture(pane_id: str, **_: object) -> Capture:
+        facts = newcomer.pane_facts(pane_id)
+        assert facts is not None
+        return Capture(["another agent's screen"], facts, 0)
+
+    monkeypatch.setattr(newcomer, "capture", capture)
+    monkeypatch.setattr(remote_server, "_resolve_project", lambda ref=None: project)
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: newcomer)
+    now = datetime.now(tz=UTC)
+
+    # The listing, status_of and so `fleet ls`, asq and the phone's api/fleet.
+    statuses = {status.agent.id: status for status in fleet_service.list_agents(project)}
+    statuses[coder.id] = fleet_service.status_of(coder)
+    for status in statuses.values():
+        assert (status.state, status.detail, status.held) == (
+            "unknown",
+            fleet_service.ANOTHER_SERVER,
+            True,
+        ), status
+        assert shown_pane(status) is None, "asq's Agent and Manager tabs"
+    status = statuses[coder.id]
+    assert not fleet_service.tell(project, "coder-1", "please rebase").delivered
+    assert fleet_service.nudge_manager(project.id, reason="coder-1 exited") is False
+    assert remote_server._remote_pane_refusal(newcomer, coder) == remote_server.PANE_OUTLIVED
+    snap = remote_needs._needs_snapshot(project, status, None, (), now)
+    assert snap.pane_is_agent is False, "what quick answers and agent actions type on"
+    [card] = remote_needs.needs_from_agent(status, None, project=project, events=(), now=now)
+    assert (card.kind, card.reason) == (
+        "lost",
+        "coder-1 is out of reach: another tmux server answers on its socket",
+    )
+    with pytest.raises(remote_server.RequestError) as shown:
+        remote_server._live_panes("coder-1")
+    assert (shown.value.status, shown.value.error) == (409, "not_agent"), "the phone's pane"
+    assert remote_server._pane_width(coder) == 80, "not the other agent's width"
+    with pytest.raises(FleetError, match="another tmux server answers on its socket"):
+        fleet_service.stop(project, "coder-1")
+
+    assert newcomer.typed == [] and newcomer.killed == []
+    # Negative control: on their own server every path takes the same panes as theirs.
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: tmux)
+    for row in (manager, coder):
+        tmux.set_command(row.pane_id, "claude")
+    own = fleet_service.status_of(coder)
+    assert (own.state, own.held, shown_pane(own)) == ("waiting", False, coder.pane_id)
+    assert remote_server._remote_pane_refusal(tmux, coder) is None
+    assert remote_needs._needs_snapshot(project, own, None, (), now).pane_is_agent is True
+    assert fleet_service.nudge_manager(project.id, reason="coder-1 exited") is True
+    assert fleet_service.tell(project, "coder-1", "please rebase").delivered
+    assert newcomer.typed == [], "and still nothing of the newcomer's"
 
 
 def test_with_no_boot_id_a_row_from_before_the_boot_is_lost_not_held_by_the_next_server(

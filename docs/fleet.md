@@ -33,7 +33,7 @@ Three ideas carry the whole feature:
 | Tool | Needed for | Minimum |
 | --- | --- | --- |
 | **`tmux`** | the fleet itself — spawning and surfacing agents | **3.2** (`new-window -e`, extended keys); **3.5+ recommended**, where shift+enter and the other extended chords reach the agent (3.3/3.4 would mistype them, so there shift+enter travels as ctrl+J — Claude Code's same newline — and the rest are refused with a warning) |
-| **`claude`** | every fleet role runs on Claude Code | 2.1.x — `--session-id`, `--permission-mode`, `--effort` |
+| **`claude`** or **`codex`** | every fleet role runs on a terminal coding agent: Claude Code, Codex, or each role its own ([coding agents](coding-agents.md)) | Claude Code 2.1.x — `--session-id`, `--permission-mode`, `--effort`; Codex CLI 0.162.1 — `--approve-for-me`, hooks |
 | `git` | worktrees for coders and reviewers | 2.20+ |
 | `gh` | *optional* — the coder opens PRs and the reviewer reviews them with it | any current release |
 | Python | the CLI | 3.11+ |
@@ -52,11 +52,14 @@ Windows: run everything inside WSL2, as you already would for Claude Desktop.
 On Windows-native, `asq` prints a one-line "the fleet needs tmux — run inside
 WSL2" and every other command works as before.
 
-Then the CLI, connected to Claude Code:
+Then the CLI, connected to your coding agent (the Welcome page in `asq` does
+this step for you):
 
 ```sh
 pipx install 'aisquare-cli[tui]'          # or: pip install 'aisquare-cli[tui]'
 aisquare agents connect claude-code       # the lifecycle hooks the fleet reads state from
+aisquare agents connect codex             # or Codex's, in CODEX_HOME
+aisquare agents use codex                 # Codex for every launch (the default is Claude Code)
 aisquare doctor                           # is everything wired? (and how to fix anything)
 ```
 
@@ -73,8 +76,21 @@ tmux can see and its row says so (`no hooks`).
 
 1. **Run `asq`** (or `aisquare`) in a terminal. The UI opens: the navigator on
    the left and a Welcome page on the right that walks you to a fleet in three
-   steps: pick a project, connect Claude Code (it names the install command
-   when Claude Code is missing), then start the manager and two coders. Press
+   steps: pick a project, set up your coding agent, then start the manager and
+   two coders. Step 2 is the agent the fleet will launch: Claude Code, or Codex
+   where you chose it or where it is the only one installed. It names the
+   install commands when the agent is missing (both agents' when neither is
+   installed), and with both installed it asks which to use and saves the pick as
+   your default (`aisquare agents use`). It shows the version, whether the account
+   the manager will run on is signed in — *Sign in* opens the Accounts page, for
+   Codex with `codex login` already open there — and *Connect* installs aisquare's
+   hooks. Codex runs hooks only once you trust them: the card says so, and you do
+   it in the manager's pane (`/hooks`), the first time it starts. Step 3 starts
+   the manager and the coders on that agent, each on the account the account
+   ladder picks (see [Accounts](#accounts)); a role bound to an agent of its own
+   (`aisquare team bind coder --agent claude-code`) keeps it. Both agents ask
+   whether to trust a new folder on their first start, so step 3 types nothing
+   into the manager: you answer it in its pane. Press
    `w` in the sidebar to come back to it. No script ever meets a
    full-screen app, and the two ways of getting no UI differ. **In a pipe or
    with `TERM=dumb`**: the help page on stdout and exit 2, byte for byte as
@@ -106,9 +122,12 @@ tmux can see and its row says so (`no hooks`).
    bell), **⏳ limited** (parked on a Claude usage limit, with the reset time),
    **💤 exited(N)**, **✗ lost**. **Click an agent** and you see its real
    session; click into the pane and every key you type goes to it. `＋ spawn
-   agent` on a project starts one of your own (Phase 4).
+   agent` on a project starts one of your own (Phase 4): its dialog is `aisquare
+   fleet spawn` with the role, the agent, the account (that agent's slots) and
+   the permission in that agent's words (Claude Code's `--permission-mode`;
+   Codex's `--sandbox` and `--approval`), and shows the flags the launch will pass.
 5. Selecting an agent gives its pane the keyboard at once — type, and it reaches
-   Claude Code. **Press `F12`** to hand focus back to the sidebar (it is the one key the pane
+   the agent. **Press `F12`** to hand focus back to the sidebar (it is the one key the pane
    never forwards; configurable). With the sidebar focused: `t` picks a theme,
    `q` quits the UI — and the agents keep running.
    The line between the navigator and the content is a divider: drag it to

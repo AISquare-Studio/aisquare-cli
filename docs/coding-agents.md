@@ -113,8 +113,59 @@ A merely present, unused Codex home is advisory. `team harness` reports a bad
 role with its repair hint alongside the roles that resolve successfully.
 `--json agents use codex --project` returns `scope: "project"` and `project_id`.
 
-The Settings tab has user and role agent choices; the spawn dialog supports a
-per-launch choice. Model/account profiles continue to use `team bind`.
+### In asq: Welcome, Doctor, Settings and the spawn dialog
+
+`asq` takes a Codex user from an empty home to a running manager and two coders
+the way it takes a Claude Code user ([the first five
+minutes](fleet.md#the-first-five-minutes)):
+
+- **Welcome, step 2** is the agent the fleet launches for the manager: the
+  selection order above, and on a machine where Codex is the only agent installed
+  and nothing chose one, Codex. It shows Codex's version (read from its install,
+  else `codex --version`) and binary, whether the account the manager will launch
+  on is signed in (`CODEX_HOME/auth.json`, read locally), and whether AISquare's
+  hooks are in that `CODEX_HOME`. *Connect* runs `agents connect codex` (with
+  `--config-dir` when the manager's home is not your shell's); *Sign in* opens the
+  Accounts page with `codex login` already running on that account; *Check again*
+  looks again (the page also does so every few seconds). Hooks switched off
+  (`features.hooks = false`) or a `hooks.json` that cannot be read are named
+  instead of offering a Connect that cannot help. The trust step is Codex's own:
+  the card says the hooks run once you trust them in `/hooks`, and step 3 says
+  where (the manager's pane, the first time it starts). With neither agent
+  installed, step 2 names both agents' install commands (Codex: its installer
+  `curl -fsSL https://chatgpt.com/codex/install.sh | sh`, Homebrew on macOS, npm);
+  with both installed and nothing more specific than the user default choosing, it
+  offers *Use Claude Code* / *Use Codex* and saves the pick as your default
+  (`agents use`).
+- **Welcome, step 3** starts the manager and the coders with `fleet spawn --agent`
+  on that agent (a role bound to an agent of its own keeps it), each on the account
+  the account ladder picks for it. A Codex the page picked because it was the only
+  one installed is saved as your default first, so the coders the manager spawns
+  later run on Codex too. Nothing is typed into a new agent: Codex, like Claude
+  Code, first asks whether to trust the folder.
+- **Doctor** rows for each Codex home: connected (`configured`/`observed`),
+  `partial` (some of AISquare's hooks, naming the missing events), not connected,
+  hooks naming a stale or missing aisquare, hooks switched off, `unverified` (the
+  trust step, whose fix is `/hooks` in Codex — no button can trust hooks) and the
+  account rows (`codex-accounts`, defaults, bindings, limits). *Connect* fixes are
+  one click, and so is a slot's sign-in: *Sign in account N* opens the Accounts
+  page with that slot's `codex login` in its pane. `aisquare --json doctor` carries
+  every row.
+- **Settings** edits, per role, the agent (`team.profiles.<role>.agent`), Claude
+  Code's permission mode, Codex's sandbox, approval policy (`on-request` or
+  `never`) and `approve_for_me`, the worktree switch and the account binding (whose
+  list names any slot of another agent, which a launch would refuse). Under each
+  role is the line its next `fleet spawn` passes for permission — the adapter's own
+  flags (`--approve-for-me`, `--sandbox read-only --ask-for-approval on-request`,
+  `--permission-mode auto`) — or the refusal the spawn would meet. A per-role
+  agent-neutral permission value is the fleet-parity task's; until it lands, each
+  agent keeps its own words here.
+- **The spawn dialog** (`＋ spawn agent`) is `fleet spawn` with the role, agent,
+  account (the launching agent's slots only) and permission (Claude Code's
+  `--permission-mode`, or Codex's `--sandbox` and `--approval`), and shows the
+  flags the launch will pass. It calls the same `services.fleet.spawn`.
+
+Model/account profiles continue to use `team bind`.
 Settings retains custom values written by another version, so they can be
 reviewed or corrected without losing them when saving unrelated changes.
 A damaged AISquare config renders defaults and an error; saving preserves the

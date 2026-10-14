@@ -13,6 +13,7 @@ from typing import NoReturn
 import tomli_w
 import typer
 from rich.table import Table
+from rich.text import Text
 
 from aisquare.core import paths
 from aisquare.core import snapshot as snapshot_core
@@ -225,7 +226,7 @@ def emit_project_detail(project: ProjectInfo) -> None:
     grid = Table.grid(padding=(0, 2))
     grid.add_column(style="bold")
     grid.add_column()
-    grid.add_row("name", project.root.name or project.id)
+    grid.add_row("name", Text(_project_name(project)))
     grid.add_row("id", project.id)
     grid.add_row("root", str(project.root))
     if project.linked_repos:
@@ -234,7 +235,15 @@ def emit_project_detail(project: ProjectInfo) -> None:
 
 
 def _project_name(project: ProjectInfo) -> str:
-    return project.root.name or project.id
+    """``services.project.display_name``: the nickname, else the directory, else the id.
+
+    Imported here, not at module scope, for :func:`project_for_ref`'s reason. A
+    nickname is free text, so a line that prints it prints it as data
+    (``markup=False``, a :class:`~rich.text.Text` cell): ``[wip]`` is not a style.
+    """
+    from aisquare.services.project import display_name  # lazy: see project_for_ref
+
+    return display_name(project)
 
 
 def projects_json(
@@ -309,7 +318,9 @@ def emit_projects(
         marker = "*" if project.id == active_id else ""
         if project.pinned_at is not None:
             marker = (marker + "📌").strip()
-        cells = [marker, project.root.name or "—", project.id, str(project.root)]
+        # display_name's order, with a dash for the id the next column shows anyway.
+        name = Text(project.nickname or project.root.name or "—")
+        cells: list[str | Text] = [marker, name, project.id, str(project.root)]
         if captured:
             cells.append("captured" if project.onboarded_at is None else "yes")
         if arranged:
@@ -329,7 +340,7 @@ def emit_project_action(message: str, project: ProjectInfo) -> None:
     if get_state().json_output:
         typer.echo(project.model_dump_json())
     else:
-        stdout_console().print(message)
+        stdout_console().print(message, markup=False)  # a nickname is text, not markup
 
 
 def _active_note(
@@ -362,7 +373,9 @@ def emit_project_forget(report: ProjectForgetReport) -> None:
         return
     console = stdout_console()
     project = report.project
-    console.print(f"✓ forgot {_project_name(project)} ({project.id}) at {project.root}")
+    console.print(
+        f"✓ forgot {_project_name(project)} ({project.id}) at {project.root}", markup=False
+    )
     if report.purged:
         counts = ", ".join(f"{count} {table}" for table, count in report.removed.items() if count)
         console.print(f"  deleted: {counts or 'no rows'}")
@@ -376,7 +389,7 @@ def emit_project_forget(report: ProjectForgetReport) -> None:
     _say_keys_still_live(report.keys_still_live)
     note = _active_note(report.active, changed=report.active_changed, pin_error=report.pin_error)
     if note is not None:
-        console.print(f"  {note}")
+        console.print(f"  {note}", markup=False)
 
 
 def _say_keys_still_live(owed: list[PendingRevocation]) -> None:
@@ -420,7 +433,9 @@ def emit_prune(report: ProjectPruneReport) -> None:
         if project.id in kept:
             why += f" (kept: {candidate.live_agents} live agent(s))"
         marker = "" if report.dry_run else ("·" if project.id in kept else "✓")
-        table.add_row(marker, why, _project_name(project), project.id, str(project.root))
+        table.add_row(
+            marker, Text(why), Text(_project_name(project)), project.id, str(project.root)
+        )
     console.print(table)
     if report.dry_run:
         return
@@ -438,7 +453,7 @@ def emit_prune(report: ProjectPruneReport) -> None:
     _say_keys_still_live(report.keys_still_live)
     note = _active_note(report.active, changed=report.active_changed, pin_error=report.pin_error)
     if note is not None:
-        console.print(f"  {note}")
+        console.print(f"  {note}", markup=False)
 
 
 def emit_setup(report: SetupReport) -> None:

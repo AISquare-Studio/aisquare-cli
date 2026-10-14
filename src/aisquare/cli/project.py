@@ -143,14 +143,64 @@ def switch(name: Annotated[str, typer.Argument(help="Project name or id prefix."
         fail(str(exc), error="ambiguous_project", ref=name)
     except StateUnwritableError as exc:
         fail(str(exc), error="state_unwritable", ref=name)
-    emit_project_action(f"✓ switched to {project.root.name or project.id} ({project.id})", project)
+    emit_project_action(
+        f"✓ switched to {project_service.display_name(project)} ({project.id})", project
+    )
 
 
 @app.command("link")
 def link(repo: Annotated[str, typer.Argument(help="Repository path or URL to link.")]) -> None:
     """Link another repository into the active project."""
     project = project_service.link(repo)
-    emit_project_action(f"✓ linked {repo} into {project.root.name or project.id}", project)
+    emit_project_action(f"✓ linked {repo} into {project_service.display_name(project)}", project)
+
+
+@app.command("rename")
+def rename(
+    nickname: Annotated[
+        str | None,
+        typer.Argument(help="What to call it: any text, up to 255 characters."),
+    ] = None,
+    project: Annotated[
+        str | None,
+        typer.Option(
+            "--project",
+            "-P",
+            help="Project by name, codename, id prefix, nickname or path "
+            "(default: the active project).",
+            metavar="PROJECT",
+        ),
+    ] = None,
+    clear: Annotated[
+        bool, typer.Option("--clear", help="Drop the nickname: the folder's name shows again.")
+    ] = False,
+) -> None:
+    """Give a project a nickname — what the sidebar and the lists call it.
+
+    Free text, like naming a browser tab: what you are doing there. The codename
+    (`fleet rename`) still names its tmux session and branches.
+    """
+    if nickname is None and not clear:
+        fail("pass a nickname, or --clear", error="usage")
+    if nickname is not None and clear:
+        fail("pass a nickname or --clear, not both", error="usage")
+    target = _project_ref(project) if project is not None else project_service.info()
+    try:
+        renamed = project_service.set_nickname(target, nickname)
+    except ValueError as exc:
+        fail(str(exc), error="bad_nickname", ref=target.id)
+    except KeyError:
+        fail(
+            f"{project_service.display_name(target)} is not one of your projects — add it "
+            f"first: aisquare project onboard {shlex.quote(str(target.root))}",
+            error="not_found",
+            ref=target.id,
+        )
+    emit_project_action(
+        f"✓ {project_service.display_name(target)} is now called "
+        f"{project_service.display_name(renamed)}",
+        renamed,
+    )
 
 
 @app.command("onboard")
@@ -308,8 +358,12 @@ app.add_typer(group_app, name="group")
 
 
 def _project_id(ref: str) -> str:
+    return _project_ref(ref).id
+
+
+def _project_ref(ref: str) -> ProjectInfo:
     try:
-        return project_service.resolve(ref).id
+        return project_service.resolve(ref)
     except KeyError:
         fail(f"no project matches '{ref}'", error="not_found", ref=ref)
     except ValueError as exc:
@@ -328,7 +382,7 @@ def _emit_layout(message: str, entry: groups_service.UndoEntry | None = None) ->
 
 def _arrangement_json(arrangement: groups_service.Arrangement) -> dict[str, object]:
     def project(p: ProjectInfo) -> dict[str, object]:
-        return {"id": p.id, "name": p.root.name or p.id, "position": p.position}
+        return {"id": p.id, "name": project_service.display_name(p), "position": p.position}
 
     def group(e: groups_service.GroupEntry) -> dict[str, object]:
         return {
@@ -413,7 +467,7 @@ def group_list() -> None:
     for entry in entries:
         pin = " 📌" if entry.group.pinned_at is not None else ""
         fold = " (collapsed)" if entry.group.collapsed else ""
-        names = ", ".join(m.root.name or m.id for m in entry.members) or "—"
+        names = ", ".join(project_service.display_name(m) for m in entry.members) or "—"
         stdout_console().print(f"{entry.group.name}{pin}{fold}: {names}", markup=False)
 
 

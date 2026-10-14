@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import unicodedata
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -84,7 +85,7 @@ def switch_to(project: ProjectInfo) -> ProjectInfo:
 
 
 def _one_match(store: ContextStore, term: str) -> ProjectInfo:
-    """The single registered project ``term`` names — a name, codename or id prefix.
+    """The single registered project ``term`` names — a name, codename, id prefix or nickname.
 
     ``KeyError`` when nothing matches, ``ValueError`` (listing the candidates)
     when several do; the two commands that share this share its wording.
@@ -99,7 +100,8 @@ def _one_match(store: ContextStore, term: str) -> ProjectInfo:
 
 
 def resolve(ref: str) -> ProjectInfo:
-    """The registered project ``ref`` names: an id prefix, a name, a codename or a path.
+    """The registered project ``ref`` names: an id prefix, a name, a codename, a path or
+    a nickname (only when nothing else matches: :meth:`ContextStore.find_projects`).
 
     A path is tried first whenever ``ref`` looks like one — it exists, or it
     is spelled with a separator or a leading dot — and is looked up by the id
@@ -143,8 +145,33 @@ class ProjectBusyError(Exception):
 
 
 def display_name(project: ProjectInfo) -> str:
-    """How the project is named to a person: its directory, falling back to the id."""
-    return project.root.name or project.id
+    """How the project is named to a person: its nickname, else its directory, else the id."""
+    return project.nickname or project.root.name or project.id
+
+
+NICKNAME_MAX = 255
+"""The longest nickname :func:`set_nickname` keeps, in characters."""
+
+
+def set_nickname(project: ProjectInfo, nickname: str | None) -> ProjectInfo:
+    """Give ``project`` the name a person sees, or clear it: ``None`` or blank clears.
+
+    Free text, trimmed: spaces, punctuation and any script are kept, and the
+    codename (which names the tmux session and the branches) is not touched.
+    ``ValueError`` for more than :data:`NICKNAME_MAX` characters or a control
+    character (a newline, a tab, an escape) — a nickname is one line on every
+    surface that shows it — and nothing is written. ``KeyError`` when the
+    project is not registered, or is forgotten.
+    """
+    text = (nickname or "").strip()
+    if len(text) > NICKNAME_MAX:
+        raise ValueError(
+            f"a nickname is at most {NICKNAME_MAX} characters; this one has {len(text)}"
+        )
+    if any(unicodedata.category(char) == "Cc" for char in text):
+        raise ValueError("a nickname is one line: no newlines, tabs or other control characters")
+    with store_session() as store:
+        return store.set_project_nickname(project.id, text or None)
 
 
 def forget(ref: str, *, purge: bool = False) -> ProjectForgetReport:

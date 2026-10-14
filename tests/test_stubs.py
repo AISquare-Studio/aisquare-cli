@@ -130,6 +130,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "list",
             "switch",
             "link",
+            "rename",
             "onboard",
             "forget",
             "prune",

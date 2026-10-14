@@ -31,6 +31,7 @@ from aisquare.core.state import get_state
 from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
+from aisquare.services import project as project_service
 
 app = typer.Typer(
     help="The fleet: this project's manager and the agents it spawns, each a tmux pane.",
@@ -87,8 +88,9 @@ def _project(ref: str | None) -> ProjectInfo:
 
 
 def _display_name(project: ProjectInfo) -> str:
-    """Basename primary, ``project.id`` when the basename is empty (§5.7)."""
-    return project.root.name or project.id
+    """``services.project.display_name``: the nickname, the basename, else ``project.id``
+    (§5.7). Free text: a line that prints it passes ``markup=False``."""
+    return project_service.display_name(project)
 
 
 def _project_json(project: ProjectInfo) -> dict[str, object]:
@@ -138,7 +140,7 @@ def _emit_agents(project: ProjectInfo, agents: list[FleetAgentStatus]) -> None:
     title = _display_name(project)
     if project.codename:
         title = f"{title} · {project.codename} · {fleet_service.session_name(project.codename)}"
-    console.print(title)
+    console.print(title, markup=False)
     if not agents:
         console.print("  (no agents) — start one: aisquare fleet spawn manager")
         return
@@ -909,7 +911,8 @@ def rename(
         return
     stdout_console().print(
         f"✓ {_display_name(updated)} is now {updated.codename} "
-        f"({fleet_service.session_name(updated.codename or '')})"
+        f"({fleet_service.session_name(updated.codename or '')})",
+        markup=False,
     )
     # The rename fails OPEN on the tmux half (the row is what everything else
     # reads), and a swallowed one costs `fleet attach` — so say it here rather
@@ -929,7 +932,7 @@ def pause(project: ProjectRef = None, as_session: SessionRef = None) -> None:
     if get_state().json_output:
         typer.echo(json.dumps({"paused": True, **_project_json(target)}))
         return
-    stdout_console().print(f"⏸ fleet paused for {_display_name(target)}")
+    stdout_console().print(f"⏸ fleet paused for {_display_name(target)}", markup=False)
 
 
 @app.command("resume")
@@ -943,7 +946,7 @@ def resume(project: ProjectRef = None, as_session: SessionRef = None) -> None:
     if get_state().json_output:
         typer.echo(json.dumps({"paused": False, **_project_json(target)}))
         return
-    stdout_console().print(f"▶ fleet resumed for {_display_name(target)}")
+    stdout_console().print(f"▶ fleet resumed for {_display_name(target)}", markup=False)
 
 
 def not_interactive_reason() -> str | None:

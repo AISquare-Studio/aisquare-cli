@@ -54,6 +54,7 @@ from aisquare.cli.ui.groups import (
     UndoLayout,
 )
 from aisquare.models import FleetAgentStatus, ProjectGroup, ProjectInfo
+from aisquare.services.project import display_name
 from aisquare.services.project_groups import Arrangement, GroupEntry, arrange
 
 ROLE_ICON: dict[str, str] = {
@@ -141,8 +142,8 @@ class ResizeSidebar(Message):
 
 
 def project_name(project: ProjectInfo) -> str:
-    """The display name: the root's basename, or the id when the basename is empty (§5.7)."""
-    return project.root.name or project.id
+    """The display name: the nickname, the root's basename, else the id (§5.7)."""
+    return display_name(project)
 
 
 def short_path(path: Path, home: Path | None = None) -> str:

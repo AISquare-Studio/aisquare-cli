@@ -440,12 +440,7 @@ Live ChatGPT/API-key authentication and delivery to a deployed gateway require
 release smoke tests with those services; loopback tests do not claim that
 external validation.
 
-To add another terminal agent, implement the protocol in
-`core/agent_adapters/types.py`, register it in that package, and add native
-event/telemetry handling where its protocol differs. Reuse the launch, board,
-memory and fleet services. Add adapter contract fixtures and an opt-in native
-test. Keep unsupported capabilities explicit instead of copying another
-agent's flags or claiming hookless detection is integration.
+To add another terminal agent, follow [Adding a terminal agent](#adding-a-terminal-agent).
 
 Native contracts (checked against 0.162.1's `codex --help` and `codex features list`):
 [Codex hooks](https://learn.chatgpt.com/docs/hooks),
@@ -461,3 +456,104 @@ network delivery if the gateway accepts a request but its acknowledgement is los
 Malformed members are skipped without discarding valid neighboring records. Permanent
 spool failures cost at most one write attempt per request, and `aisquare doctor` checks
 spool access and reports the most recent receiver failure.
+
+## Adding a terminal agent
+
+`src/aisquare/core/agent_adapters/` is the one place a terminal agent (Gemini CLI,
+Grok, ...) is implemented. The shared services (hooks, board, launch, fleet, doctor)
+ask its adapter and never compare its name: `tests/test_no_agent_literals.py` fails on
+`== "codex"`, `in (..., "claude-code")` or a `match` case on either name anywhere
+outside that package. Keep unsupported capabilities explicit instead of copying
+another agent's flags or claiming hookless detection is integration.
+
+### The files
+
+| # | File | What |
+|---|------|------|
+| 1 | `src/aisquare/core/agent_adapters/<agent>.py` | A class implementing `AgentAdapter` (`types.py`), with its `AgentCapabilities`. |
+| 2 | `src/aisquare/core/agent_adapters/__init__.py` | One line: `register(<Agent>Adapter())`. |
+| 3 | `tests/fixtures/agent_events/<id>.json` | `events`: a recorded payload for every hook event it installs, with the `AgentEvent` fields it must decode to; `version_output`/`version`; `hooks_off` (the file and text that switch its hooks off). |
+| 4 | `tests/test_adapter_contract.py` | Its row in `EXPECTED_PERMISSIONS` (a coder's and a reviewer's flags). |
+| 5 | `tests/test_<agent>_native.py`, `tests/run_<agent>_native.py` | The opt-in test against the real binary (`AISQUARE_TEST_<AGENT>=1`), as `test_codex_native.py` and its CI job do for Codex. |
+| 6 | `docs/coding-agents.md` | Its setup and native settings. |
+
+Nothing else, and no new `aisquare hook` subcommand: a `HookSpec` whose command is
+`types.GENERIC_HOOK` installs `aisquare hook event --agent <id> --event <native event>`
+(plus `--config-dir <home>` with `hook_names_home`), which decodes with the adapter.
+Optional slots: numbered login slots (`accounts`, an `AgentAccounts`), the plugin route
+(`plugin`, an `AgentPlugin`), and native telemetry (`capabilities.native_telemetry` with
+`telemetry_args`; the receiver in `services/native_telemetry.py` reads Codex's OTel
+attributes and config layers, which a second telemetry agent extends there).
+
+### The protocol
+
+| Slot | What it answers |
+|------|-----------------|
+| `id`, `label`, `binary`, `install_hint` | The board's and config's name; what the UI says; the executable (`adapter_for_binary` knows a wrapper by this name). |
+| `home_env`, `home_name`, `config_dir(home, env, explicit)` | The config dir the binary reads: explicit, else `$home_env`, else `~/home_name`. |
+| `version_args` | The arguments that print its version; `types.version_in` reads the output. |
+| `settings_name`, `capabilities.hooks` | The hooks file in that dir, and each event installed with its subcommand, timeout and matcher. `core.agents.install_hooks`/`remove_hooks` merge it, keeping every foreign entry. |
+| `hooks_off_setting`, `hooks_switch(home, settings, args)` | The setting that silences every hook, and whether the dir or the launch arguments set it. |
+| `plugin` | The aisquare plugin route, or `None`. |
+| `decode_event(payload)` | The payload as an `AgentEvent` of one kind: `session_start`, `prompt`, `stop`, `session_end`, `interrupt`, `attention`, `tool_done`, `turn_failed`, `notification`; `None` for one AISquare ignores. |
+| `encode_reply(kind, reply)` | What the hook prints: context for `session_start`/`prompt`, a "keep going" decision for `stop`, `""` for nothing. |
+| `model_args`, `resolve_model`, `native_args`, `native_choice`, `validate`, `effort_alias` | Model and reasoning effort: the flags, the configured choice, the native spelling, what a native argv already chose. |
+| `permission_args(intent, role)` | The flags for a `PermissionIntent` (below); `ValueError` for one it cannot express. |
+| `fleet_args(role, label, mode, ...)` | A fleet spawn's flags from the role's native permission settings, then `label_args(label)`. |
+| `resume_args(native_id, transcript)` | The arguments that resume a session, put first. |
+| `exit_command` | What `fleet stop` types to end the session so its `SessionEnd` runs. |
+| `mcp_args`, `context_files`, `disable_native_teams` | AISquare's MCP server for this session; the instruction files it reads; the arguments and environment that keep its own sub-agent teams off. |
+| `telemetry_args(endpoint, authorization)` | Its OpenTelemetry exporter, with `native_telemetry`. |
+
+`AgentCapabilities` holds the rest as flags, each documented in `types.py` with the
+service that reads it: `assigns_session_id` (AISquare names the session at launch),
+`requires_hook_trust`, `hook_names_home`, `strict_hooks_file`, `stop_reason_as_prompt`,
+`limits_in_transcript` (no turn-failed event), `ambient_first_run`,
+`reads_pane_readiness` (`fleet tell` may type into a pane that looks idle),
+`resumes_across_homes`, `exports_home_env`, `own_doctor_check`, `model_ladders`,
+`model_proxy`, `positional_prompt`, `first_context_file_only`, `sandbox_permissions`,
+`legacy_fleet_args`, `value_options`, `switch_options`.
+
+A `PermissionIntent` is a write scope (`read_only`, `workspace`, `full`) and an
+approvals policy (`ask`, `auto`, `never`), written `workspace:auto`. A reviewer's seats
+are `read_only:auto`, every other role `workspace:auto`; an explicit native flag still
+wins.
+
+| Intent | Claude Code | Codex |
+|--------|-------------|-------|
+| `read_only:ask` | `--permission-mode manual --disallowedTools=Edit Write NotebookEdit` | `--sandbox read-only --ask-for-approval on-request` |
+| `read_only:auto` (reviewer) | `--permission-mode auto --disallowedTools=Edit Write NotebookEdit` | `--sandbox read-only --ask-for-approval on-request` |
+| `read_only:never` | `--permission-mode dontAsk --disallowedTools=Edit Write NotebookEdit` | `--sandbox read-only --ask-for-approval never` |
+| `workspace:ask` | `--permission-mode manual` | `--sandbox workspace-write --ask-for-approval on-request` |
+| `workspace:auto` (default) | `--permission-mode auto` | `--approve-for-me` |
+| `workspace:never` | `--permission-mode dontAsk` | `--sandbox workspace-write --ask-for-approval never` |
+| `full:ask` | `--permission-mode manual` | `--sandbox danger-full-access --ask-for-approval on-request` |
+| `full:auto` | `--permission-mode auto` | refused: `--approve-for-me` runs only in workspace-write |
+| `full:never` | `--permission-mode bypassPermissions` | `--sandbox danger-full-access --ask-for-approval never` |
+
+### What the conformance suite fails on
+
+`tests/test_adapter_contract.py` runs every case for every registered adapter and for
+`tests/fake_agent.py`, a synthetic third agent registered only there. It fails when:
+
+- the fixture file or the `EXPECTED_PERMISSIONS` row is missing;
+- an installed event has no recorded payload, or decodes to another kind or other fields;
+- the adapters together no longer decode every event kind;
+- installing twice doubles a hook, removing leaves the file other than it was before,
+  a foreign entry is lost, or the installed command is not `hook_args`'s;
+- the fixture's hooks-off switch does not make a complete install read as not connected;
+- the installed command, run as `aisquare hook ...` with the recorded payloads, does not
+  put the session on the board under this agent and then mark it `waiting`;
+- a reply prints something for nothing, drops the context, or makes a Stop reply the
+  bare reason rather than a decision;
+- `version_in` misreads its version line, or `config_dir` ignores `home_env` or an
+  explicit dir;
+- an intent maps to neither flags nor a refusal with a reason; resume arguments are
+  empty; the exit command is not a slash command; the MCP arguments do not name the
+  server; nothing keeps native teams off; telemetry arguments come without the
+  capability.
+
+The fake adapter was written from this section alone. Besides the cases above it is
+spawned through `services.fleet.spawn` with a stub binary, its window's `aisquare
+launch` builds its argv, and `fleet stop` types its `/quit`, with no change to any
+shared service.

@@ -2655,6 +2655,67 @@ def test_spawn_refuses_to_start_a_server_at_a_socket_a_running_server_lost(
     assert fleet_service.spawn(project, "coder").agent.label == "coder-2"
 
 
+def test_a_spawn_over_a_server_that_exited_leaves_its_rows_lost_not_held(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    plain_project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 2: a `kill-server` (or a tmux crash) leaves the socket file with
+    nothing listening, and the first spawn in any project starts the next server there.
+    Every row of the old server had recorded its start, and under the new one each was
+    held as another server's for good: `reap` left it, `stop` refused it, and it still
+    counted toward the cap and the one-manager rule, until `shutdown --forget`. 0.8.0 read
+    them lost. The spawn forgets the start of the server that exited while the stale file
+    still says so, in every project, and the rows read lost as before: `reap` records
+    them, `stop` ends them, `restart` brings a coder back. A row whose server listens at
+    another path is not that server's."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    manager = fleet_service.spawn(project, "manager").agent
+    coder = _coder(project)
+    other = fleet_service.spawn(plain_project, "manager").agent
+    apart = Path("/elsewhere/tmux-1000/asq-test")  # another TMUX_TMPDIR's server, still up
+    elsewhere = tmux.per_path[apart] = FakeTmux()
+    elsewhere.started = tmux.started
+    window = elsewhere.spawn_window("asq-x", name="coder-2", cwd=project.root, command=["c"])
+    moved = {"socket_path": apart, "pane_id": window.pane_id}
+    with store_session() as store:
+        kept = store.upsert_fleet_agent(_coder(project).model_copy(update=moved))
+    tmux.kill_server()  # `tmux -L asq kill-server`: the file stays, nothing listens
+    assert tmux.listener() is None
+
+    receipt = fleet_service.spawn(project, "coder")  # any spawn, in any project
+
+    assert receipt.agent.label == "coder-3" and tmux.running
+    states = {s.agent.label: (s.state, s.held) for s in fleet_service.list_agents(project)}
+    assert states == {
+        "manager": ("lost", False),
+        "coder-1": ("lost", False),
+        "coder-2": ("waiting", False),  # its server is not the one that exited
+        "coder-3": ("waiting", False),
+    }, states
+    [theirs] = fleet_service.list_agents(plain_project)
+    assert (theirs.agent.id, theirs.state, theirs.held) == (other.id, "lost", False)
+    [said] = [note for note in receipt.notes if "had exited" in note]
+    assert said.startswith(f"the tmux server at {tmux.socket_path()} had exited, leaving its")
+    for name in ("manager", "coder-1"):
+        assert f"{name} ({project.root.name})" in said, said
+    assert f"manager ({plain_project.root.name})" in said, "every project's, on a shared server"
+    assert " read lost from now on, as their panes went with it " in said, said
+    # Lost, as in 0.8.0: a coder comes back under its own label, the manager's row ends at
+    # a stop, and `reap` records the rest; nothing is held, and nothing of coder-3's touched.
+    assert fleet_service.restart(project, "coder-1").replaced.id == coder.id
+    assert fleet_service.stop(project, "manager").agent.id == manager.id
+    report = fleet_service.reap()
+    assert [row.id for row in report.lost] == [other.id] and report.held == []
+    with store_session() as store:
+        still = store.get_fleet_agent(kept.id)
+    assert still is not None and still.ended_at is None and still.server_started_at is not None
+    assert [typed for typed in tmux.typed if typed[0] == receipt.agent.pane_id] == []
+
+
 def test_a_row_whose_socket_another_server_took_is_held_not_ended(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

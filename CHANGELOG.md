@@ -191,7 +191,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   gives it one `lost` card saying it is out of reach (not prompts whose every
   answer is refused, nor nothing once its board goes stale), `fleet shutdown`
   leaves it live until `--forget`, and
-  `upgrade` and `uninstall` count it as running and name `--forget`. Before,
+  `upgrade` and `uninstall` count it as running and name `--forget`. A
+  server that exited (a `kill-server`, a crash) leaves its socket file with
+  nothing listening, and the next spawn, in any project, sees it before it
+  starts a server there: that server's rows read lost from then on, as in
+  0.8.0, not held under the new one, so `reap` records them and `restart`
+  brings them back; the receipt names them. Before,
   the newcomer's missing pane read as the row's pane gone, and `stop`,
   `shutdown` and `reap` ended the row while its agent ran on, where nothing
   could reach it. The doctor says the same for such a row, instead of

@@ -1190,6 +1190,7 @@ class ContextStore(Protocol):
     def end_fleet_agent_if_live(
         self, agent_id: str, *, exit_status: int | None = None
     ) -> FleetAgent | None: ...
+    def forget_fleet_agent_server_start(self, agent_id: str, started: datetime) -> bool: ...
     # The Claude account registry (v15, #145): the arrangement of the slots.
     def claude_accounts(self) -> list[ClaudeAccountRecord]: ...
     def upsert_claude_account(self, slot: int, config_dir: Path) -> ClaudeAccountRecord: ...
@@ -3626,6 +3627,23 @@ class SqliteStore:
         if cursor.rowcount == 0:
             return None
         return self.get_fleet_agent(agent_id)
+
+    def forget_fleet_agent_server_start(self, agent_id: str, started: datetime) -> bool:
+        """Clear a LIVE row's recorded server start while it is still ``started``; whether it did.
+
+        For a row whose server exited (``services.fleet._forget_an_exited_server``): with no
+        start recorded, it reads lost under the next server at its socket, as a row from
+        before 0.8.1 does, rather than held as that server's for good. A compare-and-set on
+        the start the caller read and on ``ended_at IS NULL``, so a row ended or rewritten
+        since is left as it is.
+        """
+        cursor = self._conn.execute(
+            "UPDATE fleet_agent SET server_started_at = NULL "
+            "WHERE id = ? AND ended_at IS NULL AND server_started_at = ?",
+            (agent_id, started.isoformat()),
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
 
     # --- the Claude account registry (v15, #145) --------------------------------------------
     #

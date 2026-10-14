@@ -1292,16 +1292,22 @@ them; once you know that server is not running, `fleet shutdown --all --forget`
 ends their rows on your word.
 
 **The server was stopped outside the CLI.** Rows read `unknown (tmux
-unavailable)` and `reap` reaps nothing — correctly: it cannot ask. Once any
-project spawns again, a new server is up on the socket and hands the old pane
-ids out afresh. That server is not the old rows': every row records when its
-server started, and this one started at another time, so they read `unknown
-(another tmux server on its socket)` — never the state of the agent that got
-their id, whose pane the UI does not show under them either. From outside, a
-server killed by hand looks like one that lost its socket file and runs on, so
-`reap` leaves those rows and names them, `stop` and `restart` refuse them, and
-`shutdown` leaves them live; once you know the old server is gone, `fleet
-shutdown --forget` ends their rows on your word. (A row started before 0.8.1
+unavailable)` and `reap` reaps nothing — correctly: it cannot ask. A stopped
+server leaves its socket file behind with nothing listening, which shows that it
+exited: the next spawn, in any project, sees it before it starts a new server at
+that path, and the rows on the old one read `✗ lost` from then on, as their
+panes are gone (its receipt names them). A plain `reap` records them, `restart`
+brings one back under its own label, and asq's Start the coders restarts the
+lost coders. A server started some other way (a hand-run `tmux -L asq`, a 0.8.0
+client) takes the path without that step, and hands the old pane ids out
+afresh. That server is not the old rows': every row records when its server
+started, and this one started at another time, so they read `unknown (another
+tmux server on its socket)` — never the state of the agent that got their id,
+whose pane the UI does not show under them either. From outside, such a server
+looks like one that took the path from a server that lost its socket file and
+runs on, so `reap` leaves those rows and names them, `stop` and `restart`
+refuse them, and `shutdown` leaves them live; once you know the old server is
+gone, `fleet shutdown --forget` ends their rows on your word. (A row started before 0.8.1
 recorded no start, reads `✗ lost` as before, and a plain `reap` records it.)
 `shutdown` records them as lost on your word, at any point, scoped to one
 project or over all of them:

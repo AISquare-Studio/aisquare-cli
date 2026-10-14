@@ -256,3 +256,79 @@ def test_a_reading_served_from_the_cache_still_says_where_the_window_is_heading(
 def test_the_page_ticks_each_minute_and_asks_at_most_every_five() -> None:
     assert accounts_view.TICK_SECONDS == 60.0
     assert accounts_view.USAGE_SECONDS == accounts_service.USAGE_MAX_AGE_SECONDS == 300.0
+
+
+def _unreachable(account: ClaudeAccount) -> ClaudeUsage:
+    """The scripted endpoint, down: what ``usage`` answers when the request cannot be made."""
+    return ClaudeUsage(available=False, reason="could not reach the usage endpoint (URLError)")
+
+
+def test_a_failed_try_after_a_good_read_is_not_called_a_refresh(
+    no_network: dict[str, Any], clock: Clock, tmp_path: Path
+) -> None:
+    """The tester, verifying ff2070e1: with the endpoint unreachable the line read 'last
+    refreshed just now' although nothing was read. It ages from the last reading actually
+    READ, and says when a later try failed."""
+    endpoint: dict[str, Callable[[ClaudeAccount], ClaudeUsage]] = {"up": _answering(clock)}
+    no_network["usage"] = lambda account: endpoint["up"](account)
+    frame = _signed_in(2, tmp_path, "tok-two")
+
+    async def go(pilot: Pilot[None]) -> dict[str, object]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle_until(app, lambda: len(no_network["usage_calls"]) >= 1)
+        await settle(app)
+        seen: dict[str, object] = {"read": _age(view)}
+        endpoint["up"] = _unreachable
+        clock.advance(minutes=6)
+        view.refresh_readings()  # due, and the endpoint is down
+        await settle_until(app, lambda: len(no_network["usage_calls"]) >= 2)
+        await settle(app)
+        seen["failed"] = _age(view)
+        seen["row"] = line(view, 2)
+        clock.advance(minutes=2)
+        view.refresh_readings()  # the failure is served, not retried inside five minutes
+        await settle(app)
+        seen["aged"] = (len(no_network["usage_calls"]), _age(view))
+        endpoint["up"] = _answering(clock)
+        await pilot.click(view.query_one("#usage-refresh", Button))
+        await settle_until(app, lambda: len(no_network["usage_calls"]) >= 3)
+        await settle(app)
+        seen["back"] = _age(view)
+        return seen
+
+    seen = drive(go, overview=frame)
+    assert seen["read"] == "last refreshed just now"
+    assert seen["failed"] == "last refreshed 6m ago · last try failed just now"
+    assert "could not reach the usage endpoint" in str(seen["row"])
+    assert seen["aged"] == (2, "last refreshed 8m ago · last try failed 2m ago")
+    assert seen["back"] == "last refreshed just now", "a good read clears the failure"
+
+
+def test_nothing_read_yet_says_never_and_the_failure_beside_the_oldest_good_read(
+    no_network: dict[str, Any], clock: Clock, tmp_path: Path
+) -> None:
+    """Slot 2's endpoint is down from the first try: 'never'. Slot 3 then reads: the line
+    ages from slot 3's reading — the only one READ — and still says slot 2's try failed."""
+    answer = _answering(clock)
+    no_network["usage"] = lambda account: (
+        _unreachable(account) if account.slot == 2 else answer(account)
+    )
+    frame = _signed_in(2, tmp_path, "tok-two")
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle_until(app, lambda: len(no_network["usage_calls"]) >= 1)
+        await settle(app)
+        never = _age(view)
+        clock.advance(minutes=1)
+        second = _signed_in(3, tmp_path, "tok-three").accounts
+        view.show(_overview(*frame.accounts, *second))
+        await settle_until(app, lambda: len(no_network["usage_calls"]) >= 2)
+        await settle(app)
+        return never, _age(view)
+
+    never, some = drive(go, overview=frame)
+    assert never == "last refreshed never · last try failed just now"
+    assert some == "last refreshed just now · last try failed 1m ago"

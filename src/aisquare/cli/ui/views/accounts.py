@@ -38,7 +38,8 @@ are the one thing here that costs a request: they are read through the shared
 five-minute cache (``cached_usage``), so an account is asked at most once every
 :data:`USAGE_SECONDS` however often the page is opened, and only while it is on
 screen; *↻ Refresh usage* asks every account now, and the line beside it says
-how old the readings are.
+how old the readings are — the last ones actually READ, and when a later try
+failed, that too.
 
 Every visible string is ``rich.text.Text`` built with ``append``: an email,
 a path and a server's reason are DATA (CONTRIBUTING: no markup in data).
@@ -851,6 +852,8 @@ class AccountsView(Vertical):
         """The session the credits line was drawn (or emptied) for."""
         self.usage: dict[int, ClaudeUsage] = {}
         self.trends: dict[int, UsageTrend | None] = {}
+        self._read_at: dict[int, datetime] = {}
+        """When each slot's usage was last READ: a failed try replaces its reading, not this."""
         self._asked: set[int] = set()
         """The signed-in slots a usage reading has been started for (``show``)."""
         self.login: _ClaudeLogin | None = None
@@ -1073,6 +1076,7 @@ class AccountsView(Vertical):
         for stale in existing.values():
             self.usage.pop(stale.slot, None)
             self.trends.pop(stale.slot, None)  # a re-used slot must not inherit a projection
+            self._read_at.pop(stale.slot, None)
             stale.remove()
 
     def _name_of(self, account: ClaudeAccount) -> str:
@@ -1153,21 +1157,29 @@ class AccountsView(Vertical):
         self.refresh_usage(force=True)
 
     def _paint_usage_age(self) -> None:
-        """``last refreshed 3m ago`` — the OLDEST reading the rows show; ``refreshing…`` while
-        a read runs, when *↻ Refresh usage* is off too; ``never`` before the first."""
+        """``last refreshed 3m ago`` — the OLDEST reading the signed-in rows hold that was
+        actually read; ``never`` before the first. A row whose latest try read nothing (an
+        unreachable endpoint, a rejected token) adds ``· last try failed just now``, the
+        newest such try: a failure is never passed off as a refresh. ``refreshing…`` while a
+        read runs, when *↻ Refresh usage* is off too."""
         running = self._usage_running()
         self.query_one("#usage-refresh", Button).disabled = running
-        stamps = [
+        slots = [row.slot for row in self.rows() if row.status.signed_in]
+        read = [self._read_at[slot] for slot in slots if slot in self._read_at]
+        failed = [
             reading.fetched_at
-            for row in self.rows()
-            if (reading := self.usage.get(row.slot)) is not None and reading.fetched_at is not None
+            for slot in slots
+            if (reading := self.usage.get(slot)) is not None
+            and not reading.available
+            and reading.fetched_at is not None
         ]
         if running:
             said = "refreshing…"
-        elif stamps:
-            said = f"last refreshed {accounts_service.describe_age(min(stamps))}"
         else:
-            said = "last refreshed never"
+            age = accounts_service.describe_age(min(read)) if read else "never"
+            said = f"last refreshed {age}"
+            if failed:
+                said += f" · last try failed {accounts_service.describe_age(max(failed))}"
         self.query_one("#usage-age", Static).update(Text(said, style="dim"))
 
     def refresh_credits(self) -> None:
@@ -1207,6 +1219,8 @@ class AccountsView(Vertical):
         for slot, (usage, trend) in fetched.items():
             self.usage[slot] = usage
             self.trends[slot] = trend
+            if usage.available and usage.fetched_at is not None:
+                self._read_at[slot] = usage.fetched_at
         for row in self.rows():
             if row.slot in fetched:
                 usage, trend = fetched[row.slot]

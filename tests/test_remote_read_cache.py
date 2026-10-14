@@ -325,6 +325,77 @@ def test_a_compute_whose_pool_shut_down_before_it_ran_ends_every_wait_on_it() ->
         assert asyncio.run(again) == "screen", "a failure the pool caused is not kept"
 
 
+def test_a_capture_nobody_waits_for_any_more_is_cancelled_while_it_waits_for_a_thread() -> None:
+    """Review of #259, remote focus, 6/12: a socket that stops wanting a pane lets its read go,
+    which ended its wait and nothing else. The capture stayed in the pane pool's queue, which
+    has no bound: subscriptions churned (each spelling of a project a kind of its own) queued
+    captures nobody wanted, and with tmux slow every phone's pane frames waited behind them.
+    The last waiter to let go cancels a capture still queued; one waited on still is taken."""
+    cache = remote_server._Cache(ttl=60.0)
+    release = threading.Event()
+    computed: list[str] = []
+
+    def capture(name: str) -> Snapshot:
+        def run() -> object:
+            computed.append(name)
+            return name
+
+        return run
+
+    async def read() -> object:
+        pool = ThreadPoolExecutor(max_workers=1)
+        busy = asyncio.get_running_loop().run_in_executor(pool, release.wait, 10)  # tmux slow
+        dropped = [
+            asyncio.ensure_future(cache.cached_snapshot(f"pane:{n}", capture(f"pane {n}"), pool))
+            for n in range(20)
+        ]
+        shared = [
+            asyncio.ensure_future(cache.cached_snapshot("pane:shared", capture("shared"), pool))
+            for _ in range(2)
+        ]
+        await asyncio.sleep(0.05)
+        for each in [*dropped, shared[0]]:
+            each.cancel()
+        await asyncio.sleep(0.05)
+        assert set(cache._flights) == {"pane:shared"}, "a queued capture nobody waits for"
+        release.set()
+        await busy
+        answer = await asyncio.wait_for(shared[1], 5)
+        pool.shutdown(wait=True)
+        return answer
+
+    assert asyncio.run(read()) == "shared"
+    assert computed == ["shared"], "a capture nobody waited for took a thread"
+    assert cache._flights == {}
+
+
+def test_a_capture_already_running_when_its_last_waiter_goes_is_kept_for_the_tick() -> None:
+    """Only a job still queued is cancelled: one already reading tmux runs on, and what it
+    read is the tick's for the next socket that asks, not read again."""
+    cache = remote_server._Cache(ttl=60.0)
+    started, release = threading.Event(), threading.Event()
+    computed: list[str] = []
+
+    def capture() -> object:
+        computed.append("screen")
+        started.set()
+        release.wait(timeout=10)
+        return "screen"
+
+    async def read() -> object:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            only = asyncio.ensure_future(cache.cached_snapshot("pane:", capture, pool))
+            await _eventually(started.is_set)
+            only.cancel()
+            await asyncio.sleep(0.05)
+            release.set()
+            await _eventually(lambda: cache._flights == {})
+            return await cache.cached_snapshot("pane:", capture, pool)
+
+    assert asyncio.run(read()) == "screen"
+    assert computed == ["screen"], "read once"
+
+
 def test_the_flights_hold_only_the_kinds_in_flight_whatever_kinds_are_asked_for() -> None:
     """A kind is whatever spelling of ``?project=`` a client sent: the flights, like the
     snapshots, must not keep one per spelling."""

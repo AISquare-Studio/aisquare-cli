@@ -3614,6 +3614,18 @@ def _cache_answer(outcome: object) -> object:
     return outcome
 
 
+@dataclass(slots=True)
+class _Flight:
+    """A kind being computed (:class:`_Cache`): the future its callers wait on, when it was
+    claimed, how many callers wait on it still, and the pool's job computing it, where it
+    is one that may be cancelled while it waits for a thread."""
+
+    future: Future[object]
+    began: float
+    waiters: int = 0
+    job: Future[Any] | None = None
+
+
 class _Cache:
     """One snapshot per kind per tick, however many sockets are open: each cached read,
     and each pane the stream's sockets watch (one capture, not one per socket).
@@ -3654,20 +3666,27 @@ class _Cache:
     a pane that slow came every two ticks (sweep of #243, round 5). Sockets out of
     step still share one read within the tick, and an outcome whose read took the
     whole ttl answers the callers that waited on it and is kept for none after.
+
+    A compute on a pool of the caller's (the pane pool) that nobody waits for any more is
+    cancelled while it waits for a thread. Its socket's read was let go (:func:`_let_read_go`)
+    and the job stayed in the pool's queue, which has no bound: a device subscribing and
+    unsubscribing panes, each spelling of a project a kind of its own, queued captures nobody
+    wanted, 32 a tick across four sockets, and with tmux slow (30 s a capture) every phone's
+    pane frames waited behind them (review of #259, remote focus, 6/12).
     """
 
     def __init__(self, ttl: float, *, clock: Callable[[], float] = time.monotonic) -> None:
         self._ttl = ttl
         self._clock = clock
-        self._lock = threading.Lock()
-        """Guards the two tables, and is never held while a snapshot is computed."""
+        self._lock = threading.RLock()
+        """Guards the two tables, and is never held while a snapshot is computed. Re-entered by
+        a job cancelled under it, whose callback ends its flight (:meth:`_cache_let_go`)."""
         self._values: dict[str, tuple[float, object]] = {}
         """Each kind's outcome within the tick, with when its compute was claimed: its
         snapshot, or :class:`_Failed`."""
-        self._flights: dict[str, tuple[Future[object], float]] = {}
-        """The kinds being computed now, each to the future its callers wait on and when it
-        was claimed. A flight goes when its compute ends, so this holds the kinds in flight
-        and no more, whatever kinds are asked for."""
+        self._flights: dict[str, _Flight] = {}
+        """The kinds being computed now, each to its flight. A flight goes when its compute
+        ends, so this holds the kinds in flight and no more, whatever kinds are asked for."""
 
     def _cache_fresh(self, kind: str) -> tuple[float, object] | None:
         """``kind``'s outcome while it is younger than the ttl; call it holding ``_lock``."""
@@ -3688,7 +3707,8 @@ class _Cache:
     def _cache_claim(self, kind: str) -> tuple[Future[object], bool]:
         """``kind``'s outcome as a future, and whether this caller is the one to compute it:
         settled already for what the tick kept, the flight another caller computes, or a
-        new flight (``True``), which :meth:`_cache_compute` settles."""
+        new flight (``True``), which :meth:`_cache_compute` settles. A caller handed a flight
+        waits on it until it ends or :meth:`_cache_let_go`."""
         from concurrent.futures import Future
 
         with self._lock:
@@ -3696,9 +3716,10 @@ class _Cache:
             if hit is None:
                 flying = self._flights.get(kind)
                 if flying is not None:
-                    return flying[0], False
+                    flying.waiters += 1
+                    return flying.future, False
                 flight: Future[object] = Future()
-                self._flights[kind] = (flight, self._clock())
+                self._flights[kind] = _Flight(flight, self._clock(), waiters=1)
                 # Running, so a waiter that is cancelled (its socket closed) ends its own
                 # wait and never the flight the other callers wait on.
                 flight.set_running_or_notify_cancel()
@@ -3726,19 +3747,42 @@ class _Cache:
         ends once, and a later ending changes nothing."""
         with self._lock:
             flying = self._flights.get(kind)
-            if flying is None or flying[0] is not flight:
+            if flying is None or flying.future is not flight:
                 return
             del self._flights[kind]
             if keep:
-                self._cache_store(kind, outcome, flying[1])
+                self._cache_store(kind, outcome, flying.began)
         flight.set_result(outcome)
 
     def _cache_job_done(self, kind: str, flight: Future[object]) -> None:
-        """A compute's job ended: if it never ran (its pool shut down first), its flight ends
-        here, since its callers must not wait for it forever."""
+        """A compute's job ended: if it never ran (its pool shut down first, or nobody waited
+        for it any more), its flight ends here, since its callers must not wait for it
+        forever."""
         if not flight.done():
             never = RuntimeError("the snapshot was not taken: its thread pool shut down")
             self._cache_settle(kind, flight, _Failed(never, None), keep=False)
+
+    def _cache_queued(self, kind: str, flight: Future[object], job: Future[Any]) -> None:
+        """``job`` computes ``kind``'s flight, on a pool of the caller's: one
+        :meth:`_cache_let_go` may cancel while it waits for a thread."""
+        with self._lock:
+            flying = self._flights.get(kind)
+            if flying is not None and flying.future is flight:
+                flying.job = job
+
+    def _cache_let_go(self, kind: str, flight: Future[object]) -> None:
+        """A caller stopped waiting on ``flight`` (its socket's read let go, its socket
+        closed). The last one to cancels its job while the job waits for a thread: what it
+        would read is nobody's. A job already running is left to end, its outcome kept for
+        the tick. Under the lock, so no caller joins the flight between the count and the
+        cancel; the cancelled job's callback ends the flight (:meth:`_cache_job_done`)."""
+        with self._lock:
+            flying = self._flights.get(kind)
+            if flying is None or flying.future is not flight:
+                return
+            flying.waiters -= 1
+            if flying.waiters <= 0 and flying.job is not None:
+                flying.job.cancel()
 
     async def cached_snapshot(
         self, kind: str, compute: Snapshot, pool: Executor | None = None
@@ -3754,14 +3798,23 @@ class _Cache:
             run = functools.partial(
                 contextvars.copy_context().run, self._cache_compute, kind, flight, compute
             )
+            job: Future[Any] | asyncio.Future[Any]
             try:
-                job = asyncio.get_running_loop().run_in_executor(pool, run)
+                if pool is None:
+                    job = asyncio.get_running_loop().run_in_executor(None, run)
+                else:
+                    job = pool.submit(run)
+                    self._cache_queued(kind, flight, job)
             except BaseException as exc:  # a pool shut down: the callers waiting hear why
                 self._cache_settle(kind, flight, _Failed(exc, exc.__traceback__), keep=False)
                 raise
             job.add_done_callback(lambda _job: self._cache_job_done(kind, flight))
         if not flight.done():
-            await asyncio.wrap_future(flight)
+            try:
+                await asyncio.wrap_future(flight)
+            except asyncio.CancelledError:
+                self._cache_let_go(kind, flight)
+                raise
         return _cache_answer(flight.result())
 
 

@@ -17,6 +17,7 @@ from typing import Annotated, Any
 import typer
 
 from aisquare.cli.common import fail
+from aisquare.core import agents as agent_core
 from aisquare.core import selfcli
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
@@ -195,15 +196,11 @@ def _emit_plan(plan: lifecycle_service.UpgradePlan) -> None:
         label = lifecycle_service.agent_label(site.agent)
         if site.hooks_off is None:
             _say(f"  then:    re-connects the {label} hooks in {site.config_dir}")
-        elif site.agent == lifecycle_service.HOOK_AGENT:
-            _say(
-                f"  then:    rewrites the {label} hooks in {site.config_dir} (switched off "
-                'there: "disableAllHooks": true)'
-            )
         else:
+            setting = agent_core.HOOKS_OFF_SETTINGS.get(site.agent, f"{site.hooks_off}")
             _say(
                 f"  then:    rewrites the {label} hooks in {site.config_dir} (switched off "
-                f"there by {site.hooks_off})"
+                f"there: {setting})"
             )
     for site in plan.left:
         _say(f"  leaves:  {site.config_dir} — {site.reason}")
@@ -264,7 +261,8 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
             turn_on = (
                 f'remove "disableAllHooks" from {hook.hooks_off} to turn them on'
                 if hook.agent == lifecycle_service.HOOK_AGENT
-                else f"a setting in {hook.hooks_off} turns them off; change it to run them"
+                else f"remove {agent_core.HOOKS_OFF_SETTINGS.get(hook.agent, 'the setting')} "
+                f"from {hook.hooks_off} to turn them on"
             )
             _say(f"· hooks rewritten in {where}, but switched off: {turn_on}")
         elif hook.ok and hook.review:

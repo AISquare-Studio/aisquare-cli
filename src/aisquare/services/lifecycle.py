@@ -202,8 +202,9 @@ def initialize(
         if connection.hooks_off is not None:
             notes.append(
                 f"Installed {agent}'s hooks and imported {connection.imported} entries, but "
-                f'{connection.hooks_off} sets "disableAllHooks": true, so they will not run '
-                "until you remove that key."
+                f"{connection.hooks_off} sets "
+                f"{agent_core.HOOKS_OFF_SETTINGS.get(agent, 'every hook off')}, so they will "
+                "not run until you remove that key."
             )
         else:
             notes.append(
@@ -321,9 +322,10 @@ class HookSite:
     programs: tuple[str, ...] = ()
     reason: str | None = None
     hooks_off: Path | None = None
-    """For a site the upgrade rewrites: its settings file, when that switches every hook off
-    (``"disableAllHooks": true``, :func:`agent_core.hooks_off`). The hooks are rewritten so
-    they run once the key goes; until then Claude Code runs none, so it is not "connected"."""
+    """For a site the upgrade rewrites: the file that switches every hook off there
+    (Claude Code's ``"disableAllHooks": true``, Codex's ``features.hooks = false``:
+    :func:`agent_core.hooks_off`). The hooks are rewritten so they run once the setting
+    goes; until then the agent runs none, so it is not "connected"."""
     agent: str = HOOK_AGENT
     """Whose directory it is (:func:`hook_agents`): Claude Code's, or a Codex home."""
 

@@ -3894,3 +3894,22 @@ def test_a_retired_codex_account_home_is_not_refreshed_back_into_a_connection(
 
     assert [(site.agent, site.config_dir) for site in refresh] == [("codex", live)]
     assert left == ()
+
+
+def test_a_codex_home_whose_hooks_are_switched_off_is_named_by_codexs_setting(
+    runner: CliRunner, tool: Tool, machine: Machine, isolated_agent_home: Path
+) -> None:
+    """`features.hooks = false` in a Codex home's config.toml switches its hooks off: the
+    plan and the report name that setting, never Claude Code's "disableAllHooks"."""
+    codex = _codex_hooked(isolated_agent_home / ".codex", tool.script)
+    (codex / "config.toml").write_text("[features]\nhooks = false\n", encoding="utf-8")
+    _record_agents(codex=[codex])
+
+    planned = runner.invoke(app, ["upgrade", "--dry-run"])
+    result = runner.invoke(app, ["upgrade", "--yes"])
+
+    off = "`features.hooks = false`"
+    assert f"rewrites the Codex hooks in {codex} (switched off there: {off})" in planned.stdout
+    assert result.exit_code == 0, result.output
+    assert f"but switched off: remove {off} from {codex / 'config.toml'}" in result.stdout
+    assert "disableAllHooks" not in planned.stdout + result.stdout

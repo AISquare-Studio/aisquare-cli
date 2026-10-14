@@ -65,8 +65,9 @@ Status distinguishes configured hooks from observed execution. `unverified`
 means the file is installed but this definition has not been observed running.
 `observed` means a callback ran; a session's own trust and permission policy
 still applies. Evidence identifies the definition that actually ran, so an older
-open session cannot verify newly installed hooks. Reconnect after upgrading,
-then review the updated hooks in Codex. Doctor reports missing hooks, stale AISquare executables,
+open session cannot verify newly installed hooks. `aisquare upgrade` rewrites
+them for the new install (see Upgrade and uninstall); review the updated hooks in
+Codex. Doctor reports missing hooks, stale AISquare executables,
 short context timeouts and the review step, including account homes discovered
 on disk. End and interrupt handlers are local and use Codex's three-second
 maximum. Reconnect preserves extra headroom for the two context hooks and

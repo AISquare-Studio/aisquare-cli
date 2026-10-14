@@ -2965,15 +2965,26 @@ def _doctor_verdict() -> DoctorVerdict:
         return verdict
 
 
-def _explainability_policy() -> dict[str, object] | None:
-    """The policy applied to this machine's model traffic, from the config."""
+def _explainability_policy(project: ProjectInfo | None = None) -> dict[str, object] | None:
+    """The policy applied to the model traffic of ``project``'s agents, from the config; the
+    machine's for ``None``.
+
+    The target is resolved for the project their launches join (``orchestrator.team_project``
+    of its root: the hub under ``AISQUARE_TEAM_HUB``, else its principal checkout), as spawn
+    resolves it and the fleet UI's card does (``views.explainability.key_project``): that
+    project's destination may name another target than the machine's (#142). Resolved with
+    no project, an agent launched against staging read ``target: prod`` and prod's gateway
+    on the phone (review of #259, remote focus, 8/12).
+    """
+    from aisquare.core import orchestrator
     from aisquare.core.config import load_config
     from aisquare.services import explainability_ops as ops
 
     try:
         config = load_config()
         settings = config.explainability
-        target = ops.resolve_target(settings, None)
+        joined = None if project is None else orchestrator.team_project(project.root).id
+        target = ops.resolve_target(settings, None, project_id=joined)
     except Exception:
         return None
     return {
@@ -3010,7 +3021,7 @@ def _live_explainability(label: str, project: str | None = None) -> dict[str, ob
         session=session,
         turns=turns,
         verdict=_doctor_verdict(),
-        policy=_explainability_policy(),
+        policy=_explainability_policy(target),
     )
 
 
@@ -3568,25 +3579,38 @@ class _RateLimiter:
     so the table holds the keys of the last window and no more: keyed on a header, a
     fresh invented address per request grew it forever. Called on the event loop alone,
     with no ``await`` between a route's check and its count, so it takes no lock.
+
+    What ages out is found in :attr:`_order`, every call counted in the order counted, from
+    its head: each call costs the calls that aged out since, not a walk of every key. The
+    walk was on the event loop, and anyone holding the link may post an unlock from as
+    many addresses as an IPv6 /64 has: 2 ms a call with 20 000 keys live, some 40 s of the
+    loop's every minute at 20 000 calls a minute, every socket and read stalled behind it
+    (review of #259, remote focus, 7/12).
     """
 
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
         self._attempts: dict[str, deque[float]] = {}
+        self._order: deque[tuple[float, str]] = deque()
+        """Every call :attr:`_attempts` holds, as ``(when, key)``, oldest first."""
 
     def limiter_retry_after(self, key: str, limit: int, window: float) -> float | None:
         """Count a call by ``key``: ``None`` when it may go ahead, else the seconds until
         it may (and nothing is counted)."""
         now = self._clock()
-        for known, held in list(self._attempts.items()):
-            while held and now - held[0] >= window:
-                held.popleft()
-            if not held:
-                del self._attempts[known]
+        order = self._order
+        while order and now - order[0][0] >= window:
+            when, known = order.popleft()
+            aged = self._attempts.get(known)
+            if aged and aged[0] <= when:
+                aged.popleft()
+                if not aged:
+                    del self._attempts[known]
         held = self._attempts.setdefault(key, deque())
         if len(held) >= limit:
             return window - (now - held[0])
         held.append(now)
+        order.append((now, key))
         return None
 
     def limiter_wait_seconds(self, key: str, limit: int, window: float) -> int | None:
@@ -3612,6 +3636,18 @@ def _cache_answer(outcome: object) -> object:
     if isinstance(outcome, _Failed):
         raise outcome.error.with_traceback(outcome.traceback)
     return outcome
+
+
+@dataclass(slots=True)
+class _Flight:
+    """A kind being computed (:class:`_Cache`): the future its callers wait on, when it was
+    claimed, how many callers wait on it still, and the pool's job computing it, where it
+    is one that may be cancelled while it waits for a thread."""
+
+    future: Future[object]
+    began: float
+    waiters: int = 0
+    job: Future[Any] | None = None
 
 
 class _Cache:
@@ -3654,20 +3690,27 @@ class _Cache:
     a pane that slow came every two ticks (sweep of #243, round 5). Sockets out of
     step still share one read within the tick, and an outcome whose read took the
     whole ttl answers the callers that waited on it and is kept for none after.
+
+    A compute on a pool of the caller's (the pane pool) that nobody waits for any more is
+    cancelled while it waits for a thread. Its socket's read was let go (:func:`_let_read_go`)
+    and the job stayed in the pool's queue, which has no bound: a device subscribing and
+    unsubscribing panes, each spelling of a project a kind of its own, queued captures nobody
+    wanted, 32 a tick across four sockets, and with tmux slow (30 s a capture) every phone's
+    pane frames waited behind them (review of #259, remote focus, 6/12).
     """
 
     def __init__(self, ttl: float, *, clock: Callable[[], float] = time.monotonic) -> None:
         self._ttl = ttl
         self._clock = clock
-        self._lock = threading.Lock()
-        """Guards the two tables, and is never held while a snapshot is computed."""
+        self._lock = threading.RLock()
+        """Guards the two tables, and is never held while a snapshot is computed. Re-entered by
+        a job cancelled under it, whose callback ends its flight (:meth:`_cache_let_go`)."""
         self._values: dict[str, tuple[float, object]] = {}
         """Each kind's outcome within the tick, with when its compute was claimed: its
         snapshot, or :class:`_Failed`."""
-        self._flights: dict[str, tuple[Future[object], float]] = {}
-        """The kinds being computed now, each to the future its callers wait on and when it
-        was claimed. A flight goes when its compute ends, so this holds the kinds in flight
-        and no more, whatever kinds are asked for."""
+        self._flights: dict[str, _Flight] = {}
+        """The kinds being computed now, each to its flight. A flight goes when its compute
+        ends, so this holds the kinds in flight and no more, whatever kinds are asked for."""
 
     def _cache_fresh(self, kind: str) -> tuple[float, object] | None:
         """``kind``'s outcome while it is younger than the ttl; call it holding ``_lock``."""
@@ -3688,7 +3731,8 @@ class _Cache:
     def _cache_claim(self, kind: str) -> tuple[Future[object], bool]:
         """``kind``'s outcome as a future, and whether this caller is the one to compute it:
         settled already for what the tick kept, the flight another caller computes, or a
-        new flight (``True``), which :meth:`_cache_compute` settles."""
+        new flight (``True``), which :meth:`_cache_compute` settles. A caller handed a flight
+        waits on it until it ends or :meth:`_cache_let_go`."""
         from concurrent.futures import Future
 
         with self._lock:
@@ -3696,9 +3740,10 @@ class _Cache:
             if hit is None:
                 flying = self._flights.get(kind)
                 if flying is not None:
-                    return flying[0], False
+                    flying.waiters += 1
+                    return flying.future, False
                 flight: Future[object] = Future()
-                self._flights[kind] = (flight, self._clock())
+                self._flights[kind] = _Flight(flight, self._clock(), waiters=1)
                 # Running, so a waiter that is cancelled (its socket closed) ends its own
                 # wait and never the flight the other callers wait on.
                 flight.set_running_or_notify_cancel()
@@ -3726,19 +3771,42 @@ class _Cache:
         ends once, and a later ending changes nothing."""
         with self._lock:
             flying = self._flights.get(kind)
-            if flying is None or flying[0] is not flight:
+            if flying is None or flying.future is not flight:
                 return
             del self._flights[kind]
             if keep:
-                self._cache_store(kind, outcome, flying[1])
+                self._cache_store(kind, outcome, flying.began)
         flight.set_result(outcome)
 
     def _cache_job_done(self, kind: str, flight: Future[object]) -> None:
-        """A compute's job ended: if it never ran (its pool shut down first), its flight ends
-        here, since its callers must not wait for it forever."""
+        """A compute's job ended: if it never ran (its pool shut down first, or nobody waited
+        for it any more), its flight ends here, since its callers must not wait for it
+        forever."""
         if not flight.done():
             never = RuntimeError("the snapshot was not taken: its thread pool shut down")
             self._cache_settle(kind, flight, _Failed(never, None), keep=False)
+
+    def _cache_queued(self, kind: str, flight: Future[object], job: Future[Any]) -> None:
+        """``job`` computes ``kind``'s flight, on a pool of the caller's: one
+        :meth:`_cache_let_go` may cancel while it waits for a thread."""
+        with self._lock:
+            flying = self._flights.get(kind)
+            if flying is not None and flying.future is flight:
+                flying.job = job
+
+    def _cache_let_go(self, kind: str, flight: Future[object]) -> None:
+        """A caller stopped waiting on ``flight`` (its socket's read let go, its socket
+        closed). The last one to cancels its job while the job waits for a thread: what it
+        would read is nobody's. A job already running is left to end, its outcome kept for
+        the tick. Under the lock, so no caller joins the flight between the count and the
+        cancel; the cancelled job's callback ends the flight (:meth:`_cache_job_done`)."""
+        with self._lock:
+            flying = self._flights.get(kind)
+            if flying is None or flying.future is not flight:
+                return
+            flying.waiters -= 1
+            if flying.waiters <= 0 and flying.job is not None:
+                flying.job.cancel()
 
     async def cached_snapshot(
         self, kind: str, compute: Snapshot, pool: Executor | None = None
@@ -3754,14 +3822,23 @@ class _Cache:
             run = functools.partial(
                 contextvars.copy_context().run, self._cache_compute, kind, flight, compute
             )
+            job: Future[Any] | asyncio.Future[Any]
             try:
-                job = asyncio.get_running_loop().run_in_executor(pool, run)
+                if pool is None:
+                    job = asyncio.get_running_loop().run_in_executor(None, run)
+                else:
+                    job = pool.submit(run)
+                    self._cache_queued(kind, flight, job)
             except BaseException as exc:  # a pool shut down: the callers waiting hear why
                 self._cache_settle(kind, flight, _Failed(exc, exc.__traceback__), keep=False)
                 raise
             job.add_done_callback(lambda _job: self._cache_job_done(kind, flight))
         if not flight.done():
-            await asyncio.wrap_future(flight)
+            try:
+                await asyncio.wrap_future(flight)
+            except asyncio.CancelledError:
+                self._cache_let_go(kind, flight)
+                raise
         return _cache_answer(flight.result())
 
 
@@ -6227,8 +6304,10 @@ _quitting = False
 Ctrl-C's handler may run it again while it waits for a push."""
 
 
-def _remote_quit_now() -> NoReturn:
-    """End the process at once, saying which writes it leaves unfinished.
+def _remote_quit_now(undone: str | None = None) -> NoReturn:
+    """End the process at once, saying which writes it leaves unfinished, then ``undone``,
+    what else the quit was to do that it now will not (asq's Update or Uninstall, which
+    ``run_ui`` was to hand the terminal to once the waits were over).
 
     At once is the point: Python's own exit waits for every worker thread, the ones
     still running a write included (``concurrent.futures`` joins them all), so an exit
@@ -6239,6 +6318,11 @@ def _remote_quit_now() -> NoReturn:
     (``remote_push.push_drain``), which runs here instead, for
     :data:`REMOTE_QUIT_PUSH_SECONDS` at most, so the farewell an auto-off sent still
     goes out; one more Ctrl-C ends that wait too.
+
+    Every ngrok this process started is signalled first
+    (``ngrok_tunnel.end_every_tunnel_now``): the fleet UI's Ctrl-C stopped only the one of
+    the Remote turning off, and one a start had spawned on the writer's thread after the
+    turn-off took its tunnel ran on (review of #259, remote focus, 4/12).
     """
     import sys
 
@@ -6247,12 +6331,17 @@ def _remote_quit_now() -> NoReturn:
         os._exit(130)
     _quitting = True
     try:
+        tunnels = sys.modules.get("aisquare.services.ngrok_tunnel")  # loaded by all that start one
+        if tunnels is not None:
+            tunnels.end_every_tunnel_now()
         left = remote_writes_running()
         if left:
             _remote_say(
                 f"Remote quit with {', '.join(left)} unfinished: "
                 "`aisquare fleet ls` shows where the agent is"
             )
+        if undone is not None:
+            _remote_say(undone)
         pushes = sys.modules.get("aisquare.services.remote_push")  # loaded by all that push
         if pushes is not None:
             pushes.push_drain(REMOTE_QUIT_PUSH_SECONDS)
@@ -6260,9 +6349,9 @@ def _remote_quit_now() -> NoReturn:
         os._exit(130)
 
 
-def remote_wait_for_writes() -> None:
+def remote_wait_for_writes(undone: str | None = None) -> None:
     """Once the fleet UI is gone: see out the writes phones started that still run, saying
-    so, and quit at once on Ctrl-C (:func:`_remote_quit_now`).
+    so, and quit at once on Ctrl-C (:func:`_remote_quit_now`), saying ``undone`` too.
 
     Quitting stopped the server and returned after 5 s whatever it was doing, and then
     the process waited, silently, for any write still running: a restart or a switch
@@ -6280,7 +6369,7 @@ def remote_wait_for_writes() -> None:
         for server in stopped:
             server.wound_down(max(0.0, deadline - time.monotonic()))
     except KeyboardInterrupt:
-        _remote_quit_now()
+        _remote_quit_now(undone)
 
 
 def _remote_serve_server(config: uvicorn.Config) -> uvicorn.Server:
@@ -7107,16 +7196,41 @@ def _page_project_not_build(source: Path) -> str | None:
 def _page_copy_skips(source: Path, directory: str, names: list[str]) -> set[str]:
     """What :func:`install_page` leaves behind of ``names`` in ``directory`` of ``source``,
     what a server would not serve from ``source`` (:func:`_built_page_target`): a hidden
-    name, and a link that leads out of ``source`` or to a hidden file there."""
-    return {
-        name
-        for name in names
-        if name.startswith(".")
-        or (
-            (Path(directory) / name).is_symlink()
-            and _built_page_target(source, Path(directory) / name) is None
-        )
-    }
+    name, and a link that leads out of ``source`` or to a hidden file there. And a link back
+    into a directory the copy is inside of (:func:`_page_copy_loops`), which serves nothing
+    the build does not hold already."""
+    skipped: set[str] = set()
+    for name in names:
+        path = Path(directory) / name
+        if name.startswith("."):
+            skipped.add(name)
+        elif path.is_symlink():
+            target = _built_page_target(source, path)
+            if target is None or _page_copy_loops(source, Path(directory), target):
+                skipped.add(name)
+    return skipped
+
+
+def _page_copy_loops(source: Path, directory: Path, target: Path) -> bool:
+    """Whether a link in ``directory`` of ``source`` to ``target`` leads back to where the copy
+    already is: ``target`` is ``directory`` or holds it, or holds where one of the
+    directories above it in ``source`` resolves, a link the copy came through.
+
+    ``copytree`` follows a link to a directory and copies what is there, so ``assets/up ->
+    ..`` copied the whole build into itself at every level, some 40 deep, until the path
+    was one the system could not look up: a 1 MB build wrote 82 directories, a 100 MB one
+    about 4 GB, before the clean-up; and the ``shutil.Error`` it raised, an ``OSError``, was
+    told to make ``~/.aisquare`` writable or free some space (review of #259, remote focus,
+    5/12). Two links leading into each other (``a/x -> b``, ``b/y -> a``) loop as well:
+    each is copied once, and stops where it would come round again.
+    """
+    for walked in (directory, *directory.parents):
+        here = _remote_resolved(walked)
+        if here is not None and here.is_relative_to(target):
+            return True
+        if walked == source:
+            return False
+    return False
 
 
 def _page_copy_narrowed(root: Path) -> None:
@@ -7258,14 +7372,13 @@ def start_remote_server(dist_dir: Path | None = None, port: int = DEFAULT_PORT) 
     if page_problem is not None:
         raise NoRemotePage(page_problem)
     state = runtime()
-    claimed = False
     try:
         with _lock:
             if _server is not None and _server.running:
                 return state.connection_info(_server.port)
             if any(stopped.winding_down for stopped in _winding_down):
                 raise RemoteWindingDown(_remote_winding_down())
-            claimed = _claim_remote_home(state, by="panel", port=port)
+            _claim_remote_home(state, by="panel", port=port)
             state.remote_coming_on()
             _remote_auto_off_missed(state)
             app = build_remote_app(state, dist_dir=dist_dir)
@@ -7273,8 +7386,11 @@ def start_remote_server(dist_dir: Path | None = None, port: int = DEFAULT_PORT) 
             server.start_serving()
             _server = server
     except BaseException:
-        if claimed:
-            _release_remote_home()
+        # Whoever took the claim: one this process held already (its last server ended
+        # without a stop) has just had its note rewritten for this port, which never came
+        # up, and kept it, with the home, until asq quit (review of #259, round 4). Kept
+        # while a server of this process still serves or winds down.
+        _release_remote_home()
         raise
     _schedule_flush()
     return state.connection_info(port)

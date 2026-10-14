@@ -851,7 +851,8 @@ def reap(
             "row on a socket that does not answer as lost, but for one whose agent may "
             "still run (its socket file taken from under its server), which is left live "
             "and named. Without it a silent server marks nothing, because it may be alive "
-            "under another TMUX_TMPDIR.",
+            "under another TMUX_TMPDIR. A row whose socket another tmux server answers on "
+            "is left live and named with or without this flag.",
         ),
     ] = False,
 ) -> None:
@@ -903,8 +904,10 @@ def reap(
     for agent in report.lost:
         console.print(f"  ✗ {agent.label}  pane {agent.pane_id} gone")
     for row in report.held:
-        # --server-down's word did not reach it: its agent may still run (the one rule
-        # `shutdown` and `uninstall` ask), and the reason carries the way out.
+        # Its agent may still run where no tmux client reaches it (the one rule `shutdown`
+        # and `uninstall` ask): another server answers on its socket, on any reap, or, with
+        # --server-down, its socket file is gone or could not be asked. The reason says
+        # which, and carries the way out.
         console.print(f"  ⚠ {row.agent.label}  LEFT LIVE — {row.reason}")
     for path in report.worktrees_removed:
         console.print(f"  🗑 {path}")

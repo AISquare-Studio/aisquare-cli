@@ -43,6 +43,7 @@ from aisquare.core.tmux import (
     SocketReads,
     TmuxError,
     TmuxServer,
+    asking_server,
     boot_id,
     server_may_run,
 )
@@ -2118,11 +2119,12 @@ def _may_run(
     too, so a row counted here is never one it ends as gone (round 27 of #257): one whose
     socket is gone counts until ``fleet shutdown --forget`` ends it on the operator's word,
     unless it recorded no boot and predates this one (round 28). ``reads`` is the plan's,
-    so rows on one server ask it once.
+    so rows on one server ask it once. Asked through :func:`~aisquare.core.tmux.asking_server`,
+    which writes nothing and waits seconds, not 30, for a server that does not answer.
     """
     _label, socket_name, created, recorded, booted, started = row
     return server_may_run(
-        TmuxServer(socket_name), recorded, booted, this_boot, created, started, reads=reads
+        asking_server(socket_name), recorded, booted, this_boot, created, started, reads=reads
     )
 
 

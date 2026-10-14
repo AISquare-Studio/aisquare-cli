@@ -409,6 +409,86 @@ def test_an_ngrok_group_that_ignores_the_terminate_is_killed_whole(
                 os.kill(pid, signal.SIGKILL)
 
 
+@pytest.mark.parametrize("tied", [True, False], ids=["tied", "the control: as before"])
+def test_an_ngrok_ends_with_the_process_that_started_it_however_that_ends(
+    tmp_path: Path, tied: bool
+) -> None:
+    """Review of #259, remote focus, 4/12: ngrok runs in a group of its own, and only a hangup
+    or a SIGTERM of the fleet UI ended it. After a ``kill -9``, the OOM killer or a crash in
+    C it ran on, the public link pointed at a ``127.0.0.1`` port any account could bind,
+    and the static domain held. Its parent (``popen_tied``) ends its group once the fleet
+    UI is gone, SIGKILLing what ignored the SIGTERM. The stand-in ignores it, and so does
+    the child it forks into the group."""
+    if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
+        pytest.skip("process groups are POSIX")
+    pids = tmp_path / "pids"
+    body = (
+        "import os, signal\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "child = os.fork()\n"
+        "if child == 0:\n"
+        "    time.sleep(60)\n"
+        "    os._exit(0)\n"
+        f"open({str(pids)!r}, 'w').write(str(os.getpid()) + ' ' + str(child))\n"
+        f"print({json.dumps(json.dumps(STARTED))}, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    command = ngrok_printing(tmp_path, body)
+    fleet_ui = tmp_path / "fleet-ui.py"
+    fleet_ui.write_text(
+        "import subprocess, sys, time\n"
+        "from aisquare.services import ngrok_tunnel\n"
+        "ngrok_tunnel.STOP_SECONDS = 0.5\n"
+        f"popen = ngrok_tunnel.popen_tied if {tied!r} else subprocess.Popen\n"
+        f"tunnel = ngrok_tunnel.NgrokTunnel(8750, command={command!r}, popen=popen)\n"
+        "assert tunnel.start_tunnel() is None\n"
+        "print(tunnel.wait_for_url(10), flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    ui = subprocess.Popen([sys.executable, str(fleet_ui)], stdout=subprocess.PIPE, text=True)
+    started: list[int] = []
+    try:
+        assert ui.stdout is not None
+        assert ui.stdout.readline().strip() == STARTED["url"]
+        started = [int(pid) for pid in pids.read_text().split()]
+        ui.kill()
+        ui.wait(10)
+        if tied:
+            assert all(gone(pid) for pid in started), "ngrok outlived the fleet UI"
+        else:
+            assert not any(gone(pid, 1.0) for pid in started), "the control"
+    finally:
+        with contextlib.suppress(OSError):
+            ui.kill()
+        for pid in started:
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
+
+
+def test_the_tied_parent_ends_as_ngrok_ended_its_code_or_its_signal(tmp_path: Path) -> None:
+    """What reads ngrok's exit (the reason a tunnel never came, ``_exit_sentence``) reads the
+    parent's: it is ngrok's code, or the signal that ended ngrok."""
+    if sys.platform == "win32":
+        pytest.skip("the parent runs where there are process groups")
+    script = tmp_path / "exits.py"
+    script.write_text(
+        "import os, sys\nif sys.argv[1] == 'kill':\n    os.kill(os.getpid(), 9)\n"
+        "sys.exit(int(sys.argv[1]))\n"
+    )
+    for argument, code in (("0", 0), ("3", 3), ("kill", -signal.SIGKILL)):
+        ran = ngrok_tunnel.popen_tied(
+            [sys.executable, str(script), argument], stdout=subprocess.PIPE, text=True
+        )
+        assert ran.wait(10) == code, argument
+    missing = ngrok_tunnel.popen_tied(
+        [str(tmp_path / "no-such-ngrok")], stdout=subprocess.PIPE, text=True
+    )
+    out, _ = missing.communicate(timeout=10)
+    assert missing.returncode == 1
+    said = ngrok_tunnel.parse_log_line(out.splitlines()[0]).error
+    assert said is not None and said.startswith("could not start ") and "No such file" in said
+
+
 def test_a_url_its_listener_could_not_take_never_ends_the_log_reader(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1656,8 +1736,10 @@ def test_the_switches_survive_a_restart_of_the_tui_next_to_the_theme_key() -> No
     assert not second.running
     second.restore()
     assert second.running
-    assert server.allow_write_calls == [True], "a restart does not write the switch again"
-    assert second.write_actions_allowed() is True
+    # Back read-only (review of #259, remote focus, 11/12): the switch is written off once,
+    # and the human switches it on again if they want it.
+    assert server.allow_write_calls == [True, False]
+    assert second.write_actions_allowed() is False
 
 
 def test_a_switch_saves_its_own_key_and_never_the_other_tuis_start_of_day() -> None:
@@ -2164,7 +2246,7 @@ def test_a_remote_that_does_not_come_back_at_start_is_news() -> None:
     heard = heard_news(no_ngrok)
     no_ngrok.restore()
     assert no_ngrok.running
-    assert heard == [(f"Remote is on, but phones cannot reach it — {INSTALL_HINT}", True)]
+    assert heard[1:] == [(f"Remote is on, but phones cannot reach it — {INSTALL_HINT}", True)]
     no_ngrok.turn_off()
 
     back = RemoteController(
@@ -2175,7 +2257,57 @@ def test_a_remote_that_does_not_come_back_at_start_is_news() -> None:
     assert back._waiter is not None
     back._waiter.join(5)
     back.turn_off()
-    assert back.running is False and heard == [], "a Remote back as it was, and turned off, is none"
+    assert back.running is False and len(heard) == 1, "back on, and nothing else to say"
+    assert heard[0][0].startswith("Remote is back on from the last session — read-only")
+
+
+def test_a_remote_a_tui_start_brings_back_comes_back_read_only_and_says_so() -> None:
+    """Review of #259, remote focus, 11/12: a restore came back as it was left, publicly
+    tunnelled with writes on, and only a failure was news: a Remote left on with writes on
+    and auto-off Never was reachable from the internet with writes on after ``asq`` or
+    ``aisquare upgrade --reopen`` started, and a human who forgot was never told. It comes
+    back with writes off, and the notice says so and when auto-off comes, as trouble when
+    it never does. A press brings writes back."""
+    clock = datetime(2026, 10, 14, 9, 0, tzinfo=UTC)
+    server = fake_server()
+    server.allow_write = True
+    never = RemoteController(
+        server=server,
+        tunnel_factory=fake_tunnel_factory(url="x"),
+        state=RemoteState(remote_enabled=True, auto_off_minutes=None),
+        now=lambda: clock,
+    )
+    heard = heard_news(never)
+    never.restore()
+    assert never.running and server.allow_write is False
+    assert never.write_actions_allowed() is False
+    said = "Remote is back on from the last session — writes turned off (R turns them on)"
+    assert heard[0] == (f"{said} · auto-off never", True)
+    never.set_allow_write(True)
+    assert server.allow_write is True, "the human switches them on again"
+    never.turn_off()
+
+    timed = RemoteController(
+        server=server,
+        tunnel_factory=fake_tunnel_factory(url="x"),
+        state=RemoteState(remote_enabled=True, auto_off_minutes=60),
+        now=lambda: clock,
+    )
+    heard = heard_news(timed)
+    timed.restore()
+    assert timed.auto_off_at is not None
+    from aisquare.cli.ui.views.remote import _auto_off_time
+
+    ends = _auto_off_time(timed.auto_off_at, clock)
+    assert heard[0] == (f"{said} · auto-off {ends}", False)
+    timed.turn_off()
+
+    pressed = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    server.allow_write = True
+    heard = heard_news(pressed)
+    pressed.turn_on()  # a press is the human's own: the switch is as they left it, no notice
+    assert server.allow_write is True and heard == []
+    pressed.turn_off()
 
 
 def test_a_remote_another_process_serves_is_no_news_at_start_and_keeps_the_saved_switch() -> None:

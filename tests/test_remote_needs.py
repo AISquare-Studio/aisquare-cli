@@ -532,6 +532,48 @@ def test_a_sub_agents_next_prompt_has_no_item_until_its_notice() -> None:
     assert _one(_classify(status, tail, pane_output=lambda: None)).since == seen
 
 
+def test_a_call_beside_one_answered_has_no_card_until_its_own_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, remote focus, 1/12: one message calls two tools that each need a
+    permission. The first's prompt is answered, which writes nothing until it ends, and the
+    second's is drawn: the same pending calls, the same ``last_seen_at``, the row reading
+    ``attention`` again once the pane has been quiet 5 s. Rule 5's card was the first call's
+    again, its id and its URL, and a tap of "1" on it re-derived as current and approved the
+    other call. Until the second prompt's notice lands, the pane printed after the newest
+    notice: no card, and nothing a tap could match."""
+    row = _row()
+    asked = NOW - timedelta(seconds=40)
+    called = asked - timedelta(seconds=6)
+    session = _session(row, state="attention", seen=asked)
+    said = "Claude needs your permission to use WebFetch"
+    events = [_event(4, "attention", said, session=session, at=asked)]
+    first = _tool("toolu_a", "WebFetch", at=called, url="https://a.example/")
+    second = _tool("toolu_b", "WebFetch", at=called, url="https://b.example/")
+    tail = _tail(first, second, at=called)
+    status = _status(row, "attention", session)
+    card = _one(_classify(status, tail, events, pane_output=lambda: called))
+    assert card.id == needs_item_id(PROJECT.id, "permission", "toolu_a")
+    assert card.detail["input"] == {"url": "https://a.example/"}
+    drawn = NOW - timedelta(seconds=6)
+    assert _classify(status, tail, events, pane_output=lambda: drawn) == []
+    slow = NOW - timedelta(seconds=13)
+    assert _classify(status, tail, events, pane_output=lambda: slow) == [], "a hook slowed"
+    fleet = Fleet(agents=[status], events=events, output_at=drawn)
+    fleet.tails[f"/transcripts/{row.label}.jsonl"] = tail
+    snap = _now_of(fleet, FakeTmux(reference=NOW), monkeypatch)
+    assert not needs_item_current(snap, card.id), "a tap on the first call's card is stale"
+    assert needs_dialog_open(snap), "the second prompt is up all the same"
+    noticed = _status(row, "attention", _session(row, state="attention", seen=NOW))
+    form = _one(_classify(noticed, tail, events, pane_output=lambda: drawn))
+    assert form.id != card.id and form.answers == (), "a dialog the board has no words for"
+    # Negative controls: one call pending, or a redraw long after the notice, hides nothing.
+    alone = _tail(first, at=called)
+    assert _one(_classify(status, alone, events, pane_output=lambda: drawn)).id == card.id
+    long_after = _classify(status, tail, events, pane_output=lambda: NOW - timedelta(seconds=25))
+    assert _one(long_after).id == card.id
+
+
 def test_rule_6_a_prompt_dismissed_with_esc_is_interrupted_not_a_prompt() -> None:
     """Esc fires no Stop: the row keeps reading ``attention`` for its whole stale window."""
     row = _row()
@@ -2450,6 +2492,67 @@ def test_an_unreadable_dismissals_file_dismisses_nothing(body: str) -> None:
     remote_needs_path().parent.mkdir(parents=True, exist_ok=True)
     remote_needs_path().write_text(body, encoding="utf-8")
     assert load_needs_dismissals() == {}
+
+
+_KEPT_AT = (datetime.now(UTC) - timedelta(hours=1)).isoformat(timespec="seconds")
+_KEPT_DISMISSED = {f"ny_{n:016x}": _KEPT_AT for n in range(3)}
+_KEPT_BEFORE = {
+    "version": 1,
+    "dismissed": _KEPT_DISMISSED,
+    "first_seen": {"fleet_down:prj_alpha": _KEPT_AT},
+}
+"""What three dismissals and a sighting leave on file, each an hour ago (within the week)."""
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        json.dumps(_KEPT_BEFORE).encode() + b"\x00",  # one stray byte
+        b"\xff\xfe not UTF-8",
+        b"[1, 2]",
+        b'{"dismissed": ["ny_1"]}',
+        b'{"dismissed": {"ny_1": {"at": "2026-10-07T11:00:00+00:00"}}}',  # a later shape
+    ],
+)
+def test_a_needs_file_a_write_cannot_read_whole_is_kept_aside_not_overwritten(
+    body: bytes, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review of #259, remote focus, 3/12: a file that could not be read was read as empty,
+    and the next dismissal, re-dating or first sighting replaced it with that one entry:
+    every earlier dismissal and first sighting gone for good. It is moved to
+    ``remote-needs.json.bad`` as it was, said in the log, and a new one started."""
+    path = remote_needs_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(body)
+    with caplog.at_level(logging.WARNING, logger=remote_needs.log.name):
+        record_needs_dismissal("ny_newest")
+    assert path.with_name("remote-needs.json.bad").read_bytes() == body
+    assert set(load_needs_dismissals()) == {"ny_newest"}
+    assert "remote-needs.json.bad" in caplog.text
+
+
+def test_a_needs_file_that_could_not_be_read_is_never_written(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read that failed (EIO, EACCES) says nothing of what is in the file: the write is the
+    ``OSError`` (a dismissal's 503, the watcher's streak), the file left as it was."""
+    path = remote_needs_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(_KEPT_BEFORE), encoding="utf-8")
+    real = Path.read_text
+
+    def failing(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self == path:
+            raise OSError(5, "Input/output error")
+        return real(self, *args, **kwargs)
+
+    with monkeypatch.context() as patched, pytest.raises(OSError, match="Input/output"):
+        patched.setattr(Path, "read_text", failing)
+        record_needs_dismissal("ny_newest")
+    assert json.loads(path.read_text(encoding="utf-8")) == _KEPT_BEFORE
+    assert not path.with_name("remote-needs.json.bad").exists()
+    record_needs_dismissal("ny_newest")  # the control: read whole, it is built on
+    assert set(load_needs_dismissals()) == {*_KEPT_DISMISSED, "ny_newest"}
 
 
 def test_a_dismissals_stamp_and_asq_remote_needs_age_are_read_as_the_server_reads_a_stamp(
@@ -5609,6 +5712,42 @@ def test_an_answered_card_leaves_the_feed_at_once_as_a_dismissed_one_does(
         assert [item["kind"] for item in live.feed()] == ["board_question"], (
             "the feed's own scan, begun right after the answer, still shows the prompt"
         )
+    finally:
+        watcher.stop_watching()
+
+
+def test_an_answered_card_is_gone_before_its_audit_line_is_written(
+    live: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, remote focus, 2/12: the card left the feed only once the audit line
+    was written, an await after the keys: a scan that published in between put the answered
+    card back on every page with its buttons live, and before the push sender, and a second
+    tap on a question or a plan typed its keys again. It leaves as the keys are typed."""
+    monkeypatch.setattr(remote_needs, "NEEDS_RESCAN_AFTER_ANSWER", 30.0)
+    live.runtime.set_allow_write(True)
+    card = live.card("permission")
+    watcher = live.app.kit.lane_state["needs"]
+    heard: list[list[str]] = []
+    live.app.kit.needs_listeners.append(lambda items, at: heard.append([i.id for i in items]))
+    audit = live.app.kit.kit_audit
+    during: list[list[str]] = []
+
+    def scanned_meanwhile(device: Any, endpoint: str, summary: str) -> None:
+        if endpoint == "needs/answer":
+            watcher.scan_needs_now()  # the watcher's tick, as the line is being written
+            during.append([item.id for item in watcher.needs_items_now()])
+        audit(device, endpoint, summary)
+
+    monkeypatch.setattr(live.app.kit, "kit_audit", scanned_meanwhile)
+    try:
+        body = {"id": card["id"], "keys": ["1"]}
+        response = live.client.post(live.url("needs/answer"), json=body)
+        assert response.status_code == 200, response.text
+        assert live.tmux.typed == [("keys", "%7", "1")]
+        assert len(during) == 1 and during[0], "the scan published the rest of the feed"
+        assert card["id"] not in during[0], "not the answered card again"
+        assert heard and card["id"] not in heard[-1], "nor handed to the push sender"
+        assert live.audit()[-1].endswith("keys=[1] text=0ch enter=False")
     finally:
         watcher.stop_watching()
 

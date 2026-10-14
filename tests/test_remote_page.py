@@ -1322,10 +1322,16 @@ def test_routes_are_built_only_from_ids_that_validate(node_report: dict[str, Any
 
 
 def test_safe_url_opens_only_this_origin_or_an_ngrok_page(node_report: dict[str, Any]) -> None:
+    """Off this origin, only an ngrok host under this page's own ``/r/<token>/`` path: a free
+    ngrok URL that changed keeps it. Any ``/r/`` in the path was taken, and anyone can have
+    an ngrok host, so a forged push's tap opened ``attacker.ngrok-free.app/phish/r/``, a
+    look-alike page asking for the passphrase (review of #259, remote focus, 10/12)."""
     safe = node_report["safeUrl"]
     own = "https://own.example/r/t/#/n/ny_0123456789abcdef"
     assert safe[own] == own
     assert safe["https://x.ngrok-free.app/r/t/"] == "https://x.ngrok-free.app/r/t/"
+    moved = "https://y.ngrok.app/r/t/#/n/ny_0123456789abcdef"
+    assert safe[moved] == moved
     for refused in (
         "https://evil.example/r/t/",
         "http://x.ngrok-free.app/r/t/",
@@ -1334,8 +1340,12 @@ def test_safe_url_opens_only_this_origin_or_an_ngrok_page(node_report: dict[str,
         "https://u:p@x.ngrok.app/r/t/",
         "https://x.ngrok.io/no-token-path",
         "not a url",
+        "https://attacker.ngrok-free.app/phish/r/",
+        "https://attacker.ngrok-free.app/r/other/",
+        "https://x.ngrok-free.app/r/t",
     ):
         assert safe[refused] is None, refused
+    assert node_report["safeUrlNoScope"] is None, "no scope to hold it to: nothing off-origin"
     assert tuple(node_report["suffixes"]) == NGROK_SUFFIXES
 
 
@@ -2176,6 +2186,19 @@ def test_the_first_socket_after_an_unlock_that_fails_is_tried_again_after_a_seco
     for, and the first after the unlock."""
     across = boot_report["backoffAcrossAnUnlock"]
     assert across == {"waits": [1, 2, 4, 1], "locked": True}
+
+
+def test_a_socket_the_machine_accepts_and_then_closes_backs_off_until_one_is_healthy(
+    boot_report: dict[str, Any],
+) -> None:
+    """Review of #259, remote focus, 9/12: an open reset the backoff, so a socket the machine
+    accepted and then closed with 1011 (an error every tick meets) waited the first step,
+    1 s, every time: the page reconnected about once a second for as long as it lasted,
+    asking again for the fleet, the board and every pane each time, where the server's
+    1011 counts on the page backing off. It backs off, and a socket that heard its
+    heartbeat is a healthy one: the next drop waits the first step again."""
+    after = boot_report["backoffAfterOpens"]
+    assert after == {"waits": [1, 2, 4, 8, 1, 2], "sockets": 7}
 
 
 def test_the_live_tabs_keys_wait_from_the_moment_its_socket_is_lost(

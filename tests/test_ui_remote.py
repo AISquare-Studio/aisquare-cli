@@ -34,7 +34,7 @@ from textual.widgets import Button, DataTable, Select, Static, Switch
 from aisquare.cli.ui import app as app_mod
 from aisquare.cli.ui import remote_control
 from aisquare.cli.ui.app import FleetApp, HelpScreen
-from aisquare.cli.ui.remote_control import READ_ONLY_REASON, RemoteController
+from aisquare.cli.ui.remote_control import READ_ONLY_REASON, RemoteController, load_remote_state
 from aisquare.cli.ui.views import remote as remote_view
 from aisquare.cli.ui.views.remote import RemotePanel, qr_text
 from aisquare.core import paths, state_file
@@ -695,16 +695,24 @@ def test_the_modal_state_survives_a_restart_of_the_tui() -> None:
         app = pilot.app
         assert isinstance(app, FleetApp)
         assert app.remote.running, "a Remote that was on comes back on at the next start"
+        await written(pilot)
+        # Back read-only, and said so: writes come back on only when switched on again
+        # (review of #259, remote focus, 11/12).
+        assert any(
+            line.startswith("Remote is back on from the last session — writes turned off")
+            for line in toasts(app)
+        )
         modal = await open_panel(pilot)
         assert modal.query_one("#remote-on", Switch).value is True
-        assert modal.query_one("#remote-allow-write", Switch).value is True
+        assert modal.query_one("#remote-allow-write", Switch).value is False
         assert modal.query_one("#remote-auto-off", Select).value == 120
-        assert shown(modal.query_one("#remote-write-hint", Static)) == "writes reach the fleet"
+        assert shown(modal.query_one("#remote-write-hint", Static)) == READ_ONLY_REASON
+        assert json.loads(paths.remote_state_path().read_text())["allow_write"] is False
         # The persisted token is the same one, so the link the phone kept still works.
         assert remote_server.runtime().token in shown(modal.query_one("#remote-link", Static))
         modal.query_one("#remote-allow-write", Switch).toggle()
         await written(pilot)
-        assert json.loads(paths.remote_state_path().read_text())["allow_write"] is False
+        assert json.loads(paths.remote_state_path().read_text())["allow_write"] is True
 
     drive(second, tunnel=missing_ngrok)
     # Leaving the TUI ends the processes but keeps the switch for the next restore.
@@ -1722,7 +1730,7 @@ def test_run_ui_ends_its_ngrok_on_a_hangup_or_a_sigterm_and_puts_the_signals_bac
 
     monkeypatch.setattr(app_mod, "FleetApp", Quit)
     monkeypatch.setattr(remote_control, "end_every_tunnel_now", lambda: ended.append("ngrok"))
-    monkeypatch.setattr(remote_server, "remote_wait_for_writes", lambda: None)
+    monkeypatch.setattr(remote_server, "remote_wait_for_writes", lambda undone=None: None)
     with at_their_default(ending):
         app_mod.run_ui()
         assert all(callable(handler) for handler in during.values()), during
@@ -1783,6 +1791,40 @@ def test_a_tunnel_that_does_not_come_up_after_a_restore_is_toasted_from_its_thre
         )
 
     drive_controller(go, controller)
+
+
+@pytest.mark.parametrize(("command", "off"), [("uninstall", True), ("upgrade", False)])
+def test_asqs_own_remote_is_off_before_its_uninstall_and_only_stopped_before_its_update(
+    command: str, off: bool
+) -> None:
+    """Review of #259, remote focus, 12/12: docs/remote.md said asq's own Remote is turned off
+    before its Update or Uninstall starts. The hand-over's quit only stopped it, as any quit
+    does: no phone signed out and the switch kept, so after an Uninstall without --purge
+    ``remote.json`` kept the devices, the link and the passphrase, and the first asq after a
+    reinstall brought Remote back with its phones let in. Before an Uninstall it is turned
+    off: every device revoked and the switch saved off. An Update's reopened asq brings it
+    back, so it is stopped, as the doc now says."""
+    from aisquare.cli.ui.views.doctor import DoctorView
+
+    server = FakeServer()
+    controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url=PUBLIC))
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        app.remote.turn_on()
+        assert app.remote.running
+        app.on_doctor_view_hand_off(DoctorView.HandOff((command, "--reopen")))
+        for _ in range(500):  # the start-up reads end, then it quits
+            if app._exit:
+                break
+            await asyncio.sleep(0.01)
+        assert app._exit, "the hand-over never quit"
+
+    drive_controller(go, controller)
+    assert controller.wait_until_off(10)
+    assert server.revoked_every == (["remote off"] if off else [])
+    assert load_remote_state().remote_enabled is (not off)
 
 
 def test_auto_off_is_toasted_unless_the_panel_says_it() -> None:

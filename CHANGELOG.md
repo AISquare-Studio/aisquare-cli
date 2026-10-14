@@ -303,9 +303,10 @@ that reads at a glance.**
   holds the write switch (off by default) and an auto-off timer (30/60/120
   minutes or Never). Whether Remote is on and the timer live in `state.json`
   beside the theme; the write switch is the server's, in `remote.json`, the one
-  `asq remote allow-write` sets, so a TUI start never changes it. No
-  ngrok outlives the UI, a Remote that was on comes back on at the next start,
-  and a dead ngrok is restarted within 30 s. With `AISQUARE_REMOTE_NGROK_URL`
+  `asq remote allow-write` sets. No ngrok outlives the UI, however it ends. A
+  Remote that was on comes back on at the next start, with writes off and a
+  notice that it is back and when auto-off comes; a dead ngrok is restarted
+  within 30 s. With `AISQUARE_REMOTE_NGROK_URL`
   set, ngrok runs on that static domain (`--url=`), so the link survives.
 - **`asq remote serve [--port] [--auto-off MINUTES] [--public-url URL] [--dist DIR]`**,
   for a machine without the UI open. Auto-off defaults to 60 minutes (`0` is
@@ -368,10 +369,10 @@ that reads at a glance.**
 - **`aisquare team bind <role> --env-file KEY=PATH`: a variable whose value is
   read from a file at every launch**, for a secret. config.toml, the launch
   banner and `team spawn`'s printed command hold the path, never the value
-  (the printed command reads the file itself, in a subshell, as the launch
-  does: its carriage returns and any byte-order mark dropped, a token saved as
-  UTF-16 read too, and an empty or unreadable file stops the line before the
-  role starts). It is for the
+  (the printed command reads the file itself, in a subshell, with the launch's
+  reader, `aisquare team read-env-file`: its trailing newlines and any
+  byte-order mark dropped, a token saved as UTF-16 read too, and an empty,
+  blank or unreadable file stops the line before the role starts). It is for the
   reviewer, which keeps its shell: bound to a GitHub token that cannot write
   the repository's contents, it can review and comment but not push or merge
   through `gh`. [docs/fleet.md](docs/fleet.md#a-reviewer-that-cannot-push)

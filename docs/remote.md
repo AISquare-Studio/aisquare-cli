@@ -85,8 +85,11 @@ authtoken put back while Remote is on brings the phones back with no off and on,
 which would sign every one out. An ngrok missing when Remote came on is looked
 for each minute too, so one installed meanwhile starts within the minute. A link
 ngrok announces late (a network still coming up) is shown, and used for
-notifications, as soon as it comes. With the
-panel closed, a notice says when a Remote that was on could not come back on as
+notifications, as soon as it comes. A Remote that was on when the UI last
+closed comes back on as it starts, with writes off: a notice says it is back,
+and when auto-off comes (or that it never does, as a warning); switch writes on
+again in the panel if you want them. With the
+panel closed, a notice also says when a Remote that was on could not come back on as
 the UI started, when phones cannot reach it (ngrok missing or not up, and once it
 is up after all), when ngrok came back on a new link, and when auto-off turned
 Remote off. A Remote another `serve` or fleet UI has on is not news: the panel
@@ -108,7 +111,10 @@ auto-off; a `kill` (SIGTERM) or a closed terminal (SIGHUP, unless it runs under
 started beside it then too, as `serve` says on its way out: left up, ngrok hands
 the phones' requests, their cookies with them, to whatever takes port 8750 next,
 and any account on the machine can. (The panel stops its own
-ngrok first, once the phones heard Remote is off, and lets go of the port after.) A
+ngrok first, once the phones heard Remote is off, and lets go of the port after.
+Its ngrok ends with the fleet UI however that ends, a `kill -9` or the OOM killer
+too: on Linux and macOS it runs under a small parent that ends it, and anything
+it started, once the UI is gone.) A
 Ctrl-C while a phone's write is still running (a restart or switch can take 40
 seconds) says which, and waits for it: cut short, it can leave the agent down. A
 second Ctrl-C quits at once and leaves it unfinished, giving a notification still on
@@ -208,8 +214,9 @@ aisquare remote allow-write off
 
 The R panel's **Allow write actions** switch sets the same value. There is one
 write switch, the server's own, in `~/.aisquare/remote.json`: the shell and the
-panel both set it there, whether Remote is on or off, so they always agree and
-starting the TUI never changes it. The page's READ-ONLY sentence names both.
+panel both set it there, whether Remote is on or off, so they always agree. The
+one change the TUI makes on its own: a Remote it brings back at its start comes
+back with writes off. The page's READ-ONLY sentence names both.
 Switching writes off, signing a phone out, or turning Remote off in the panel or
 by auto-off, also stops what that phone sent and the machine has not started
 yet: a write waiting behind a restart is refused, not run. One already running
@@ -330,8 +337,10 @@ and how long the whole is; past 20 fields it says how many it leaves out; a call
 whose input is over 16 KiB never reaches the phone, and its card says that
 instead. A permission a sub-agent asks for shows the task the sub-agent was
 given, and says that the call it answers is the sub-agent's own, which the card
-cannot show. Open the agent to read such a call before you answer it. Under a
-permission, a question or a plan, the bottom of the agent's live screen is shown
+cannot show. Open the agent to read such a call before you answer it. When one
+reply calls two tools that each ask, the second one's card comes a few seconds
+after its prompt, once its own notification lands: until then the card would be
+the first call's, already answered. Under a permission, a question or a plan, the bottom of the agent's live screen is shown
 too, so the real option labels are on screen next to the buttons.
 
 **Quick answers** are the card's buttons: `1`, `2` and No for a tool's
@@ -546,7 +555,11 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   stopping. Closing the UI or stopping `serve` with Ctrl-C does not; expiry
   bounds them. Either, once the auto-off time has come, is auto-off. A Remote that
   ended with no way out at all (killed, or a fleet UI ended by a signal) has its
-  auto-off run when Remote next comes on, if its time came meanwhile.
+  auto-off run when Remote next comes on, if its time came meanwhile. Its ngrok
+  does not outlive it, so nothing reaches `127.0.0.1:8750` through the link while
+  Remote is gone; but nothing signed the phones out either, so their cookies open
+  the next Remote. Turn Remote off in the panel, or run
+  `aisquare remote revoke --all`, to sign them out.
 - **Auto-off** is enforced by the server itself: past the deadline every request
   is a 404, and within half a minute Remote turns off, phones signed out, even
   on a machine that slept through the deadline. With writes on, a phone can
@@ -557,7 +570,9 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   for the tunnel the panel asked for, to Remote's own port, or `--public-url`
   named: never what a request or ngrok's local API says, since anyone on the
   machine can answer on that API's port before your ngrok does, or start a tunnel
-  of their own through it.
+  of their own through it. And the phone opens a tap's link only on the page's
+  own address, or under its own `/r/<token>/` on an ngrok host (a free URL that
+  changed): anyone can have an ngrok host, so no other path on one is opened.
 - **ngrok's inspector and local API are off.** Left on, ngrok keeps every request
   and answer on its local web interface (`127.0.0.1:4040`), which asks for no
   password: the passphrase you unlock with, every device's cookie, the token and
@@ -738,8 +753,10 @@ shell or another asq's R panel, with its port and process id. An upgrade replace
 the install under that server, which keeps running the old release until it is
 started again, so turn it off first. An uninstall would leave it running with no
 aisquare to turn it off, sign its phones out or switch its writes off, so it
-refuses until it is off. asq's own Remote is turned off before its Update or
-Uninstall starts.
+refuses until it is off. asq's own Remote is turned off before its Uninstall
+starts: every phone is signed out and it stays off. Before an Update it is only
+stopped, as quitting asq stops it: its phones stay signed in, and the asq the
+Update reopens brings it back, with writes off.
 
 **`serve` says the port is in use.** Something else took 8750. Pass `--port` and
 give ngrok (and `status`) the same port.

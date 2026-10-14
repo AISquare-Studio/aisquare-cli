@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import shlex
+import sys
 import threading
 import time
 from collections import Counter
@@ -1839,6 +1840,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         running = self._holding_the_quit()
         if not running:
             self._worker_threads.drop_held()
+            if self.hand_off[:1] == ("uninstall",):
+                # Off, not only stopped as a quit leaves it: every phone signed out (its
+                # farewell drained before the exec, run_ui) and the switch saved off. Stopped,
+                # remote.json kept the devices, the link and the passphrase past an Uninstall
+                # without --purge, and the first asq after a reinstall brought Remote back,
+                # its phones let in by their cookies (review of #259, remote focus, 12/12).
+                # An Update's asq --reopen brings it back, read-only.
+                self.remote.turn_off(wait=False)
             self.exit()
             return
         waited = _hand_off_clock() - self._hand_off_since
@@ -2030,11 +2039,33 @@ def _cut_off_workers() -> frozenset[str]:
 REMOTE_QUIT_QUIET_SECONDS = 0.5
 """How long ``run_ui`` waits for a Remote still stopping before it says that it is."""
 
+_HANDED_OVER = {"upgrade": "Update", "uninstall": "Uninstall"}
+"""The Doctor's button for each command it hands over (``doctor.HAND_OFFS``)."""
+
+
+def _hand_off_undone(hand_off: tuple[str, ...]) -> str:
+    """What a Ctrl-C in the quit's waits says of the hand-over it ends: that the Update or
+    Uninstall did not run, and the command that runs it, with this process's global flags.
+
+    The Ctrl-C ends the process at once (``remote_server._remote_quit_now``), and said
+    nothing of it: a user who pressed it to hurry the upgrade along could not tell that
+    ``aisquare upgrade`` never ran (round 4 of #259). ``--reopen`` is asq's own, to open it
+    again once the command is done, and not asked of a command typed in a shell.
+    """
+    from aisquare.core import selfcli
+
+    args = [arg for arg in hand_off if arg != "--reopen"]
+    button = _HANDED_OVER.get(args[0], args[0]) if args else "the hand-over"
+    command = shlex.join(["aisquare", *selfcli.global_flags(), *args])
+    return f"⚠ {button} did not run: asq quit at the Ctrl-C — `{command}` runs it"
+
 
 def run_ui(**options: Any) -> None:
     """Run the fleet UI until the user quits; then say what its last saves could not land,
     see out a phone's write that still runs, saying so (a Ctrl-C there quits at once), and
-    hand the terminal to the command Update or Uninstall asked for, if one did.
+    hand the terminal to the command Update or Uninstall asked for, if one did, once the R
+    panel's own writes of ``remote.json`` have landed and the pushes sent to the phones have
+    gone out.
 
     A Remote that was on stops on a thread of its own at quit (``on_unmount``), so the
     screen did not freeze while uvicorn and ngrok wound down; the process waits for
@@ -2043,31 +2074,49 @@ def run_ui(**options: Any) -> None:
     running is what holds a stop up (uvicorn waits for the request), and raised out of
     here the Ctrl-C was Click's "Aborted!", after which Python's exit waited for the
     write all the same, silently. What the quit could not save is said before either
-    wait, so a quit at once keeps it. A hangup or a SIGTERM ends the process as ever, its
-    ngrok first (``ngrok_ends_with``).
+    wait, so a quit at once keeps it; an Update or Uninstall it drops is said as it quits
+    (:func:`_hand_off_undone`). A hangup or a SIGTERM ends the process as ever, its ngrok
+    first (``ngrok_ends_with``).
     """
     from aisquare.services import remote_server
 
     app = FleetApp(**options)
     with ngrok_ends_with():
         app.run()
+        # Read with getattr so an app still needs only `run()`, `unsaved` and `remote` to be
+        # run here.
+        hand_off = getattr(app, "hand_off", None)
+        undone = None if hand_off is None else _hand_off_undone(hand_off)
         for line in app.unsaved:
             stderr_console().print(f"⚠ {line}", markup=False, highlight=False)
         try:
             if not app.remote.wait_until_off(REMOTE_QUIT_QUIET_SECONDS):
                 stderr_console().print("stopping Remote (its server and ngrok)…", markup=False)
                 app.remote.wait_until_off()
+            if hand_off is not None:
+                # The R panel's writes of remote.json (the write switch, a revoke) run on a
+                # thread an exit joins and the exec skips; the stop above waited for them
+                # only when this asq served Remote (round 4 of #259).
+                app.remote.writes_done()
         except KeyboardInterrupt:
             try:  # the thread that would stop ngrok ends with the process
                 app.remote.stop_tunnel_now()
             finally:
-                remote_server._remote_quit_now()
+                remote_server._remote_quit_now(undone)
         # A phone's write still running would hold the exit as long as it runs: said, not silent.
-        remote_server.remote_wait_for_writes()
-    # The terminal is ours again, and Remote, its ngrok and the phones' writes are done: give
-    # it to the command, whose exec skips what an exit would run. Read with getattr so an app
-    # still needs only `run()`, `unsaved` and `remote` to be run here.
-    hand_off = getattr(app, "hand_off", None)
+        remote_server.remote_wait_for_writes(undone)
+        if hand_off is not None:
+            # The "Remote is off" a turn-off or the quit's auto-off sent the phones goes out on
+            # a daemon thread, which an exit waits for (`push_drain`, at exit) and the exec
+            # would kill mid-send (round 5 of #259).
+            pushes = sys.modules.get("aisquare.services.remote_push")  # loaded by all that push
+            try:
+                if pushes is not None:
+                    pushes.push_drain()
+            except KeyboardInterrupt:
+                remote_server._remote_quit_now(undone)
+    # The terminal is ours again, and Remote, its ngrok, the panel's writes, the phones' and
+    # the pushes are done: give it to the command, whose exec skips what an exit would run.
     if hand_off is not None:
         from aisquare.core import selfcli
 

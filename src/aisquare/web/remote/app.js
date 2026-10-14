@@ -1003,7 +1003,6 @@ function connect() {
     if (S.sock !== sock) return;
     opened = true;
     S.sockState = "open";
-    S.backoff = 0;
     // An open is no update: a page gone stale stays so until a frame comes, as a phone that
     // slept must not act on the screen it showed before. The first one starts the clock.
     if (!S.lastFrameAt) S.lastFrameAt = Date.now();
@@ -1119,6 +1118,7 @@ function onFrame(text) {
 /* When the machine last looked for what needs you, by its clock as the frame's ts is: a
  * watcher stuck in a scan leaves the feed saying how old it is. */
 function noteScan(ts, payload) {
+  S.backoff = 0; // heartbeats, not opens, say healthy
   const scanned = payload && typeof payload.needs_scanned_at === "string" ? payload.needs_scanned_at : "";
   const behind = Date.parse(ts) - Date.parse(scanned) > SCAN_BEHIND_MS ? scanned : "";
   if (behind === S.scannedBehind) return;

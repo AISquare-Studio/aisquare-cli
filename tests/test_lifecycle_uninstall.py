@@ -973,6 +973,55 @@ def test_the_plan_asks_each_server_once_not_once_per_row(
     assert asked == {"listener": 1, "started": 1}, "once for the server, not once per row"
 
 
+_START_TIME = ["display-message", "-p", "#{start_time}"]
+
+
+@pytest.mark.parametrize("plan", ["uninstall", "upgrade"])
+def test_the_plans_ask_a_server_its_start_writing_nothing_and_waiting_seconds(
+    plan: str,
+    runner: CliRunner,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 4: a plan asks the server that answers on a row's socket when it
+    started, and asked it as every tmux command is put, with the bundled conf: that made the
+    home and rewrote a conf that had drifted, in plans that promise to write nothing (#253),
+    and gave a wedged server 30 s per socket. Now ``-f /dev/null``, which a question never
+    reads, and a few seconds. The upgrade plan counts the fleet with ``running_fleet``."""
+    then = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    asked: list[tuple[list[str], float]] = []
+
+    def tmux(
+        argv: list[str], stdin: bytes | None, *, timeout: float | None = None
+    ) -> tmux_core.Completed:
+        asked.append((list(argv), tmux_core._COMMAND_TIMEOUT if timeout is None else timeout))
+        return tmux_core.Completed(0, f"{int(then.timestamp())}\n", "")
+
+    monkeypatch.setattr(TmuxServer, "listener", lambda _self, _recorded=None: "answers")
+    monkeypatch.setattr(TmuxServer, "binary", lambda _self: "tmux")
+    monkeypatch.setattr(tmux_core, "_tmux", tmux)
+    _initialised(runner, tmp_path)
+    _live_agent(tmp_path / "repo", socket_path=tmp_path / "asq", server_started_at=then)
+    conf = paths.aisquare_home() / tmux_core.CONF_NAME
+    conf.write_text("# an older aisquare's conf\n", encoding="utf-8")
+
+    if plan == "uninstall":
+        assert lifecycle.uninstall_plan().listening == ("coder-1 (repo)",)
+    else:
+        assert lifecycle.running_fleet()[0] == ("coder-1 (repo)",)
+
+    assert conf.read_text(encoding="utf-8") == "# an older aisquare's conf\n", "rewritten"
+    # `tmux -V` (whether `fleet shutdown` could run) hands tmux no conf at all.
+    assert [call for call in asked if call[0][1:] != ["-V"]] == [
+        (
+            ["tmux", "-S", str(tmp_path / "asq"), "-f", os.devnull, *_START_TIME],
+            tmux_core._ASK_TIMEOUT,
+        )
+    ]
+    assert tmux_core._ASK_TIMEOUT <= 5
+
+
 @pytest.mark.parametrize("listening", [True, False], ids=["server-listening", "no-server"])
 def test_a_live_row_blocks_only_while_its_server_listens(
     tool: Tool,

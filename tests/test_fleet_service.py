@@ -383,9 +383,14 @@ class FakeTmux(TmuxServer):
         )
 
     def pane_facts(self, pane_id: str) -> PaneFacts | None:
-        """As the real one, which asks ``#{start_time}`` in the same ``display-message``."""
+        """As the real one, which asks ``#{start_time}`` and ``#{window_activity}`` (to the
+        second, rounded down) in the same ``display-message``."""
         facts = self.facts.get(pane_id) if self._read() else None
-        return None if facts is None else replace(facts, server_started=self.started)
+        if facts is None:
+            return None
+        printed = self.output_at.get(pane_id)
+        last = None if printed is None else datetime.fromtimestamp(int(printed.timestamp()), UTC)
+        return replace(facts, server_started=self.started, last_output=last)
 
     def capture(
         self,
@@ -2691,6 +2696,42 @@ def test_spawn_refuses_to_start_a_server_at_a_socket_a_running_server_lost(
     assert fleet_service.spawn(project, "coder").agent.label == "coder-2"
 
 
+def test_the_rows_a_new_server_would_answer_for_are_read_in_one_query(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    plain_project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 4: before a server starts at the fleet's socket, every live row
+    recorded there is asked about, in every project, forgotten ones' included. That walked
+    `list_projects` and ran one `fleet_agents` query per project ever registered, captured
+    directories included, twice per spawn. One query now, and the refusal still names a
+    forgotten project's row by its project."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    coder = _coder(project)
+    other = fleet_service.spawn(plain_project, "manager").agent
+    with store_session() as store:
+        store.forget_project(plain_project.id)
+    tmux.running = False  # no tmux client reaches the server…
+    tmux.socket_file = False  # …because its socket file is gone, not because it exited
+
+    with store_session() as store:
+        asked: list[str] = []
+        store._conn.set_trace_callback(asked.append)  # type: ignore[attr-defined]
+        try:
+            rows = list(fleet_service._live_rows_here(store, tmux, fleet_service.settings()))
+        finally:
+            store._conn.set_trace_callback(None)  # type: ignore[attr-defined]
+
+    assert {agent.id: answer for agent, answer in rows} == {coder.id: "gone", other.id: "gone"}
+    reads = [sql for sql in asked if sql.lstrip().upper().startswith("SELECT")]
+    assert len(reads) == 1 and "FROM fleet_agent WHERE ended_at IS NULL" in reads[0], reads
+    with pytest.raises(FleetError, match="lost its socket file") as refused:
+        fleet_service.spawn(project, "coder")
+    assert f"manager ({plain_project.root.name})" in str(refused.value), "forgotten, named"
+
+
 def test_a_spawn_over_a_server_that_exited_leaves_its_rows_lost_not_held(
     tmux: FakeTmux,
     claude_on_path: Path,
@@ -2750,6 +2791,67 @@ def test_a_spawn_over_a_server_that_exited_leaves_its_rows_lost_not_held(
         still = store.get_fleet_agent(kept.id)
     assert still is not None and still.ended_at is None and still.server_started_at is not None
     assert [typed for typed in tmux.typed if typed[0] == receipt.agent.pane_id] == []
+
+
+def test_a_check_before_a_server_starts_reads_the_socket_once_and_a_spawn_says_both_checks(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 5: `_forget_an_exited_server` and `_refuse_a_freed_socket` each
+    read the fleet's socket, so a check made two connects, and a spawn, which checks before
+    it captures the project or makes a worktree and again as its window opens, made four.
+    One read says which of the two applies. And the rows the window's check forgot, a
+    server having exited while the spawn checked its worktree out, went unsaid: the spawn
+    threw that check's answer away."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    asked: list[Path | None] = []
+    listener = tmux.listener
+
+    def counted(recorded: Path | None = None) -> SocketAnswer | None:
+        asked.append(recorded)
+        return listener(recorded)
+
+    monkeypatch.setattr(tmux, "listener", counted)
+    manager = fleet_service.spawn(project, "manager").agent
+
+    assert len(asked) == 2, asked  # a server listens: one read per check
+    checks = fleet_service._before_a_server_starts
+    early = [True]
+
+    def then_the_server_exits(srv: TmuxServer, config: FleetSettings) -> list[FleetAgent]:
+        exited = checks(srv, config)
+        if early:  # the spawn's own check, before its worktree
+            early.clear()
+            tmux.kill_server()  # the file stays, nothing listens
+        return exited
+
+    monkeypatch.setattr(fleet_service, "_before_a_server_starts", then_the_server_exits)
+    receipt = fleet_service.spawn(project, "coder", worktree=False)
+
+    [said] = [note for note in receipt.notes if "had exited" in note]
+    assert f"manager ({project.root.name}) reads lost from now on" in said, said
+    with store_session() as store:
+        forgotten = store.get_fleet_agent(manager.id)
+    assert forgotten is not None and forgotten.server_started_at is None
+
+
+def test_the_sign_in_window_asks_its_check_with_the_config_its_server_was_made_for(
+    tmux: FakeTmux, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 5: the Accounts sign-in window passed no `config`, so the check
+    before a server starts read `config.toml` again on Textual's thread, and asked the rows
+    of today's `[fleet] tmux_socket` while the page probed the server it had kept from its
+    first sign-in. The page reads `[fleet]` once and passes it with the server it made."""
+    from aisquare.core import claude_accounts as claude_accounts_core
+    from aisquare.services import claude_accounts as claude_accounts_service
+
+    config = fleet_service.settings()
+    monkeypatch.setattr(fleet_service, "settings", lambda: pytest.fail("[fleet] read again"))
+    account = claude_accounts_core.default_account()
+
+    window = claude_accounts_service.open_sign_in_window(account, tmux, config=config)
+
+    assert window.pane_id in tmux.facts
 
 
 def _callers_of(name: str) -> set[tuple[str, str]]:
@@ -2998,6 +3100,46 @@ def test_a_stop_and_a_restart_read_the_servers_start_in_the_answer_that_names_th
     assert fleet_service._pane_alive(other) is False
 
 
+def test_a_look_at_the_fleet_reads_the_servers_start_in_the_answers_that_named_its_panes(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 4: `_observe` asked `srv.started_at()` in a `display-message` of
+    its own though the window list and a pane's facts it had just read carry the start
+    (`#{start_time}`): one more tmux process per server on asq's 2 s tick, every needs-you
+    scan, every `status_of` and `tell`. It reads the start there, and asks only when no
+    answer carried it (live rows, no pane seen), as it must to tell a lost row from a held
+    one."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    coder = _coder(project)
+    tmux.set_command(coder.pane_id, "claude")
+    session = f"asq-{_codename(project)}"
+    asked: list[datetime | None] = []
+    started_at = tmux.started_at
+
+    def counted() -> datetime | None:
+        asked.append(started_at())
+        return asked[-1]
+
+    monkeypatch.setattr(tmux, "started_at", counted)
+
+    assert coder.id in (fleet_service._observe(tmux, session, [coder]) or {}), "the window list"
+    # A session renamed under it: the pane answers to `pane_facts` alone.
+    assert coder.id in (fleet_service._observe(tmux, "asq-renamed", [coder]) or {}), "facts"
+    assert fleet_service.status_of(coder).state != "lost"
+    assert asked == [], "not one display-message for the start"
+    # On a server that took the socket, a start read there still holds the row's pane.
+    tmux.started += timedelta(minutes=5)
+    assert fleet_service._observe(tmux, session, [coder]) == {coder.id: fleet_service.HELD}
+    assert asked == []
+    # Control: a live row and no pane seen, so no answer carried the start: asked, once.
+    tmux.facts.pop(coder.pane_id)
+    tmux.sessions[session] = []
+    tmux.started -= timedelta(minutes=5)
+    assert fleet_service._observe(tmux, session, [coder]) == {}
+    assert asked == [tmux.started]
+
+
 def _planned_ends(plan: fleet_service.ShutdownPlan) -> dict[str, str]:
     """What a shutdown plan says it does with each row."""
     return {
@@ -3216,6 +3358,34 @@ def test_every_path_that_decides_a_held_rows_fate_gives_the_one_verdict(
     assert _planned_ends(forget) == _ends(forgotten) == {coder.id: "lost"}
     assert forget.lost_why[coder.id] == forgotten.recorded[0].reason
     assert lifecycle.running_fleet()[0] == ()
+
+
+@pytest.mark.parametrize("said", ["unasked", "gone"])
+def test_a_row_on_a_socket_tmux_reached_is_held_only_as_another_servers(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    said: str,
+) -> None:
+    """Review of #259, round 5: on a socket tmux had just reached, a row that recorded its
+    server's start was held for any answer of its socket but `answers`: a connect that timed
+    out on a busy server (`unasked`), or a file removed since (`gone`). Held, it spared no
+    session, so the kill phase killed its agent with the session while the report said
+    `left live`, and `--forget` recorded lost a row whose socket tmux answered on. Only
+    `another` holds it there; any other answer stops it as any row, plan and run alike."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    monkeypatch.setattr(tmux, "listener", lambda recorded=None: said)
+
+    for forget in (False, True):
+        coder = _coder(project)
+        assert coder.server_started_at == tmux.started, "asked whether it is another's"
+        plan = fleet_service.shutdown_plan(project, forget=forget)
+        report = fleet_service.shutdown(project, forget=forget)
+
+        assert _planned_ends(plan) == _ends(report) == {coder.id: "stop"}, (forget, plan, report)
+        assert [agent.exit_status for agent in report.stopped] == [0], "its own /exit"
 
 
 def test_every_path_that_types_into_or_shows_a_pane_refuses_a_held_rows_id(
@@ -7383,6 +7553,34 @@ def test_nudge_refuses_a_stale_waiting_row_that_ls_and_tell_call_working(
         (manager.pane_id, "literal", NUDGE_TEXT),
         (manager.pane_id, "key", "Enter"),
     ]
+
+
+def test_nudge_reads_the_panes_last_output_in_its_facts(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 5: the nudge ran `list-panes -a`, every pane on the server, for
+    one pane's last output, which the facts it had just read carry (`PaneFacts.last_output`):
+    one more tmux process per nudge, in a sub-agent's CLI process. It reads it there, and
+    still tells a pane that printed just now (working) from a quiet one (waiting)."""
+    manager = fleet_service.spawn(project, "manager").agent
+    tmux.set_command(manager.pane_id, "claude")
+    _stale_board_session(
+        manager, "waiting", seen_ago=team_service._STALE_AFTER + timedelta(minutes=1)
+    )
+    ran: list[tuple[str, ...]] = []
+
+    def run(*args: str, stdin: bytes | None = None) -> str:
+        ran.append(args)
+        return ""
+
+    monkeypatch.setattr(tmux, "run", run)
+
+    tmux.printed(manager.pane_id)  # mid-turn
+    assert fleet_service.nudge_manager(project.id, reason="task_review") is False
+    tmux.printed(manager.pane_id, ago=ACTIVITY_WINDOW + timedelta(seconds=2))
+    assert fleet_service.nudge_manager(project.id, reason="task_review") is True
+
+    assert ran == [], "no list-panes"
 
 
 @pytest.mark.parametrize("command", ["bash", PYTHON_LAUNCHER, "zsh"])

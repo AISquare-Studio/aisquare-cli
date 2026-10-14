@@ -208,11 +208,12 @@ _SUBAGENT_TOOLS = frozenset({"Task", "Agent"})
 """The tools a sub-agent runs inside: a prompt pending under one is the sub-agent's."""
 
 _NOTICE_WAIT = timedelta(seconds=20)
-"""How long after its pane printed a sub-agent's prompt may still be waiting for the
-notification that names it (:func:`_needs_subagent_prompt`). Claude Code sends it 6 s after
-the prompt is drawn; the hook's process starts in a second or so, and may wait out the
-store's busy timeout (5 s) for its write; tmux tells the time of output to the second,
-rounded down. That is about 13 s at worst. A notification later than this leaves the
+"""How long after its pane printed a sub-agent's prompt, or the prompt of a call beside
+another, may still be waiting for the notification that names it
+(:func:`_needs_drawn_since_notice`). Claude Code sends it 6 s after the prompt is drawn;
+the hook's process starts in a second or so, and may wait out the store's busy timeout (5 s)
+for its write; tmux tells the time of output to the second, rounded down. That is about 13 s
+at worst. A notification later than this leaves the
 prompt named after the one before until it lands, and a redraw (an attach, a resize, a
 key that moves the highlight) hides the card this long."""
 
@@ -865,7 +866,10 @@ def needs_from_agent(
        (:func:`_needs_later_notice`): the call's own prompt was answered, and what is up
        now is rule 8's too. Once the agent wrote after the turn's first notice, a later
        one's words are not on the board, and nothing tells a form asked then from its
-       tool's own prompt: it reads as the prompt, whose digits would go into the form;
+       tool's own prompt: it reads as the prompt, whose digits would go into the form.
+       Nor, with more than one call pending, while the pane printed after the newest
+       notice (:func:`_needs_drawn_since_notice`): the oldest call's prompt answered, the
+       next call's is up, and its own notice has not come;
     6. no pending tool, and the newest record an interruption later than the session's last
        hook, or one only Claude Code's own records follow (a local or ``!`` command run at
        the prompt since, which fires no hook either) → ``interrupted``, whatever the row
@@ -896,7 +900,8 @@ def needs_from_agent(
     3 to 6 and 9 cannot hold. ``exited`` and ``unknown`` agents need nothing here; ``crashed``,
     ``manager_down`` and ``fleet_down`` speak for them. ``manager_live`` and ``accounts``
     decide only when a push may go out. ``pane_output`` says when the agent's pane last
-    printed, asked only of a sub-agent's prompt.
+    printed, asked only of a sub-agent's prompt and of a prompt with more than one call
+    pending.
 
     A held row got rules 3 to 10 from its board while that was fresh: permission and
     question cards, pushed, whose every answer was a 409 ``not_agent`` (its pane id is
@@ -978,6 +983,8 @@ def needs_from_agent(
                 return _needs_subagent_prompt(
                     pending[0], session, pane_output, project=project, agent=agent, now=now
                 )
+            if len(pending) > 1 and _needs_drawn_since_notice(session, pane_output, now):
+                return []  # the oldest call's prompt answered, maybe, and the next one's up
             return [
                 _needs_permission_item(pending[0], project=project, agent=agent, name=name, now=now)
             ]
@@ -1415,8 +1422,7 @@ def _needs_subagent_prompt(
     notification lands, or :data:`_NOTICE_WAIT` passes without one.
     """
     seen = session.last_seen_at
-    output = None if pane_output is None else pane_output()
-    if output is not None and output > seen and now - output < _NOTICE_WAIT:
+    if _needs_drawn_since_notice(session, pane_output, now):
         return []
     return [
         _needs_permission_item(
@@ -1429,6 +1435,28 @@ def _needs_subagent_prompt(
             since=seen,
         )
     ]
+
+
+def _needs_drawn_since_notice(
+    session: TeamSession | None,
+    pane_output: Callable[[], datetime | None] | None,
+    now: datetime,
+) -> bool:
+    """The pane printed after the notice ``last_seen_at`` names, less than :data:`_NOTICE_WAIT`
+    ago: the prompt on screen may be one whose notification has not landed yet.
+
+    A prompt answered writes nothing until its tool ends, so with two calls of one message
+    pending, the oldest's answered, the next one's prompt is drawn under the same
+    ``last_seen_at`` and the same pending tools. Rule 5's card was the oldest call's again,
+    its id and its command, and a tap of "1" on it re-derived as current and approved the
+    other call (review of #259, remote focus, 1/12). A sub-agent's prompts are all under
+    its one ``Task`` (:func:`_needs_subagent_prompt`). Its cost is a redraw (an attach, a
+    resize, a key that moves the highlight) hiding the card this long.
+    """
+    if session is None:
+        return False
+    output = None if pane_output is None else pane_output()
+    return output is not None and output > session.last_seen_at and now - output < _NOTICE_WAIT
 
 
 def _needs_tool_detail(
@@ -2976,10 +3004,8 @@ watcher's memory key → when a scan first saw what it dates (:func:`_needs_date
 
 def _needs_kept() -> dict[str, dict[str, str]]:
     """Each part of ``remote-needs.json``, ``key → ISO stamp``; empty where unreadable."""
-    from aisquare.core.paths import remote_needs_path
-
     try:
-        raw = json.loads(remote_needs_path().read_text(encoding="utf-8"))
+        raw = _needs_kept_raw()
     except (OSError, ValueError):
         raw = None
     parts: dict[str, dict[str, str]] = {}
@@ -2990,18 +3016,68 @@ def _needs_kept() -> dict[str, dict[str, str]]:
     return parts
 
 
+def _needs_kept_raw() -> object:
+    """``remote-needs.json`` as its JSON; ``None`` when there is none. Raises ``OSError`` for a
+    file that could not be read, ``ValueError`` for one that is not JSON."""
+    from aisquare.core.paths import remote_needs_path
+
+    try:
+        text = remote_needs_path().read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    return json.loads(text)
+
+
+def _needs_kept_whole(raw: object) -> dict[str, dict[str, str]]:
+    """Each part of ``raw`` when all of it is as this version writes it, else ``ValueError``:
+    an object whose parts, where there, are objects of strings."""
+    if raw is not None and not isinstance(raw, dict):
+        raise ValueError("it is not a JSON object")
+    parts: dict[str, dict[str, str]] = {}
+    for part in _NEEDS_KEPT_PARTS:
+        kept = None if raw is None else raw.get(part)
+        if kept is None:
+            kept = {}
+        if not isinstance(kept, dict) or not all(isinstance(v, str) for v in kept.values()):
+            raise ValueError(f"its {part!r} is not an object of strings")
+        parts[part] = dict(kept)
+    return parts
+
+
 def _needs_keep(edit: Callable[[dict[str, dict[str, str]]], None]) -> None:
     """Write ``remote-needs.json`` again, ``edit`` applied to its parts; one writer at a time,
-    and owner-only, like every Remote file."""
+    and owner-only, like every Remote file.
+
+    What is written builds on the whole file, so only a file that is not there is empty. A
+    read that failed (``EIO``, ``EACCES``) is the ``OSError`` it was, and nothing is written:
+    a dismissal answers 503, and the watcher tells its streak. A file this version cannot
+    read in full (not JSON, a hand edit, a later version's shape) is moved aside to
+    ``remote-needs.json.bad``, kept for the human, and a new one started. It was read as
+    empty and replaced by the one entry being written, every dismissal and first sighting
+    in it lost for good: every dismissed card back on every phone, and pushed again, an
+    ongoing outage under a new id (review of #259, remote focus, 3/12).
+    """
     from aisquare.core.atomic import write_replacing
     from aisquare.core.paths import remote_needs_path
 
     with _dismissals_lock:
-        parts = _needs_kept()
-        edit(parts)
         path = remote_needs_path()
+        parts = _needs_kept_to_write(path)
+        edit(parts)
         path.parent.mkdir(parents=True, exist_ok=True)
         write_replacing(path, json.dumps({"version": 1, **parts}, indent=2), owner_only=True)
+
+
+def _needs_kept_to_write(path: Path) -> dict[str, dict[str, str]]:
+    """The parts of ``path`` for a write to build on, empty once a file it cannot build on
+    was moved to ``remote-needs.json.bad``; the caller holds ``_dismissals_lock``."""
+    try:
+        return _needs_kept_whole(_needs_kept_raw())
+    except ValueError as exc:  # json's, a text that is not UTF-8, or the shape's
+        aside = path.with_name(f"{path.name}.bad")
+        os.replace(path, aside)
+        log.warning("remote: %s could not be read (%s); it is kept as %s", path, exc, aside)
+        return _needs_kept_whole(None)
 
 
 def load_needs_dismissals() -> dict[str, str]:
@@ -3502,6 +3578,7 @@ def _needs_send(agent: FleetAgent, keys: Sequence[str], text: str, enter: bool) 
 
 def _needs_answer_now(
     kit: RemoteKit,
+    watcher: RemoteNeedsWatcher,
     device: Device,
     item: NeedsItem,
     project: ProjectInfo,
@@ -3518,6 +3595,13 @@ def _needs_answer_now(
     typing (:meth:`RemoteKit.kit_write_still_allowed`): the re-derivation came between
     them and the keys. A tmux that fails mid-answer is a 503 whose ``audit`` says it was
     tried, as part of it may have reached the pane.
+
+    The card leaves ``watcher``'s feed as soon as the keys are typed, here on the write
+    thread (:meth:`RemoteNeedsWatcher.needs_answered`). It left once the audit line was written,
+    after an await a scan could publish in: the answered card back on every page with
+    live buttons, pushed if its window had just closed, and a question's or a plan's
+    second tap typed again, those cards being current with no ``attention`` until the
+    agent writes its result (review of #259, remote focus, 2/12).
     """
     from aisquare.services import fleet as fleet_service
     from aisquare.services.remote_server import RequestError, _audit_keys, remote_agent_lock
@@ -3553,6 +3637,7 @@ def _needs_answer_now(
         except Exception as exc:
             said = f"tmux could not type it: {exc}"
             raise RequestError(503, "fleet_unavailable", said, audit=f"{summary} failed") from None
+        watcher.needs_answered(item.id)
         return {"answered": item.id, "agent": label, "project": project.id, "sent": True}, summary
     finally:
         lock.release()
@@ -3643,7 +3728,7 @@ def needs_routes(kit: RemoteKit) -> list[BaseRoute]:
             return kit.kit_refuse(400, "not_answerable", why)
 
         def answer_now(_named: dict[str, Any]) -> tuple[dict[str, object], str]:
-            return _needs_answer_now(kit, device, item, project, keys, text, enter)
+            return _needs_answer_now(kit, watcher, device, item, project, keys, text, enter)
 
         tracked = _remote_write_tracked("needs/answer", answer_now)
         try:
@@ -3655,7 +3740,6 @@ def needs_routes(kit: RemoteKit) -> list[BaseRoute]:
                 await asyncio.to_thread(kit.kit_audit, device, "needs/answer", exc.audit)
             raise
         await asyncio.to_thread(kit.kit_audit, device, "needs/answer", summary)
-        watcher.needs_answered(item.id)
         return JSONResponse(result)
 
     return [

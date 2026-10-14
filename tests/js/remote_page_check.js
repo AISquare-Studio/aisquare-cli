@@ -251,7 +251,10 @@ for (const url of [
   OWN + "/r/t/#/n/ny_0123456789abcdef", "https://x.ngrok-free.app/r/t/", "https://evil.example/r/t/",
   "http://x.ngrok-free.app/r/t/", "https://x.ngrok-free.app.evil.com/r/", "javascript:alert(1)",
   "https://u:p@x.ngrok.app/r/t/", "https://x.ngrok.io/no-token-path", "not a url",
-]) report.safeUrl[url] = worker.safeUrl(url, OWN);
+  "https://attacker.ngrok-free.app/phish/r/", "https://attacker.ngrok-free.app/r/other/",
+  "https://y.ngrok.app/r/t/#/n/ny_0123456789abcdef", "https://x.ngrok-free.app/r/t",
+]) report.safeUrl[url] = worker.safeUrl(url, OWN + "/r/t/");
+report.safeUrlNoScope = worker.safeUrl("https://x.ngrok-free.app/r/t/");
 report.suffixes = worker.NGROK_SUFFIXES;
 report.notices = {
   needs: worker.pushNotice({ title: "api: coder-1 needs you", body: "coder-1 asks you a question", tag: "asq-needs", url: null }),

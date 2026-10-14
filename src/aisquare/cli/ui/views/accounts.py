@@ -71,6 +71,7 @@ from aisquare.cli.ui.terminal import InPlaceField, TerminalPane
 from aisquare.cli.ui.ticks import while_running
 from aisquare.core import browser, paths
 from aisquare.core import claude_accounts as core
+from aisquare.core.config import FleetSettings
 from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxError, TmuxServer
 from aisquare.models import (
@@ -920,10 +921,9 @@ class AccountsView(Vertical):
             elif login.fresh:
                 accounts_service.abandon_sign_in(login.account)
 
-    def server(self) -> TmuxServer:
-        if self._server is None:
-            self._server = fleet_service.server()
-        return self._server
+    def server(self, config: FleetSettings | None = None) -> TmuxServer:
+        """The server given to the page, else the fleet's as ``config`` names it now."""
+        return self._server if self._server is not None else fleet_service.server(config)
 
     # --- data in ----------------------------------------------------------------------------
 
@@ -1584,8 +1584,14 @@ class AccountsView(Vertical):
         fresh = slot is None
         since = None if fresh else accounts_service.login_fingerprint(account)
         try:
-            server = self.server()
-            window = accounts_service.open_sign_in_window(account, server, cwd=self.sign_in_cwd)
+            # One read of [fleet] for the server and for the check before a server starts
+            # there. A server kept from the page's first sign-in kept the socket of that day,
+            # while the check read today's (review of #259, round 5).
+            config = fleet_service.settings()
+            server = self.server(config)
+            window = accounts_service.open_sign_in_window(
+                account, server, cwd=self.sign_in_cwd, config=config
+            )
         except (TmuxError, fleet_service.FleetError) as exc:
             if fresh:
                 accounts_service.abandon_sign_in(account)

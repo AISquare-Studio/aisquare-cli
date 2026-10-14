@@ -276,10 +276,13 @@ class ReapReport:
     agents, every later project, the worktree pass and the manager nudges, and
     a traceback instead of a report (round 5)."""
     held: list[ShutdownRow] = field(default_factory=list)
-    """Rows ``--server-down`` left live, each with why: tmux reports no server on their
-    socket, but their agent may still be running (:func:`_hold_on_absent_server`), as the
-    one rule says — a socket file taken from under its server, a socket that could not be
-    asked. Said as ``shutdown`` says a row it left live (follow-up of #257)."""
+    """Rows the sweep left live whose agent may still be running where no tmux client
+    reaches it, each with why and the way out. On every ``reap``: a row whose socket another
+    tmux server answers on (:func:`_hold_on_another_server`). Under ``--server-down`` also:
+    a row on a socket tmux reports no server for, which the one rule says may still run, a
+    socket file taken from under its server or a socket that could not be asked
+    (:func:`_hold_on_absent_server`). The reason says which. Said as ``shutdown`` says a row
+    it left live (follow-up of #257; review of #259, round 5)."""
 
 
 @dataclass(frozen=True)
@@ -1251,7 +1254,10 @@ def _observe(
     a view — a listing's reconcile, ``reap``, a restart — takes that agent's
     pane for the row's. The server is asked when it started once a pane has
     answered, or once it has answered for live rows it holds no pane of: the
-    answer says whether the rows' server is this one (:func:`_outlived`).
+    answer says whether the rows' server is this one (:func:`_outlived`). Read
+    where tmux already said it, in the window list or a pane's facts
+    (``#{start_time}``); asked in a ``display-message`` of its own only when no
+    answer carried it (review of #259, round 4).
 
     A live row the answering server is NOT the server of — one that recorded its
     server's start, and this one started at another time, in the same boot — is
@@ -1268,6 +1274,7 @@ def _observe(
         )
         live = [agent for agent in agents if agent.ended_at is None]
         output_at = _activity_times(srv) if live else {}
+        said = [w.server_started for w in windows.values() if w.server_started is not None]
         seen: dict[str, _PaneView] = {}
         for agent in agents:
             window = windows.get(agent.pane_id)
@@ -1293,9 +1300,13 @@ def _observe(
                     facts.current_command,
                     output_at.get(agent.pane_id),
                 )
+                if facts.server_started is not None:
+                    said.append(facts.server_started)
         if live and not seen and not _server_answers(srv):
             return None
-        started = srv.started_at() if seen or live else None
+        started = None
+        if seen or live:  # one server, one start: any answer that carried it says it
+            started = said[0] if said else srv.started_at()
         boot = _Boot()  # asked only for a row that may be held
         views: _Observed = {}
         for agent in agents:
@@ -1794,22 +1805,12 @@ def spawn(
     # starts there would hold them for good: they read lost from now on, in every project,
     # decided while the stale file still says so. And a socket path a running server lost
     # is not one to start a server at: the agents on it would be stranded for good, and the
-    # new server would answer for their rows. Asked again as the window opens (`open_window`).
+    # new server would answer for their rows. Asked here so the refusal comes before the
+    # project is captured or a worktree made (#139), and again as the window opens
+    # (`open_window`), as a server can exit while the worktree is checked out.
     exited = _before_a_server_starts(srv, config)
     if exited:
-        one = len(exited) == 1
-        with store_session() as store:
-            names = ", ".join(
-                f"{row.label} ({_name(store.get_project(row.project_id) or project)})"
-                for row in exited
-            )
-        notes.append(
-            f"the tmux server at {srv.socket_path()} had exited, leaving its socket file: "
-            f"{names} {'reads' if one else 'read'} lost from now on, as {'its' if one else 'their'}"
-            f" {'pane' if one else 'panes'} went with it (`aisquare fleet reap` records "
-            f"{'it' if one else 'them'}, `aisquare fleet restart` starts {'it' if one else 'them'}"
-            " again)"
-        )
+        notes.append(_exited_note(srv, exited))
     # Nothing up to the codename below writes the project's registration: every
     # refusal that needs no window is given first (#139). A spawn refused for its
     # account, its worktree, its task, the cap or a second manager had already
@@ -2028,6 +2029,7 @@ def spawn(
             width=width,
             height=height,
             config=config,
+            notes=notes,
         )
     except TmuxError as exc:
         raise FleetError(f"tmux could not start the window: {exc}") from exc
@@ -2369,33 +2371,33 @@ def _take_over(agent: FleetAgent, previous: str, session_id: str, notes: list[st
 
 def _live_rows_here(
     store: ContextStore, srv: TmuxServer, config: FleetSettings
-) -> Iterator[tuple[ProjectInfo, FleetAgent, SocketAnswer | None]]:
+) -> Iterator[tuple[FleetAgent, SocketAnswer | None]]:
     """Every live row recorded at this shell's socket path, in every project, with what the
     one rule says of its agent (:func:`~aisquare.core.tmux.server_may_run`): the rows a
     server started at that path would answer for.
 
     The server is shared by every project, so every project's rows are asked, forgotten
-    ones' included; a row asked at another path (:func:`_address`) is another server's. The
-    one walk :func:`_refuse_a_freed_socket` and :func:`_forget_an_exited_server` take, so
-    the two cannot come to count different rows (review of #259, round 3).
+    ones' included, in one query (``live_fleet_agents``; a query per project before round 4
+    of #259); a row asked at another path (:func:`_address`) is another server's. The one
+    walk :func:`_refuse_a_freed_socket` and :func:`_forget_an_exited_server` take, so the
+    two cannot come to count different rows (review of #259, round 3).
     """
     this_boot = tmux_core.boot_id()
     here = _Address(config.tmux_socket)
     reads = tmux_core.SocketReads()  # one socket: asked once, not per row
-    for current in store.list_projects(include_forgotten=True):
-        for agent in store.fleet_agents(current.id, live_only=True):
-            if _address(agent, config) != here:
-                continue
-            answer = tmux_core.server_may_run(
-                srv,
-                agent.socket_path,
-                agent.boot_id,
-                this_boot,
-                agent.created_at,
-                agent.server_started_at,
-                reads=reads,
-            )
-            yield current, agent, answer
+    for agent in store.live_fleet_agents():
+        if _address(agent, config) != here:
+            continue
+        answer = tmux_core.server_may_run(
+            srv,
+            agent.socket_path,
+            agent.boot_id,
+            this_boot,
+            agent.created_at,
+            agent.server_started_at,
+            reads=reads,
+        )
+        yield agent, answer
 
 
 def _refuse_a_freed_socket(srv: TmuxServer, config: FleetSettings) -> None:
@@ -2420,13 +2422,11 @@ def _refuse_a_freed_socket(srv: TmuxServer, config: FleetSettings) -> None:
     except TmuxUnavailable:
         return  # no POSIX uid: no tmux server can exist here
     with store_session() as store:
-        stranded = [
-            f"{agent.label} ({_name(current)})"
-            for current, agent, answer in _live_rows_here(store, srv, config)
-            if answer == "gone"
-        ]
-    if not stranded:
-        return
+        gone = [agent for agent, answer in _live_rows_here(store, srv, config) if answer == "gone"]
+        if not gone:
+            return
+        names = {known.id: _name(known) for known in store.list_projects(include_forgotten=True)}
+    stranded = [f"{row.label} ({names.get(row.project_id, row.project_id)})" for row in gone]
     one = len(stranded) == 1
     raise FleetError(
         f"not started: the tmux server that {', '.join(stranded)} {'runs' if one else 'run'} "
@@ -2464,15 +2464,12 @@ def _forget_an_exited_server(srv: TmuxServer, config: FleetSettings) -> list[Fle
     Ending it here instead would cost that. Asked per row, and written as a compare-and-set
     (``forget_fleet_agent_server_start``), so a server another process brought up meanwhile
     leaves its rows and any held one alone.
+
+    Asked by :func:`_before_a_server_starts` once it read a stale file at the path.
     """
-    try:
-        if srv.listener(srv.socket_path()) is not None:
-            return []
-    except TmuxUnavailable:
-        return []  # no POSIX uid: no tmux server can exist here
     forgotten: list[FleetAgent] = []
     with store_session() as store:
-        for _, agent, answer in _live_rows_here(store, srv, config):
+        for agent, answer in _live_rows_here(store, srv, config):
             started = agent.server_started_at
             if (
                 answer is None
@@ -2495,10 +2492,38 @@ def _before_a_server_starts(srv: TmuxServer, config: FleetSettings) -> list[Flee
     agents (:func:`_refuse_a_freed_socket`, which raises). Only ``spawn`` asked, and the
     Accounts sign-in window, on the same server, started one past both (review of #259,
     round 3): so every window opened there goes through :func:`open_window`, which asks.
+
+    One read of the socket says which, if either, applies. Each asked it, so a check cost
+    two connects, and a spawn checks twice (review of #259, round 5). A server listening
+    there, the usual case, is one connect and nothing else.
     """
-    exited = _forget_an_exited_server(srv, config)
-    _refuse_a_freed_socket(srv, config)
-    return exited
+    try:
+        answer = srv.listener(srv.socket_path())
+    except TmuxUnavailable:
+        return []  # no POSIX uid: no tmux server can exist here
+    if answer is None:
+        return _forget_an_exited_server(srv, config)
+    if answer == "gone":
+        _refuse_a_freed_socket(srv, config)
+    return []
+
+
+def _exited_note(srv: TmuxServer, exited: Sequence[FleetAgent]) -> str:
+    """What a spawn says of the rows :func:`_before_a_server_starts` forgot the start of: they
+    read lost from now on, named with their projects, forgotten ones' included."""
+    one = len(exited) == 1
+    with store_session() as store:
+        known = {each.id: _name(each) for each in store.list_projects(include_forgotten=True)}
+    names = ", ".join(
+        f"{row.label} ({known.get(row.project_id, row.project_id)})" for row in exited
+    )
+    return (
+        f"the tmux server at {srv.socket_path()} had exited, leaving its socket file: "
+        f"{names} {'reads' if one else 'read'} lost from now on, as {'its' if one else 'their'}"
+        f" {'pane' if one else 'panes'} went with it (`aisquare fleet reap` records "
+        f"{'it' if one else 'them'}, `aisquare fleet restart` starts {'it' if one else 'them'}"
+        " again)"
+    )
 
 
 def open_window(
@@ -2512,14 +2537,20 @@ def open_window(
     width: int = DEFAULT_WINDOW_WIDTH,
     height: int = DEFAULT_WINDOW_HEIGHT,
     config: FleetSettings | None = None,
+    notes: list[str] | None = None,
 ) -> WindowInfo:
     """A window on the fleet's tmux server ``srv`` (:func:`server`), opened once what must hold
     before a server starts there does (:func:`_before_a_server_starts`): the one way anything
     opens a window at the fleet's socket, a spawn's agent and the Accounts sign-in window
     alike (tests/test_fleet_service.py names every caller). :class:`FleetError` when it may
     not; :class:`~aisquare.core.tmux.TmuxError` when tmux would not
-    (:meth:`~aisquare.core.tmux.TmuxServer.spawn_window`)."""
-    _before_a_server_starts(srv, config or settings())
+    (:meth:`~aisquare.core.tmux.TmuxServer.spawn_window`). ``config`` is the one ``srv`` was
+    made for, the caller's, so the check asks the rows of the socket it probes. ``notes``,
+    when given, gets the rows whose exited server's start the check forgot, for the caller
+    to say (:func:`_exited_note`)."""
+    exited = _before_a_server_starts(srv, config or settings())
+    if exited and notes is not None:
+        notes.append(_exited_note(srv, exited))
     return srv.spawn_window(
         session, name=name, cwd=cwd, command=command, env=env, width=width, height=height
     )
@@ -3762,8 +3793,12 @@ def _unreached(
 
     ``answering`` is a row on a socket the probe found a server on: asked whether that
     server is the row's (``"another"``: it started at another time than the one the row
-    recorded, which lost its socket file to it and may run on, follow-up of #257). A server
-    that is the row's is then ``None`` here: the row is stopped as any other. ``forget``
+    recorded, which lost its socket file to it and may run on, follow-up of #257). Any other
+    answer is then ``None`` here and the row is stopped as any other: tmux reached that
+    server, so a socket that read ``"unasked"`` (a connect that timed out on a busy server)
+    or ``"gone"`` (its file removed since) holds no agent out of reach (review of #259,
+    round 5): held, the row spared no session, so the kill phase ended its agent while the
+    report said it was left live. ``forget``
     is how the way out spells the operator's word: ``shutdown``'s own flag, or the command
     for ``reap``. ``reads`` is the caller's for every row it asks, so rows on one server ask
     it once (:class:`~aisquare.core.tmux.SocketReads`).
@@ -3778,7 +3813,7 @@ def _unreached(
         agent.server_started_at,
         reads=reads,
     )
-    if answer is None or (answering and answer == "answers"):
+    if answer is None or (answering and answer != "another"):
         return None
     try:
         path = agent.socket_path or srv.socket_path()
@@ -5980,9 +6015,10 @@ def nudge_manager(project_id: str, *, reason: str) -> bool:
     (``_STALE_AFTER``). A row frozen at ``waiting`` while the pane keeps
     printing (hooks that stopped firing: a Stop that never ran, a session id
     that no longer matches) is ``working`` everywhere else, and typing into it
-    is the interleaving ``tell`` refuses to cause. Agreeing costs one extra
-    ``list-panes`` for the pane's last-output time, on a path the debounce
-    already bounds to one pass per :data:`NUDGE_DEBOUNCE`.
+    is the interleaving ``tell`` refuses to cause. The pane's last-output time it needs for
+    that comes with the pane's facts (``PaneFacts.last_output``, ``#{window_activity}``),
+    in the one ``display-message``. A ``list-panes -a`` over every pane on the server for it
+    was one more tmux process per nudge (review of #259, round 5).
     """
     try:
         with store_session() as store:
@@ -6002,10 +6038,7 @@ def nudge_manager(project_id: str, *, reason: str) -> bool:
             if facts is None or not _its_agent(manager, facts):
                 return False  # not the agent, or the id is another agent's on another server
             pane = _PaneView(
-                facts.dead,
-                facts.dead_status,
-                facts.current_command,
-                _activity_times(srv).get(manager.pane_id),
+                facts.dead, facts.dead_status, facts.current_command, facts.last_output
             )
             state, _ = _derive(manager, session, pane, observed=True, now=now)
             if state != "waiting":

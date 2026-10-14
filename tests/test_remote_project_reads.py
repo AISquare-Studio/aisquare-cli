@@ -545,7 +545,7 @@ def test_the_card_of_another_projects_coder_is_that_coders_card(
     monkeypatch.setattr(
         remote_server, "_doctor_verdict", lambda: DoctorVerdict(sdk_present=True, red=[])
     )
-    monkeypatch.setattr(remote_server, "_explainability_policy", lambda: None)
+    monkeypatch.setattr(remote_server, "_explainability_policy", lambda project=None: None)
     reads = live_sources()
     assert reads.explainability("coder-1", other.id)["model"] == "model-of-the-other-project"
     assert reads.explainability("coder-1", None)["model"] == "model-of-the-current-project"

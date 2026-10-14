@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -141,10 +142,12 @@ class FakeServer(TmuxServer):
         return self._listened
 
     def pane_facts(self, pane_id: str) -> PaneFacts | None:
+        """As the real one, which asks ``#{start_time}`` in the same ``display-message``."""
         self.asked.append(f"pane_facts:{pane_id}")
         if self._facts_raise:
             raise TmuxError("unexpected display-message output")
-        return self._panes.get(pane_id)
+        facts = self._panes.get(pane_id)
+        return None if facts is None else replace(facts, server_started=self._started)
 
     def started_at(self) -> datetime | None:
         self.asked.append("started_at")
@@ -559,7 +562,8 @@ def test_fleet_check_counts_a_row_older_than_its_server_as_gone(home: Path, tmp_
     assert "1 recorded live but the tmux pane is gone" in check.detail
     assert "manager" in check.detail and "coder-1" not in check.detail
     assert check.fix and "aisquare fleet reap --all" in check.fix
-    assert server.asked.count("started_at") == 1  # once per socket, not per row
+    # Said with each pane (`#{start_time}`): not asked on its own, per row or per socket.
+    assert server.asked.count("started_at") == 0
 
 
 def test_fleet_check_reads_empty_facts_as_a_gone_pane(home: Path, tmp_path: Path) -> None:
@@ -687,6 +691,36 @@ def test_fleet_check_tells_another_server_on_a_rows_socket_from_a_pane_that_is_g
     assert "1 recorded live but the tmux pane is gone: coder-1" in check.detail
     assert "another tmux server" not in check.detail
     assert check.fix and "SIGUSR1" not in check.fix
+
+
+def test_fleet_check_asks_a_servers_start_only_where_no_pane_of_its_said_it(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 5: the check asked `started_at()` per address once a pane's facts
+    answered, though the facts carry the start (`PaneFacts.server_started`), and then the
+    one rule asked it again for each pane that was gone (`server_may_run`), through a
+    `SocketReads` of its own. Read where a pane said it, each server is asked at most once,
+    and here not at all, and a row another server answers for is still told apart."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "this-boot")
+    then = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    project = _seed(tmp_path / "repo")
+    alive = _agent(project.id, "coder-1", "%1")
+    taken = _agent(project.id, "coder-2", "%2").model_copy(
+        update={"boot_id": "this-boot", "server_started_at": then}
+    )
+    _seed(tmp_path / "repo", alive, taken)
+    server = FakeServer(
+        sessions=("asq-amber-otter",),
+        panes={"%1": _facts("%1")},
+        started=then + timedelta(minutes=5),
+        listened="answers",
+    )
+
+    check = diagnostics._check_fleet(lambda socket: server)
+
+    assert "another tmux server answers on the socket" in check.detail
+    assert "may still be running: coder-2" in check.detail and "coder-1" not in check.detail
+    assert server.asked.count("started_at") == 0, server.asked
 
 
 def test_fleet_check_does_not_vouch_for_a_server_that_is_silent_but_not_absent(

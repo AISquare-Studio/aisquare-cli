@@ -14,6 +14,7 @@ from aisquare.core.agent_adapters import DEFAULT_AGENT, adapter_for_binary, get_
 from aisquare.core.agent_adapters.types import AgentAdapter, BadEffortError
 from aisquare.core.config import AppConfig, config_snapshot, load_config, save_config
 from aisquare.core.spawn import LAUNCH_AGENT_ENV as LAUNCH_AGENT_ENV
+from aisquare.core.spawn import LAUNCH_PID_ENV
 from aisquare.core.store import store_session
 
 # Operator preference; launches export their own family under LAUNCH_AGENT_ENV.
@@ -82,6 +83,9 @@ def launch_identity(env: dict[str, str], selected: ResolvedAgent, hub: Path | No
         env["AISQUARE_FLEET_AGENT"] = fleet
     env["AISQUARE_LAUNCH_ID"] = str(uuid.uuid4())
     env[LAUNCH_AGENT_ENV] = selected.adapter.id
+    # The agent is exec'd in this process, so its pid is this one: what tells an agent
+    # that hands its hooks its own pid (Claude Code's CLAUDE_PID) from a child of it.
+    env[LAUNCH_PID_ENV] = str(os.getpid())
     # The agent started here is its own process, not one a tool started: the variable
     # its kind marks its tools' shells with (Codex's CODEX_THREAD_ID), inherited from
     # wherever this runs — a window of a tmux server a Codex tool started — would make

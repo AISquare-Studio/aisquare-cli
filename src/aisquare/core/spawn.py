@@ -143,6 +143,11 @@ TRACING_ENV_VARS = ("ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS")
 
 LAUNCH_AGENT_ENV = "AISQUARE_LAUNCH_AGENT"
 
+#: The pid ``aisquare launch`` ran as, which the agent it execs keeps (POSIX): a hook
+#: whose agent hands it this pid (``AgentCapabilities.pid_env``) is the launch's own
+#: process (``core.agent_sessions.own_process``).
+LAUNCH_PID_ENV = "AISQUARE_LAUNCH_PID"
+
 #: The MARKER half, and the INVENTORY of it: the run key, the role the launch
 #: ran as, and — when the launch owns its Run rather than letting the proxy key
 #: it — the gateway Run key, all exported beside the headers by

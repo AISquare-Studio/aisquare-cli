@@ -2835,6 +2835,48 @@ def test_the_hook_cli_keeps_a_clearing_fleet_agents_claim_in_claude_codes_order(
     assert _task_now(mine.id).claimed_by == "sess-cli-c2"
 
 
+def test_the_agents_own_resume_to_an_earlier_session_takes_its_launch_back(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    """Review r2 of #113, finding 2 (r1 finding 6, for Claude Code): after a ``/clear``
+    to S2, ``/resume S1`` left the launch's binding (the MCP server's identity) on S2,
+    and the MCP server revived S2 and recorded its claims there. The launch's own
+    process is the one whose ``CLAUDE_PID`` is the pid ``aisquare launch`` ran as; a
+    child's resume moves nothing."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    monkeypatch.setenv("AISQUARE_LAUNCH_ID", "launch-claude")
+    monkeypatch.setenv("AISQUARE_LAUNCH_PID", str(PANE_PID))
+
+    def hook(name: str, **payload: object) -> None:
+        body = json.dumps({"cwd": str(project.root), **payload})
+        result = runner.invoke(app, ["hook", name], input=body)
+        assert result.exit_code == 0, result.output
+
+    def launch() -> str | None:
+        with store_session() as store:
+            return store.get_meta("launch-session:launch-claude")
+
+    hook("session-start", session_id=first, source="startup")
+    hook("session-end", session_id=first, reason="clear")
+    hook("session-start", session_id="sess-r2", source="clear")
+    assert launch() == "sess-r2" and _row(agent.id).session_id == "sess-r2"
+    _become(agent, tmux, monkeypatch, pid=CHILD_PID, role="coder")
+    hook("session-start", session_id=first, source="resume")
+    assert launch() == "sess-r2" and _row(agent.id).session_id == "sess-r2", "a child's"
+
+    _become(agent, tmux, monkeypatch, pid=PANE_PID, role="coder")
+    hook("session-start", session_id=first, source="resume")
+
+    assert launch() == first and _row(agent.id).session_id == first
+    with store_session() as store:
+        assert store.get_meta(f"fleet-session:{agent.id}") == first
+
+
 def test_a_child_process_of_the_agent_neither_takes_the_row_nor_the_task(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

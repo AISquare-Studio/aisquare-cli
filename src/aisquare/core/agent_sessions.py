@@ -9,7 +9,8 @@ from datetime import UTC, datetime, timedelta
 from time import time as _now
 from typing import TYPE_CHECKING
 
-from aisquare.core.orchestrator import lease_minutes
+from aisquare.core.orchestrator import env_agent_pid, lease_minutes
+from aisquare.core.spawn import LAUNCH_PID_ENV
 from aisquare.core.store import ContextStore
 from aisquare.models import TeamSession
 
@@ -64,11 +65,21 @@ def own_process(adapter: AgentAdapter) -> bool | None:
     or in one a tool of some agent started (``False``) — for an agent that marks the
     shells its tools run in (``capabilities.tool_shell_env``: Codex's ``CODEX_THREAD_ID``,
     which its own hooks never see and a nested ``codex exec``'s always inherit, measured
-    on 0.162.1). ``None`` for an agent that does not."""
+    on 0.162.1).
+
+    For an agent that hands its hooks its own pid instead (``capabilities.pid_env``:
+    Claude Code's ``CLAUDE_PID``), ``True`` when that pid is the one the launch ran as
+    (:data:`~aisquare.core.spawn.LAUNCH_PID_ENV`), which the agent it execs keeps; any
+    other is ``None``, not ``False``: a nested child's, but also the agent's own behind a
+    wrapper that forks, or where an exec starts a new process. Without it a Claude Code
+    agent's ``/resume`` to an earlier session left the launch on the one it came from
+    (review r2 of #113, finding 2). ``None`` for an agent with neither."""
     variable = adapter.capabilities.tool_shell_env
-    if variable is None:
-        return None
-    return not os.environ.get(variable)
+    if variable is not None:
+        return not os.environ.get(variable)
+    pid = env_agent_pid(adapter.capabilities.pid_env)
+    launch = os.environ.get(LAUNCH_PID_ENV, "").strip()
+    return True if pid is not None and launch.isdigit() and int(launch) == pid else None
 
 
 def bind_launch_session(

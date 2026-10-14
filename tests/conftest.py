@@ -193,6 +193,7 @@ AMBIENT_ENV_VARS = (
     "AISQUARE_CODING_AGENT",
     "AISQUARE_LAUNCH_AGENT",
     "AISQUARE_LAUNCH_ID",
+    "AISQUARE_LAUNCH_PID",
     "AISQUARE_TEAM",
     "AISQUARE_ROLE",
     # Read off the ambient env by `services/mcp_server.py` to attribute remote

@@ -1200,6 +1200,48 @@ def test_spawn_prelude_clears_every_marker_a_previous_paste_exported(
     )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the printed command runs `aisquare launch`, which finds the agent with "
+    "shutil.which and execs it: an sh stub is no program on Windows (tests/fakebin.py)",
+)
+def test_a_launch_hands_the_agent_the_pid_it_runs_as(
+    isolated_home: Path,
+    tmp_path: Path,
+) -> None:
+    """``aisquare launch`` execs the agent in its own process and exports that pid, so a
+    hook whose ``CLAUDE_PID`` is it is the launch's own agent, never a child (review r2
+    of #113, finding 2); one an outer launch exported is replaced."""
+    import subprocess
+
+    from aisquare.core import spawn
+
+    runner, app = _cli()
+    printed = runner.invoke(app, ["--json", "team", "spawn", "coder"])  # type: ignore[arg-type]
+    assert printed.exit_code == 0, printed.output
+    command = json.loads(printed.output)["command"]
+    stub = tmp_path / "claude"
+    stub.write_text(
+        f"#!{sys.executable}\nimport os,json\n"
+        "print(json.dumps({'pid': os.getpid(), 'env': dict(os.environ)}))\n"
+    )
+    stub.chmod(0o755)
+    child = subprocess.run(
+        ["sh", "-c", command],
+        env={
+            **os.environ,
+            spawn.LAUNCH_PID_ENV: "1",
+            "PATH": f"{tmp_path}:{Path(sys.executable).parent}:/usr/bin:/bin",
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert child.returncode == 0, child.stderr
+    ran = json.loads(child.stdout)
+    assert ran["env"][spawn.LAUNCH_PID_ENV] == str(ran["pid"])
+
+
 def test_spawn_printed_command_defers_session_id_to_execution(
     isolated_home: Path,
 ) -> None:

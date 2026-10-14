@@ -352,6 +352,10 @@ class UsageSample(BaseModel):
     session_resets_at: datetime | None = None
     week_percent: float | None = None
     week_resets_at: datetime | None = None
+    token_fingerprint: str | None = None
+    """Which token took the reading: a fingerprint of it (never the token), so the
+    five-minute cache serves a reading only to the login that took it. ``None`` on a
+    reading recorded before it was kept (schema v28)."""
 
 
 class UsageTrend(BaseModel):

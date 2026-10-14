@@ -839,6 +839,13 @@ _SCHEMA_V26 = ""
 # ``name`` column is not it: written once as the basename and never read, it is not
 # repurposed.
 _SCHEMA_V27 = ""
+# v28: which token a usage reading was taken with — a fingerprint of it, never the token.
+# The five-minute cache (``services.claude_accounts.cached_usage``) serves a recorded
+# reading only to the token that took it: a slot signed into another login, or signed
+# out, is asked again rather than shown the last login's figure. The column is the whole
+# step, so the script is empty: it is in :data:`_PRODUCTS`; a row from before it keeps
+# NULL, which the cache serves to no token, and which the trends read as before.
+_SCHEMA_V28 = ""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -868,6 +875,7 @@ _MIGRATIONS = (
     _SCHEMA_V25,
     _SCHEMA_V26,
     _SCHEMA_V27,
+    _SCHEMA_V28,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -917,6 +925,7 @@ _PRODUCTS: dict[int, _Products] = {
     ),
     25: _Products(columns=(("fleet_agent", "server_started_at", "TEXT"),)),
     26: _Products(columns=(("project", "nickname", "TEXT"),)),
+    27: _Products(columns=(("claude_usage", "token_fingerprint", "TEXT"),)),
 }
 
 _PROJECT_COLUMNS = (
@@ -984,7 +993,8 @@ _SESSION_COLUMNS = (
     "transcript_path, account, model, effort, limit_resets_at"
 )
 _USAGE_COLUMNS = (
-    "slot, fetched_at, session_percent, session_resets_at, week_percent, week_resets_at"
+    "slot, fetched_at, session_percent, session_resets_at, week_percent, week_resets_at, "
+    "token_fingerprint"
 )
 #: How long usage readings are kept — long enough for a weekly window's history.
 _USAGE_RETENTION = timedelta(days=7)
@@ -1433,6 +1443,7 @@ def _row_to_usage_sample(row: sqlite3.Row) -> UsageSample:
         session_resets_at=_maybe_dt(row["session_resets_at"]),
         week_percent=row["week_percent"],
         week_resets_at=_maybe_dt(row["week_resets_at"]),
+        token_fingerprint=row["token_fingerprint"],
     )
 
 
@@ -3797,7 +3808,7 @@ class SqliteStore:
     def add_usage_sample(self, sample: UsageSample) -> None:
         """Record one reading and drop this slot's readings older than :data:`_USAGE_RETENTION`."""
         self._conn.execute(
-            f"INSERT INTO claude_usage ({_USAGE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?)",
+            f"INSERT INTO claude_usage ({_USAGE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 sample.slot,
                 sample.fetched_at.isoformat(),
@@ -3805,6 +3816,7 @@ class SqliteStore:
                 sample.session_resets_at.isoformat() if sample.session_resets_at else None,
                 sample.week_percent,
                 sample.week_resets_at.isoformat() if sample.week_resets_at else None,
+                sample.token_fingerprint,
             ),
         )
         self._conn.execute(

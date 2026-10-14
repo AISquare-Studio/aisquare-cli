@@ -860,8 +860,23 @@ def _record_sample(
             session_resets_at=result.session_resets_at,
             week_percent=result.week_percent,
             week_resets_at=result.week_resets_at,
+            token_fingerprint=_token_fingerprint(account),
         )
     )
+
+
+def _token_fingerprint(account: ClaudeAccount, now: datetime | None = None) -> str | None:
+    """Which login a reading belongs to: a fingerprint of the token :func:`usage` would
+    send (never the token), or ``None`` when it would send none — no credentials file, or,
+    given ``now``, a token already expired at ``now``.
+
+    Read when the reading is recorded, a few milliseconds after the fetch sent it: a
+    token swapped in between is a race no surface could act on.
+    """
+    creds = core.credentials(account)
+    if creds is None or (now is not None and creds.expired(now)):
+        return None
+    return hashlib.sha256(creds.access_token.encode()).hexdigest()[:16]
 
 
 def usage_trend(
@@ -1023,43 +1038,49 @@ def read_usage_with_trends(
 # history every recording reader already writes, so it is shared across
 # processes for free: a reading `accounts usage` took two minutes ago serves the
 # page. Only answered readings are recorded there; a fetch that went out and
-# failed (a rejected token, an unreachable endpoint) is remembered in-process,
-# keyed on the token it sent, so a refreshed token is asked at once. A
-# headroom pick and `doctor --live` still read live (`read_usage`): one decides
-# where an agent runs, the other was asked to look now.
+# failed (a rejected token, an unreachable endpoint) is remembered in-process.
+# Both are keyed on the token: a recorded reading is served only to the token
+# that took it (a fingerprint is kept with it, schema v28), so a refreshed token
+# or another login is asked at once, and a slot that would send no token at all
+# (signed out, expired) is told so rather than shown its last figure. Of the two,
+# the NEWER wins: a refresh that found the token rejected is not undone by the
+# success recorded before it. A headroom pick and `doctor --live` still read live
+# (`read_usage`): one decides where an agent runs, the other was asked to look now.
 
 USAGE_MAX_AGE_SECONDS = 300.0
 """How old a recorded reading may be and still be served instead of a fetch: five minutes."""
 
-_UNANSWERED: dict[tuple[str, int], ClaudeUsage] = {}
-"""Fetches that went out and failed, by (config dir, hash of the token sent): see above."""
+_UNANSWERED: dict[tuple[str, str], ClaudeUsage] = {}
+"""Fetches that went out and failed, by (config dir, fingerprint of the token sent): see above."""
 _UNANSWERED_LOCK = threading.Lock()
 
 
-def _attempt_key(account: ClaudeAccount, now: datetime) -> tuple[str, int] | None:
-    """What a failed fetch is remembered by; ``None`` when :func:`usage` would not fetch at all."""
-    creds = core.credentials(account)
-    if creds is None or creds.expired(now):
-        return None
-    return str(account.config_dir), hash(creds.access_token)
-
-
 def _recorded_usage(
-    accounts: Sequence[ClaudeAccount], *, since: datetime, now: datetime
+    accounts: Sequence[ClaudeAccount],
+    tokens: Mapping[int, str],
+    *,
+    since: datetime,
+    now: datetime,
 ) -> dict[int, ClaudeUsage]:
-    """Each account's newest recorded reading taken at or after ``since``, in one store session.
+    """Each account's newest reading recorded at or after ``since`` WITH the token it holds
+    now (``tokens``, by slot), in one store session.
 
-    A reading one of whose windows has reset since is not served: the window
-    it describes is over, and the new one starts near 0 %.
+    A reading another token took is not served: a slot signed into another login
+    since would show the last one's figure. Nor is one of whose windows has reset
+    since: the window it describes is over, and the new one starts near 0 %.
     """
     found: dict[int, ClaudeUsage] = {}
     try:
         with store_session() as store:
             for account in accounts:
-                samples = store.usage_samples(account.slot, since=since)
-                if not samples:
+                token = tokens.get(account.slot)
+                if token is None:
                     continue
-                newest = samples[-1]
+                samples = store.usage_samples(account.slot, since=since)
+                taken = [sample for sample in samples if sample.token_fingerprint == token]
+                if not taken:
+                    continue
+                newest = taken[-1]
                 resets = (newest.session_resets_at, newest.week_resets_at)
                 if any(when is not None and when <= now for when in resets):
                     continue
@@ -1086,40 +1107,57 @@ def cached_usage(
 ) -> dict[int, ClaudeUsage]:
     """Every account's reading, fetched only when the last one is older than ``max_age`` seconds.
 
-    Serves each account's newest reading recorded in ``claude_usage`` when it
-    is younger than ``max_age``; the rest are fetched in ONE concurrent,
-    recording round (:func:`read_usage`). ``force=True`` fetches every account
-    regardless — the page's refresh key. Each reading's ``fetched_at`` says how
-    old it is ("refreshed 3m ago"); a reading that could not be taken carries
-    the moment that was found out, and a failed fetch is not retried before
-    ``max_age`` either, unless the account's token has changed since.
+    Serves each account's newest result younger than ``max_age`` for the token
+    it holds now: a reading recorded in ``claude_usage`` with that token, or a
+    fetch with it that failed (a rejected token, an unreachable endpoint), so a
+    failed fetch is not retried before ``max_age`` either. Whichever of the two
+    is newer wins. The rest are fetched in ONE concurrent, recording round
+    (:func:`read_usage`), and so is an account that holds no token to send —
+    signed out, or expired — which :func:`usage` answers without a request.
+    ``force=True`` fetches every account regardless — the page's refresh key.
+    Each reading's ``fetched_at`` says how old it is ("refreshed 3m ago"); a
+    reading that could not be taken carries the moment that was found out.
     """
     if not accounts:
         return {}
     moment = now or _now()
     since = moment - timedelta(seconds=max_age)
+    tokens = {
+        account.slot: token
+        for account in accounts
+        if (token := _token_fingerprint(account, moment)) is not None
+    }
     readings: dict[int, ClaudeUsage] = {}
     if not force:
-        readings.update(_recorded_usage(accounts, since=since, now=moment))
-        with _UNANSWERED_LOCK:
-            for account in accounts:
-                key = None if account.slot in readings else _attempt_key(account, moment)
-                failed = _UNANSWERED.get(key) if key is not None else None
-                if failed is not None and failed.fetched_at and failed.fetched_at >= since:
-                    readings[account.slot] = failed
+        recorded = _recorded_usage(accounts, tokens, since=since, now=moment)
+        for account in accounts:
+            token = tokens.get(account.slot)
+            if token is None:
+                continue
+            with _UNANSWERED_LOCK:
+                failed = _UNANSWERED.get((str(account.config_dir), token))
+            known = [
+                reading
+                for reading in (recorded.get(account.slot), failed)
+                if reading is not None and reading.fetched_at and reading.fetched_at >= since
+            ]
+            if known:
+                readings[account.slot] = max(known, key=lambda reading: reading.fetched_at or since)
     stale = [account for account in accounts if account.slot not in readings]
     if stale:
         fetched = read_usage(stale, now=now, fetch=fetch)
         for account in stale:
             reading = fetched[account.slot]
-            key = _attempt_key(account, moment)
+            token = tokens.get(account.slot)
             if not reading.available:
                 reading = reading.model_copy(update={"fetched_at": moment})
-            with _UNANSWERED_LOCK:
-                if key is not None and not reading.available:
-                    _UNANSWERED[key] = reading
-                elif key is not None:
-                    _UNANSWERED.pop(key, None)
+            if token is not None:
+                with _UNANSWERED_LOCK:
+                    key = (str(account.config_dir), token)
+                    if reading.available:
+                        _UNANSWERED.pop(key, None)
+                    else:
+                        _UNANSWERED[key] = reading
             readings[account.slot] = reading
     return {account.slot: readings[account.slot] for account in accounts}
 

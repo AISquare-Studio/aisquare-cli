@@ -15,7 +15,7 @@ Three asks from the human, each with the control that would catch it going blind
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +26,7 @@ from aisquare.cli.app import app
 from aisquare.core import claude_accounts as core
 from aisquare.core import harness
 from aisquare.core.store import store_session
-from aisquare.models import ClaudeAccount, ClaudeUsage
+from aisquare.models import ClaudeAccount, ClaudeUsage, UsageSample
 from aisquare.services import claude_accounts as service
 from tests.test_claude_accounts import NOW
 from tests.test_usage_aware_accounts import _payload, _slot, _Usage
@@ -138,6 +138,118 @@ def test_an_expired_token_needs_a_login_and_is_never_sent(fake_home: Path) -> No
     assert not reading.available and reading.needs_login and fetch.calls == []
     not_signed_in = service.usage(core.create_account(), now=NOW, fetch=fetch)
     assert not not_signed_in.available and not not_signed_in.needs_login
+
+
+def _swap_token(account: ClaudeAccount, token: str) -> None:
+    """What a /login into another account, or Claude Code refreshing it, leaves on disk."""
+    creds = core.credentials_path(account)
+    data = json.loads(creds.read_text())
+    data["claudeAiOauth"]["accessToken"] = token
+    creds.write_text(json.dumps(data))
+
+
+def test_a_newer_failure_is_not_masked_by_an_older_success(fake_home: Path) -> None:
+    """A refresh that found the token rejected stays the answer: the success recorded
+    before it is older, and the newest result wins (tester's repro 1, round 1)."""
+    work = _slot("work@example.com", "tok-work")
+    fetch = _Usage({"tok-work": _payload(40)})
+    assert service.cached_usage([work], now=NOW, fetch=fetch)[work.slot].session_percent == 40
+
+    del fetch.by_token["tok-work"]  # now 401
+    refreshed = service.cached_usage(
+        [work], now=NOW + timedelta(minutes=1), force=True, fetch=fetch
+    )
+    assert refreshed[work.slot].needs_login
+
+    served = service.cached_usage([work], now=NOW + timedelta(minutes=2), fetch=fetch)
+    assert len(fetch.calls) == 2, "the failure is served, not re-asked"
+    reading = served[work.slot]
+    assert not reading.available and reading.needs_login
+    assert reading.fetched_at == NOW + timedelta(minutes=1)
+    summary = service.fleet_headroom([work], served)
+    assert (summary.level, summary.needs_login, summary.usable) == ("empty", 1, 0)
+
+    # And the other way round: a success after the failure (the same token, the
+    # endpoint back) is newer than it, and is what is served.
+    fetch.by_token["tok-work"] = _payload(55)
+    service.cached_usage([work], now=NOW + timedelta(minutes=3), force=True, fetch=fetch)
+    again = service.cached_usage([work], now=NOW + timedelta(minutes=4), fetch=fetch)
+    assert again[work.slot].session_percent == 55 and len(fetch.calls) == 3
+
+
+def test_a_signed_out_slot_is_not_shown_its_last_figure(
+    fake_home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """/logout removes the credentials file: the slot sends no token, so nothing it
+    recorded is served, and it says why, as before the cache (tester's repro 2)."""
+    work = _slot("work@example.com", "tok-work")
+    fetch = _Usage({"tok-work": _payload(40)})
+    service.cached_usage([work], now=NOW, fetch=fetch)
+
+    core.credentials_path(work).unlink()
+    reading = service.cached_usage([work], now=NOW + timedelta(minutes=1), fetch=fetch)[work.slot]
+    assert not reading.available and reading.reason == "no credentials file — not signed in"
+    assert fetch.calls == ["tok-work"]  # told without a request
+
+    # The same through the CLI, on the real clock.
+    later = datetime.now(UTC) + timedelta(hours=3)
+    personal = _slot("personal@example.com", "tok-personal")
+    monkeypatch.setattr(
+        service, "_http_get", _Usage({"tok-personal": _payload(40, resets_at=later)})
+    )
+    first = runner.invoke(app, ["--json", "accounts", "usage", str(personal.slot)])
+    assert json.loads(first.stdout)[0]["usage"]["session_percent"] == 40
+    core.credentials_path(personal).unlink()
+    gone = runner.invoke(app, ["--json", "accounts", "usage", str(personal.slot)])
+    [row] = json.loads(gone.stdout)
+    assert row["usage"]["available"] is False and row["signed_in"] is False
+    assert row["usage"]["reason"] == "no credentials file — not signed in"
+
+
+def test_a_reading_is_served_only_to_the_token_that_took_it(fake_home: Path) -> None:
+    """A slot signed into another login inside the window is asked, not shown the last
+    login's figure (tester's round-1 note); back on the first token, its reading serves."""
+    work = _slot("work@example.com", "tok-work")
+    fetch = _Usage({"tok-work": _payload(95), "tok-other": _payload(5)})
+    service.cached_usage([work], now=NOW, fetch=fetch)
+
+    _swap_token(work, "tok-other")
+    other = service.cached_usage([work], now=NOW + timedelta(minutes=1), fetch=fetch)
+    assert fetch.calls == ["tok-work", "tok-other"] and other[work.slot].session_percent == 5
+
+    _swap_token(work, "tok-work")
+    back = service.cached_usage([work], now=NOW + timedelta(minutes=2), fetch=fetch)
+    assert len(fetch.calls) == 2 and back[work.slot].session_percent == 95
+
+
+def test_every_recording_reader_marks_its_token_and_never_stores_it(fake_home: Path) -> None:
+    """A headroom pick's live round (``read_usage``) serves the cache too, and what the
+    store keeps is a fingerprint: the token is nowhere in ``context.db``."""
+    from aisquare.core.paths import db_path
+
+    work = _slot("work@example.com", "tok-work-secret")
+    fetch = _Usage({"tok-work-secret": _payload(40)})
+    service.read_usage([work], now=NOW, fetch=fetch)
+    service.cached_usage([work], now=NOW + timedelta(minutes=1), fetch=fetch)
+    assert len(fetch.calls) == 1
+
+    with store_session() as store:
+        [sample] = store.usage_samples(work.slot, since=NOW - timedelta(days=1))
+    assert sample.token_fingerprint and "tok-work-secret" not in sample.token_fingerprint
+    assert b"tok-work-secret" not in db_path().read_bytes()
+
+
+def test_a_reading_recorded_before_the_fingerprint_was_kept_is_not_served(
+    fake_home: Path,
+) -> None:
+    """A v27 row says nothing of its token, so no token is served it: one fetch after
+    the upgrade, and the trends still read it."""
+    work = _slot("work@example.com", "tok-work")
+    with store_session() as store:
+        store.add_usage_sample(UsageSample(slot=work.slot, fetched_at=NOW, session_percent=12.0))
+    fetch = _Usage({"tok-work": _payload(40)})
+    reading = service.cached_usage([work], now=NOW + timedelta(minutes=1), fetch=fetch)
+    assert fetch.calls == ["tok-work"] and reading[work.slot].session_percent == 40
 
 
 def test_describe_age_is_the_refreshed_line() -> None:

@@ -225,6 +225,54 @@ def test_a_nested_codex_under_the_window_takes_neither_the_row_nor_the_task(
     assert [row.session_id for row in listed if row.id == codex.agent.id] == [first]
 
 
+def test_a_codex_exec_from_a_claude_agents_tool_shell_takes_neither_its_row_nor_its_task(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review r2 of #113, finding 1: a ``codex exec`` a Claude Code agent's Bash tool
+    runs inherits the window's ``AISQUARE_FLEET_AGENT`` and the agent's own
+    ``CLAUDE_PID``, and has no ``CODEX_THREAD_ID`` (only Codex's tools set it), so its
+    hooks read as the pane's own Codex process: it took the Claude row and its claim,
+    and its SessionEnd released the task the Claude agent was still working. A session
+    of another agent than the row's is never the pane's own."""
+    task = _task(project, "the claude coder's task")
+    agent = fleet_service.spawn(
+        project, "coder", agent="claude-code", task_id=task.id, worktree=False
+    ).agent
+    first = agent.session_id
+    assert agent.agent == "claude-code" and first is not None
+    tmux.pids[agent.pane_id] = PANE_PID
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", agent.id)
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    monkeypatch.setenv("CLAUDE_PID", str(PANE_PID))
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(task.id, session_ref=first)
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    home = tmp_path / "codex-home"
+    home.mkdir()
+
+    def hook(event: str, **extra: object) -> str:
+        payload = {
+            "hook_event_name": event,
+            "session_id": "exec-thread",
+            "cwd": str(project.root),
+            "transcript_path": str(home / "sessions" / "rollout-exec-thread.jsonl"),
+            **extra,
+        }
+        return agent_events.handle(CODEX, payload, home)
+
+    child = hook("SessionStart", source="startup", model="gpt-test")
+
+    assert "ASSIGNED TO YOU" not in child
+    assert _row(agent.id).session_id == first and _claimed_by(task.id) == first
+    hook("UserPromptSubmit", prompt="second opinion on this diff", turn_id="turn-1")
+    hook("SessionEnd", reason="other")
+    assert _row(agent.id).session_id == first and _claimed_by(task.id) == first
+
+
 def test_the_agents_own_resume_to_an_earlier_thread_takes_the_row_and_its_launch_back(
     codex_agent: tuple[Codex, TeamTask],
 ) -> None:

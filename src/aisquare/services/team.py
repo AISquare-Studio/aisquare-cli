@@ -28,7 +28,7 @@ from typing import NamedTuple
 
 from aisquare.core import agent_sessions, brain, harness, insights, orchestrator, workspace
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core.agent_adapters import recorded_adapter
+from aisquare.core.agent_adapters import DEFAULT_AGENT, recorded_adapter
 from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.ids import new_event_id, new_task_id
 from aisquare.core.store import AmbiguousIdError, ContextStore, store_session, unmet_needs
@@ -2494,7 +2494,10 @@ def _pane_holds(agent: FleetAgent, session_agent: str | None) -> bool | None:
     the question is put in its terms: its pid, read from the variable it hands its hooks
     (``AgentCapabilities.pid_env``) and compared with the pane's; or, for an agent that
     marks its tools' shells instead (``tool_shell_env``), whether this hook runs under
-    one (``agent_sessions.own_process``).
+    one (``agent_sessions.own_process``). A session of another agent than the row's is
+    never the pane's own: a ``codex exec`` a Claude Code agent's tool runs carries no
+    ``CODEX_THREAD_ID`` and the window's ``AISQUARE_FLEET_AGENT``, and took the row and
+    its claims as Codex's own process (review r2 of #113, finding 1).
 
     ``None`` when it cannot be told: neither (a binary that exports no pid), a tmux
     that does not answer, or a pane that is already gone. Callers treat that as "not
@@ -2506,6 +2509,8 @@ def _pane_holds(agent: FleetAgent, session_agent: str | None) -> bool | None:
     seen; imported here because ``services.fleet`` imports this module the same lazy
     way.
     """
+    if (session_agent or DEFAULT_AGENT) != (agent.agent or DEFAULT_AGENT):
+        return False
     adapter = recorded_adapter(session_agent)
     if adapter is not None and adapter.capabilities.pid_env is None:
         return agent_sessions.own_process(adapter)

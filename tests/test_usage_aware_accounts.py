@@ -973,7 +973,7 @@ def test_headroom_skips_what_it_cannot_read_and_honours_disabled_and_exclude(
 
 
 def test_choose_uses_headroom_only_when_configured_and_falls_back_to_the_default(
-    fake_home: Path, work: ProjectInfo
+    fake_home: Path, work: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _slot("work@example.com", "tok-work")
     _slot("personal@example.com", "tok-personal")
@@ -997,7 +997,10 @@ def test_choose_uses_headroom_only_when_configured_and_falls_back_to_the_default
     settings_service.bind_role("coder", account="2")
     assert service.choose(role="coder", project=work, fetch=fetch).source == "role binding"
 
-    # Nothing readable: the default decides, with the notes saying why.
+    # Nothing readable (a minute on, past what a launch serves): the default decides, with
+    # the notes saying why.
+    later = NOW + timedelta(seconds=service.PICK_MAX_AGE_SECONDS + 1)
+    monkeypatch.setattr(service, "_now", lambda: later)
     offline = service.choose(role="tester", project=work, fetch=_Usage({}))
     assert offline.source == "machine default" and offline.account is not None
     assert offline.account.slot == 2
@@ -1080,6 +1083,41 @@ def test_choose_for_handover_asks_headroom_before_the_binding_and_refuses_when_a
         ).account
         is None
     )
+
+
+def test_a_launch_picks_from_a_reading_a_minute_old_and_a_hand_over_reads_live(
+    fake_home: Path, work: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #261, m1: ``pick = "headroom"`` is the default, and its pick read live, so
+    the sidebar's read then three launches sent four rounds. A launch now picks from the
+    cache, a minute deep; a hand-over still reads every candidate now."""
+    work_slot = _slot("work@example.com", "tok-work")
+    personal = _slot("personal@example.com", "tok-personal")
+    fetch = _Usage({"tok-work": _payload(95), "tok-personal": _payload(10)})
+    _settings(switch_at=85)
+
+    service.cached_usage([work_slot, personal], fetch=fetch)  # the sidebar's read
+    assert len(fetch.calls) == 2
+    for _ in range(3):
+        launched = service.choose(role="tester", project=work, fetch=fetch)
+        assert launched.source == "headroom" and launched.account is not None
+        assert launched.account.slot == personal.slot
+    assert len(fetch.calls) == 2  # three launches, no request
+
+    later = NOW + timedelta(seconds=service.PICK_MAX_AGE_SECONDS + 1)
+    monkeypatch.setattr(service, "_now", lambda: later)
+    service.choose(role="tester", project=work, fetch=fetch)
+    assert len(fetch.calls) == 4  # a minute on: one round, every candidate
+    handed = service.choose_for_handover(role="coder", project=work, exclude=(2,), fetch=fetch)
+    assert handed.account is not None and handed.account.slot == personal.slot
+    assert len(fetch.calls) == 5  # live, though the launch just read it
+
+    # One candidate is the answer whatever it reads: no request at all.
+    service.set_disabled(str(personal.slot), True)
+    alone = service.choose(role="tester", project=work, fetch=_Usage({}))
+    assert alone.account is not None and alone.account.slot == work_slot.slot
+    assert alone.source == "headroom" and alone.notes == []
+    assert len(fetch.calls) == 5
 
 
 def test_a_hand_over_picks_nothing_from_a_registry_it_cannot_read(

@@ -421,7 +421,9 @@ def choose(
     ``spread=True``, which a hand-over passes — the machine default gives way to
     :func:`headroom_choice`, the account with room in both of its windows,
     ``exclude`` naming the slot a hand-over is leaving. When no account's usage
-    can be read, the machine default decides exactly as before.
+    can be read, the machine default decides exactly as before. A launch reads
+    usage through the cache, a minute deep (:data:`PICK_MAX_AGE_SECONDS`); a
+    hand-over (``spread=True``) reads it live.
 
     ``exclude`` is honoured on EVERY rung: a binding or a project default that
     names the account being left is skipped with a note and the ladder goes on,
@@ -489,7 +491,11 @@ def choose(
     by_headroom = spread if spread is not None else settings.pick == "headroom"
     if by_headroom:
         picked, more = headroom_choice(
-            accounts, switch_at=settings.switch_at, exclude=skip, fetch=fetch
+            accounts,
+            switch_at=settings.switch_at,
+            exclude=skip,
+            fetch=fetch,
+            max_age=PICK_MAX_AGE_SECONDS if spread is None else None,
         )
         if spread is None:
             # The default rung since 0.8.2, so every machine walks it: one with no account
@@ -1320,6 +1326,18 @@ def read_fleet_headroom(
 
 _NOTHING_TO_PICK = "headroom: no enabled, signed-in account to pick from"
 
+PICK_MAX_AGE_SECONDS = 60.0
+"""How old a reading a LAUNCH's headroom pick may use (:func:`choose`): one minute.
+
+``pick = "headroom"`` is the default since 0.8.2, so every ``fleet spawn`` and
+``aisquare claude`` walks that rung, and read live it sent one request per account each
+time, a second after the sidebar had read them too (review of #261, m1). A minute is the
+sidebar's own tick, so a burst of spawns, or a spawn beside the sidebar's or the page's
+read, is served by one reading. And a five-hour window moves a point or two a minute
+under the heaviest use, far less than the room under ``switch_at`` a pick looks for;
+the cache's five minutes could start an agent on an account that crossed the line since.
+A hand-over still reads live (:func:`choose_for_handover`)."""
+
 
 def headroom_choice(
     accounts: Sequence[ClaudeAccount],
@@ -1329,6 +1347,7 @@ def headroom_choice(
     fetch: Fetch | None = None,
     now: datetime | None = None,
     least_bad: bool = True,
+    max_age: float | None = None,
 ) -> tuple[ClaudeAccount | None, list[str]]:
     """The account with headroom, and the notes that say how it was picked.
 
@@ -1339,8 +1358,12 @@ def headroom_choice(
 
     Candidates are the enabled, signed-in accounts in priority order, minus
     ``exclude`` (the account a hand-over is leaving). Their usage is read
-    concurrently through :func:`read_usage`, so a pick costs one round trip,
-    not one per account. The rule: the FIRST candidate under ``switch_at``
+    concurrently, so a pick costs one round trip, not one per account: every
+    candidate now (:func:`read_usage`) by default — a hand-over is moving an
+    agent off a full account — or, given ``max_age`` (a launch:
+    :data:`PICK_MAX_AGE_SECONDS`), through :func:`cached_usage`, and then not at
+    all for a single candidate, which is the answer whatever it reads (with
+    ``least_bad``). The rule: the FIRST candidate under ``switch_at``
     percent of the fuller of its two windows (:func:`headroom_percent`: a
     spent week is no room, however empty the five hours read) — priority order
     is the operator's preference, and an account with room keeps it — else the
@@ -1357,7 +1380,12 @@ def headroom_choice(
     ]
     if not candidates:
         return None, [_NOTHING_TO_PICK]
-    readings = read_usage(candidates, now=now, fetch=fetch)
+    if max_age is None:
+        readings = read_usage(candidates, now=now, fetch=fetch)
+    elif len(candidates) == 1 and least_bad:
+        return candidates[0], []
+    else:
+        readings = cached_usage(candidates, max_age=max_age, now=now, fetch=fetch)
     measured: list[tuple[ClaudeAccount, float]] = []
     notes: list[str] = []
     for account in candidates:
@@ -1413,7 +1441,10 @@ def choose_for_handover(
     (no least-bad answer, see :func:`headroom_choice`) and otherwise refuses,
     which leaves the agent parked with Claude Code's own wait intact; a manual
     switch keeps the least-bad answer and, when no usage can be read at all,
-    falls back to the ladder minus the account being left.
+    falls back to the ladder minus the account being left. Either reads every
+    candidate's usage live, never from the cache a launch uses: it is moving an
+    agent off an account that just filled, and a figure even a minute old could
+    send it to another that has filled since.
 
     A registry that cannot be read picks nothing, manual or automatic, and says
     why. Its fallback is the bare directories, where every slot reads as

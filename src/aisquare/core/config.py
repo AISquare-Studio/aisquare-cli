@@ -640,6 +640,12 @@ class AccountsSettings(BaseModel):
     Both defaults were ``default`` and ``wait`` through 0.8.1; a file those builds
     saved keeps either only where it differs from them (``_V1_DEFAULTS``).
 
+    ``share_trust``, on by default, copies a folder's trust into the account a launch
+    runs on when any other account has it, so an agent never waits at Claude Code's
+    "trust this folder?" for a folder the human already said yes to on another login.
+    ``share_settings``, off by default, keeps every managed account's ``settings.json``
+    a link to the plain claude's. Both: ``core.claude_sharing``.
+
     Read from the config file alone, like ``[fleet]``: there is no
     ``AISQUARE_ACCOUNTS_*`` variable, for the same reason that section gives.
     """
@@ -648,6 +654,8 @@ class AccountsSettings(BaseModel):
     switch_at: int = Field(default=85, ge=1, le=100)
     on_limit: Literal["wait", "switch"] = "switch"
     wait_if_reset_within_minutes: int = Field(default=15, ge=0)
+    share_trust: bool = True
+    share_settings: bool = False
 
 
 class AppConfig(BaseModel):

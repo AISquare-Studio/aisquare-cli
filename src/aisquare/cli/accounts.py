@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Annotated, Any, NoReturn
 
 import typer
@@ -27,6 +28,7 @@ from rich.text import Text
 from aisquare.cli.common import expected_config_write_errors, fail, format_reset
 from aisquare.cli.fleet import not_interactive_reason
 from aisquare.core import claude_accounts as core
+from aisquare.core import claude_sharing
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
 from aisquare.models import (
@@ -43,7 +45,7 @@ from aisquare.services import settings as settings_service
 
 app = typer.Typer(
     help="Claude Code accounts this CLI manages: list, add, remove, run, usage, "
-    "default, alias, order, move, disable, enable.",
+    "default, alias, order, move, disable, enable, trust, settings.",
     no_args_is_help=False,
     invoke_without_command=True,
 )
@@ -685,6 +687,199 @@ def remove(slot: SlotRef) -> None:
         console.print(f"  · {note}", markup=False)
 
 
+_TRUST_WORDS = {
+    "trusted": "trusted now",
+    "already": "already trusted",
+    "skipped": "skipped",
+    "failed": "NOT trusted",
+}
+
+
+@app.command("trust")
+def trust(
+    folder: Annotated[
+        Path | None,
+        typer.Argument(
+            help="The folder to trust on every account (default: this one). In a git "
+            "checkout its repository is trusted, as Claude Code's own yes there would.",
+            show_default=False,
+        ),
+    ] = None,
+    sync: Annotated[
+        bool,
+        typer.Option(
+            "--sync",
+            help="Instead: copy every folder any account trusts into every other account.",
+        ),
+    ] = False,
+) -> None:
+    """Trust a folder on every Claude account at once, so no agent stops at the question.
+
+    Claude Code asks "trust this folder?" once per account, and an agent on an account
+    that was never asked waits there for a human. A launch copies the trust from any
+    account that has it (`[accounts] share_trust`); this does it now, for every account.
+    Only the folder's trust entry in each account's .claude.json is written.
+    """
+    if sync and folder is not None:
+        fail("pass a folder, or --sync — not both", error="usage")
+    if sync:
+        changes, gone = accounts_service.sync_trust()
+        _trust_report(changes, None, gone=gone)
+        return
+    target = (folder or Path.cwd()).expanduser()
+    if not target.is_dir():
+        fail(f"{target} is not a folder", error="no_such_folder", ref=str(target))
+    scope, changes = accounts_service.trust_everywhere(target)
+    _trust_report(changes, scope)
+
+
+def _trust_report(
+    changes: list[accounts_service.TrustChange],
+    scope: claude_sharing.TrustScope | None,
+    *,
+    gone: int = 0,
+) -> None:
+    failed = any(change.outcome == "failed" for change in changes)
+    if get_state().json_output:
+        payload: dict[str, Any] = {
+            "accounts": [
+                {
+                    "slot": change.account.slot,
+                    "label": core.label(change.account),
+                    "outcome": change.outcome,
+                    "folders": list(change.folders),
+                    "reason": change.reason,
+                }
+                for change in changes
+            ]
+        }
+        if scope is not None:
+            payload["folder"] = str(scope.folder)
+            payload["trusted_as"] = scope.key
+        else:
+            payload["folders_gone"] = gone
+        typer.echo(json.dumps(payload))
+    else:
+        console = stdout_console()
+        if scope is not None:
+            head = f"{scope.key} on every account"
+            if scope.key != str(scope.folder):
+                head += f" (it covers {scope.folder})"
+        else:
+            head = "every trusted folder on every account"
+        mark, style = ("✗ ", "red") if failed else ("✓ ", "green")
+        console.print(Text.assemble((mark, style), head))
+        for change in changes:
+            words = _TRUST_WORDS[change.outcome]
+            if scope is None and change.outcome == "trusted":
+                words = f"{len(change.folders)} folder(s) trusted now: {', '.join(change.folders)}"
+            line = f"  · {core.label(change.account)}: {words}"
+            if change.reason:
+                line += f" — {change.reason}"
+            console.print(line, markup=False, style="red" if change.outcome == "failed" else None)
+        if gone:
+            console.print(
+                f"  · {gone} trusted folder(s) no longer exist — not copied", markup=False
+            )
+    if failed:
+        raise typer.Exit(1)
+
+
+_SETTINGS_WORDS = {
+    "shared": "shares it now",
+    "already": "shares it",
+    "kept": "keeps its own",
+    "unshared": "has its own copy now",
+    "own": "has its own",
+    "none": "has none",
+    "failed": "FAILED",
+}
+
+
+@app.command("settings")
+def settings(
+    sync: Annotated[
+        bool,
+        typer.Option(
+            "--sync",
+            help="Link every managed account's settings.json to the plain claude's now "
+            "(each one's own is kept beside it as settings.json.own-<stamp>).",
+        ),
+    ] = False,
+    unshare: Annotated[
+        bool,
+        typer.Option(
+            "--unshare",
+            help="Give every linked account its own copy again, as it is now.",
+        ),
+    ] = False,
+) -> None:
+    """One settings.json for every account: the plain claude's, which the others link to.
+
+    Bare, it shows what each managed account's settings.json is. Permissions, hooks,
+    the model and the status line then change once for all; the logins stay apart —
+    .claude.json and .credentials.json are never shared, and a settings.json that sets
+    what decides a login (an API key, a token, a cloud provider) is never shared or
+    replaced. `aisquare config set accounts.share_settings true` relinks at each launch.
+    """
+    if sync and unshare:
+        fail("pass --sync or --unshare — not both", error="usage")
+    refusal: str | None = None
+    try:
+        if sync:
+            source, changes = accounts_service.share_settings()
+        elif unshare:
+            source, changes = accounts_service.unshare_settings()
+        else:
+            source, refusal, changes = accounts_service.settings_overview()
+    except accounts_service.AccountsError as exc:
+        fail(str(exc), error="not_shareable")
+    sharing_on = accounts_service.accounts_settings().share_settings
+    failed = any(change.outcome == "failed" for change in changes)
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "source": str(source),
+                    "share_settings": sharing_on,
+                    "refusal": refusal,
+                    "accounts": [
+                        {
+                            "slot": change.account.slot,
+                            "label": core.label(change.account),
+                            "outcome": change.outcome,
+                            "kept": None if change.backup is None else str(change.backup),
+                            "reason": change.reason,
+                        }
+                        for change in changes
+                    ],
+                }
+            )
+        )
+    else:
+        console = stdout_console()
+        console.print(
+            f"the plain claude's settings.json: {source} · relinked at each launch: "
+            f"{'on' if sharing_on else 'off'}",
+            markup=False,
+        )
+        if refusal is not None:
+            console.print(f"  ⚠ cannot be shared: {refusal}", markup=False, style="yellow")
+        if not changes:
+            console.print(
+                "  · no managed accounts — `aisquare accounts add` makes one", markup=False
+            )
+        for change in changes:
+            line = f"  · {core.label(change.account)} {_SETTINGS_WORDS[change.outcome]}"
+            if change.backup is not None:
+                line += f" (its own kept as {change.backup})"
+            if change.reason:
+                line += f" — {change.reason}"
+            console.print(line, markup=False, style="red" if change.outcome == "failed" else None)
+    if failed:
+        raise typer.Exit(1)
+
+
 def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:
     """Replace this process with Claude Code (indirection so tests can intercept)."""
     os.execve(binary, argv, env)
@@ -710,6 +905,8 @@ def run(ctx: typer.Context, slot: SlotRef) -> None:
     stderr_console().print(
         Text.assemble("Opening claude as ", (core.label(account), "bold"), f" ({who})…"),
     )
+    for note in accounts_service.share_for_launch(account=account):
+        stderr_console().print(f"accounts: {note}", style="dim")
     _exec(found.binary, [found.binary, *ctx.args], accounts_service.session_env(account))
 
 

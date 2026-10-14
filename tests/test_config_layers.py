@@ -228,9 +228,16 @@ def test_config_list_overrides_with_none_still_prints_toml(runner: CliRunner) ->
 
 
 def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> None:
-    """The snapshot is version 1's defaults, frozen. When a default changes later, it
-    changes here — never in ``_V1_DEFAULTS``, which is what 0.8 wrote."""
-    changed = {"accounts": {"pick": "headroom", "on_limit": "switch"}}
+    """The snapshot is version 1's defaults, frozen. When a default changes later, or a
+    setting is added, it changes here — never in ``_V1_DEFAULTS``, which is what 0.8 wrote."""
+    changed = {
+        "accounts": {
+            "pick": "headroom",
+            "on_limit": "switch",
+            "share_trust": True,
+            "share_settings": False,
+        }
+    }
     assert _overlay(_V1_DEFAULTS, changed) == system_defaults()
 
 

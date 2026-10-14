@@ -14,7 +14,9 @@ browser. The UI does that in a tmux window it renders and watches; the
 terminal command does it as a foreground child and looks afterwards. Either
 way the login "landed" when the directory holds what a signed-in Claude Code
 writes there — :func:`sign_in_landed` — and nothing here ever writes those
-files.
+files. What the accounts SHARE is the exception, and touches no login: a
+folder's trust entry in ``.claude.json``, and (opt-in) ``settings.json`` as a
+link to the plain claude's (:func:`share_for_launch`, ``core.claude_sharing``).
 
 **Usage is best effort, on purpose.** The percentages come from the endpoint
 Claude Code's own ``/usage`` reads (:data:`USAGE_URL`), called with the access
@@ -31,6 +33,7 @@ import contextlib
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import signal
 import sqlite3
@@ -45,6 +48,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from aisquare.core import claude_accounts as core
+from aisquare.core import claude_sharing as sharing
 from aisquare.core import paths
 from aisquare.core.config import AccountsSettings, load_config
 from aisquare.core.spawn import untraced_env
@@ -1909,3 +1913,296 @@ def run_session(
         if on_main_thread:
             signal.signal(signal.SIGINT, previous)
     return int(completed.returncode)
+
+
+# --- what the accounts share: folder trust and settings.json (core.claude_sharing) --------
+
+
+@dataclass(frozen=True)
+class TrustChange:
+    """What sharing folder trust did to one account's ``.claude.json``."""
+
+    account: ClaudeAccount
+    outcome: Literal["trusted", "already", "skipped", "failed"]
+    """``trusted``: entries were written (:attr:`folders`); ``already``: nothing was
+    missing; ``skipped``: Claude Code never started there; ``failed``: :attr:`reason`."""
+    folders: tuple[str, ...] = ()
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class SettingsChange:
+    """What sharing ``settings.json`` did to one managed account, or what it holds."""
+
+    account: ClaudeAccount
+    outcome: Literal["shared", "already", "kept", "unshared", "own", "none", "failed"]
+    """``shared``: linked now; ``already``: was linked; ``kept``: left as its own, for
+    :attr:`reason`; ``unshared``: its link became its own copy; ``own`` / ``none``: what
+    it holds, untouched; ``failed``: :attr:`reason`."""
+    backup: Path | None = None
+    """The copy of its own settings.json a link replaced, beside it."""
+    reason: str | None = None
+
+
+def share_for_launch(
+    folder: Path | None = None,
+    *,
+    account: ClaudeAccount | None = None,
+    env: Mapping[str, str] | None = None,
+) -> list[str]:
+    """Share into the account a launch in ``folder`` runs on what ``[accounts]`` says to.
+
+    Right before ``aisquare launch`` replaces itself with the agent, and before ``fleet
+    spawn`` opens its window (so the receipt carries the note). The account is ``account``
+    when the launch chose one, else the one whose ``.claude.json`` the launch's ``env``
+    leads Claude Code to (default: this process's), and nothing is done for a directory
+    that is no account of ours. ``folder`` defaults to the working directory.
+
+    - ``share_trust``: when no entry trusts the folder there and another account's does,
+      that entry is copied (:func:`core.claude_sharing.grant_trust`). Trust nobody gave is
+      never written: Claude Code asks, and ``fleet ls`` says the agent waits for it.
+    - ``share_settings``: a managed account's ``settings.json`` becomes a link to the plain
+      claude's, its own kept beside it (:func:`share_settings`).
+
+    The notes say what changed, or why it could not; a launch is never refused for it.
+    """
+    try:
+        knobs = accounts_settings()
+        if not (knobs.share_trust or knobs.share_settings):
+            return []
+        accounts = list_accounts()
+        target = (
+            next((one for one in accounts if one.slot == account.slot), account)
+            if account is not None
+            else _account_of_env(os.environ if env is None else env, accounts)
+        )
+        if target is None:
+            return []
+        notes: list[str] = []
+        if knobs.share_trust:
+            notes += _share_trust_into(target, Path.cwd() if folder is None else folder, accounts)
+        if knobs.share_settings and target.managed:
+            notes += _share_settings_into(target)
+        return notes
+    except Exception as exc:  # an observer of the launch: it costs the sharing, never the launch
+        return [f"nothing was shared into this launch's account ({exc})"]
+
+
+def _account_of_env(
+    env: Mapping[str, str], accounts: Sequence[ClaudeAccount]
+) -> ClaudeAccount | None:
+    """The account whose ``.claude.json`` a Claude Code started with ``env`` reads, if ours."""
+    config = env.get(core.CONFIG_DIR_VAR, "").strip()
+    wanted = (
+        paths.expand_user(Path(config)) / ".claude.json"
+        if config
+        else core.home_config_dir().with_name(".claude.json")
+    )
+    return next((one for one in accounts if _same_path(core.claude_json_path(one), wanted)), None)
+
+
+def _same_path(a: Path, b: Path) -> bool:
+    return os.path.realpath(a) == os.path.realpath(b)
+
+
+def _share_trust_into(
+    target: ClaudeAccount, folder: Path, accounts: Sequence[ClaudeAccount]
+) -> list[str]:
+    """Copy the entry that trusts ``folder`` into ``target`` from the first account with one."""
+    scope = sharing.trust_scope(folder)
+    name = core.label(target)
+    try:
+        own = sharing.read_claude_json(core.claude_json_path(target))
+    except sharing.NotStartedYet:
+        return []  # its first run asks for a login before any folder
+    except sharing.SharingError as exc:
+        return [_trust_not_shared(name, scope, exc)]
+    if sharing.trusted_by(own, scope) is not None:
+        return []
+    for other in accounts:
+        if other.slot == target.slot:
+            continue
+        try:
+            key = sharing.trusted_by(sharing.read_claude_json(core.claude_json_path(other)), scope)
+        except sharing.SharingError:
+            continue
+        if key is None:
+            continue
+        try:
+            sharing.grant_trust(core.claude_json_path(target), key)
+        except sharing.SharingError as exc:
+            return [_trust_not_shared(name, scope, exc)]
+        return [f"{key} is trusted on {core.label(other)} — now on {name} too"]
+    return []
+
+
+def _trust_not_shared(name: str, scope: sharing.TrustScope, exc: Exception) -> str:
+    return (
+        f"folder trust could not be shared into {name}: {exc} — approve Claude Code's "
+        f"question there once, or `aisquare accounts trust {shlex.quote(str(scope.folder))}`"
+    )
+
+
+def trust_everywhere(folder: Path) -> tuple[sharing.TrustScope, list[TrustChange]]:
+    """Trust ``folder`` on every account at once — ``aisquare accounts trust <dir>``.
+
+    The entry written is the one Claude Code's own yes there would write (the canonical
+    repository root, else the folder: :attr:`~core.claude_sharing.TrustScope.key`). An
+    account any entry already trusts it on is left as it is. The human's own command, so
+    ``[accounts] share_trust`` is not consulted.
+    """
+    scope = sharing.trust_scope(folder)
+    changes: list[TrustChange] = []
+    for account in list_accounts():
+        path = core.claude_json_path(account)
+        try:
+            if sharing.trusted_by(sharing.read_claude_json(path), scope) is not None:
+                changes.append(TrustChange(account, "already"))
+                continue
+            written = sharing.grant_trust(path, scope.key)
+        except sharing.NotStartedYet as exc:
+            changes.append(TrustChange(account, "skipped", reason=str(exc)))
+            continue
+        except sharing.SharingError as exc:
+            changes.append(TrustChange(account, "failed", reason=str(exc)))
+            continue
+        changes.append(TrustChange(account, "trusted", folders=tuple(written)))
+    return scope, changes
+
+
+def sync_trust() -> tuple[list[TrustChange], int]:
+    """Copy every folder any account trusts into every account — ``accounts trust --sync``.
+
+    Folders that no longer exist are not copied; their count comes back beside the
+    changes. An account that another entry already trusts a folder on is not given its
+    entry too. One write per account.
+    """
+    accounts = list_accounts()
+    read: dict[int, dict[str, Any] | sharing.SharingError] = {}
+    every: dict[str, None] = {}
+    for account in accounts:
+        try:
+            data = sharing.read_claude_json(core.claude_json_path(account))
+        except sharing.SharingError as exc:
+            read[account.slot] = exc
+            continue
+        read[account.slot] = data
+        every.update(dict.fromkeys(sharing.trusted_folders(data)))
+    folders = [key for key in every if os.path.isdir(key)]
+    scopes = [(key, sharing.trust_scope(Path(key))) for key in folders]
+    changes: list[TrustChange] = []
+    for account in accounts:
+        found = read[account.slot]
+        if isinstance(found, sharing.SharingError):
+            outcome: Literal["skipped", "failed"] = (
+                "skipped" if isinstance(found, sharing.NotStartedYet) else "failed"
+            )
+            changes.append(TrustChange(account, outcome, reason=str(found)))
+            continue
+        missing = [key for key, scope in scopes if sharing.trusted_by(found, scope) is None]
+        if not missing:
+            changes.append(TrustChange(account, "already"))
+            continue
+        try:
+            written = sharing.grant_trust(core.claude_json_path(account), *missing)
+        except sharing.SharingError as exc:
+            changes.append(TrustChange(account, "failed", reason=str(exc)))
+            continue
+        changes.append(TrustChange(account, "trusted", folders=tuple(written)))
+    return changes, len(every) - len(folders)
+
+
+def settings_source() -> Path:
+    """The ``settings.json`` every managed account shares: the plain claude's."""
+    return sharing.settings_path(core.default_account())
+
+
+def settings_refusal(source: Path | None = None) -> str | None:
+    """Why the plain claude's ``settings.json`` cannot be the shared one, or ``None``."""
+    source = settings_source() if source is None else source
+    if not os.path.isfile(source):
+        return f"the plain claude has no settings.json yet ({source})"
+    try:
+        login = sharing.login_keys(
+            sharing.read_settings(source, "the plain claude's settings.json")
+        )
+    except sharing.SharingError as exc:
+        return str(exc)
+    if login:
+        return (
+            f"the plain claude's settings.json sets {', '.join(login)}, which decide a "
+            "login — shared, every account would sign in as one"
+        )
+    return None
+
+
+def settings_overview() -> tuple[Path, str | None, list[SettingsChange]]:
+    """The shared file, why it cannot be shared (if so), and what each managed account holds."""
+    source = settings_source()
+    held = [
+        SettingsChange(account, sharing.settings_state(account, source))
+        for account in list_accounts()
+        if account.managed
+    ]
+    return source, settings_refusal(source), held
+
+
+def share_settings(*, now: datetime | None = None) -> tuple[Path, list[SettingsChange]]:
+    """Link every managed account's ``settings.json`` to the plain claude's —
+    ``aisquare accounts settings --sync``. :class:`AccountsError` when that file cannot be
+    the shared one (:func:`settings_refusal`)."""
+    source = settings_source()
+    refusal = settings_refusal(source)
+    if refusal is not None:
+        raise AccountsError(refusal)
+    moment = now or _now()
+    return source, [_link_settings(one, source, moment) for one in list_accounts() if one.managed]
+
+
+def _link_settings(account: ClaudeAccount, source: Path, now: datetime) -> SettingsChange:
+    if sharing.settings_state(account, source) == "shared":
+        return SettingsChange(account, "already")
+    try:
+        backup = sharing.link_settings(account, source, now=now)
+    except sharing.SharingError as exc:
+        return SettingsChange(account, "kept", reason=str(exc))
+    except OSError as exc:
+        return SettingsChange(account, "failed", reason=exc.strerror or str(exc))
+    return SettingsChange(account, "shared", backup=backup)
+
+
+def _share_settings_into(target: ClaudeAccount) -> list[str]:
+    """``share_settings`` at a launch: link ``target``'s, saying why not when it cannot."""
+    source = settings_source()
+    if sharing.settings_state(target, source) == "shared":
+        return []
+    name = core.label(target)
+    refusal = settings_refusal(source)
+    if refusal is not None:
+        return [f"settings.json is not shared into {name}: {refusal}"]
+    change = _link_settings(target, source, _now())
+    if change.outcome == "shared":
+        kept = f" (its own kept as {change.backup.name})" if change.backup is not None else ""
+        return [f"{name} now reads the plain claude's settings.json{kept}"]
+    return [f"settings.json is not shared into {name}: {change.reason}"]
+
+
+def unshare_settings() -> tuple[Path, list[SettingsChange]]:
+    """Give every linked managed account its own copy again — ``accounts settings --unshare``.
+
+    Each keeps the settings it has now; none follows the plain claude's any more. With
+    ``[accounts] share_settings`` still on, the next launch links it again.
+    """
+    source = settings_source()
+    changes: list[SettingsChange] = []
+    for account in list_accounts():
+        if not account.managed:
+            continue
+        try:
+            unlinked = sharing.unlink_settings(account, source)
+        except OSError as exc:
+            changes.append(SettingsChange(account, "failed", reason=exc.strerror or str(exc)))
+            continue
+        state = sharing.settings_state(account, source)
+        changes.append(SettingsChange(account, "unshared" if unlinked else state))
+    return source, changes

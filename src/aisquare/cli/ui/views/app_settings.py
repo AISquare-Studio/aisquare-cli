@@ -2,10 +2,11 @@
 
 Everything ``~/.aisquare/config.toml`` holds that is not about one project:
 permission mode, worktree and account per role, the fleet's escape key, agent
-cap, worktree root and native-teams switch, and how launches pick an account
-and what a usage limit does. The project's own Settings tab keeps what IS the
-project's (its nickname). Written through ``core.config.save_config`` — the one
-writer, which keeps only what differs from the system defaults — and re-read
+cap, worktree root and native-teams switch, how launches pick an account,
+what a usage limit does and what the accounts share. The project's own
+Settings tab keeps what IS the project's (its nickname). Written through
+``core.config.save_config`` — the one writer, which keeps only what differs
+from the system defaults — and re-read
 after every save so the form shows what the file holds. Precedence: a per-spawn
 flag beats this file beats the system default; no value here is read from the
 environment.
@@ -91,6 +92,12 @@ _INPUTS = (
 _SELECTS = ("accounts-pick", "accounts-on-limit")
 """The form's fields beside the per-role rows, by id: what :meth:`AppSettingsView._changed`
 compares with what they showed when the form was read."""
+_ACCOUNT_SWITCHES = {
+    "accounts-share-trust": "share_trust",
+    "accounts-share-settings": "share_settings",
+}
+"""``[accounts]``'s two switches, by id → field: what the accounts share
+(``core.claude_sharing``)."""
 
 
 def role_order(fleet: FleetSettings) -> list[str]:
@@ -195,7 +202,9 @@ class AppSettingsView(VerticalScroll):
     AppSettingsView #settings-note { color: $text-muted; margin-top: 1; height: auto; }
     """
     ROLE_SECTION: ClassVar[str] = "roles — permission mode, worktree and account per role"
-    ACCOUNTS_SECTION: ClassVar[str] = "accounts — how launches pick one; what a usage limit does"
+    ACCOUNTS_SECTION: ClassVar[str] = (
+        "accounts — how launches pick one; what a usage limit does; what they share"
+    )
 
     def __init__(self, *, id: str | None = None) -> None:
         super().__init__(id=id)
@@ -348,6 +357,12 @@ class AppSettingsView(VerticalScroll):
                 type="integer",
                 id="accounts-wait-minutes",
             )
+        with Horizontal(classes="row"):
+            yield Label("share folder trust")
+            yield Switch(self.accounts.share_trust, id="accounts-share-trust")
+        with Horizontal(classes="row"):
+            yield Label("share settings.json")
+            yield Switch(self.accounts.share_settings, id="accounts-share-settings")
         with Horizontal(id="settings-buttons", classes="row"):
             yield Button("Save", id="save-settings", variant="primary")
             yield Button("Reload", id="reload-settings")
@@ -385,6 +400,8 @@ class AppSettingsView(VerticalScroll):
         for wid in _SELECTS:
             values[wid] = self.query_one(f"#{wid}", Select).value
         values["native-teams"] = self.query_one("#native-teams", Switch).value
+        for wid in _ACCOUNT_SWITCHES:
+            values[wid] = self.query_one(f"#{wid}", Switch).value
         return values
 
     def _changed(self) -> set[str]:
@@ -417,6 +434,8 @@ class AppSettingsView(VerticalScroll):
         self.query_one("#accounts-wait-minutes", Input).value = str(
             self.accounts.wait_if_reset_within_minutes
         )
+        for wid, key in _ACCOUNT_SWITCHES.items():
+            self.query_one(f"#{wid}", Switch).value = getattr(self.accounts, key)
         for role in self._roles:
             settings = self.fleet.roles.get(role, FleetRoleSettings())
             suffix = widget_suffix(role)
@@ -497,6 +516,9 @@ class AppSettingsView(VerticalScroll):
             value = self.query_one(f"#{wid}", Select).value
             if wid in changed and isinstance(value, str):
                 update[key] = value
+        for wid, key in _ACCOUNT_SWITCHES.items():
+            if wid in changed:
+                update[key] = self.query_one(f"#{wid}", Switch).value
         return current.model_copy(update=update)
 
     def _apply_account_bindings(self, config: AppConfig) -> None:

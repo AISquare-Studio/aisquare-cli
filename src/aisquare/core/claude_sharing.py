@@ -1,0 +1,409 @@
+"""What several Claude Code accounts share: the folders the human trusted, and one settings.json.
+
+Every account is its own ``CLAUDE_CONFIG_DIR`` (``core.claude_accounts``), and Claude Code
+keeps two things there that the human means for every account at once.
+
+**Folder trust.** The first time Claude Code starts in a folder it asks "Quick safety
+check: Is this a project you created or one you trust?", and a yes is recorded in THAT
+account's ``.claude.json`` as ``projects["<folder>"].hasTrustDialogAccepted``. A yes on
+account 2 is nothing to account 3, whose agent then sits at the question until a human
+answers it — and the highlighted answer is "No, exit", so the first prompt the fleet types
+there ends the agent. ``.claude.json`` cannot be shared to fix that: the login
+(``oauthAccount``, ``userID``) is in the same file. So the entry that covers a folder is
+COPIED from the account that has it (:func:`grant_trust`), and nothing else is touched.
+
+Measured with Claude Code 2.1.299 in a scratch ``CLAUDE_CONFIG_DIR`` (2026-10-14):
+
+- the key is a REAL path: an entry under a symlinked spelling does not count, and a folder
+  reached through a link is looked up by its resolved path;
+- a yes in a git checkout records the CANONICAL repository root — the main checkout's, from
+  a worktree as from a sub-folder — and a yes outside git records the folder itself;
+- a folder in a repository is trusted by the canonical root's entry or by one on any folder
+  from it up to its own git top level; outside git, by one on it or any ancestor. A folder
+  ABOVE a repository's top level does not cover the repository (:func:`trust_scope`);
+- ``{"hasTrustDialogAccepted": true}`` alone is an entry Claude Code honours;
+- Claude Code saves the file under a ``<file>.lock`` directory (``proper-lockfile``),
+  re-reading it under that lock, and replaces it by rename THROUGH a symlink — so an entry
+  another process writes under the same lock survives the running session's next save.
+
+**settings.json** (permissions, hooks, model, status line) holds no login, and Claude Code
+writes it through a symlink and keeps the link (measured: ``/model`` on a linked file), as
+``agents connect`` does (``core.agents``). So the managed accounts can share the plain
+claude's by linking theirs to it (:func:`link_settings`) — opt-in, and never where either
+file carries what decides a login (:func:`login_keys`): shared, that would sign every
+account in as one.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import os
+import re
+import shutil
+import time
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Literal
+
+from aisquare.core import atomic
+from aisquare.models import ClaudeAccount
+
+TRUST_KEY = "hasTrustDialogAccepted"
+
+LOCK_STALE_SECONDS = 10.0
+"""When Claude Code's ``<file>.lock`` is a dead process's: ``proper-lockfile``'s default,
+which its config saves use (a live holder refreshes the lock every 5 s)."""
+LOCK_WAIT_SECONDS = 2.0
+"""How long :func:`grant_trust` waits for a live holder; a save holds it for milliseconds."""
+_LOCK_POLL = 0.05
+
+_sleep: Callable[[float], None] = time.sleep
+_monotonic: Callable[[], float] = time.monotonic
+
+
+class SharingError(Exception):
+    """Why an account's file was left as it was, in words for a launch note."""
+
+
+class NotStartedYet(SharingError):
+    """The account has no ``.claude.json``: Claude Code never started there, so there is
+    no file to add to — and creating one is Claude Code's first run, not ours."""
+
+
+# --- folder trust ---------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TrustScope:
+    """Which ``projects`` entries decide whether Claude Code asks in :attr:`folder`."""
+
+    folder: Path
+    """The folder as Claude Code sees it: resolved."""
+    key: str
+    """What a yes to the question there records: the canonical repository root, else the
+    folder. ``accounts trust`` writes this one."""
+    covering: tuple[str, ...]
+    """Every entry that trusts the folder, :attr:`key` first: then the folder and its
+    parents up to its git top level, or up to ``/`` outside git."""
+
+
+def trust_scope(folder: Path) -> TrustScope:
+    """The entries that trust ``folder`` for Claude Code (the module docstring's rules)."""
+    real = Path(os.path.realpath(folder))
+    top = _git_top(real)
+    if top is None:
+        return TrustScope(real, str(real), tuple(str(p) for p in (real, *real.parents)))
+    canonical = _canonical_root(top)
+    walk = [real, *(parent for parent in real.parents if parent.is_relative_to(top))]
+    covering = dict.fromkeys([str(canonical), *(str(p) for p in walk)])
+    return TrustScope(real, str(canonical), tuple(covering))
+
+
+def _git_top(folder: Path) -> Path | None:
+    """The nearest folder from ``folder`` up holding ``.git`` — a directory in a checkout,
+    a file in a worktree or a submodule — or ``None`` outside git."""
+    for candidate in (folder, *folder.parents):
+        if os.path.lexists(candidate / ".git"):
+            return candidate
+    return None
+
+
+def _canonical_root(top: Path) -> Path:
+    """The main checkout of the repository ``top`` is the top level of.
+
+    ``top`` itself for a checkout; for a worktree, the folder holding the ``.git`` its
+    ``gitdir``'s ``commondir`` names (``git worktree add`` writes both). A ``.git`` file
+    with no ``commondir`` behind it is a submodule's, its own repository's root.
+    """
+    marker = top / ".git"
+    if not marker.is_file():
+        return top
+    try:
+        line = marker.read_text(encoding="utf-8").strip()
+        if not line.startswith("gitdir:"):
+            return top
+        gitdir = top / line.removeprefix("gitdir:").strip()  # an absolute gitdir wins the join
+        common = (gitdir / "commondir").read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return top
+    shared = Path(os.path.realpath(gitdir / common))
+    return shared.parent if shared.name == ".git" else shared
+
+
+def trusted_by(data: Mapping[str, Any] | None, scope: TrustScope) -> str | None:
+    """The entry of a parsed ``.claude.json`` that trusts ``scope``'s folder, or ``None``."""
+    projects = data.get("projects") if data is not None else None
+    if not isinstance(projects, dict):
+        return None
+    for key in scope.covering:
+        entry = projects.get(key)
+        if isinstance(entry, dict) and entry.get(TRUST_KEY) is True:
+            return key
+    return None
+
+
+def trusted_folders(data: Mapping[str, Any]) -> list[str]:
+    """Every entry of a parsed ``.claude.json`` that records a yes, in the file's order."""
+    projects = data.get("projects")
+    if not isinstance(projects, dict):
+        return []
+    return [
+        key
+        for key, entry in projects.items()
+        if isinstance(key, str) and isinstance(entry, dict) and entry.get(TRUST_KEY) is True
+    ]
+
+
+def read_claude_json(path: Path) -> dict[str, Any]:
+    """The ``.claude.json`` at ``path``, parsed — or :class:`SharingError` saying why not."""
+    return _parse(_read(path), "its .claude.json")
+
+
+def _read(path: Path) -> bytes:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        raise NotStartedYet("Claude Code has never started there (no .claude.json)") from None
+    except OSError as exc:
+        raise SharingError(f"its .claude.json cannot be read ({exc.strerror or exc})") from exc
+
+
+def _parse(raw: bytes, what: str) -> dict[str, Any]:
+    try:
+        data: Any = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise SharingError(f"{what} is not valid JSON") from None
+    if not isinstance(data, dict):
+        raise SharingError(f"{what} is not a JSON object")
+    return data
+
+
+def grant_trust(path: Path, *keys: str) -> list[str]:
+    """Record a yes for each of ``keys`` in the ``.claude.json`` at ``path``; those written.
+
+    A key whose entry already says yes is left out. Only ``projects[key].hasTrustDialogAccepted``
+    changes: the file is read under Claude Code's own lock (:func:`_config_lock`), those
+    values set, and the rest written back the way Claude Code writes it — two-space JSON,
+    no newline at the end — so every other key keeps its bytes. One write, replaced by
+    rename, through a symlink as Claude Code replaces it. A file that is missing,
+    unreadable or not a JSON object is left as it is, with :class:`SharingError` saying
+    why: never created here, and never overwritten with what this could make of it.
+    """
+    with _config_lock(path):
+        target = Path(os.path.realpath(path))
+        raw = _read(target)
+        data = _parse(raw, "its .claude.json")
+        projects = data.setdefault("projects", {})
+        if not isinstance(projects, dict):
+            raise SharingError("its .claude.json has a 'projects' that is not an object")
+        written: list[str] = []
+        for key in dict.fromkeys(keys):
+            entry = projects.get(key)
+            if entry is None:
+                projects[key] = {TRUST_KEY: True}
+            elif not isinstance(entry, dict):
+                raise SharingError(f"its .claude.json has an entry for {key} that is not an object")
+            elif entry.get(TRUST_KEY) is True:
+                continue
+            else:
+                entry[TRUST_KEY] = True
+            written.append(key)
+        if not written:
+            return []
+        body = json.dumps(data, indent=2, ensure_ascii=False)
+        if raw.endswith(b"\n"):  # hand-edited: kept as found
+            body += "\n"
+        try:
+            atomic.write_replacing(target, body.encode("utf-8"))
+        except (OSError, UnicodeError) as exc:
+            raise SharingError(f"its .claude.json could not be written ({exc})") from exc
+    return written
+
+
+@contextlib.contextmanager
+def _config_lock(path: Path) -> Iterator[None]:
+    """Claude Code's own lock on its config: the directory ``<path>.lock`` (``proper-lockfile``).
+
+    Taken as Claude Code takes it, so a session saving at the same moment waits for this
+    write and then re-reads the file with the entry in it, rather than both writing what
+    each read. A lock older than :data:`LOCK_STALE_SECONDS` is a dead process's and is
+    taken over, as ``proper-lockfile`` does; a live one is waited for, up to
+    :data:`LOCK_WAIT_SECONDS`.
+    """
+    lock = path.with_name(path.name + ".lock")
+    deadline = _monotonic() + LOCK_WAIT_SECONDS
+    while True:
+        try:
+            os.mkdir(lock)
+            break
+        except FileExistsError:
+            if _stale(lock) and _removed(lock):
+                continue
+            if _monotonic() >= deadline:
+                raise SharingError(
+                    "a running Claude Code held its .claude.json lock past "
+                    f"{LOCK_WAIT_SECONDS:.0f} s"
+                ) from None
+            _sleep(_LOCK_POLL)
+        except OSError as exc:
+            raise SharingError(
+                f"its .claude.json cannot be locked ({exc.strerror or exc})"
+            ) from exc
+    try:
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            os.rmdir(lock)
+
+
+def _stale(lock: Path) -> bool:
+    try:
+        return time.time() - lock.stat().st_mtime > LOCK_STALE_SECONDS
+    except OSError:  # released meanwhile, or not ours to ask: not a dead holder's
+        return False
+
+
+def _removed(lock: Path) -> bool:
+    """Take a dead holder's lock away; whether it is gone (it may not be empty, or ours)."""
+    try:
+        os.rmdir(lock)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+# --- the question on screen -------------------------------------------------------------
+
+_SCREEN_ESCAPES = re.compile(
+    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|$)"  # OSC: the dialog's "Security guide" is a link
+    r"|\x1b\[[0-?]*[ -/]*[@-~]"  # CSI, SGR included
+)
+_TRUST_QUESTION = re.compile(r"\btrust (?:this folder|the files in this folder)\b", re.IGNORECASE)
+_TRUST_EXIT = re.compile(r"\bNo, exit\b")
+
+
+def shows_trust_prompt(lines: Iterable[str]) -> bool:
+    """Whether a captured screen is Claude Code's folder-trust question.
+
+    2.1.299 draws "Yes, I trust this folder" under a highlighted "No, exit"; the 1.x
+    builds asked "Do you trust the files in this folder?" over the same "No, exit". Both
+    phrases must be on the screen, so an agent that merely writes about trust is not
+    taken for the dialog. A Claude Code string, not a contract: pinned by a test with
+    the captured screen.
+    """
+    text = " ".join(" ".join(_SCREEN_ESCAPES.sub("", line).split()) for line in lines)
+    return bool(_TRUST_QUESTION.search(text) and _TRUST_EXIT.search(text))
+
+
+# --- one settings.json ------------------------------------------------------------------
+
+SETTINGS_FILE = "settings.json"
+
+LOGIN_SETTINGS = (
+    "apiKeyHelper",
+    "forceLoginMethod",
+    "forceLoginOrgUUID",
+    "awsAuthRefresh",
+    "awsCredentialExport",
+)
+"""Top-level settings that decide which login or credentials a session uses."""
+
+LOGIN_ENV = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CONFIG_DIR",
+    "CLAUDE_CODE_TMPDIR",
+)
+"""Variables a settings file's ``env`` may set that replace the account's own login (a key,
+a token, a cloud provider) or the account itself (the two variables an account IS)."""
+
+SettingsState = Literal["shared", "own", "none"]
+
+
+def settings_path(account: ClaudeAccount) -> Path:
+    return account.config_dir / SETTINGS_FILE
+
+
+def login_keys(data: Mapping[str, Any]) -> list[str]:
+    """The settings in a parsed settings file that decide a login, as ``env.X`` or ``key``."""
+    found = [key for key in LOGIN_SETTINGS if key in data]
+    env = data.get("env")
+    if isinstance(env, dict):
+        found += [f"env.{name}" for name in LOGIN_ENV if name in env]
+    return found
+
+
+def read_settings(path: Path, what: str) -> dict[str, Any]:
+    """The settings file at ``path`` parsed — :class:`SharingError` naming it as ``what``."""
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise SharingError(f"{what} cannot be read ({exc.strerror or exc})") from exc
+    return _parse(raw, what)
+
+
+def settings_state(account: ClaudeAccount, source: Path) -> SettingsState:
+    """``shared`` when the account's settings.json is a link to ``source``, ``own`` when it is
+    any other file or link, ``none`` when it has none."""
+    path = settings_path(account)
+    if os.path.islink(path) and os.path.realpath(path) == os.path.realpath(source):
+        return "shared"
+    return "own" if os.path.lexists(path) else "none"
+
+
+def link_settings(account: ClaudeAccount, source: Path, *, now: datetime) -> Path | None:
+    """Make ``account``'s settings.json a link to ``source``; the copy of its own it kept.
+
+    The account's own file is copied beside it first, as ``settings.json.own-<UTC stamp>``,
+    then the link is renamed over it in one step: a session starting meanwhile reads the
+    old file or the shared one, never none. Refused (:class:`SharingError`) when its own
+    file sets what decides its login (:func:`login_keys`), since the link would drop it.
+    An own file that is not JSON is copied and replaced: Claude Code reads nothing from it.
+    ``None`` when there was nothing to keep. The caller checks ``source`` itself.
+    """
+    target = settings_path(account)
+    backup: Path | None = None
+    if os.path.isfile(target):
+        try:
+            own: dict[str, Any] | None = read_settings(target, "its own settings.json")
+        except SharingError:
+            own = None
+        login = login_keys(own) if own is not None else []
+        if login:
+            raise SharingError(
+                f"its own settings.json sets {', '.join(login)}, which decide its login"
+            )
+        backup = target.with_name(f"{SETTINGS_FILE}.own-{now:%Y%m%dT%H%M%SZ}")
+        shutil.copy2(target, backup)
+    temporary = target.with_name(f".{SETTINGS_FILE}.link-{os.getpid()}")
+    with contextlib.suppress(FileNotFoundError):
+        temporary.unlink()
+    os.symlink(source, temporary)
+    try:
+        os.replace(temporary, target)
+    except OSError:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+        raise
+    return backup
+
+
+def unlink_settings(account: ClaudeAccount, source: Path) -> bool:
+    """Give ``account`` its own copy of the shared settings.json again; whether it had a link.
+
+    The link is replaced by a file holding what the shared one holds now, so the account
+    keeps the same settings and stops following the plain claude's.
+    """
+    if settings_state(account, source) != "shared":
+        return False
+    atomic.write_replacing(settings_path(account), Path(source).read_bytes())
+    return True

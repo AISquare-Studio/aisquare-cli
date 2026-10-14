@@ -46,7 +46,9 @@ first time someone moved a directory by hand.
 organisation, ids) and ``.credentials.json`` (the OAuth tokens) are read to
 describe an account; nothing here writes either. Claude Code refreshes its own
 tokens — a token found expired is reported as such, never refreshed, because a
-second writer racing the agent for that file is how a login gets corrupted.
+second writer racing the agent for that file is how a login gets corrupted. The
+one write into ``.claude.json`` is ``core.claude_sharing``'s: a folder's trust,
+copied from another account under Claude Code's own lock, and nothing else.
 
 This is not the "accounts" cut that ``core.config.RoleLaunchProfile`` records
 deleting. That one expanded a bare name into the OPERATOR's directory layout —

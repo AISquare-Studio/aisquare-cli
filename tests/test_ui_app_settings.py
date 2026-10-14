@@ -17,7 +17,7 @@ import pytest
 from textual.app import App, ComposeResult
 from textual.notifications import SeverityLevel
 from textual.pilot import Pilot
-from textual.widgets import Button, Input, Select, Static
+from textual.widgets import Button, Input, Select, Static, Switch
 
 from aisquare.cli.ui.views.app_settings import AppSettingsView, ConfirmReset
 from aisquare.core import paths
@@ -335,6 +335,36 @@ def test_settings_saves_the_accounts_section_and_rejects_a_bad_line() -> None:
     assert shown_pick == "default"  # the form opened on what the file holds
     assert any("between 1 and 100" in m and sev == "error" for m, sev in notices), notices
     assert load_config().accounts.switch_at == 70  # a refused form never reaches the writer
+
+
+def test_settings_switches_what_the_accounts_share() -> None:
+    """``share_trust`` (on by default) and ``share_settings`` (off) are two switches in the
+    accounts section; Save writes the one changed and nothing else."""
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> tuple[bool, bool]:
+        await pilot.pause()
+        shown = (
+            host.query_one("#accounts-share-trust", Switch).value,
+            host.query_one("#accounts-share-settings", Switch).value,
+        )
+        host.query_one("#accounts-share-trust", Switch).value = False
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+        return shown
+
+    assert drive(scenario) == (True, False)  # the defaults
+    assert _config_toml()["accounts"] == {"share_trust": False}
+    assert load_config().accounts.share_trust is False
+
+    async def reopened(pilot: Pilot[None], host: AppHost) -> bool:
+        await pilot.pause()
+        host.query_one("#accounts-share-settings", Switch).value = True
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+        return host.query_one("#accounts-share-trust", Switch).value
+
+    assert drive(reopened) is False  # the form opened on what the file holds
+    assert _config_toml()["accounts"] == {"share_trust": False, "share_settings": True}
 
 
 def test_reset_all_asks_first_then_keeps_a_backup_and_shows_the_defaults() -> None:

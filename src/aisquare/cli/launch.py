@@ -324,6 +324,11 @@ def launch(
         stderr_console().print(f"accounts: {note}", style="dim")
     if choice.account is not None:
         claude_accounts_core.apply_launch_env(env, choice.account, shell=os.environ)
+    # The folder's trust from whichever account has it, so the agent does not stop at
+    # Claude Code's "trust this folder?" — whose highlighted answer is "No, exit" — for
+    # a folder the human already said yes to on another login (`[accounts] share_trust`).
+    for note in claude_accounts_service.share_for_launch(account=choice.account, env=env):
+        stderr_console().print(f"accounts: {note}", style="dim")
     carried = sorted({*profile.env, *profile.file_env})
     whose = f" ({','.join(carried)})" if carried else ""
     if choice.account is not None:

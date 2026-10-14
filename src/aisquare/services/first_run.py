@@ -624,14 +624,15 @@ def _probe_agent(
 
 def _agent_version(adapter: AgentAdapter, binary: str) -> str | None:
     """The version the install's layout names (as the Accounts page reads it), else what
-    ``<binary> --version`` prints, bounded; ``None`` when neither answers."""
+    the binary prints for the adapter's ``version_args`` (``--version``), bounded; ``None``
+    when neither answers."""
     try:
         found = accounts_service.install(adapter.id)
         if found.version and found.binary == binary:
             return found.version
     except Exception:
         pass
-    return agent_core.hook_binary_version([binary, "--version"], timeout=5.0)
+    return agent_core.hook_binary_version([binary, *adapter.version_args], timeout=5.0)
 
 
 def _manager_account(agent: str, cwd: Path | None) -> ClaudeAccount:

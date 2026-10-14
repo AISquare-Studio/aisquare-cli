@@ -22,7 +22,12 @@ value here is the ACCOUNT per role (#145): the select beside each role writes
 --account`` writes — the middle rung of the account ladder a launch walks
 (``--account`` > role binding > project default > machine default).
 
-Not on any navigation yet: the Settings hub routes to ``AppSettingsView(id="app-settings")``.
+Save writes only the fields changed on the form since it was read: the file as it is
+then holds the rest, a ``config set`` or ``config reset`` made from a shell meanwhile
+included.
+
+Reached from *⚙ Settings ▸ App settings*: the Settings hub opens
+``AppSettingsView(id="app-settings")``.
 """
 
 from __future__ import annotations
@@ -76,6 +81,16 @@ ON_LIMIT_MODES: tuple[tuple[str, str], ...] = (
 _ID_SAFE = re.compile(r"[^A-Za-z0-9_-]")
 ACCOUNTS_WORKER = "app-settings-accounts"
 """The worker that reads the slots the account selects offer."""
+_INPUTS = (
+    "escape-key",
+    "max-agents",
+    "worktree-dir",
+    "accounts-switch-at",
+    "accounts-wait-minutes",
+)
+_SELECTS = ("accounts-pick", "accounts-on-limit")
+"""The form's fields beside the per-role rows, by id: what :meth:`AppSettingsView._changed`
+compares with what they showed when the form was read."""
 
 
 def role_order(fleet: FleetSettings) -> list[str]:
@@ -191,6 +206,8 @@ class AppSettingsView(VerticalScroll):
         self._account_bindings: dict[str, str] = settings_service.role_account_bindings(config)
         self._accounts: list[ClaudeAccount] = []
         """The slots the account selects offer — filled by :meth:`_load_accounts`'s worker."""
+        self._shown: dict[str, object] = {}
+        """What each field showed when the form was (re)read: Save writes only what differs."""
 
     @staticmethod
     def _read_config() -> AppConfig:
@@ -349,7 +366,36 @@ class AppSettingsView(VerticalScroll):
         )
 
     def on_mount(self) -> None:
+        self._shown = self._field_values()
         self._load_accounts()
+
+    def _field_values(self) -> dict[str, object]:
+        """Every field's value by its id — not the account selects, which keep their own
+        record of what they were read with (``_account_bindings``)."""
+        values: dict[str, object] = {}
+        for role in self._roles:
+            suffix = widget_suffix(role)
+            try:
+                values[f"perm-{suffix}"] = self.query_one(f"#perm-{suffix}", Select).value
+                values[f"worktree-{suffix}"] = self.query_one(f"#worktree-{suffix}", Switch).value
+            except Exception:  # a role bound since this form was composed; shown after a reopen
+                continue
+        for wid in _INPUTS:
+            values[wid] = self.query_one(f"#{wid}", Input).value
+        for wid in _SELECTS:
+            values[wid] = self.query_one(f"#{wid}", Select).value
+        values["native-teams"] = self.query_one("#native-teams", Switch).value
+        return values
+
+    def _changed(self) -> set[str]:
+        """The ids of the fields the operator changed since the form was (re)read.
+
+        Save applies these and nothing else to the file as it is NOW. Applying the whole
+        form, a form left open undid what a shell wrote meanwhile: a ``config set``, or
+        a ``config reset`` whose every value came back from the form (review of #261, m7).
+        """
+        now = self._field_values()
+        return {wid for wid, value in now.items() if value != self._shown.get(wid, value)}
 
     # --- reading -----------------------------------------------------------------------
 
@@ -386,70 +432,72 @@ class AppSettingsView(VerticalScroll):
             bound = self._account_bindings.get(role)
             account.set_options(account_options(self._accounts, bound))
             account.value = bound or NO_ACCOUNT
+        self._shown = self._field_values()
         self._load_accounts()  # the slots as they are now, off the UI thread
 
     # --- writing -----------------------------------------------------------------------
 
-    def _form_fleet(self, current: FleetSettings) -> FleetSettings | str:
-        """``current`` with the form's values applied — or the reason the form is not valid."""
-        raw = self.query_one("#max-agents", Input).value.strip()
-        try:
-            max_agents = int(raw)
-        except ValueError:
-            return f"max agents per project must be a whole number, not {raw!r}"
-        if max_agents < 1:
-            return "max agents per project must be at least 1"
+    def _form_fleet(self, current: FleetSettings, changed: set[str]) -> FleetSettings | str:
+        """``current`` with the form's ``changed`` fields applied — or why they are not valid."""
+        update: dict[str, object] = {}
+        if "max-agents" in changed:
+            raw = self.query_one("#max-agents", Input).value.strip()
+            try:
+                max_agents = int(raw)
+            except ValueError:
+                return f"max agents per project must be a whole number, not {raw!r}"
+            if max_agents < 1:
+                return "max agents per project must be at least 1"
+            update["max_agents_per_project"] = max_agents
         roles = dict(current.roles)
         for role in self._roles:
             suffix = widget_suffix(role)
+            role_update: dict[str, object] = {}
             value = self.query_one(f"#perm-{suffix}", Select).value
-            mode = (
-                value
-                if isinstance(value, str)
-                else current.roles.get(role, FleetRoleSettings()).permission_mode
-            )
-            existing = current.roles.get(role, FleetRoleSettings())
-            roles[role] = existing.model_copy(
-                update={
-                    "permission_mode": mode,
-                    "worktree": self.query_one(f"#worktree-{suffix}", Switch).value,
-                }
-            )
-        return current.model_copy(
-            update={
-                "roles": roles,
-                "escape_key": self.query_one("#escape-key", Input).value.strip()
-                or DEFAULT_ESCAPE_KEY,
-                "max_agents_per_project": max_agents,
-                "worktree_dir": self.query_one("#worktree-dir", Input).value.strip()
-                or DEFAULT_WORKTREE_DIR,
-                "disable_native_agent_teams": self.query_one("#native-teams", Switch).value,
-            }
-        )
+            if f"perm-{suffix}" in changed and isinstance(value, str):
+                role_update["permission_mode"] = value
+            if f"worktree-{suffix}" in changed:
+                role_update["worktree"] = self.query_one(f"#worktree-{suffix}", Switch).value
+            if role_update:
+                existing = current.roles.get(role, FleetRoleSettings())
+                roles[role] = existing.model_copy(update=role_update)
+        update["roles"] = roles
+        if "escape-key" in changed:
+            escape = self.query_one("#escape-key", Input).value.strip()
+            update["escape_key"] = escape or DEFAULT_ESCAPE_KEY
+        if "worktree-dir" in changed:
+            root = self.query_one("#worktree-dir", Input).value.strip()
+            update["worktree_dir"] = root or DEFAULT_WORKTREE_DIR
+        if "native-teams" in changed:
+            update["disable_native_agent_teams"] = self.query_one("#native-teams", Switch).value
+        return current.model_copy(update=update)
 
-    def _form_accounts(self, current: AccountsSettings) -> AccountsSettings | str:
-        """``current`` with the ``[accounts]`` form applied — or why the form is not valid."""
-        raw_switch = self.query_one("#accounts-switch-at", Input).value.strip()
-        raw_wait = self.query_one("#accounts-wait-minutes", Input).value.strip()
+    def _form_accounts(
+        self, current: AccountsSettings, changed: set[str]
+    ) -> AccountsSettings | str:
+        """``current`` with the ``[accounts]`` fields ``changed`` applied — or why they are not
+        valid."""
+        switch_at, wait_minutes = current.switch_at, current.wait_if_reset_within_minutes
         try:
-            switch_at = int(raw_switch)
-            wait_minutes = int(raw_wait)
+            if "accounts-switch-at" in changed:
+                switch_at = int(self.query_one("#accounts-switch-at", Input).value.strip())
+            if "accounts-wait-minutes" in changed:
+                wait_minutes = int(self.query_one("#accounts-wait-minutes", Input).value.strip())
         except ValueError:
             return "switch at and wait-if-reset-within must be whole numbers"
         if not 1 <= switch_at <= 100:
             return "switch at must be between 1 and 100 (a percentage of a usage window)"
         if wait_minutes < 0:
             return "wait if reset within cannot be negative"
-        pick = self.query_one("#accounts-pick", Select).value
-        on_limit = self.query_one("#accounts-on-limit", Select).value
-        return current.model_copy(
-            update={
-                "pick": pick if isinstance(pick, str) else current.pick,
-                "switch_at": switch_at,
-                "on_limit": on_limit if isinstance(on_limit, str) else current.on_limit,
-                "wait_if_reset_within_minutes": wait_minutes,
-            }
-        )
+        update: dict[str, object] = {
+            "switch_at": switch_at,
+            "wait_if_reset_within_minutes": wait_minutes,
+        }
+        for wid, key in (("accounts-pick", "pick"), ("accounts-on-limit", "on_limit")):
+            value = self.query_one(f"#{wid}", Select).value
+            if wid in changed and isinstance(value, str):
+                update[key] = value
+        return current.model_copy(update=update)
 
     def _apply_account_bindings(self, config: AppConfig) -> None:
         """Fold the account selects the operator CHANGED into ``config.team.profiles``.
@@ -499,13 +547,14 @@ class AppSettingsView(VerticalScroll):
                 markup=False,
             )
             return
-        result = self._form_fleet(config.fleet)
+        changed = self._changed()
+        result = self._form_fleet(config.fleet, changed)
         if isinstance(result, str):
             self.notify(result, severity="error", timeout=6, markup=False)
             return
         config.fleet = result
         self._apply_account_bindings(config)
-        accounts = self._form_accounts(config.accounts)
+        accounts = self._form_accounts(config.accounts, changed)
         if isinstance(accounts, str):
             self.notify(accounts, severity="error", timeout=6, markup=False)
             return
@@ -543,7 +592,7 @@ class AppSettingsView(VerticalScroll):
         self.reload_form()
         if backup is None:
             self.notify(
-                "every setting was at its default already — there was no file to move",
+                "nothing to reset: every setting was at its default already",
                 timeout=5,
                 markup=False,
             )

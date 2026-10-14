@@ -21,8 +21,9 @@ from textual.widgets import Button, Input, Select, Static
 
 from aisquare.cli.ui.views.app_settings import AppSettingsView, ConfirmReset
 from aisquare.core import paths
-from aisquare.core.config import load_config, save_config
+from aisquare.core.config import AppConfig, load_config, overrides, save_config
 from aisquare.services import fleet as fleet_service
+from aisquare.services import settings as settings_service
 from tests.ui_workers import settle_page
 
 T = TypeVar("T")
@@ -99,9 +100,9 @@ def test_settings_saves_a_changed_permission_mode_to_config_toml() -> None:
     fleet_on_disk = _config_toml()["fleet"]
     on_disk = fleet_on_disk["roles"]
     assert on_disk["coder"]["permission_mode"] == "plan"  # the bytes, not the widget
-    assert "worktree" not in on_disk["coder"]  # at its default, which the file does not repeat
+    assert on_disk["coder"]["worktree"] is True  # the role's table whole, for older builds
     assert load_config().fleet.roles["coder"].worktree is True  # untouched fields survive
-    assert "manager" not in on_disk  # only the changed role changed
+    assert on_disk["manager"] == {"permission_mode": "auto", "worktree": False, "extra_args": []}
     assert fleet_on_disk["worktree_dir"] == ".fleet-trees"  # the worktree root (§4.2)
     assert "escape_key" not in fleet_on_disk  # an untouched fleet field keeps its default
     assert load_config().fleet.escape_key == "f12"
@@ -392,3 +393,59 @@ def test_reset_all_with_nothing_changed_says_so() -> None:
     notices = drive(scenario)
     assert any("at its default already" in m for m, _ in notices), notices
     assert not list(paths.config_path().parent.glob("config.toml.bak-*"))
+
+
+def test_reset_all_of_a_file_holding_no_setting_keeps_no_backup() -> None:
+    """A save of the defaults leaves a file (its version, the role tables): Reset all of it
+    backed it up and said "yours are kept" (review of #261, m8)."""
+    save_config(load_config())
+    assert paths.config_path().exists()
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> list[tuple[str, str]]:
+        host.query_one("#reset-settings", Button).press()
+        await settle(pilot)
+        host.screen.query_one("#reset-confirm", Button).press()
+        await settle(pilot)
+        return host.notices
+
+    notices = drive(scenario)
+    assert any(m.startswith("nothing to reset") for m, _ in notices), notices
+    assert not list(paths.config_path().parent.glob("config.toml.bak-*"))
+
+
+def test_a_form_left_open_saves_only_what_was_changed_on_it() -> None:
+    """The reviewer's repro (review of #261, m7): the file holds ``escape_key = "f11"`` and
+    ``switch_at = 70`` when App settings opens. From a shell, ``config set accounts.pick
+    default``; Save with max agents changed keeps it. Then ``config reset``; Save with max
+    agents changed again keeps the reset: the form wrote back every field it showed, and
+    undid both."""
+    config = load_config()
+    config.fleet.escape_key = "f11"
+    config.accounts.switch_at = 70
+    save_config(config)
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> dict[str, object]:
+        seen: dict[str, object] = {}
+        settings_service.set_value("accounts.pick", "default")  # a shell, while it is open
+        host.query_one("#max-agents", Input).value = "5"
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+        seen["set"] = load_config()
+        settings_service.reset_settings()  # a shell again: the form still shows f11, 70
+        host.query_one("#max-agents", Input).value = "6"
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+        seen["reset"] = load_config()
+        seen["form"] = host.query_one("#escape-key", Input).value
+        return seen
+
+    seen = drive(scenario)
+    kept = seen["set"]
+    assert isinstance(kept, AppConfig)
+    assert kept.accounts.pick == "default", "the shell's config set stands"
+    assert (kept.fleet.escape_key, kept.accounts.switch_at) == ("f11", 70)
+    assert kept.fleet.max_agents_per_project == 5
+    after = seen["reset"]
+    assert isinstance(after, AppConfig)
+    assert overrides(after) == {"fleet": {"max_agents_per_project": 6}}, "the reset stands"
+    assert seen["form"] == "f12", "after Save the form shows what the file holds"

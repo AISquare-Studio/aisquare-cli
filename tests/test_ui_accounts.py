@@ -81,6 +81,11 @@ T = TypeVar("T")
 SIZE = (140, 40)
 PRIVATE_SOCKET = f"asq-test-{os.getpid()}-ui-accounts"
 NOW = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
+#: How long a scripted read or write holds before it lets go on its own, and how long a test
+#: waits for an event it is owed. Every test lets its holds go and is owed only what comes, so
+#: only a run already gone wrong waits it out. Generous, as a short one is a race with the
+#: runner: on windows-latest a 5 s hold ran out while a test was still typing.
+HOLD_S = 60.0
 
 
 # --- fixtures and helpers --------------------------------------------------------------------
@@ -484,7 +489,7 @@ def test_the_shells_tick_reads_the_accounts_off_the_ui_thread_and_paints_the_ans
         threads.append(threading.current_thread().name)
         if hold.is_set():
             asked.set()
-            release.wait(10)
+            release.wait(HOLD_S)
         return frames[0]
 
     async def run() -> tuple[int | None, bool, int | None, int | None]:
@@ -496,7 +501,7 @@ def test_the_shells_tick_reads_the_accounts_off_the_ui_thread_and_paints_the_ans
             frames.pop(0)
             try:
                 app.refresh_data()  # the two-second tick, with the registry held
-                held = await asyncio.to_thread(asked.wait, 5)
+                held = await asyncio.to_thread(asked.wait, HOLD_S)
                 await pilot.pause()
                 while_held = _claude_count(app)
             finally:
@@ -541,7 +546,7 @@ def test_ticks_while_the_accounts_read_waits_let_it_answer_and_read_once_more_af
         try:
             if n:
                 asked[n].set()
-                gates[n].wait(10)  # as a writer holds the lock
+                gates[n].wait(HOLD_S)  # as a writer holds the lock
             emails = ["me@example.com", *(f"{i}@example.com" for i in range(2, n + 2))]
             return _overview(*(_status(i, email) for i, email in enumerate(emails, 1)))
         finally:
@@ -555,14 +560,14 @@ def test_ticks_while_the_accounts_read_waits_let_it_answer_and_read_once_more_af
             hold.set()
             try:
                 app.refresh_data()  # a tick: the first held read waits on the registry
-                assert await asyncio.to_thread(asked[1].wait, 5), "the tick asked"
+                assert await asyncio.to_thread(asked[1].wait, HOLD_S), "the tick asked"
                 app.refresh_data()  # two more ticks while it waits
                 app.refresh_data()
                 await pilot.pause()
                 while_held = _claude_count(app)
                 gates[1].set()  # the writer lets go
                 # The read the ticks were owed starts once the first one's answer is painted.
-                assert await asyncio.to_thread(asked[2].wait, 5), "a read after the wait"
+                assert await asyncio.to_thread(asked[2].wait, HOLD_S), "a read after the wait"
                 await pilot.pause()
                 answered = _claude_count(app)
                 gates[2].set()
@@ -602,7 +607,7 @@ def test_a_tick_the_app_handles_before_a_reads_answer_still_lets_that_answer_pai
             held.append(len(held) + 1)
             n = held[-1]
             asked[n].set()
-            gates[n].wait(10)  # as a writer holds the lock
+            gates[n].wait(HOLD_S)  # as a writer holds the lock
         emails = ["me@example.com", *(f"{i}@example.com" for i in range(2, n + 2))]
         return _overview(*(_status(i, email) for i, email in enumerate(emails, 1)))
 
@@ -613,7 +618,7 @@ def test_a_tick_the_app_handles_before_a_reads_answer_still_lets_that_answer_pai
             hold.set()
             try:
                 app.refresh_data()  # a tick: the first held read waits on the registry
-                assert await asyncio.to_thread(asked[1].wait, 5), "the tick asked"
+                assert await asyncio.to_thread(asked[1].wait, HOLD_S), "the tick asked"
                 [first] = [
                     w for w in app.workers if w.group == ACCOUNTS_WORKER and not w.is_finished
                 ]
@@ -627,7 +632,7 @@ def test_a_tick_the_app_handles_before_a_reads_answer_still_lets_that_answer_pai
                     app.refresh_data()
 
                 app.call_later(tick_ahead_of_the_answer)
-                assert await asyncio.to_thread(asked[2].wait, 5), "the tick read again"
+                assert await asyncio.to_thread(asked[2].wait, HOLD_S), "the tick read again"
                 await pilot.pause()
                 answered = _claude_count(app)
                 gates[2].set()
@@ -775,14 +780,16 @@ def test_a_page_on_screen_before_its_first_frame_reads_the_usage_when_the_frame_
 
     def reader() -> AccountsOverview:
         asked.set()
-        release.wait(10)  # as a writer holds the registry's lock
+        release.wait(HOLD_S)  # as a writer holds the registry's lock
         return overview
 
     async def run() -> tuple[bool, list[int], str]:
         app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=reader)
         async with app.run_test(size=SIZE):
             try:
-                assert await asyncio.to_thread(asked.wait, 5), "the shell asked for the accounts"
+                assert await asyncio.to_thread(asked.wait, HOLD_S), (
+                    "the shell asked for the accounts"
+                )
                 app.post_message(AccountsSelected())  # what a click on the section posts
                 # Only the usage group is waited for: the held read is the point.
                 await settle_until(
@@ -856,7 +863,7 @@ def test_a_page_shown_before_its_first_frame_reads_the_usage_when_the_frame_land
     release = threading.Event()
 
     def reader() -> AccountsOverview:
-        release.wait(10)
+        release.wait(HOLD_S)
         return _overview(_status(1, "me@example.com"), _status(2, "two@example.com"))
 
     async def run() -> tuple[list[int], list[int], str]:
@@ -1243,11 +1250,11 @@ def test_quitting_mid_sign_in_cancels_the_device_flow(
         await pilot.click("#aisquare-sign-in")
         # The quit must land while the wait runs. The press reaches the page as a message
         # and the flow is a thread, so the wait's own start is what this waits for, bounded.
-        assert await asyncio.to_thread(waiting.wait, 5), "the sign-in never reached its wait"
+        assert await asyncio.to_thread(waiting.wait, HOLD_S), "the sign-in never reached its wait"
 
     drive(go)  # the app exits here: the view unmounts while the wait is in flight
 
-    assert released.wait(5), "the wait never noticed the page had gone"
+    assert released.wait(HOLD_S), "the wait never noticed the page had gone"
     assert observed["cancelled"] is True
     assert seen == []  # complete_sign_in never ran: nothing was stored
 
@@ -1813,7 +1820,7 @@ def test_two_quick_arrange_clicks_write_in_turn_and_both_report(
             inside.append(name)
             if hold:
                 first_in.set()
-                release.wait(timeout=5)
+                release.wait(timeout=HOLD_S)
             inside.remove(name)
 
         return run
@@ -1830,7 +1837,7 @@ def test_two_quick_arrange_clicks_write_in_turn_and_both_report(
 
         monkeypatch.setattr(view, "_notice", spy)
         view.arrange_accounts(write("first", hold=True), done="✓ slot 3 moved up once")
-        assert await asyncio.to_thread(first_in.wait, 5)  # the first write is under way…
+        assert await asyncio.to_thread(first_in.wait, HOLD_S)  # the first write is under way…
         view.arrange_accounts(write("second", hold=False), done="✓ slot 3 moved up twice")
         await asyncio.sleep(0.2)  # …and the second click's thread has had its chance to start
         release.set()
@@ -1893,12 +1900,12 @@ class HeldReads:
             gate = threading.Event()
             self.made.append(gate)
             self.gates.put(gate)
-            gate.wait(timeout=10)
+            gate.wait(timeout=HOLD_S)
         return frame
 
     async def next_held(self) -> threading.Event:
-        """The gate of the next read to start holding (``queue.Empty`` after 5 s)."""
-        return await asyncio.to_thread(self.gates.get, True, 5)
+        """The gate of the next read to start holding (``queue.Empty`` after :data:`HOLD_S`)."""
+        return await asyncio.to_thread(self.gates.get, True, HOLD_S)
 
     def open_all(self) -> None:
         self.holding = False
@@ -1953,7 +1960,7 @@ def slow_set_alias(monkeypatch: pytest.MonkeyPatch) -> tuple[threading.Event, th
 
     def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
         entered.set()
-        release.wait(timeout=5)
+        release.wait(timeout=HOLD_S)
         return real_set_alias(ref, alias)
 
     monkeypatch.setattr(accounts_service, "set_alias", set_alias)
@@ -2176,7 +2183,7 @@ def test_a_write_that_lands_after_the_user_moved_away_leaves_the_focus_where_the
         try:
             await rename(pilot, 2)
             await pilot.press(*"work", "enter")
-            assert await asyncio.to_thread(entered.wait, 5)  # the write is under way…
+            assert await asyncio.to_thread(entered.wait, HOLD_S)  # the write is under way…
             app.sidebar.focus()  # …and the user goes to the sidebar before it lands
             await pilot.pause()
             moved = app.focused is app.sidebar
@@ -2210,7 +2217,7 @@ def test_text_typed_while_the_write_waits_is_kept_as_the_next_name(
         try:
             await rename(pilot, 2)
             await pilot.press(*"work", "enter")
-            assert await asyncio.to_thread(entered.wait, 5)
+            assert await asyncio.to_thread(entered.wait, HOLD_S)
             await pilot.press("s")  # typed while the first write waits
         finally:
             release.set()
@@ -2251,7 +2258,7 @@ def test_rename_reopened_while_a_write_is_on_its_way_shows_that_name_and_enter_k
         try:
             await rename(pilot, 2)
             await pilot.press(*"work", "enter")
-            assert await asyncio.to_thread(entered.wait, 5)  # the write is on its way…
+            assert await asyncio.to_thread(entered.wait, HOLD_S)  # the write is on its way…
             await pilot.press("escape")
             await rename(pilot, 2)  # …and Rename is opened again before it lands
             await pilot.pause()
@@ -2436,8 +2443,10 @@ def test_a_rename_waits_its_turn_behind_an_arrange_write_still_running(
         # ended by itself on windows-latest while the name was still being typed, and the
         # rename wrote behind it before the test looked (CI run 38571988017). The bound only
         # keeps a broken test from hanging, and says so.
-        let_go = release.wait(timeout=60)
-        order.append(f"default {ref}: end" if let_go else f"default {ref}: gave up after 60 s")
+        let_go = release.wait(timeout=HOLD_S)
+        order.append(
+            f"default {ref}: end" if let_go else f"default {ref}: gave up after {HOLD_S:.0f} s"
+        )
 
     def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
         order.append(f"alias {ref} {alias}")
@@ -2455,10 +2464,12 @@ def test_a_rename_waits_its_turn_behind_an_arrange_write_still_running(
         monkeypatch.setattr(view, "_arranging", spy)
         try:
             await press(pilot, "#account-default-2")
-            assert await asyncio.to_thread(default_in.wait, 5)  # Default is writing…
+            assert await asyncio.to_thread(default_in.wait, HOLD_S)  # Default is writing…
             await rename(pilot, 2)
             await pilot.press(*"work", "enter")
-            asked = await asyncio.to_thread(spy.second.wait, 5)  # …and the rename asks for the lock
+            asked = await asyncio.to_thread(
+                spy.second.wait, HOLD_S
+            )  # …and the rename asks for the lock
             waiting = list(order)
         finally:
             release.set()
@@ -2549,7 +2560,7 @@ def test_escape_while_a_write_is_on_its_way_does_not_say_nothing_changed(
         try:
             await rename(pilot, 2)
             await pilot.press(*"work", "enter")
-            assert await asyncio.to_thread(entered.wait, 5)  # the write is on its way…
+            assert await asyncio.to_thread(entered.wait, HOLD_S)  # the write is on its way…
             await pilot.press("escape")  # …when Esc is pressed
             await pilot.pause()
             closed = not row(view, 2).renaming

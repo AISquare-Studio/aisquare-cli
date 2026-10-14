@@ -59,6 +59,11 @@ _REAL_EXEC_SELF = selfcli.exec_self
 
 #: Textual's own, which a test that records every worker start wraps.
 _REAL_START = Worker._start
+#: How long a scripted read or write holds before it lets go on its own, and how long a test
+#: waits for an event it is owed. Every test lets its holds go and is owed only what comes, so
+#: only a run already gone wrong waits it out. Generous, as a short one is a race with the
+#: runner: on windows-latest a 5 s hold ran out while a test was still typing.
+HOLD_S = 60.0
 
 # --------------------------------------------------------------------------- the view
 
@@ -139,7 +144,7 @@ def test_the_install_route_is_read_off_the_ui_thread_and_update_waits_for_it() -
 
     def held_refusal() -> str | None:
         threads.append(threading.get_ident())
-        release.wait(10)
+        release.wait(HOLD_S)
         return None
 
     view = DoctorView(machine=True, update_refusal=held_refusal)
@@ -186,7 +191,10 @@ def test_only_asqs_own_doctor_is_machine_wide_and_no_doctor_may_be_busy(
         onboard = next(v for v in app.query(DoctorView) if v.id == "onboard-doctor")
         release = threading.Event()
         onboard.run_worker(
-            lambda: release.wait(10), name=doctor_view.FIX_WORKER, thread=True, exit_on_error=False
+            lambda: release.wait(HOLD_S),
+            name=doctor_view.FIX_WORKER,
+            thread=True,
+            exit_on_error=False,
         )  # its fix, still writing
         app.query_one("#doctor-update", Button).press()
         await settle_page(app, group="held")  # the fix is held on purpose: settle no group
@@ -217,7 +225,7 @@ def _held_hand_off(name: str) -> tuple[Any, list[str], Any]:
         assert isinstance(app, ui_app.FleetApp)
         said: list[str] = []
         app.notify = lambda message, **_: said.append(str(message))  # type: ignore[method-assign]
-        app.run_worker(lambda: release.wait(10), name=name, thread=True, exit_on_error=False)
+        app.run_worker(lambda: release.wait(HOLD_S), name=name, thread=True, exit_on_error=False)
         app.query_one("#doctor-update", Button).press()
         await settle_page(app, group="held")  # the worker is held on purpose: settle no group
         refused = app.hand_off
@@ -280,7 +288,7 @@ def test_update_waits_out_every_other_worker_and_starts_no_other_meanwhile(
         exits: list[Any] = []
         app.notify = lambda message, **_: said.append(str(message))  # type: ignore[method-assign]
         app.exit = lambda *_args, **_kwargs: exits.append(app.hand_off)  # type: ignore[method-assign]
-        app.run_worker(lambda: release.wait(10), name=name, thread=True, exit_on_error=False)
+        app.run_worker(lambda: release.wait(HOLD_S), name=name, thread=True, exit_on_error=False)
         app.query_one("#doctor-update", Button).press()
         await settle_page(app, group="held")  # the read is held on purpose: settle no group
         while_held = list(exits)
@@ -325,7 +333,7 @@ def test_update_waits_for_a_cancelled_doctor_run_whose_thread_still_runs(
 
     def held_doctor() -> list[Any]:
         started.set()
-        release.wait(10)
+        release.wait(HOLD_S)
         return []
 
     async def fn(pilot: Pilot[None]) -> tuple[Any, list[Any], list[Any]]:
@@ -337,7 +345,7 @@ def test_update_waits_for_a_cancelled_doctor_run_whose_thread_still_runs(
         app._doctor = held_doctor
         app.run_doctor()
         old = app._doctor_worker
-        assert old is not None and await asyncio.to_thread(started.wait, 10)
+        assert old is not None and await asyncio.to_thread(started.wait, HOLD_S)
         app._doctor = lambda: []
         app.run_doctor()  # the project switch: an exclusive start cancels the held run
         await settle_page(app)
@@ -373,7 +381,7 @@ def test_update_waits_for_a_cancelled_async_thread_worker_whose_thread_still_run
 
     async def held() -> None:
         started.set()
-        release.wait(10)
+        release.wait(HOLD_S)
 
     async def answer() -> str:
         await asyncio.sleep(0)
@@ -387,7 +395,7 @@ def test_update_waits_for_a_cancelled_async_thread_worker_whose_thread_still_run
         app.notify = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
         work = held if shape == "async def" else held()
         worker = app.run_worker(work, name="async-read", thread=True, exit_on_error=False)
-        assert await asyncio.to_thread(started.wait, 10)
+        assert await asyncio.to_thread(started.wait, HOLD_S)
         worker.cancel()
         await settle_page(app)
         app.query_one("#doctor-update", Button).press()
@@ -491,7 +499,9 @@ def test_update_leaves_a_task_worker_to_the_quit(
         with_the_loader = list(exits)
         app.hand_off = None  # the control: once more, under a thread worker of that name
         exits.clear()
-        app.run_worker(lambda: release.wait(10), name="_loader", thread=True, exit_on_error=False)
+        app.run_worker(
+            lambda: release.wait(HOLD_S), name="_loader", thread=True, exit_on_error=False
+        )
         app.query_one("#doctor-update", Button).press()
         await settle_page(app, group="held")
         under_a_thread = list(exits)
@@ -533,7 +543,7 @@ def test_update_leaves_the_thread_textuals_tree_lists_a_folder_in_to_the_quit(
     def hung(_tree: Any, paths: Any) -> list[Path]:
         if hold.is_set():
             listing.set()
-            release.wait(30)
+            release.wait(HOLD_S)
         return list(paths)
 
     monkeypatch.setattr(onboard_view.ProjectTree, "filter_paths", hung)
@@ -548,7 +558,7 @@ def test_update_leaves_the_thread_textuals_tree_lists_a_folder_in_to_the_quit(
         hold.set()
         reloaded = app.query_one(onboard_view.ProjectTree).reload()
         try:
-            assert await asyncio.to_thread(listing.wait, 10), "the tree lists the home"
+            assert await asyncio.to_thread(listing.wait, HOLD_S), "the tree lists the home"
             listings = [str(w.name) for w in app.workers if w._thread_worker and not w.is_finished]
             update = app.query_one("#doctor-update", Button)
             update.press()
@@ -558,7 +568,7 @@ def test_update_leaves_the_thread_textuals_tree_lists_a_folder_in_to_the_quit(
             exits.clear()
             mine = threading.Event()
             app.run_worker(
-                lambda: mine.wait(10), name="_load_directory", thread=True, exit_on_error=False
+                lambda: mine.wait(HOLD_S), name="_load_directory", thread=True, exit_on_error=False
             )
             update.press()
             await _until(lambda: app.hand_off is not None)
@@ -734,7 +744,7 @@ def _starts_with_a_hand_over(
             if pending:
                 # Held until the steps end (the ``finally``), however slow the runner.
                 app.run_worker(
-                    lambda: release.wait(60), name="held", thread=True, exit_on_error=False
+                    lambda: release.wait(HOLD_S), name="held", thread=True, exit_on_error=False
                 )
                 app.query_one("#doctor-update", Button).press()
                 # The press bubbles to the Doctor view, its hand-over to the app: hop by hop.
@@ -1049,7 +1059,7 @@ def test_run_ui_hands_over_only_once_the_r_panels_writes_have_landed(
     remote = RemoteController(server=server)
     remote.set_allow_write(False, wait=False)
     remote.revoke_device("dev_0000000a", wait=False)
-    assert server.waiting.wait(5), "the switch's write waits for the lock"
+    assert server.waiting.wait(HOLD_S), "the switch's write waits for the lock"
     landed: list[bool] = []
 
     class _Quit(_FakeApp):

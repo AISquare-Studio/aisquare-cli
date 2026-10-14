@@ -21,11 +21,13 @@ page because they are properties of the role; the account is the middle rung of
 the account ladder a launch walks (``--account`` > role binding > project
 default > machine default), and it is an account of the role's agent.
 
-Permission is each agent's own vocabulary until a neutral one lands: Claude
-Code's ``permission_mode``, Codex's ``sandbox``, ``approval_policy`` and
+Permission is ONE value per role, for every agent: ``fleet.roles.<role>.permission``,
+``WRITE:APPROVALS`` (``workspace:auto``…), which each agent's adapter maps to its own
+flags. Left unset ("each agent's own"), the agent-specific row under it applies:
+Claude Code's ``permission_mode``, Codex's ``sandbox``, ``approval_policy`` and
 ``approve_for_me``. Under each role, the flags its next ``fleet spawn`` passes
-(:func:`launch_line`, the adapter's own ``fleet_args``), for the agent the form
-says it runs on, so a value is never saved without its meaning shown — or the
+(:func:`launch_line`, ``services.fleet.permission_flags``) — for every agent when the
+role has one permission — so a value is never saved without its meaning shown, or the
 refusal a spawn would meet.
 """
 
@@ -33,7 +35,7 @@ from __future__ import annotations
 
 import re
 import shlex
-from typing import ClassVar
+from typing import ClassVar, get_args
 
 from rich.text import Text
 from textual import on
@@ -46,7 +48,13 @@ from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import codenames, paths
 from aisquare.core.agent_adapters import adapters, get_adapter
 from aisquare.core.agent_adapters.codex import APPROVAL_POLICIES
-from aisquare.core.agent_adapters.types import fleet_extra_args
+from aisquare.core.agent_adapters.types import (
+    AgentAdapter,
+    Approvals,
+    PermissionIntent,
+    WriteScope,
+    fleet_extra_args,
+)
 from aisquare.core.config import (
     CLAUDE_PERMISSION_MODES,
     AccountsSettings,
@@ -67,6 +75,17 @@ PERMISSION_MODES: tuple[tuple[str, str], ...] = (
     ("(no flag)", ""),
 )
 """Claude Code's ``--permission-mode`` choices (``core.config``), plus "pass no flag"."""
+INTENTS: tuple[str, ...] = tuple(
+    str(PermissionIntent(write, approvals))
+    for write in get_args(WriteScope)
+    for approvals in get_args(Approvals)
+)
+"""Every ``WRITE:APPROVALS`` a role's one permission can be (``PermissionIntent``)."""
+INTENT_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("each agent's own (below)", ""),
+    *((intent, intent) for intent in INTENTS),
+)
+"""``fleet.roles.<role>.permission``: unset, or one value mapped per agent."""
 
 DEFAULT_ESCAPE_KEY = FleetSettings().escape_key
 DEFAULT_WORKTREE_DIR = FleetSettings().worktree_dir
@@ -135,12 +154,14 @@ def approve_value(setting: bool | None) -> str:
 def launch_line(role: str, agent: str, settings: FleetRoleSettings) -> Text:
     """What ``fleet spawn <role>`` passes for permission on ``agent`` with ``settings``.
 
-    The adapter's own ``fleet_args``, given what ``services.fleet.spawn`` gives it with no
-    per-spawn flag: Claude Code the role's ``permission_mode``; an agent with sandboxed
-    permissions (Codex) its ``sandbox``, ``approval_policy`` and ``approve_for_me``,
-    never Claude's mode. ``--name`` is left out (it is the agent's label, not its
-    permission). A combination the adapter refuses reads as that refusal, which is what
-    the spawn would say.
+    ``services.fleet.permission_flags``, the mapping the spawn itself makes, with no
+    per-spawn flag: the role's ``permission`` (one value, mapped per agent) when it has
+    one, and then each agent's flags for it, the role's own agent first; otherwise the
+    agent's own settings — Claude Code the role's ``permission_mode``, an agent with
+    sandboxed permissions (Codex) its ``sandbox``, ``approval_policy`` and
+    ``approve_for_me``, never Claude's mode. The label's flag is left out (it is the
+    agent's label, not its permission). A combination an agent refuses reads as that
+    refusal, which is what the spawn would say.
     """
     text = Text(f"  {role} → ", style="dim")
     try:
@@ -148,26 +169,34 @@ def launch_line(role: str, agent: str, settings: FleetRoleSettings) -> Text:
     except ValueError:
         text.append(f"{agent} is not an agent this version knows", style="yellow")
         return text
-    sandboxed = adapter.capabilities.sandbox_permissions
+    shown = [adapter]
+    if settings.permission:
+        text.append(f"{settings.permission}: ", style="dim")
+        shown += [other for other in adapters() if other.id != adapter.id]
+    for index, each in enumerate(shown):
+        if index:
+            text.append(" · ", style="dim")
+        _append_flags(text, role, each, settings)
+    return text
+
+
+def _append_flags(
+    text: Text, role: str, adapter: AgentAdapter, settings: FleetRoleSettings
+) -> None:
+    role_args = fleet_extra_args(adapter, settings.extra_args, settings.agent_args)
     try:
-        flags = adapter.fleet_args(
-            role,
-            role,
-            None if sandboxed else (settings.permission_mode or None),
-            sandbox=settings.sandbox if sandboxed else None,
-            approval=settings.approval_policy if sandboxed else None,
-            approve_for_me=settings.approve_for_me if sandboxed else None,
+        flags, _recorded = fleet_service.permission_flags(
+            adapter, role, role, settings, native=role_args
         )
-    except ValueError as exc:
+    except fleet_service.FleetError as exc:
         text.append(f"{adapter.label}: refused at spawn — {exc}", style="red")
-        return text
-    if "--name" in flags:
-        at = flags.index("--name")
-        flags = flags[:at] + flags[at + 2 :]
-    flags += fleet_extra_args(adapter, settings.extra_args, settings.agent_args)
+        return
+    labelled = adapter.label_args(role)
+    if labelled and flags[-len(labelled) :] == labelled:
+        flags = flags[: -len(labelled)]
+    flags += role_args
     text.append(f"{adapter.label} ", style="dim")
     text.append(shlex.join(flags) if flags else "(no permission flag)", style="dim")
-    return text
 
 
 NO_ACCOUNT = ""
@@ -349,10 +378,10 @@ class SettingsView(VerticalScroll):
                     id=f"family-{suffix}",
                 )
                 yield Select(
-                    permission_options(settings.permission_mode),
-                    value=settings.permission_mode,
+                    _options(settings.permission or "", list(INTENT_OPTIONS)),
+                    value=settings.permission or "",
                     allow_blank=False,
-                    id=f"perm-{suffix}",
+                    id=f"intent-{suffix}",
                 )
                 yield Label("worktree", classes="worktree-label")
                 yield Switch(settings.worktree, id=f"worktree-{suffix}")
@@ -365,7 +394,13 @@ class SettingsView(VerticalScroll):
                     classes="account-select",
                 )
             with Horizontal(classes="row"):
-                yield Label("Codex scope / approval")
+                yield Label("each agent's own")
+                yield Select(
+                    permission_options(settings.permission_mode),
+                    value=settings.permission_mode,
+                    allow_blank=False,
+                    id=f"perm-{suffix}",
+                )
                 yield Select(
                     _options(settings.sandbox or "", SANDBOX_OPTIONS),
                     value=settings.sandbox or "",
@@ -383,7 +418,6 @@ class SettingsView(VerticalScroll):
                     value=approve_value(settings.approve_for_me),
                     allow_blank=False,
                     id=f"afm-{suffix}",
-                    classes="account-select",
                 )
             yield Static(id=f"launch-{suffix}", classes="launch-line")
         yield Static("fleet", classes="section")
@@ -474,12 +508,14 @@ class SettingsView(VerticalScroll):
         """``role``'s settings as the form holds them now."""
         suffix = widget_suffix(role)
         settings = self.fleet.roles.get(role, FleetRoleSettings())
+        intent = self._selected(f"#intent-{suffix}")
         mode = self._selected(f"#perm-{suffix}")
         sandbox = self._selected(f"#sandbox-{suffix}")
         approval = self._selected(f"#approval-{suffix}")
         approve = self._selected(f"#afm-{suffix}")
         return settings.model_copy(
             update={
+                "permission": settings.permission if intent is None else (intent or None),
                 "permission_mode": settings.permission_mode if mode is None else mode,
                 "sandbox": settings.sandbox if sandbox is None else (sandbox or None),
                 "approval_policy": (
@@ -551,6 +587,7 @@ class SettingsView(VerticalScroll):
             family = config.team.profiles.get(role, RoleLaunchProfile()).agent or ""
             for field, value, options in (
                 ("family", family, _agent_options(family)),
+                ("intent", settings.permission or "", list(INTENT_OPTIONS)),
                 ("sandbox", settings.sandbox or "", SANDBOX_OPTIONS),
                 ("approval", settings.approval_policy or "", APPROVAL_OPTIONS),
                 ("afm", approve_value(settings.approve_for_me), APPROVE_FOR_ME_OPTIONS),
@@ -586,6 +623,10 @@ class SettingsView(VerticalScroll):
             mode = self._optional_selection(f"#perm-{suffix}", existing.permission_mode) or ""
             roles[role] = existing.model_copy(
                 update={
+                    # "each agent's own" is "" — unset, so the rows under it apply.
+                    "permission": self._optional_selection(
+                        f"#intent-{suffix}", existing.permission
+                    ),
                     "permission_mode": mode,
                     "worktree": self.query_one(f"#worktree-{suffix}", Switch).value,
                 }

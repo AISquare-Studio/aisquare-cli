@@ -36,18 +36,42 @@ def prune_metadata(store: ContextStore) -> None:
             store.set_meta(_PRUNED_AT, str(now))
 
 
+_LAUNCH = "launch"
+_FLEET = "fleet"
+
+
 def launch_tokens() -> list[tuple[str, str]]:
     return [
         (prefix, token)
         for key, prefix in (
-            ("AISQUARE_LAUNCH_ID", "launch"),
-            ("AISQUARE_FLEET_AGENT", "fleet"),
+            ("AISQUARE_LAUNCH_ID", _LAUNCH),
+            ("AISQUARE_FLEET_AGENT", _FLEET),
         )
         if (token := os.environ.get(key))
     ]
 
 
+def fleet_binding(store: ContextStore, agent_id: str) -> str | None:
+    """The session first bound to fleet row ``agent_id``'s window (its launch's own)."""
+    return store.get_meta(f"{_FLEET}-session:{agent_id}")
+
+
+def started_under_this_launch(store: ContextStore, session_id: str) -> bool:
+    """Whether ``session_id`` STARTED under this process's ``AISQUARE_LAUNCH_ID``: the
+    same ``aisquare launch``, which every session of one agent process shares."""
+    token = os.environ.get("AISQUARE_LAUNCH_ID")
+    return bool(token) and store.get_meta(f"{_LAUNCH}-seen:{token}:{session_id}") is not None
+
+
 def bind_launch_session(store: ContextStore, session_id: str, *, started: bool = False) -> None:
+    """Bind ``session_id`` to this process's launch tokens (:func:`launch_tokens`).
+
+    The first session to send an event under a token is bound to it. A session that
+    STARTS later under a launch token takes that binding over (a ``/clear`` is the
+    launch's newest session), but never a fleet row's: a nested child inherits the
+    window's ``AISQUARE_FLEET_AGENT`` as much as the agent's own ``/clear`` does, and
+    the row moves only with its claims (``services.team._adopt``).
+    """
     tokens = launch_tokens()
     if not tokens:
         if started:
@@ -62,7 +86,10 @@ def bind_launch_session(store: ContextStore, session_id: str, *, started: bool =
             if started:
                 seen = f"{prefix}-seen:{token}:{session_id}"
                 if store.set_meta_once(seen, "1"):
-                    store.set_meta(binding, session_id)
+                    if prefix == _FLEET:
+                        store.set_meta_once(binding, session_id)
+                    else:
+                        store.set_meta(binding, session_id)
                 else:
                     store.touch_meta(seen)
                     current = store.get_meta(binding)

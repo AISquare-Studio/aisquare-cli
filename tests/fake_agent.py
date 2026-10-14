@@ -162,7 +162,11 @@ class FakeAgentAdapter:
         self.validate(model, effort)
         return (["--model", model] if model else []) + (["--effort", effort] if effort else [])
 
-    def permission_args(self, intent: PermissionIntent, role: str) -> list[str]:
+    def permission_args(
+        self, intent: PermissionIntent, role: str, native: Sequence[str] = ()
+    ) -> list[str]:
+        if "--write" in native or "--approvals" in native:
+            return []
         return ["--write", intent.write, "--approvals", intent.approvals]
 
     def fleet_args(
@@ -190,6 +194,9 @@ class FakeAgentAdapter:
 
     def resume_args(self, native_session_id: str, transcript_path: Path | None) -> list[str]:
         return ["--thread", native_session_id]
+
+    def queue_args(self, native_session_id: str, message: str) -> list[str] | None:
+        return ["inbox", native_session_id, message]
 
     def disable_native_teams(self) -> tuple[list[str], dict[str, str]]:
         return ["--no-subagents"], {"FAKE_AGENT_TEAMS": "off"}

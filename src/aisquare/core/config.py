@@ -236,6 +236,11 @@ and ``fleet restart --permission-mode`` takes nothing else, or ``""`` for no fla
 class FleetRoleSettings(BaseModel):
     """How the fleet launches one role — every field is a DEFAULT the user may change.
 
+    ``permission`` is the role's permission in no agent's vocabulary, one value for every
+    agent: ``WRITE:APPROVALS`` (``workspace:auto``, ``read_only:auto``, ``full:never``…,
+    ``core.agent_adapters.types.PermissionIntent``), which each agent's adapter maps to
+    its own flags (docs/fleet.md has the table). Set, it wins over the agent-specific
+    fields below; unset (``None``), they apply as they always did.
     ``permission_mode`` is any Claude Code ``--permission-mode`` value (``auto``,
     ``acceptEdits``, ``bypassPermissions``, ``manual``, ``dontAsk``, ``plan``); the
     empty string means "pass no flag". ``sandbox``, ``approval_policy`` and
@@ -250,6 +255,7 @@ class FleetRoleSettings(BaseModel):
     different surface, documented in the README).
     """
 
+    permission: str | None = None
     permission_mode: str = "auto"
     sandbox: str | None = None
     approval_policy: str | None = None

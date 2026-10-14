@@ -486,20 +486,28 @@ class CodexAdapter:
             ["--ask-for-approval", approval] if approval and native_approval is None else []
         )
 
-    def permission_args(self, intent: PermissionIntent, role: str) -> list[str]:
+    def permission_args(
+        self, intent: PermissionIntent, role: str, native: Sequence[str] = ()
+    ) -> list[str]:
         """``workspace:auto`` is ``--approve-for-me`` (the automatic reviewer, which runs
         only in workspace-write, so ``full:auto`` is refused); every other intent is
         ``--sandbox`` with ``--ask-for-approval``, ``ask`` and a read-only ``auto`` being
-        ``on-request`` (a reviewer's seats, as :meth:`fleet_args` gives them)."""
-        if intent.approvals == "auto" and intent.write == "workspace":
-            return ["--approve-for-me"]
+        ``on-request`` (a reviewer's seats, as :meth:`fleet_args` gives them). What
+        ``native`` already chooses wins: ``--approve-for-me`` cannot sit beside a native
+        sandbox or policy (Codex refuses the launch), so it is left to them, and a native
+        ``--sandbox`` or ``--ask-for-approval`` is not given a second time."""
         if intent.approvals == "auto" and intent.write == "full":
             raise ValueError(
                 "Codex reviews approvals automatically only in the workspace-write sandbox; "
                 "use full:ask or full:never"
             )
+        native_sandbox, native_approval = _native_approvals(native)
+        if intent.approvals == "auto" and intent.write == "workspace":
+            return [] if native_sandbox or native_approval else ["--approve-for-me"]
         approval = "never" if intent.approvals == "never" else "on-request"
-        return ["--sandbox", _SANDBOXES[intent.write], "--ask-for-approval", approval]
+        return (["--sandbox", _SANDBOXES[intent.write]] if native_sandbox is None else []) + (
+            ["--ask-for-approval", approval] if native_approval is None else []
+        )
 
     def label_args(self, label: str) -> list[str]:
         return []
@@ -507,6 +515,11 @@ class CodexAdapter:
     def resume_args(self, native_session_id: str, transcript_path: Path | None) -> list[str]:
         """``codex resume <SESSION_ID>``: the thread by its id, any options after it."""
         return ["resume", native_session_id]
+
+    def queue_args(self, native_session_id: str, message: str) -> list[str] | None:
+        """``codex queue --thread <id> --message <text>``: measured on 0.162.1 against an
+        interactive TUI session busy with a turn, the message ran as its next turn."""
+        return ["queue", "--thread", native_session_id, "--message", message]
 
     def disable_native_teams(self) -> tuple[list[str], dict[str, str]]:
         return ["-c", "agents.enabled=false"], {}

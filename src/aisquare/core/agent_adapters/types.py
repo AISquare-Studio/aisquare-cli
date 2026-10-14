@@ -90,6 +90,12 @@ class AgentCapabilities:
     """A session resumes from another config dir (Claude Code finds a transcript by its
     absolute path), so ``fleet switch`` to another account resumes it; otherwise the
     thread lives in its home and the replacement starts fresh with a hand-off prompt."""
+    pid_env: str | None = None
+    """The variable in which the agent hands each hook its own pid (Claude Code's
+    ``CLAUDE_PID``): the process identity ``services.team`` binds a fleet row to. Without
+    one, the row's launch tokens and the start's ``source`` stand in (rule 1 of the
+    fleet-row section), and any such variable in the hook's environment is another
+    process's, inherited."""
     exports_home_env: bool = True
     """A launch sets :attr:`AgentAdapter.home_env` to the config dir it resolved; Claude
     Code's ``CLAUDE_CONFIG_DIR`` stays as the shell or the binding wrote it."""
@@ -211,6 +217,13 @@ class PermissionIntent:
             return cls("read_only", "auto")
         return cls()
 
+    @staticmethod
+    def written(value: str) -> bool:
+        """Whether ``value`` is written as an intent (``write:approvals``) rather than in an
+        agent's own words (Claude Code's ``auto``, Codex's ``read-only``): no native
+        permission value has a colon."""
+        return ":" in value
+
     @classmethod
     def parse(cls, value: str) -> PermissionIntent:
         write, _, approvals = value.strip().partition(":")
@@ -313,6 +326,7 @@ class AgentAdapter(Protocol):
     with :meth:`hooks_switch`, ``plugin``. Events: :meth:`decode_event` and
     :meth:`encode_reply`. Launch: :meth:`model_args`, :meth:`permission_args`,
     :meth:`fleet_args`, :meth:`label_args`, :meth:`resume_args`, ``exit_command``,
+    :meth:`queue_args`,
     :meth:`mcp_args`, :meth:`context_files`, :meth:`disable_native_teams`,
     :meth:`telemetry_args`. Accounts: ``accounts``. ``capabilities`` says the rest.
     """
@@ -405,9 +419,12 @@ class AgentAdapter(Protocol):
         ...
 
     def model_args(self, model: str | None, effort: str | None) -> list[str]: ...
-    def permission_args(self, intent: PermissionIntent, role: str) -> list[str]:
-        """The native flags for ``intent``. Raises ``ValueError`` for one the agent
-        cannot express."""
+    def permission_args(
+        self, intent: PermissionIntent, role: str, native: Sequence[str] = ()
+    ) -> list[str]:
+        """The native flags for ``intent``, less what the ``native`` arguments the launch
+        already carries settle (they win, as an explicit native flag always does). Raises
+        ``ValueError`` for an intent the agent cannot express."""
         ...
 
     def fleet_args(
@@ -430,6 +447,13 @@ class AgentAdapter(Protocol):
 
     def resume_args(self, native_session_id: str, transcript_path: Path | None) -> list[str]:
         """Arguments that resume a session, put before every other argument."""
+        ...
+
+    def queue_args(self, native_session_id: str, message: str) -> list[str] | None:
+        """Arguments to the agent's binary that queue ``message`` for its RUNNING session,
+        delivered as the next turn once the current one ends (``fleet tell`` to a busy
+        agent), run with :attr:`home_env` set to the session's config dir; ``None`` for
+        an agent without such a queue (the message is then a board note)."""
         ...
 
     def disable_native_teams(self) -> tuple[list[str], dict[str, str]]:

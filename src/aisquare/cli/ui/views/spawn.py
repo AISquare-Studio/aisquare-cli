@@ -2,10 +2,11 @@
 
 The dialog is ``aisquare fleet spawn`` with its choices as controls: the role, the
 coding agent (``--agent``; blank is the role's, the project's or the user's default),
-the account (``--account``; blank is the account ladder's answer), the permission in
-the agent's own vocabulary (Claude Code's ``--permission-mode``; Codex's
-``--sandbox`` and ``--approval``; blank is the role's setting), a label and a first
-task. It launches through ``services.fleet.spawn``, the call the command makes, with
+the account (``--account``; blank is the account ladder's answer), the permission —
+one ``WRITE:APPROVALS`` value every agent maps to its own flags (``--permission-mode
+workspace:auto``), or the agent's own vocabulary (Claude Code's ``--permission-mode``;
+Codex's ``--sandbox`` and ``--approval``); blank is the role's setting — a label and a
+first task. It launches through ``services.fleet.spawn``, the call the command makes, with
 the same arguments, so a refusal reads as the command's.
 
 The controls follow the agent the launch will start: the one picked, else the one
@@ -27,7 +28,12 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Select, Static
 from textual.worker import Worker, WorkerState
 
-from aisquare.cli.ui.views.settings import APPROVAL_OPTIONS, SANDBOX_OPTIONS, launch_line
+from aisquare.cli.ui.views.settings import (
+    APPROVAL_OPTIONS,
+    INTENTS,
+    SANDBOX_OPTIONS,
+    launch_line,
+)
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core.agent_adapters import adapters, get_adapter
 from aisquare.core.config import CLAUDE_PERMISSION_MODES, FleetRoleSettings
@@ -37,6 +43,11 @@ from aisquare.services import claude_accounts as accounts_service
 
 DEFAULT = ""
 """Every select's "let the role, the project or the machine decide" value."""
+INTENT_CHOICES: list[tuple[str, str]] = [
+    ("Permission (every agent): role default", DEFAULT),
+    *((intent, intent) for intent in INTENTS),
+]
+"""One value every agent maps to its own flags; chosen, it replaces the agent's own below."""
 PERMISSION_OPTIONS: list[tuple[str, str]] = [
     ("Permission: role default", DEFAULT),
     *((mode, mode) for mode in CLAUDE_PERMISSION_MODES),
@@ -108,6 +119,7 @@ class SpawnScreen(ModalScreen[fleet.SpawnReceipt | None]):
                 allow_blank=False,
                 id="spawn-account",
             )
+            yield Select(INTENT_CHOICES, value=DEFAULT, allow_blank=False, id="spawn-intent")
             yield Select(
                 PERMISSION_OPTIONS, value=DEFAULT, allow_blank=False, id="spawn-permission"
             )
@@ -174,9 +186,11 @@ class SpawnScreen(ModalScreen[fleet.SpawnReceipt | None]):
             sandboxed = adapter.capabilities.sandbox_permissions
         except ValueError:
             sandboxed = False
-        self.query_one("#spawn-permission", Select).display = not sandboxed
-        self.query_one("#spawn-sandbox", Select).display = sandboxed
-        self.query_one("#spawn-approval", Select).display = sandboxed
+        # One value for every agent replaces the agent's own words, which then hide.
+        intent = self._value("#spawn-intent")
+        self.query_one("#spawn-permission", Select).display = not sandboxed and not intent
+        self.query_one("#spawn-sandbox", Select).display = sandboxed and not intent
+        self.query_one("#spawn-approval", Select).display = sandboxed and not intent
         account = self.query_one("#spawn-account", Select)
         shown = account.value
         options = account_choices(self.accounts, agent)
@@ -187,11 +201,19 @@ class SpawnScreen(ModalScreen[fleet.SpawnReceipt | None]):
             settings = fleet.role_settings(role)
         except Exception:  # a config that will not parse: the spawn says why
             settings = FleetRoleSettings()
-        overrides = {
+        overrides: dict[str, object] = {
             "permission_mode": self._value("#spawn-permission") or settings.permission_mode,
             "sandbox": self._value("#spawn-sandbox") or settings.sandbox,
             "approval_policy": self._value("#spawn-approval") or settings.approval_policy,
         }
+        if intent:
+            overrides["permission"] = intent
+        elif (self._value("#spawn-permission") and not sandboxed) or (
+            sandboxed and (self._value("#spawn-sandbox") or self._value("#spawn-approval"))
+        ):
+            # The agent's own words chosen for this spawn win over the role's one value,
+            # as they do in `fleet spawn`.
+            overrides["permission"] = None
         if self._value("#spawn-sandbox") or self._value("#spawn-approval"):
             # A sandbox or a policy chosen for this spawn wins over the role's setting.
             overrides["approve_for_me"] = None
@@ -226,11 +248,19 @@ class SpawnScreen(ModalScreen[fleet.SpawnReceipt | None]):
             sandboxed = get_adapter(self.launch_agent()).capabilities.sandbox_permissions
         except ValueError:
             sandboxed = False
-        # Each agent's own words, as `fleet spawn` takes them: --permission-mode for Claude
-        # Code, --sandbox and --approval for Codex. The other agent's are never sent.
-        permission = None if sandboxed else (self._value("#spawn-permission") or None)
-        sandbox = (self._value("#spawn-sandbox") or None) if sandboxed else None
-        approval = (self._value("#spawn-approval") or None) if sandboxed else None
+        # One value for every agent, as `fleet spawn --permission-mode WRITE:APPROVALS`
+        # takes it; else each agent's own words: --permission-mode for Claude Code,
+        # --sandbox and --approval for Codex. The other agent's are never sent.
+        intent = self._value("#spawn-intent") or None
+        permission: str | None
+        sandbox: str | None
+        approval: str | None
+        if intent is not None:
+            permission, sandbox, approval = intent, None, None
+        else:
+            permission = None if sandboxed else (self._value("#spawn-permission") or None)
+            sandbox = (self._value("#spawn-sandbox") or None) if sandboxed else None
+            approval = (self._value("#spawn-approval") or None) if sandboxed else None
         self.busy = True
         self.query_one("#spawn-submit", Button).disabled = True
         try:

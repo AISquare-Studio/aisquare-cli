@@ -3815,9 +3815,12 @@ class SqliteStore:
             f"WHERE f.project_id = ?{clause} ORDER BY f.created_at, f.id",
             (project_id,),
         ).fetchall()
+        # The row's own id first, as ``_bound_fleet_agent`` reads it: the launch's binding
+        # is the session it started with, and a row moves off that (a ``/clear``) only
+        # in its own column (``adopt_fleet_agent_session``).
         return [
             _row_to_fleet_agent(row).model_copy(update={"session_id": row["bound_session_id"]})
-            if row["bound_session_id"]
+            if row["bound_session_id"] and row["session_id"] is None
             else _row_to_fleet_agent(row)
             for row in rows
         ]
@@ -3828,15 +3831,19 @@ class SqliteStore:
         One targeted lookup rather than materialising every live row and
         scanning: this runs on the session-start hook AND on every ``task next``,
         including the plain CLI ones that have no fleet row at all and paid for
-        the whole list to find that out (review of #116, round 3).
+        the whole list to find that out (review of #116, round 3). A row whose own
+        column is empty is the session its launch bound, as :meth:`_bound_fleet_agent`
+        reads it (an agent whose native id binds at its start).
         """
         row = self._conn.execute(
             f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent "
-            "WHERE project_id = ? AND session_id = ? AND ended_at IS NULL "
+            "WHERE project_id = ? AND ended_at IS NULL AND (session_id = ? OR "
+            "(session_id IS NULL AND (SELECT value FROM team_meta "
+            "WHERE key = 'fleet-session:' || fleet_agent.id) = ?)) "
             "ORDER BY created_at DESC LIMIT 1",
-            (project_id, session_id),
+            (project_id, session_id, session_id),
         ).fetchone()
-        return _row_to_fleet_agent(row) if row is not None else None
+        return self._bound_fleet_agent(row) if row is not None else None
 
     def adopt_fleet_agent_session(
         self, agent_id: str, previous: str | None, session_id: str, lease_until: datetime
@@ -3858,17 +3865,28 @@ class SqliteStore:
         ``fleet stop`` and from every other hook, so the row must still be the
         one that was read — ended, or taken by somebody else in between, and
         nothing moves. A targeted UPDATE, never a whole-row write, for the same
-        reason (a stale snapshot written back resurrected a stopped agent).
+        reason (a stale snapshot written back resurrected a stopped agent). A row
+        whose own column is empty is the session its launch bound
+        (``fleet-session:<id>``, an agent whose native id binds at its start), as
+        :meth:`_bound_fleet_agent` reads it, and moves into the column.
         """
         try:
             cursor = self._conn.execute(
                 "UPDATE fleet_agent SET session_id = ? "
-                "WHERE id = ? AND ended_at IS NULL AND session_id IS ?",
+                "WHERE id = ? AND ended_at IS NULL AND COALESCE(session_id, "
+                "(SELECT value FROM team_meta WHERE key = 'fleet-session:' || fleet_agent.id)) "
+                "IS ?",
                 (session_id, agent_id, previous),
             )
             if cursor.rowcount != 1:
                 self._rollback()
                 return False
+            # The launch's binding follows the row it names, so it always says which
+            # session the row is now; nothing else moves it (``agent_sessions``).
+            self._conn.execute(
+                "UPDATE team_meta SET value = ? WHERE key = 'fleet-session:' || ?",
+                (session_id, agent_id),
+            )
             if previous is not None:
                 # Every claim the old id holds moves; the LEASE is stamped on the
                 # ``doing`` ones alone. Stamped on a review or blocked task too,

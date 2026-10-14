@@ -97,6 +97,7 @@ class ClaudeCodeAdapter:
         ambient_first_run=True,
         reads_pane_readiness=True,
         resumes_across_homes=True,
+        pid_env="CLAUDE_PID",
         exports_home_env=False,
         own_doctor_check=True,
         model_proxy=True,
@@ -275,11 +276,14 @@ class ClaudeCodeAdapter:
         self.validate(model, effort)
         return (["--model", model] if model else []) + (["--effort", effort] if effort else [])
 
-    def permission_args(self, intent: PermissionIntent, role: str) -> list[str]:
+    def permission_args(
+        self, intent: PermissionIntent, role: str, native: Sequence[str] = ()
+    ) -> list[str]:
         """``--permission-mode`` (``ask`` ``manual``, ``auto`` ``auto``, ``never``
         ``dontAsk``, or ``bypassPermissions`` with a ``full`` write scope); Claude Code has
         no sandbox, so ``read_only`` is the reviewer's denial of the tools that edit files
-        (``core.config.REVIEWER_ARGS``)."""
+        (``core.config.REVIEWER_ARGS``). A mode or a denial ``native`` already passes (the
+        reviewer's role arguments carry that denial) is not passed twice."""
         from aisquare.core.config import REVIEWER_ARGS
 
         mode = (
@@ -287,7 +291,11 @@ class ClaudeCodeAdapter:
             if intent.write == "full" and intent.approvals == "never"
             else _MODES[intent.approvals]
         )
-        return ["--permission-mode", mode, *(REVIEWER_ARGS if intent.write == "read_only" else ())]
+        chosen = list(option_values(native, "--permission-mode"))
+        denied = [arg for arg in REVIEWER_ARGS if arg not in native]
+        return (["--permission-mode", mode] if not chosen else []) + (
+            denied if intent.write == "read_only" else []
+        )
 
     def fleet_args(
         self,
@@ -315,6 +323,9 @@ class ClaudeCodeAdapter:
         """``--resume <transcript>``: Claude Code ≥ 2.1.223 finds a session by its
         transcript's absolute path from any directory, and keeps its id (#146)."""
         return ["--resume", str(transcript_path) if transcript_path else native_session_id]
+
+    def queue_args(self, native_session_id: str, message: str) -> list[str] | None:
+        return None  # no queue: `fleet tell` types into its prompt when the pane waits
 
     def disable_native_teams(self) -> tuple[list[str], dict[str, str]]:
         return [], {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0"}

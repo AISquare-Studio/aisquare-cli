@@ -28,6 +28,7 @@ from typing import NamedTuple
 
 from aisquare.core import agent_sessions, brain, harness, insights, orchestrator, workspace
 from aisquare.core import claude_accounts as claude_accounts_core
+from aisquare.core.agent_adapters import recorded_adapter
 from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.ids import new_event_id, new_task_id
 from aisquare.core.store import AmbiguousIdError, ContextStore, store_session, unmet_needs
@@ -78,6 +79,11 @@ CLEAR_REASON = "clear"
 """Claude Code's ``SessionEnd`` reason for ``/clear``: the session id ends, the process
 does not — and the ``SessionStart`` of the id that follows comes AFTER this end
 (measured on 2.1.272). See rule 2 in the fleet-row section below."""
+
+CLEAR_SOURCE = "clear"
+"""The ``SessionStart`` source of the id a ``/clear`` starts (Claude Code's, and Codex's
+for its ``/clear`` and ``/new``): for an agent with no pid of its own, with the launch,
+what proves the pane's process cleared (rule 1 in the fleet-row section below)."""
 
 HANDOVER_STATE = "switching"
 """The ``team_session.state`` ``fleet switch`` sets before it ``/exit``s an agent that is
@@ -1456,8 +1462,9 @@ def hook_session_start(
         session = agent_sessions.adopt_local_session(store, session)
         # Before the board is read below: the assignment may move this agent's
         # claims onto its new id, and a board read first still named the old one.
-        # ``source`` plays no part — see rule 1 of the fleet-row section.
-        assigned = _assignment(store, session.id, project.id)
+        # ``source`` plays no part where the agent hands its hooks its pid — see
+        # rule 1 of the fleet-row section for an agent that does not.
+        assigned = _assignment(store, session.id, project.id, source=source)
         store.renew_leases(session.id, now + timedelta(minutes=orchestrator.lease_minutes()))
         # Presence is board state, not feed traffic: /clear cycles, resumes and
         # ephemeral `claude -p` children would otherwise spam join/left pairs.
@@ -2337,7 +2344,7 @@ def _render_board(
 #    hands every hook the pid of the process that fired it (``CLAUDE_PID``), and
 #    tmux knows the pid at the root of the row's pane (``#{pane_pid}``);
 #    ``launch`` execs the agent, so for the pane's own agent the two are equal
-#    and for a child they never are (``orchestrator.env_claude_pid``, measured
+#    and for a child they never are (``orchestrator.env_agent_pid``, measured
 #    across a ``/clear`` on 2.1.272). A row bound to another session id is
 #    ADOPTED — rebound, its claims moved — only by the pane's process, whatever
 #    ``SessionStart`` source the caller reports: ``startup``, ``resume``, ``fork``
@@ -2346,6 +2353,17 @@ def _render_board(
 #    cannot be checked — no ``CLAUDE_PID``, tmux not answering — stays with the
 #    session it has; only an UNBOUND row binds on first arrival then, because a
 #    binary that could not be started on a chosen id has nothing better.
+#    An agent that hands its hooks no pid of its own (Codex, whose ``CLAUDE_PID``
+#    is whoever started the tmux server's: ``AgentCapabilities.pid_env``) is told
+#    apart by its launch instead (:func:`_launch_holds`). The FIRST session to
+#    arrive under a row's ``AISQUARE_FLEET_AGENT`` is the row's (the launch binds it,
+#    ``core.agent_sessions``) — a fresh hand-over's row adopts it off the parked id,
+#    as ``_take_over`` would have with a minted one; and a ``SessionStart(clear)``
+#    under the same ``AISQUARE_LAUNCH_ID`` the row's session started under is the
+#    pane's own ``/clear``: Codex 0.162.1 fires no ``SessionEnd`` for the id it
+#    leaves (measured), and a nested ``codex exec`` starts ``startup`` or ``resume``,
+#    never ``clear``. Nothing else moves such a row: a later start under the window's
+#    variables is a child's, and no longer rebinds the launch's row either.
 # 2. A /CLEAR KEEPS THE CLAIMS. Claude Code fires ``SessionEnd(reason=clear)``
 #    for the old id BEFORE ``SessionStart(source=clear)`` for the new one, so
 #    the end hook — when the pane's process is the one clearing — retires the
@@ -2478,11 +2496,15 @@ def _fleet_row_hint(
         return None
 
 
-def _pane_holds(agent: FleetAgent) -> bool | None:
+def _pane_holds(agent: FleetAgent, session_agent: str | None) -> bool | None:
     """Whether the process running this hook is the one in ``agent``'s pane (rule 1).
 
-    ``None`` when it cannot be told: no ``CLAUDE_PID`` in the environment (a
-    binary that does not export one), a tmux that does not answer, or a pane
+    ``session_agent`` is the agent whose hook this is (the session's ``agent``): its
+    pid is read from the variable that agent hands its hooks
+    (``AgentCapabilities.pid_env``), and from nothing else.
+
+    ``None`` when it cannot be told: no such variable (an agent that exports
+    none, or a binary that does not), a tmux that does not answer, or a pane
     that is already gone. Callers treat that as "not proven" — a bound row is
     not adopted on a guess, because the guess that was wrong here handed a
     parent's task to its child. The fleet's own server factory is used so the
@@ -2492,7 +2514,8 @@ def _pane_holds(agent: FleetAgent) -> bool | None:
     fake tmux is seen; imported here because ``services.fleet`` imports this
     module the same lazy way.
     """
-    pid = orchestrator.env_claude_pid()
+    adapter = recorded_adapter(session_agent)
+    pid = orchestrator.env_agent_pid(adapter.capabilities.pid_env if adapter else None)
     if pid is None:
         return None
     from aisquare.services import fleet as fleet_service
@@ -2506,22 +2529,50 @@ def _pane_holds(agent: FleetAgent) -> bool | None:
     return pane_pid == pid
 
 
-def _adopt(store: ContextStore, agent: FleetAgent, session_id: str) -> bool:
+def _adopt(
+    store: ContextStore, agent: FleetAgent, session_id: str, *, source: str | None = None
+) -> bool:
     """Bind ``agent``'s row to ``session_id``; ``False`` when this session may not have it.
 
     The pane's own process always may (a ``/clear``, a compaction, a resume —
     whatever the source says); any other process never may; and when it cannot
-    be told, only a row nobody is bound to yet is taken, on first arrival. The
-    row and the claims of the session it leaves move in one store transaction
-    (``adopt_fleet_agent_session``), which also refuses a row that ended, or was
-    bound by somebody else, between the read and the write — ``fleet stop`` and
-    this hook are different processes.
+    be told by its pid, by its launch (:func:`_launch_holds`, with the start's
+    ``source``), and failing that only a row nobody is bound to yet is taken, on
+    first arrival. The row and the claims of the session it leaves move in one store
+    transaction (``adopt_fleet_agent_session``), which also refuses a row that ended,
+    or was bound by somebody else, between the read and the write — ``fleet stop``
+    and this hook are different processes.
     """
-    holds = _pane_holds(agent)
+    session = store.get_session(session_id)
+    holds = _pane_holds(agent, session.agent if session is not None else None)
+    if holds is None:
+        holds = _launch_holds(store, agent, session_id, source)
     if holds is False or (holds is None and agent.session_id is not None):
         return False
     lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
     return store.adopt_fleet_agent_session(agent.id, agent.session_id, session_id, lease)
+
+
+def _launch_holds(
+    store: ContextStore, agent: FleetAgent, session_id: str, source: str | None
+) -> bool | None:
+    """Whether ``session_id`` is the process in ``agent``'s pane, told by its launch (rule 1).
+
+    For a hook with no pid of its agent's own to compare. ``True`` for the first session
+    bound to the row's window (``agent_sessions.fleet_binding``, which only an adoption
+    moves after) when the row was recorded on another id — the one a fresh hand-over
+    parked its claims on, which ``spawn`` could not move onto an id Codex had not
+    named yet — and for a ``SessionStart(clear)`` under the launch the row's session
+    started under. ``None`` otherwise: not proven, which keeps a bound row where it is.
+    """
+    current = agent.session_id
+    if current is None or current == session_id:
+        return None
+    if agent_sessions.fleet_binding(store, agent.id) == session_id:
+        return True
+    if source == CLEAR_SOURCE and agent_sessions.started_under_this_launch(store, current):
+        return True
+    return None
 
 
 def _handing_over_a_fleet_row(store: ContextStore, session: TeamSession) -> bool:
@@ -2544,7 +2595,7 @@ def _clearing_its_own_pane(store: ContextStore, session: TeamSession) -> bool:
     """
     try:
         row = _fleet_row_for(store, session.id, session.project_id)
-        return row is not None and _pane_holds(row) is True
+        return row is not None and _pane_holds(row, session.agent) is True
     except Exception:
         return False
 
@@ -2567,7 +2618,9 @@ class Assignment(NamedTuple):
     holder_gone: bool
 
 
-def _assignment(store: ContextStore, session_id: str, project_id: str) -> Assignment | None:
+def _assignment(
+    store: ContextStore, session_id: str, project_id: str, *, source: str | None = None
+) -> Assignment | None:
     """The task this session was spawned for, joining the session to its fleet row.
 
     ``fleet spawn --task`` recorded the task on the ``fleet_agent`` row and named
@@ -2582,7 +2635,7 @@ def _assignment(store: ContextStore, session_id: str, project_id: str) -> Assign
     task that will not parse — each costs the assignment block, never the board.
     """
     try:
-        return _resolve_assignment(store, session_id, project_id)
+        return _resolve_assignment(store, session_id, project_id, source=source)
     except Exception:
         return None
 
@@ -2610,12 +2663,15 @@ def _late_assignment(store: ContextStore, session: TeamSession) -> Assignment | 
     return _assignment(store, session.id, session.project_id)
 
 
-def _resolve_assignment(store: ContextStore, session_id: str, project_id: str) -> Assignment | None:
-    """The body of :func:`_assignment`, free to raise; the rules are the section's."""
+def _resolve_assignment(
+    store: ContextStore, session_id: str, project_id: str, *, source: str | None = None
+) -> Assignment | None:
+    """The body of :func:`_assignment`, free to raise; the rules are the section's.
+    ``source`` is the ``SessionStart``'s, ``None`` at a prompt."""
     agent = _fleet_row(store, session_id, project_id, allow_unbound=True)
     if agent is None:
         return None
-    if agent.session_id != session_id and not _adopt(store, agent, session_id):
+    if agent.session_id != session_id and not _adopt(store, agent, session_id, source=source):
         # The name in the environment is a row this session may not have
         # (rule 1) — but the session may be bound to a row of its OWN, and
         # `task next` (`_fleet_row_for`) reads that row for the order. The

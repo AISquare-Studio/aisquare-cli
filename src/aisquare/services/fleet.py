@@ -52,6 +52,7 @@ from aisquare.core.agent_adapters import (
     get_adapter,
     recorded_adapter,
 )
+from aisquare.core.agent_adapters.types import AgentAdapter, PermissionIntent
 from aisquare.core.config import (
     CLAUDE_PERMISSION_MODES,
     FleetRoleSettings,
@@ -60,6 +61,7 @@ from aisquare.core.config import (
     replacing_the_former_reviewer_default_first,
 )
 from aisquare.core.ids import new_agent_id
+from aisquare.core.spawn import untraced_env
 from aisquare.core.store import AmbiguousIdError, ContextStore, store_session
 from aisquare.core.tmux import (
     DEFAULT_WINDOW_HEIGHT,
@@ -74,6 +76,7 @@ from aisquare.core.version import __version__
 from aisquare.core.workspace import active_project
 from aisquare.models import (
     CLOSED_STATUSES,
+    ClaudeAccount,
     FleetAgent,
     FleetAgentState,
     FleetAgentStatus,
@@ -244,8 +247,9 @@ class SpawnReceipt:
     join the board. NOT a permission-mode fallback — there is none: the mode is the
     flag, then the role's config, then ``auto``, and nothing here rewrites it."""
     prompt_typed: bool | None = None
-    """Whether the ``prompt`` asked for reached the pane: ``None`` when none was
-    asked for, ``False`` when it was not typed — the notes say why."""
+    """Whether the ``prompt`` asked for reached the agent: ``None`` when none was
+    asked for, ``False`` when it was not typed — the notes say why. One an agent takes
+    as its argument (``capabilities.positional_prompt``) is on its command line: ``True``."""
     failures: list[str] = field(default_factory=list)
     """The notes about what did NOT happen once the agent was up: the prompt not typed,
     the claims of a hand-over not moved, the previous session not marked ended. Each
@@ -1656,40 +1660,19 @@ def spawn(
             )
         refuse_if_taken()
 
-    mode = role_config.permission_mode if permission_mode is None else permission_mode
-    # The role config's modes are in the legacy (Claude Code's) vocabulary; another agent
-    # takes only an explicit one, in its own (a replay's "" is "none recorded": its default).
-    native_mode = (
-        mode if selected.adapter.capabilities.legacy_fleet_args else (permission_mode or None)
+    # The agent's own flags, refused (a sandbox for Claude Code, a Claude mode for Codex,
+    # an intent the agent cannot express) before a worktree or a codename is made for a
+    # spawn that cannot start.
+    native, native_mode = permission_flags(
+        selected.adapter,
+        role,
+        picked,
+        role_config,
+        permission_mode=permission_mode,
+        sandbox=sandbox,
+        approval_policy=approval_policy,
+        native=arguments.argv,
     )
-    # The agent's own flags, refused (a sandbox for Claude Code, a Claude mode for Codex)
-    # before a worktree or a codename is made for a spawn that cannot start.
-    native_sandbox = (
-        role_config.sandbox if selected.adapter.capabilities.sandbox_permissions else None
-    )
-    native_approval = (
-        role_config.approval_policy if selected.adapter.capabilities.sandbox_permissions else None
-    )
-    approve_for_me = (
-        role_config.approve_for_me if selected.adapter.capabilities.sandbox_permissions else None
-    )
-    try:
-        native = selected.adapter.fleet_args(
-            role,
-            picked,
-            native_mode,
-            sandbox=sandbox if sandbox is not None else native_sandbox,
-            approval=approval_policy if approval_policy is not None else native_approval,
-            # A sandbox or a policy chosen for this spawn wins over the role's setting.
-            approve_for_me=(
-                approve_for_me
-                if sandbox is None and approval_policy is None and native_mode is None
-                else None
-            ),
-            native=arguments.argv,
-        )
-    except ValueError as exc:
-        raise FleetError(str(exc)) from exc
     # WHICH ACCOUNT, decided here and carried into the window as an explicit
     # `--account <slot>` (#145). The one resolver `launch` itself uses — flag,
     # role binding, project default, machine default — runs HERE rather than
@@ -1830,7 +1813,9 @@ def spawn(
     # that the agent is starting, and neither its own session nor the store and
     # transcript reads may land between the row and `_take_over` (review of
     # #169, round 2). The note is said once the row is written, below.
-    evidence = auto_mode.spawn_evidence(native_mode)
+    evidence = (
+        auto_mode.spawn_evidence(native_mode) if selected.adapter.capabilities.model_proxy else None
+    )
     tmux_session = session_name(codename)
     width, height = size if size is not None else (DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
     try:
@@ -1921,11 +1906,15 @@ def spawn(
         stored = _take_over(stored, takes_over, identity.session_id, moved)
     _supersede(rows, views, stored, config)
     typing: list[str] = []
-    # A prompt an agent takes on its command line went into the window's command.
+    # A prompt an agent takes on its command line went into the window's command: it
+    # reaches the agent as its argument, and the restart or switch that passed it reads
+    # that as delivered.
     typed = (
-        _type_prompt(srv, stored.pane_id, prompt, typing)
-        if prompt and not selected.adapter.capabilities.positional_prompt
-        else None
+        None
+        if not prompt
+        else True
+        if selected.adapter.capabilities.positional_prompt
+        else _type_prompt(srv, stored.pane_id, prompt, typing)
     )
     return SpawnReceipt(
         agent=stored,
@@ -1935,6 +1924,108 @@ def spawn(
         prompt_typed=typed,
         failures=[*moved, *(typing if typed is False else [])],
     )
+
+
+def permission_flags(
+    adapter: AgentAdapter,
+    role: str,
+    label: str,
+    role_config: FleetRoleSettings,
+    *,
+    permission_mode: str | None = None,
+    sandbox: str | None = None,
+    approval_policy: str | None = None,
+    native: Sequence[str] = (),
+) -> tuple[list[str], str | None]:
+    """The permission flags (and the label's) a spawn of ``role`` passes ``adapter``'s agent,
+    with the value its launch spec records (``LaunchSpec.permission_mode``).
+
+    One permission for every agent — the role's ``permission``, or ``WRITE:APPROVALS``
+    as this spawn's (or a replayed) ``permission_mode`` — is the adapter's to map
+    (``AgentAdapter.permission_args``), and what the ``native`` arguments already settle
+    wins. A value in the agent's own words, and this spawn's ``sandbox``/
+    ``approval_policy``, take the agent's own path (``AgentAdapter.fleet_args``) with the
+    role's agent-specific settings, as they always did. Raises :class:`FleetError` for
+    what the agent refuses. ``spawn`` and the Settings page's launch line both ask this.
+    """
+    intent = _permission_intent(
+        role,
+        role_config,
+        permission_mode,
+        native_given=sandbox is not None or approval_policy is not None,
+    )
+    if intent is not None:
+        try:
+            flags = [*adapter.permission_args(intent, role, native), *adapter.label_args(label)]
+        except ValueError as exc:
+            raise FleetError(f"{adapter.label}: {exc}") from exc
+        # Recorded as written, so a restart maps it again for whichever agent it starts.
+        return flags, str(intent)
+    mode = role_config.permission_mode if permission_mode is None else permission_mode
+    # The role config's modes are in the legacy (Claude Code's) vocabulary; another agent
+    # takes only an explicit one, in its own (a replay's "" is "none recorded": its default).
+    native_mode = mode if adapter.capabilities.legacy_fleet_args else (permission_mode or None)
+    sandboxed = adapter.capabilities.sandbox_permissions
+    try:
+        flags = adapter.fleet_args(
+            role,
+            label,
+            native_mode,
+            sandbox=sandbox if sandbox is not None else role_config.sandbox if sandboxed else None,
+            approval=(
+                approval_policy
+                if approval_policy is not None
+                else role_config.approval_policy
+                if sandboxed
+                else None
+            ),
+            # A sandbox or a policy chosen for this spawn wins over the role's setting.
+            approve_for_me=(
+                role_config.approve_for_me
+                if sandboxed and sandbox is None and approval_policy is None and native_mode is None
+                else None
+            ),
+            native=native,
+        )
+    except ValueError as exc:
+        raise FleetError(str(exc)) from exc
+    return flags, native_mode
+
+
+def _permission_intent(
+    role: str,
+    role_config: FleetRoleSettings,
+    permission_mode: str | None,
+    *,
+    native_given: bool,
+) -> PermissionIntent | None:
+    """The permission a spawn maps per agent (``PermissionIntent``), or ``None`` for the
+    agent's own path.
+
+    ``permission_mode`` is this spawn's, or a replay's recorded one: written
+    ``WRITE:APPROVALS`` it is the intent, refused beside a native ``--sandbox`` or
+    ``--approval`` for the same spawn (one or the other); in an agent's own words it is
+    that agent's. Without one, the role's ``permission``, unless this spawn chose a
+    native sandbox or policy, which wins over the role as any per-spawn flag does.
+    """
+    if permission_mode is not None:
+        if not PermissionIntent.written(permission_mode):
+            return None
+        if native_given:
+            raise FleetError(
+                f"--permission-mode {permission_mode} is mapped to each agent's own flags; "
+                "pass it without --sandbox or --approval, or pass those alone"
+            )
+        try:
+            return PermissionIntent.parse(permission_mode)
+        except ValueError as exc:
+            raise FleetError(str(exc)) from exc
+    if native_given or not role_config.permission:
+        return None
+    try:
+        return PermissionIntent.parse(role_config.permission)
+    except ValueError as exc:
+        raise FleetError(f"fleet.roles.{role}.permission: {exc}") from exc
 
 
 def _launch_binary(
@@ -2717,18 +2808,33 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
     documents and refuses to cause. So the same readiness test decides here —
     the one :func:`nudge_manager` already applies — and a pane that is not the
     agent's gets the board note instead.
+
+    An agent whose pane cannot be read for readiness
+    (``capabilities.reads_pane_readiness``: Codex) is typed into only when its own hooks
+    freshly say ``waiting``. When they freshly say ``working``, the message goes through
+    the agent's own queue for its next turn (``AgentAdapter.queue_args``: ``codex queue``,
+    which reached an interactive session busy with a turn on 0.162.1), and a queue that
+    fails, or an agent without one, leaves the board note.
     """
     with store_session() as store:
         agent = _live_agent(store, project, label)
     status = status_of(agent)
     adapter = recorded_adapter(agent.agent)
-    if not (adapter is not None and adapter.capabilities.reads_pane_readiness) and (
-        status.session is None
-        or status.session.state != "waiting"
-        or _now() - status.session.last_seen_at > _team()._STALE_AFTER
-    ):
-        how = _file_note(project, label, text, sender)
-        return TellResult(False, f"no confirmed waiting native session — {how}")
+    if not (adapter is not None and adapter.capabilities.reads_pane_readiness):
+        # The agent's own hooks say what the pane cannot. A fresh "working" is a busy
+        # agent, which takes the message through its own queue where it has one.
+        session = status.session
+        fresh = session is not None and _now() - session.last_seen_at <= _team()._STALE_AFTER
+        if fresh and session is not None and session.state == "working" and adapter is not None:
+            queued = _queue_message(adapter, agent.binary, session, text)
+            if queued is True:
+                return TellResult(True, "queued for its next turn (it was working)")
+            if queued is not None:
+                how = _file_note(project, label, text, sender)
+                return TellResult(False, f"{queued} — {how}")
+        if not (fresh and session is not None and session.state == "waiting"):
+            how = _file_note(project, label, text, sender)
+            return TellResult(False, f"no confirmed waiting native session — {how}")
     if status.state == "waiting":
         srv = server_of(agent)
         if not _pane_is_the_agent(srv, agent.pane_id):
@@ -2747,6 +2853,57 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
         return TellResult(True, "typed into its pane (it was waiting)")
     how = _file_note(project, label, text, sender)
     return TellResult(False, f"it is {status.state} — {how}")
+
+
+_QUEUE_TIMEOUT = 30.0
+
+
+def _queue_message(
+    adapter: AgentAdapter, binary: str, session: TeamSession, text: str
+) -> bool | str | None:
+    """Queue ``text`` for ``session``'s next turn through the agent's own queue, with
+    ``binary``, the one the row runs.
+
+    ``True`` when it was queued; ``None`` when the agent has no queue
+    (``AgentAdapter.queue_args``) or the session names no thread or home to queue for;
+    otherwise why it failed, for the board note that carries the message instead. Run
+    with the agent's home set to the one the session ran under (its ``account``), where
+    its queue is; never raises.
+    """
+    thread = session.native_session_id
+    if not thread or not session.account:
+        return None
+    argv = adapter.queue_args(thread, text)
+    if argv is None:
+        return None
+    executable = shutil.which(binary)
+    if executable is None:
+        return f"{binary!r} is not on your PATH to queue it"
+    try:
+        done = _run_native(
+            [executable, *argv], env={**untraced_env(), adapter.home_env: session.account}
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"{adapter.label} could not queue it ({type(exc).__name__}: {exc})"
+    if done.returncode != 0:
+        said = (done.stderr or done.stdout or "").strip().splitlines()
+        return f"{adapter.label} could not queue it ({said[-1] if said else done.returncode})"
+    return True
+
+
+def _run_native(argv: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """One short-lived native command (``codex queue``), its output captured."""
+    return subprocess.run(
+        argv,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdin=subprocess.DEVNULL,
+        timeout=_QUEUE_TIMEOUT,
+        check=False,
+    )
 
 
 def _pane_is_the_agent(srv: TmuxServer, pane_id: str) -> bool:
@@ -4334,10 +4491,12 @@ def switch(
     and the window kill took the hook — and this function — down before
     ``spawn`` ran (finding 1; ``services.hooks._detach``).
 
-    A CODEX agent moves between Codex accounts, and always FRESH: its thread is a
+    A CODEX agent moves between Codex accounts, FRESH across homes: its thread is a
     rollout under the old ``CODEX_HOME``, which a session on another home cannot
-    resume, so the replacement starts with the hand-off prompt and takes the
-    claims over, as ``--fresh`` does for Claude Code.
+    resume (``capabilities.resumes_across_homes``), so the replacement starts with the
+    hand-off prompt and takes the claims over, as ``--fresh`` does for Claude Code — its
+    first hook under the new window adopts them (``services.team``'s rule 1). A target
+    whose home is the one the session ran under resumes ``codex resume <id>``.
 
     What is deliberately NOT promised: that Claude Code resumes a transcript
     written under one ``CLAUDE_CONFIG_DIR`` from another. The path form is
@@ -4380,13 +4539,6 @@ def switch(
     failures: list[str] = []  # the notes that say what did not happen (`SwitchReceipt`)
     kind = agent.agent or claude_accounts_core.AGENT
     adapter = recorded_adapter(kind)
-    if adapter is not None and not adapter.capabilities.resumes_across_homes and not fresh:
-        # Its rollout lives under the old CODEX_HOME: no session on another home resumes it.
-        fresh = True
-        notes.append(
-            f"{claude_accounts_core.agent_label(kind)} cannot resume a thread under another "
-            "account's home — the replacement starts fresh with a hand-off prompt"
-        )
     # The accounts service decides, as for every launch
     # (tests/test_one_account_resolver.py): `--to` is the flag rung; without it
     # headroom decides first, with the account the agent is leaving excluded.
@@ -4424,6 +4576,19 @@ def switch(
     if current is not None and target.slot == current:
         raise FleetError(
             f"{label!r} already runs on {claude_accounts_core.label(target)} (slot {target.slot})"
+        )
+    if (
+        adapter is not None
+        and not adapter.capabilities.resumes_across_homes
+        and not fresh
+        and not _same_home(session, target)
+    ):
+        # Its thread lives under the old home (a Codex rollout under its CODEX_HOME): no
+        # session on another home resumes it. One on the same home does.
+        fresh = True
+        notes.append(
+            f"{claude_accounts_core.agent_label(kind)} cannot resume a thread under another "
+            "account's home — the replacement starts fresh with a hand-off prompt"
         )
     _refuse_a_replay_that_cannot_start(agent, session)
     # A hand-over whether it resumes or not: the agent is coming back, so its
@@ -4572,16 +4737,11 @@ def _respawn(
         # names it (rule 3), and a hand-off prompt naming it set the replacement on
         # finished work.
         task = None
-    transcript = (
-        Path(session.transcript_path) if session is not None and session.transcript_path else None
-    )
     resume: ResumeSpec | None = None
-    if not fresh and session is not None and transcript is not None and transcript.is_file():
-        resume = ResumeSpec(session.id, transcript, session.native_session_id)
-    elif not fresh:
-        notes.append(
-            "no transcript on disk to resume — the replacement starts fresh with a hand-off prompt"
-        )
+    if not fresh:
+        resume, why_not = _resumable(session)
+        if why_not is not None:
+            notes.append(f"{why_not} — the replacement starts fresh with a hand-off prompt")
     prompt = resume_prompt if resume is not None else _handoff_prompt(agent, task, recent, reason)
     receipt = spawn(
         project,
@@ -4621,6 +4781,38 @@ def _respawn(
         )
     notes.extend(receipt.notes)
     return receipt, resume is not None, notes
+
+
+def _same_home(session: TeamSession | None, target: ClaudeAccount) -> bool:
+    """Whether ``target``'s home is the config dir ``session`` ran under (its ``account``)."""
+    if session is None or not session.account:
+        return False
+    return agent_core.dir_identity(Path(session.account)) == agent_core.dir_identity(
+        target.config_dir
+    )
+
+
+def _resumable(session: TeamSession | None) -> tuple[ResumeSpec | None, str | None]:
+    """What resumes ``session``, the board session a row is bound to — or why nothing does.
+
+    Its transcript on disk, and the agent's own id for it: Claude Code's IS the board's
+    (``capabilities.assigns_session_id``), resumed by the transcript's path; another
+    agent's is the native id its first hook bound (Codex resumes ``codex resume <id>``
+    from its home). A row whose agent never reached a hook has no session, and a session
+    recorded with no native id has nothing to name the thread by: both start fresh and
+    say so.
+    """
+    if session is None:
+        return None, "no session is bound to the row (its agent never reached a hook)"
+    transcript = Path(session.transcript_path) if session.transcript_path else None
+    if transcript is None or not transcript.is_file():
+        return None, "no transcript on disk to resume"
+    adapter = recorded_adapter(_family(session))
+    assigned = adapter is None or adapter.capabilities.assigns_session_id
+    native = session.native_session_id
+    if not assigned and (native is None or native == session.id):
+        return None, "no native session id is bound to the row's session"
+    return ResumeSpec(session.id, transcript, native), None
 
 
 def _refuse_a_replay_that_cannot_start(agent: FleetAgent, session: TeamSession | None) -> None:
@@ -4733,18 +4925,14 @@ def restart(
     that hand-over ends it and starts the replacement itself.
     ``agent_id`` pins the row, as for :func:`stop`: the agent view's Restart
     means the row it shows, never a replacement that took the label since.
-    ``permission_mode`` is refused first when Claude Code does not take it
-    (:data:`~aisquare.core.config.CLAUDE_PERMISSION_MODES`, or ``""`` for no
-    flag). The replacement records it, so a typo was replayed by every later
-    restart, switch and hand-over, and it stopped a running agent for a
-    replacement that could not start (review of #169, round 1).
+    ``permission_mode`` is refused first when the row's agent does not take it
+    (:func:`_refuse_a_permission_the_agent_cannot_take`: a ``WRITE:APPROVALS`` intent
+    its adapter maps, or a value in its own words — Claude Code's
+    :data:`~aisquare.core.config.CLAUDE_PERMISSION_MODES` — or ``""`` for no flag).
+    The replacement records it, so a typo was replayed by every later restart, switch
+    and hand-over, and it stopped a running agent for a replacement that could not
+    start (review of #169, round 1).
     """
-    if permission_mode is not None and permission_mode not in ("", *CLAUDE_PERMISSION_MODES):
-        raise FleetError(
-            f"cannot restart {label!r}: {permission_mode!r} is not a Claude Code permission "
-            f"mode ({', '.join(CLAUDE_PERMISSION_MODES)}, or empty for no flag) — nothing "
-            "was stopped"
-        )
     with store_session() as store:
         current = store.get_project(project.id) or project
         agent = store.fleet_agent_by_label(project.id, label, live_only=False)
@@ -4756,6 +4944,7 @@ def restart(
         if agent_id is not None and agent.id != agent_id:
             raise _replaced(label, agent, agent_id)
         session = store.get_session(agent.session_id) if agent.session_id else None
+        _refuse_a_permission_the_agent_cannot_take(agent, session, permission_mode)
         if agent.ended_at is None and _handed_over(agent, session, _now()):
             # A `switch` (or another restart) is between its `/exit` and its end: the
             # pane reads dead, the listing leaves the row to it, and a restart that
@@ -4898,6 +5087,40 @@ def restart(
         notes=notes,
         prompt_typed=bool(receipt.prompt_typed),
     )
+
+
+def _refuse_a_permission_the_agent_cannot_take(
+    agent: FleetAgent, session: TeamSession | None, mode: str | None
+) -> None:
+    """Raise when the agent ``agent``'s replacement would run refuses ``mode`` — before
+    anything is stopped. The agent is the one whose hook joined the row's session, else
+    the one the row was spawned as; one this install does not know is ``spawn``'s to
+    refuse."""
+    if not mode:
+        return
+    adapter = recorded_adapter(_family(session) or agent.agent)
+    if adapter is None:
+        return
+    why: str | None = None
+    if PermissionIntent.written(mode):
+        try:
+            adapter.permission_args(PermissionIntent.parse(mode), agent.role)
+        except ValueError as exc:
+            why = str(exc)
+    elif adapter.capabilities.legacy_fleet_args:
+        if mode not in CLAUDE_PERMISSION_MODES:
+            why = (
+                f"{mode!r} is not a {adapter.label} permission mode "
+                f"({', '.join(CLAUDE_PERMISSION_MODES)}, or empty for no flag), nor "
+                "WRITE:APPROVALS such as workspace:auto"
+            )
+    else:
+        try:
+            adapter.fleet_args(agent.role, agent.label, mode)
+        except ValueError as exc:
+            why = f"{exc}, or WRITE:APPROVALS such as workspace:auto"
+    if why is not None:
+        raise FleetError(f"cannot restart {agent.label!r}: {why} — nothing was stopped")
 
 
 def _pane_alive(agent: FleetAgent) -> bool:

@@ -173,7 +173,10 @@ def spawn(
         str | None,
         typer.Option(
             "--permission-mode",
-            help="Claude Code permission mode (auto, acceptEdits, …); default per role.",
+            help="Permission as WRITE:APPROVALS, mapped to each agent's own flags "
+            "(workspace:auto, read_only:auto, workspace:ask, full:never…; docs/fleet.md), "
+            "or in the agent's own words (Claude Code: auto, acceptEdits, …; Codex: a "
+            "sandbox); default per role.",
         ),
     ] = None,
     agent: Annotated[str | None, typer.Option("--agent", help="Coding agent family.")] = None,
@@ -302,9 +305,10 @@ def restart(
         str | None,
         typer.Option(
             "--permission-mode",
-            help="Claude Code permission mode for the replacement (auto, acceptEdits, …); "
-            "default: the one the agent was launched with, or the role's for an agent "
-            "spawned before that was recorded (#144).",
+            help="Permission for the replacement: WRITE:APPROVALS mapped per agent "
+            "(workspace:auto, read_only:auto…) or the agent's own (Claude Code: auto, "
+            "acceptEdits, …); default: the one the agent was launched with, or the role's "
+            "for an agent spawned before that was recorded (#144).",
         ),
     ] = None,
     project: ProjectRef = None,

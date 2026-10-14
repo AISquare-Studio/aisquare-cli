@@ -292,9 +292,13 @@ def test_untraced_pasted_claude_spawn_cannot_rebind_its_parent(
     assert "AISQUARE_FLEET_AGENT" not in env
 
 
-def test_codex_new_session_rebinds_board_and_mcp_without_late_old_callback(
+def test_codex_new_session_rebinds_the_launch_and_mcp_without_late_old_callback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The launch's binding follows its newest start, and a late callback of the old one
+    does not take it back. The fleet row's does not move on a start: a nested child
+    inherits the window's variables as much as a ``/clear`` does, so the row moves only
+    with its claims (tests/test_codex_fleet_parity.py)."""
     monkeypatch.setenv("AISQUARE_LAUNCH_ID", "launch")
     monkeypatch.setenv("AISQUARE_FLEET_AGENT", "fleet")
     project = team_project(tmp_path)
@@ -304,9 +308,10 @@ def test_codex_new_session_rebinds_board_and_mcp_without_late_old_callback(
             {"hook_event_name": "SessionStart", "session_id": native, "cwd": str(tmp_path)},
             tmp_path,
         )
+    first = agent_events.session_key(CODEX, tmp_path, "first")
     second = agent_events.session_key(CODEX, tmp_path, "second")
     with store_session() as store:
-        assert store.get_meta("fleet-session:fleet") == second
+        assert store.get_meta("fleet-session:fleet") == first
         assert store.get_meta("launch-session:launch") == second
     assert mcp_server.client_session_id(project.id) == second
 

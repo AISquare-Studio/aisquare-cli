@@ -111,6 +111,9 @@ Excluded, the fleet's own plumbing (docs/plans/fleet-tui.md §3.4):
   * ``services/fleet.py::_git`` — ``git worktree`` (add, remove, list) and the
     branch queries behind ``fleet reap`` (§3.5); no model, not stripped, like
     the other git seams.
+  * ``services/fleet.py::_run_native`` — ``codex queue`` for ``fleet tell`` to a
+    busy Codex agent: a client of the agent's local session store, no model;
+    stripped, so the caller's identity is not handed to a Codex process.
 
 Checked and NOT a seam, recorded so the next reader does not re-derive it:
   * ``services/project.py`` — catches ``subprocess.SubprocessError`` but starts
@@ -328,6 +331,13 @@ SEAMS: dict[str, Seam] = {
         EXCLUDED,
         "`tmux attach` — a terminal client on the fleet server, not an agent; "
         "the agents inside already have their identities",
+    ),
+    "aisquare/services/fleet.py::_run_native": Seam(
+        EXCLUDED,
+        "`codex queue --thread <id> --message <text>` for `fleet tell` to a busy Codex "
+        "agent (`AgentAdapter.queue_args`): a client of the agent's local session store, "
+        "no model process; stripped, so the caller's run and fleet identity stay its own",
+        strips_identity=True,
     ),
     "aisquare/services/fleet.py::_git": Seam(
         EXCLUDED,

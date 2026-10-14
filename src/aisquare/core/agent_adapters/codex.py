@@ -660,9 +660,12 @@ class CodexAdapter:
         return ["resume", native_session_id]
 
     def queue_args(self, native_session_id: str, message: str) -> list[str] | None:
-        """``codex queue --thread <id> --message <text>``: measured on 0.162.1 against an
-        interactive TUI session busy with a turn, the message ran as its next turn."""
-        return ["queue", "--thread", native_session_id, "--message", message]
+        """``codex queue --thread <id> --message=<text>``: measured on 0.162.1 against an
+        interactive TUI session busy with a turn, the message ran as its next turn. The
+        text is joined to its option, as ``--message <text>`` parses one that starts with
+        ``-`` (``--no-verify was wrong``, ``- [ ] step``) as an option of its own and the
+        queue exits with "unexpected argument" (measured)."""
+        return ["queue", "--thread", native_session_id, f"--message={message}"]
 
     def disable_native_teams(self) -> tuple[list[str], dict[str, str]]:
         return ["-c", "agents.enabled=false"], {}

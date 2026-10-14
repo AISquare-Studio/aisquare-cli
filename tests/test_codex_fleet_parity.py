@@ -458,9 +458,24 @@ def test_tell_queues_for_a_busy_codex_agent_through_codex_queue(
     assert told.delivered is True and "queued for its next turn" in told.how
     [(argv, env)] = calls
     assert Path(argv[0]).name.startswith("codex")
-    assert argv[1:] == ["queue", "--thread", "thread-one", "--message", "rebase on main first"]
+    assert argv[1:] == ["queue", "--thread", "thread-one", "--message=rebase on main first"]
     assert env["CODEX_HOME"] == str(codex.home), "the queue of the home the thread runs under"
     assert _notes_to(codex.project, codex.agent.label) == []
+
+
+@pytest.mark.parametrize(
+    "text", ["--no-verify was wrong, amend the commit", "- [ ] step one\n- [ ] step two", "-"]
+)
+def test_a_told_message_that_starts_with_a_dash_is_the_queues_text_not_an_option(
+    text: str,
+) -> None:
+    """``codex queue --message <text>`` reads a text that starts with ``-`` as an option
+    and exits "unexpected argument" (0.162.1, measured); joined to ``--message=``, it is the
+    message, whatever follows the dash."""
+    argv = CODEX.queue_args("thread-one", text)
+
+    assert argv == ["queue", "--thread", "thread-one", f"--message={text}"]
+    assert not any(word == text for word in argv), "never a word of its own"
 
 
 def test_a_queue_that_fails_leaves_the_message_on_the_board(

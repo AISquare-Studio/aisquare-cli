@@ -361,14 +361,16 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
                     return any((_user_texts(request) or [""])[-1] == text for request in requests)
 
                 # A busy agent is told through `codex queue`, which reaches the
-                # interactive session: the message runs as its next turn.
+                # interactive session: the message runs as its next turn. One that
+                # starts with a dash is the message, not an option of the queue's.
                 pane = receipt.agent.pane_id
                 until(lambda: state(receipt.agent) == "waiting", 20, "waiting", pane)
                 assert fleet.tell(project, label, "SLOW busy fixture").delivered
                 until(lambda: state(receipt.agent) == "working", 10, "working", pane)
-                queued = fleet.tell(project, label, "queued fixture line")
+                told = "--no-verify queued fixture line"
+                queued = fleet.tell(project, label, told)
                 assert queued.delivered and "queued for its next turn" in queued.how, queued
-                until(lambda: ran("queued fixture line"), 40, "the queued line ran", pane)
+                until(lambda: ran(told), 40, "the queued line ran", pane)
                 # A restart resumes the bound thread: `codex ... resume <id> -- <line>`,
                 # the history before it and the claims with it.
                 until(lambda: state(receipt.agent) == "waiting", 20, "waiting again", pane)
@@ -386,8 +388,7 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
                 pane = restarted.started.pane_id
                 until(
                     lambda: any(
-                        (_user_texts(request) or [""])[-1] == line
-                        and "queued fixture line" in _user_texts(request)
+                        (_user_texts(request) or [""])[-1] == line and told in _user_texts(request)
                         for request in requests
                     ),
                     40,

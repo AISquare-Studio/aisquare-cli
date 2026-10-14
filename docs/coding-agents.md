@@ -146,8 +146,11 @@ minutes](fleet.md#the-first-five-minutes)):
 - **Doctor** rows for each Codex home: connected (`configured`/`observed`),
   `partial` (some of AISquare's hooks, naming the missing events), not connected,
   hooks naming a stale or missing aisquare, hooks switched off, `unverified` (the
-  trust step, whose fix is `/hooks` in Codex — no button can trust hooks) and the
-  account rows (`codex-accounts`, defaults, bindings, limits). *Connect* fixes are
+  trust step, whose fix is `/hooks` in Codex — no button can trust hooks), the
+  plugin route (connected through the aisquare Codex plugin, its hooks not trusted
+  yet, both routes installed — keep one — or the plugin running in place of
+  `hooks.json` hooks whose aisquare is gone) and the account rows
+  (`codex-accounts`, defaults, bindings, limits). *Connect* fixes are
   one click, and so is a slot's sign-in: *Sign in account N* opens the Accounts
   page with that slot's `codex login` in its pane. `aisquare --json doctor` carries
   every row.

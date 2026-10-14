@@ -11,6 +11,7 @@ behaviour's control is the other state, or Claude Code's page unchanged.
 from __future__ import annotations
 
 import dataclasses
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -21,7 +22,7 @@ from textual.pilot import Pilot
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.sidebar import AccountsSelected
 from aisquare.cli.ui.views.accounts import AccountsView
-from aisquare.cli.ui.views.welcome import WelcomeView, agent_button
+from aisquare.cli.ui.views.welcome import WelcomeView, agent_button, claude_text
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.models import FleetAgentStatus
 from aisquare.services import first_run
@@ -83,6 +84,16 @@ def test_a_codex_only_machine_shows_codex_its_version_sign_in_hooks_and_trust_st
     # Control: once a hook ran, the trust line is gone and the rest stands.
     _title, trusted = hosted(Machine(claude=[CODEX_TRUSTED]), _look)
     assert "/hooks" not in trusted and "✓ connected" in trusted
+
+
+def test_the_hooks_home_is_named_in_full_as_this_platform_spells_it() -> None:
+    """On the Windows runner the account home sat under the user's folder and step 2 named
+    it ``~/AppData/.../codex-accounts/2``, a spelling neither cmd nor Explorer takes; it is
+    named in full, as the binary and a hooks-off config.toml are, wherever it lives."""
+    home = Path.home() / ".aisquare" / "codex-accounts" / "2"
+    for state in (CODEX_UNHOOKED, CODEX_TRUSTED):
+        text = claude_text(dataclasses.replace(state, home=home), platform=sys.platform).plain
+        assert f" in {home}" in text and "~" not in text, text
 
 
 def test_codex_missing_names_its_installer_and_check_again() -> None:

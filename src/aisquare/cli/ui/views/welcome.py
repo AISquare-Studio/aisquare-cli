@@ -299,7 +299,10 @@ def _other_agent_text(text: Text, claude: ClaudeState) -> Text:
             "when it first starts",
             style="dim",
         )
-    where = f" in {short_path(claude.home)}" if claude.home is not None else ""
+    # In full, as this platform spells it, like the binary above and a hooks-off file: a
+    # short_path under the user's folder read ~/AppData/... on Windows, which neither cmd
+    # nor Explorer takes.
+    where = f" in {claude.home}" if claude.home is not None else ""
     if claude.connected:
         text.append("\n✓ ", style="green")
         text.append("connected — the manager gets its instructions through aisquare's hooks")

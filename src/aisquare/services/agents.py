@@ -513,7 +513,7 @@ def _disconnect_refusal(name: str, config_dir: Path | None) -> Refusal | None:
     from aisquare.services import lifecycle  # lazy: lifecycle imports this module
 
     directory = spec.settings_path.parent
-    _binaries, stuck = lifecycle.hooks_stuck(directory)
+    _binaries, stuck = lifecycle.hooks_stuck(directory, name)
     if stuck is None:
         return None
     return Refusal(

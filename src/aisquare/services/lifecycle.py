@@ -19,6 +19,7 @@ import re
 import shutil
 import sqlite3
 import sys
+import tomllib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -30,6 +31,7 @@ from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import credentials as credentials_store
 from aisquare.core import paths
 from aisquare.core import snapshot as snapshot_core
+from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.config import (
     AppConfig,
     ExplainabilitySettings,
@@ -266,7 +268,30 @@ def _explainability_step(decision: bool | None) -> list[str]:
 # --- upgrade -----------------------------------------------------------------------------
 
 HOOK_AGENT = "claude-code"
-"""The one agent whose hooks aisquare writes (``core.agents._HOOKS``)."""
+"""The first agent whose hooks aisquare wrote (``core.agents._HOOKS``), and what every
+per-agent helper here reads when it is not told another (:func:`hook_agents`)."""
+
+CODEX = "codex"
+"""Codex: its hooks in ``$CODEX_HOME/hooks.json``, its MCP servers and plugins in
+``$CODEX_HOME/config.toml``, and the homes it may run in (:func:`_codex_homes`)."""
+
+
+def hook_agents() -> tuple[str, ...]:
+    """Every agent aisquare writes hooks for, in the registry's order (Claude Code first):
+    upgrade re-connects, and uninstall removes, the hooks of each."""
+    return tuple(spec.name for spec in agent_core.specs() if spec.hooks)
+
+
+def agent_label(agent: str) -> str:
+    """``agent`` as a person names it: Claude Code, Codex."""
+    return get_adapter(agent).label
+
+
+def settings_name(agent: str) -> str:
+    """The file ``agent``'s hooks live in, inside its config dir: Claude Code's
+    ``settings.json``, Codex's ``hooks.json`` (its adapter's ``settings_name``)."""
+    return get_adapter(agent).settings_name
+
 
 VERSION_CHECK_TIMEOUT_SECONDS = 60.0
 HOOK_REFRESH_TIMEOUT_SECONDS = 120.0
@@ -287,7 +312,7 @@ class UpgradeRefused(RuntimeError):
 
 @dataclass(frozen=True)
 class HookSite:
-    """One Claude Code config directory, and what its aisquare hooks run.
+    """One agent's config directory, and what its aisquare hooks run.
 
     ``reason`` is set when the directory is left alone, and says why.
     """
@@ -299,6 +324,8 @@ class HookSite:
     """For a site the upgrade rewrites: its settings file, when that switches every hook off
     (``"disableAllHooks": true``, :func:`agent_core.hooks_off`). The hooks are rewritten so
     they run once the key goes; until then Claude Code runs none, so it is not "connected"."""
+    agent: str = HOOK_AGENT
+    """Whose directory it is (:func:`hook_agents`): Claude Code's, or a Codex home."""
 
 
 @dataclass(frozen=True)
@@ -406,6 +433,10 @@ class HookRefresh:
     error: str | None = None
     hooks_off: Path | None = None
     """:attr:`HookSite.hooks_off`: rewritten, but switched off there."""
+    agent: str = HOOK_AGENT
+    review: bool = False
+    """Whether the rewrite changed a definition the agent runs only once trusted (Codex's
+    ``/hooks``): it now asks for them to be reviewed again (:func:`_definition`)."""
 
 
 @dataclass(frozen=True)
@@ -473,13 +504,14 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
     fleet_error: str | None = None
     if reason is None:
         refresh, left = refresh_sites(route.facts)
-        if target is not None and lacks_refresh_hooks(target):
+        if target is not None:
             # upgrade() leaves the hooks alone on a move back to a release before
             # `agents refresh-hooks`, so the plan must not promise a re-connect: the plan,
             # its --json, the question and the report agree (review of #257). Said once,
-            # here, with the remedy: a note in the report said it again.
-            left = (*left, *(_left_by_move_back(site, target) for site in refresh))
-            refresh = ()
+            # here, with the remedy: a note in the report said it again. So are a Codex
+            # home's on a move back to a release with no Codex hooks.
+            refresh, held = _held_by_target(refresh, target)
+            left = (*left, *held)
         live, _unlistened, fleet_error = running_fleet()
     return UpgradePlan(
         route=route,
@@ -526,17 +558,64 @@ def lacks_refresh_hooks(release: str) -> bool:
     return install_route.is_newer(FIRST_REFRESH_HOOKS, release) is True
 
 
+#: The last release with no Codex hooks: an install of it, or of one before it, has none to
+#: write, and its ``agents refresh-hooks codex`` fails.
+LAST_WITHOUT_CODEX_HOOKS = "0.8.0"
+
+
+def lacks_agent_hooks(agent: str, release: str) -> bool:
+    """Whether ``release`` has no hooks for ``agent`` to write: Codex's, up to
+    :data:`LAST_WITHOUT_CODEX_HOOKS`. Claude Code's have been there since before
+    ``upgrade`` (:func:`lacks_refresh_hooks` is that release's question)."""
+    if agent != CODEX:
+        return False
+    return install_route.is_newer(release, LAST_WITHOUT_CODEX_HOOKS) is False
+
+
+def _held_by_target(
+    sites: tuple[HookSite, ...], target: str
+) -> tuple[tuple[HookSite, ...], tuple[HookSite, ...]]:
+    """Which of ``sites`` the install of ``target`` re-connects, and the rest, each left
+    with why: a release with no hooks for the site's agent (:func:`lacks_agent_hooks`), or
+    one before ``agents refresh-hooks`` (:func:`lacks_refresh_hooks`)."""
+    kept: list[HookSite] = []
+    held: list[HookSite] = []
+    for site in sites:
+        if lacks_agent_hooks(site.agent, target):
+            held.append(_left_without_agent_hooks(site, target))
+        elif lacks_refresh_hooks(target):
+            held.append(_left_by_move_back(site, target))
+        else:
+            kept.append(site)
+    return tuple(kept), tuple(held)
+
+
 def _left_by_move_back(site: HookSite, target: str) -> HookSite:
     """``site`` left as it is by a move back to ``target``, a release that
     :func:`lacks_refresh_hooks`, with the command that rewrites its hooks for that release."""
     rewrite = install_route.command_line(
-        ["aisquare", "agents", "connect", HOOK_AGENT, "--config-dir", str(site.config_dir)]
+        ["aisquare", "agents", "connect", site.agent, "--config-dir", str(site.config_dir)]
     )
     why = (
         f"{target} predates `agents refresh-hooks` (new in {FIRST_REFRESH_HOOKS}): the move "
         f"back leaves the hooks as they are; `{rewrite}` rewrites them for {target}"
     )
-    return HookSite(site.config_dir, site.programs, why)
+    return HookSite(site.config_dir, site.programs, why, agent=site.agent)
+
+
+def _left_without_agent_hooks(site: HookSite, target: str) -> HookSite:
+    """``site`` left as it is by a move back to ``target``, which has no hooks for its agent
+    (:func:`lacks_agent_hooks`): they then run a program that does not know them, so the
+    command that takes them out is named, to run before the move."""
+    remove = install_route.command_line(
+        ["aisquare", "agents", "disconnect", site.agent, "--config-dir", str(site.config_dir)]
+    )
+    why = (
+        f"{target} has no {agent_label(site.agent)} hooks: the move back leaves them as they "
+        f"are, and they fail in every {agent_label(site.agent)} session there — take them out "
+        f"first with `{remove}`"
+    )
+    return HookSite(site.config_dir, site.programs, why, agent=site.agent)
 
 
 def _held_back(route: install_route.InstallRoute) -> str | None:
@@ -616,12 +695,21 @@ def runs_this_install(binary: agent_core.HookBinary, found: install_route.Facts)
     return program == prefix or prefix in program.parents
 
 
+def _refresh_candidates(agent: str) -> list[Path]:
+    """The directories whose ``agent`` hooks an upgrade may rewrite: those THIS home
+    connected (``agents.json``), and for Codex also every account home under this home
+    (:func:`_codex_account_dirs`), which only aisquare makes."""
+    recorded = agent_core.connected_dirs(agent)
+    return [*recorded, *_codex_account_dirs()] if agent == CODEX else recorded
+
+
 def refresh_sites(found: install_route.Facts) -> tuple[tuple[HookSite, ...], tuple[HookSite, ...]]:
     """Which recorded hook sites the upgraded install re-connects, and which it leaves.
 
-    Only directories THIS home connected (``agents.json``) — a directory found on
-    disk was never this home's to rewrite — and only those that still carry
-    aisquare hooks: an operator who removed them by hand did not ask for them
+    Every agent's (:func:`hook_agents`), and only directories THIS home connected
+    (``agents.json``) or made (a Codex account home, :func:`_refresh_candidates`) — a
+    directory found on disk was never this home's to rewrite — and only those that still
+    carry aisquare hooks: an operator who removed them by hand did not ask for them
     back. A site whose hooks run ANOTHER install of aisquare that is still on
     disk is left alone and named, because re-connecting it would quietly move a
     developer's hooks off the checkout they chose and onto this release. A
@@ -630,15 +718,16 @@ def refresh_sites(found: install_route.Facts) -> tuple[tuple[HookSite, ...], tup
     """
     refresh: list[HookSite] = []
     left: list[HookSite] = []
-    seen: set[Path] = set()
-    for directory in agent_core.connected_dirs(HOOK_AGENT):
-        key = agent_core.dir_identity(directory)
+    seen: set[tuple[str, Path]] = set()
+    sites = [(name, path) for name in hook_agents() for path in _refresh_candidates(name)]
+    for agent, directory in sites:
+        key = (agent, agent_core.dir_identity(directory))
         if key in seen:
             continue
         seen.add(key)
-        binaries, error = hook_binaries(directory)
+        binaries, error = hook_binaries(directory, agent)
         if error is not None:
-            left.append(HookSite(directory, reason=error))
+            left.append(HookSite(directory, reason=error, agent=agent))
             continue
         if not binaries:
             continue
@@ -656,31 +745,35 @@ def refresh_sites(found: install_route.Facts) -> tuple[tuple[HookSite, ...], tup
             ),
             None,
         )
-        unwritable = agents_service.settings_unwritable(directory / "settings.json")
+        unwritable = agents_service.settings_unwritable(directory / settings_name(agent))
         if foreign is not None:
             left.append(
                 HookSite(
                     directory,
                     programs,
                     f"its hooks run {foreign.program}, another install of aisquare",
+                    agent=agent,
                 )
             )
         elif unwritable is not None:
             # Planned, it failed in the new install after a good upgrade, which then
             # exited 1 and kept asq closed; the remedy it printed failed the same way
             # (review of #257). The hooks name the tool path the reinstall keeps.
-            left.append(HookSite(directory, programs, _CANNOT_REWRITE.format(unwritable)))
+            left.append(
+                HookSite(directory, programs, _cannot_rewrite(agent, unwritable), agent=agent)
+            )
         else:
             # Rewritten all the same, as `agents connect` does: they run once the key goes.
             # Said, because the plan and the report called such a site re-connected, where
             # connect and init now say it is not (sweep of #257).
-            off = agent_core.hooks_off(HOOK_AGENT, directory)
-            refresh.append(HookSite(directory, programs, hooks_off=off))
+            off = agent_core.hooks_off(agent, directory)
+            refresh.append(HookSite(directory, programs, hooks_off=off, agent=agent))
     return tuple(refresh), tuple(left)
 
 
-#: Why a site whose hooks are ours is left: aisquare may not write its settings.json.
-_CANNOT_REWRITE = "its settings.json cannot be rewritten: {}"
+def _cannot_rewrite(agent: str, why: str) -> str:
+    """Why a site whose hooks are ours is left: aisquare may not write its settings file."""
+    return f"its {settings_name(agent)} cannot be rewritten: {why}"
 
 
 #: A ``"command": "…"`` pair in settings.json text, found without parsing the JSON.
@@ -720,21 +813,25 @@ def lenient_text(raw: bytes) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def settings_unreadable(directory: Path) -> str | None:
+def settings_unreadable(directory: Path, agent: str = HOOK_AGENT) -> str | None:
     """Why the aisquare hooks in ``directory`` cannot be read or rewritten, or ``None``.
 
     ``hook_commands`` reads a file it cannot parse as one with no hooks (#247),
     which is right for doctor and wrong for a step that has to act on the hooks.
     A site is named, with its reason, when:
-    - its settings.json cannot be read at all, which may hide hooks; or
+    - its settings file (``agent``'s: :func:`settings_name`) cannot be read at all,
+      which may hide hooks; or
     - it holds aisquare hook commands (:func:`lenient_hook_commands`) in a file
       that is not UTF-8, not valid JSON, or not an object with a ``hooks``
-      object. Claude Code may still run those hooks, and this CLI cannot rewrite
-      that file safely.
+      object, or, for an agent whose hooks file is refused rather than rewritten in
+      another shape (Codex's, ``agent_core.hooks_shape_strict``), one with an event that
+      is not an array. The agent may still run those hooks, and this CLI cannot
+      rewrite that file safely.
     A file that cannot be parsed but holds nothing of ours is not this
     command's business (review of #254).
     """
-    settings = directory / "settings.json"
+    name = settings_name(agent)
+    settings = directory / name
     if paths.names_no_home(settings):
         return None  # a home this machine does not have holds no file (agent_core.present)
     # One read, "missing" split out. An exists() first raised PermissionError on 3.11 to
@@ -747,41 +844,46 @@ def settings_unreadable(directory: Path) -> str | None:
     except OSError as exc:
         if agent_core.nothing_there(exc):
             return None
-        return f"its settings.json could not be read ({exc})"
+        return f"its {name} could not be read ({exc})"
     problem: str | None = None
     try:
         data = json.loads(raw.decode("utf-8"))
     except ValueError as exc:  # UnicodeDecodeError is one
         problem = f"cannot be read as UTF-8 JSON ({exc})"
     else:
-        if not isinstance(data, dict) or not isinstance(data.get("hooks", {}), dict):
+        hooks = data.get("hooks", {}) if isinstance(data, dict) else None
+        if not isinstance(hooks, dict):
             problem = "is not a JSON object with a hooks object"
+        elif agent_core.hooks_shape_strict(agent) and any(
+            not isinstance(groups, list) for groups in hooks.values()
+        ):
+            problem = "has a hooks event that is not an array"
     if problem is None or not lenient_hook_commands(lenient_text(raw)):
         return None
     # Said by upgrade's plan and by uninstall's: both act on the hooks by rewriting the
     # file, so the ending names that, not either command's verb (review of #257).
-    return (
-        f"its settings.json holds aisquare hooks but {problem}, "
-        "so aisquare cannot rewrite it safely"
-    )
+    return f"its {name} holds aisquare hooks but {problem}, so aisquare cannot rewrite it safely"
 
 
-def hook_binaries(directory: Path) -> tuple[list[agent_core.HookBinary], str | None]:
-    """The distinct programs ``directory``'s aisquare hooks run — or why it could not be read.
+def hook_binaries(
+    directory: Path, agent: str = HOOK_AGENT
+) -> tuple[list[agent_core.HookBinary], str | None]:
+    """The distinct programs ``directory``'s aisquare hooks for ``agent`` run — or why it
+    could not be read.
 
-    The one reader for upgrade's refresh and uninstall's plan. A settings.json
+    The one reader for upgrade's refresh and uninstall's plan. A settings file
     this user cannot read, or that is not UTF-8, is a reason (:func:`settings_unreadable`),
     and so is anything else the read raises: one bad file must not stop the work
     on every other directory, and must never pass for a directory with no hooks.
     """
-    unreadable = settings_unreadable(directory)
+    unreadable = settings_unreadable(directory, agent)
     if unreadable is not None:
         return [], unreadable
     try:
-        commands = agent_core.hook_commands(HOOK_AGENT, directory)
+        commands = agent_core.hook_commands(agent, directory)
     except (OSError, ValueError, TypeError, RuntimeError) as exc:
         # RuntimeError: pathlib's, for a recorded `~olduser/.claude` (sweep of #257).
-        return [], f"its settings.json could not be read ({exc})"
+        return [], f"its {settings_name(agent)} could not be read ({exc})"
     binaries: list[agent_core.HookBinary] = []
     for command in commands:
         binary = agent_core.hook_binary(command)
@@ -790,21 +892,23 @@ def hook_binaries(directory: Path) -> tuple[list[agent_core.HookBinary], str | N
     return binaries, None
 
 
-def hooks_stuck(directory: Path) -> tuple[list[agent_core.HookBinary], str | None]:
-    """The programs ``directory``'s aisquare hooks run, and why they cannot be taken out of
-    it, or ``None`` when they can: :func:`hook_binaries`' reason, else, for hooks that are
-    there, a settings.json this user may not write.
+def hooks_stuck(
+    directory: Path, agent: str = HOOK_AGENT
+) -> tuple[list[agent_core.HookBinary], str | None]:
+    """The programs ``directory``'s aisquare hooks for ``agent`` run, and why they cannot be
+    taken out of it, or ``None`` when they can: :func:`hook_binaries`' reason, else, for
+    hooks that are there, a settings file this user may not write.
 
     The one rule for uninstall's plan and for `agents disconnect`
     (``agents_service.access``): disconnect asked only the first half and ended in a
     PermissionError traceback on a read-only settings.json holding the hooks, the
     home-manager shape, which the doctor's own fixes sent people to (review of #257).
     """
-    binaries, error = hook_binaries(directory)
+    binaries, error = hook_binaries(directory, agent)
     if error is None and binaries:
-        unwritable = agents_service.settings_unwritable(directory / "settings.json")
+        unwritable = agents_service.settings_unwritable(directory / settings_name(agent))
         if unwritable is not None:
-            error = _CANNOT_REWRITE.format(unwritable)
+            error = _cannot_rewrite(agent, unwritable)
     return binaries, error
 
 
@@ -953,24 +1057,54 @@ REFRESH_HOOKS = ("agents", "refresh-hooks", HOOK_AGENT)
 FIRST_REFRESH_HOOKS = "0.8.0"
 
 
+def refresh_hooks_argv(agent: str = HOOK_AGENT) -> tuple[str, ...]:
+    """:data:`REFRESH_HOOKS` for ``agent``: what the new install runs for one of its sites."""
+    return (*REFRESH_HOOKS[:2], agent)
+
+
+def _definition(site: HookSite) -> str | None:
+    """The definition of ``site``'s hooks its agent trusts, for one that runs them only once
+    trusted (Codex, ``requires_hook_trust``), else ``None``; ``None`` too when it cannot be
+    read. Changed by a refresh, Codex asks for the hooks to be reviewed again in ``/hooks``
+    (docs/coding-agents.md)."""
+    if not get_adapter(site.agent).capabilities.requires_hook_trust:
+        return None
+    try:
+        return agent_core.hook_fingerprint(site.agent, site.config_dir)
+    except (OSError, ValueError):  # AgentSettingsError is a ValueError
+        return None
+
+
 def _refresh(site: HookSite, found: install_route.Facts) -> HookRefresh:
     """Rewrite one site's hooks BY the new install, so they name the new install.
 
     The console script beside the interpreter, not ``python -m aisquare``: hooks
     are written for whatever program the refresh ran as, and the module form
-    would fall back to whichever ``aisquare`` comes first on PATH.
+    would fall back to whichever ``aisquare`` comes first on PATH. A Codex home's
+    whose definition the rewrite changed is said to need review (:func:`_definition`):
+    an identical one is not rewritten at all (``agent_core._write_settings``).
     """
     script = found.executable.with_name("aisquare.exe" if found.platform == "win32" else "aisquare")
     if not script.exists():
-        return HookRefresh(site.config_dir, False, f"the new install has no {script}")
-    argv = [str(script), *REFRESH_HOOKS, "--config-dir", str(site.config_dir)]
+        return HookRefresh(
+            site.config_dir, False, f"the new install has no {script}", agent=site.agent
+        )
+    argv = [str(script), *refresh_hooks_argv(site.agent), "--config-dir", str(site.config_dir)]
+    before = _definition(site)
     answer = install_route.run_captured(argv, timeout=HOOK_REFRESH_TIMEOUT_SECONDS)
     if answer.error is not None:
-        return HookRefresh(site.config_dir, False, answer.error)
+        return HookRefresh(site.config_dir, False, answer.error, agent=site.agent)
     if answer.returncode != 0:
         said = _reason_line(answer.stderr, answer.stdout) or f"exit {answer.returncode}"
-        return HookRefresh(site.config_dir, False, said)
-    return HookRefresh(site.config_dir, True, hooks_off=site.hooks_off)
+        return HookRefresh(site.config_dir, False, said, agent=site.agent)
+    after = _definition(site) if before is not None else None
+    return HookRefresh(
+        site.config_dir,
+        True,
+        hooks_off=site.hooks_off,
+        agent=site.agent,
+        review=after is not None and after != before,
+    )
 
 
 # --- uninstall ---------------------------------------------------------------------------
@@ -1011,18 +1145,20 @@ class UninstallRefused(RuntimeError):
 
 @dataclass(frozen=True)
 class McpRegistration:
-    """An MCP server entry in a ``.claude.json`` that runs aisquare."""
+    """An MCP server entry in a ``.claude.json``, or in a Codex home's ``config.toml``
+    (``[mcp_servers.<name>]``), that runs aisquare."""
 
     name: str
     file: Path
     """The ``.claude.json`` that holds it: the file itself, links resolved, so one file
     reached two ways is one, and a link the purge deletes never stands for a file it
-    leaves (sweep 2 of #257)."""
+    leaves (sweep 2 of #257). A Codex entry's ``config.toml``, the same way."""
     project: str | None = None
     """The project a local-scope entry belongs to; ``None`` for user scope."""
     config_dir: Path | None = None
     """The ``CLAUDE_CONFIG_DIR`` under which ``claude`` reads ``file``: ``None`` for
-    ``~/.claude.json``, which it reads with that variable unset."""
+    ``~/.claude.json``, which it reads with that variable unset. A Codex entry's is the
+    ``CODEX_HOME`` that holds ``file``."""
     fetches: bool = False
     """Whether it runs aisquare through a runner that fetches the package (``uvx``,
     ``uv tool run``, ``uv run --with``, ``pipx run``), so it still starts once the
@@ -1034,6 +1170,24 @@ class McpRegistration:
     """For a project-scope entry, each ``.claude.json`` (the file itself) whose block for
     the project has not declined it: sessions under that config dir start it, or ask to
     (:func:`_project_registrations`)."""
+    agent: str = HOOK_AGENT
+    """Whose file holds it, and so whose command removes it (:func:`mcp_removal`)."""
+
+
+#: The name the aisquare Codex plugin is installed under, before its ``@marketplace``: the
+#: one an uninstall looks for in each Codex home's ``config.toml`` (:func:`_codex_plugins`).
+#: The Codex plugin route's manifest holds the same name as the Claude Code plugin's.
+CODEX_PLUGIN = agent_core.CLAUDE_PLUGIN
+
+
+@dataclass(frozen=True)
+class CodexPlugin:
+    """The aisquare Codex plugin, enabled in a Codex home's ``config.toml``
+    (``[plugins."aisquare@<marketplace>"]``)."""
+
+    config_dir: Path
+    plugin_id: str
+    """As ``config.toml`` keys it and ``codex plugin remove`` takes it: ``aisquare@…``."""
 
 
 @dataclass(frozen=True)
@@ -1047,7 +1201,8 @@ class UninstallPlan:
 
     route: install_route.InstallRoute
     hooks: tuple[HookSite, ...]
-    """Every Claude Code directory holding aisquare hooks, with what they run."""
+    """Every Claude Code directory and Codex home holding aisquare hooks, with what they
+    run (:attr:`HookSite.agent` says whose)."""
     unreadable: tuple[HookSite, ...]
     """Directories whose hooks cannot be taken out: a settings.json that could not be
     read, which may hold some, or one holding ours that this user may not write."""
@@ -1099,6 +1254,12 @@ class UninstallPlan:
     where it or what a launcher cut short left beside it is there
     (:func:`_plugin_answers_there`): outside the home, so named beside it, and deleted
     with --purge (:attr:`deletes_answers`)."""
+    codex_plugins: tuple[CodexPlugin, ...] = ()
+    """The Codex homes that enable the aisquare Codex plugin (:func:`_codex_plugins`). Codex
+    owns them, so uninstall leaves the plugin and names its removal, as for Claude Code's."""
+    codex_accounts: tuple[Path, ...] = ()
+    """The Codex account homes inside the home (:func:`_codex_account_dirs`), each with its
+    sign-in: a purge deletes them with it."""
 
     @property
     def package_command(self) -> str:
@@ -1153,6 +1314,14 @@ class UninstallPlan:
         if not self.purges:
             return self.plugins
         return tuple(plugin for plugin in self.plugins if not self.in_home(plugin.config_dir))
+
+    @property
+    def lasting_codex_plugins(self) -> tuple[CodexPlugin, ...]:
+        """:attr:`codex_plugins` still enabled after this run: when it purges, not those in a
+        Codex account home inside the home it deletes, as :attr:`lasting_plugins`."""
+        if not self.purges:
+            return self.codex_plugins
+        return tuple(p for p in self.codex_plugins if not self.in_home(p.config_dir))
 
     @property
     def lasting_mcp(self) -> tuple[McpRegistration, ...]:
@@ -1238,9 +1407,10 @@ class UninstallPlan:
             # aisquare, and `aisquare serve` makes the home again (review of #257). One
             # naming the installed program can only fail once the package is gone.
             where = ", ".join(f"{entry.name} in {mcp_place(entry)}" for entry in fetching)
+            who = " or ".join(dict.fromkeys(agent_label(entry.agent) for entry in fetching))
             return UninstallRefused(
                 f"--purge would not last: the MCP server {where} runs aisquare through a "
-                f"runner that fetches it, so Claude Code's next session starts it and makes "
+                f"runner that fetches it, so {who}'s next session starts it and makes "
                 f"{self.home} again. Remove it first: "
                 f"{'; '.join(mcp_removal(entry) for entry in fetching)}",
                 error="mcp_registered",
@@ -1254,6 +1424,18 @@ class UninstallPlan:
                 f"Claude Code's next session there runs aisquare and makes {self.home} again. "
                 f"Remove the plugin first: "
                 f"{'; '.join(plugin_removal(plugin) for plugin in lasting)}",
+                error="plugin_enabled",
+            )
+        codex_lasting = self.lasting_codex_plugins
+        if purging and codex_lasting:
+            # The Codex plugin's hooks run aisquare as the Claude Code plugin's do, so a purge
+            # its next session undoes is refused the same way.
+            where = ", ".join(str(plugin.config_dir) for plugin in codex_lasting)
+            return UninstallRefused(
+                f"--purge would not last: the aisquare Codex plugin is enabled in {where}, so "
+                f"Codex's next session there runs aisquare and makes {self.home} again. "
+                f"Remove the plugin first: "
+                f"{'; '.join(codex_plugin_removal(plugin) for plugin in codex_lasting)}",
                 error="plugin_enabled",
             )
         return None
@@ -1281,6 +1463,7 @@ class HookRemoval:
     config_dir: Path
     ok: bool
     error: str | None = None
+    agent: str = HOOK_AGENT
 
 
 @dataclass(frozen=True)
@@ -1703,15 +1886,40 @@ def _declines(block: dict[str, Any], name: str) -> bool:
 
 def mcp_place(entry: McpRegistration) -> str:
     """Where an MCP registration is: its ``.claude.json``, and the project it belongs to;
-    a project-scope one's ``.mcp.json``, which names the project itself."""
+    a project-scope one's ``.mcp.json``, which names the project itself; a Codex one's
+    ``config.toml``."""
     if entry.shared:
         return str(entry.file)
     return str(entry.file) + (f", project {entry.project}" if entry.project else "")
 
 
+def _codex_command(argv: list[str], home: Path) -> str:
+    """``argv`` (a ``codex`` command) as one that acts on Codex home ``home``.
+
+    ``codex`` reads ``$CODEX_HOME``, else ``~/.codex``: nothing is added for the home this
+    shell's ``codex`` already reads, ``env -u CODEX_HOME`` for ``~/.codex`` from a shell
+    that names another, and the variable otherwise, as :func:`mcp_removal` aims ``claude``.
+    Native Windows has neither form, so there the variable it needs is said after it.
+    """
+    command = install_route.command_line(argv)
+    ambient = os.environ.get("CODEX_HOME", "").strip()
+    default = agent_core.dir_identity(agent_core.home() / ".codex")
+    here = agent_core.dir_identity(Path(ambient)) if ambient else default
+    there = agent_core.dir_identity(home)
+    if there == here:
+        return command
+    if sys.platform == "win32":
+        need = "unset" if there == default else f"set to {home}"
+        return f"{command} (run it with CODEX_HOME {need})"
+    if there == default:
+        return f"env -u CODEX_HOME {command}"
+    return f"CODEX_HOME={install_route.command_line([str(home)])} {command}"
+
+
 def mcp_removal(entry: McpRegistration) -> str:
     """The command that removes ``entry``: ``claude mcp remove`` at its scope, aimed at the
-    ``.claude.json`` that holds it, and for a project's entry run from inside the project.
+    ``.claude.json`` that holds it, and for a project's entry run from inside the project;
+    ``codex mcp remove`` aimed at its Codex home (:func:`_codex_command`) for a Codex one.
 
     ``claude mcp remove`` acts on the file ``CLAUDE_CONFIG_DIR`` names (``~/.claude.json``
     when it is unset), and its local scope is the project it runs in; its project scope
@@ -1724,6 +1932,9 @@ def mcp_removal(entry: McpRegistration) -> str:
     Native Windows has no ``env -u``, ``VAR=value command`` or (in PowerShell 5.1)
     ``&&``, so there the folder and the variable the command needs are said after it.
     """
+    if entry.agent == CODEX:
+        home = entry.config_dir if entry.config_dir is not None else entry.file.parent
+        return _codex_command(["codex", "mcp", "remove", entry.name], home)
     scope = "project" if entry.shared else "user" if entry.project is None else "local"
     command = install_route.command_line(["claude", "mcp", "remove", "--scope", scope, entry.name])
     ambient = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
@@ -1759,8 +1970,151 @@ def mcp_removal(entry: McpRegistration) -> str:
 def mcp_note(entry: McpRegistration) -> str:
     """What an uninstall leaves registered: one MCP server that runs aisquare, and its removal."""
     return (
-        f"the MCP server {entry.name} is still registered in {mcp_place(entry)}, and Claude "
-        f"Code owns that file — remove it: {mcp_removal(entry)}"
+        f"the MCP server {entry.name} is still registered in {mcp_place(entry)}, and "
+        f"{agent_label(entry.agent)} owns that file — remove it: {mcp_removal(entry)}"
+    )
+
+
+def plugin_note(plugin: agent_core.ClaudePlugin) -> str:
+    """What an uninstall leaves running in a directory that enables the aisquare plugin."""
+    return (
+        f"the aisquare plugin is still enabled in {plugin_place(plugin)}, so Claude Code keeps "
+        f"running aisquare there (through uvx once the package is gone) — remove it: "
+        f"{plugin_removal(plugin)}"
+    )
+
+
+# --- Codex homes ---------------------------------------------------------------------------
+#
+# What uninstall reads of Codex: the hooks in each home's hooks.json, which it takes out
+# (agent_core.remove_hooks keeps every other group), and the MCP servers and plugins in
+# its config.toml, which it never rewrites. config.toml is Codex's own file, which a
+# running Codex rewrites too (trust, plugins), so those are named with the `codex` command
+# that removes each, as `.claude.json`'s are with `claude mcp remove`.
+
+
+def _codex_account_dirs() -> list[Path]:
+    """Every directory under ``<aisquare home>/codex-accounts``: the Codex account homes
+    aisquare makes, one per slot, and any it retired. Asked one entry at a time with
+    ``os.path.isdir``, which never raises, as :func:`_account_dirs` asks Claude Code's;
+    nothing when the folder is not there."""
+    root = paths.aisquare_home() / "codex-accounts"
+    try:
+        children = sorted(root.iterdir()) if os.path.isdir(root) else []
+    except OSError:
+        return []
+    return [child for child in children if os.path.isdir(child)]
+
+
+def _codex_homes() -> list[Path]:
+    """Every Codex home aisquare may have written hooks into or Codex may read, each once.
+
+    The homes the doctor's scan finds (``agent_core.hook_dirs``: those this home connected,
+    ``$CODEX_HOME`` or ``~/.codex``, and ``~/.codex*`` holding our hooks), then every
+    ``~/.codex*`` directory, hooked or not, whose ``config.toml`` may register aisquare or
+    whose ``hooks.json`` holds ours only to a lenient reading (:func:`settings_unreadable`
+    names those), then each account home under this home (:func:`_codex_account_dirs`).
+    """
+    try:
+        siblings = sorted(agent_core.home().glob(".codex*"))
+    except OSError:
+        siblings = []
+    candidates = [
+        *agent_core.hook_dirs(CODEX),
+        *(path for path in siblings if os.path.isdir(path)),
+        *_codex_account_dirs(),
+    ]
+    seen: set[Path] = set()
+    homes: list[Path] = []
+    for directory in candidates:
+        key = agent_core.dir_identity(directory)
+        if key not in seen:
+            seen.add(key)
+            homes.append(directory)
+    return homes
+
+
+def _read_toml(path: Path) -> dict[str, Any]:
+    """The TOML table at ``path``, or ``{}``: absent, unreadable, or not TOML Codex reads.
+
+    A reader's rule (:func:`agent_core.read_json`'s): nothing here writes ``config.toml``.
+    One Codex cannot parse either starts no server and enables no plugin.
+    """
+    try:
+        with open(path, "rb") as handle:
+            return tomllib.load(handle)
+    except (OSError, ValueError):  # TOMLDecodeError and UnicodeDecodeError are ValueErrors
+        return {}
+
+
+def _codex_configs(homes: Iterable[Path]) -> list[tuple[Path, Path, dict[str, Any]]]:
+    """``(home, config.toml itself, its table)`` for each home's ``config.toml``, a file
+    reached through two homes read once."""
+    read: set[Path] = set()
+    found: list[tuple[Path, Path, dict[str, Any]]] = []
+    for home in homes:
+        path = agent_core.dir_identity(home / "config.toml")
+        if path in read:
+            continue
+        read.add(path)
+        data = _read_toml(path)
+        if data:
+            found.append((home, path, data))
+    return found
+
+
+def _codex_registrations(
+    configs: Iterable[tuple[Path, Path, dict[str, Any]]],
+) -> tuple[McpRegistration, ...]:
+    """aisquare's MCP servers in Codex's ``config.toml`` files: each ``[mcp_servers.<name>]``
+    whose ``command`` and ``args`` run aisquare (:func:`_runs_aisquare`, the rule
+    ``.claude.json``'s are read by). Read only: ``codex mcp remove`` is the tool that owns
+    the file. A launch's ``-c mcp_servers.aisquare…`` (``agents.mcp``) is written nowhere,
+    so there is nothing of it to find or remove."""
+    found: list[McpRegistration] = []
+    for home, path, data in configs:
+        servers = data.get("mcp_servers")
+        if not isinstance(servers, dict):
+            continue
+        found.extend(
+            McpRegistration(str(name), path, None, home, _fetches_aisquare(spec), agent=CODEX)
+            for name, spec in servers.items()
+            if _runs_aisquare(spec)
+        )
+    return tuple(found)
+
+
+def _codex_plugins(
+    configs: Iterable[tuple[Path, Path, dict[str, Any]]],
+) -> tuple[CodexPlugin, ...]:
+    """The aisquare Codex plugin wherever a ``config.toml`` enables it: a
+    ``[plugins."aisquare@<marketplace>"]`` table (:data:`CODEX_PLUGIN`) without
+    ``enabled = false``. Read only, and empty until the plugin route ships one."""
+    found: list[CodexPlugin] = []
+    for home, _path, data in configs:
+        plugins = data.get("plugins")
+        if not isinstance(plugins, dict):
+            continue
+        found.extend(
+            CodexPlugin(home, str(plugin_id))
+            for plugin_id, table in plugins.items()
+            if str(plugin_id).partition("@")[0] == CODEX_PLUGIN
+            and isinstance(table, dict)
+            and table.get("enabled", True) is not False
+        )
+    return tuple(found)
+
+
+def codex_plugin_removal(plugin: CodexPlugin) -> str:
+    """The command that removes the aisquare Codex plugin from its Codex home."""
+    return _codex_command(["codex", "plugin", "remove", plugin.plugin_id], plugin.config_dir)
+
+
+def codex_plugin_note(plugin: CodexPlugin) -> str:
+    """What an uninstall leaves running in a Codex home that enables the aisquare plugin."""
+    return (
+        f"the aisquare Codex plugin is still enabled in {plugin.config_dir}, so Codex keeps "
+        f"running aisquare there — remove it: {codex_plugin_removal(plugin)}"
     )
 
 
@@ -1999,22 +2353,31 @@ def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
     """Decide what ``aisquare uninstall`` would do. Reads only; never creates the home."""
     route = install_route.detect()
     candidates = [*agent_core.hook_dirs(HOOK_AGENT), *_account_dirs(), *_siblings_hiding_hooks()]
+    codex_homes = _codex_homes()
+    # An agent with hooks and no scan of its own here: the directories the doctor finds.
+    others = [agent for agent in hook_agents() if agent not in (HOOK_AGENT, CODEX)]
+    sites = [
+        *((HOOK_AGENT, directory) for directory in candidates),
+        *((CODEX, directory) for directory in codex_homes),
+        *((agent, directory) for agent in others for directory in agent_core.hook_dirs(agent)),
+    ]
     hooks: list[HookSite] = []
     unreadable: list[HookSite] = []
-    seen: set[Path] = set()
-    for directory in candidates:
-        key = agent_core.dir_identity(directory)
+    seen: set[tuple[str, Path]] = set()
+    for agent, directory in sites:
+        key = (agent, agent_core.dir_identity(directory))
         if key in seen:
             continue
         seen.add(key)
         # Hooks of ours that cannot be taken out: the run would fail on the write, so the
         # plan says so first and keeps the package (review of #257). The rule
         # `agents disconnect` asks too.
-        binaries, error = hooks_stuck(directory)
+        binaries, error = hooks_stuck(directory, agent)
         if error is not None:
-            unreadable.append(HookSite(directory, reason=error))
+            unreadable.append(HookSite(directory, reason=error, agent=agent))
         elif binaries:
-            hooks.append(HookSite(directory, tuple(str(b.program) for b in binaries)))
+            programs = tuple(str(b.program) for b in binaries)
+            hooks.append(HookSite(directory, programs, agent=agent))
     home = paths.aisquare_home()
     try:
         entries = tuple(sorted(c.name for c in home.iterdir())) if home.is_dir() else ()
@@ -2025,11 +2388,12 @@ def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
     custom = custom_home(home)
     claude_dirs = [*candidates, *_claude_dirs_for_mcp()]
     mcp, logins = _mcp_registrations(claude_dirs)
+    codex_configs = _codex_configs(codex_homes)
     return UninstallPlan(
         route=route,
         hooks=tuple(hooks),
         unreadable=tuple(unreadable),
-        mcp=mcp,
+        mcp=(*mcp, *_codex_registrations(codex_configs)),
         package_argv=tuple(install_route.remove_argv(route)),
         package_env=install_route.installer_env(route),
         package_reason=install_route.not_removable(route),
@@ -2048,6 +2412,8 @@ def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
         listening=tuple(label for label, answer in answers if answer == "answers"),
         plugins=_plugins(claude_dirs),
         plugin_answers=_plugin_answers_there(),
+        codex_plugins=_codex_plugins(codex_configs),
+        codex_accounts=tuple(_codex_account_dirs()),
     )
 
 
@@ -2066,23 +2432,25 @@ def uninstall(plan: UninstallPlan) -> UninstallReport:
     removals: list[HookRemoval] = []
     for site in plan.hooks:
         try:
-            agent_core.remove_hooks(HOOK_AGENT, site.config_dir)
-            left = agent_core.hook_commands(HOOK_AGENT, site.config_dir)
+            agent_core.remove_hooks(site.agent, site.config_dir)
+            left = agent_core.hook_commands(site.agent, site.config_dir)
         except Exception as exc:  # fail open per directory; the report names it
-            removals.append(HookRemoval(site.config_dir, False, str(exc) or type(exc).__name__))
+            why = str(exc) or type(exc).__name__
+            removals.append(HookRemoval(site.config_dir, False, why, agent=site.agent))
             continue
         if left:
-            removals.append(
-                HookRemoval(site.config_dir, False, f"{len(left)} aisquare hook(s) still there")
-            )
+            why = f"{len(left)} aisquare hook(s) still there"
+            removals.append(HookRemoval(site.config_dir, False, why, agent=site.agent))
         else:
-            removals.append(HookRemoval(site.config_dir, True))
+            removals.append(HookRemoval(site.config_dir, True, agent=site.agent))
     # A site that could not be read may still hold our hooks, and nothing here can
     # take them out: a failure like any other, so the package stays and the
     # command is still there to run again (review of #253). One inside the home
     # waits for the purge, which deletes it, hooks and all (sweep of #257).
     blocking = plan.blocking
-    removals.extend(HookRemoval(site.config_dir, False, site.reason) for site in blocking)
+    removals.extend(
+        HookRemoval(site.config_dir, False, site.reason, agent=site.agent) for site in blocking
+    )
     purged, purge_error = False, None
     hooks_failed = any(not removal.ok for removal in removals)
     if plan.purges and not hooks_failed:
@@ -2100,7 +2468,7 @@ def uninstall(plan: UninstallPlan) -> UninstallReport:
     if not purged:
         # The purge that would have taken them did not happen: they are still there.
         removals.extend(
-            HookRemoval(site.config_dir, False, site.reason)
+            HookRemoval(site.config_dir, False, site.reason, agent=site.agent)
             for site in plan.unreadable
             if site not in blocking
         )
@@ -2163,15 +2531,16 @@ def _answers_cut_short(answers: Path) -> list[Path]:
 def _unrecord_hookless() -> None:
     """Drop every recorded agent site that carries no aisquare hook from agents.json.
 
-    Every agent, not only Claude Code: ``agents connect codex`` records a site
-    that never had hooks, and an uninstalled aisquare connects nothing. A site
-    whose settings.json cannot be read keeps its record — it may still hold ours.
+    Every agent, not only those with hooks: 0.7.0's ``agents connect codex`` recorded a
+    site that never had hooks, and an uninstalled aisquare connects nothing. A site
+    whose settings file cannot be read keeps its record — it may still hold ours.
     """
     registry = agent_core.read_json(paths.agents_registry_path())
     names = set(registry.get("connected") or []) | set(registry.get("connections") or {})
+    hooked = hook_agents()
     for name in sorted(str(n) for n in names):
         for directory in agent_core.connected_dirs(name, registry):
-            binaries, error = hook_binaries(directory) if name == HOOK_AGENT else ([], None)
+            binaries, error = hook_binaries(directory, name) if name in hooked else ([], None)
             if error is None and not binaries:
                 agent_core.set_connected(name, False, directory)
 
@@ -2208,28 +2577,41 @@ def _uninstall_notes(
     answers_deleted: bool = False,
 ) -> list[str]:
     notes: list[str] = []
-    if any(removal.ok for removal in removals):
-        notes.append("open Claude Code sessions keep the hooks they started with — restart them")
+    removed = [removal for removal in removals if removal.ok]
+    for agent in dict.fromkeys(removal.agent for removal in removed):
+        notes.append(
+            f"open {agent_label(agent)} sessions keep the hooks they started with — restart them"
+        )
     if answers_deleted:
         notes.append(ANSWERS_LOOKED_FOR)
     for entry in plan.lasting_mcp if purged else plan.mcp:
         notes.append(mcp_note(entry))
     for plugin in plan.lasting_plugins if purged else plan.plugins:
         notes.append(plugin_note(plugin))
+    for codex_plugin in plan.lasting_codex_plugins if purged else plan.codex_plugins:
+        notes.append(codex_plugin_note(codex_plugin))
     notes.append(
-        "a running `aisquare serve` keeps running until you stop it; uv, tmux, Node, gh "
-        "and Claude Code stay installed"
+        "a running `aisquare serve` keeps running until you stop it; "
+        f"{stays_installed(plan)} stay installed"
     )
     return notes
 
 
-def plugin_note(plugin: agent_core.ClaudePlugin) -> str:
-    """What an uninstall leaves running in a directory that enables the aisquare plugin."""
+def touches_codex(plan: UninstallPlan) -> bool:
+    """Whether the plan names anything of Codex's: its hooks, an MCP server or the plugin."""
     return (
-        f"the aisquare plugin is still enabled in {plugin_place(plugin)}, so Claude Code keeps "
-        f"running aisquare there (through uvx once the package is gone) — remove it: "
-        f"{plugin_removal(plugin)}"
+        any(site.agent == CODEX for site in (*plan.hooks, *plan.unreadable))
+        or any(entry.agent == CODEX for entry in plan.mcp)
+        or bool(plan.codex_plugins)
     )
+
+
+def stays_installed(plan: UninstallPlan) -> str:
+    """What an uninstall leaves installed: the tools beside aisquare, and the coding agents,
+    Codex among them where the plan names anything of its (:func:`touches_codex`)."""
+    if touches_codex(plan):
+        return "uv, tmux, Node, gh, Claude Code and Codex"
+    return "uv, tmux, Node, gh and Claude Code"
 
 
 def remove_package(plan: UninstallPlan, *, stdout_to_stderr: bool) -> None:

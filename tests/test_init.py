@@ -98,3 +98,52 @@ def test_init_connects_a_detected_agent(
     settings = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8"))
     assert "SessionStart" in settings["hooks"]
     assert "UserPromptSubmit" in settings["hooks"]
+
+
+def test_init_connects_codex(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`init --agent codex`, which main's 0.8.0 refused ("can't connect Codex yet"), installs
+    Codex's hooks into its home and records the connection, as `agents connect codex` does,
+    and says the one step left: trusting them in Codex's /hooks."""
+    home = tmp_path / "agenthome"
+    (home / ".codex").mkdir(parents=True)
+    (home / ".codex" / "AGENTS.md").write_text("# Prefs\nsmall commits\n", encoding="utf-8")
+    monkeypatch.setattr("aisquare.core.agents._home", lambda: home)
+
+    result = runner.invoke(app, ["init", "--agent", "codex", "--local", "--no-onboard"])
+
+    assert result.exit_code == 0, result.output
+    assert "Connected codex: hooks installed, imported 1 entries." in result.stdout
+    assert "open /hooks in Codex to review and trust them" in result.stdout
+    hooks = json.loads((home / ".codex" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
+    assert {"SessionStart", "UserPromptSubmit", "Stop"} <= set(hooks)
+    listed = _json(runner.invoke(app, ["--json", "agents", "list"]).stdout)
+    [codex] = [agent for agent in listed if agent["name"] == "codex"]
+    assert codex["connected"] is True
+
+
+def test_init_connects_claude_code_and_codex_together(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "agenthome"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".codex").mkdir(parents=True)
+    monkeypatch.setattr("aisquare.core.agents._home", lambda: home)
+
+    result = runner.invoke(
+        app, ["init", "--agent", "claude-code", "--agent", "codex", "--local", "--no-onboard"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Connected claude-code: hooks installed" in result.stdout
+    assert "Connected codex: hooks installed" in result.stdout
+    assert (
+        "SessionStart"
+        in json.loads((home / ".claude" / "settings.json").read_text("utf-8"))["hooks"]
+    )
+    assert (
+        "SessionStart" in json.loads((home / ".codex" / "hooks.json").read_text("utf-8"))["hooks"]
+    )
+    registry = json.loads((tmp_path / "aisquare-home" / "agents.json").read_text("utf-8"))
+    assert registry["connected"] == ["claude-code", "codex"]

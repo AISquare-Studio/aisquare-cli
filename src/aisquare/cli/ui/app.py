@@ -962,8 +962,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             if fresh_project is None:
                 continue  # the row has left the frame: keep what the view has
             if fresh_project != project_view.project:
-                # A new codename or root: the view re-reads what depends on it.
-                project_view.project = fresh_project
+                # A new codename, root or nickname: the view re-reads what depends on it.
+                project_view.refresh_project(fresh_project)
             if snapshot.notices.get(fresh_project.id) is not None:
                 continue  # we could not ask — not "the fleet answered: none"
             # ProjectView.show() is the MANAGER status renderer; the snapshot

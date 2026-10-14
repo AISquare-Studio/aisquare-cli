@@ -4764,3 +4764,73 @@ def test_a_handle_removed_mid_press_lets_the_mouse_go(
     assert marked, "the drag was running over api's card"
     assert captured is None
     assert not still_marked and closed, "the drag went with its handle"
+
+
+# --- the project's Settings tab follows a rename made elsewhere -----------------------------
+
+
+def test_the_settings_tab_follows_a_rename_made_on_the_card_or_in_a_shell(
+    tmp_path: Path, script: Script
+) -> None:
+    """The tab kept the project it was built with: after a card rename it still showed the
+    folder name, and Save with a blank field was refused as "already that" against its stale
+    copy — so the nickname could not be cleared from there. Each frame now hands the view
+    the stored row; the field follows unless the operator is typing in it; Save always writes.
+    """
+    from aisquare.cli.ui.sidebar import RenameProject
+    from aisquare.cli.ui.views.settings import SettingsView
+    from aisquare.core.store import store_session
+    from aisquare.services import project as project_service
+
+    projects = seed(tmp_path, ("prj_a", "alpha", None))
+
+    def stored() -> str | None:
+        with store_session() as store:
+            row = store.get_project("prj_a")
+        assert row is not None
+        return row.nickname
+
+    async def go(pilot: Pilot[None]) -> dict[str, object]:
+        app = fleet_app(pilot)
+        await settle(app)
+        await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
+        await settle(app)
+        view = app.current_view()
+        assert isinstance(view, ProjectView)
+        view.active = "tab-settings"
+        await settle(app)
+        tab = view.query_one(SettingsView)
+        field = tab.query_one("#nickname", Input)
+
+        def seen() -> tuple[str, str]:
+            return field.value, shown(tab.query_one("#settings-title", Static))
+
+        out: dict[str, object] = {"opened": seen()}
+        app.post_message(RenameProject("prj_a", "Card name"))  # what the card's field posts
+        await settle(app)
+        out["card"] = seen()
+        project_service.set_nickname(projects[0], "Shell name")  # `aisquare project rename`
+        app.refresh_data()  # the next tick
+        await settle(app)
+        out["shell"] = seen()
+        field.value = "half typed"
+        project_service.set_nickname(projects[0], "Elsewhere again")
+        app.refresh_data()
+        await settle(app)
+        out["typing"] = seen()
+        field.value = ""
+        tab.query_one("#save-nickname", Button).press()
+        await settle(app)
+        out["cleared"] = (seen(), stored())
+        return out
+
+    out = drive(go)
+    assert out["opened"] == ("", "project settings — alpha")
+    assert out["card"] == ("Card name", "project settings — Card name")
+    assert out["shell"] == ("Shell name", "project settings — Shell name")
+    assert out["typing"] == ("half typed", "project settings — Elsewhere again"), (
+        "what the operator is typing stays; the title says the stored name"
+    )
+    assert out["cleared"] == (("", "project settings — alpha"), None), (
+        "a blank Save clears a nickname set elsewhere"
+    )

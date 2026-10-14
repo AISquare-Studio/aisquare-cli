@@ -10,7 +10,10 @@ launches pick an account — is App settings (``views.app_settings``).
 The write opens the store, so it runs in a thread worker (:data:`NICKNAME_WORKER`)
 and the tab answers when it lands: the field and the title show what the store
 now holds, and :class:`~aisquare.cli.ui.sidebar.ProjectRenamed` tells the rest
-of the app to show the new name.
+of the app to show the new name. A rename made anywhere else — a card, ``project
+rename`` in a shell — reaches the tab with the app's next frame
+(:meth:`SettingsView.show_project`), and Save always writes what the field says:
+the tab's own copy of the project is never what decides there is nothing to save.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, VerticalScroll
+from textual.css.query import NoMatches
 from textual.widgets import Button, Input, Label, Static
 from textual.worker import Worker, WorkerState
 
@@ -64,6 +68,28 @@ class SettingsView(VerticalScroll):
         super().__init__(id=id)
         self.project = project
 
+    def show_project(self, project: ProjectInfo) -> None:
+        """The project as the store has it now: the title, the codename line and the field.
+
+        The field follows only while it still shows the nickname the tab last had —
+        what the operator is in the middle of typing is theirs, and Save writes it.
+        """
+        if project == self.project:
+            return
+        before = self.project.nickname or ""
+        self.project = project
+        try:
+            field = self.query_one("#nickname", Input)
+            title = self.query_one("#settings-title", Static)
+            line = self.query_one("#fleet-id", Static)
+        except NoMatches:  # not composed yet: compose reads self.project
+            return
+        if field.value.strip() == before:
+            field.value = project.nickname or ""
+        field.placeholder = project.root.name or project.id
+        title.update(self._title())
+        line.update(fleet_id_line(project))
+
     def _title(self) -> Text:
         return Text(
             f"project settings — {project_service.display_name(self.project)}", style="bold"
@@ -95,11 +121,13 @@ class SettingsView(VerticalScroll):
     @on(Input.Submitted, "#nickname")
     @on(Button.Pressed, "#save-nickname")
     def _save_nickname(self) -> None:
-        """Write the field as the nickname, off the UI thread; blank clears it."""
+        """Write the field as the nickname, off the UI thread; blank clears it.
+
+        Always written, never compared with the tab's copy of the project first: a
+        rename made elsewhere may not have reached it, and writing the same name
+        again changes nothing.
+        """
         wanted = self.query_one("#nickname", Input).value.strip()
-        if wanted == (self.project.nickname or ""):
-            self.notify("the nickname is already that — nothing to save", timeout=4, markup=False)
-            return
         project = self.project
         self.run_worker(
             lambda: project_service.set_nickname(project, wanted or None),

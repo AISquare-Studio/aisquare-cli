@@ -331,6 +331,16 @@ class ProjectView(TabbedContent):
         self._pending: list[FleetAgentStatus] | None = None
         """A snapshot pushed before the tabs mounted, applied at mount."""
 
+    def refresh_project(self, project: ProjectInfo) -> None:
+        """Take the project as the store has it now — renamed from a card or the CLI, say.
+
+        The Settings tab shows its nickname and codename, so it is handed the fresh
+        row too; the other tabs read only the id and root, which do not change.
+        """
+        self.project = project
+        for settings in self.query(SettingsView):
+            settings.show_project(project)
+
     def refresh_status(self, agents: Sequence[FleetAgentStatus]) -> None:
         """Take the shell's fresh snapshot of this project's agents.
 

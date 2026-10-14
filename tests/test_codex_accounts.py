@@ -926,7 +926,9 @@ def test_a_codex_switch_goes_fresh_to_the_codex_account_with_room(
     assert agent is not None
     monkeypatch.setattr(fleet, "_live_agent", lambda store, project, label, agent_id=None: agent)
     monkeypatch.setattr(fleet, "_require_role", lambda role: None)
-    monkeypatch.setattr(fleet, "_refuse_a_replay_that_cannot_start", lambda agent, session: None)
+    monkeypatch.setattr(
+        fleet, "_refuse_a_replay_that_cannot_start", lambda project, agent, session: None
+    )
     monkeypatch.setattr(fleet, "_mark_handing_over", lambda *a, **k: None)
     monkeypatch.setattr(fleet, "_unmark_handing_over", lambda session: None)
     monkeypatch.setattr(fleet, "stop", lambda *a, **k: Mock(agent=agent, withheld=False))

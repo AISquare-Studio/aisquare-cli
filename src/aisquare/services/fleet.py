@@ -1740,7 +1740,16 @@ def spawn(
         )
     agent_id = new_agent_id()
     flags: list[str] = []
-    if resolution.source != "default":
+    # A replay that fell back to today's default binary resolved it for the row's agent
+    # (`_respawn` passes it as `agent`), which labels it that choice's; the window's
+    # `launch`, given the same `--agent`, lands on the same binary by itself.
+    replayed_default = (
+        spec is not None
+        and binary is None
+        and chosen is None
+        and resolution.binary == selected.adapter.binary
+    )
+    if resolution.source != "default" and not replayed_default:
         # `launch` re-resolves the binary inside the window — and the window's
         # environment is the long-lived tmux SERVER's, which never carries
         # `AISQUARE_BIN_<ROLE>` or `AISQUARE_AGENT_BIN` (`core/tmux.py` spawns
@@ -4590,7 +4599,7 @@ def switch(
             f"{claude_accounts_core.agent_label(kind)} cannot resume a thread under another "
             "account's home — the replacement starts fresh with a hand-off prompt"
         )
-    _refuse_a_replay_that_cannot_start(agent, session)
+    _refuse_a_replay_that_cannot_start(project, agent, session)
     # A hand-over whether it resumes or not: the agent is coming back, so its
     # claims wait for the replacement and no exit is announced. A fresh start
     # used to stop the agent as `fleet stop` does — the task went back to the
@@ -4756,6 +4765,10 @@ def _respawn(
         size=size,
         permission_mode=permission_mode,
         spec=agent.launch_spec,
+        # The agent the row ran, never today's resolution of the role: a `--agent codex
+        # --bin <wrapper>` row came back with Claude Code's flags, and a role bound to
+        # another agent since refused only after the original was stopped (r1 of #113).
+        agent=_replayed_agent(agent, session),
         # The agent whose own hook joined the row to a board session, whatever its
         # binary is called, resumed or `--fresh`.
         family=_family(session),
@@ -4815,7 +4828,9 @@ def _resumable(session: TeamSession | None) -> tuple[ResumeSpec | None, str | No
     return ResumeSpec(session.id, transcript, native), None
 
 
-def _refuse_a_replay_that_cannot_start(agent: FleetAgent, session: TeamSession | None) -> None:
+def _refuse_a_replay_that_cannot_start(
+    project: ProjectInfo, agent: FleetAgent, session: TeamSession | None
+) -> None:
     """Raise now what replaying ``agent``'s launch spec would refuse — BEFORE it is stopped.
 
     :func:`restart` and :func:`switch` stop a running agent and only then
@@ -4831,9 +4846,12 @@ def _refuse_a_replay_that_cannot_start(agent: FleetAgent, session: TeamSession |
     spawned before v18). Asking the role's for a row with a spec refused the
     restart of an agent whose recorded binary was still there because the
     role's binding had moved to one that is not. A refusal names no ``--bin``:
-    ``fleet restart``, ``fleet switch`` and Restart take none.
+    ``fleet restart``, ``fleet switch`` and Restart take none. The agent that binary
+    runs as is asked too, as :func:`spawn` asks it (``agent_launch.resolve`` with
+    :func:`_replayed_agent`): a binary another agent's, and a wrapper with nothing to
+    name its agent, are refused here rather than after the stop.
     """
-    _launch_binary(
+    replayed = _launch_binary(
         agent.role,
         binary=None,
         spec=agent.launch_spec,
@@ -4841,6 +4859,22 @@ def _refuse_a_replay_that_cannot_start(agent: FleetAgent, session: TeamSession |
         notes=[],
         bin_flag=False,
     )
+    chosen = (
+        replayed.binary if agent.launch_spec is not None and replayed.source != "default" else None
+    )
+    try:
+        agent_launch.resolve(
+            agent.role, agent=_replayed_agent(agent, session), binary=chosen, cwd=project.root
+        )
+    except ValueError as exc:
+        raise FleetError(str(exc)) from exc
+
+
+def _replayed_agent(agent: FleetAgent, session: TeamSession | None) -> str | None:
+    """The agent a replacement of ``agent`` runs: the one its spawn resolved and carried
+    into the window as ``--agent`` (the row's ``agent``), else the one whose hook joined
+    its board session; ``None`` for a row with neither, which the role resolves today."""
+    return agent.agent or _family(session)
 
 
 def _family(session: TeamSession | None) -> str | None:
@@ -4971,7 +5005,7 @@ def restart(
     slot = _account_slot_of(agent, session)
     try:
         _require_role(agent.role)
-        _refuse_a_replay_that_cannot_start(agent, session)
+        _refuse_a_replay_that_cannot_start(project, agent, session)
         choice = claude_accounts_service.choose(
             str(slot) if slot is not None else None, role=agent.role, project=project
         )

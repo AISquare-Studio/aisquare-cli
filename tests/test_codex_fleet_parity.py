@@ -29,14 +29,16 @@ from aisquare.core.config import (
     REVIEWER_ARGS,
     FleetRoleSettings,
     FleetSettings,
+    RoleLaunchProfile,
     load_config,
     save_config,
 )
-from aisquare.core.store import store_session
+from aisquare.core.store import SqliteStore, store_session
 from aisquare.models import FleetAgent, ProjectInfo, TeamSession, TeamTask
 from aisquare.services import agent_events, auto_mode
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
+from tests import fakebin
 from tests.test_codex_account_switch import codex_on_path  # noqa: F401 - fixture, by name
 from tests.test_fleet_service import (  # noqa: F401 - fixtures, by name
     FakeTmux,
@@ -438,6 +440,74 @@ def test_tell_to_a_codex_agent_that_is_not_working_queues_nothing(
 
     assert told.delivered is False and "board note" in told.how
     assert _notes_to(codex.project, codex.agent.label) == ["hello"]
+
+
+# --- a replacement runs the row's own agent (review r1 of #113, finding 1) ---------------
+
+
+def test_a_codex_wrapper_row_restarts_as_codex_whatever_the_role_resolves_today(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``fleet spawn --agent codex --bin <wrapper>``: nothing but the row says the wrapper
+    is Codex, and the replacement re-resolved the role, landing on Claude Code."""
+    wrapper = fakebin.executable_fake(
+        tmp_path / "wrap-bin", "codex-wrap", windows="set /p line=", posix="read line"
+    )
+    fakebin.prepend_to_path(wrapper.parent, monkeypatch)
+    agent = fleet_service.spawn(
+        project, "coder", agent="codex", binary="codex-wrap", worktree=False
+    ).agent
+    assert agent.agent == "codex" and agent.binary == "codex-wrap"
+
+    receipt = fleet_service.restart(project, agent.label)
+
+    command = _command(tmux)
+    assert receipt.started.agent == "codex"
+    assert _flag(command, "--agent") == "codex" and _flag(command, "--command") == "codex-wrap"
+    native = _native(command)
+    assert "--approve-for-me" in native and "--name" not in native, native
+
+
+def test_a_role_bound_to_another_agent_since_still_restarts_the_rows_agent(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """Re-resolved, ``codex`` under a role now bound to Claude Code is refused ('runs
+    codex, but claude-code was selected') — after the original was already stopped."""
+    agent = fleet_service.spawn(project, "coder", agent="codex", worktree=False).agent
+    config = load_config()
+    config.team.profiles["coder"] = RoleLaunchProfile(agent="claude-code")
+    save_config(config)
+
+    receipt = fleet_service.restart(project, agent.label)
+
+    assert receipt.started.agent == "codex" and _flag(_command(tmux), "--agent") == "codex"
+
+
+def test_a_replay_its_agent_refuses_is_refused_before_anything_is_stopped(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    agent = fleet_service.spawn(project, "coder", agent="codex", worktree=False).agent
+    with store_session() as store:  # a row whose agent and binary disagree
+        assert isinstance(store, SqliteStore)
+        store._conn.execute(
+            "UPDATE fleet_agent SET agent = 'claude-code' WHERE id = ?", (agent.id,)
+        )
+        store._conn.commit()
+    spawned = len(tmux.spawned)
+
+    with pytest.raises(fleet_service.FleetError, match="runs codex, but claude-code"):
+        fleet_service.restart(project, agent.label)
+
+    assert tmux.typed == [] and agent.pane_id not in tmux.killed
+    assert len(tmux.spawned) == spawned
 
 
 # --- one permission per role, mapped per agent (acceptance 4) ----------------------------

@@ -187,7 +187,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   leaves it and names it with the way out (with `--server-down` too, and under
   `held` in `--json`), `fleet stop` and `restart` refuse it
   with the way back, `fleet tell` and the phone's Tell file a board note to it
-  rather than type into the pane the newcomer gave its id, `fleet shutdown`
+  rather than type into the pane the newcomer gave its id, Remote's needs-you
+  gives it one `lost` card saying it is out of reach (not prompts whose every
+  answer is refused, nor nothing once its board goes stale), `fleet shutdown`
   leaves it live until `--forget`, and
   `upgrade` and `uninstall` count it as running and name `--forget`. Before,
   the newcomer's missing pane read as the row's pane gone, and `stop`,

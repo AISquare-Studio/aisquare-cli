@@ -289,7 +289,7 @@ aisquare --json remote needs
 | crashed | an agent exited with an error in the last hour, or was stopped for a switch or a restart that could not start its replacement, its task unfinished, while no manager is there to handle it (below) |
 | limited | an agent hit its usage limit; when the limit named its reset, the card tells it by the phone's clock, and the Board tab leaves out the reset its line says by the machine's |
 | failed | an agent's turn ended on an API error (a login that expired, credit that ran out, the API overloaded past Claude Code's own retries), and it waits at its prompt |
-| lost | an agent's pane is gone |
+| lost | an agent's pane is gone, or another tmux server took its socket, so nothing here reaches it |
 | fleet_down | tmux is not answering for a project |
 | asked | an agent ended its turn with a question in plain text |
 | board_result | the manager reports a result, or a coder reports one to the manager when no manager is there to read it (below). A coder's result to a manager that stopped stays on the board; the `manager_down` card is the signal |

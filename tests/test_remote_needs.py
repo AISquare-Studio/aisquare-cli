@@ -244,6 +244,37 @@ def test_rule_1_a_gone_pane_is_lost_before_anything_its_transcript_says() -> Non
     assert item.actions == ("restart", "stop", "dismiss")
 
 
+def test_rule_1_a_held_row_is_one_lost_card_saying_why_whatever_its_board_says() -> None:
+    """Review of #259, round 2: a row held as another tmux server's got rules 3 to 10 from
+    its board while that was fresh: permission and question cards, pushed, whose every
+    answer was a 409 `not_agent` (its pane id is another agent's on the server at its
+    socket). Then, the board stale, nothing at all: an `unknown` row needs nothing, and
+    `fleet_down` leaves held rows out. Before 0.8.1 the same row read `lost` and had that
+    card. It is one `lost` card of its own reason, the same item while it lasts."""
+    row = _row()
+    pending = _tail(_tool("toolu_1"))
+    fresh = _session(row, state="attention")
+    stale = _session(row, state="attention", seen=NOW - timedelta(hours=1))
+    held = [
+        fleet_service._status(row, session, {row.id: None}, None, NOW, FleetSettings())
+        for session in (fresh, stale)
+    ]
+    assert all(status.held for status in held)
+    # And a status that reads its board's state, as one from before the derivation held it.
+    held.append(_status(row, "attention", fresh).model_copy(update={"held": True}))
+
+    cards = [_one(_classify(status, pending)) for status in held]
+
+    for item in cards:
+        assert (item.kind, item.agent_id) == ("lost", row.id), item
+        assert item.reason == "coder-1 is out of reach: another tmux server answers on its socket"
+        assert item.actions == ("restart", "stop", "dismiss")
+        assert item.push_after == NOW + timedelta(seconds=60)
+    assert len({item.id for item in cards}) == 1, "one item while it lasts"
+    # Negative control: on its own server the same row is at its permission prompt.
+    assert _one(_classify(_status(row, "attention", fresh), pending)).kind == "permission"
+
+
 def test_rule_2_a_limited_row_is_limited_about_its_newest_limit_event() -> None:
     row = _row()
     session = _session(row, state="limited", resets=NOW + timedelta(hours=2))
@@ -1425,10 +1456,14 @@ def test_a_row_held_as_another_servers_does_not_silence_the_server_that_answered
     assert (held.state, held.detail, held.held) == ("unknown", fleet_service.ANOTHER_SERVER, True)
     fleet = Fleet(agents=[held, _status(new, "attention", _session(new, state="attention"))])
 
-    assert [(item.kind, item.agent) for item in _scan(fleet)] == [("permission", "coder-2")]
+    assert [(item.kind, item.agent) for item in _scan(fleet)] == [
+        ("permission", "coder-2"),
+        ("lost", "coder-1"),  # its own card, out of reach (round 2)
+    ]
     assert fleet.probed == [], "the held row says its server answered"
     fleet.agents = [held]
-    assert _scan(fleet) == [], "no `tmux is not answering` for a server that answered"
+    said = [item.kind for item in _scan(fleet)]
+    assert said == ["lost"], "no `tmux is not answering` for a server that answered"
     assert fleet.probed == []
     # The control: the same row unknown because its server could not be asked.
     unasked = fleet_service._status(old, stale, None, None, NOW, FleetSettings())

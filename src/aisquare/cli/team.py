@@ -12,7 +12,9 @@ import re
 import shlex
 import shutil
 import sqlite3
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Annotated, NoReturn
 
 import typer
@@ -279,11 +281,22 @@ def _bin_env_hint(role: str) -> str:
 
 
 def _parse_env(pairs: list[str]) -> dict[str, str]:
-    """``KEY=VALUE`` pairs from the command line, or a usage error."""
+    """``KEY=VALUE`` pairs from the command line, or a usage error: a pair with no ``=``, or a
+    KEY that is not a variable name a shell can set (:func:`harness.is_env_name`). Every
+    pair here ends up in ``team spawn``'s printed shell line, bound (``team bind``) or not,
+    where such a key broke the paste, or ran as shell code (review of #259, round 3)."""
     try:
-        return harness.parse_env_pairs(pairs)
+        parsed = harness.parse_env_pairs(pairs)
     except ValueError as exc:
         fail(str(exc), error="bad_env_pair")
+    for key in parsed:
+        if not harness.is_env_name(key):
+            message = f"{key!r} is not a variable name: {_ENV_NAME_RULE}"
+            fail(message, error="bad_env_pair", detail=message)
+    return parsed
+
+
+_ENV_NAME_RULE = "letters, digits and _, not starting with a digit"
 
 
 @app.command("spawn")
@@ -405,15 +418,27 @@ def spawn(
         )
     if launch_profile.refusal is not None:
         fail(launch_profile.refusal, error="env_file_unreadable", detail=launch_profile.refusal)
+    # A key written into config.toml by hand (`team bind` refuses one) is set as a shell word
+    # in the line below, where it is no assignment: refused, as no paste could start the role.
+    unnamed = sorted(
+        key
+        for key in {*launch_profile.env, *launch_profile.env_files}
+        if not harness.is_env_name(key)
+    )
+    if unnamed:
+        message = (
+            f"{role_name}'s binding sets {', '.join(map(repr, unnamed))}, which a shell line "
+            f"cannot set ({_ENV_NAME_RULE}) — unbind it: aisquare team bind {role_name} "
+            f"--unset {shlex.quote(unnamed[0])}"
+        )
+        fail(message, error="bad_env_key", detail=message)
     # Put the profile's vars IN the printed command, not just in --exec's env.
     # The banner is meant to be pasted, and a printed command that silently
     # launches with different variables than the one it just reported is worse
-    # than printing nothing. A variable bound to a file is read by the paste itself,
-    # `$(cat …)`: its value is a secret, which a printed line must not hold.
+    # than printing nothing. A variable bound to a file is read by the paste itself
+    # (`_reading_env_files`, below): its value is a secret, which a printed line must not hold.
     for key, value in launch_profile.env.items():
         env_assignments.append(f"{key}={shlex.quote(value)}")
-    for key, path in launch_profile.env_files.items():
-        env_assignments.append(f'{key}="$(cat {shlex.quote(path)})"')
     # ONE precedence rule with `cli/launch.py`: the role's own flags
     # (`RoleProfile.default_args`) sit after the binding's args, and an explicit
     # flag or its `--no-` opt-out WINS wherever it appears — not because of
@@ -461,7 +486,11 @@ def spawn(
         )
         banner = f"{banner}  ·  env {shown}"
     command = " ".join([*env_assignments, shlex.join(argv)])
-    if tracing is not None and tracing.enabled:
+    traced = tracing is not None and tracing.enabled
+    if traced and explainability_service.accepts_session_id(binary.binary):
+        command = f"{command} {_SESSION_ID_SUBSTITUTION}"  # the id the eval below mints
+    command = _reading_env_files(command, launch_profile.env_files)
+    if traced:
         # Never burn a pipeline id into a printable command: every paste would
         # reuse the same id and those sessions would merge into one Run. The
         # eval mints a fresh id per run instead; if tracing is down at run
@@ -484,8 +513,6 @@ def spawn(
         # traceparent on the wire, AISQUARE_RUN_TRACE_ID exported. Same
         # fail-open: a refused root falls back to X-Pipeline-Id, a dead proxy
         # to untraced, and neither costs the paste.
-        if explainability_service.accepts_session_id(binary.binary):
-            command = f"{command} {_SESSION_ID_SUBSTITUTION}"
         command = (
             f"{_CLEAR_PREVIOUS_TRACE}; "
             f'eval "$(aisquare explainability env {shlex.quote(role_name)} --post-root)"; '
@@ -607,6 +634,37 @@ def spawn(
         stdout_console().print(f"  run it in the role's terminal:\n  {command}", markup=False)
 
 
+def _reading_env_files(command: str, env_files: Mapping[str, str]) -> str:
+    """``command`` with each variable bound to a file (``env_files``) read by the paste itself,
+    as ``aisquare launch`` reads it (``harness.read_env_file``): never its value in the line,
+    its carriage returns dropped with the trailing newlines, and a file that cannot be read
+    or holds nothing refusing the line, naming the variable, rather than starting the role
+    without it. In a subshell, so the paste sets nothing in the shell it is pasted into.
+
+    It was ``KEY="$(cat path)"`` before the command: a file gone or emptied since it was
+    printed started the role with ``KEY`` empty, the other login the refusal exists to
+    prevent, said by a ``cat:`` line alone; and one saved with CRLF gave ``KEY=token\\r``
+    where ``--exec`` and ``fleet spawn`` give ``token`` (review of #259, round 2).
+
+    And without the byte-order mark ``launch`` drops (``config.decode_by_bom``): UTF-8's, and
+    UTF-16's once its NULs are dropped, which leaves an ASCII token as it was saved. Kept, a
+    file saved by PowerShell 5.1 gave ``KEY=\\ufefftoken`` (review of #259, round 3).
+    """
+    if not env_files:
+        return command
+    reads = [
+        f"{key}=\"$(tr -d '\\r\\000' < {shlex.quote(path)})\" && "
+        + "".join(f'{key}="${{{key}#"$(printf \'{mark}\')"}}" && ' for mark in _BYTE_ORDER_MARKS)
+        + f': "${{{key}:?its file is empty or cannot be read}}" && export {key}'
+        for key, path in env_files.items()
+    ]
+    return f"({' && '.join([*reads, command])})"
+
+
+_BYTE_ORDER_MARKS = ("\\357\\273\\277", "\\377\\376", "\\376\\377")
+"""UTF-8's, and UTF-16's little- and big-endian marks, as ``printf`` spells their bytes."""
+
+
 @app.command("harness")
 def harness_status() -> None:
     """Show the role→model matrix and how each ladder resolves right now."""
@@ -641,6 +699,9 @@ def harness_status() -> None:
                 # them a role bound with `--env-file GH_TOKEN=…` showed no GH_TOKEN
                 # here, while the text matrix named it (review of #259, round 1).
                 "env_files": launch_profile.env_files,
+                # Why the role will not launch, when it will not: a file-bound key whose
+                # file cannot be read (review of #259, round 3). `null` otherwise.
+                "refusal": launch_profile.refusal,
                 "extra_args": launch_profile.args,
                 # The role's OWN flags, the third axis of "what will this role
                 # launch with". Without it the matrix reported `extra_args: []`
@@ -690,6 +751,8 @@ def harness_status() -> None:
             f"→ {pinned or resolution.model} [{source}]{bin_note}",
             markup=False,
         )
+        if launch_profile.refusal is not None:
+            console.print(f"  ⚠ {launch_profile.refusal}", markup=False)
     if interference:
         console.print(f"⚠ env overrides model selection: {', '.join(interference)}", markup=False)
     console.print(
@@ -814,8 +877,8 @@ def bind(
                 "--clear-account or --clear",
                 error="nothing_to_bind",
             )
-        env_files = _parse_env(env_file_pairs or [])
-        for key, typed in env_files.items():
+        env_files: dict[str, str] = {}
+        for key, typed in _parse_env(env_file_pairs or []).items():
             # Read NOW, as --account is resolved now: a typo is a usage error rather than
             # a binding that refuses every later launch of the role.
             where = harness.expand_value(typed)
@@ -824,6 +887,10 @@ def bind(
             except ValueError as exc:
                 message = f"--env-file {key}: {where} {exc}"
                 fail(message, error="env_file_unreadable", detail=message)
+            # Kept as typed where that names a full path (`~`, `$HOME`: portable), else as
+            # the file read here: kept relative, every launch looked for it in its own
+            # working directory, and the role's window refused (review of #259, round 3).
+            env_files[key] = typed if Path(where).is_absolute() else str(Path(where).absolute())
         if account is not None:
             # Resolved NOW, so a typo is a usage error rather than a binding
             # that refuses every later launch of the role.

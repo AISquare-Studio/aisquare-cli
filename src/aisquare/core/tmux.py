@@ -78,6 +78,7 @@ import shutil
 import socket as socket_module
 import subprocess
 import sys
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -226,6 +227,7 @@ _WINDOW_FIELDS = (
     "pane_dead_status",
     "pane_current_command",
     "window_activity_flag",
+    "start_time",
 )
 _WINDOW_FORMAT = _SEP.join(f"#{{{name}}}" for name in _WINDOW_FIELDS)
 _VERSION = re.compile(r"(\d+)\.(\d+)")
@@ -462,6 +464,53 @@ def socket_answer(path: Path | None) -> SocketAnswer | None:
     return "answers"
 
 
+class SocketReads:
+    """What :func:`server_may_run` asks of the machine for one read of the fleet (a plan, a
+    run, a sweep), each asked at most once: a socket's listener, and when the server that
+    answers there started, per socket; and when this boot started.
+
+    The answers belong to the server, not to the row, and every caller asks them row by row
+    over rows that share a server. With ten live agents on one answering server, a plan ran
+    ten ``display-message`` processes and ten socket connects for one answer, and its run
+    as many again (review of #259, round 3). A start that could not be asked is ``None``
+    here too, as :func:`server_may_run` has always judged it.
+    """
+
+    def __init__(self) -> None:
+        self._listeners: dict[object, SocketAnswer | None] = {}
+        self._starts: dict[object, datetime | None] = {}
+        self._booted: tuple[datetime | None] | None = None
+
+    @staticmethod
+    def _key(srv: TmuxServer, recorded: Path | None) -> object:
+        """The socket asked: the path a row recorded, else where ``-L`` finds ``srv``'s."""
+        return recorded if recorded is not None else (srv.socket, srv.path)
+
+    def listener(self, srv: TmuxServer, recorded: Path | None) -> SocketAnswer | None:
+        """:meth:`TmuxServer.listener` at ``recorded``, asked once per socket."""
+        key = self._key(srv, recorded)
+        if key not in self._listeners:
+            self._listeners[key] = srv.listener(recorded)
+        return self._listeners[key]
+
+    def started(self, srv: TmuxServer, recorded: Path | None) -> datetime | None:
+        """When the server answering at ``recorded`` started, asked once per socket; ``None``
+        when it could not be asked (no usable tmux, a denied socket)."""
+        key = self._key(srv, recorded)
+        if key not in self._starts:
+            try:
+                self._starts[key] = (srv if recorded is None else srv.at(recorded)).started_at()
+            except TmuxError:  # TmuxUnavailable included: a server listens, and may be the row's
+                self._starts[key] = None
+        return self._starts[key]
+
+    def boot_started(self) -> datetime | None:
+        """:func:`boot_started`, asked once."""
+        if self._booted is None:
+            self._booted = (boot_started(),)
+        return self._booted[0]
+
+
 def server_may_run(
     srv: TmuxServer,
     recorded: Path | None,
@@ -469,6 +518,8 @@ def server_may_run(
     this_boot: str | None,
     created: datetime | None = None,
     started: datetime | None = None,
+    *,
+    reads: SocketReads | None = None,
 ) -> SocketAnswer | None:
     """Whether the agent of a live fleet row may still be running on ``srv``, and why; ``None``
     when it cannot be. The one rule ``upgrade``, ``uninstall``, ``fleet shutdown``, ``stop``
@@ -502,20 +553,21 @@ def server_may_run(
     start moves with the clock, so it explains only a socket the row's server lost, never
     one that answers as the row's or could not be asked: a row misjudged by a stepped
     clock is ended only when its server's socket is gone as well.
+
+    ``reads`` is the caller's :class:`SocketReads` for one read of the fleet, so rows on
+    one server ask it once; each call asks afresh without one.
     """
     if booted is not None and this_boot is not None and booted != this_boot:
         return None
-    answer = srv.listener(recorded)
+    reads = reads or SocketReads()
+    answer = reads.listener(srv, recorded)
     if answer == "answers" and started is not None:
-        try:
-            now = (srv if recorded is None else srv.at(recorded)).started_at()
-        except TmuxError:  # TmuxUnavailable included: a server listens, and may be the row's
-            now = None
+        now = reads.started(srv, recorded)
         if now is not None and now != started:
             answer = "another"
     unbooted = booted is None or this_boot is None
     if answer in ("gone", "another") and unbooted and created is not None:
-        booted_at = boot_started()
+        booted_at = reads.boot_started()
         if booted_at is not None and created < booted_at:
             return None
     return answer
@@ -614,6 +666,11 @@ class WindowInfo:
     landed, when there was none to make, and on every window a listing reports.
     The spawn fails open on it; this is how the refusal still reaches the
     caller's receipt (review of #162, round 1)."""
+    server_started: datetime | None = None
+    """When the server that listed the window started (``#{start_time}``), as
+    :meth:`TmuxServer.started_at` says it, ``None`` when tmux does not say: asked in the same
+    ``list-panes``, as :attr:`PaneFacts.server_started` is, so a listing says which server's
+    lifetime its pane ids belong to without a second process (review of #259, round 3)."""
 
 
 def _int(value: str, default: int = 0) -> int:
@@ -1257,6 +1314,7 @@ class TmuxServer:
                     dead_status=_optional_int(values["pane_dead_status"]),
                     current_command=values["pane_current_command"],
                     activity=values["window_activity_flag"] == "1",
+                    server_started=_epoch(values["start_time"]),
                 )
             )
         return windows
@@ -1537,11 +1595,19 @@ class TmuxServer:
         refused: no key name has one, and tmux would split or mangle it. This
         is the floor under every caller; the remote's allowlist
         (``remote_server.check_remote_key_names``) is the boundary itself.
+
+        A control character is any of Unicode's (``Cc``): C0, DEL and the C1 controls,
+        ``"\\x9b"`` (CSI) among them. ``ord(char) < 0x20`` let DEL and C1 through (review of
+        #259, round 2). So is a lone surrogate (``Cs``), which the argv's encoding turns
+        into the raw byte it escapes, ``"\\udc9b"`` into that CSI. A printable character
+        of any script stays a key: an alt chord sends ``M-é``.
         """
         if not keys:
             return
         for key in keys:
-            if not key or any(char.isspace() or ord(char) < 0x20 for char in key):
+            if not key or any(
+                char.isspace() or unicodedata.category(char) in ("Cc", "Cs") for char in key
+            ):
                 raise TmuxError(f"{key!r} is not a tmux key name")
         self.run("send-keys", "-t", pane_id, "--", *(_data_arg(key) for key in keys))
 

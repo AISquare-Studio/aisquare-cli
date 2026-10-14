@@ -36,6 +36,7 @@ from aisquare.cli import install as install_cli
 from aisquare.cli.app import app
 from aisquare.core import agents as agent_core
 from aisquare.core import paths, selfcli, spawn
+from aisquare.core.config import RoleLaunchProfile, load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxServer
@@ -1992,6 +1993,41 @@ def test_a_move_back_to_a_release_that_reads_config_whole_names_what_it_reads_ot
     assert "⚠ 0.8.1 reads config.toml without this release's defaults under it" in said, said
     assert "`aisquare config set accounts.pick …`" in said.replace("\n", " "), said
     assert chosen["config_defaults_lost"] == ["accounts.on_limit wait (here switch)"], chosen
+
+
+def test_a_move_back_before_env_files_names_the_roles_whose_file_bindings_it_ignores(
+    runner: CliRunner, tool: Tool, machine: Machine, tmp_path: Path
+) -> None:
+    """Review of #259, round 2: 0.8.0's role profile ignores keys it does not know, so after
+    `upgrade --version 0.8.0` a reviewer bound with `team bind reviewer --env-file
+    GH_TOKEN=…` launched with the shell's own GH_TOKEN, often the owner's token that can
+    push, and the plan said nothing. It names each role and its variables, in the plan,
+    under --yes and in --json; a move to a release that reads env_files says nothing."""
+    token = tmp_path / "reviewer-gh-token"
+    token.write_text("github_pat_cannot_push\n", encoding="utf-8")
+    config = load_config()
+    config.team.profiles["reviewer"] = RoleLaunchProfile(env_files={"GH_TOKEN": str(token)})
+    config.team.profiles["coder"] = RoleLaunchProfile(env={"CLAUDE_CONFIG_DIR": "/c2"})
+    save_config(config)
+    warning = (
+        "⚠ 0.8.0 predates `team bind --env-file` (new in 0.8.1) and ignores that binding: "
+        "reviewer (GH_TOKEN) would launch there with whatever value the launching shell has, "
+        "such as a GH_TOKEN that can push. The binding stays in config.toml, read again from "
+        "0.8.1 on"
+    )
+
+    planned = runner.invoke(app, ["upgrade", "--version", "0.8.0"])
+    back = _one_object(runner.invoke(app, ["--json", "upgrade", "--version", "0.8.0"]).stdout)
+    machine.new_version = "0.8.0"
+    ran = runner.invoke(app, ["upgrade", "--version", "0.8.0", "--yes"])
+    machine.new_version = "0.9.0"
+    across = _one_object(runner.invoke(app, ["--json", "upgrade", "--version", "0.8.1"]).stdout)
+    forward = _one_object(runner.invoke(app, ["--json", "upgrade", "--version", "0.9.1"]).stdout)
+
+    assert warning in planned.stdout, planned.stdout
+    assert warning in ran.stdout, "--yes skips the plan, not what it costs"
+    assert back["env_files_dropped"] == ["reviewer (GH_TOKEN)"], back
+    assert across["env_files_dropped"] == forward["env_files_dropped"] == [], "they read it"
 
 
 def _live_fleet_agent(root: Path, label: str = "coder-1") -> None:

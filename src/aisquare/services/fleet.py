@@ -34,13 +34,13 @@ import shutil
 import sqlite3
 import subprocess
 import time
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, Literal
 
 from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as claude_accounts_core
@@ -319,6 +319,10 @@ class ShutdownRow:
 
     agent: FleetAgent
     reason: str
+    held: bool = False
+    """Left live as one whose agent may run where no tmux client reaches it (``_held_rows``),
+    not as a pane seen alive: no server this run asks holds its pane, so it spares no session
+    there (``_spared``)."""
 
 
 @dataclass
@@ -413,14 +417,18 @@ class ShutdownPlan:
     """``<socket>:<session>`` for every fleet session the kill phase would target."""
     absent_sockets: list[str] = field(default_factory=list)
     held: dict[str, str] = field(default_factory=dict)
-    """Rows on an absent socket the run would LEAVE LIVE, by id, with why: their agent may
-    still run (:func:`_unreached`). Under ``forget``, only those whose socket answers, which
-    it does not end."""
+    """Rows the run would LEAVE LIVE, by id, with why: their agent may still run where no
+    tmux client reaches it (:func:`_unreached`), on a socket that did not answer or one
+    another server answers. Under ``forget``, only those whose socket answers, which it
+    does not end."""
     lost: dict[str, str] = field(default_factory=dict)
-    """Rows the run would record lost, by id, with the socket no server answered on: its
-    name, or the path its server said it listened on (:func:`_address`). Under
-    :attr:`tmux_unusable`, every row not :attr:`held`, with the socket no tmux here could
-    ask."""
+    """Rows the run would record lost, by id, with their socket: its name, or the path its
+    server said it listened on (:func:`_address`). Those no server answered on, and under
+    ``forget`` those held, whether or not their socket answers; under
+    :attr:`tmux_unusable`, every row not :attr:`held`, unchecked."""
+    lost_why: dict[str, str] = field(default_factory=dict)
+    """Why the run would record each of :attr:`lost` lost, by id: the reason its report
+    gives the row (``ShutdownReport.recorded``)."""
     tmux_unusable: str | None = None
     """Why tmux is not usable here, for a ``forget`` plan: every row is then ended
     unchecked, on the operator's word, but for those in :attr:`held`, whose socket
@@ -1001,10 +1009,28 @@ class _PaneView:
     when tmux did not say."""
 
 
-_Observed = dict[str, "_PaneView | None"]
-"""What one server said, by row id: the facts of the row's pane; ``None`` for a row whose
-server is NOT the one that answered at its socket (:func:`_observe`), which is held as
-unasked; and no entry for a row whose pane is gone."""
+class _Held:
+    """What :func:`_observe` says of a live row whose server is NOT the one that answered at its
+    socket: held as unasked (:func:`_on_another_server`), its agent perhaps running where no
+    tmux client reaches it. :data:`HELD` is the one instance."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "HELD"
+
+
+HELD = _Held()
+"""Under a held row's id in :data:`_Observed`. Not ``None``, which is what a plain ``.get()``
+gives for a row whose pane is gone too: held rows were ``None`` there, so a reader that took
+the map's word without :func:`_own_view` read a held row as gone, and ended it under its
+running agent; ``reap`` was safe only because :func:`_view` screened the row first (review of
+#259, round 3). A reader that reaches a pane's facts now has to say what a held row is."""
+
+_Observed = dict[str, "_PaneView | _Held"]
+"""What one server said, by row id: the facts of the row's pane; :data:`HELD` for a row whose
+server is NOT the one that answered at its socket (:func:`_observe`); and no entry for a row
+whose pane is gone."""
 
 
 def _agent_running(current_command: str) -> bool:
@@ -1094,7 +1120,7 @@ def _outlived(agent: FleetAgent, server_started: datetime | None) -> bool:
 
 
 def _on_another_server(
-    agent: FleetAgent, server_started: datetime | None, this_boot: str | None
+    agent: FleetAgent, server_started: datetime | None, boot: _Boot | None = None
 ) -> bool:
     """Whether the server that answered at ``agent``'s socket, started at ``server_started``,
     is not the one its row was started on, and that one may still run: it recorded its
@@ -1108,13 +1134,44 @@ def _on_another_server(
     :func:`~aisquare.core.tmux.server_may_run` judges it: counted from this boot instead,
     every row was held after a reboot against the server the next spawn started, and
     ``reap``, ``shutdown`` and ``uninstall`` could not end it (review of #259, round 1).
+
+    The boot is asked only here, once a row has passed the test that makes it matter
+    (``boot``: :class:`_Boot`, once per read).
     """
     if agent.server_started_at is None or not _outlived(agent, server_started):
         return False
+    boot = boot or _Boot()
+    this_boot = boot.id()
     if agent.boot_id is not None and this_boot is not None:
         return agent.boot_id == this_boot
-    booted_at = tmux_core.boot_started()
+    booted_at = boot.started()
     return booted_at is None or agent.created_at >= booted_at
+
+
+class _Boot:
+    """This boot's identity and start (``tmux_core.boot_id``, ``boot_started``), each asked
+    of the machine at most once, and only when asked for: one per read of the fleet.
+
+    ``boot_id`` keeps only an id it found (round 28 of #257), so where ``sysctl`` fails each
+    question is another ``sysctl`` run, with a 5 s timeout. :func:`_observe` asked it of
+    every read with live rows, asq's 2 s tick, needs-you's 3 s scan and every
+    ``status_of``, though only a row that may be held needs it, which is rare; and
+    ``boot_started`` once more per such row (review of #259, round 2).
+    """
+
+    def __init__(self) -> None:
+        self._id: tuple[str | None] | None = None
+        self._started: tuple[datetime | None] | None = None
+
+    def id(self) -> str | None:
+        if self._id is None:
+            self._id = (tmux_core.boot_id(),)
+        return self._id[0]
+
+    def started(self) -> datetime | None:
+        if self._started is None:
+            self._started = (tmux_core.boot_started(),)
+        return self._started[0]
 
 
 def _observe(
@@ -1145,7 +1202,7 @@ def _observe(
 
     A live row the answering server is NOT the server of — one that recorded its
     server's start, and this one started at another time, in the same boot — is
-    HELD, as ``None`` under its id: its server lost its socket file to this one and
+    HELD, as :data:`HELD` under its id: its server lost its socket file to this one and
     may run on where no client reaches it, so nothing reads it as lost or ends it
     (:func:`_on_another_server`). Readers take it through :func:`_own_view`, which
     answers ``None`` for it, as for a server that could not be asked.
@@ -1186,13 +1243,13 @@ def _observe(
         if live and not seen and not _server_answers(srv):
             return None
         started = srv.started_at() if seen or live else None
-        this_boot = tmux_core.boot_id() if live else None
+        boot = _Boot()  # asked only for a row that may be held
         views: _Observed = {}
         for agent in agents:
             if agent.id in seen and not _outlived(agent, started):
                 views[agent.id] = seen[agent.id]
-            elif agent.ended_at is None and _on_another_server(agent, started, this_boot):
-                views[agent.id] = None
+            elif agent.ended_at is None and _on_another_server(agent, started, boot):
+                views[agent.id] = HELD
         return views
     except TmuxError:
         return None
@@ -1241,16 +1298,26 @@ def _view(
 def _own_view(agent: FleetAgent, observed: _Observed | None) -> _Observed | None:
     """``observed`` as ``agent``'s own server's word, or ``None`` when it is not: the server
     could not be asked, or it is another server than the row's, which :func:`_observe`
-    holds under the row's id as ``None``. The one way a reader takes a server's answer for
-    a row, so none of them reads a held row as a pane that is gone."""
-    if observed is None or (agent.id in observed and observed[agent.id] is None):
+    holds under the row's id as :data:`HELD`. The one way a reader takes a server's answer
+    for a row, so none of them reads a held row as a pane that is gone."""
+    if observed is None or _held_by_another(agent, observed):
         return None
     return observed
 
 
 def _held_by_another(agent: FleetAgent, observed: _Observed | None) -> bool:
     """Whether ``observed`` holds ``agent`` as a row of another server's (:func:`_observe`)."""
-    return observed is not None and agent.id in observed and observed[agent.id] is None
+    return observed is not None and observed.get(agent.id) is HELD
+
+
+def _pane_in(agent: FleetAgent, observed: _Observed) -> _PaneView | None:
+    """``agent``'s pane in its own server's word (:func:`_own_view`), or ``None`` when that
+    server holds none: the pane is gone. A held row's entry is no pane, and it is not gone:
+    a caller that did not screen it out raises here, rather than end it under its agent."""
+    pane = observed.get(agent.id)
+    if isinstance(pane, _Held):
+        raise FleetError(f"{agent.label}'s row is held as another server's: not its own view")
+    return pane
 
 
 def _exit_detail(status: int | None) -> str | None:
@@ -1264,9 +1331,9 @@ def _derive(
     *,
     observed: bool,
     now: datetime,
-    unasked: str = "tmux unavailable",
+    held: bool = False,
 ) -> tuple[FleetAgentState, str | None]:
-    """State from the board first, tmux second (§5.1) — with one honest exception.
+    """State from the board first, tmux second (§5.1) — with two honest exceptions.
 
     A dead or vanished pane is a hard fact no board row can contradict: a
     process that has exited cannot be waiting, however recently its hooks
@@ -1275,8 +1342,15 @@ def _derive(
     first; then a fresh ``team_session`` row (not ended, seen within
     ``_STALE_AFTER``) decides between working, waiting and attention; then
     recent output (:data:`ACTIVITY_WINDOW`) means working; and when tmux cannot
-    be asked at all the answer is ``unknown``, never a guess, with ``unasked`` as
-    the reason: the caller's word for why the row's server was not heard.
+    be asked at all the answer is ``unknown``, never a guess.
+
+    So is another server at the row's socket (``held``, :func:`_observe`): it reads
+    ``unknown`` whatever its board says, saying why (:data:`ANOTHER_SERVER`). Its agent is
+    one no tmux client reaches, if it runs at all, and its pane id there is another
+    agent's. Derived from a fresh board, it read a healthy ``waiting`` with no reason for
+    half an hour, under which ``fleet tell`` typed into that other agent, needs-you
+    pushed prompts every answer to was refused, and a held manager counted as one that
+    takes its coders' questions (review of #259, round 2).
     """
     if agent.ended_at is not None:
         return "exited", _exit_detail(agent.exit_status)
@@ -1286,6 +1360,8 @@ def _derive(
         if pane.dead:
             return "exited", _exit_detail(pane.dead_status)
     hooks = "no hooks" if agent.session_id is None else None
+    if held:
+        return "unknown", ANOTHER_SERVER if hooks is None else f"{ANOTHER_SERVER}; {hooks}"
     if session is not None and session.ended_at is None:
         fresh = now - session.last_seen_at <= _team()._STALE_AFTER
         board_state = _BOARD_STATES.get(session.state)
@@ -1332,6 +1408,7 @@ def _derive(
         # what it is" (models.py). A missing board join is a second, smaller
         # fact: reported after the reason, never instead of it — an operator
         # told only "no hooks" reads a healthy fleet with an odd binary.
+        unasked = "tmux unavailable"
         return "unknown", unasked if hooks is None else f"{unasked}; {hooks}"
     busy = pane.last_output is not None and now - pane.last_output <= ACTIVITY_WINDOW
     return ("working" if busy else "waiting"), hooks
@@ -1355,8 +1432,9 @@ def _limit_detail(until: datetime | None, now: datetime) -> str:
 
 
 ANOTHER_SERVER = "another tmux server on its socket"
-"""A held row's detail (:func:`_observe`): a server answers at its socket, and it is not
-the one the row was started on, which may run on where no client reaches it."""
+"""A held row's detail (:func:`_observe`), whose state is ``unknown`` whatever its board
+says (:func:`_derive`): a server answers at its socket, and it is not the one the row was
+started on, which may run on where no client reaches it."""
 
 
 def _status(
@@ -1371,18 +1449,11 @@ def _status(
     """``address`` is the row's as the caller worked it out once (:func:`_where`)."""
     # The server's word AS GIVEN (`_observe_sockets`' view for the row's address), never
     # through `_view`: a row the answering server is not the server of is held there under
-    # its id, which is the one fact that names the detail below.
+    # its id, which is the one fact that decides its state and detail below.
     held = _held_by_another(agent, observed)
     observed = _own_view(agent, observed)
-    pane = observed.get(agent.id) if observed is not None else None
-    state, detail = _derive(
-        agent,
-        session,
-        pane,
-        observed=observed is not None,
-        now=now,
-        unasked=ANOTHER_SERVER if held else "tmux unavailable",
-    )
+    pane = _pane_in(agent, observed) if observed is not None else None
+    state, detail = _derive(agent, session, pane, observed=observed is not None, now=now, held=held)
     return FleetAgentStatus(
         agent=agent,
         state=state,
@@ -1616,6 +1687,26 @@ def spawn(
     )
     _refuse_an_env_file_it_cannot_read(role)
     role_config = role_settings(role, config)
+    # A server that exited at the socket path left its rows live, and the server this spawn
+    # starts there would hold them for good: they read lost from now on, in every project,
+    # decided while the stale file still says so. And a socket path a running server lost
+    # is not one to start a server at: the agents on it would be stranded for good, and the
+    # new server would answer for their rows. Asked again as the window opens (`open_window`).
+    exited = _before_a_server_starts(srv, config)
+    if exited:
+        one = len(exited) == 1
+        with store_session() as store:
+            names = ", ".join(
+                f"{row.label} ({_name(store.get_project(row.project_id) or project)})"
+                for row in exited
+            )
+        notes.append(
+            f"the tmux server at {srv.socket_path()} had exited, leaving its socket file: "
+            f"{names} {'reads' if one else 'read'} lost from now on, as {'its' if one else 'their'}"
+            f" {'pane' if one else 'panes'} went with it (`aisquare fleet reap` records "
+            f"{'it' if one else 'them'}, `aisquare fleet restart` starts {'it' if one else 'them'}"
+            " again)"
+        )
     # Nothing up to the codename below writes the project's registration: every
     # refusal that needs no window is given first (#139). A spawn refused for its
     # account, its worktree, its task, the cap or a second manager had already
@@ -1659,9 +1750,6 @@ def spawn(
             notes.append(f"the manager is always labelled {MANAGER_LABEL!r} (asked: {label!r})")
         else:
             notes.append(f"label {label!r} is held by a live agent — using {picked!r}")
-    # A socket path a running server lost is not one to start a server at: the agents on
-    # it would be stranded for good, and the new server would answer for their rows.
-    _refuse_a_freed_socket(srv, config)
 
     use_worktree = role_config.worktree if worktree is None else worktree
 
@@ -1820,7 +1908,8 @@ def spawn(
         # the session environment, so a later spawn — or a window opened by hand
         # — starts from the server's environment and sets its own (review of
         # #203, rounds 3 and 4; §7.6 for the opt-out).
-        window = srv.spawn_window(
+        window = open_window(
+            srv,
             tmux_session,
             name=picked,
             cwd=cwd,
@@ -1828,6 +1917,7 @@ def spawn(
             env=env,
             width=width,
             height=height,
+            config=config,
         )
     except TmuxError as exc:
         raise FleetError(f"tmux could not start the window: {exc}") from exc
@@ -2167,6 +2257,37 @@ def _take_over(agent: FleetAgent, previous: str, session_id: str, notes: list[st
     return current if current is not None else agent
 
 
+def _live_rows_here(
+    store: ContextStore, srv: TmuxServer, config: FleetSettings
+) -> Iterator[tuple[ProjectInfo, FleetAgent, SocketAnswer | None]]:
+    """Every live row recorded at this shell's socket path, in every project, with what the
+    one rule says of its agent (:func:`~aisquare.core.tmux.server_may_run`): the rows a
+    server started at that path would answer for.
+
+    The server is shared by every project, so every project's rows are asked, forgotten
+    ones' included; a row asked at another path (:func:`_address`) is another server's. The
+    one walk :func:`_refuse_a_freed_socket` and :func:`_forget_an_exited_server` take, so
+    the two cannot come to count different rows (review of #259, round 3).
+    """
+    this_boot = tmux_core.boot_id()
+    here = _Address(config.tmux_socket)
+    reads = tmux_core.SocketReads()  # one socket: asked once, not per row
+    for current in store.list_projects(include_forgotten=True):
+        for agent in store.fleet_agents(current.id, live_only=True):
+            if _address(agent, config) != here:
+                continue
+            answer = tmux_core.server_may_run(
+                srv,
+                agent.socket_path,
+                agent.boot_id,
+                this_boot,
+                agent.created_at,
+                agent.server_started_at,
+                reads=reads,
+            )
+            yield current, agent, answer
+
+
 def _refuse_a_freed_socket(srv: TmuxServer, config: FleetSettings) -> None:
     """Refuse to start a server at a socket path a running server lost (follow-up of #257).
 
@@ -2177,7 +2298,7 @@ def _refuse_a_freed_socket(srv: TmuxServer, config: FleetSettings) -> None:
     from under it, which the server outlives. A spawn then started a second server at the
     freed path, which answered for the row from then on, and the agent kept running
     where nothing could reach it again. The server is shared by every project, so every
-    project's live rows are asked, not only this one's.
+    project's live rows are asked, not only this one's (:func:`_live_rows_here`).
 
     Asked only when this shell's path holds no file: a server listening there is the one
     the spawn joins, and a stale file is a server that exited, which tmux replaces.
@@ -2188,18 +2309,12 @@ def _refuse_a_freed_socket(srv: TmuxServer, config: FleetSettings) -> None:
         here = srv.socket_path()
     except TmuxUnavailable:
         return  # no POSIX uid: no tmux server can exist here
-    this_boot = tmux_core.boot_id()
-    stranded: list[str] = []
     with store_session() as store:
-        for current in store.list_projects(include_forgotten=True):
-            for agent in store.fleet_agents(current.id, live_only=True):
-                if _address(agent, config) != _Address(config.tmux_socket):
-                    continue  # asked at another path, which this spawn does not take
-                answer = tmux_core.server_may_run(
-                    srv, agent.socket_path, agent.boot_id, this_boot, agent.created_at
-                )
-                if answer == "gone":
-                    stranded.append(f"{agent.label} ({_name(current)})")
+        stranded = [
+            f"{agent.label} ({_name(current)})"
+            for current, agent, answer in _live_rows_here(store, srv, config)
+            if answer == "gone"
+        ]
     if not stranded:
         return
     one = len(stranded) == 1
@@ -2212,6 +2327,91 @@ def _refuse_a_freed_socket(srv: TmuxServer, config: FleetSettings) -> None:
         f"makes tmux create its socket again, and spawn again; if it is not, "
         f"`aisquare fleet shutdown --forget` ends {'its row' if one else 'their rows'} on "
         f"your word"
+    )
+
+
+def _forget_an_exited_server(srv: TmuxServer, config: FleetSettings) -> list[FleetAgent]:
+    """Forget the recorded start of a server that exited at this shell's socket path, before a
+    spawn starts the next server there, so that its rows read lost under the new one rather
+    than held as its; the rows it changed.
+
+    A socket file with nothing listening is a server that exited (tmux leaves the file:
+    :func:`~aisquare.core.tmux.socket_answer`), and the spawn's ``new-session`` starts the
+    next server at that path. The agents went with the old one (a hand-run ``kill-server``,
+    a crash). Once the next server is up, each of their rows, having recorded its server's
+    start, was held as another server's (:func:`_on_another_server`), since from outside a
+    killed server looks like one that lost its socket file and runs on. Every such row, in
+    every project, was held for good: ``reap`` left it, ``stop`` refused it, and it still
+    counted toward ``max_agents_per_project`` and the one-manager rule until ``shutdown
+    --forget`` (review of #259, round 2). 0.8.0 read them lost.
+
+    The evidence is there only until the new server takes the path, so it is acted on here:
+    each live row recorded at this path (:func:`_live_rows_here`) that the one rule says
+    cannot be running (:func:`~aisquare.core.tmux.server_may_run` is ``None``: the stale
+    file, or another boot) forgets its server's start, as a row from before 0.8.1 has none.
+    It then reads ``lost`` under the next server, as in 0.8.0: ``reap`` records it, ``stop``
+    ends it, and Welcome's top-up restarts a coder under its own label, its session resumed.
+    Ending it here instead would cost that. Asked per row, and written as a compare-and-set
+    (``forget_fleet_agent_server_start``), so a server another process brought up meanwhile
+    leaves its rows and any held one alone.
+    """
+    try:
+        if srv.listener(srv.socket_path()) is not None:
+            return []
+    except TmuxUnavailable:
+        return []  # no POSIX uid: no tmux server can exist here
+    forgotten: list[FleetAgent] = []
+    with store_session() as store:
+        for _, agent, answer in _live_rows_here(store, srv, config):
+            started = agent.server_started_at
+            if (
+                answer is None
+                and started is not None
+                and store.forget_fleet_agent_server_start(agent.id, started)
+            ):
+                forgotten.append(agent)
+    return forgotten
+
+
+def _before_a_server_starts(srv: TmuxServer, config: FleetSettings) -> list[FleetAgent]:
+    """What must hold before anything starts a tmux server at the fleet's socket path, asked in
+    this one place; the rows whose exited server's start it forgot. ``srv`` is the fleet's
+    server for ``config`` (:func:`server`).
+
+    ``new-session`` starts a server where none listens. Over a stale file, a server that
+    exited, that is the next server, and the rows of the one that exited forget its start
+    first, or the new one holds them for good (:func:`_forget_an_exited_server`). At a path
+    with no file, a running server may have lost it, and a server started there strands its
+    agents (:func:`_refuse_a_freed_socket`, which raises). Only ``spawn`` asked, and the
+    Accounts sign-in window, on the same server, started one past both (review of #259,
+    round 3): so every window opened there goes through :func:`open_window`, which asks.
+    """
+    exited = _forget_an_exited_server(srv, config)
+    _refuse_a_freed_socket(srv, config)
+    return exited
+
+
+def open_window(
+    srv: TmuxServer,
+    session: str,
+    *,
+    name: str,
+    cwd: Path,
+    command: Sequence[str],
+    env: Mapping[str, str] | None = None,
+    width: int = DEFAULT_WINDOW_WIDTH,
+    height: int = DEFAULT_WINDOW_HEIGHT,
+    config: FleetSettings | None = None,
+) -> WindowInfo:
+    """A window on the fleet's tmux server ``srv`` (:func:`server`), opened once what must hold
+    before a server starts there does (:func:`_before_a_server_starts`): the one way anything
+    opens a window at the fleet's socket, a spawn's agent and the Accounts sign-in window
+    alike (tests/test_fleet_service.py names every caller). :class:`FleetError` when it may
+    not; :class:`~aisquare.core.tmux.TmuxError` when tmux would not
+    (:meth:`~aisquare.core.tmux.TmuxServer.spawn_window`)."""
+    _before_a_server_starts(srv, config or settings())
+    return srv.spawn_window(
+        session, name=name, cwd=cwd, command=command, env=env, width=width, height=height
     )
 
 
@@ -2602,7 +2802,7 @@ def _end_dead_rows(
         for agent in agents
         if agent.ended_at is None
         and (observed := _view(agent, views, config, addresses)) is not None
-        and (pane := observed.get(agent.id)) is not None
+        and (pane := _pane_in(agent, observed)) is not None
         and pane.dead
     ]
     if not dead:
@@ -2665,8 +2865,8 @@ def _lingering_windows(
         address = _where(agent, config, addresses)
         observed = views.get(address)
         pane = observed.get(agent.id) if observed else None
-        if pane is None or not pane.dead:
-            continue
+        if not isinstance(pane, _PaneView) or not pane.dead:
+            continue  # no pane, or a held row's (HELD), whose id is another agent's there
         key = (address, agent.pane_id)
         held = owners.get(key)
         if held is None or (
@@ -2772,19 +2972,34 @@ def tell(
     ``agent_id`` pins the row, as for :func:`stop`: the phone's tell means the
     agent it showed, and a replacement that took the label since (a manager's
     restart or switch, in another process) is refused, not typed into.
+
+    And the pane must be the row's own (:func:`_its_agent`): on the server that took a row's
+    socket, its pane id is another agent's. A held row read its board's ``waiting`` while
+    that was fresh, and pasted into, that agent got the text and an Enter (review of #259,
+    round 2).
     """
     with store_session() as store:
         agent = _live_agent(store, project, label, agent_id=agent_id)
     status = status_of(agent)
     if status.state == "waiting":
         srv = server_of(agent)
-        if not _pane_is_the_agent(srv, agent.pane_id):
+        try:
+            facts = srv.pane_facts(agent.pane_id)
+        except TmuxError:
+            facts = None  # tmux that cannot answer is not a pane to type into either
+        if not _its_agent(agent, facts):
             how = _file_note(project, label, text, sender)
-            return TellResult(
-                False,
-                "it reads as waiting, but its pane is not running the agent yet (the "
-                f"launcher or a shell is in the foreground) — {how}",
-            )
+            if facts is not None and _outlived(agent, facts.server_started):
+                why = (
+                    "it reads as waiting, but the tmux server at its socket is not the one it "
+                    "was started on, and its pane id there is another agent's"
+                )
+            else:
+                why = (
+                    "it reads as waiting, but its pane is not running the agent yet (the "
+                    "launcher or a shell is in the foreground)"
+                )
+            return TellResult(False, f"{why} — {how}")
         try:
             srv.paste(agent.pane_id, text)
             srv.send_keys(agent.pane_id, "Enter")
@@ -2796,21 +3011,24 @@ def tell(
     return TellResult(False, f"it is {status.state} — {how}")
 
 
-def _pane_is_the_agent(srv: TmuxServer, pane_id: str) -> bool:
-    """Whether the pane's foreground process is the agent right now.
+def _its_agent(agent: FleetAgent, facts: PaneFacts | None) -> bool:
+    """Whether the pane these facts are of runs ``agent``'s own agent now: the agent is in its
+    foreground (:func:`_runs_the_agent`), on the server the row was started on
+    (:func:`_outlived`), from one ``display-message`` (``PaneFacts.server_started``).
 
-    Never raises: tmux that cannot answer is not a pane to type into either
-    (and :func:`_derive` has already called such an agent ``unknown``).
+    The one test every path that types into a row's pane puts: :func:`tell`, the manager's
+    nudge (:func:`nudge_manager`), and the remote's keys, quick answers and agent actions
+    (``remote_server._remote_facts_refusal``). ``tell`` asked only the first, and pasted
+    into the pane another server gave a held row's id (review of #259, round 2).
     """
-    try:
-        facts = srv.pane_facts(pane_id)
-    except TmuxError:
-        return False
-    return _runs_the_agent(facts)
+    return (
+        facts is not None and _runs_the_agent(facts) and not _outlived(agent, facts.server_started)
+    )
 
 
 def _runs_the_agent(facts: PaneFacts | None) -> bool:
-    """:func:`_pane_is_the_agent`'s answer, for a caller that holds the pane's facts already."""
+    """Whether the pane's foreground process is the agent right now: not dead, and not a
+    shell or the launcher (:func:`_agent_running`). Half of :func:`_its_agent`."""
     return facts is not None and not facts.dead and _agent_running(facts.current_command)
 
 
@@ -2968,8 +3186,10 @@ def _stop_row(
         Either read finds a pane by its id, and on a server that started after
         the row was written that pane is another agent's (:func:`_outlived`):
         the row's own is gone with the server it ran on, which is what ``None``
-        says. Asked of tmux only once a pane has answered, and strictly, as the
-        reads before it.
+        says. When the server started comes in the same answer as the pane
+        (``WindowInfo.server_started``, ``PaneFacts.server_started``): asked in a
+        second ``display-message`` of its own, every look of a stop's grace period
+        cost one more process (review of #259, round 3).
 
         Neither read names the pane when tmux found no server at the socket, and
         a socket file taken from under its server is one of those: that is not a
@@ -2980,7 +3200,7 @@ def _stop_row(
         """
         for window in srv.windows_or_raise(session):
             if window.pane_id == agent.pane_id:
-                if _outlived(agent, srv.started_at()):
+                if _outlived(agent, window.server_started):
                     _refuse_unless_gone(agent, srv)
                     return None
                 return window
@@ -2988,7 +3208,7 @@ def _stop_row(
         if facts is None:
             _refuse_unless_gone(agent, srv)
             return None
-        if _outlived(agent, srv.started_at()):
+        if _outlived(agent, facts.server_started):
             _refuse_unless_gone(agent, srv)
             return None
         return WindowInfo(
@@ -3373,6 +3593,7 @@ def _unreached(
     unusable: bool = False,
     answering: bool = False,
     forget: str = "--forget",
+    reads: tmux_core.SocketReads | None = None,
 ) -> tuple[SocketAnswer, str, str] | None:
     """``(what its socket said, why, what to do)`` for a row whose server did not answer
     through tmux, or could not be asked as tmux is ``unusable`` here, but whose agent may
@@ -3390,7 +3611,8 @@ def _unreached(
     recorded, which lost its socket file to it and may run on, follow-up of #257). A server
     that is the row's is then ``None`` here: the row is stopped as any other. ``forget``
     is how the way out spells the operator's word: ``shutdown``'s own flag, or the command
-    for ``reap``.
+    for ``reap``. ``reads`` is the caller's for every row it asks, so rows on one server ask
+    it once (:class:`~aisquare.core.tmux.SocketReads`).
     """
     srv = server_of(agent, config)
     answer = tmux_core.server_may_run(
@@ -3400,6 +3622,7 @@ def _unreached(
         this_boot,
         agent.created_at,
         agent.server_started_at,
+        reads=reads,
     )
     if answer is None or (answering and answer == "answers"):
         return None
@@ -3435,13 +3658,14 @@ def _held_rows(
     agent: its pane read as gone, and the socket answered.
     """
     this_boot = tmux_core.boot_id()
+    reads = tmux_core.SocketReads()  # one per server, not per row
     held: dict[str, tuple[SocketAnswer, str, str]] = {}
     for _, agents in targets:
         for agent in agents:
             if unusable or not answering.get(_address(agent, config)):
-                unreached = _unreached(agent, config, this_boot, unusable=unusable)
+                unreached = _unreached(agent, config, this_boot, unusable=unusable, reads=reads)
             elif agent.server_started_at is not None:
-                unreached = _unreached(agent, config, this_boot, answering=True)
+                unreached = _unreached(agent, config, this_boot, answering=True, reads=reads)
             else:
                 continue
             if unreached is not None:
@@ -3491,6 +3715,34 @@ def _fleet_sessions(
     return sessions
 
 
+def _spared(
+    report: ShutdownReport, config: FleetSettings
+) -> tuple[set[tuple[_Address, str]], set[tuple[_Address, str]]]:
+    """``(socket, project id)`` and ``(socket, pane id)`` for each row ``report`` LEFT LIVE
+    on a pane its server holds, whose session the kill phase spares.
+
+    The spare rule follows the PANE, not only the project's current session name: a
+    `rename` that failed open (or a hand rename) leaves an agent in an `asq-*` session that
+    `_fleet_sessions` returns with no project, and under `--all` the prefix sweep killed it
+    over a row this had just marked LEFT LIVE (review of #121, round 2). So a session is
+    also spared when one of its panes is a row left live — asked of tmux only when there is
+    such a row, so the ordinary path costs nothing extra. Keyed by (socket, pane id): pane
+    ids are unique only within ONE tmux server (every server starts at %0), so a failed
+    `%1` on the old socket must not spare an unrelated session holding `%1` on the current
+    one (review of #121, round 3).
+
+    Not a row left live as held (:attr:`ShutdownRow.held`): its agent may run where no
+    client reaches it, and its pane is on no server this run asks. A row another server
+    answers for spared its project's session on that server, which the held agent does
+    not run on, with every window there and the server itself (review of #259, round 3).
+    """
+    seen = [row for row in report.failed if not row.held]
+    return (
+        {(_address(row.agent, config), row.agent.project_id) for row in seen},
+        {(_address(row.agent, config), row.agent.pane_id) for row in seen},
+    )
+
+
 def _kill_fleet_sessions(
     targets: Sequence[tuple[ProjectInfo, list[FleetAgent]]],
     sockets: Sequence[_Address],
@@ -3512,23 +3764,11 @@ def _kill_fleet_sessions(
     server down when the fleet is all it held: ``BUNDLED_CONF`` does not set
     ``exit-empty off``, so a server with no session exits on its own.
 
-    A session holding a row this LEFT LIVE is spared. Killing it would end an
-    agent whose pane ``_verify_gone`` had just confirmed alive, and leave its
+    A session holding a row this LEFT LIVE is spared (:func:`_spared`). Killing it would
+    end an agent whose pane ``_verify_gone`` had just confirmed alive, and leave its
     live row on a dead pane — the state this whole command exists to end.
     """
-    spared = {(_address(row.agent, config), row.agent.project_id) for row in report.failed}
-    # The spare rule follows the PANE, not only the project's current session
-    # name: a `rename` that failed open (or a hand rename) leaves an agent in an
-    # `asq-*` session that `_fleet_sessions` returns with no project, and under
-    # `--all` the prefix sweep killed it over a row this had just marked LEFT
-    # LIVE (review of #121, round 2). So a session is also spared when one of
-    # its panes is a row left live — asked of tmux only when there is such a
-    # row, so the ordinary path costs nothing extra.
-    # Keyed by (socket, pane id): pane ids are unique only within ONE tmux
-    # server (every server starts at %0), so a failed `%1` on the old socket
-    # must not spare an unrelated session holding `%1` on the current one
-    # (review of #121, round 3).
-    spared_panes = {(_address(row.agent, config), row.agent.pane_id) for row in report.failed}
+    spared, spared_panes = _spared(report, config)
     for socket in sockets:
         if not answering.get(socket):
             continue
@@ -3772,6 +4012,58 @@ def _row_that_went_away(agent: FleetAgent, reason: str, report: ShutdownReport) 
     _not_down(report, agent.project_id)
 
 
+@dataclass(frozen=True)
+class _Verdict:
+    """What ``shutdown`` does with one row (:func:`_shutdown_verdict`)."""
+
+    end: Literal["stop", "live", "lost"]
+    """``stop`` it through its server; leave it ``live``; or record it ``lost`` unstopped."""
+    reason: str = ""
+    """Why, as the run reports it: a row left live's reason (``ShutdownReport.failed``), or
+    the one a row recorded lost is ended with (``ShutdownReport.recorded``)."""
+    plan: str = ""
+    """Why, as the plan shows it (``ShutdownPlan.held``, ``ShutdownPlan.lost_why``)."""
+
+
+def _shutdown_verdict(
+    agent: FleetAgent,
+    answering: Mapping[_Address, bool],
+    held: Mapping[str, tuple[SocketAnswer, str, str]],
+    *,
+    forget: bool,
+    unusable: str | None,
+    config: FleetSettings | None = None,
+) -> _Verdict:
+    """What ``shutdown`` does with ``agent``'s row, the one verdict its plan shows and its run
+    carries out (:func:`shutdown_plan`, :func:`_shutdown_row`), so the two cannot disagree.
+
+    Stopped where its server answers. Recorded lost where none answers, unless its agent may
+    still run (``held``, :func:`_held_rows`): left live then, saying why and what to do, or
+    under ``forget`` ended on the operator's word, but never one whose socket answers (round
+    28 of #257). A row held on an answering socket is one whose server is another than the
+    one that answers there: left live, or ended on the word, as a row on a silent socket
+    is, and never stopped through the other server. The plan decided that last case apart:
+    under ``--forget`` it listed such a row neither as held nor as lost, so it said
+    ``stopped (%3)``, the other server's pane id, while the run recorded it lost (review of
+    #259, round 3; round 29 of #257 was the same mismatch for silent sockets).
+    """
+    address = _address(agent, config or settings())
+    unreached = held.get(agent.id)
+    if unusable is None and answering.get(address) and unreached is None:
+        return _Verdict("stop")
+    if unreached is not None and (unreached[0] == "answers" or not forget):
+        _, why, way = unreached
+        kept = ", which --forget does not end as a server answers there" if forget else ""
+        return _Verdict("live", f"{why} — left live{kept}: {way}", f"{why} — {way}")
+    if unusable is not None:
+        reason = f"ended on your word (--forget), unchecked: {unusable}"
+    elif unreached is None:
+        reason = f"no server answered on socket '{address}'"
+    else:
+        reason = f"ended on your word (--forget): {unreached[1]}"
+    return _Verdict("lost", reason, reason)
+
+
 def _shutdown_row(
     project: ProjectInfo,
     agent: FleetAgent,
@@ -3785,11 +4077,10 @@ def _shutdown_row(
     forget: bool = False,
     config: FleetSettings | None = None,
 ) -> None:
-    """Stop one row where its server answers; record it lost where it does not, unless its
-    agent may still run (``held``, :func:`_unreached`): left live then, saying why and what
-    to do, or under ``forget`` ended on the operator's word. Never one whose socket answers:
-    a server listens there, which is no word's to deny, and ``uninstall`` counts it, so
-    ending it let the next ``uninstall`` go on under it (round 28 of #257).
+    """Stop one row, leave it live or record it lost, as :func:`_shutdown_verdict` says, the
+    verdict the plan showed: never ending one whose socket answers, as a server listens
+    there, which is no word's to deny, and ``uninstall`` counts it, so ending it let the
+    next ``uninstall`` go on under it (round 28 of #257).
 
     ``stop``'s refusal is not swallowed. It refuses on exactly one verdict —
     ``_verify_gone`` looked again and the pane is VERIFIABLY still alive — which
@@ -3805,23 +4096,15 @@ def _shutdown_row(
     not be used under ``--forget`` (:func:`_shutdown_tmux`): no pane was asked, and only a
     row whose socket answers is kept.
     """
-    address = _address(agent, config or settings())
-    unreached = (held or {}).get(agent.id)
-    # A row held on an answering socket is one whose server is another than the one that
-    # answers there (`_held_rows`): left live, or ended on the operator's word, as a row on
-    # a silent socket is, and never stopped through the other server.
-    if unusable is not None or not answering.get(address) or unreached is not None:
-        if unreached is not None and (unreached[0] == "answers" or not forget):
-            _, why, way = unreached
-            kept = ", which --forget does not end as a server answers there" if forget else ""
-            report.failed.append(ShutdownRow(agent, f"{why} — left live{kept}: {way}"))
-            _not_down(report, agent.project_id)
-        elif unusable is not None:
-            _record_lost(agent, f"ended on your word (--forget), unchecked: {unusable}", report)
-        elif unreached is None:
-            _record_lost(agent, f"no server answered on socket '{address}'", report)
-        else:
-            _record_lost(agent, f"ended on your word (--forget): {unreached[1]}", report)
+    verdict = _shutdown_verdict(
+        agent, answering, held or {}, forget=forget, unusable=unusable, config=config
+    )
+    if verdict.end == "live":
+        report.failed.append(ShutdownRow(agent, verdict.reason, held=True))
+        _not_down(report, agent.project_id)
+        return
+    if verdict.end == "lost":
+        _record_lost(agent, verdict.reason, report)
         return
     try:
         # The snapshot's row is the row stopped — THAT pane, whatever label a
@@ -3866,7 +4149,7 @@ def _retire_late_panes(
     """
     if not late:
         return
-    spared_panes = {(_address(row.agent, config), row.agent.pane_id) for row in report.failed}
+    _, spared_panes = _spared(report, config)
     sessions: list[tuple[_Address, str, str]] = []  # (socket, session, project id)
     for project, agent in late:
         address = _address(agent, config)
@@ -4159,31 +4442,29 @@ def shutdown_plan(project: ProjectInfo | None = None, *, forget: bool = False) -
     before anything is printed. A session query that fails AFTER a good probe refuses
     the same way: the operator confirms this list, so a list missing a session
     the run would still kill is worse than no list at all.
+
+    Each row's disposition is the run's own verdict (:func:`_shutdown_verdict`), so what
+    the plan says it stops, leaves live or records lost is what the run does with it.
     """
     config = settings()
     unusable = _shutdown_tmux(config, forget=forget)
     targets = _shutdown_targets(project)
+    rows = [agent for _, agents in targets for agent in agents]
     if unusable is not None:
-        rows = [agent for _, agents in targets for agent in agents]
-        held_live = {
-            agent_id: f"{why} — {way}"
-            for agent_id, (answer, why, way) in _held_rows(
-                targets, {}, config, unusable=True
-            ).items()
-            if answer == "answers"  # what --forget may not end (_shutdown_row)
-        }
-        return ShutdownPlan(
-            projects=[current for current, agents in targets if agents],
-            agents=rows,
-            tmux_unusable=unusable,
-            held=held_live,
-            # Every other row is ended unchecked (`_record_lost`), so the plan says so: a
-            # script reading `--json`'s `lost` saw nothing being ended (round 29 of #257).
-            lost={
-                agent.id: str(_address(agent, config))
-                for agent in rows
-                if agent.id not in held_live
-            },
+        # Every row but those whose socket answers is ended unchecked (`_record_lost`), so
+        # the plan says so: a script reading `--json`'s `lost` saw nothing being ended
+        # (round 29 of #257). Nothing is asked of tmux, and no session is killed.
+        return _planned(
+            ShutdownPlan(
+                projects=[current for current, agents in targets if agents],
+                agents=rows,
+                tmux_unusable=unusable,
+            ),
+            {},
+            _held_rows(targets, {}, config, unusable=True),
+            forget=forget,
+            unusable=unusable,
+            config=config,
         )
     sockets = _shutdown_sockets(targets, config)
     _refuse_from_inside(sockets, config)
@@ -4219,25 +4500,43 @@ def shutdown_plan(project: ProjectInfo | None = None, *, forget: bool = False) -
                 "to show a plan that may be short of what a shutdown would kill; try again "
                 "once tmux answers"
             ) from exc
-    held = {
-        agent_id: (why, way)
-        for agent_id, (answer, why, way) in _held_rows(targets, answering, config).items()
-        if not forget or answer == "answers"  # what --forget may not end (_shutdown_row)
-    }
-    rows = [agent for _, agents in targets for agent in agents]
-    addresses = {agent.id: _address(agent, config) for agent in rows}
-    return ShutdownPlan(
-        projects=[current for current, agents in targets if agents],
-        agents=rows,
-        sessions=sessions,
-        absent_sockets=[str(socket) for socket in sockets if not answering[socket]],
-        held={agent_id: f"{why} — {way}" for agent_id, (why, way) in held.items()},
-        lost={
-            agent.id: str(addresses[agent.id])
-            for agent in rows
-            if not answering[addresses[agent.id]] and agent.id not in held
-        },
+    return _planned(
+        ShutdownPlan(
+            projects=[current for current, agents in targets if agents],
+            agents=rows,
+            sessions=sessions,
+            absent_sockets=[str(socket) for socket in sockets if not answering[socket]],
+        ),
+        answering,
+        _held_rows(targets, answering, config),
+        forget=forget,
+        unusable=None,
+        config=config,
     )
+
+
+def _planned(
+    plan: ShutdownPlan,
+    answering: Mapping[_Address, bool],
+    held: Mapping[str, tuple[SocketAnswer, str, str]],
+    *,
+    forget: bool,
+    unusable: str | None,
+    config: FleetSettings,
+) -> ShutdownPlan:
+    """``plan`` with each of its rows' verdict (:func:`_shutdown_verdict`): those the run
+    leaves live in :attr:`ShutdownPlan.held`, those it records lost in
+    :attr:`ShutdownPlan.lost`, each with why; every other row is stopped."""
+    for agent in plan.agents:
+        verdict = _shutdown_verdict(
+            agent, answering, held, forget=forget, unusable=unusable, config=config
+        )
+        if verdict.end == "live":
+            plan.held[agent.id] = verdict.plan
+        elif verdict.end == "lost":
+            plan.lost[agent.id] = str(_address(agent, config))
+            plan.lost_why[agent.id] = verdict.plan
+    return plan
 
 
 def shutdown(
@@ -4746,6 +5045,12 @@ def _refuse_a_replay_that_cannot_start(agent: FleetAgent, session: TeamSession |
     restart of an agent whose recorded binary was still there because the
     role's binding had moved to one that is not. A refusal names no ``--bin``:
     ``fleet restart``, ``fleet switch`` and Restart take none.
+
+    And every other refusal :func:`spawn` gives before a window opens: a bound file it
+    cannot read, and a socket path a running server lost (:func:`_refuse_a_freed_socket`).
+    That one was asked only inside the spawn, after the stop had typed ``/exit``: an agent
+    whose own server listens at another path was stopped, and its replacement refused,
+    which left it down (review of #259, round 2).
     """
     _launch_binary(
         agent.role,
@@ -4756,6 +5061,8 @@ def _refuse_a_replay_that_cannot_start(agent: FleetAgent, session: TeamSession |
         bin_flag=False,
     )
     _refuse_an_env_file_it_cannot_read(agent.role)
+    config = settings()
+    _refuse_a_freed_socket(server(config), config)
 
 
 def _refuse_an_env_file_it_cannot_read(role: str) -> None:
@@ -5024,12 +5331,13 @@ def _pane_alive(agent: FleetAgent) -> bool:
 
     A pane under the row's id on a server younger than the row is another
     agent's (:func:`_outlived`), so it is not the row's pane alive. When the
-    server started is a second question, put once the pane has answered alive,
-    and a refusal of that one judges nothing, as a start tmux does not report
-    does. Read as "cannot say", it sent the restart of a RUNNING agent down
-    the other branch: stopped as ``fleet stop`` stops it, its claims released
-    and its exit announced, then replaced with no hand-over (review of the
-    #203 final-round fixes, F5).
+    server started comes in the same answer (``PaneFacts.server_started``; a
+    second ``display-message`` before, review of #259, round 3), and a start tmux
+    does not report judges nothing. A refusal of that second question was read
+    as "cannot say" once, and sent the restart of a RUNNING agent down the other
+    branch: stopped as ``fleet stop`` stops it, its claims released and its exit
+    announced, then replaced with no hand-over (review of the #203 final-round
+    fixes, F5).
     """
     srv = server_of(agent)
     try:
@@ -5038,11 +5346,7 @@ def _pane_alive(agent: FleetAgent) -> bool:
         return False
     if facts is None or facts.dead:
         return False
-    try:
-        started = srv.started_at()
-    except TmuxError:
-        started = None
-    return not _outlived(agent, started)
+    return not _outlived(agent, facts.server_started)
 
 
 def project_of(agent: FleetAgent) -> ProjectInfo:
@@ -5258,6 +5562,7 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
     report = ReapReport()
     absent: dict[_Address, bool] = {}
     this_boot = tmux_core.boot_id() if server_down else None
+    reads = tmux_core.SocketReads()  # one per server for the sweep, not per row
     now = _now()
     with store_session() as store:
         if project is not None:
@@ -5296,12 +5601,13 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
                                     config,
                                     this_boot,
                                     report,
+                                    reads,
                                 )
                 for agent in live:
                     observed = _view(agent, views, config)
                     if observed is None:
                         continue  # that server could not be asked: nothing is marked
-                    pane = observed.get(agent.id)
+                    pane = _pane_in(agent, observed)
                     if (pane is None or pane.dead) and _handed_over(
                         agent,
                         store.get_session(agent.session_id) if agent.session_id else None,
@@ -5343,7 +5649,11 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
 
 
 def _hold_on_absent_server(
-    agents: Sequence[FleetAgent], config: FleetSettings, this_boot: str | None, report: ReapReport
+    agents: Sequence[FleetAgent],
+    config: FleetSettings,
+    this_boot: str | None,
+    report: ReapReport,
+    reads: tmux_core.SocketReads | None = None,
 ) -> _Observed:
     """The view ``reap --server-down`` takes of a server tmux reports absent: no pane for a
     row whose agent cannot be running, which reads lost; every other row held, as a row of
@@ -5356,15 +5666,15 @@ def _hold_on_absent_server(
     only what the one rule says cannot be running
     (:func:`~aisquare.core.tmux.server_may_run`): a row from another boot, or one whose
     socket file is there with nothing listening. The way out names ``fleet shutdown
-    --forget``, the operator's word that ends a held row.
+    --forget``, the operator's word that ends a held row. ``reads`` is the sweep's.
     """
     view: _Observed = {}
     for agent in agents:
         unreached = _unreached(
-            agent, config, this_boot, forget="`aisquare fleet shutdown --forget`"
+            agent, config, this_boot, forget="`aisquare fleet shutdown --forget`", reads=reads
         )
         if unreached is not None:
-            view[agent.id] = None
+            view[agent.id] = HELD
             report.held.append(ShutdownRow(agent, f"{unreached[1]} — left live: {unreached[2]}"))
     return view
 
@@ -5535,10 +5845,8 @@ def nudge_manager(project_id: str, *, reason: str) -> bool:
                 return False
             srv = server_of(manager)
             facts = srv.pane_facts(manager.pane_id)
-            if facts is None or facts.dead or not _agent_running(facts.current_command):
-                return False
-            if _outlived(manager, srv.started_at()):
-                return False  # the id is another agent's on a newer server
+            if facts is None or not _its_agent(manager, facts):
+                return False  # not the agent, or the id is another agent's on another server
             pane = _PaneView(
                 facts.dead,
                 facts.dead_status,

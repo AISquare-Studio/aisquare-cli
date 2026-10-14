@@ -1374,6 +1374,65 @@ def test_who_serves_this_home_elsewhere_is_named_by_the_note_its_claim_wrote(
     assert remote_server.remote_served_by() is None, "its note names nobody once the lock goes"
 
 
+def test_the_note_says_this_processs_latest_claim_and_goes_with_its_lock(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 3: `remote-serve.json` was written only when a process took the
+    lock fresh, and never removed. A claim of a home this process held already left the
+    first server's port in it, a note that could not be written left the previous holder's,
+    and letting the lock go left it all, so `upgrade` and `uninstall` named a process that
+    had ended, or the wrong port. Each claim says itself, the note goes with the lock, and
+    one that cannot be written leaves no other holder named: someone serves, unnamed."""
+    monkeypatch.setattr(remote_server, "_runtime", None)
+    monkeypatch.setattr(remote_server, "_server", None)
+    state = remote_server.runtime()
+    note = remote_state_path().with_name(remote_server.SERVE_NOTE_NAME)
+
+    def noted() -> object:
+        return json.loads(note.read_text(encoding="utf-8"))
+
+    def as_another_process_sees_it() -> str:
+        done = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from aisquare.services import remote_server as r; print(r.remote_served_by())",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=True,
+        )
+        return done.stdout.strip()
+
+    try:
+        with remote_server._lock:
+            assert remote_server._claim_remote_home(state, by="panel", port=8750) is True
+        assert noted() == {"pid": os.getpid(), "by": "panel", "port": 8750}
+        with remote_server._lock:
+            assert remote_server._claim_remote_home(state, by="serve", port=8751) is False
+        assert noted() == {"pid": os.getpid(), "by": "serve", "port": 8751}, "this server's"
+        named = f"`aisquare remote serve` on port 8751, process {os.getpid()}"
+        assert as_another_process_sees_it() == named
+    finally:
+        remote_server._release_remote_home()
+    assert not note.exists(), "its note goes with the lock"
+
+    note.write_text(json.dumps({"pid": 1, "by": "serve", "port": 9999}), encoding="utf-8")
+
+    def full(*_args: object, **_kwargs: object) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(remote_server, "write_replacing", full)
+    try:
+        with remote_server._lock:
+            assert remote_server._claim_remote_home(state, by="panel", port=8750) is True
+        assert not note.exists(), "the last holder's note names nobody who serves"
+        assert as_another_process_sees_it() == remote_server.SERVED_BY_SOMEONE
+    finally:
+        remote_server._release_remote_home()
+
+
 def test_start_without_the_extra_says_what_to_install(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         remote_server, "_remote_dependency_error", lambda: "the remote extra is not installed"

@@ -813,7 +813,9 @@ def needs_from_agent(
 
     In order (SPEC §4.2):
 
-    1. derived ``lost``, its pane gone → ``lost``;
+    1. derived ``lost``, its pane gone → ``lost``; and a row held as another tmux server's
+       (``FleetAgentStatus.held``), whatever its board says: its agent is one nothing here
+       reaches, so it is a ``lost`` card of its own reason, never a prompt (below);
     2. derived ``limited`` → ``limited``;
     3. a pending ``AskUserQuestion`` → ``question``;
     4. a pending ``ExitPlanMode`` → ``plan``;
@@ -860,11 +862,31 @@ def needs_from_agent(
     ``manager_down`` and ``fleet_down`` speak for them. ``manager_live`` and ``accounts``
     decide only when a push may go out. ``pane_output`` says when the agent's pane last
     printed, asked only of a sub-agent's prompt.
+
+    A held row got rules 3 to 10 from its board while that was fresh: permission and
+    question cards, pushed, whose every answer was a 409 ``not_agent`` (its pane id is
+    another agent's on the server that answers at its socket), and then, the board stale,
+    nothing at all, as an ``unknown`` row needs nothing and ``fleet_down`` leaves held rows
+    out. Before 0.8.1 the same row read ``lost`` and had its card (review of #259, round 2).
     """
-    if status.state in ("exited", "unknown"):
-        return []
     agent, session = status.agent, status.session
     name = needs_push_safe(agent.label)
+    if status.held and agent.ended_at is None:
+        return [
+            _needs_item(
+                "lost",
+                agent.id,
+                project=project,
+                agent=agent,
+                reason=f"{name} is out of reach: another tmux server answers on its socket",
+                excerpt=None,
+                detail={},
+                since=now,
+                push_after=now + _NEEDS_PUSH_DELAY["lost"],
+            )
+        ]
+    if status.state in ("exited", "unknown"):
+        return []
     own = [e for e in events if session is not None and e.session_id == session.id]
     attention_event = max((e for e in own if e.kind == "attention"), key=_needs_seq, default=None)
     limited_event = max((e for e in own if e.kind == "limited"), key=_needs_seq, default=None)

@@ -1585,7 +1585,7 @@ class AccountsView(Vertical):
         try:
             server = self.server()
             window = accounts_service.open_sign_in_window(account, server, cwd=self.sign_in_cwd)
-        except TmuxError as exc:
+        except (TmuxError, fleet_service.FleetError) as exc:
             if fresh:
                 accounts_service.abandon_sign_in(account)
             self._notice(f"✗ could not open a sign-in window: {exc}", "error")

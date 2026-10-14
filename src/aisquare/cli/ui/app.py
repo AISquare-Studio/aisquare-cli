@@ -146,6 +146,9 @@ _QUIT_POLL = 0.1
 """Seconds between the looks a hand-over takes at the reads it waits out (``_exit_when_read``)."""
 _HAND_OFF_PATIENCE = 10.0
 """Seconds a hand-over waits for the reads running before it names them and can be called off."""
+_hand_off_clock: Callable[[], float] = time.monotonic
+"""What a hand-over's wait is timed by: the injection point a test's own clock takes, so the
+seconds its toast names are the test's, not a runner's (a slow one said 1 s for 0)."""
 
 SIDEBAR_WIDTH_KEY = "sidebar_width"
 """The ``state.json`` key the navigator's width is remembered under (#137) — beside
@@ -608,7 +611,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self._workers = self._worker_threads = _WorkerThreads(self)
         """Textual's own manager, which ``self.workers`` reads, and the threads it ran."""
         self._hand_off_since = 0.0
-        """When the pending hand-over was asked for (``time.monotonic``)."""
+        """When the pending hand-over was asked for (``_hand_off_clock``)."""
         self._hand_off_overdue = False
         """The pending hand-over has waited ``_HAND_OFF_PATIENCE``: a second press calls it off."""
         self._hand_off_poll: Timer | None = None
@@ -1773,7 +1776,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.notify(f"{running} is still running — try again when it ends", severity="warning")
             return
         self.hand_off = event.args
-        self._hand_off_since = time.monotonic()
+        self._hand_off_since = _hand_off_clock()
         self._hand_off_overdue = False
         if self._holding_the_quit():
             self.notify("asq quits once the reads running end", timeout=4)
@@ -1796,7 +1799,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self._worker_threads.drop_held()
             self.exit()
             return
-        waited = time.monotonic() - self._hand_off_since
+        waited = _hand_off_clock() - self._hand_off_since
         if not self._hand_off_overdue and waited >= _HAND_OFF_PATIENCE:
             self._hand_off_overdue = True
             self.notify(

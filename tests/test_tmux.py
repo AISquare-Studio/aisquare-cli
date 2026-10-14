@@ -712,17 +712,24 @@ def test_spawn_window_refuses_a_cwd_tmux_would_replace_with_home(
 def test_list_windows_parses_each_pane_and_skips_a_malformed_line(
     fake_bin: Path, conf: Path
 ) -> None:
-    live = _SEP.join(["@0", "manager", "%0", "0", "", "claude", "1"])
-    dead = _SEP.join(["@1", "coder-1", "%1", "1", "3", "sh", "0"])
+    live = _SEP.join(["@0", "manager", "%0", "0", "", "claude", "1", "1760346007"])
+    dead = _SEP.join(["@1", "coder-1", "%1", "1", "3", "sh", "0", "1760346007"])
+    old = _SEP.join(["@3", "coder-2", "%3", "0", "", "sh", "0", ""])  # a tmux without it
     broken = _SEP.join(["@2", "only-two-fields"])
-    fake = FakeTmux(Completed(0, f"{live}\n{dead}\n{broken}\n", ""))
+    fake = FakeTmux(Completed(0, f"{live}\n{dead}\n{old}\n{broken}\n", ""))
     windows = _server(fake, fake_bin, conf).list_windows("asq-amber-fox")
     assert fake.commands() == [
         ["list-panes", "-s", "-t", "=asq-amber-fox", "-F", tmux_module._WINDOW_FORMAT]
     ]
+    # When the server started comes in the same answer, so a listing says which server's
+    # lifetime its pane ids belong to without a second process (review of #259, round 3).
+    started = datetime.fromtimestamp(1760346007, tz=UTC)
     assert windows == [
-        WindowInfo("asq-amber-fox", "@0", "manager", "%0", False, None, "claude", True),
-        WindowInfo("asq-amber-fox", "@1", "coder-1", "%1", True, 3, "sh", False),
+        WindowInfo(
+            "asq-amber-fox", "@0", "manager", "%0", False, None, "claude", True, None, started
+        ),
+        WindowInfo("asq-amber-fox", "@1", "coder-1", "%1", True, 3, "sh", False, None, started),
+        WindowInfo("asq-amber-fox", "@3", "coder-2", "%3", False, None, "sh", False),
     ]
 
     gone = FakeTmux(Completed(1, "", "can't find session: asq-amber-fox"))
@@ -1242,7 +1249,25 @@ def test_a_key_that_would_end_the_command_or_read_as_a_flag_stays_data(
     ]
 
 
-@pytest.mark.parametrize("key", ["", " ", "Enter\n", "C-c\r", "a\tb", "\x1b", "Up\x00"])
+@pytest.mark.parametrize(
+    "key",
+    [
+        "",
+        " ",
+        "Enter\n",
+        "C-c\r",
+        "a\tb",
+        "\x1b",
+        "Up\x00",
+        # Review of #259, round 2: `ord(char) < 0x20` let DEL and the C1 controls through.
+        "\x7f",
+        "M-\x7f",
+        "\x80",
+        "Up\x9b",  # CSI
+        "\x9f",
+        "M-\udc9b",  # a lone surrogate: the argv's encoding makes it the byte 0x9b
+    ],
+)
 def test_a_key_no_tmux_name_could_be_is_refused_before_tmux_runs(
     fake_bin: Path, conf: Path, key: str
 ) -> None:
@@ -1251,6 +1276,15 @@ def test_a_key_no_tmux_name_could_be_is_refused_before_tmux_runs(
     with pytest.raises(TmuxError, match="not a tmux key name"):
         server.send_keys("%3", "Enter", key)
     assert fake.commands() == [], "nothing at all was sent, not even the valid key before it"
+
+
+def test_a_printable_key_of_any_script_is_still_sent(fake_bin: Path, conf: Path) -> None:
+    """The control-character floor refuses controls, not text: an alt chord on a key of
+    another script is a key name tmux takes (`M-é`), as is a character past the C1 block."""
+    fake = FakeTmux()
+    server = _server(fake, fake_bin, conf)
+    server.send_keys("%3", "M-é", "M-ж", "M-\xa1", "C-\u00e0")
+    assert fake.commands() == [["send-keys", "-t", "%3", "--", "M-é", "M-ж", "M-¡", "C-à"]]
 
 
 #: The most arguments tmux 3.7 takes in one command ("Limit MSG_COMMAND argument to

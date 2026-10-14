@@ -1088,5 +1088,6 @@ class FleetAgentStatus(BaseModel):
     held: bool = False
     """The listing held the row as another server's (``services.fleet.ANOTHER_SERVER``): a
     server answers at its socket, and it is not the one the row was started on, which may
-    run on where no client reaches it. Whatever the board says of its state, its pane id
-    is no pane of its own there: that server numbers its panes from ``%0`` again."""
+    run on where no client reaches it. Its state is ``unknown`` whatever its board says, and
+    its pane id is no pane of its own there: that server numbers its panes from ``%0``
+    again."""

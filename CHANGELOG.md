@@ -348,7 +348,10 @@ that reads at a glance.**
 - **`aisquare team bind <role> --env-file KEY=PATH`: a variable whose value is
   read from a file at every launch**, for a secret. config.toml, the launch
   banner and `team spawn`'s printed command hold the path, never the value
-  (the printed command reads the file itself, `$(cat …)`). It is for the
+  (the printed command reads the file itself, in a subshell, as the launch
+  does: its carriage returns and any byte-order mark dropped, a token saved as
+  UTF-16 read too, and an empty or unreadable file stops the line before the
+  role starts). It is for the
   reviewer, which keeps its shell: bound to a GitHub token that cannot write
   the repository's contents, it can review and comment but not push or merge
   through `gh`. [docs/fleet.md](docs/fleet.md#a-reviewer-that-cannot-push)
@@ -358,10 +361,19 @@ that reads at a glance.**
   read, or holds nothing, refuses the launch (`env_file_unreadable`) rather
   than start the role on this shell's credentials. `fleet spawn`, `restart`
   and `switch` refuse before a window opens or a running agent is stopped.
-  `team bind` reads the file when it binds. A key lives in `env` or
+  `team bind` refuses a KEY no shell can set (`--env` too: letters, digits and
+  `_`, not starting with a digit), as `team spawn` prints each as a shell
+  word, and `team spawn` refuses one written into config.toml by hand.
+  `team bind` reads the file when it binds, and keeps a relative PATH as the
+  full path of the file it read; a relative path written into config.toml by
+  hand refuses every launch, wherever it is launched from. A key lives in `env` or
   `env_files`, never both, and `--unset` removes it from either. `team
   harness` names the key, and `team harness --json` carries `env_files`, each
-  key to its path, on every role.
+  key to its path, on every role, one whose file cannot be read included: the
+  role's refusal is a ⚠ line under it, and `refusal` in `--json`. `aisquare upgrade --version` to a release
+  before 0.8.1, which ignores `env_files`, names each role bound to a file and
+  its variables before it moves back (`env_files_dropped` in `--json`): there
+  those roles launch with whatever value the launching shell has.
 
 ### Changed
 - **`aisquare upgrade` warns, and `aisquare uninstall` refuses, while Remote is
@@ -381,9 +393,8 @@ that reads at a glance.**
   path, or one whose recorded path is where `-L` finds that name from this
   shell anyway. The field is additive, and Remote's `api/fleet` carries it too,
   as it carries those agents. They carry `held` too, `true` for a row held as
-  another tmux server's (see Fixed): its state is its board's while that is
-  fresh, then `unknown`, and its pane id is no pane of its own, so asq shows
-  none under it.
+  another tmux server's (see Fixed): its state is `unknown` whatever its board
+  says, and its pane id is no pane of its own, so asq shows none under it.
 
 ### Fixed
 - `fleet spawn` no longer starts a tmux server at a socket path a running
@@ -394,7 +405,12 @@ that reads at a glance.**
   into that path is now refused, for every project on the socket, naming the
   agents, `SIGUSR1` as the way back to their server, and `fleet shutdown
   --forget` for agents that are not running. A stale socket file (the server
-  exited) and rows from another boot still get a fresh server.
+  exited) and rows from another boot still get a fresh server. `fleet restart`
+  and `switch` give the same refusal before they stop the agent, rather than
+  after, which left it down. asq's Accounts sign-in window, which opens on the
+  fleet's server too, is refused the same way, and over a stale socket file it
+  takes the same step a spawn takes (below): every window at the fleet's
+  socket now opens through one entry that asks both.
 - A tmux server that took the socket path from a running one no longer
   answers for that one's agents. Every spawn now records when its server
   started (`fleet_agent.server_started_at`, schema v26), and a server at the
@@ -402,8 +418,21 @@ that reads at a glance.**
   asq show the row as `unknown (another tmux server on its socket)`, `reap`
   leaves it and names it with the way out (with `--server-down` too, and under
   `held` in `--json`), `fleet stop` and `restart` refuse it
-  with the way back, `fleet shutdown` leaves it live until `--forget`, and
-  `upgrade` and `uninstall` count it as running and name `--forget`. Before,
+  with the way back, `fleet tell` and the phone's Tell file a board note to it
+  rather than type into the pane the newcomer gave its id, Remote's needs-you
+  gives it one `lost` card saying it is out of reach (not prompts whose every
+  answer is refused, nor nothing once its board goes stale), `fleet shutdown`
+  leaves it live until `--forget` (and spares none of its project's sessions on
+  the server that took its socket, where its agent does not run), and
+  `upgrade` and `uninstall` count it as running and name `--forget`
+  (`uninstall` says to send its server `SIGUSR1` only once no server answers
+  on that socket, as tmux's handler takes the path from whatever listens). A
+  server that exited (a `kill-server`, a crash) leaves its socket file with
+  nothing listening, and the next spawn, in any project, or asq's Accounts
+  sign-in window, sees it before it starts a server there: that server's rows
+  read lost from then on, as in
+  0.8.0, not held under the new one, so `reap` records them and `restart`
+  brings them back; the receipt names them. Before,
   the newcomer's missing pane read as the row's pane gone, and `stop`,
   `shutdown` and `reap` ended the row while its agent ran on, where nothing
   could reach it. The doctor says the same for such a row, instead of
@@ -545,8 +574,11 @@ and an aisquare that upgrades and uninstalls itself.**
   cannot reach, for agents you know are not running: a server whose socket
   file is gone, or every row where tmux cannot be used here, but never a row
   whose socket a server still answers on. Without it, `shutdown` leaves such a
-  row live and says what to do, as `aisquare uninstall` still counts it.
-  Uninstall names `--forget` for those rows, which it otherwise refused with no
+  row live and says what to do, as `aisquare uninstall` still counts it. The
+  plan it asks you to confirm reads the run's own verdict for each row: a row
+  another tmux server answers for is shown recorded lost under `--forget`,
+  never stopped, and `--json` carries the run's reason for each `lost` row
+  under `lost_why`. Uninstall names `--forget` for those rows, which it otherwise refused with no
   way out. Every fleet command (`fleet ls` and asq's tick, `tell`, `stop`,
   `restart`, `reap`, `shutdown`) and the doctor ask each agent's tmux server at
   the socket its row recorded, so one started under another `TMUX_TMPDIR` is

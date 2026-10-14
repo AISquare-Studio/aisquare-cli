@@ -1168,7 +1168,8 @@ class LaunchProfile(BaseModel):
     #: the reader hunting for who won.
     env_sources: dict[str, str] = {}
     #: The binding's ``env_files`` this launch reads, each key to its file, expanded:
-    #: what may be shown of them. Their values are :attr:`file_env`.
+    #: what may be shown of them, one that cannot be read included (:attr:`refusal`).
+    #: Their values are :attr:`file_env`.
     env_files: dict[str, str] = {}
     #: The values read from :attr:`env_files`, for the launch's environment alone: never
     #: dumped, never in a repr, so nothing that prints a profile can print a secret.
@@ -1205,15 +1206,34 @@ def read_env_file(path: str) -> str:
     dropped, as ``$(cat path)`` gives it. ``ValueError`` saying what is wrong with the file
     when it cannot be read or holds nothing: an empty value would launch the role without
     the secret it was bound to carry, as a blank ``CLAUDE_CONFIG_DIR`` would start another
-    login (:func:`expand_value`)."""
+    login (:func:`expand_value`).
+
+    Decoded by the byte-order mark it opens with (``config.decode_by_bom``): a token saved by
+    Windows PowerShell 5.1's ``Set-Content -Encoding UTF8`` or an older Notepad opens with
+    U+FEFF, which ``strip()`` keeps, and the role launched with ``GH_TOKEN='\\ufeffghp_…'``,
+    every ``gh`` and ``git`` call then failing to authenticate with nothing to say why
+    (review of #259, round 3). One saved as UTF-16 (PowerShell 5.1's ``>``) reads too."""
+    from aisquare.core.config import decode_by_bom  # lazy: config imports harness back
+
     try:
-        value = Path(path).read_text(encoding="utf-8").rstrip("\r\n")
+        value = decode_by_bom(Path(path).read_bytes()).rstrip("\r\n")
     except (OSError, UnicodeDecodeError) as exc:
         reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc)
         raise ValueError(f"cannot be read ({reason})") from exc
     if not value.strip():
         raise ValueError("is empty")
     return value
+
+
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def is_env_name(key: str) -> bool:
+    """Whether ``key`` is a variable name a POSIX shell can set and export: letters, digits
+    and ``_``, not starting with a digit. ``team spawn``'s printed line sets a binding's
+    variables as shell words, where ``GH-TOKEN=…`` is a command name and a ``;`` in a key
+    runs whatever follows it (review of #259, round 3)."""
+    return _ENV_NAME.match(key) is not None
 
 
 def parse_env_pairs(pairs: Sequence[str]) -> dict[str, str]:
@@ -1272,6 +1292,24 @@ def resolve_profile(
     for key, path in files.items():
         if sources.get(key) == "flag":
             continue
+        # Shown whether or not it can be read: a binding that cannot be is what keeps the
+        # role from launching, and `team harness` showed the role as bound to nothing
+        # (review of #259, round 3).
+        env.pop(key, None)
+        sources[key] = "file"
+        shown[key] = path
+        if refusal is not None:
+            continue  # the first refusal decides; no other secret is read for it
+        if not Path(path).is_absolute():
+            # Read against whatever directory each launch runs in: the bind's shell read it,
+            # the fleet's pre-check read asq's, and the window's `launch` its worktree's, where
+            # it was refused (review of #259, round 3). `team bind` stores a full path now.
+            refusal = (
+                f"{role} reads {key} from {path}, a relative path, which each launch would "
+                f"look for in its own working directory — not launching {role} without it. "
+                f"Bind it by its full path: aisquare team bind {role} --env-file {key}=<path>"
+            )
+            continue
         try:
             file_env[key] = read_env_file(path)
         except ValueError as exc:
@@ -1279,10 +1317,6 @@ def resolve_profile(
                 f"{role} reads {key} from {path}, which {exc} — not launching {role} without it. "
                 f"Fix the file, or unbind it: aisquare team bind {role} --unset {key}"
             )
-            break
-        env.pop(key, None)
-        sources[key] = "file"
-        shown[key] = path
     return LaunchProfile(
         env=env,
         args=args,

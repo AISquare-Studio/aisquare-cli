@@ -103,10 +103,10 @@ def shown_pane(status: FleetAgentStatus) -> str | None:
     asked — keeps the pane: that is no verdict about it.
 
     A row that recorded its server's start is not ``lost`` under the next server but held
-    (``FleetAgentStatus.held``), and reads its board's state while that is fresh, then
-    ``unknown``: its id is the next server's all the same, so it gets no pane either. Told
-    by the state word alone, the tabs showed and typed into another agent's pane under it
-    (review of #259, round 1).
+    (``FleetAgentStatus.held``), and reads ``unknown`` (another tmux server on its socket):
+    its id is the next server's all the same, so it gets no pane either. Told by the state
+    word alone, the tabs showed and typed into another agent's pane under it (review of
+    #259, round 1).
     """
     return None if status.state == "lost" or status.held else status.agent.pane_id
 

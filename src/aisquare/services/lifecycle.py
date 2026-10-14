@@ -38,7 +38,14 @@ from aisquare.core.config import (
     save_config,
 )
 from aisquare.core.store import store_session
-from aisquare.core.tmux import SocketAnswer, TmuxError, TmuxServer, boot_id, server_may_run
+from aisquare.core.tmux import (
+    SocketAnswer,
+    SocketReads,
+    TmuxError,
+    TmuxServer,
+    boot_id,
+    server_may_run,
+)
 from aisquare.core.version import DISTRIBUTION, __version__
 from aisquare.core.workspace import current_project
 from aisquare.models import ClaudeIdentity, SetupReport
@@ -337,6 +344,10 @@ class UpgradePlan:
     """The settings a move back to a release that reads config.toml whole
     (:data:`LAST_WHOLE_CONFIG` and earlier) takes from that release's defaults, not this
     one's, as the file says nothing of them: ``accounts.pick default (here headroom)``."""
+    env_files_dropped: tuple[str, ...] = ()
+    """The roles bound to a file (``RoleLaunchProfile.env_files``) that a move back to a
+    release before :data:`FIRST_ENV_FILES` ignores, each with its variables:
+    ``reviewer (GH_TOKEN)``."""
 
     @property
     def runnable(self) -> bool:
@@ -403,6 +414,29 @@ class UpgradePlan:
             f"{', '.join(self.config_defaults_lost)}. Your own settings read the same in "
             f"both; to keep one of these there, set it after the move (`aisquare config set "
             f"{first} …`)"
+        )
+
+    @property
+    def env_files_warning(self) -> str | None:
+        """What a move back costs the roles bound to a file, or ``None`` when it costs none.
+
+        A release before :data:`FIRST_ENV_FILES` ignores the keys its config does not know,
+        so such a role launches there with whatever value the launching shell has: for a
+        reviewer bound to a token that cannot push, often one that can. 0.8.1 refuses an
+        unreadable file to prevent exactly that, and the move back said nothing of it
+        (review of #259, round 2). Said, as :attr:`fleet_warning` is, rather than refused:
+        the bindings stay in config.toml for the way forward again.
+        """
+        if not self.env_files_dropped:
+            return None
+        one = len(self.env_files_dropped) == 1
+        return (
+            f"{self.target} predates `team bind --env-file` (new in {FIRST_ENV_FILES}) and "
+            f"ignores {'that binding' if one else 'those bindings'}: "
+            f"{', '.join(self.env_files_dropped)} would launch there with whatever value the "
+            "launching shell has, such as a GH_TOKEN that can push. The "
+            f"{'binding stays' if one else 'bindings stay'} in config.toml, read again from "
+            f"{FIRST_ENV_FILES} on"
         )
 
     @property
@@ -513,6 +547,7 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
             reason = reason or pin_unmet
     refresh: tuple[HookSite, ...] = ()
     left: tuple[HookSite, ...] = ()
+    dropped: tuple[str, ...] = ()
     live: tuple[str, ...] = ()
     fleet_error: str | None = None
     remote: str | None = None
@@ -528,6 +563,8 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
             refresh = ()
         if target is not None and reads_config_whole(target):
             lost = _config_defaults_lost()
+        if target is not None and lacks_env_files(target):
+            dropped = _env_file_bindings()
         live, _unlistened, fleet_error = running_fleet()
         remote = running_remote()
     return UpgradePlan(
@@ -546,6 +583,7 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
         fleet_error=fleet_error,
         remote=remote,
         config_defaults_lost=lost,
+        env_files_dropped=dropped,
     )
 
 
@@ -594,6 +632,26 @@ def _config_defaults_lost() -> tuple[str, ...]:
     return tuple(
         f"{key} {theirs} (here {ours})"
         for key, ours, theirs in defaults_a_whole_file_reader_lacks(config)
+    )
+
+
+def lacks_env_files(release: str) -> bool:
+    """Whether ``release`` predates ``env_files`` bindings (:data:`FIRST_ENV_FILES`), whose
+    keys its config then ignores."""
+    return install_route.is_newer(FIRST_ENV_FILES, release) is True
+
+
+def _env_file_bindings() -> tuple[str, ...]:
+    """Each role bound to a file, with its variables (:attr:`UpgradePlan.env_files_dropped`);
+    none when the config cannot be read, which says nothing either way."""
+    try:
+        profiles = load_config().team.profiles
+    except Exception:
+        return ()
+    return tuple(
+        f"{role} ({', '.join(sorted(profile.env_files))})"
+        for role, profile in sorted(profiles.items())
+        if profile.env_files
     )
 
 
@@ -1024,6 +1082,8 @@ REFRESH_HOOKS = ("agents", "refresh-hooks", HOOK_AGENT)
 FIRST_REFRESH_HOOKS = "0.8.0"
 #: The last release that reads config.toml as it stands: those after lay it over defaults.
 LAST_WHOLE_CONFIG = "0.8.1"
+#: The first release that reads ``env_files`` (``team bind --env-file``): 0.8.0 ignores it.
+FIRST_ENV_FILES = "0.8.1"
 
 
 def _refresh(site: HookSite, found: install_route.Facts) -> HookRefresh:
@@ -1161,6 +1221,10 @@ class UninstallPlan:
     has another server on it than the one they were started on: no tmux client reaches
     them, so ``fleet shutdown`` leaves them live, and only its ``--forget`` ends their rows
     (round 27 of #257; follow-up)."""
+    taken: tuple[str, ...] = ()
+    """Those of :attr:`unreached` whose socket has another server on it: the way back to
+    their own server, ``SIGUSR1``, waits until no server answers there, as tmux's handler
+    takes the path from whatever listens on it (review of #259, round 3)."""
     listening: tuple[str, ...] = ()
     """The rest of :attr:`live_agents`: a server answers on their socket, so ``--forget``
     leaves them live. Sorted per row, never by subtracting :attr:`unreached` from
@@ -1291,14 +1355,25 @@ class UninstallPlan:
             unreached = ""
             if self.unreached:
                 # `fleet shutdown` cannot reach them, and leaves them live: said, with the
-                # two ways on (round 27 of #257).
+                # two ways on (round 27 of #257). tmux's SIGUSR1 handler unlinks whatever is
+                # at the path and binds it, so sent while another server listens there it
+                # hands that server's path to the old one, and every agent on it is the one
+                # no client reaches: only once no server answers (review of #259, round 3),
+                # as `stop`, `shutdown`, `reap` and the doctor say.
                 one = len(self.unreached) == 1
+                once = ""
+                if self.taken:
+                    once = (
+                        " once no server answers on that socket"
+                        if len(self.taken) == len(self.unreached)
+                        else f" (for {', '.join(self.taken)}, once no server answers on its socket)"
+                    )
                 unreached = (
                     f"; it cannot reach {', '.join(self.unreached)}, as the socket "
                     f"{'its' if one else 'their'} tmux server listened on is gone, could not "
                     f"be asked, or has another server on it. If {'it is' if one else 'they are'} "
-                    f"still running, send that server SIGUSR1, which makes tmux create its "
-                    f"socket again, and run it again; if not, end "
+                    f"still running, send that server SIGUSR1{once}, which makes tmux create "
+                    f"its socket again, and run it again; if not, end "
                     f"{'its row' if one else 'their rows'} on your word: {FLEET_FORGET}"
                 )
             return UninstallRefused(
@@ -2035,23 +2110,29 @@ def _tmux_unusable() -> str | None:
     return None
 
 
-def _may_run(row: _LiveRow, this_boot: str | None) -> SocketAnswer | None:
+def _may_run(
+    row: _LiveRow, this_boot: str | None, reads: SocketReads | None = None
+) -> SocketAnswer | None:
     """Whether the agent of live ``row`` may still be running, and why; ``None`` when it
     cannot be. :func:`~aisquare.core.tmux.server_may_run`, the rule ``fleet shutdown`` asks
     too, so a row counted here is never one it ends as gone (round 27 of #257): one whose
     socket is gone counts until ``fleet shutdown --forget`` ends it on the operator's word,
-    unless it recorded no boot and predates this one (round 28).
+    unless it recorded no boot and predates this one (round 28). ``reads`` is the plan's,
+    so rows on one server ask it once.
     """
     _label, socket_name, created, recorded, booted, started = row
-    return server_may_run(TmuxServer(socket_name), recorded, booted, this_boot, created, started)
+    return server_may_run(
+        TmuxServer(socket_name), recorded, booted, this_boot, created, started, reads=reads
+    )
 
 
 def _fleet_answers() -> tuple[tuple[tuple[str, SocketAnswer], ...], int, str | None]:
     """:func:`running_fleet`, with what each live row's socket said (:func:`_may_run`)."""
     rows, fleet_error = _live_fleet_agents()
     this_boot = boot_id() if rows else None
+    reads = SocketReads()
     live = tuple(
-        (row[0], answer) for row in rows if (answer := _may_run(row, this_boot)) is not None
+        (row[0], answer) for row in rows if (answer := _may_run(row, this_boot, reads)) is not None
     )
     return live, len(rows) - len(live), fleet_error
 
@@ -2187,6 +2268,7 @@ def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
         fleet_error=fleet_error,
         tmux_unusable=_tmux_unusable() if live else None,
         unreached=tuple(label for label, answer in answers if answer != "answers"),
+        taken=tuple(label for label, answer in answers if answer == "another"),
         listening=tuple(label for label, answer in answers if answer == "answers"),
         plugins=_plugins(claude_dirs),
         plugin_answers=_plugin_answers_there(),

@@ -18,6 +18,8 @@ from __future__ import annotations
 import json
 import shlex
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -713,10 +715,72 @@ class TestEnvFiles:
         machine = runner.invoke(app, ["--json", "team", "spawn", "reviewer", "--no-probe"])
 
         assert human.exit_code == 0 and machine.exit_code == 0, human.output + machine.output
-        assert f'GH_TOKEN="$(cat {shlex.quote(str(token))})"' in human.output
+        assert f"GH_TOKEN=\"$(tr -d '\\r\\000' < {shlex.quote(str(token))})\"" in human.output
         assert "GH_TOKEN [file]" in human.output
         assert TOKEN not in human.output and TOKEN not in machine.output
         assert json.loads(machine.stdout)["env_files"] == {"GH_TOKEN": str(token)}
+
+    @pytest.mark.skipif(
+        sys.platform == "win32" or shutil.which("sh") is None,
+        reason="the paste runs in a POSIX shell",
+    )
+    def test_the_printed_command_reads_the_file_as_launch_does(
+        self,
+        runner: CliRunner,
+        work_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Review of #259, round 2: the printed `GH_TOKEN="$(cat path)"` skipped what
+        `read_env_file` does. Pasted after the file had gone, or gone empty, it started the
+        role with `GH_TOKEN=""`, the other login the refusal exists to prevent, said by a
+        `cat:` line alone; saved with CRLF, it gave `token\\r` where `--exec` and `fleet
+        spawn` give `token`. The paste reads it as `launch` does, in a subshell: the value
+        without its CR, and a line that starts nothing for a file empty or gone, whatever
+        `GH_TOKEN` the shell it is pasted into has."""
+        token = _token_file(tmp_path, TOKEN + "\r\n")
+        agent = tmp_path / "bin" / "agent"
+        agent.parent.mkdir()
+        agent.write_text('#!/bin/sh\nprintf "[%s]" "$GH_TOKEN"\n', encoding="utf-8")
+        agent.chmod(0o755)
+        _bind("reviewer", bin=str(agent), env_files={"GH_TOKEN": str(token)})
+        monkeypatch.setenv("AISQUARE_TEAM", "1")
+        result = runner.invoke(app, ["--json", "team", "spawn", "reviewer", "--no-probe"])
+        assert result.exit_code == 0, result.output
+        command = json.loads(result.stdout)["command"]
+        assert TOKEN not in command, "the line holds the path, never the value"
+        assert command.startswith("(GH_TOKEN="), "in a subshell: the paste sets nothing here"
+        shell = {"PATH": "/usr/bin:/bin", "GH_TOKEN": "this-shells-token-that-can-push"}
+
+        def paste() -> tuple[int, str, str]:
+            done = subprocess.run(
+                ["sh", "-c", command], env=shell, capture_output=True, text=True, check=False
+            )
+            return done.returncode, done.stdout, done.stderr
+
+        assert paste() == (0, f"[{TOKEN}]", ""), "the value as launch reads it, no CR"
+        # Review of #259, round 3: a token saved with a byte-order mark (PowerShell 5.1's
+        # `Set-Content -Encoding UTF8`, an older Notepad; its `>` writes UTF-16) launched as
+        # `﻿<token>`, which every `gh` call refused. Read without it, here and at launch.
+        for encoding in ("utf-8-sig", "utf-16", "utf-16-le", "utf-16-be"):
+            mark = "﻿" if encoding in ("utf-16-le", "utf-16-be") else ""
+            token.write_bytes(f"{mark}{TOKEN}\r\n".encode(encoding))
+            assert token.read_bytes()[:2] in (b"\xef\xbb", b"\xff\xfe", b"\xfe\xff"), encoding
+            assert harness.resolve_profile("reviewer").file_env == {"GH_TOKEN": TOKEN}, encoding
+            assert paste() == (0, f"[{TOKEN}]", ""), encoding
+        token.write_bytes(b"\xef\xbb\xbf\n")  # a mark and nothing else: empty, both ways
+        assert harness.resolve_profile("reviewer").refusal is not None
+        status, out, err = paste()  # `${KEY:?}`'s status is the shell's: 1 in bash, 2 in dash
+        assert (status != 0, out) == (True, ""), "a mark alone starts nothing"
+        assert "GH_TOKEN: its file is empty or cannot be read" in err
+        token.write_text("\n", encoding="utf-8")
+        status, out, err = paste()
+        assert (status != 0, out) == (True, ""), "an emptied file starts nothing"
+        assert "GH_TOKEN: its file is empty or cannot be read" in err
+        token.unlink()
+        status, out, err = paste()
+        assert (status != 0, out) == (True, ""), "a file gone starts nothing"
+        assert str(token) in err or "reviewer-gh-token" in err, err
 
     def test_team_harness_names_the_file_bound_key_and_reads_its_file_once(
         self,
@@ -750,6 +814,34 @@ class TestEnvFiles:
         assert row["env_files"] == {"GH_TOKEN": str(token)} and "GH_TOKEN" not in row["env"]
         assert "env=GH_TOKEN" in human.output
         assert TOKEN not in human.output and TOKEN not in machine.output
+        assert row["refusal"] is None
+
+    def test_team_harness_names_a_binding_whose_file_is_gone_and_that_the_role_will_not_launch(
+        self, runner: CliRunner, work_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review of #259, round 3: with the reviewer's GH_TOKEN file deleted,
+        `resolve_profile` stopped before it named the key, so `team harness` showed no
+        `env=GH_TOKEN`, `--json` `"env_files": {}`, and neither said the role cannot launch:
+        the command an operator runs to see what a role launches with was silent about the
+        binding that refuses it. The key is named with its path, and the refusal said."""
+        gone = tmp_path / "secrets" / "gone"
+        token = _token_file(tmp_path)
+        _bind("reviewer", env_files={"GH_TOKEN": str(gone), "GITHUB_TOKEN": str(token)})
+        monkeypatch.setenv("AISQUARE_TEAM", "1")
+
+        human = runner.invoke(app, ["team", "harness"])
+        machine = runner.invoke(app, ["--json", "team", "harness"])
+
+        assert human.exit_code == 0 and machine.exit_code == 0, human.output + machine.output
+        row = {row["role"]: row for row in json.loads(machine.stdout)["roles"]}["reviewer"]
+        assert row["env_files"] == {"GH_TOKEN": str(gone), "GITHUB_TOKEN": str(token)}
+        assert row["refusal"].startswith(f"reviewer reads GH_TOKEN from {gone}, which cannot")
+        said = " ".join(human.output.split())
+        assert "env=GH_TOKEN,GITHUB_TOKEN" in said
+        assert f"⚠ reviewer reads GH_TOKEN from {gone}, which cannot be read" in said
+        assert TOKEN not in human.output and TOKEN not in machine.output
+        launched = harness.resolve_profile("reviewer")
+        assert launched.file_env == {}, "a refused launch carries none of the secrets"
 
 
 class TestBindEnvFile:
@@ -766,6 +858,80 @@ class TestBindEnvFile:
         profile = load_config().team.profiles["reviewer"]
         assert profile.env_files == {"GH_TOKEN": "$SECRETS/reviewer-gh-token"}
         assert TOKEN not in paths.config_path().read_text(encoding="utf-8")
+        assert TOKEN not in result.output
+
+    def test_a_relative_path_is_stored_as_the_file_it_named_where_it_was_bound(
+        self, runner: CliRunner, work_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review of #259, round 3: `team bind` read a relative PATH from the bind shell's
+        working directory and stored it relative, so every launch resolved it against its
+        own: `cd ~/.config/aisquare && team bind reviewer --env-file GH_TOKEN=reviewer-token`
+        succeeded, and every window's `launch`, in its worktree, refused the role, while the
+        fleet's pre-check read asq's directory and could pass. It stores the file it read."""
+        token = _token_file(tmp_path)
+        monkeypatch.chdir(token.parent)
+        here = Path.cwd() / token.name
+
+        result = runner.invoke(
+            app, ["team", "bind", "reviewer", "--env-file", f"GH_TOKEN={token.name}"]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert load_config().team.profiles["reviewer"].env_files == {"GH_TOKEN": str(here)}
+        monkeypatch.chdir(work_dir)  # where the role launches: its worktree
+        launched = harness.resolve_profile("reviewer")
+        assert launched.refusal is None and launched.file_env == {"GH_TOKEN": TOKEN}
+
+    def test_a_relative_path_in_the_config_refuses_every_launch_alike(
+        self, work_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One written into config.toml by hand: each launch would look for it in its own
+        working directory, so whether the role starts would depend on where it is launched
+        from. Every launch refuses it, wherever, naming the way to bind it by its full path."""
+        token = _token_file(tmp_path)
+        _bind("reviewer", env_files={"GH_TOKEN": token.name})
+
+        for where in (work_dir, token.parent):  # even where the file would be found
+            monkeypatch.chdir(where)
+            got = harness.resolve_profile("reviewer")
+            assert got.refusal is not None and got.file_env == {}
+            assert f"reads GH_TOKEN from {token.name}, a relative path" in got.refusal
+            assert "aisquare team bind reviewer --env-file GH_TOKEN=<path>" in got.refusal
+
+    @pytest.mark.parametrize("flag", ["--env", "--env-file"])
+    @pytest.mark.parametrize("key", ["GH-TOKEN", "GH TOKEN", "X;touch pwned", "1ST"])
+    def test_a_key_no_shell_can_set_is_refused_at_bind(
+        self, runner: CliRunner, work_dir: Path, tmp_path: Path, flag: str, key: str
+    ) -> None:
+        """Review of #259, round 3: `parse_env_pairs` took any key with no `=`, and `team
+        spawn` prints each bound key as a shell word: `GH-TOKEN="$(tr …)"` is a command
+        name, so the paste failed with 'command not found', and a key holding `;` ran what
+        followed it. `team bind` refuses such a key, for `--env` and `--env-file` alike."""
+        value = str(_token_file(tmp_path)) if flag == "--env-file" else "x"
+
+        result = runner.invoke(app, ["--json", "team", "bind", "reviewer", flag, f"{key}={value}"])
+
+        assert result.exit_code != 0, result.output
+        said = json.loads(result.stdout)
+        assert said["error"] == "bad_env_pair" and repr(key) in said["detail"], said
+        assert "reviewer" not in load_config().team.profiles, "nothing bound"
+        assert not (work_dir / "pwned").exists()
+
+    def test_spawn_refuses_to_print_a_line_for_a_key_written_into_the_config_by_hand(
+        self, runner: CliRunner, work_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A config.toml synced from another machine, or edited by hand, can still hold such a
+        key: `team spawn` says which, and how to unbind it, rather than print a line that
+        breaks when pasted, or runs part of the key."""
+        _bind("reviewer", env_files={"GH-TOKEN": str(_token_file(tmp_path))})
+        monkeypatch.setenv("AISQUARE_TEAM", "1")
+
+        result = runner.invoke(app, ["--json", "team", "spawn", "reviewer", "--no-probe"])
+
+        assert result.exit_code != 0, result.output
+        said = json.loads(result.stdout)
+        assert said["error"] == "bad_env_key", said
+        assert "aisquare team bind reviewer --unset GH-TOKEN" in said["detail"]
         assert TOKEN not in result.output
 
     def test_a_file_it_cannot_read_is_refused_at_bind(

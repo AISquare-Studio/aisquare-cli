@@ -12,6 +12,7 @@ import re
 import shlex
 import shutil
 import sqlite3
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, NoReturn
 
@@ -406,12 +407,10 @@ def spawn(
     # Put the profile's vars IN the printed command, not just in --exec's env.
     # The banner is meant to be pasted, and a printed command that silently
     # launches with different variables than the one it just reported is worse
-    # than printing nothing. A variable bound to a file is read by the paste itself,
-    # `$(cat …)`: its value is a secret, which a printed line must not hold.
+    # than printing nothing. A variable bound to a file is read by the paste itself
+    # (`_reading_env_files`, below): its value is a secret, which a printed line must not hold.
     for key, value in launch_profile.env.items():
         env_assignments.append(f"{key}={shlex.quote(value)}")
-    for key, path in launch_profile.env_files.items():
-        env_assignments.append(f'{key}="$(cat {shlex.quote(path)})"')
     # ONE precedence rule with `cli/launch.py`: the role's own flags
     # (`RoleProfile.default_args`) sit after the binding's args, and an explicit
     # flag or its `--no-` opt-out WINS wherever it appears — not because of
@@ -459,7 +458,11 @@ def spawn(
         )
         banner = f"{banner}  ·  env {shown}"
     command = " ".join([*env_assignments, shlex.join(argv)])
-    if tracing is not None and tracing.enabled:
+    traced = tracing is not None and tracing.enabled
+    if traced and explainability_service.accepts_session_id(binary.binary):
+        command = f"{command} {_SESSION_ID_SUBSTITUTION}"  # the id the eval below mints
+    command = _reading_env_files(command, launch_profile.env_files)
+    if traced:
         # Never burn a pipeline id into a printable command: every paste would
         # reuse the same id and those sessions would merge into one Run. The
         # eval mints a fresh id per run instead; if tracing is down at run
@@ -482,8 +485,6 @@ def spawn(
         # traceparent on the wire, AISQUARE_RUN_TRACE_ID exported. Same
         # fail-open: a refused root falls back to X-Pipeline-Id, a dead proxy
         # to untraced, and neither costs the paste.
-        if explainability_service.accepts_session_id(binary.binary):
-            command = f"{command} {_SESSION_ID_SUBSTITUTION}"
         command = (
             f"{_CLEAR_PREVIOUS_TRACE}; "
             f'eval "$(aisquare explainability env {shlex.quote(role_name)} --post-root)"; '
@@ -603,6 +604,28 @@ def spawn(
         os.execvpe(argv[0], argv, env)
     if not get_state().json_output:
         stdout_console().print(f"  run it in the role's terminal:\n  {command}", markup=False)
+
+
+def _reading_env_files(command: str, env_files: Mapping[str, str]) -> str:
+    """``command`` with each variable bound to a file (``env_files``) read by the paste itself,
+    as ``aisquare launch`` reads it (``harness.read_env_file``): never its value in the line,
+    its carriage returns dropped with the trailing newlines, and a file that cannot be read
+    or holds nothing refusing the line, naming the variable, rather than starting the role
+    without it. In a subshell, so the paste sets nothing in the shell it is pasted into.
+
+    It was ``KEY="$(cat path)"`` before the command: a file gone or emptied since it was
+    printed started the role with ``KEY`` empty, the other login the refusal exists to
+    prevent, said by a ``cat:`` line alone; and one saved with CRLF gave ``KEY=token\\r``
+    where ``--exec`` and ``fleet spawn`` give ``token`` (review of #259, round 2).
+    """
+    if not env_files:
+        return command
+    reads = [
+        f"{key}=\"$(tr -d '\\r' < {shlex.quote(path)})\" && "
+        f': "${{{key}:?its file is empty or cannot be read}}" && export {key}'
+        for key, path in env_files.items()
+    ]
+    return f"({' && '.join([*reads, command])})"
 
 
 @app.command("harness")

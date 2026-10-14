@@ -133,7 +133,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`aisquare team bind <role> --env-file KEY=PATH`: a variable whose value is
   read from a file at every launch**, for a secret. config.toml, the launch
   banner and `team spawn`'s printed command hold the path, never the value
-  (the printed command reads the file itself, `$(cat …)`). It is for the
+  (the printed command reads the file itself, in a subshell, as the launch
+  does: its carriage returns dropped, and an empty or unreadable file stops
+  the line before the role starts). It is for the
   reviewer, which keeps its shell: bound to a GitHub token that cannot write
   the repository's contents, it can review and comment but not push or merge
   through `gh`. [docs/fleet.md](docs/fleet.md#a-reviewer-that-cannot-push)

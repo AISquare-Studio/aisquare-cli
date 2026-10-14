@@ -18,6 +18,8 @@ from __future__ import annotations
 import json
 import shlex
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -713,10 +715,58 @@ class TestEnvFiles:
         machine = runner.invoke(app, ["--json", "team", "spawn", "reviewer", "--no-probe"])
 
         assert human.exit_code == 0 and machine.exit_code == 0, human.output + machine.output
-        assert f'GH_TOKEN="$(cat {shlex.quote(str(token))})"' in human.output
+        assert f"GH_TOKEN=\"$(tr -d '\\r' < {shlex.quote(str(token))})\"" in human.output
         assert "GH_TOKEN [file]" in human.output
         assert TOKEN not in human.output and TOKEN not in machine.output
         assert json.loads(machine.stdout)["env_files"] == {"GH_TOKEN": str(token)}
+
+    @pytest.mark.skipif(
+        sys.platform == "win32" or shutil.which("sh") is None,
+        reason="the paste runs in a POSIX shell",
+    )
+    def test_the_printed_command_reads_the_file_as_launch_does(
+        self,
+        runner: CliRunner,
+        work_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Review of #259, round 2: the printed `GH_TOKEN="$(cat path)"` skipped what
+        `read_env_file` does. Pasted after the file had gone, or gone empty, it started the
+        role with `GH_TOKEN=""`, the other login the refusal exists to prevent, said by a
+        `cat:` line alone; saved with CRLF, it gave `token\\r` where `--exec` and `fleet
+        spawn` give `token`. The paste reads it as `launch` does, in a subshell: the value
+        without its CR, and a line that starts nothing for a file empty or gone, whatever
+        `GH_TOKEN` the shell it is pasted into has."""
+        token = _token_file(tmp_path, TOKEN + "\r\n")
+        agent = tmp_path / "bin" / "agent"
+        agent.parent.mkdir()
+        agent.write_text('#!/bin/sh\nprintf "[%s]" "$GH_TOKEN"\n', encoding="utf-8")
+        agent.chmod(0o755)
+        _bind("reviewer", bin=str(agent), env_files={"GH_TOKEN": str(token)})
+        monkeypatch.setenv("AISQUARE_TEAM", "1")
+        result = runner.invoke(app, ["--json", "team", "spawn", "reviewer", "--no-probe"])
+        assert result.exit_code == 0, result.output
+        command = json.loads(result.stdout)["command"]
+        assert TOKEN not in command, "the line holds the path, never the value"
+        assert command.startswith("(GH_TOKEN="), "in a subshell: the paste sets nothing here"
+        shell = {"PATH": "/usr/bin:/bin", "GH_TOKEN": "this-shells-token-that-can-push"}
+
+        def paste() -> tuple[int, str, str]:
+            done = subprocess.run(
+                ["sh", "-c", command], env=shell, capture_output=True, text=True, check=False
+            )
+            return done.returncode, done.stdout, done.stderr
+
+        assert paste() == (0, f"[{TOKEN}]", ""), "the value as launch reads it, no CR"
+        token.write_text("\n", encoding="utf-8")
+        status, out, err = paste()
+        assert (status != 0, out) == (True, ""), "an emptied file starts nothing"
+        assert "GH_TOKEN: its file is empty or cannot be read" in err
+        token.unlink()
+        status, out, err = paste()
+        assert (status != 0, out) == (True, ""), "a file gone starts nothing"
+        assert str(token) in err or "reviewer-gh-token" in err, err
 
     def test_team_harness_names_the_file_bound_key_and_reads_its_file_once(
         self,

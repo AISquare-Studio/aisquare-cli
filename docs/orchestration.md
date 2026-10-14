@@ -426,7 +426,10 @@ parallel sessions collide in temp. `--account` sets both for you.
 A value that is a secret binds with `--env-file KEY=PATH` instead: the file is
 read at every launch, so config.toml, the launch banner and `team spawn`'s
 printed command hold the path and never the value, and a file that cannot be
-read refuses the launch. The reviewer's GitHub token is what it is for (see
+read refuses the launch. The printed command reads the file when it is pasted, as
+the launch does: in a subshell, its carriage returns dropped, and a file that is
+empty or gone by then stops the line before the role starts. The reviewer's
+GitHub token is what it is for (see
 [A reviewer that cannot push](fleet.md#a-reviewer-that-cannot-push)).
 
 For a one-off, `aisquare launch <role> --env KEY=VALUE` merges over the

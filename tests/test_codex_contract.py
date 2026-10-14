@@ -224,6 +224,10 @@ def test_the_role_setting_and_a_spawn_choice_turn_it_off(
     command = _spawned(tmp_path, monkeypatch, "coder", approval_policy="never")
     assert "--approve-for-me" not in command
     assert command[command.index("--ask-for-approval") + 1] == "never"
+    # Codex reads a spawn's --permission-mode as its sandbox, a choice of this spawn too.
+    command = _spawned(tmp_path, monkeypatch, "coder", permission_mode="read-only")
+    assert "--approve-for-me" not in command
+    assert command[command.index("--sandbox") + 1] == "read-only"
 
 
 def test_a_role_policy_codex_refuses_refuses_the_spawn(

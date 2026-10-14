@@ -1675,7 +1675,9 @@ def spawn(
             approval=approval_policy if approval_policy is not None else native_approval,
             # A sandbox or a policy chosen for this spawn wins over the role's setting.
             approve_for_me=(
-                approve_for_me if sandbox is None and approval_policy is None else None
+                approve_for_me
+                if sandbox is None and approval_policy is None and native_mode is None
+                else None
             ),
             native=arguments.argv,
         )

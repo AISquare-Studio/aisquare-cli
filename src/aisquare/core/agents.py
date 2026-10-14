@@ -667,6 +667,10 @@ def install_hooks(name: str, config_dir: Path | None = None) -> bool:
 def remove_hooks(name: str, config_dir: Path | None = None) -> bool:
     """Remove aisquare's hooks from the agent's settings. True if any were removed.
 
+    From every event, as :func:`hook_commands` finds them: one under an event this
+    version does not install (an older install's, a hand-added one, another agent's
+    ``hook`` subcommand) is still ours, and left behind it failed every uninstall.
+
     A file that is not a JSON object, or not UTF-8, holds nothing of ours to take out and
     is left alone; where such a file is refused (:func:`hooks_shape_strict`), it and one
     whose hooks have another shape raise :class:`AgentSettingsError`.
@@ -688,17 +692,16 @@ def remove_hooks(name: str, config_dir: Path | None = None) -> bool:
     if not isinstance(hooks, dict):
         return False
     removed = False
-    for hook in spec.hooks:
-        groups = hooks.get(hook.event)
+    for event, groups in list(hooks.items()):
         if not isinstance(groups, list):
             continue
         kept = _without_aisquare(groups)
         if kept != groups:
             removed = True
             if kept:
-                hooks[hook.event] = kept
+                hooks[event] = kept
             else:
-                hooks.pop(hook.event, None)
+                hooks.pop(event, None)
     if not hooks:
         settings.pop("hooks", None)
     if removed:

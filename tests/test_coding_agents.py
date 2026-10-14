@@ -288,6 +288,29 @@ def test_hook_merge_preserves_other_handlers_and_disconnect_removes_only_ours(
     }
 
 
+@pytest.mark.parametrize("agent", ["claude-code", "codex"])
+def test_disconnect_removes_ours_from_events_this_version_does_not_install(
+    agent: str, tmp_path: Path
+) -> None:
+    directory = tmp_path / agent
+    directory.mkdir()
+    adapter = agent_adapters.get_adapter(agent)
+    path = directory / adapter.settings_name
+    assert agents.install_hooks(agent, directory)
+    settings = json.loads(path.read_text())
+    ours = settings["hooks"][adapter.capabilities.hooks[0].event][0]["hooks"][0]
+    unrelated = {"type": "command", "command": "run-my-hook"}
+    # An older install's event, and another agent's subcommand under it, beside a user's.
+    settings["hooks"]["RetiredEvent"] = [
+        {"hooks": [ours, {**ours, "command": "aisquare hook codex"}, unrelated]}
+    ]
+    path.write_text(json.dumps(settings))
+    assert agents.hook_commands(agent, directory)
+    assert agents.remove_hooks(agent, directory)
+    assert agents.hook_commands(agent, directory) == []
+    assert json.loads(path.read_text())["hooks"] == {"RetiredEvent": [{"hooks": [unrelated]}]}
+
+
 def test_connect_respects_override_and_reports_native_trust(tmp_path: Path) -> None:
     directory = tmp_path / ".codex"
     directory.mkdir()

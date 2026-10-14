@@ -1157,14 +1157,24 @@ class AccountsView(Vertical):
         self.refresh_usage(force=True)
 
     def _paint_usage_age(self) -> None:
-        """``last refreshed 3m ago`` — the OLDEST reading the signed-in rows hold that was
-        actually read; ``never`` before the first. A row whose latest try read nothing (an
-        unreachable endpoint, a rejected token) adds ``· last try failed just now``, the
+        """``last refreshed 3m ago`` — the OLDEST reading the usable rows hold that was
+        actually read; ``never`` before the first. A usable row whose latest try read nothing
+        (an unreachable endpoint, an HTTP error) adds ``· last try failed just now``, the
         newest such try: a failure is never passed off as a refresh. ``refreshing…`` while a
-        read runs, when *↻ Refresh usage* is off too."""
+        read runs, when *↻ Refresh usage* is off too.
+
+        A row that needs a login (signed out, its token expired or refused) or whose token
+        this CLI cannot read (missing, the macOS Keychain) counts in neither half: its own
+        status says so, and an account left expired would otherwise say "failed" every tick.
+        """
         running = self._usage_running()
         self.query_one("#usage-refresh", Button).disabled = running
-        slots = [row.slot for row in self.rows() if row.status.signed_in]
+        slots = [
+            row.slot
+            for row in self.rows()
+            if row.status.token_state == "ok"
+            and not needs_login(row.status, self.usage.get(row.slot))
+        ]
         read = [self._read_at[slot] for slot in slots if slot in self._read_at]
         failed = [
             reading.fetched_at

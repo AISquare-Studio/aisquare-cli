@@ -36,6 +36,7 @@ from tests.test_ui_accounts import (
     drive,
     fleet_app,
     line,
+    offered,
     open_accounts,
     settle,
     shown,
@@ -69,12 +70,15 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
     return moved
 
 
-def _signed_in(slot: int, root: Path, token: str) -> AccountsOverview:
-    """A frame with slot ``slot`` signed in, its credentials on disk under ``root``."""
-    status = _status(slot, f"slot{slot}@example.com", root=root)
+def _signed_in(slot: int, root: Path, token: str, *, expired: bool = False) -> AccountsOverview:
+    """A frame with slot ``slot`` signed in, its credentials on disk under ``root`` — their
+    token already ``expired``, as ``describe`` then says, when asked."""
+    status = _status(
+        slot, f"slot{slot}@example.com", root=root, token_state="expired" if expired else "ok"
+    )
     path = core.credentials_path(status.account)
     path.parent.mkdir(parents=True, exist_ok=True)
-    expires = int((NOW + timedelta(days=30)).timestamp() * 1000)
+    expires = int((NOW + timedelta(days=-1 if expired else 30)).timestamp() * 1000)
     path.write_text(json.dumps({"claudeAiOauth": {"accessToken": token, "expiresAt": expires}}))
     return _overview(status)
 
@@ -332,3 +336,111 @@ def test_nothing_read_yet_says_never_and_the_failure_beside_the_oldest_good_read
     never, some = drive(go, overview=frame)
     assert never == "last refreshed never · last try failed just now"
     assert some == "last refreshed just now · last try failed 1m ago"
+
+
+#: What ``usage`` answers for an account that needs a login, or whose token the CLI cannot
+#: read — and the state ``describe`` gives its row then.
+NEEDS_LOGIN: dict[str, tuple[str, ClaudeUsage]] = {
+    "expired": (
+        "expired",
+        ClaudeUsage(
+            available=False,
+            reason="the stored token has expired — open a session on this account to refresh it",
+            needs_login=True,
+        ),
+    ),
+    "rejected": (
+        "ok",
+        ClaudeUsage(
+            available=False,
+            reason="the token was rejected — open a session on this account to refresh it",
+            needs_login=True,
+        ),
+    ),
+    "keychain": (
+        "missing",
+        ClaudeUsage(
+            available=False,
+            reason="credentials are in the macOS Keychain, which the CLI does not read",
+        ),
+    ),
+}
+
+
+def test_an_expired_account_beside_a_good_one_adds_nothing_to_the_line_for_ten_minutes(
+    no_network: dict[str, Any], clock: Clock, tmp_path: Path
+) -> None:
+    """The human keeps an account whose token stays expired (slot 4). Its row says so and
+    offers Log in; the line beside Refresh usage is about the readings, and stays calm:
+    no '· last try failed just now' on every tick. A tick each 61 s, so no reading is ever
+    exactly five minutes old: slot 2 is read again on the fifth and the tenth."""
+    good = _answering(clock)
+    expired_answer = NEEDS_LOGIN["expired"][1]
+    no_network["usage"] = lambda account: expired_answer if account.slot == 4 else good(account)
+    two = _signed_in(2, tmp_path, "tok-two").accounts
+    four = _signed_in(4, tmp_path, "tok-four", expired=True).accounts
+    frame = _overview(*two, *four)
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], int, str, bool]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle_until(app, lambda: no_network["usage_calls"].count(2) >= 1)
+        await settle(app)
+        said = [_age(view)]
+        for _ in range(10):
+            clock.advance(seconds=61)
+            view.refresh_readings()
+            await settle(app)
+            said.append(_age(view))
+        return said, no_network["usage_calls"].count(2), line(view, 4), offered(view, 4, "login")
+
+    said, read, row, log_in = drive(go, overview=frame)
+    ages = ["just now", "1m ago", "2m ago", "3m ago", "4m ago"]
+    assert said == [f"last refreshed {age}" for age in [*ages, *ages, "just now"]]
+    assert read == 3, "slot 2 read on opening, and again at 5m05s and 10m10s"
+    assert "token expired" in row and log_in, "the row says why, and offers Log in"
+
+
+@pytest.mark.parametrize("kind", sorted(NEEDS_LOGIN))
+def test_an_account_that_needs_a_login_counts_in_neither_half_of_the_line(
+    kind: str, no_network: dict[str, Any], clock: Clock, tmp_path: Path
+) -> None:
+    """Slot 4 was read, then needs a login (or its token is in the Keychain): its old
+    reading no longer sets the age, and its answer is not a failed try. Slot 2's endpoint
+    going down still is."""
+    token_state, answer = NEEDS_LOGIN[kind]
+    good = _answering(clock)
+    endpoint: dict[int, Callable[[ClaudeAccount], ClaudeUsage]] = {2: good, 4: good}
+    no_network["usage"] = lambda account: endpoint[account.slot](account)
+    two = _signed_in(2, tmp_path, "tok-two").accounts
+    four = _signed_in(4, tmp_path, "tok-four").accounts
+    frame = _overview(*two, *four)
+
+    async def go(pilot: Pilot[None]) -> list[str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle_until(app, lambda: len(no_network["usage_calls"]) >= 2)
+        await settle(app)
+        said = [_age(view)]
+        clock.advance(minutes=6)
+        endpoint[4] = lambda account: answer
+        status = four[0].model_copy(update={"token_state": token_state})
+        view.show(_overview(*two, status))
+        view.refresh_readings()  # both due: slot 2 reads, slot 4 needs a login
+        await settle_until(app, lambda: len(no_network["usage_calls"]) >= 4)
+        await settle(app)
+        said.append(_age(view))
+        clock.advance(minutes=6)
+        endpoint[2] = _unreachable
+        view.refresh_readings()  # both due again: slot 2's endpoint is down
+        await settle_until(app, lambda: len(no_network["usage_calls"]) >= 6)
+        await settle(app)
+        said.append(_age(view))
+        return said
+
+    said = drive(go, overview=frame)
+    assert said == [
+        "last refreshed just now",
+        "last refreshed just now",
+        "last refreshed 6m ago · last try failed just now",
+    ]

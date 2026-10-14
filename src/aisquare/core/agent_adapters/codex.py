@@ -184,6 +184,7 @@ class CodexAdapter:
         limits_in_transcript=True,
         native_telemetry=True,
         positional_prompt=True,
+        idle_prompt_mark="? for shortcuts",
         first_context_file_only=True,
         sandbox_permissions=True,
         tool_shell_env="CODEX_THREAD_ID",

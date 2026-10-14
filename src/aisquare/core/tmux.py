@@ -1411,6 +1411,10 @@ class TmuxServer:
             wrapped=None if wrapped is None else wrapped[: facts.height],
         )
 
+    def screen_text(self, pane_id: str) -> list[str]:
+        """The rows on ``pane_id``'s screen now, as plain text: no escapes, no history."""
+        return self.run("capture-pane", "-p", "-t", pane_id).splitlines()
+
     def _frame(
         self, pane_id: str, scrollback: int, height: int | None, flags: bool
     ) -> tuple[list[str], list[bool] | None, PaneFacts]:

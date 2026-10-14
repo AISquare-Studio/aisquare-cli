@@ -2821,33 +2821,46 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
     agent's gets the board note instead.
 
     An agent whose pane cannot be read for readiness
-    (``capabilities.reads_pane_readiness``: Codex) is typed into only when its own hooks
-    freshly say ``waiting``. When they freshly say ``working``, the message goes through
-    the agent's own queue for its next turn (``AgentAdapter.queue_args``: ``codex queue``,
-    which reached an interactive session busy with a turn on 0.162.1), and a queue that
-    fails, or an agent without one, leaves the board note.
+    (``capabilities.reads_pane_readiness``: Codex) is typed into only at its prompt as
+    :func:`_at_its_prompt` decides it: its own hooks freshly say ``waiting``, or, with
+    none fresh (none fire before its first prompt), its quiet pane shows its empty
+    prompt. When they freshly say ``working``, the message goes through the agent's own
+    queue for its next turn (``AgentAdapter.queue_args``: ``codex queue``, which reached
+    an interactive session busy with a turn on 0.162.1), and a queue that fails, or an
+    agent without one, leaves the board note. The queue is no way in before the first
+    prompt: Codex writes the thread's rollout with it, and ``codex queue`` refused the
+    thread a fresh TUI had open with "no rollout found for thread id".
     """
     with store_session() as store:
         agent = _live_agent(store, project, label)
     status = status_of(agent)
     adapter = recorded_adapter(agent.agent)
+    srv = server_of(agent)
     if not (adapter is not None and adapter.capabilities.reads_pane_readiness):
         # The agent's own hooks say what the pane cannot. A fresh "working" is a busy
         # agent, which takes the message through its own queue where it has one.
         session = status.session
-        fresh = session is not None and _now() - session.last_seen_at <= _team()._STALE_AFTER
-        if fresh and session is not None and session.state == "working" and adapter is not None:
+        if (
+            _hooks_fresh(session, _now())
+            and session is not None
+            and session.state == "working"
+            and adapter is not None
+        ):
             queued = _queue_message(adapter, agent.binary, session, text)
             if queued is True:
                 return TellResult(True, "queued for its next turn (it was working)")
             if queued is not None:
                 how = _file_note(project, label, text, sender)
                 return TellResult(False, f"{queued} — {how}")
-        if not (fresh and session is not None and session.state == "waiting"):
+        if not _at_its_prompt(srv, agent, session, status.state, _now()):
             how = _file_note(project, label, text, sender)
-            return TellResult(False, f"no confirmed waiting native session — {how}")
+            unseen = (
+                f" and its pane is not at {adapter.label}'s empty prompt"
+                if adapter is not None and adapter.capabilities.idle_prompt_mark
+                else ""
+            )
+            return TellResult(False, f"no confirmed waiting native session{unseen} — {how}")
     if status.state == "waiting":
-        srv = server_of(agent)
         if not _pane_is_the_agent(srv, agent.pane_id):
             how = _file_note(project, label, text, sender)
             return TellResult(
@@ -2927,6 +2940,48 @@ def _pane_is_the_agent(srv: TmuxServer, pane_id: str) -> bool:
     except TmuxError:
         return False
     return facts is not None and not facts.dead and _agent_running(facts.current_command)
+
+
+def _hooks_fresh(session: TeamSession | None, now: datetime) -> bool:
+    """Whether ``session``'s own hooks spoke within ``_STALE_AFTER``, so its state is theirs."""
+    return session is not None and now - session.last_seen_at <= _team()._STALE_AFTER
+
+
+def _at_its_prompt(
+    srv: TmuxServer,
+    agent: FleetAgent,
+    session: TeamSession | None,
+    state: FleetAgentState,
+    now: datetime,
+) -> bool:
+    """Whether a line typed into ``agent``'s pane now lands at its prompt: the one test
+    ``tell`` and :func:`nudge_manager` type by. ``state`` is :func:`_derive`'s.
+
+    An agent whose pane reads its readiness (``capabilities.reads_pane_readiness``) is
+    there when it reads ``waiting``. Another is there when its own hooks freshly say
+    ``waiting`` — and when they say nothing fresh (none fire before its first prompt, as
+    Codex's do not), when its pane is quiet (``waiting``) and the last line on its screen
+    is the agent's empty-prompt mark (``capabilities.idle_prompt_mark``). Quiet alone is
+    not enough: Codex's folder-trust and hook-review dialogs print nothing either, and an
+    Enter there answers them for the human (``enter continue`` on the folder's). Never
+    raises.
+    """
+    if state != "waiting":
+        return False
+    adapter = recorded_adapter(agent.agent)
+    if adapter is not None and adapter.capabilities.reads_pane_readiness:
+        return True
+    if _hooks_fresh(session, now):
+        return session is not None and session.state == "waiting"
+    mark = adapter.capabilities.idle_prompt_mark if adapter is not None else None
+    if not mark:
+        return False
+    try:
+        screen = srv.screen_text(agent.pane_id)
+    except TmuxError:
+        return False
+    last = next((line.strip() for line in reversed(screen) if line.strip()), "")
+    return last.startswith(mark)
 
 
 def _type_line(srv: TmuxServer, pane_id: str, text: str, *, command: bool = False) -> None:
@@ -5604,9 +5659,10 @@ def nudge_manager(project_id: str, *, reason: str) -> bool:
     that no longer matches) is ``working`` everywhere else, and typing into it
     is the interleaving ``tell`` refuses to cause. Agreeing costs one extra
     ``list-panes`` for the pane's last-output time, on a path the debounce
-    already bounds to one pass per :data:`NUDGE_DEBOUNCE`. The line goes in as ``tell``
-    types one (:func:`_type_line`): a Codex manager kept every nudge sent with its Enter
-    in one burst unsent in its composer, and woke for none of them.
+    already bounds to one pass per :data:`NUDGE_DEBOUNCE`. And ``waiting`` must be
+    at its prompt as ``tell`` decides it (:func:`_at_its_prompt`), the line typed as
+    ``tell`` types one (:func:`_type_line`): a Codex manager kept every nudge sent with
+    its Enter in one burst unsent in its composer, and woke for none of them.
     """
     try:
         with store_session() as store:
@@ -5634,7 +5690,7 @@ def nudge_manager(project_id: str, *, reason: str) -> bool:
                 _activity_times(srv).get(manager.pane_id),
             )
             state, _ = _derive(manager, session, pane, observed=True, now=now)
-            if state != "waiting":
+            if not _at_its_prompt(srv, manager, session, state, now):
                 return False
             store.set_meta(key, now.isoformat())
             _type_line(srv, manager.pane_id, NUDGE_TEXT)

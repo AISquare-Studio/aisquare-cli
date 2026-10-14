@@ -318,12 +318,20 @@ alive. Otherwise the message is filed as a board note addressed to that agent,
 and the output says which happened (`✓` typed, `→` noted). Never interrupts an
 agent that is working or sitting on a permission prompt. Takes `--as SESSION`.
 
-A **Codex** agent's pane does not show whether it sits at its prompt, so its
-own hooks decide: typed when they freshly say *waiting*; when they freshly say
-*working*, queued for its next turn with `codex queue --thread <its thread>
---message <text>` under its own `CODEX_HOME` (`✓ queued for its next turn`;
-measured on 0.162.1: the message ran as the next turn of an interactive session
-busy with one); anything else, or a queue that fails, is the board note.
+A **Codex** agent's pane going quiet does not show that it sits at its prompt —
+its folder-trust and hook-review dialogs are as quiet — so its own hooks decide:
+typed when they freshly say *waiting*; when they freshly say *working*, queued
+for its next turn with `codex queue --thread <its thread> --message <text>` under
+its own `CODEX_HOME` (`✓ queued for its next turn`; measured on 0.162.1: the
+message ran as the next turn of an interactive session busy with one). When they
+say nothing fresh — Codex fires no hook before its first prompt, so an agent
+started without one (asq Welcome's coders) has none yet — it is typed into when
+its pane is quiet and shows Codex's empty prompt (the footer `? for shortcuts`);
+`codex queue` cannot reach a thread before its first prompt. Anything else, or a
+queue that fails, is the board note. Every typed line is one paste with its Enter
+a moment later, as `fleet stop` types `/exit`: Codex reads keys in one burst as a
+paste and keeps an Enter inside it as text. The manager's wake-up nudge is typed
+the same way, under the same rule.
 
 ### `fleet stop`
 

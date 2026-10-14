@@ -408,10 +408,12 @@ per minute across processes sharing the store. Ordinary starts between cleanup
 runs use an indexed timestamp read.
 
 Initial fleet tasks use Codex's positional prompt. After that, `fleet tell`
-types into a Codex agent whose hooks freshly say it is waiting, queues the
-message for the next turn of one they say is working (`codex queue --thread
-<id> --message <text>` under its own `CODEX_HOME`), and otherwise files a board
-note ([`fleet tell`](fleet.md#fleet-tell)). Permission and user-input hooks mark
+types into a Codex agent whose hooks freshly say it is waiting — or, before any
+hook has fired (no first prompt yet), whose quiet pane shows Codex's empty prompt
+— queues the message for the next turn of one they say is working (`codex queue
+--thread <id> --message <text>` under its own `CODEX_HOME`), and otherwise files a
+board note ([`fleet tell`](fleet.md#fleet-tell)); the manager's wake-up nudge
+goes in by the same rule, its Enter apart. Permission and user-input hooks mark
 attention, tools restore working state, and end hooks release claims. The
 existing fleet pause, resume, attach, stop, reap and worktree operations remain
 shared; `fleet stop` types `/exit` and its Enter apart, because Codex reads one
@@ -579,6 +581,8 @@ tells its agent's own process from a nested child, across a `/clear` or a `/resu
 `requires_hook_trust`, `hook_names_home`, `strict_hooks_file`, `stop_reason_as_prompt`,
 `limits_in_transcript` (no turn-failed event), `ambient_first_run`,
 `reads_pane_readiness` (`fleet tell` may type into a pane that looks idle),
+`idle_prompt_mark` (what the last line of the screen starts with at an empty prompt,
+Codex's `? for shortcuts`: where a pane its hooks say nothing fresh about is typed into),
 `resumes_across_homes`, `exports_home_env`, `own_doctor_check`, `model_ladders`,
 `model_proxy`, `positional_prompt`, `first_context_file_only`, `sandbox_permissions`,
 `legacy_fleet_args`, `value_options`, `switch_options`.

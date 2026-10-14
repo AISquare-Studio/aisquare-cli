@@ -86,6 +86,14 @@ class AgentCapabilities:
     """The fleet can tell from the pane that the agent sits at its prompt, so ``fleet
     tell`` types into a pane the listing reads as waiting; without it, only into one
     whose own hooks freshly say waiting (anything else is a board note)."""
+    idle_prompt_mark: str | None = None
+    """What starts the last line of the agent's screen while it sits at an EMPTY prompt
+    (Codex's footer ``? for shortcuts``, measured on 0.162.1; text in the prompt replaces
+    it, and a turn redraws the pane every second). For an agent without
+    :attr:`reads_pane_readiness` whose hooks say nothing fresh — none fire before its first
+    prompt — a pane quiet for ``ACTIVITY_WINDOW`` that shows it is at its prompt, so
+    ``fleet tell`` and the manager's nudge type there; the agent's folder-trust and
+    hook-review dialogs are as quiet and show no such line."""
     resumes_across_homes: bool = False
     """A session resumes from another config dir (Claude Code finds a transcript by its
     absolute path), so ``fleet switch`` to another account resumes it; otherwise the

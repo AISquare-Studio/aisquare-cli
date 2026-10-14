@@ -161,6 +161,8 @@ class FakeTmux(TmuxServer):
         self.facts: dict[str, PaneFacts] = {}
         self.output_at: dict[str, datetime] = {}
         """When each pane last printed — what ``#{window_activity}`` reports."""
+        self.screens: dict[str, list[str]] = {}
+        """The rows on each pane's screen — what ``capture-pane -p`` prints."""
         self.pids: dict[str, int] = {}
         """The pid tmux started in each pane — what ``pane_pid`` answers. Unset
         means tmux cannot say, which the identity check reads as "cannot tell"."""
@@ -366,6 +368,12 @@ class FakeTmux(TmuxServer):
 
     def pane_facts(self, pane_id: str) -> PaneFacts | None:
         return self.facts.get(pane_id) if self._read() else None
+
+    def screen_text(self, pane_id: str) -> list[str]:
+        """As the real one, which runs ``capture-pane`` strictly: tmux's refusal raises."""
+        if not self._read() or pane_id not in self.facts:
+            raise TmuxError(f"can't find pane: {pane_id}")
+        return list(self.screens.get(pane_id, []))
 
     # The strict twins the shutdown paths use: each is the lenient answer UNLESS
     # the server could not be asked, and that single distinction is `reachable()`

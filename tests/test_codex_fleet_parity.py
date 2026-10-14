@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from importlib import import_module
 from pathlib import Path
 from unittest.mock import Mock
@@ -496,7 +496,99 @@ def test_tell_to_a_codex_agent_that_is_not_working_queues_nothing(
     assert _notes_to(codex.project, codex.agent.label) == ["hello"]
 
 
-# --- a line typed into a Codex pane: its Enter apart (lane B of #113) ----------------------
+# --- a line typed into a Codex pane: at its prompt, its Enter apart (lane B of #113) -----
+
+#: Codex 0.162.1's screens under tmux 3.7c, trimmed: its empty prompt, the two dialogs a
+#: fresh pane sits at just as quietly, and the prompt holding a draft of the human's.
+#: ``CHEVRON`` is the U+203A Codex marks its prompt and a dialog's choice with.
+CHEVRON = "\u203a"
+IDLE_PROMPT = [
+    "  >_ OpenAI Codex (v0.162.1)",
+    "",
+    f"{CHEVRON} Ask Codex to do anything",
+    "",
+    "  gpt-5.5 default · /work/repo",
+    "  ? for shortcuts                                              ⚠ 2 warnings · f2 to view",
+    "",
+]
+TRUST_DIALOG = [
+    "  Folder access",
+    "  Trust this folder? Codex can read, edit, and run files here, subject to your",
+    "",
+    f"{CHEVRON} 1. Trust and continue",
+    "  2. Quit",
+    "",
+    "  enter continue · esc quit",
+]
+HOOK_REVIEW = [
+    "  Hooks need review",
+    "  8 hooks are new or changed.",
+    "",
+    f"{CHEVRON} 1. Review hooks",
+    "  2. Trust all and continue",
+    "  3. Continue without trusting (hooks won't run)",
+    "",
+    "  enter confirm · esc skip",
+]
+DRAFT = [
+    f"{CHEVRON} half a sentence of the human's",
+    "",
+    "  gpt-5.5 default · /work/repo",
+    "                                                               ⚠ 2 warnings · f2 to view",
+]
+
+
+def test_tell_types_into_a_codex_agent_at_its_empty_prompt_before_any_hook(
+    codex_agent: tuple[Codex, TeamTask],
+    tmux: FakeTmux,  # noqa: F811
+    clock: FakeClock,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Welcome starts Codex coders with no prompt, and Codex fires no hook before its
+    first one: every ``tell`` was a board note the coder never saw. Its quiet pane at the
+    empty prompt takes the line, the Enter after its own gap."""
+    codex, _ = codex_agent
+    pane = codex.agent.pane_id
+    tmux.set_command(pane, "codex")
+    tmux.screens[pane] = IDLE_PROMPT
+    typed = _timed_input(tmux, clock, monkeypatch)
+
+    told = fleet_service.tell(codex.project, codex.agent.label, "reply ok")
+
+    assert told.delivered is True and "typed" in told.how, told
+    [(kind, text, typed_at), (key, enter, entered_at)] = typed
+    assert (kind, text, key, enter) == ("paste", "reply ok", "key", "Enter")
+    assert round(entered_at - typed_at, 9) >= fleet_service._KEY_GAP > 0
+    assert _notes_to(codex.project, codex.agent.label) == []
+
+
+@pytest.mark.parametrize(
+    ("screen", "printing"),
+    [(TRUST_DIALOG, False), (HOOK_REVIEW, False), (DRAFT, False), (IDLE_PROMPT, True)],
+    ids=["folder-trust", "hook-review", "draft", "mid-turn"],
+)
+def test_a_codex_pane_not_quiet_at_its_empty_prompt_gets_the_note(
+    codex_agent: tuple[Codex, TeamTask],
+    tmux: FakeTmux,  # noqa: F811
+    screen: list[str],
+    printing: bool,
+) -> None:
+    """An Enter at the folder-trust dialog trusts the folder for the human, at the hook
+    review it opens the review, into a draft it sends the human's half sentence; and a
+    turn keeps the footer while it redraws its timer every second."""
+    codex, _ = codex_agent
+    pane = codex.agent.pane_id
+    tmux.set_command(pane, "codex")
+    tmux.screens[pane] = screen
+    if printing:
+        tmux.printed(pane)
+
+    told = fleet_service.tell(codex.project, codex.agent.label, "reply ok")
+
+    assert told.delivered is False and "board note" in told.how
+    assert "not at Codex's empty prompt" in told.how
+    assert tmux.typed == []
+    assert _notes_to(codex.project, codex.agent.label) == ["reply ok"]
 
 
 def test_a_waiting_codex_manager_is_woken_with_the_enter_apart(
@@ -525,6 +617,15 @@ def test_a_waiting_codex_manager_is_woken_with_the_enter_apart(
     [(kind, text, typed_at), (key, enter, entered_at)] = typed
     assert (kind, text, key, enter) == ("paste", fleet_service.NUDGE_TEXT, "key", "Enter")
     assert round(entered_at - typed_at, 9) >= fleet_service._KEY_GAP > 0
+    # A wait past _STALE_AFTER leaves the hooks saying nothing fresh: the pane decides as
+    # it does for tell, and a draft of the human's in the prompt is not typed behind.
+    later = datetime.now(tz=UTC) + team_service._STALE_AFTER + timedelta(minutes=1)
+    monkeypatch.setattr(fleet_service, "_now", lambda: later)
+    tmux.screens[manager.pane_id] = DRAFT
+    assert fleet_service.nudge_manager(project.id, reason="task_review") is False
+    tmux.screens[manager.pane_id] = IDLE_PROMPT
+    assert fleet_service.nudge_manager(project.id, reason="task_review") is True
+    assert len(typed) == 4
 
 
 # --- a replacement runs the row's own agent (review r1 of #113, finding 1) ---------------

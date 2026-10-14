@@ -302,8 +302,9 @@ have ended. `status` is the same data, always live only.
 State is **derived, never stored**: a fresh board session row wins (working ·
 waiting · attention · limited — the last one trusted until the reset it names
 has passed, since a parked agent fires no hook; and a Codex agent's attention
-until one of its hooks moves it, since Codex redraws its approval view every
-second it waits); otherwise tmux's facts (a dead
+until one of its hooks moves it or its screen shows Codex's working line again,
+which is the moment the human allows the command, since Codex redraws its
+approval view every second it waits); otherwise tmux's facts (a dead
 pane → exited with its code; activity → working; else waiting); no pane at all → lost; `· unknown`
 when neither source can answer. The detail beside the chip says why when that
 is not obvious — an exit code, `no hooks` for a binary without our lifecycle
@@ -323,7 +324,7 @@ agent that is working or sitting on a permission prompt. Takes `--as SESSION`.
 A **Codex** agent's pane going quiet does not show that it sits at its prompt —
 its folder-trust and hook-review dialogs are as quiet — so its own hooks decide:
 typed when they freshly say *waiting*; when they freshly say *working*, queued
-for its next turn with `codex queue --thread <its thread> --message <text>` under
+for its next turn with `codex queue --thread <its thread> --message=<text>` under
 its own `CODEX_HOME` (`✓ queued for its next turn`; measured on 0.162.1: the
 message ran as the next turn of an interactive session busy with one). When they
 say nothing fresh — Codex fires no hook before its first prompt, so an agent
@@ -794,8 +795,12 @@ even where the role's own arguments carry it too.
 Codex runs its tools in a sandbox, and every `aisquare` call an agent makes writes the
 store in the aisquare home, a board read included. The **store profile** is the
 fleet's own Codex permission profile: Codex's built-in `:workspace` or `:read-only`,
-with the aisquare home writable and, within it, the account homes, the credentials
-and the config read-only, since what is written there runs outside any sandbox. So a
+with the aisquare home writable and, within it, the account homes, the credentials,
+the keys, the config, the fleet's tmux conf and the agent registry read-only, since
+what is written there runs, or chooses what runs, outside any sandbox. The launch
+specs a restart replays stay in the writable store, so `fleet spawn` records each
+one's digest in `launch-specs/`, which is read-only to the sandbox, and a restart
+replays only a spec whose digest matches. So a
 Codex agent's board calls succeed on their first, sandboxed attempt, a reviewer's
 verdict included, while its worktree stays read-only
 ([the sandbox and the store](coding-agents.md#the-sandbox-and-the-aisquare-store)).

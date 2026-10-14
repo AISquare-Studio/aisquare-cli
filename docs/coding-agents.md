@@ -233,22 +233,23 @@ fixes.
 | Context at session start | `SessionStart` hook context | Same: the Codex manager quoted its "You are team session … (role: manager)" line. | Smoke 3; live hooks |
 | Prompt capture (`aisquare log`) | `UserPromptSubmit` | Same, with `source=codex`. | Smoke 4; live hooks |
 | ▶ working / ⏸ waiting | From its hooks | Same, from Codex's hooks. | Smoke 5 |
-| 🔔 attention | `Notification`: a permission prompt or a question | 🔔 for an approval the human answers ("Codex needs your approval") and for `request_user_input`. None for one Codex's automatic reviewer decides under `--approve-for-me`. **Differs:** Codex fires `PermissionRequest` with the same payload for both, so the reviewer is read from the session's rollout. Codex also redraws its approval view every second, so the bell holds until `PostToolUse`, Esc, `Stop` or the next prompt. | Smoke 5 failed both ways (seven false bells for one task; a real approval read working). Fixed in `3b11964c` and `182f70e7`. Live sandbox: a reviewed escalation rang no bell, and attention held for 3.6 s of redraws, then working after `y` |
+| 🔔 attention | `Notification`: a permission prompt or a question | 🔔 for an approval the human answers ("Codex needs your approval") and for `request_user_input`. None for one Codex's automatic reviewer decides under `--approve-for-me`. **Differs:** Codex fires `PermissionRequest` with the same payload for both, so the reviewer is read from the session's rollout. Codex also redraws its approval view every second, so pane activity does not clear the bell. It clears when Codex's working line (`esc to interrupt`) is back on the screen, which is the moment the human allows the command, or on Esc, `Stop` or the next prompt. | Smoke 5 failed both ways (seven false bells for one task; a real approval read working). Fixed in `3b11964c`, `182f70e7` and `467d4ef4` (review r2). Live sandbox: a reviewed escalation rang no bell, attention held through the redraws, and the row read working within 5 s of `y`, while the approved 8 s command still ran |
 | ⏳ limited and `on_limit = "switch"` | The `StopFailure` hook. Claude Code's own wait-and-continue runs at the reset. | **Differs:** Codex has no `StopFailure`. The limit is read off the rollout at `Stop` and `Interrupt`, and nothing continues at the reset. | Synthetic rollouts only: no real limit was available, so not exercised live |
 | Manager continuation | The `Stop` hook's "keep going" decision | Same: "Blocked by hook: 1 board update(s)…", and the manager went on. | Smoke 6 |
 | Waking a waiting manager | The nudge is typed into its prompt. | Same. Every line the fleet types is now a bracketed paste with its Enter 0.2 s later. **Differs:** Codex reads a burst of keys as a paste and keeps an Enter inside it as text. A manager whose hooks went stale is nudged only when its pane shows the empty prompt. | Smoke 6 failed (three nudges left unsent in the composer). Fixed in `6ee17ee3`. Live panes: a waiting manager runs the nudge a coder's task review sends |
-| `fleet tell` | Typed when it is waiting, else a board note | Typed when its hooks say waiting. **Differs:** a busy agent's message is queued with `codex queue` and runs as its next turn (`✓ queued for its next turn`); Claude Code has no queue. Before its first prompt (no hook yet), the message is typed when the pane is quiet and shows `? for shortcuts`. At the folder-trust or hook-review dialog, which is as quiet, it is a board note, so the dialog stays the human's. | Smoke 7 (typed, then queued; a never-prompted agent got only a note). That case was fixed in `47c9f23b`. Live panes: "reply ok" told before any hook ran, and the hook review was left alone. Live hooks: queue |
+| `fleet tell` | Typed when it is waiting, else a board note | Typed when its hooks say waiting. **Differs:** a busy agent's message is queued with `codex queue --message=<text>` and runs as its next turn (`✓ queued for its next turn`), even a message that starts with `-`. Claude Code has no queue. Before its first prompt (no hook yet), the message is typed when the pane is quiet and shows `? for shortcuts`. At the folder-trust or hook-review dialog, which is as quiet, or with a draft in its composer, it is a board note, so the dialog and the draft stay the human's. | Smoke 7 (typed, then queued; a never-prompted agent got only a note). That case was fixed in `47c9f23b`. Live panes: "reply ok" told before any hook ran, and the hook review was left alone. Live hooks: a queued `--no-verify …` ran as the next turn (`fc860457`, review r2) |
 | `fleet stop` | Types `/exit`; `SessionEnd` releases the claims. | Same: `/exit`, with its Enter apart, and exit 0. Codex's `SessionEnd` ended the session 0.5 s before the fleet's `agent_exited`. | Smoke 8; live hooks |
 | `fleet restart`, Restart | `claude --resume <transcript>` | Same outcome: `codex <options> resume <thread> -- <continue line>`. It quoted its question and answer from before the restart, and its claim was kept. | Smoke 9; live hooks |
 | `/clear` | Row and claims move to the new session. | Same: the row and the claim moved, and the new thread knew its claim. **Differs:** Codex fires no `SessionEnd` for the thread it leaves; the new thread's `SessionStart` (clear) comes with its first prompt. | Smoke 10; live hooks |
+| A session a tool starts | `CLAUDE_PID` tells the agent's own process from a child it starts. | `CODEX_THREAD_ID`, which Codex sets only in its tools' shells, does the same. A session of another agent than the row's never takes the row, such as a `codex exec` from a Claude Code agent's Bash tool. | Measured on 0.162.1; unit tests (`5898ce7e`, review r2) |
 | Accounts and usage | Numbered slots; usage from the endpoint Claude Code's `/usage` reads | The same slots, on one ladder (`~/.aisquare/codex-accounts/<n>`), with doctor rows. **Differs:** usage is read offline from the account's own rollouts (49 % of 5 h and 8 % of the week in the smoke). It is only as fresh as the last turn, and has no *to the limit* trend. | Smoke 11 |
 | `fleet switch` to another account | Resumes the session on the new account. | **Differs:** a Codex thread lives under its `CODEX_HOME`, so the agent starts fresh with the hand-off prompt (which got through the new home's folder-trust dialog) and its claim moves. A switch onto the same home resumes. | Smoke 12 |
 | Claim, review, done | Board tasks | Same: a Codex coder claimed a task and sent it to review, and a Codex tester marked it done. | Smoke 13 |
-| Board calls from inside the agent | No sandbox: `aisquare` runs as the user. | Same since `e8436fa3`: a sandboxed fleet Codex runs under the fleet's `aisquare` permission profile, and its board calls succeed on the first, sandboxed attempt. **Differs:** Codex sandboxes its tools. A pick in its own `/permissions`, or a `codex` started by hand, uses its own sandbox ([the sandbox and the store](#the-sandbox-and-the-aisquare-store)). | Filed by the smoke: every call needed an escalation. Live sandbox: a note and a task claim succeeded sandboxed |
+| Board calls from inside the agent | No sandbox: `aisquare` runs as the user. | Same since `e8436fa3`: a sandboxed fleet Codex runs under the fleet's `aisquare` permission profile, and its board calls succeed on the first, sandboxed attempt. **Differs:** Codex sandboxes its tools. What runs outside the sandbox (account homes, config, credentials and keys, the fleet's tmux conf, the agent registry) is read-only to it, and a restart replays a launch spec only if its digest, which the sandbox cannot write, matches. A pick in its own `/permissions`, or a `codex` started by hand, uses its own sandbox ([the sandbox and the store](#the-sandbox-and-the-aisquare-store)). | Filed by the smoke: every call needed an escalation. Live sandbox: a note and a task claim succeeded sandboxed. Writes to the read-only paths were refused, and the spec's digest held (`ca6d43ea`, `8337e88c`, review r2) |
 | Who answers approvals (`ask` / `auto` / `never`) | `--permission-mode manual` / `auto` / `dontAsk` | Same intent. `ask` puts Codex's "Would you like to run the following command?" in the pane, and `auto` is `--approve-for-me`. **Differs:** the reviewer is pinned on every spawn, restart and resume (`approvals_reviewer`), because a resumed thread otherwise keeps its own. `full:auto` is refused. | Filed by the smoke: a restart onto `ask` kept the automatic reviewer. Fixed in `e8436fa3`. Live sandbox: `fleet restart --permission-mode workspace:ask` brought the prompt |
 | Read-only reviewer | `--disallowedTools=Edit Write NotebookEdit`; its shell can still write | **Differs, and is stricter:** the store profile over `:read-only` with Codex's reviewer (`read_only:auto`). The worktree is read-only to the sandbox, and its verdict still reaches the board. | Live sandbox: the reviewer posted its verdict |
 | MCP (`agents.mcp = true`) | AISquare's stdio server per launch | Same: Codex called `aisquare.team_board` and `aisquare.note_add`, and the note landed on the hook-bound row. | Smoke 14; live hooks |
-| Explainability | Model traffic through the explainability proxy | **Differs:** Codex exports its own OTLP logs to a per-launch loopback receiver, which the SDK replays. The smoke spooled 58 native events: token counts and tool names, no tool arguments. The receiver's token reaches Codex in its environment, never its command line. There is no gateway for OpenAI Responses traffic. | Smoke 15. Token: `6efabab1`, where a scan of every `/proc/*/cmdline` found it 0 times. Live hooks |
+| Explainability | Model traffic through the explainability proxy | **Differs:** Codex exports its own OTLP logs to a per-launch loopback receiver, which the SDK replays. The smoke spooled 58 native events: token counts and tool names, no tool arguments. The receiver's token reaches Codex in its environment, never its command line, and is kept out of the shells its tools run in. There is no gateway for OpenAI Responses traffic. | Smoke 15. Token: `6efabab1`, where a scan of every `/proc/*/cmdline` found it 0 times, and `63d61be4` (review r2). Live hooks: the native events spool, and a tool's shell read the variable empty |
 | A team on both agents | Claude Code manager | Codex coder: each quoted the other's note from context, and a Codex `--kind result` woke the Claude Code manager. | Smoke 16 |
 | Upgrade and uninstall | Re-connects, or removes, the hooks. | The same for every Codex home and account home. `uninstall` names the `codex mcp remove` / `codex plugin remove` commands. **Differs:** a changed hook definition needs a new `/hooks` review. | Smoke 17 |
 | Doctor | Claude Code rows | Same on a Codex-only home with no `claude` on PATH: exit 0, Codex `observed`. | Smoke 18 |
@@ -461,18 +462,42 @@ So the fleet runs a sandboxed Codex agent under a permission profile of its own,
 -c default_permissions="aisquare"
 -c permissions.aisquare.extends=":workspace"        # ":read-only" for a reviewer's seat
 -c permissions.aisquare.filesystem={"<aisquare home>" = "write",
-     "<aisquare home>/codex-accounts" = "read", "<aisquare home>/claude-accounts" = "read",
-     "<aisquare home>/cache/codex-accounts" = "read", "<aisquare home>/cache/claude-accounts" = "read",
-     "<aisquare home>/credentials" = "read", "<aisquare home>/config.toml" = "read"}
+     "<aisquare home>/claude-accounts" = "read", "<aisquare home>/codex-accounts" = "read",
+     "<aisquare home>/cache/claude-accounts" = "read", "<aisquare home>/cache/codex-accounts" = "read",
+     "<aisquare home>/cache/oidc" = "read", "<aisquare home>/launch-specs" = "read",
+     "<aisquare home>/credentials" = "read", "<aisquare home>/config.toml" = "read",
+     "<aisquare home>/fleet-tmux.conf" = "read", "<aisquare home>/agents.json" = "read",
+     "<aisquare home>/explainability-key" = "read"}
 ```
 
-Codex's built-in profile for the write scope, with the aisquare home writable and,
-within it, what runs outside any sandbox read-only: the account homes (a Codex home's
-`config.toml` holds its hook trust and its hooks run unsandboxed; a Claude Code home's
-settings and hooks likewise), the credentials, and aisquare's config (which chooses
-every later launch's flags). Codex's own guards in the workspace (`.git`, `.codex`,
-`.agents`) still hold, and a read-only path that does not exist yet cannot be made.
-Measured: `aisquare note`, `task claim` and `board` succeed on their first, sandboxed
+This is Codex's built-in profile for the write scope, with the aisquare home
+writable. Inside it, whatever runs outside any sandbox, or chooses what does, is
+read-only (`types.store_read_only`):
+
+- the account homes and their caches: a Codex home's `config.toml` holds its hook
+  trust and its hooks run unsandboxed, and a Claude Code home's settings and hooks
+  likewise;
+- the sign-in tokens, the credentials and the explainability key;
+- aisquare's config, which chooses every later launch's flags;
+- `fleet-tmux.conf`, which every fleet tmux server loads;
+- `agents.json`, the homes `aisquare upgrade` reconnects hooks in;
+- `launch-specs/`, the digests of the launch specs.
+
+The board's own writes stay possible, so the launch specs in `context.db` (what
+`fleet restart`, `fleet switch` and the usage-limit hand-over replay, outside any
+sandbox) are writable from the sandbox too. So `fleet spawn` records each spec's
+SHA-256 in `launch-specs/<row id>.sha256`, which is read-only to the sandbox, and a
+replay takes only a spec whose digest it finds there. Any other spec, changed since
+or recorded by another aisquare, is not replayed: the replacement starts as the role
+resolves today, and the command says so. The run that first makes the directory
+records the specs the store already holds, so agents that run across an upgrade keep
+their launch. A path denied reading (`"none"`) is not used: with one, Codex reads its
+own instruction files through its sandbox helper, and where bwrap cannot bring up
+loopback the session does not start.
+
+Codex's sandbox leaves an empty file on the host where a path its profile names does
+not exist (measured), so the launcher makes those paths first. Codex's own guards in
+the workspace (`.git`, `.codex`, `.agents`) still hold. Measured: `aisquare note`, `task claim` and `board` succeed on their first, sandboxed
 attempt in the TUI, `exec` and `resume`; the profile holds beside `--approve-for-me`
 and over a `sandbox_mode` in `config.toml`. A plain `--add-dir <aisquare home>` (or
 `sandbox_workspace_write.writable_roots`) reaches the store too, but a sandboxed command
@@ -524,15 +549,20 @@ Initial fleet tasks use Codex's positional prompt. After that, `fleet tell`
 types into a Codex agent whose hooks freshly say it is waiting — or, before any
 hook has fired (no first prompt yet), whose quiet pane shows Codex's empty prompt
 — queues the message for the next turn of one they say is working (`codex queue
---thread <id> --message <text>` under its own `CODEX_HOME`), and otherwise files a
+--thread <id> --message=<text>` under its own `CODEX_HOME`, the text joined to its
+option so one starting with `-` is not read as an option), and otherwise files a
 board note ([`fleet tell`](fleet.md#fleet-tell)); the manager's wake-up nudge
 goes in by the same rule, its Enter apart. A permission request the human answers,
 and a `request_user_input`, mark attention; one Codex's automatic reviewer answers
 does not, though Codex fires its `PermissionRequest` hook for both with the same
 payload: the reviewer comes from the session's rollout (its newest `turn_context`, or
 a `/permissions` change since). Codex redraws its approval view every second while
-it waits, so pane output does not clear the bell: it holds until `PostToolUse` (the
-command was allowed and ran), `Interrupt` (Esc), `Stop` or the next prompt. Tools
+it waits, so pane output does not clear the bell. The bell clears when Codex's working
+line (`• Working (12s • esc to interrupt)`) is back on the pane's screen. The approval
+view replaces that line, and it returns the moment the human allows the command, so a
+long approved command reads working while it runs. The bell also clears on
+`PostToolUse`, `Interrupt` (Esc), `Stop` or the next prompt. A screen tmux cannot
+read keeps the bell. Tools
 restore working state, and end hooks release claims. The
 existing fleet pause, resume, attach, stop, reap and worktree operations remain
 shared; `fleet stop` types `/exit` and its Enter apart, because Codex reads one
@@ -557,7 +587,15 @@ With both `explainability.enabled` and `explainability.ship` enabled, Codex
 exports native OTLP JSON logs to a per-launch, authenticated loopback receiver on
 POSIX/WSL. The receiver's bearer token reaches Codex in its launch environment
 (`OTEL_EXPORTER_OTLP_LOGS_HEADERS`), never on its command line, which every local
-user can read. It spools allowlisted, redacted event metadata. Existing
+user can read. `-c shell_environment_policy.exclude=[…]` keeps the variable out of
+the shells Codex's tools run in, where an app's own OpenTelemetry SDK would prefer it
+to the app's `OTEL_EXPORTER_OTLP_HEADERS`. Codex's own exporter still sends it
+(measured on 0.162.1). That `-c` replaces the operator's own `exclude`, so the list
+also carries the patterns of every config layer the launch may read: system, user,
+profile, and the project's `.codex/config.toml`. If the operator sets that variable
+themselves, or sets `shell_environment_policy` with their own `-c`, their value is
+kept and AISquare's native tracing is off for the launch, which says so. It spools
+allowlisted, redacted event metadata. Existing
 `asq explainability ship` delivery replays model, tool and decision spans
 through the SDK under the same run binding. User-configured native OTEL
 exporters in the effective account home, selected profile, system config or
@@ -689,7 +727,7 @@ attributes and config layers, which a second telemetry agent extends there).
 | `encode_reply(kind, reply)` | What the hook prints: context for `session_start`/`prompt`, a "keep going" decision for `stop`, `""` for nothing. |
 | `model_args`, `resolve_model`, `native_args`, `native_choice`, `validate`, `effort_alias` | Model and reasoning effort: the flags, the configured choice, the native spelling, what a native argv already chose. |
 | `permission_args(intent, role, native)` | The flags for a `PermissionIntent` (below), less what the `native` arguments already settle, with `store_access` for its write scope; `ValueError` for one it cannot express. `fleet.roles.<role>.permission` and `--permission-mode WRITE:APPROVALS` reach every agent through it (`services.fleet.permission_flags`). |
-| `store_access(write, store)` | How a session sandboxed at `write` reaches the aisquare store in `store` (`types.store_dir()`), with `types.store_read_only(store)` read-only within it ([the sandbox and the store](#the-sandbox-and-the-aisquare-store)). `[]` without `sandboxes_tools` and for a scope run unsandboxed. |
+| `store_access(write, store)` | How a session sandboxed at `write` reaches the aisquare store in `store` (`types.store_dir()`), with `types.store_read_only(store)` read-only within it, made first by `types.prepare_store` ([the sandbox and the store](#the-sandbox-and-the-aisquare-store)). `[]` without `sandboxes_tools` and for a scope run unsandboxed. |
 | `fleet_args(role, label, mode, ...)` | A fleet spawn's flags from the role's native permission settings, then `label_args(label)`. |
 | `resume_args(native_id, transcript)` | The arguments that resume a session, put first: `fleet restart`, `fleet switch` and Restart resume the native id the first hook bound (Codex: `codex <options> resume <id> -- <continue line>`). |
 | `exit_command` | What `fleet stop` types to end the session so its `SessionEnd` runs. |
@@ -698,7 +736,7 @@ attributes and config layers, which a second telemetry agent extends there).
 | `role_defaults(role, binary, args)` | The flags a role needs on this agent wherever it starts (Claude Code's ui-tester `--chrome`), less what `args` says. |
 | `browser_tools(home)` | The browser the agent brings itself, as the doctor's browser-tools line names it (Codex's `browser_use` feature and bundled browser plugin); `None` where the doctor finds it another way. |
 | `mcp_args`, `context_files`, `disable_native_teams` | AISquare's MCP server for this session; the instruction files it reads; the arguments and environment that keep its own sub-agent teams off. |
-| `telemetry_args(endpoint)` | Its OpenTelemetry exporter, with `native_telemetry`. The receiver's `Authorization` is never an argument: it reaches the agent in `OTEL_EXPORTER_OTLP_LOGS_HEADERS`. |
+| `telemetry_args(endpoint, keep_out=)` | Its OpenTelemetry exporter, with `native_telemetry`. The receiver's `Authorization` is never an argument: it reaches the agent in `OTEL_EXPORTER_OTLP_LOGS_HEADERS`, and `keep_out` (the variable, with the operator's own patterns) is what the agent keeps out of its tools' shells (Codex: `shell_environment_policy.exclude`). |
 
 `AgentCapabilities` holds the rest as flags, each documented in `types.py` with the
 service that reads it: `pid_env` (the variable that hands a hook the agent's own pid,
@@ -715,7 +753,9 @@ Codex's `? for shortcuts`: where a pane its hooks say nothing fresh about is typ
 `model_proxy`, `positional_prompt`, `first_context_file_only`, `sandbox_permissions`,
 `sandboxes_tools` (its tools run in an OS sandbox, which `store_access` must open to
 the store), `redraws_while_asking` (its UI redraws while it waits on the human, so an
-attention row holds until a hook moves it), `legacy_fleet_args`, `value_options`,
+attention row holds until a hook moves it or its screen shows `working_mark`),
+`working_mark` (what its screen shows only while a turn runs unblocked, Codex's
+`esc to interrupt`), `legacy_fleet_args`, `value_options`,
 `switch_options`.
 
 A `PermissionIntent` is a write scope (`read_only`, `workspace`, `full`) and an
@@ -755,8 +795,8 @@ The store profile is [the sandbox and the store](#the-sandbox-and-the-aisquare-s
 - `version_in` misreads its version line, or `config_dir` ignores `home_env` or an
   explicit dir;
 - an agent that sandboxes its tools (`sandboxes_tools`) has a write scope whose
-  `store_access` does not name the store, or leaves out an account home, the
-  credentials or the config to keep read-only; a permission the fleet maps for it,
+  `store_access` does not name the store (a Windows home included, as the agent
+  spells it), or leaves out a path `types.store_read_only` keeps read-only; a permission the fleet maps for it,
   a role's built-in one included, does not carry its `store_access`; or an agent
   without a sandbox declares any;
 - an intent maps to neither flags nor a refusal with a reason; resume arguments are

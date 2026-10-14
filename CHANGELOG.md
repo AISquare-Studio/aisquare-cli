@@ -41,6 +41,13 @@ adapter.**
   and never adds a trust-bypass flag.
 - `agents connect codex` no longer exits 1 with "can't connect … yet" (0.8.0):
   it installs the hooks. Cursor stays detection-only and still refuses.
+- Fleet launch specs (what `fleet restart`, `fleet switch` and the usage-limit
+  hand-over replay) are now checked against a digest in
+  `~/.aisquare/launch-specs/`. The run that first makes the directory records
+  the specs already in the store, so agents running across the upgrade keep
+  their launch. A spec whose digest does not match, such as one changed since
+  or recorded by another aisquare, is not replayed: the replacement starts as
+  the role resolves today, and the command says so.
 - `fleet.roles.<role>.permission` is new and unset; an existing
   `permission_mode` (or Codex `sandbox` / `approval_policy` / `approve_for_me`)
   means what it did.
@@ -66,13 +73,15 @@ adapter.**
   <thread>`); a switch onto another account starts fresh with the hand-off
   prompt. `fleet stop` types `/exit`, so Codex's own `SessionEnd` releases the
   claims. `fleet tell` types into a waiting Codex agent and queues the message
-  for a busy one's next turn with `codex queue`. An agent that has had no prompt
+  for a busy one's next turn with `codex queue` (a message that starts with
+  `-` included). An agent that has had no prompt
   yet (asq Welcome's coders) is typed into once its pane shows Codex's empty
   prompt, never into its folder-trust or hook-review dialog. Every line the fleet
   types is one paste with its Enter a moment later, since Codex keeps an Enter
   inside a burst of keys as text, so a waiting Codex manager is woken like a
   Claude Code one. `/clear` keeps the row and moves the claims to the new
-  thread, and a `codex exec` a tool starts never takes its parent's row.
+  thread, and a `codex exec` a tool starts never takes its parent's row, a
+  Claude Code agent's included.
   `fleet spawn` gives a Codex role its `[agents.models.codex]` model and effort,
   a ui-tester on Codex gets no `--chrome`, and asq's pane sends shift+Enter to
   Codex as ctrl+J, its newline.
@@ -80,12 +89,17 @@ adapter.**
   ("Codex needs your approval") and a `request_user_input` ring the bell; one
   Codex's automatic reviewer decides under `--approve-for-me` does not, read
   from the session's rollout because Codex's hook payload is the same for both.
-  The bell holds while Codex redraws its approval view, until the command runs,
-  Esc, `Stop` or the next prompt.
+  The bell holds while Codex redraws its approval view and clears the moment
+  the human allows the command, when Codex's working line is back on its
+  screen, so a long approved command reads working while it runs.
 - **Codex's sandbox reaches the board.** The fleet runs a sandboxed Codex agent
   under a permission profile of its own, `aisquare`: Codex's `:workspace` (or
   `:read-only` for a reviewer) with the aisquare home writable and, inside it,
-  the account homes, credentials and config read-only. Its `aisquare` calls
+  what runs or chooses what runs outside the sandbox read-only: the account
+  homes, the config, credentials and keys, `fleet-tmux.conf` and `agents.json`.
+  The launch specs that restart, switch and the hand-over replay stay in the
+  store, so `fleet spawn` records each one's SHA-256 in `launch-specs/`, which
+  the sandbox can only read, and only a spec whose digest matches is replayed. Its `aisquare` calls
   succeed on the first, sandboxed attempt instead of each needing an approval,
   and a reviewer's verdict reaches the board while its worktree stays read-only.
   A `--sandbox` in a role's own native arguments replaces the profile. See
@@ -127,8 +141,12 @@ adapter.**
   loopback receiver, which `explainability ship` replays through the SDK. The
   receiver's token reaches Codex in its environment
   (`OTEL_EXPORTER_OTLP_LOGS_HEADERS`), never on its command line, where `ps`
-  would show it. An exporter you configured in the account home the launch runs
-  on is kept and AISquare stands down.
+  would show it. It is kept out of the shells Codex's tools run in
+  (`shell_environment_policy.exclude`, with your own patterns kept), so no app
+  you run there sends it on. An exporter you configured in the account home the
+  launch runs on is kept and AISquare stands down. So is your own value of that
+  variable, or your own `-c shell_environment_policy…`, and native tracing is
+  then off for the launch.
 - `aisquare upgrade` re-connects Codex's hooks in every connected Codex home and
   Codex account home, and says when Codex asks for them to be reviewed again;
   `aisquare uninstall` takes them out and names each Codex MCP server and plugin

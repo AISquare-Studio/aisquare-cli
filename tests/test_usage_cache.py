@@ -29,11 +29,7 @@ from aisquare.core.store import store_session
 from aisquare.models import ClaudeAccount, ClaudeUsage
 from aisquare.services import claude_accounts as service
 from tests.test_claude_accounts import NOW
-from tests.test_claude_accounts import fake_home as _redirected_home
 from tests.test_usage_aware_accounts import _payload, _slot, _Usage
-
-#: Re-exported so pytest collects it here (see tests/test_account_defaults.py).
-fake_home = _redirected_home
 
 
 def _reading(session: float | None, week: float | None = None, **more: Any) -> ClaudeUsage:

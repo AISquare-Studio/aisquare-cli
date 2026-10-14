@@ -2487,7 +2487,14 @@ def test_at_most_the_newest_500_dismissals_are_kept() -> None:
     assert f"ny_{599:016x}" not in kept and f"ny_{0:016x}" in kept, "the oldest go first"
 
 
-@pytest.mark.parametrize("body", ["not json", "[1, 2]", '{"dismissed": ["ny_1"]}'])
+_TOO_DEEP = "[" * 100_000 + "]" * 100_000
+"""JSON nested past the parser's depth: ``json.loads`` raises ``RecursionError`` on it, which
+escaped every reader and the writer (review of #259, round 6, 4/10)."""
+
+
+@pytest.mark.parametrize(
+    "body", ["not json", "[1, 2]", '{"dismissed": ["ny_1"]}', _TOO_DEEP], ids=lambda b: b[:16]
+)
 def test_an_unreadable_dismissals_file_dismisses_nothing(body: str) -> None:
     remote_needs_path().parent.mkdir(parents=True, exist_ok=True)
     remote_needs_path().write_text(body, encoding="utf-8")
@@ -2512,7 +2519,9 @@ _KEPT_BEFORE = {
         b"[1, 2]",
         b'{"dismissed": ["ny_1"]}',
         b'{"dismissed": {"ny_1": {"at": "2026-10-07T11:00:00+00:00"}}}',  # a later shape
+        _TOO_DEEP.encode(),
     ],
+    ids=lambda b: b[:16].decode(errors="replace"),
 )
 def test_a_needs_file_a_write_cannot_read_whole_is_kept_aside_not_overwritten(
     body: bytes, caplog: pytest.LogCaptureFixture
@@ -4511,9 +4520,9 @@ def test_under_a_team_hub_a_projects_rows_are_derived_again_in_one_look_at_tmux(
     looks: list[list[str]] = []
     observe = fleet_service._observe
 
-    def looked(srv: Any, tmux_session: str | None, agents: Any) -> Any:
+    def looked(srv: Any, tmux_session: str | None, agents: Any, reads: Any = None) -> Any:
         looks.append(sorted(agent.label for agent in agents))
-        return observe(srv, tmux_session, agents)
+        return observe(srv, tmux_session, agents, reads)
 
     tmux = FakeTmux()
     monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)

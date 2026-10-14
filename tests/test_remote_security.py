@@ -55,6 +55,7 @@ from aisquare.services.remote_server import (
     UNLOCK_WINDOW_SECONDS,
     WS_CLOSE_REMOTE_OFF,
     WS_CLOSE_UNAUTHORIZED,
+    RemoteError,
     RequestError,
     Runtime,
     Sources,
@@ -278,6 +279,27 @@ def test_a_second_ctrl_c_to_one_agent_within_3_s_is_a_double_press(
     clock.advance(seconds=EXIT_KEY_REPEAT_SECONDS)
     send({"agent": "coder-1", "keys": ["C-d"]})
     assert pane.sent == [("keys", "C-c"), ("keys", "C-c"), ("keys", "C-d")]
+
+
+def test_a_ctrl_c_whose_send_failed_is_no_first_press_for_the_double_press_guard(
+    pane: FakePane, clock: Clock
+) -> None:
+    """Review of #259, round 6, 5/10: the guard noted the press before the keys went out, so
+    a send that failed (400 ``write_failed``, nothing reached the pane) made the next tap
+    within 3 s a 409 ``double_press``, a second Ctrl-C "that exits Claude Code" though no
+    first one was ever delivered."""
+    send = live_writes().handlers["send-keys"]
+    pane.fail_keys = True
+    with pytest.raises(RequestError) as failed:
+        send({"agent": "coder-1", "keys": ["C-c"]})
+    assert (failed.value.status, failed.value.error) == (400, "write_failed")
+    pane.fail_keys = False
+    clock.advance(seconds=1)
+    send({"agent": "coder-1", "keys": ["C-c"]})  # the first Ctrl-C that reached the pane
+    assert pane.sent == [("keys", "C-c")]
+    with pytest.raises(RequestError) as again:  # the control: a delivered one still counts
+        send({"agent": "coder-1", "keys": ["C-c"]})
+    assert again.value.error == "double_press"
 
 
 def test_two_exit_keys_in_one_body_are_a_double_press_unless_confirmed(pane: FakePane) -> None:
@@ -843,6 +865,36 @@ def test_a_version_1_file_is_migrated_once(isolated_home: Path) -> None:
     assert migrated.password == raw["password"]
     again = Runtime(remote_state_path(), remote_audit_path())
     assert again.password == raw["password"], "once"
+
+
+@pytest.mark.parametrize("version", [3, "2", True, 2.0, None], ids=repr)
+def test_a_version_this_build_does_not_know_is_refused_never_migrated(
+    isolated_home: Path, version: object
+) -> None:
+    """Review of #259, round 6, 2/10: every ``version`` but the int 2 went to the version-1
+    migration, so a plain read (``asq remote status``, the R panel's first) of a later
+    release's file, or of a hand edit, wrote it back as version 2 with a new passphrase,
+    no devices and none of its other fields. Only a file with no version (what version 1
+    wrote) or 1 is migrated; any other is refused, untouched, and the error names it."""
+    remote_state_path().parent.mkdir(parents=True, exist_ok=True)
+    newer = {
+        "version": version,
+        "token": "T" * 32,
+        "password": "amber-river-cedar-delta",
+        "devices": [{"id": "dev_00000001", "digest": "d" * 64, "ua": "iPhone"}],
+        "future_field": {"kept": True},
+    }
+    remote_state_path().write_text(json.dumps(newer), encoding="utf-8")
+    before = remote_state_path().read_bytes()
+    with pytest.raises(RemoteError, match=rf"is version {re.escape(repr(version))}, which"):
+        Runtime(remote_state_path(), remote_audit_path())
+    assert remote_state_path().read_bytes() == before, "nothing was changed"
+
+    newer["version"] = 1  # what a version-1 file says, when it says anything
+    remote_state_path().write_text(json.dumps(newer), encoding="utf-8")
+    migrated = Runtime(remote_state_path(), remote_audit_path())
+    assert migrated.password != newer["password"]
+    assert json.loads(remote_state_path().read_bytes())["version"] == 2
 
 
 @pytest.mark.parametrize("value", ["false", "off", "no", "true", 1, ["on"]], ids=repr)

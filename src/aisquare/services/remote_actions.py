@@ -553,8 +553,9 @@ def action_pinned_call(
     recorded just after the check, and its ``NoSuchAgent`` was 404 ``no_such_agent``:
     the page said "That agent is gone." and left the agent's screen for the fleet,
     where coder-1 came back a moment later (sweep 4 of #243). Pinned, it is ``stale``,
-    as the lock's own check (:func:`action_gone`) and pinned keys answer it. A refusal
-    while the pinned row is still the live one is the fleet's, and keeps its mapping.
+    as the lock's own check (``remote_server.remote_agent_turn``) and pinned keys answer
+    it. A refusal while the pinned row is still the live one is the fleet's, and keeps its
+    mapping.
     """
     from aisquare.core.store import store_session
     from aisquare.services import fleet as fleet_service
@@ -591,14 +592,6 @@ def action_project(body: dict[str, Any]) -> ProjectInfo:
     return action_fleet_call(lambda: remote_server._resolve_project(ref))
 
 
-def action_newest_row(target: ProjectInfo, label: str) -> FleetAgent | None:
-    """The newest row holding ``label``, live or ended: the one a pinned ``agent_id`` names."""
-    from aisquare.core.store import store_session
-
-    with store_session() as store:
-        return store.fleet_agent_by_label(target.id, label, live_only=False)
-
-
 def action_stale(
     target: ProjectInfo, label: str, current: FleetAgent | None, *, escaped: bool = False
 ) -> RequestError:
@@ -607,57 +600,23 @@ def action_stale(
     ``escaped``: an Escape already went to the pinned agent's pane, and the
     sentence must not say that nothing was done.
     """
-    if current is None:
-        said = f"there is no agent {label!r} in {target.root.name or target.id} now"
-    else:
-        said = f"{label!r} is another agent now ({current.id})"
     done = "Escape was sent, nothing else was done" if escaped else "nothing was done"
-    return RequestError(
-        409,
-        "stale",
-        f"{said} — {done}",
-        current={"agent_id": None if current is None else current.id},
-    )
+    return remote_server.remote_stale(target, label, current, done=done)
 
 
-def action_gone(target: ProjectInfo, label: str, agent_id: str | None) -> RequestError:
-    """The refusal for a label no row holds: 409 ``stale`` when pinned, else 404."""
-    if agent_id is not None:
-        return action_stale(target, label, None)
-    return RequestError(
-        404,
-        "no_such_agent",
-        f"no agent {label!r} in {target.root.name or target.id} — "
-        "`aisquare fleet ls --all` shows every row",
-    )
+def action_locked(
+    target: ProjectInfo, label: str, agent_id: str | None
+) -> contextlib.AbstractContextManager[FleetAgent]:
+    """Hold the agent's one lock (409 ``busy`` while another action has it), and pin it: the
+    newest row holding the label, live or ended, the one a pinned ``agent_id`` names, read
+    under the lock and judged against the pin there (``remote_server.remote_agent_turn``).
 
-
-@contextlib.contextmanager
-def action_locked(target: ProjectInfo, label: str, agent_id: str | None) -> Iterator[FleetAgent]:
-    """Hold the agent's one lock (409 ``busy`` while another action has it), and pin it.
-
-    The label must name a row before a lock is made for it. The lock registry is
-    process-wide and never shrinks, and a label is whatever a body says.
-
-    The pin is checked under the lock, against the row read there. A second
-    request that passed an earlier read while the first one replaced the row must
-    not act on the replacement. The lock is this process's alone, so the fleet
-    call that follows gets the pin too, for a label handed on in between.
+    The lock is this process's alone, so the fleet call that follows gets the pin too, for
+    a label handed on in between.
     """
-    if action_newest_row(target, label) is None:
-        raise action_gone(target, label, agent_id)
-    lock = remote_server.remote_agent_lock(target.id, label)
-    if not lock.acquire(blocking=False):
-        raise RequestError(409, "busy", f"another action on {label} is still running")
-    try:
-        row = action_newest_row(target, label)
-        if row is None:
-            raise action_gone(target, label, agent_id)
-        if agent_id is not None and row.id != agent_id:
-            raise action_stale(target, label, row)
-        yield row
-    finally:
-        lock.release()
+    return remote_server.remote_agent_turn(
+        target, label, agent_id, live_only=False, done="nothing was done"
+    )
 
 
 # --- what the agent shows now ------------------------------------------------------------------

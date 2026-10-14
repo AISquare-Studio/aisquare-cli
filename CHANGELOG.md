@@ -295,7 +295,10 @@ all of them, and the fleet cleans up the worktrees it made.**
   server the agent's pane id names, which `stop`, `shutdown`, `reap` and
   `uninstall` compare before ending a row (see Fixed). An agent started before
   0.8.1 recorded none, and is judged as before. `fleet ls --json` carries the
-  field. 0.8.0 opens a v26 store as it is.
+  field. It also adds one index, `team_event_project_created`, on when each
+  board event was written, which the Remote needs feed reads its last day by
+  (a store an earlier 0.8.1 candidate made v26 gets it at its next open).
+  0.8.0 opens a v26 store as it is.
 - Remote keeps its state in `~/.aisquare`: `remote.json` (owner-only),
   `remote-audit.log`, `remote-needs.json` and `remote-push.json`. Each is
   written only once Remote is used. `aisquare uninstall --purge` removes them
@@ -331,7 +334,9 @@ all of them, and the fleet cleans up the worktrees it made.**
   beside the theme; the write switch is the server's, in `remote.json`, the one
   `asq remote allow-write` sets. No ngrok outlives the UI, however it ends. A
   Remote that was on comes back on at the next start, with writes off and a
-  notice that it is back and when auto-off comes; a dead ngrok is restarted
+  notice that it is back and when auto-off comes, unless its auto-off time
+  passed while the UI was gone (a closed terminal, a kill): then it stays off
+  and the notice says so; a dead ngrok is restarted
   within 30 s. With `AISQUARE_REMOTE_NGROK_URL`
   set, ngrok runs on that static domain (`--url=`), so the link survives.
 - **`asq remote serve [--port] [--auto-off MINUTES] [--public-url URL] [--dist DIR]`**,

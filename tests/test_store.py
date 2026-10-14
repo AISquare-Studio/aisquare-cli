@@ -2214,6 +2214,58 @@ def test_the_events_since_a_time_are_the_kinds_asked_for_from_that_time_on(
     assert store.team_events_since(PROJECT.id, since, kinds=[]) == []
 
 
+def test_the_events_since_a_time_do_not_take_seq_order_for_stamp_order(
+    store: ContextStore,
+) -> None:
+    """Review of #259, round 6, 6/10: both reads started from, or stopped at, the newest event
+    stamped before ``since``, as if ``seq`` order were stamp order. A clock stepped back an
+    hour (NTP, a VM's snapshot) writes seq 11 at 11:00 after seq 10 at 12:00, and asked from
+    11:30 the read began past seq 11 and never saw seq 10, a question for the human and an
+    agent's last attention among them, for as long as the window asked held it."""
+    from datetime import timedelta
+
+    noon = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
+    _board(
+        store,
+        PROJECT.id,
+        ("question", "ses_1", noon - timedelta(hours=3)),
+        ("question", "ses_1", noon),  # seq 2, stamped before the clock stepped back
+        ("attention", "ses_2", noon + timedelta(minutes=1)),
+        ("note", "ses_1", noon - timedelta(hours=1)),  # the clock stepped back an hour
+    )
+    since = noon - timedelta(minutes=30)
+    read = store.team_events_since(PROJECT.id, since, kinds=["question", "attention"])
+    assert [(e.kind, e.created_at) for e in read] == [
+        ("question", noon),
+        ("attention", noon + timedelta(minutes=1)),
+    ]
+    found = store.newest_session_event(PROJECT.id, "ses_2", "attention", since=since)
+    assert found is not None and found.created_at == noon + timedelta(minutes=1)
+
+
+def test_a_store_already_at_v26_without_the_board_stamps_index_gets_it_at_its_next_open() -> None:
+    """An earlier 0.8.1 candidate stamped v26 without ``team_event_project_created``: the
+    presence pass adds it, and the reads since a time are narrowed by it from then on."""
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.execute("DROP INDEX team_event_project_created")
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    finally:
+        raw.close()
+    with store_session() as store:
+        assert store.missing_schema() == []
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        plan = raw.execute(
+            "EXPLAIN QUERY PLAN SELECT * FROM team_event WHERE project_id = 'p' "
+            "AND created_at >= 'x' ORDER BY seq"
+        ).fetchall()
+    finally:
+        raw.close()
+    assert "team_event_project_created" in str(plan), plan
+
+
 def _short_and_long_boards(store: ContextStore, now: datetime) -> int:
     """``prj_short`` and ``prj_long``: the same last half hour, a question a minute, over 20
     and 2 000 older notes. Returns how many questions that half hour holds."""
@@ -2252,9 +2304,9 @@ def _steps(store: ContextStore, read: Callable[[], object]) -> int:
 def test_the_events_since_a_time_cost_that_time_not_the_boards_history(
     store: ContextStore,
 ) -> None:
-    """``created_at`` has no index, so filtered on it alone a read walks every event a board
-    ever had, which is never pruned. The read starts past the newest event written before
-    ``since``: a board with a hundred times the history costs the same to read."""
+    """Filtered on ``created_at`` with no index on it, a read walks every event a board ever
+    had, which is never pruned. The ``(project_id, created_at)`` index narrows it to the
+    events since ``since``: a board with a hundred times the history costs the same."""
     from datetime import timedelta
 
     now = datetime.now(tz=UTC)
@@ -2295,8 +2347,9 @@ def test_a_session_with_no_such_event_costs_the_time_asked_not_the_boards_histor
     store: ContextStore,
 ) -> None:
     """Asked by the session and the kind alone, a session that has no such event walked
-    every event its board ever had to say so, every few seconds. The walk stops at the first
-    event written before ``since``: a hundred times the history costs the same."""
+    every event its board ever had to say so, every few seconds. The ``(project_id,
+    created_at)`` index narrows it to the events since ``since``: a hundred times the
+    history costs the same."""
     from datetime import timedelta
 
     now = datetime.now(tz=UTC)

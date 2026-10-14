@@ -480,6 +480,26 @@ def _converge_v11_fork(connection: sqlite3.Connection) -> None:
     )
 
 
+def _index_board_stamps(connection: sqlite3.Connection) -> None:
+    """v25 → v26's index on when each board event was written, for the reads of the events
+    since a time that run every few seconds (``remote``'s needs scan). They started past
+    the newest event stamped before that time on the ``seq`` index, and skipped an event
+    written before a clock stepped back and stamped after the time asked (review of #259,
+    round 6, 6/10). A store at v26 without it, an earlier 0.8.1 candidate's, gets it from
+    the presence pass.
+
+    Only where ``team_event`` is: a missing table is not this step's business, as it is
+    not :func:`_add_column_if_absent`'s, and an index on it would leave the store
+    unopenable rather than one doctor names the missing table of.
+    """
+    query = "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'team_event'"
+    if connection.execute(query).fetchone() is not None:
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS team_event_project_created "
+            "ON team_event (project_id, created_at)"
+        )
+
+
 def _index_task_numbers(connection: sqlite3.Connection) -> None:
     """v29 → v30: at most one task per number on a board (partial: NULL is no number)."""
     query = "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'team_task'"
@@ -497,6 +517,7 @@ def _index_task_numbers(connection: sqlite3.Connection) -> None:
 _PREPARE: dict[int, Callable[[sqlite3.Connection], None]] = {
     11: _retire_v1_metric_table,
     12: _converge_v11_fork,
+    25: _index_board_stamps,
     29: _index_task_numbers,
 }
 
@@ -897,9 +918,10 @@ _SCHEMA_V25 = ""
 # (``#{start_time}``): the identity of the server its pane id names. A server that
 # answers at the row's socket but started at another time took the path from a server
 # that lost its socket file and may run on, so stop, shutdown, reap and uninstall hold
-# the row instead of ending it under its agent. The column is the whole step, so the
-# script is empty: it is in :data:`_PRODUCTS`; a row from before it keeps NULL, which
-# every reader takes as nothing recorded.
+# the row instead of ending it under its agent. The column is in :data:`_PRODUCTS`; a row
+# from before it keeps NULL, which every reader takes as nothing recorded. And an index on
+# when each board event was written (:func:`_index_board_stamps`, in :data:`_PREPARE`), so
+# the script is empty.
 _SCHEMA_V26 = ""
 # v27: a project's nickname — free text a person gives it, as they name a browser tab,
 # beside the codename that names its tmux session and branches and so stays constrained.
@@ -1008,7 +1030,7 @@ _PRODUCTS: dict[int, _Products] = {
     24: _Products(
         columns=(("fleet_agent", "socket_path", "TEXT"), ("fleet_agent", "boot_id", "TEXT"))
     ),
-    25: _Products(columns=(("fleet_agent", "server_started_at", "TEXT"),)),
+    25: _Products(("team_event_project_created",), (("fleet_agent", "server_started_at", "TEXT"),)),
     26: _Products(columns=(("project", "nickname", "TEXT"),)),
     27: _Products(columns=(("claude_usage", "token_fingerprint", "TEXT"),)),
     28: _Products(columns=(("team_task", "number", "INTEGER"),)),
@@ -2998,16 +3020,16 @@ class SqliteStore:
         ``human_kinds`` the human wrote (no session), oldest first.
 
         For a reader that runs every few seconds over the last day of a board (``remote``'s
-        needs scan), however busy that day was. ``created_at`` has no index, so a filter on
-        it alone walks every event the project ever had. Events are written in ``seq``
-        order, each stamped as it is written, so the read starts past the newest event
-        written before ``since``, found walking back from the newest on the ``(project_id,
-        seq)`` index: it costs the events since ``since``, not the project's history.
-        ``since`` compares as the stored ISO-8601 UTC strings do.
+        needs scan), however busy that day was: the ``(project_id, created_at)`` index
+        narrows it to the events since ``since``, not the project's history. Not by ``seq``:
+        the read started past the newest event stamped before ``since``, which took ``seq``
+        order for stamp order, and an event written before the clock stepped back (NTP, a
+        VM's snapshot) and stamped after ``since`` was skipped (review of #259, round 6,
+        6/10). ``since`` compares as the stored ISO-8601 UTC strings do.
         """
         moment = since.astimezone(UTC).isoformat()
         wanted: list[str] = []
-        params: list[str] = [project_id, project_id, moment, moment]
+        params: list[str] = [project_id, moment]
         if kinds:
             wanted.append(f"kind IN ({', '.join('?' * len(kinds))})")
             params += kinds
@@ -3017,9 +3039,7 @@ class SqliteStore:
         if not wanted:
             return []
         rows = self._conn.execute(
-            f"SELECT {_EVENT_COLUMNS} FROM team_event WHERE project_id = ? AND seq > COALESCE("
-            "(SELECT seq FROM team_event WHERE project_id = ? AND created_at < ? "
-            "ORDER BY seq DESC LIMIT 1), 0) "
+            f"SELECT {_EVENT_COLUMNS} FROM team_event WHERE project_id = ? "
             f"AND created_at >= ? AND ({' OR '.join(wanted)}) ORDER BY seq",
             params,
         ).fetchall()
@@ -3030,24 +3050,21 @@ class SqliteStore:
     ) -> TeamEvent | None:
         """The session's newest event of ``kind`` written at or after ``since``; ``None``.
 
-        For a reader that asks every few seconds (``remote``'s needs scan). It walks back
-        from the newest event on the ``(project_id, seq)`` index and stops at the first
-        that is either the one asked for or written before ``since``, so a session that
-        has no such event costs the events since ``since``: asked with a filter on the
-        session and the kind alone, it cost every event the project ever had, each time.
-        ``since`` compares as the stored ISO-8601 UTC strings do.
+        For a reader that asks every few seconds (``remote``'s needs scan): the
+        ``(project_id, created_at)`` index narrows it to the events since ``since``, so a
+        session that has no such event costs those, not every event the project ever had.
+        Not a walk back on ``seq`` that stops at the first event stamped before ``since``:
+        after a clock stepped back, that one can be newer than the event asked for, which
+        then went unseen (review of #259, round 6, 6/10). ``since`` compares as the stored
+        ISO-8601 UTC strings do.
         """
         moment = since.astimezone(UTC).isoformat()
         row = self._conn.execute(
-            f"SELECT {_EVENT_COLUMNS} FROM team_event WHERE project_id = ? "
-            "AND ((session_id = ? AND kind = ?) OR created_at < ?) ORDER BY seq DESC LIMIT 1",
+            f"SELECT {_EVENT_COLUMNS} FROM team_event WHERE project_id = ? AND session_id = ? "
+            "AND kind = ? AND created_at >= ? ORDER BY seq DESC LIMIT 1",
             (project_id, session_id, kind, moment),
         ).fetchone()
-        if row is None:
-            return None
-        event = _row_to_event(row)
-        asked = event.session_id == session_id and event.kind == kind and event.created_at >= since
-        return event if asked else None
+        return None if row is None else _row_to_event(row)
 
     def latest_seq(self, project_id: str) -> int:
         row = self._conn.execute(

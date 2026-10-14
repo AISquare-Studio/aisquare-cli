@@ -2310,6 +2310,41 @@ def test_a_remote_a_tui_start_brings_back_comes_back_read_only_and_says_so() -> 
     pressed.turn_off()
 
 
+def test_a_remote_whose_auto_off_passed_while_asq_was_down_stays_off_at_the_next_start() -> None:
+    """Review of #259, round 6, 1/10: a fleet UI ended by a closed terminal, a SIGKILL or a
+    crash after its deadline left the switch on and the deadline in ``remote.json``, and the
+    next ``asq`` put the public link back up with a fresh deadline, though the auto-off the
+    human picked had run out. That start saves the switch off and says so; a deadline still
+    ahead, or none (a clean quit clears it), brings Remote back as before."""
+    clock = datetime(2026, 10, 14, 9, 0, tzinfo=UTC)
+    server = fake_server()
+    update_state("remote_enabled", True)
+    server.server_auto_off_at = clock - timedelta(minutes=1)  # what the killed UI left
+    missed = RemoteController(
+        server=server, tunnel_factory=fake_tunnel_factory(url="x"), now=lambda: clock
+    )
+    heard = heard_news(missed)
+    missed.restore()
+    assert not missed.running and not server.running, "no server, no tunnel"
+    assert heard == [(remote_control.AUTO_OFF_MISSED, True)]
+    assert load_remote_state().remote_enabled is False
+    assert missed.status_line() == remote_control.AUTO_OFF_MISSED
+    after = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    after.restore()
+    assert not after.running, "the next start leaves it off too"
+
+    for left in (clock + timedelta(minutes=1), None):  # not passed, or a clean quit's none
+        update_state("remote_enabled", True)
+        server.server_auto_off_at = left
+        back = RemoteController(
+            server=server, tunnel_factory=fake_tunnel_factory(url="x"), now=lambda: clock
+        )
+        heard = heard_news(back)
+        back.restore()
+        assert back.running and heard[0][0].startswith("Remote is back on")
+        back.turn_off()
+
+
 def test_a_remote_another_process_serves_is_no_news_at_start_and_keeps_the_saved_switch() -> None:
     """A second fleet UI, or one started beside ``asq remote serve``, warned at every start
     that Remote "could not start — turn it off first", pointing at the Remote that was on,

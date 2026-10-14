@@ -2793,6 +2793,30 @@ def test_a_spawn_over_a_server_that_exited_leaves_its_rows_lost_not_held(
     assert [typed for typed in tmux.typed if typed[0] == receipt.agent.pane_id] == []
 
 
+def test_a_check_at_a_path_with_no_file_reads_the_fleets_socket_once(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 6, 7/10: `_refuse_a_freed_socket` read the fleet's socket again
+    right after `_before_a_server_starts` had read "gone" there, two reads a check where a
+    listening server costs one. The refusal stands on the one read; each row's own socket is
+    still asked, once (`_live_rows_here`)."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    coder = _coder(project)
+    tmux.running, tmux.socket_file = False, False  # a server that lost its socket file
+    asked: list[Path | None] = []
+    listener = tmux.listener
+
+    def counted(recorded: Path | None = None) -> SocketAnswer | None:
+        asked.append(recorded)
+        return listener(recorded)
+
+    monkeypatch.setattr(tmux, "listener", counted)
+    with pytest.raises(FleetError, match="lost its socket file"):
+        fleet_service._before_a_server_starts(tmux, fleet_service.settings())
+
+    assert asked == [tmux.socket_path(), coder.socket_path], asked
+
+
 def test_a_check_before_a_server_starts_reads_the_socket_once_and_a_spawn_says_both_checks(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3238,6 +3262,36 @@ def test_a_row_left_live_as_held_spares_no_session_on_the_server_that_took_its_s
     assert again.sessions_left_up == [f"asq:{session}"]
 
 
+@pytest.mark.parametrize(("answer", "spared"), [("answers", True), ("another", False)])
+def test_a_row_held_as_its_socket_answering_now_spares_its_session_from_a_late_take_down(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, answer: SocketAnswer, spared: bool
+) -> None:
+    """Review of #259, round 6, 3/10: a row whose socket was silent at the probe and answers
+    now (``"answers"``) is left live, held, and `_spared` dropped every held row. Its pane
+    may be on the server that came up, so a late row's take-down on that socket killed the
+    session of an agent the report said it left live. Only a row out of every client's
+    reach (``"another"``, a silent socket) spares nothing."""
+    config = fleet_service.settings()
+    held = _coder(project)
+    late = _coder(project)  # spawned during the run, exited on its own since
+    tmux.die(late.pane_id, 0)
+    unreached: dict[str, tuple[SocketAnswer, str, str]] = {held.id: (answer, "why", "do")}
+    report = fleet_service.ShutdownReport()
+    with store_session() as store:
+        named = store.get_project(project.id)  # with the codename its spawn gave it
+    assert named is not None
+
+    fleet_service._shutdown_row(
+        named, held, {}, report, force=False, grace=0, held=unreached, config=config
+    )
+    fleet_service._retire_late_panes([(named, late)], report, config)
+
+    assert [row.agent.id for row in report.failed] == [held.id]
+    session = f"asq-{_codename(project)}"
+    assert (session in tmux.sessions) is spared
+    assert (report.sessions_left_up == [_session_of(project)]) is spared
+
+
 @pytest.mark.parametrize("board", ["waiting", "working", "attention"])
 def test_a_held_row_reads_unknown_saying_why_whatever_its_fresh_board_says(
     tmux: FakeTmux,
@@ -3500,6 +3554,11 @@ def test_a_listing_asks_for_the_boot_only_for_rows_that_may_be_held_and_once_per
     monkeypatch.setattr(fleet_service, "server", lambda config=None: newcomer)
     assert all(status.held for status in fleet_service.list_agents(project))
     assert asked == {"id": 1, "started": 1}, "once each for the read, not once per row"
+    # Review of #259, round 6, 9/10: one cache of the boot per read, the one the rule asks
+    # (`SocketReads`), so a sweep's listing and its rule share the answer.
+    asked.update(id=0, started=0)
+    fleet_service.reap(project, server_down=True)
+    assert asked["id"] == 1, asked
 
 
 def test_the_one_rule_asks_each_server_once_per_read_not_once_per_row(

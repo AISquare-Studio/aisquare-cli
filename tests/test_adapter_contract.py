@@ -290,7 +290,11 @@ def test_every_installed_event_decodes_from_its_recorded_payload(adapter: AgentA
         assert decoded.kind in EVENT_KINDS
         for field, expected in case["expect"].items():
             value = getattr(decoded, field)
-            assert (str(value) if isinstance(value, Path) else value) == expected, (event, field)
+            # A path as this platform spells it: "/repo" is `\repo` on Windows.
+            assert value == (Path(expected) if isinstance(value, Path) else expected), (
+                event,
+                field,
+            )
     sample = next(iter(events.values()))["payload"]
     assert adapter.decode_event({**sample, "hook_event_name": "NoSuchEvent"}) is None
 

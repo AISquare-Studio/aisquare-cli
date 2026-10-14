@@ -101,6 +101,7 @@ class ClaudeCodeAdapter:
         assigns_session_id=True,
         ambient_first_run=True,
         reads_pane_readiness=True,
+        starts_at_its_prompt=True,
         resumes_across_homes=True,
         pid_env="CLAUDE_PID",
         exports_home_env=False,

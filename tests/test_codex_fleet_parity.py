@@ -837,6 +837,18 @@ def test_a_manager_that_is_working_keeps_its_news_for_its_own_stop(
     assert tmux.typed == [] and _owed(codex.project) is None
 
 
+def test_a_codex_start_comes_with_its_first_prompt_and_leaves_the_row_working(
+    codex_agent: tuple[Codex, TeamTask],
+) -> None:
+    """Codex fires SessionStart as its first prompt is submitted, not at rest at its
+    prompt (``starts_at_its_prompt`` is Claude Code's): the row is not made waiting."""
+    codex, _ = codex_agent
+    codex.start("thread-one")
+    with store_session() as store:
+        session = store.get_session(codex.board_id("thread-one"))
+    assert session is not None and session.state == "working"
+
+
 def test_claude_codes_hooks_leave_an_owed_nudge_alone(
     tmux: FakeTmux,  # noqa: F811
     claude_on_path: Path,  # noqa: F811

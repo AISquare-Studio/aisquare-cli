@@ -2896,6 +2896,15 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
     status = status_of(agent)
     adapter = recorded_adapter(agent.agent)
     srv = server_of(agent)
+    if adapter is not None and adapter.capabilities.starts_at_its_prompt and status.session is None:
+        # Quiet, and not at its prompt: Claude Code fires no hook at its folder-trust
+        # dialog, whose default an Enter picks — `No, exit` (2.1.300).
+        how = _file_note(project, label, text, sender)
+        return TellResult(
+            False,
+            f"its {adapter.label} session has not started (it fires no hook at its "
+            f"folder-trust dialog, where an Enter would exit it) — {how}",
+        )
     if not (adapter is not None and adapter.capabilities.reads_pane_readiness):
         # The agent's own hooks say what the pane cannot. A fresh "working" is a busy
         # agent, which takes the message through its own queue where it has one.

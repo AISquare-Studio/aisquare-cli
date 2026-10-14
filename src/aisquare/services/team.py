@@ -1462,6 +1462,19 @@ def hook_session_start(
         # ``source`` plays no part — see rule 1 of the fleet-row section.
         assigned = _assignment(store, session.id, project.id)
         store.renew_leases(session.id, now + timedelta(minutes=orchestrator.lease_minutes()))
+        adapter = recorded_adapter(agent)
+        if (
+            source != "compact"
+            and adapter is not None
+            and adapter.capabilities.starts_at_its_prompt
+        ):
+            # At its prompt, and nothing fires before its first one: the row's
+            # `working` was the column's default, so `fleet ls` read a fresh Claude Code
+            # agent as working for as long as it sat there, `fleet tell` filed a note
+            # instead of typing, and the nudge passed over a fresh manager (SMOKE2 on
+            # 2.1.300). A compaction comes mid-turn as often as not, and keeps it.
+            store.touch_session(session.id, state="waiting")
+            session = store.get_session(session.id) or session
         # Presence is board state, not feed traffic: /clear cycles, resumes and
         # ephemeral `claude -p` children would otherwise spam join/left pairs.
         return collision + _render_board(

@@ -2258,6 +2258,56 @@ def test_tell_does_not_type_into_a_pane_that_is_not_the_agent_yet(
     assert _events(project, "note") == [message], "no second note was filed"
 
 
+def test_a_fresh_claude_agent_waits_at_its_prompt_from_its_session_start(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SMOKE2 on Claude Code 2.1.300: a fresh agent sat at its empty prompt, its
+    ``SessionStart`` the one hook fired, and read ``working`` (the column's default)
+    until a human typed a first prompt, so ``tell`` filed a note and the nudge passed a
+    fresh manager over. Before that start nothing fires at all: its folder-trust dialog
+    sits as quiet as a prompt, and an Enter there picks ``No, exit`` (measured)."""
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    agent = _coder(project)
+    tmux.set_command(agent.pane_id, "claude")
+    assert agent.session_id is not None
+
+    at_the_dialog = fleet_service.tell(project, "coder-1", "please rebase")
+    assert not at_the_dialog.delivered and "has not started" in at_the_dialog.how
+    assert tmux.typed == [] and _events(project, "note") == ["please rebase"]
+
+    team_service.hook_session_start(agent.session_id, project.root, "startup")
+    assert fleet_service.status_of(agent).state == "waiting"
+    told = fleet_service.tell(project, "coder-1", "please rebase")
+    assert told.delivered and tmux.typed == [
+        (agent.pane_id, "paste", "please rebase"),
+        (agent.pane_id, "key", "Enter"),
+    ]
+    # Its first prompt makes it work; a compaction, mid-turn as often as not, keeps it so.
+    team_service.hook_prompt_heartbeat(agent.session_id, project.root)
+    team_service.hook_session_start(agent.session_id, project.root, "compact")
+    assert fleet_service.status_of(agent).state == "working"
+    # A /clear or a resume comes to rest at its prompt again.
+    for source in ("clear", "resume"):
+        team_service.hook_prompt_heartbeat(agent.session_id, project.root)
+        team_service.hook_session_start(agent.session_id, project.root, source)
+        assert fleet_service.status_of(agent).state == "waiting", source
+
+
+def test_a_fresh_claude_manager_is_nudged_before_its_first_prompt(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AISQUARE_ROLE", "manager")
+    manager = fleet_service.spawn(project, "manager").agent
+    tmux.set_command(manager.pane_id, "claude")
+    assert manager.session_id is not None
+    team_service.hook_session_start(manager.session_id, project.root, "startup")
+    assert fleet_service.nudge_manager(project.id, reason="task_review") is True
+    assert tmux.typed == [
+        (manager.pane_id, "paste", NUDGE_TEXT),
+        (manager.pane_id, "key", "Enter"),
+    ]
+
+
 def test_tell_an_unknown_label_is_no_such_agent(tmux: FakeTmux, project: ProjectInfo) -> None:
     with pytest.raises(NoSuchAgent, match="no live agent 'coder-9'"):
         fleet_service.tell(project, "coder-9", "hello")
@@ -6957,7 +7007,8 @@ def test_switch_moves_a_limited_agent_to_the_account_with_headroom_and_resumes_i
     with store_session() as store:
         revived = store.get_session(agent.session_id or "")
         still = store.get_task(task.id)
-    assert revived is not None and revived.ended_at is None and revived.state == "working"
+    # At its prompt, no longer limited: the line typed into it is its next prompt.
+    assert revived is not None and revived.ended_at is None and revived.state == "waiting"
     assert still is not None and still.status == "doing" and still.claimed_by == agent.session_id
 
 

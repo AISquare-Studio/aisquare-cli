@@ -88,6 +88,13 @@ class AgentCapabilities:
     """The fleet can tell from the pane that the agent sits at its prompt, so ``fleet
     tell`` types into a pane the listing reads as waiting; without it, only into one
     whose own hooks freshly say waiting (anything else is a board note)."""
+    starts_at_its_prompt: bool = False
+    """The agent's ``SessionStart`` fires as it comes to rest at its prompt, ready, and
+    nothing fires before it: Claude Code's, once its folder-trust dialog is answered
+    (measured on 2.1.300, where an Enter at that dialog picks its default, ``No, exit``).
+    A session that starts (not a compaction) is then ``waiting`` until a prompt says
+    otherwise, and one that has not started is not typed into. Codex's fires with its
+    first prompt."""
     idle_prompt_mark: str | None = None
     """What starts the last line of the agent's screen while it sits at an EMPTY prompt
     (Codex's footer ``? for shortcuts``, measured on 0.162.1; text in the prompt replaces

@@ -32,6 +32,7 @@ from aisquare.core.store import (
     damaged_store_recovery,
     is_corrupt_error,
     is_locked_error,
+    store_recovery,
 )
 from aisquare.services import agent_launch, explainability_ops
 from aisquare.services import claude_accounts as claude_accounts_service
@@ -84,7 +85,7 @@ def _fail_team(exc: Exception, ref: str | None = None) -> NoReturn:
         fail(
             damaged_store_message(exc),
             error="store_unopenable",
-            hint=damaged_store_recovery(),
+            hint=store_recovery(exc),
             detail=str(exc),
         )
     if isinstance(exc, sqlite3.Error) and is_corrupt_error(exc):

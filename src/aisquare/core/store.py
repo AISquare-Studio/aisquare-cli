@@ -4380,6 +4380,34 @@ class StoreUnopenable(sqlite3.DatabaseError):
     """
 
 
+def is_unreachable_error(exc: BaseException) -> bool:
+    """True when this process may not write the store: SQLite could not open the file
+    (``SQLITE_CANTOPEN``, how an agent's sandbox that leaves the aisquare home out answers
+    every board call, a read included: Codex 0.162.1) or may only read it
+    (``SQLITE_READONLY``, a directory without write permission). Nothing in the file is
+    damaged, so moving it aside would cost the board's history for nothing. A
+    :class:`StoreUnopenable` is judged by the error it wraps."""
+    cause = exc.__cause__ if isinstance(exc, StoreUnopenable) and exc.__cause__ else exc
+    code = getattr(cause, "sqlite_errorcode", None)
+    if code is not None:
+        return code & 0xFF in (sqlite3.SQLITE_CANTOPEN, sqlite3.SQLITE_READONLY)
+    text = str(exc).lower()
+    return "unable to open database file" in text or "readonly database" in text
+
+
+def store_recovery(exc: BaseException) -> str:
+    """The recovery for a store that would not open: :func:`damaged_store_recovery`,
+    unless the store was out of reach rather than damaged (:func:`is_unreachable_error`)."""
+    if not is_unreachable_error(exc):
+        return damaged_store_recovery()
+    return (
+        f"Leave it where it is: nothing in it is damaged, and this process may not write "
+        f"{paths.db_path().parent}. Inside an agent's sandbox, run the command outside it "
+        f"(an approval) — an `aisquare fleet` launch lets its agents reach the store — "
+        f"or give the directory back its permissions"
+    )
+
+
 def damaged_store_recovery() -> str:
     """The one recovery for a corrupt store, worded once and shared.
 
@@ -4410,9 +4438,7 @@ def damaged_store_message(exc: sqlite3.Error) -> str:
     via ``_fail_team`` — and three copies of a sentence is how doctor's
     remediation drifted from a working one in the first place.
     """
-    return (
-        f"the context store cannot be opened: {paths.db_path()} ({exc}). {damaged_store_recovery()}"
-    )
+    return f"the context store cannot be opened: {paths.db_path()} ({exc}). {store_recovery(exc)}"
 
 
 def damaged_data_message(exc: sqlite3.Error) -> str:

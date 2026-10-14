@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, Literal
 
 from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as claude_accounts_core
@@ -413,14 +413,18 @@ class ShutdownPlan:
     """``<socket>:<session>`` for every fleet session the kill phase would target."""
     absent_sockets: list[str] = field(default_factory=list)
     held: dict[str, str] = field(default_factory=dict)
-    """Rows on an absent socket the run would LEAVE LIVE, by id, with why: their agent may
-    still run (:func:`_unreached`). Under ``forget``, only those whose socket answers, which
-    it does not end."""
+    """Rows the run would LEAVE LIVE, by id, with why: their agent may still run where no
+    tmux client reaches it (:func:`_unreached`), on a socket that did not answer or one
+    another server answers. Under ``forget``, only those whose socket answers, which it
+    does not end."""
     lost: dict[str, str] = field(default_factory=dict)
-    """Rows the run would record lost, by id, with the socket no server answered on: its
-    name, or the path its server said it listened on (:func:`_address`). Under
-    :attr:`tmux_unusable`, every row not :attr:`held`, with the socket no tmux here could
-    ask."""
+    """Rows the run would record lost, by id, with their socket: its name, or the path its
+    server said it listened on (:func:`_address`). Those no server answered on, and under
+    ``forget`` those held, whether or not their socket answers; under
+    :attr:`tmux_unusable`, every row not :attr:`held`, unchecked."""
+    lost_why: dict[str, str] = field(default_factory=dict)
+    """Why the run would record each of :attr:`lost` lost, by id: the reason its report
+    gives the row (``ShutdownReport.recorded``)."""
     tmux_unusable: str | None = None
     """Why tmux is not usable here, for a ``forget`` plan: every row is then ended
     unchecked, on the operator's word, but for those in :attr:`held`, whose socket
@@ -3956,6 +3960,58 @@ def _row_that_went_away(agent: FleetAgent, reason: str, report: ShutdownReport) 
     _not_down(report, agent.project_id)
 
 
+@dataclass(frozen=True)
+class _Verdict:
+    """What ``shutdown`` does with one row (:func:`_shutdown_verdict`)."""
+
+    end: Literal["stop", "live", "lost"]
+    """``stop`` it through its server; leave it ``live``; or record it ``lost`` unstopped."""
+    reason: str = ""
+    """Why, as the run reports it: a row left live's reason (``ShutdownReport.failed``), or
+    the one a row recorded lost is ended with (``ShutdownReport.recorded``)."""
+    plan: str = ""
+    """Why, as the plan shows it (``ShutdownPlan.held``, ``ShutdownPlan.lost_why``)."""
+
+
+def _shutdown_verdict(
+    agent: FleetAgent,
+    answering: Mapping[_Address, bool],
+    held: Mapping[str, tuple[SocketAnswer, str, str]],
+    *,
+    forget: bool,
+    unusable: str | None,
+    config: FleetSettings | None = None,
+) -> _Verdict:
+    """What ``shutdown`` does with ``agent``'s row, the one verdict its plan shows and its run
+    carries out (:func:`shutdown_plan`, :func:`_shutdown_row`), so the two cannot disagree.
+
+    Stopped where its server answers. Recorded lost where none answers, unless its agent may
+    still run (``held``, :func:`_held_rows`): left live then, saying why and what to do, or
+    under ``forget`` ended on the operator's word, but never one whose socket answers (round
+    28 of #257). A row held on an answering socket is one whose server is another than the
+    one that answers there: left live, or ended on the word, as a row on a silent socket
+    is, and never stopped through the other server. The plan decided that last case apart:
+    under ``--forget`` it listed such a row neither as held nor as lost, so it said
+    ``stopped (%3)``, the other server's pane id, while the run recorded it lost (review of
+    #259, round 3; round 29 of #257 was the same mismatch for silent sockets).
+    """
+    address = _address(agent, config or settings())
+    unreached = held.get(agent.id)
+    if unusable is None and answering.get(address) and unreached is None:
+        return _Verdict("stop")
+    if unreached is not None and (unreached[0] == "answers" or not forget):
+        _, why, way = unreached
+        kept = ", which --forget does not end as a server answers there" if forget else ""
+        return _Verdict("live", f"{why} — left live{kept}: {way}", f"{why} — {way}")
+    if unusable is not None:
+        reason = f"ended on your word (--forget), unchecked: {unusable}"
+    elif unreached is None:
+        reason = f"no server answered on socket '{address}'"
+    else:
+        reason = f"ended on your word (--forget): {unreached[1]}"
+    return _Verdict("lost", reason, reason)
+
+
 def _shutdown_row(
     project: ProjectInfo,
     agent: FleetAgent,
@@ -3969,11 +4025,10 @@ def _shutdown_row(
     forget: bool = False,
     config: FleetSettings | None = None,
 ) -> None:
-    """Stop one row where its server answers; record it lost where it does not, unless its
-    agent may still run (``held``, :func:`_unreached`): left live then, saying why and what
-    to do, or under ``forget`` ended on the operator's word. Never one whose socket answers:
-    a server listens there, which is no word's to deny, and ``uninstall`` counts it, so
-    ending it let the next ``uninstall`` go on under it (round 28 of #257).
+    """Stop one row, leave it live or record it lost, as :func:`_shutdown_verdict` says, the
+    verdict the plan showed: never ending one whose socket answers, as a server listens
+    there, which is no word's to deny, and ``uninstall`` counts it, so ending it let the
+    next ``uninstall`` go on under it (round 28 of #257).
 
     ``stop``'s refusal is not swallowed. It refuses on exactly one verdict —
     ``_verify_gone`` looked again and the pane is VERIFIABLY still alive — which
@@ -3989,23 +4044,15 @@ def _shutdown_row(
     not be used under ``--forget`` (:func:`_shutdown_tmux`): no pane was asked, and only a
     row whose socket answers is kept.
     """
-    address = _address(agent, config or settings())
-    unreached = (held or {}).get(agent.id)
-    # A row held on an answering socket is one whose server is another than the one that
-    # answers there (`_held_rows`): left live, or ended on the operator's word, as a row on
-    # a silent socket is, and never stopped through the other server.
-    if unusable is not None or not answering.get(address) or unreached is not None:
-        if unreached is not None and (unreached[0] == "answers" or not forget):
-            _, why, way = unreached
-            kept = ", which --forget does not end as a server answers there" if forget else ""
-            report.failed.append(ShutdownRow(agent, f"{why} — left live{kept}: {way}"))
-            _not_down(report, agent.project_id)
-        elif unusable is not None:
-            _record_lost(agent, f"ended on your word (--forget), unchecked: {unusable}", report)
-        elif unreached is None:
-            _record_lost(agent, f"no server answered on socket '{address}'", report)
-        else:
-            _record_lost(agent, f"ended on your word (--forget): {unreached[1]}", report)
+    verdict = _shutdown_verdict(
+        agent, answering, held or {}, forget=forget, unusable=unusable, config=config
+    )
+    if verdict.end == "live":
+        report.failed.append(ShutdownRow(agent, verdict.reason))
+        _not_down(report, agent.project_id)
+        return
+    if verdict.end == "lost":
+        _record_lost(agent, verdict.reason, report)
         return
     try:
         # The snapshot's row is the row stopped — THAT pane, whatever label a
@@ -4343,31 +4390,29 @@ def shutdown_plan(project: ProjectInfo | None = None, *, forget: bool = False) -
     before anything is printed. A session query that fails AFTER a good probe refuses
     the same way: the operator confirms this list, so a list missing a session
     the run would still kill is worse than no list at all.
+
+    Each row's disposition is the run's own verdict (:func:`_shutdown_verdict`), so what
+    the plan says it stops, leaves live or records lost is what the run does with it.
     """
     config = settings()
     unusable = _shutdown_tmux(config, forget=forget)
     targets = _shutdown_targets(project)
+    rows = [agent for _, agents in targets for agent in agents]
     if unusable is not None:
-        rows = [agent for _, agents in targets for agent in agents]
-        held_live = {
-            agent_id: f"{why} — {way}"
-            for agent_id, (answer, why, way) in _held_rows(
-                targets, {}, config, unusable=True
-            ).items()
-            if answer == "answers"  # what --forget may not end (_shutdown_row)
-        }
-        return ShutdownPlan(
-            projects=[current for current, agents in targets if agents],
-            agents=rows,
-            tmux_unusable=unusable,
-            held=held_live,
-            # Every other row is ended unchecked (`_record_lost`), so the plan says so: a
-            # script reading `--json`'s `lost` saw nothing being ended (round 29 of #257).
-            lost={
-                agent.id: str(_address(agent, config))
-                for agent in rows
-                if agent.id not in held_live
-            },
+        # Every row but those whose socket answers is ended unchecked (`_record_lost`), so
+        # the plan says so: a script reading `--json`'s `lost` saw nothing being ended
+        # (round 29 of #257). Nothing is asked of tmux, and no session is killed.
+        return _planned(
+            ShutdownPlan(
+                projects=[current for current, agents in targets if agents],
+                agents=rows,
+                tmux_unusable=unusable,
+            ),
+            {},
+            _held_rows(targets, {}, config, unusable=True),
+            forget=forget,
+            unusable=unusable,
+            config=config,
         )
     sockets = _shutdown_sockets(targets, config)
     _refuse_from_inside(sockets, config)
@@ -4403,25 +4448,43 @@ def shutdown_plan(project: ProjectInfo | None = None, *, forget: bool = False) -
                 "to show a plan that may be short of what a shutdown would kill; try again "
                 "once tmux answers"
             ) from exc
-    held = {
-        agent_id: (why, way)
-        for agent_id, (answer, why, way) in _held_rows(targets, answering, config).items()
-        if not forget or answer == "answers"  # what --forget may not end (_shutdown_row)
-    }
-    rows = [agent for _, agents in targets for agent in agents]
-    addresses = {agent.id: _address(agent, config) for agent in rows}
-    return ShutdownPlan(
-        projects=[current for current, agents in targets if agents],
-        agents=rows,
-        sessions=sessions,
-        absent_sockets=[str(socket) for socket in sockets if not answering[socket]],
-        held={agent_id: f"{why} — {way}" for agent_id, (why, way) in held.items()},
-        lost={
-            agent.id: str(addresses[agent.id])
-            for agent in rows
-            if not answering[addresses[agent.id]] and agent.id not in held
-        },
+    return _planned(
+        ShutdownPlan(
+            projects=[current for current, agents in targets if agents],
+            agents=rows,
+            sessions=sessions,
+            absent_sockets=[str(socket) for socket in sockets if not answering[socket]],
+        ),
+        answering,
+        _held_rows(targets, answering, config),
+        forget=forget,
+        unusable=None,
+        config=config,
     )
+
+
+def _planned(
+    plan: ShutdownPlan,
+    answering: Mapping[_Address, bool],
+    held: Mapping[str, tuple[SocketAnswer, str, str]],
+    *,
+    forget: bool,
+    unusable: str | None,
+    config: FleetSettings,
+) -> ShutdownPlan:
+    """``plan`` with each of its rows' verdict (:func:`_shutdown_verdict`): those the run
+    leaves live in :attr:`ShutdownPlan.held`, those it records lost in
+    :attr:`ShutdownPlan.lost`, each with why; every other row is stopped."""
+    for agent in plan.agents:
+        verdict = _shutdown_verdict(
+            agent, answering, held, forget=forget, unusable=unusable, config=config
+        )
+        if verdict.end == "live":
+            plan.held[agent.id] = verdict.plan
+        elif verdict.end == "lost":
+            plan.lost[agent.id] = str(_address(agent, config))
+            plan.lost_why[agent.id] = verdict.plan
+    return plan
 
 
 def shutdown(

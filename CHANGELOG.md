@@ -349,8 +349,11 @@ and an aisquare that upgrades and uninstalls itself.**
   cannot reach, for agents you know are not running: a server whose socket
   file is gone, or every row where tmux cannot be used here, but never a row
   whose socket a server still answers on. Without it, `shutdown` leaves such a
-  row live and says what to do, as `aisquare uninstall` still counts it.
-  Uninstall names `--forget` for those rows, which it otherwise refused with no
+  row live and says what to do, as `aisquare uninstall` still counts it. The
+  plan it asks you to confirm reads the run's own verdict for each row: a row
+  another tmux server answers for is shown recorded lost under `--forget`,
+  never stopped, and `--json` carries the run's reason for each `lost` row
+  under `lost_why`. Uninstall names `--forget` for those rows, which it otherwise refused with no
   way out. Every fleet command (`fleet ls` and asq's tick, `tell`, `stop`,
   `restart`, `reap`, `shutdown`) and the doctor ask each agent's tmux server at
   the socket its row recorded, so one started under another `TMUX_TMPDIR` is

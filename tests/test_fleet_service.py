@@ -2891,6 +2891,70 @@ def test_a_row_whose_socket_another_server_took_is_held_not_ended(
     assert newcomer.killed == [] and newcomer.typed == []
 
 
+def _planned_ends(plan: fleet_service.ShutdownPlan) -> dict[str, str]:
+    """What a shutdown plan says it does with each row."""
+    return {
+        agent.id: "live" if agent.id in plan.held else "lost" if agent.id in plan.lost else "stop"
+        for agent in plan.agents
+    }
+
+
+def _ends(report: fleet_service.ShutdownReport) -> dict[str, str]:
+    """What a shutdown did with each row."""
+    return {
+        **{agent.id: "stop" for agent in report.stopped},
+        **{row.agent.id: "lost" for row in report.recorded},
+        **{row.agent.id: "live" for row in report.failed},
+    }
+
+
+def test_a_forget_plan_says_a_row_another_server_answers_for_is_recorded_lost_as_its_run_does(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    """Review of #259, round 3: under `--forget` the plan's filter dropped a row held as
+    another server's from `held`, and its `lost` covered only sockets that did not answer,
+    so `fleet shutdown --forget` printed `💤 coder-1 · … — stopped (%1)`, the other
+    server's pane id, and `--json`'s `lost` left it out, while the run recorded it lost
+    without stopping anything. Round 29 of #257 fixed the same mismatch for silent
+    sockets. The plan and the run now read one verdict per row, with or without the word."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    held = _coder(project)
+    newcomer = FakeTmux()  # took the socket: its %1 is another agent's
+    newcomer.started = tmux.started + timedelta(minutes=5)
+    newcomer.spawn_window("asq-elsewhere", name="coder-9", cwd=project.root, command=["c"])
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: newcomer)
+
+    for forget in (False, True):
+        own = _coder(project)  # on the newcomer, its own server: stopped either way
+        plan = fleet_service.shutdown_plan(project, forget=forget)
+        report = fleet_service.shutdown(project, forget=forget)
+        assert _planned_ends(plan) == _ends(report), (forget, plan, report)
+        assert _ends(report) == {held.id: "lost" if forget else "live", own.id: "stop"}
+
+    assert plan.lost == {held.id: str(fleet_service._address(held))}
+    [recorded] = report.recorded
+    assert plan.lost_why[held.id] == recorded.reason
+    assert recorded.reason.startswith("ended on your word (--forget): another tmux server")
+    # And the operator reads it so before confirming, in both shapes.
+    again = _coder(project, label="coder-1")  # a row held as before, once more
+    with store_session() as store:
+        store.upsert_fleet_agent(again.model_copy(update={"server_started_at": tmux.started}))
+    human = runner.invoke(app, ["fleet", "shutdown", "--forget", "-P", project.id])
+    machine = runner.invoke(app, ["--json", "fleet", "shutdown", "--forget", "-P", project.id])
+    assert human.exit_code == 0, human.output
+    said = " ".join(human.stdout.split())
+    assert "coder-1 · " in said and " — recorded lost: ended on your word (--forget): " in said
+    assert "stopped (" not in said, said
+    payload = json.loads(machine.stdout)
+    assert payload["lost"] == {again.id: str(fleet_service._address(again))}
+    assert payload["lost_why"][again.id].startswith("ended on your word (--forget): another")
+
+
 @pytest.mark.parametrize("board", ["waiting", "working", "attention"])
 def test_a_held_row_reads_unknown_saying_why_whatever_its_fresh_board_says(
     tmux: FakeTmux,

@@ -533,6 +533,7 @@ def _emit_shutdown_plan(plan: fleet_service.ShutdownPlan) -> None:
                     "absent_sockets": plan.absent_sockets,
                     "held": plan.held,
                     "lost": plan.lost,
+                    "lost_why": plan.lost_why,
                     "tmux_unusable": plan.tmux_unusable,
                 }
             )
@@ -561,10 +562,10 @@ def _emit_shutdown_plan(plan: fleet_service.ShutdownPlan) -> None:
         elif plan.tmux_unusable is not None:
             console.print(f"  ✗ {agent.label} · {where} — recorded lost, unchecked")
         elif agent.id in plan.lost:
-            console.print(
-                f"  ✗ {agent.label} · {where} — recorded lost "
-                f"(no server answers on '{plan.lost[agent.id]}')"
-            )
+            # The run's own reason: "no server answered on socket …", or, under --forget, the
+            # word that ends a row another server answers for (review of #259, round 3).
+            why = plan.lost_why.get(agent.id) or f"no server answers on '{plan.lost[agent.id]}'"
+            console.print(f"  ✗ {agent.label} · {where} — recorded lost: {why}")
         else:
             console.print(f"  💤 {agent.label} · {where} — stopped ({agent.pane_id})")
     for session in plan.sessions:

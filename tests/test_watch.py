@@ -910,3 +910,33 @@ def test_a_long_title_is_cut_to_the_table_and_the_detail_says_the_rest(
     assert len(narrow_title) < len(wide_title), "the title refits when the column narrows"
     assert wide_scroll == 0 and narrow_scroll == 0, "never a sideways scroll"
     assert detail.startswith(f"#{number} · doing · {task_id} · claimed by ")
+
+
+def test_question_mark_opens_the_boards_keys_and_its_icon_legend(
+    runner: CliRunner, work_dir: Path
+) -> None:
+    pytest.importorskip("textual", reason="the [tui] extra is not installed")
+    from textual.widgets import Static
+
+    from aisquare.cli import watch as watch_mod
+    from aisquare.cli.ui.board import STATUS_ICONS, BoardHelp
+
+    team_service.activate()
+
+    async def drive() -> tuple[bool, str, bool]:
+        app_cls = watch_mod._build_app_class(interval=60.0)
+        async with app_cls().run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("question_mark")
+            await pilot.pause()
+            opened = isinstance(pilot.app.screen, BoardHelp)
+            text = str(pilot.app.screen.query_one(Static).render())
+            await pilot.press("escape")
+            await pilot.pause()
+            return opened, text, isinstance(pilot.app.screen, BoardHelp)
+
+    opened, text, still_open = asyncio.run(drive())
+    assert opened and not still_open
+    for glyph, _style, meaning in STATUS_ICONS.values():
+        assert f"{glyph}" in text and meaning in text
+    assert "done archive" in text and "themes" in text

@@ -48,6 +48,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.coordinate import Coordinate
 from textual.geometry import Size
 from textual.message import Message
+from textual.screen import ModalScreen
 from textual.widgets import DataTable, OptionList, Static
 from textual.widgets.option_list import Option, OptionDoesNotExist
 from textual.worker import Worker, WorkerState
@@ -94,12 +95,38 @@ ICON_CELLS = 2
 TASK_COLUMNS = ("#", "st", "title")
 """The tasks table: the number on the board, the status icon, the title."""
 """The status column's width: the widest glyph, so every row's title starts at one column."""
+BOARD_KEYS: tuple[tuple[str, str], ...] = (
+    ("click Enter", "a task or feed line: its full content below"),
+    ("d", "the done archive · back to the open tasks"),
+    ("o", "the author's transcript at that moment"),
+    ("v  c", "freeze the feed to select text · copy it"),
+    ("a", "feed autoscroll on or off"),
+    ("b", "hide or show the tasks column"),
+    ("r", "refresh now"),
+    ("lines", "drag a line to resize; double-click resets it"),
+)
+"""The board's own keys, as the help screens list them."""
 
 
 def status_icon(status: str, *, waiting: bool = False) -> Text:
     """The status as its icon, coloured, padded to :data:`ICON_CELLS`."""
     glyph, style, _meaning = STATUS_ICONS.get(WAITING if waiting else status, ("?", "dim", ""))
     return Text(glyph + " " * max(0, ICON_CELLS - cell_len(glyph)), style=style)
+
+
+def board_help() -> Text:
+    """The board's keys and the icon legend, for a help screen."""
+    text = Text()
+    for key, what in BOARD_KEYS:
+        text.append(f"  {key:<11}", style="bold cyan")
+        text.append(f" {what}\n")
+    text.append("\n  task icons\n", style="bold")
+    for state, (glyph, style, meaning) in STATUS_ICONS.items():
+        text.append("  ")
+        text.append(glyph + " " * max(0, ICON_CELLS - cell_len(glyph)), style=style)
+        text.append(f"  {meaning}", style="dim" if state == "dropped" else "")
+        text.append("\n")
+    return text
 
 
 class PickableTable(DataTable[Text]):
@@ -173,6 +200,45 @@ def _number_cell(task: TeamTask) -> Text:
     if task.number is not None:
         return Text(str(task.number))
     return Text(task.id[-8:], style="dim")
+
+
+class BoardHelp(ModalScreen[None]):
+    """``aisquare board -w``'s keys and the task icons; Esc, q or ? closes.
+
+    The fleet UI's own help screen prints the same :func:`board_help` under its
+    "Board" section; ``extra`` is the hosting app's keys (a theme picker, quit).
+    """
+
+    CSS = """
+    BoardHelp { align: center middle; }
+    #boardhelpbox { width: 72; height: auto; max-height: 90%; border: heavy $accent;
+                    background: $surface; padding: 1 2; }
+    #boardhelpbox Static { height: auto; }
+    """
+    BINDINGS: ClassVar = [
+        ("escape", "close_help", "close"),
+        ("q", "close_help", "close"),
+        ("question_mark", "close_help", "close"),
+    ]
+
+    def __init__(self, extra: tuple[tuple[str, str], ...] = ()) -> None:
+        super().__init__()
+        self._extra = extra
+
+    def compose(self) -> ComposeResult:
+        text = Text("aisquare board — keys\n\n", style="bold")
+        text.append_text(board_help())
+        if self._extra:
+            text.append("\n")
+            for key, what in self._extra:
+                text.append(f"  {key:<11}", style="bold cyan")
+                text.append(f" {what}\n")
+        text.append("\nEsc closes this", style="dim")
+        with VerticalScroll(id="boardhelpbox"):
+            yield Static(text)
+
+    def action_close_help(self) -> None:
+        self.dismiss(None)
 
 
 class BoardColumn(Vertical):

@@ -44,7 +44,7 @@ from rich.text import Text
 from textual import events
 from textual.app import ComposeResult, SystemCommand
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, VerticalScroll
 from textual.css.query import NoMatches
 from textual.dom import DOMNode
 from textual.message import Message
@@ -57,6 +57,7 @@ from textual.worker import Worker, WorkerState, WorkType
 from textual.worker_manager import WorkerManager
 
 from aisquare.cli.ui.autosave import Autosave
+from aisquare.cli.ui.board import board_help
 from aisquare.cli.ui.divider import Divider, floor_of
 from aisquare.cli.ui.groups import (
     DropGroup,
@@ -213,8 +214,9 @@ class HelpScreen(ModalScreen[None]):
 
     CSS = """
     HelpScreen { align: center middle; }
-    #helpbox { width: 64; height: auto; border: heavy $accent; background: $surface;
-               padding: 1 2; }
+    #helpbox { width: 78; height: auto; max-height: 90%; border: heavy $accent;
+               background: $surface; padding: 1 2; }
+    #helpbox Static { height: auto; }
     """
     BINDINGS: ClassVar = [
         ("escape", "close_help", "close"),
@@ -253,11 +255,14 @@ class HelpScreen(ModalScreen[None]):
             ("+  w", "onboard a project · back to the Welcome page"),
             ("F1", "command palette"),
             ("q", "quit — from the sidebar; inside a pane every key goes to the agent"),
+            ("?", "this help — from anywhere but an agent's pane"),
         ):
             text.append(f"  {key:<11}", style="bold cyan")
             text.append(f" {what}\n")
+        text.append("\nBoard (a project's Board tab, and aisquare board -w)\n", style="bold")
+        text.append_text(board_help())
         text.append("\nEsc closes this", style="dim")
-        with Vertical(id="helpbox"):
+        with VerticalScroll(id="helpbox"):
             yield Static(text)
 
     def action_close_help(self) -> None:
@@ -534,7 +539,6 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             "pick_theme",
             "remote_panel",
             "refresh_now",
-            "help",
             "command_palette",
             "change_theme",
             "toggle_captured",
@@ -708,6 +712,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         unquittable (at mount the sidebar has focus, so this is only the
         fallback).
         """
+        if action == "help":
+            # `?` from anywhere it is not typing: the board, a form's button, a list —
+            # never an agent's pane, where every key is the agent's. An Input keeps it
+            # itself (``check_consume_key``).
+            focused = self.focused
+            return focused is None or not any(
+                isinstance(node, TerminalPane) for node in (focused, *focused.ancestors)
+            )
         if action not in self.SIDEBAR_ACTIONS:
             return True
         focused = self.focused

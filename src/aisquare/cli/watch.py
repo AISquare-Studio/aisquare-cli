@@ -296,13 +296,14 @@ def _build_app_class(interval: float) -> Any:
     """
     from textual.app import App as TextualApp
     from textual.app import ComposeResult
+    from textual.binding import Binding
     from textual.containers import Vertical
     from textual.screen import ModalScreen
     from textual.widgets import Footer, OptionList, Static
     from textual.widgets.option_list import Option
 
     from aisquare.cli.ui.autosave import Autosave
-    from aisquare.cli.ui.board import BoardPanel
+    from aisquare.cli.ui.board import BoardHelp, BoardPanel
     from aisquare.cli.ui.theme import theme_autosave
 
     class ThemePicker(ModalScreen[None]):
@@ -352,6 +353,7 @@ def _build_app_class(interval: float) -> Any:
             ("q", "quit", "quit"),
             ("t", "pick_theme", "themes"),
             ("s", "screenshot", "screenshot"),
+            Binding("question_mark", "help", "help", key_display="?"),
         ]
 
         @property
@@ -384,6 +386,18 @@ def _build_app_class(interval: float) -> Any:
 
         def action_pick_theme(self) -> None:
             self.push_screen(ThemePicker())
+
+        def action_help(self) -> None:
+            """``?``: the board's keys and what each task icon means."""
+            self.push_screen(
+                BoardHelp(
+                    (
+                        ("t", "themes (applied live, autosaved)"),
+                        ("s", "save a screenshot of the board"),
+                        ("q", "quit"),
+                    )
+                )
+            )
 
         def action_change_theme(self) -> None:
             # The command palette's "Change theme" lands here — route it to

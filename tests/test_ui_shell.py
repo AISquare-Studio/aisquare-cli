@@ -1915,11 +1915,16 @@ def test_the_app_keys_are_refused_while_focus_is_in_a_view(tmp_path: Path, scrip
     reached the app's binding and exited the fleet UI — taking the unsaved form
     with it (measured against the running app: ``q`` with the Settings tab's
     permission-mode ``Select`` focused set ``_exit``). The sidebar is the
-    control: there the very same keys still quit, theme and help.
+    control: there the very same keys still quit, theme and help. ``?`` is the one
+    exception: help opens from a form too — it neither quits nor changes anything,
+    and it is how the board's icons are explained (an agent's pane still gets it:
+    ``test_q_quits_from_the_sidebar_but_reaches_a_focused_terminal_pane``).
     """
     seed(tmp_path, ("prj_a", "alpha", None))
 
-    async def go(pilot: Pilot[None]) -> tuple[list[str], list[int | None], list[str], int | None]:
+    async def go(
+        pilot: Pilot[None],
+    ) -> tuple[list[str], list[int | None], list[str], list[str], int | None]:
         app = fleet_app(pilot)
         button, switch = Button("save", id="probe-button"), Switch(id="probe-switch")
         await app.content.add_content(Vertical(button, switch, id="probe-form"), set_current=True)
@@ -1927,14 +1932,20 @@ def test_the_app_keys_are_refused_while_focus_is_in_a_view(tmp_path: Path, scrip
         focused: list[str] = []
         codes: list[int | None] = []
         screens: list[str] = []
+        helps: list[str] = []
         for widget in (button, switch):
             widget.focus()
             await pilot.pause()
             focused.append(type(app.focused).__name__)
-            await pilot.press("q", "t", "question_mark", "f1")
+            await pilot.press("q", "t", "f1")
             await settle(app)  # a refused key has bubbled all the way up and been refused
             codes.append(app.return_code)
             screens.append(type(app.screen).__name__)
+            await pilot.press("question_mark")
+            await settle(app)
+            helps.append(type(app.screen).__name__)
+            await pilot.press("escape")
+            await settle(app)
         # The rule is "focus is IN the sidebar", not "focus IS the sidebar": a
         # focusable row would keep the keys live. The sidebar has none today, so
         # the probe is synthetic on purpose — it exercises the rule, not a widget.
@@ -1958,14 +1969,15 @@ def test_the_app_keys_are_refused_while_focus_is_in_a_view(tmp_path: Path, scrip
         await settle(app)
         await pilot.press("q")
         await settle(app)
-        return focused, codes, screens, app.return_code
+        return focused, codes, screens, helps, app.return_code
 
-    focused, codes, screens, quit_code = drive(go)
+    focused, codes, screens, helps, quit_code = drive(go)
     # The claim first: a quit here also stops the rest of the probe, and the
     # reader should read "q quit from a form", not "the second probe lost focus".
     assert codes == [None, None], "q in a form must not quit the fleet UI"
     assert focused == ["Button", "Switch", "Button"]  # the probes really had focus
     assert screens == ["PaneScreen", "PaneScreen", "HelpScreen", "HelpScreen"]
+    assert helps == ["HelpScreen", "HelpScreen"], "? opens help from a form as well"
     assert quit_code == 0  # …and the sidebar still quits
 
 
@@ -2006,6 +2018,42 @@ def test_help_opens_from_the_sidebar_and_closes(tmp_path: Path, script: Script) 
     # the one place they are found (review of #171, round 1).
     for key in ("shift+↑ ↓", "g p space", "shift+click", "drag title"):
         assert key in keys, key
+
+
+def test_help_opens_from_the_board_and_explains_every_task_icon(
+    tmp_path: Path, script: Script
+) -> None:
+    """``?`` was live only from the sidebar, so the board's icons had nowhere to be explained
+    from where they are seen. From the tasks table it opens the help, whose Board section
+    lists the board's keys and one line per icon — the mapping the table draws from."""
+    from aisquare.cli.ui.board import STATUS_ICONS
+
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> tuple[str, bool, str]:
+        app = fleet_app(pilot)
+        await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
+        await settle(app)
+        view = app.current_view()
+        assert isinstance(view, ProjectView)
+        view.active = "tab-board"
+        await settle(app)
+        view.query_one("#tasks").focus()
+        await pilot.pause()
+        focused = type(app.focused).__name__
+        await pilot.press("question_mark")
+        await settle(app)
+        opened = isinstance(app.screen, HelpScreen)
+        text = shown(app.screen.query_one("#helpbox Static", Static)) if opened else ""
+        return focused, opened, text
+
+    focused, opened, text = drive(go)
+    assert focused == "PickableTable", "the premise: the keyboard is on the board's tasks"
+    assert opened
+    board = text[text.index("Board") :]
+    for glyph, _style, meaning in STATUS_ICONS.values():
+        assert glyph in board and meaning in board, meaning
+    assert "done archive" in board and "drag a line to resize" in board
 
 
 def test_keyboard_cursor_walks_the_rows_and_enter_activates(tmp_path: Path, script: Script) -> None:

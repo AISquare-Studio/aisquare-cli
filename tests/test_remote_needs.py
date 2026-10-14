@@ -256,7 +256,9 @@ def test_rule_1_a_held_row_is_one_lost_card_saying_why_whatever_its_board_says()
     fresh = _session(row, state="attention")
     stale = _session(row, state="attention", seen=NOW - timedelta(hours=1))
     held = [
-        fleet_service._status(row, session, {row.id: None}, None, NOW, FleetSettings())
+        fleet_service._status(
+            row, session, {row.id: fleet_service.HELD}, None, NOW, FleetSettings()
+        )
         for session in (fresh, stale)
     ]
     assert all(status.held for status in held)
@@ -1452,7 +1454,9 @@ def test_a_row_held_as_another_servers_does_not_silence_the_server_that_answered
     was not answering. A held row's server answered; on its own it is no outage either."""
     old, new = _row("coder-1"), _row("coder-2")
     stale = _session(old, state="working", seen=NOW - timedelta(hours=1))
-    held = fleet_service._status(old, stale, {old.id: None}, None, NOW, FleetSettings())
+    held = fleet_service._status(
+        old, stale, {old.id: fleet_service.HELD}, None, NOW, FleetSettings()
+    )
     assert (held.state, held.detail, held.held) == ("unknown", fleet_service.ANOTHER_SERVER, True)
     fleet = Fleet(agents=[held, _status(new, "attention", _session(new, state="attention"))])
 

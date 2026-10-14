@@ -2892,6 +2892,40 @@ def test_a_row_whose_socket_another_server_took_is_held_not_ended(
     assert newcomer.killed == [] and newcomer.typed == []
 
 
+def test_a_held_row_is_held_in_its_servers_view_not_absent_from_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 3: in what `_observe` returns, `None` under a row's id meant
+    held, and a missing id meant its pane is gone, so a reader that did `.get(agent.id)`
+    without `_own_view` took a held row for a gone one; `reap` was safe only because
+    `_view` screened the row first. A held row is `HELD`, which no `.get()` gives for a
+    gone pane, and the one accessor that reads a pane refuses it."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    coder = _coder(project)
+    session = f"asq-{_codename(project)}"
+    newcomer = FakeTmux()  # took the socket, and gave %1 to another agent
+    newcomer.started = tmux.started + timedelta(minutes=5)
+    newcomer.spawn_window(session, name="other", cwd=project.root, command=["claude"])
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: newcomer)
+
+    views = fleet_service._observe_sockets([coder], session)
+
+    [observed] = views.values()
+    assert observed is not None and observed.get(coder.id) is fleet_service.HELD
+    assert fleet_service._own_view(coder, observed) is None
+    assert fleet_service._held_by_another(coder, observed)
+    with pytest.raises(FleetError, match="held as another server's"):
+        fleet_service._pane_in(coder, observed)
+    # The readers of the raw map claim nothing for it, though its id is a pane that died.
+    newcomer.die(coder.pane_id, 0)
+    dead = fleet_service._observe_sockets([coder], session)
+    assert fleet_service._lingering_windows([coder], dead) == {}
+    assert fleet_service._end_dead_rows([coder], dead) == []
+    with store_session() as store:
+        assert [a.id for a in store.fleet_agents(project.id, live_only=True)] == [coder.id]
+
+
 def _planned_ends(plan: fleet_service.ShutdownPlan) -> dict[str, str]:
     """What a shutdown plan says it does with each row."""
     return {

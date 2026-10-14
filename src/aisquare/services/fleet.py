@@ -1009,10 +1009,28 @@ class _PaneView:
     when tmux did not say."""
 
 
-_Observed = dict[str, "_PaneView | None"]
-"""What one server said, by row id: the facts of the row's pane; ``None`` for a row whose
-server is NOT the one that answered at its socket (:func:`_observe`), which is held as
-unasked; and no entry for a row whose pane is gone."""
+class _Held:
+    """What :func:`_observe` says of a live row whose server is NOT the one that answered at its
+    socket: held as unasked (:func:`_on_another_server`), its agent perhaps running where no
+    tmux client reaches it. :data:`HELD` is the one instance."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "HELD"
+
+
+HELD = _Held()
+"""Under a held row's id in :data:`_Observed`. Not ``None``, which is what a plain ``.get()``
+gives for a row whose pane is gone too: held rows were ``None`` there, so a reader that took
+the map's word without :func:`_own_view` read a held row as gone, and ended it under its
+running agent; ``reap`` was safe only because :func:`_view` screened the row first (review of
+#259, round 3). A reader that reaches a pane's facts now has to say what a held row is."""
+
+_Observed = dict[str, "_PaneView | _Held"]
+"""What one server said, by row id: the facts of the row's pane; :data:`HELD` for a row whose
+server is NOT the one that answered at its socket (:func:`_observe`); and no entry for a row
+whose pane is gone."""
 
 
 def _agent_running(current_command: str) -> bool:
@@ -1184,7 +1202,7 @@ def _observe(
 
     A live row the answering server is NOT the server of — one that recorded its
     server's start, and this one started at another time, in the same boot — is
-    HELD, as ``None`` under its id: its server lost its socket file to this one and
+    HELD, as :data:`HELD` under its id: its server lost its socket file to this one and
     may run on where no client reaches it, so nothing reads it as lost or ends it
     (:func:`_on_another_server`). Readers take it through :func:`_own_view`, which
     answers ``None`` for it, as for a server that could not be asked.
@@ -1231,7 +1249,7 @@ def _observe(
             if agent.id in seen and not _outlived(agent, started):
                 views[agent.id] = seen[agent.id]
             elif agent.ended_at is None and _on_another_server(agent, started, boot):
-                views[agent.id] = None
+                views[agent.id] = HELD
         return views
     except TmuxError:
         return None
@@ -1280,16 +1298,26 @@ def _view(
 def _own_view(agent: FleetAgent, observed: _Observed | None) -> _Observed | None:
     """``observed`` as ``agent``'s own server's word, or ``None`` when it is not: the server
     could not be asked, or it is another server than the row's, which :func:`_observe`
-    holds under the row's id as ``None``. The one way a reader takes a server's answer for
-    a row, so none of them reads a held row as a pane that is gone."""
-    if observed is None or (agent.id in observed and observed[agent.id] is None):
+    holds under the row's id as :data:`HELD`. The one way a reader takes a server's answer
+    for a row, so none of them reads a held row as a pane that is gone."""
+    if observed is None or _held_by_another(agent, observed):
         return None
     return observed
 
 
 def _held_by_another(agent: FleetAgent, observed: _Observed | None) -> bool:
     """Whether ``observed`` holds ``agent`` as a row of another server's (:func:`_observe`)."""
-    return observed is not None and agent.id in observed and observed[agent.id] is None
+    return observed is not None and observed.get(agent.id) is HELD
+
+
+def _pane_in(agent: FleetAgent, observed: _Observed) -> _PaneView | None:
+    """``agent``'s pane in its own server's word (:func:`_own_view`), or ``None`` when that
+    server holds none: the pane is gone. A held row's entry is no pane, and it is not gone:
+    a caller that did not screen it out raises here, rather than end it under its agent."""
+    pane = observed.get(agent.id)
+    if isinstance(pane, _Held):
+        raise FleetError(f"{agent.label}'s row is held as another server's: not its own view")
+    return pane
 
 
 def _exit_detail(status: int | None) -> str | None:
@@ -1424,7 +1452,7 @@ def _status(
     # its id, which is the one fact that decides its state and detail below.
     held = _held_by_another(agent, observed)
     observed = _own_view(agent, observed)
-    pane = observed.get(agent.id) if observed is not None else None
+    pane = _pane_in(agent, observed) if observed is not None else None
     state, detail = _derive(agent, session, pane, observed=observed is not None, now=now, held=held)
     return FleetAgentStatus(
         agent=agent,
@@ -2772,7 +2800,7 @@ def _end_dead_rows(
         for agent in agents
         if agent.ended_at is None
         and (observed := _view(agent, views, config, addresses)) is not None
-        and (pane := observed.get(agent.id)) is not None
+        and (pane := _pane_in(agent, observed)) is not None
         and pane.dead
     ]
     if not dead:
@@ -2835,8 +2863,8 @@ def _lingering_windows(
         address = _where(agent, config, addresses)
         observed = views.get(address)
         pane = observed.get(agent.id) if observed else None
-        if pane is None or not pane.dead:
-            continue
+        if not isinstance(pane, _PaneView) or not pane.dead:
+            continue  # no pane, or a held row's (HELD), whose id is another agent's there
         key = (address, agent.pane_id)
         held = owners.get(key)
         if held is None or (
@@ -5572,7 +5600,7 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
                     observed = _view(agent, views, config)
                     if observed is None:
                         continue  # that server could not be asked: nothing is marked
-                    pane = observed.get(agent.id)
+                    pane = _pane_in(agent, observed)
                     if (pane is None or pane.dead) and _handed_over(
                         agent,
                         store.get_session(agent.session_id) if agent.session_id else None,
@@ -5639,7 +5667,7 @@ def _hold_on_absent_server(
             agent, config, this_boot, forget="`aisquare fleet shutdown --forget`", reads=reads
         )
         if unreached is not None:
-            view[agent.id] = None
+            view[agent.id] = HELD
             report.held.append(ShutdownRow(agent, f"{unreached[1]} — left live: {unreached[2]}"))
     return view
 

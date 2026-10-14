@@ -89,7 +89,7 @@ that reads at a glance.**
     not known.
   - The claude dot is the room **left** across your usable accounts. Each
     account is `100 − max(session % used, week % used)`, and the dot shows the
-    average: green over 50 %, yellow 25–50 %, orange 5–25 %, red under 5 %,
+    average: green over 50 %, yellow 25–50 %, orange-red 5–25 %, red under 5 %,
     💀 none left. Grey means usage could not be read: offline, a login only in
     the macOS Keychain, or no usable account.
   - `N×` counts the usable accounts. ⚠ says an enabled account needs a login:

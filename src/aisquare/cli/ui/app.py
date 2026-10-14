@@ -72,6 +72,8 @@ from aisquare.cli.ui.groups import (
 from aisquare.cli.ui.project_menu import PIN, REMOVE, RENAME, SETTINGS, ConfirmRemove, ProjectMenu
 from aisquare.cli.ui.remote_control import SWITCHES, RemoteController, ngrok_ends_with
 from aisquare.cli.ui.sidebar import (
+    HEADROOM_DOT,
+    RED,
     SETTINGS_KEY,
     TIMES,
     AccountsSelected,
@@ -295,18 +297,22 @@ class HelpScreen(ModalScreen[None]):
         text.append("  usable Claude accounts; the dot is the room LEFT across them:\n")
         text.append("     each account 100 - max(session % used, week % used), averaged —\n")
         text.append("     ")
-        text.append("●", style="green")
-        text.append(" over 50 %  ")
-        text.append("●", style="yellow")
-        text.append(" 25-50 %  ")
-        text.append("●", style="dark_orange")
-        text.append(" 5-25 %  ")
-        text.append("●", style="red")
-        text.append(" under 5 %  💀 none left  ")
-        text.append("●", style="grey50")
+        # The line's own dots, so the legend paints exactly what the line does.
+        for level, what in (
+            ("good", "over 50 %"),
+            ("fair", "25-50 %"),
+            ("low", "5-25 %"),
+            ("critical", "under 5 %"),
+        ):
+            dot, colour = HEADROOM_DOT[level]
+            text.append(dot, style=colour)
+            text.append(f" {what}  ")
+        text.append("💀 none left  ")
+        dot, colour = HEADROOM_DOT["unknown"]
+        text.append(dot, style=colour)
         text.append(" usage could not be read (offline, Keychain-only, nothing usable)\n")
         text.append("     ")
-        text.append("●", style="red")
+        text.append("●", style=RED)
         text.append(" and ⚠ — accounts that need a login (signed out, token expired or refused);\n")
         text.append("     the dot is red when no account is usable for want of one\n")
         text.append("\nEsc closes this", style="dim")

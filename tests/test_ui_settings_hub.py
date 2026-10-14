@@ -13,6 +13,8 @@ be in focus".
 from __future__ import annotations
 
 import asyncio
+import itertools
+import math
 import threading
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
@@ -20,13 +22,19 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 import pytest
+from textual.color import Color, rgb_to_lab
+from textual.geometry import Region
 from textual.pilot import Pilot
 from textual.widgets import Button, Static
 
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.sidebar import (
+    GREEN,
+    ORANGE_RED,
+    RED,
     SETTINGS_KEY,
     TIMES,
+    YELLOW,
     OthersSection,
     SettingsRow,
     StatusLine,
@@ -51,6 +59,7 @@ from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from tests.test_claude_accounts import _sign_in
 from tests.test_ui_accounts import _overview, _status
+from tests.test_ui_shell import composited
 from tests.ui_workers import settle_page, settle_until
 
 T = TypeVar("T")
@@ -373,17 +382,17 @@ def test_the_doctor_page_names_the_project_its_checks_are_about(
 @pytest.mark.parametrize(
     ("summary", "dot", "colour"),
     [
-        (HeadroomSummary(level="good", percent_left=80.0, usable=3), "●", "green"),
-        (HeadroomSummary(level="fair", percent_left=40.0, usable=2), "●", "yellow"),
-        (HeadroomSummary(level="low", percent_left=10.0, usable=2), "●", "dark_orange"),
-        (HeadroomSummary(level="critical", percent_left=2.0, usable=1), "●", "red"),
+        (HeadroomSummary(level="good", percent_left=80.0, usable=3), "●", GREEN),
+        (HeadroomSummary(level="fair", percent_left=40.0, usable=2), "●", YELLOW),
+        (HeadroomSummary(level="low", percent_left=10.0, usable=2), "●", ORANGE_RED),
+        (HeadroomSummary(level="critical", percent_left=2.0, usable=1), "●", RED),
         (HeadroomSummary(level="empty", percent_left=0.0, usable=2), "💀", ""),
         # Offline, a Keychain login, no usable account: nothing READ — grey, not a skull.
         (HeadroomSummary(level="empty"), "●", "grey50"),
         (HeadroomSummary(level="unknown"), "●", "grey50"),
         (None, "●", "grey50"),
         # Nothing usable because each account needs a login: something to do, so red.
-        (HeadroomSummary(level="empty", needs_login=2), "●", "red"),
+        (HeadroomSummary(level="empty", needs_login=2), "●", RED),
     ],
     ids=[
         "good",
@@ -407,9 +416,7 @@ def test_the_claude_dot_follows_the_headroom_level(
         assert f"{summary.usable}{TIMES} claude" in text.plain
 
 
-@pytest.mark.parametrize(
-    ("aisquare", "colour"), [(True, "green"), (False, "red"), (None, "grey50")]
-)
+@pytest.mark.parametrize(("aisquare", "colour"), [(True, GREEN), (False, RED), (None, "grey50")])
 def test_the_aisquare_dot_is_the_sign_in(aisquare: bool | None, colour: str) -> None:
     text = status_line_text(aisquare, GOOD)
     assert text.plain.startswith("● aisquare")
@@ -430,6 +437,46 @@ def test_the_line_paints_the_injected_headroom() -> None:
         return _shown(_app(pilot).query_one(StatusLine))
 
     assert _drive(go, headroom=lambda accounts: critical) == f"● aisquare  ● 2{TIMES} claude ⚠"
+
+
+def _delta_e(one: Color, other: Color) -> float:
+    """CIE76: the distance in Lab, where about 2.3 is the least an eye tells apart."""
+    a, b = rgb_to_lab(one), rgb_to_lab(other)
+    return math.dist((a.L, a.a, a.b), (b.L, b.a, b.b))
+
+
+def test_each_band_paints_a_dot_its_neighbours_cannot_be_taken_for() -> None:
+    """The colour the eye gets — the composited strip, the theme applied — band by band, in
+    a dark theme and a light one. ``yellow`` was the theme's to paint: textual-dark's is
+    #fd971f, an orange beside the 5-25 % band's #ff8700, so 40 % left read as 10 % left
+    (validator of PR #261, MAJOR 2: ΔE 10; textual-light's pair was ΔE 28). Each band is
+    ΔE 35 or more from the next, and 0 % is the skull."""
+    bands = {75.0: "good", 40.0: "fair", 15.0: "low", 3.0: "critical"}
+
+    async def go(pilot: Pilot[None]) -> tuple[dict[str, list[Color]], list[str]]:
+        app = _app(pilot)
+        line = app.query_one(StatusLine)
+        seen: dict[str, list[Color]] = {}
+        skulls: list[str] = []
+        for theme in ("textual-dark", "textual-light"):
+            app.theme = theme
+            for left, level in bands.items():
+                app.sidebar.show_headroom(HeadroomSummary(level=level, percent_left=left, usable=2))
+                await pilot.pause()
+                (strip,) = line.render_lines(Region(0, 0, line.size.width, 1))
+                _aisquare, claude = [segment for segment in strip if "●" in segment.text]
+                assert claude.style is not None and claude.style.color is not None
+                seen.setdefault(theme, []).append(Color.from_rich_color(claude.style.color))
+            app.sidebar.show_headroom(HeadroomSummary(level="empty", percent_left=0.0, usable=2))
+            await pilot.pause()
+            skulls.append(composited(line))
+        return seen, skulls
+
+    seen, skulls = _drive(go)
+    for theme, colours in seen.items():
+        gaps = [round(_delta_e(one, other)) for one, other in itertools.pairwise(colours)]
+        assert min(gaps) >= 35, (theme, [colour.hex for colour in colours], gaps)
+    assert all("💀" in skull for skull in skulls), skulls
 
 
 def test_the_headroom_is_read_at_start_and_never_on_the_refresh_tick() -> None:
@@ -533,7 +580,7 @@ def test_every_account_signed_out_is_a_red_dot_and_a_warning_not_grey(fake_home:
         go, headroom=accounts_service.read_fleet_headroom, accounts=accounts_service.overview
     )
     assert line.endswith(f"● 0{TIMES} claude ⚠"), line
-    assert headroom_dot(headroom) == ("●", "red")
+    assert headroom_dot(headroom) == ("●", RED)
 
 
 def test_a_page_change_to_the_accounts_reads_the_headroom_again() -> None:

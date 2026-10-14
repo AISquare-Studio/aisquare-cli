@@ -248,11 +248,17 @@ SETTINGS_KEY = "settings"
 SETTINGS_ICON = "\u2699\ufe0e"
 """⚙ in its text presentation (VS15): a monotone gear, never the coloured emoji."""
 
+GREEN, YELLOW, ORANGE_RED, RED = "#3fb950", "#e6c200", "#ff5f00", "#dc143c"
+"""The status line's dot colours, as truecolor: an ANSI name is the THEME's to paint.
+Textual paints ``yellow`` through the theme's ANSI palette — textual-dark's is an
+orange, #fd971f — so the 25-50 % dot sat beside the 5-25 % one's #ff8700 and the
+two read as one (validator of PR #261). Neighbouring bands are ΔE 42 or more apart."""
+
 HEADROOM_DOT: dict[str, tuple[str, str]] = {
-    "good": ("●", "green"),
-    "fair": ("●", "yellow"),
-    "low": ("●", "dark_orange"),
-    "critical": ("●", "red"),
+    "good": ("●", GREEN),
+    "fair": ("●", YELLOW),
+    "low": ("●", ORANGE_RED),
+    "critical": ("●", RED),
     "empty": ("💀", ""),
     "unknown": ("●", "grey50"),
 }
@@ -271,7 +277,7 @@ def headroom_dot(headroom: HeadroomSummary | None) -> tuple[str, str]:
     ``percent_left`` is offline, a Keychain login or no usable account — not a fleet at 0 %.
     """
     if headroom is not None and headroom.usable == 0 and headroom.needs_login:
-        return ("●", "red")
+        return ("●", RED)
     if headroom is None or (headroom.level == "empty" and headroom.percent_left is None):
         return HEADROOM_DOT["unknown"]
     return HEADROOM_DOT[headroom.level]
@@ -286,7 +292,7 @@ def status_line_text(aisquare: bool | None, headroom: HeadroomSummary | None) ->
     the first summary lands.
     """
     text = Text(no_wrap=True, overflow="ellipsis")
-    colour = "grey50" if aisquare is None else "green" if aisquare else "red"
+    colour = "grey50" if aisquare is None else GREEN if aisquare else RED
     text.append("● ", style=colour)
     text.append("aisquare", style="dim")
     text.append("  ")

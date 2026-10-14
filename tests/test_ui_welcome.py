@@ -1512,7 +1512,7 @@ def doctor_lines(app: FleetApp) -> list[str]:
     ]
 
 
-def test_connect_brings_the_sidebars_doctor_section_up_to_date(
+def test_connect_brings_the_shells_doctor_report_up_to_date(
     captain: str | None,
     fleet_rows: dict[str, list[FleetAgentStatus]],
     scripted: Callable[[Machine], None],
@@ -1520,9 +1520,9 @@ def test_connect_brings_the_sidebars_doctor_section_up_to_date(
 ) -> None:
     """Connect is the doctor's own fix, run from Welcome, and the shell's report follows it.
 
-    It never told the shell, so the sidebar kept "⚠ claude-code: … hooks are missing"
+    It never told the shell, so the report kept "⚠ claude-code: … hooks are missing"
     under a step 2 that said connected, until ``r`` or a selection ran the checks again
-    (review of #257). A fix in the Doctor view has always refreshed the section.
+    (review of #257). A fix in the Doctor view has always refreshed it.
     """
     machine, _ = _ready_machine(tmp_path, claude=[UNHOOKED])
     scripted(machine)
@@ -1555,20 +1555,20 @@ def test_connect_brings_the_sidebars_doctor_section_up_to_date(
     assert after == [], "the report dropped the warning Connect answered"
 
 
-def test_the_sidebars_doctor_answers_for_the_project_step_one_chose(
+def test_the_doctor_answers_for_the_project_step_one_chose(
     captain: str | None,
     fleet_rows: dict[str, list[FleetAgentStatus]],
     scripted: Callable[[Machine], None],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Step 2 answers for the project step 1 chose, and the sidebar's Doctor answered for the
-    folder asq started in. With a project-scope plugin in one and not the other, the sidebar
-    warned "hooks are missing" under a step 2 that said connected, and its Connect would
-    have installed them for every repository (review of #257). While Welcome is shown the
-    Doctor answers for its project; once Choose another clears it, for the folder asq
-    started in; on another page, for the project that page shows. None of those runs the
-    checks — only start-up did — and opening the Doctor page runs them for that scope."""
+    """Step 2 answers for the project step 1 chose, and the Doctor answered for the folder
+    asq started in. With a project-scope plugin in one and not the other, the Doctor warned
+    "hooks are missing" under a step 2 that said connected, and its Connect would have
+    installed them for every repository (review of #257). While Welcome is shown the
+    Doctor's scope is its project; once Choose another clears it, the folder asq started
+    in; on another page, the project that page shows. None of those runs the checks —
+    only start-up did — and the Doctor page opened afterwards runs them for that scope."""
     alpha = ProjectInfo(id="prj_alpha", root=tmp_path / "alpha", onboarded_at=T0)
     beta = ProjectInfo(id="prj_beta", root=tmp_path / "beta", onboarded_at=T0)
     with store_session() as store:
@@ -1615,6 +1615,42 @@ def test_the_sidebars_doctor_answers_for_the_project_step_one_chose(
     assert back == (alpha.id, [None]), "back on Welcome, the project step 2 is about"
     assert cleared == (None, [None])
     assert opened == (alpha.id, [None, alpha.root]), "the page runs them, for that project"
+
+
+def test_back_on_welcome_in_the_same_frame_the_doctor_still_takes_its_project(
+    captain: str | None,
+    fleet_rows: dict[str, list[FleetAgentStatus]],
+    scripted: Callable[[Machine], None],
+    tmp_path: Path,
+) -> None:
+    """The page said which project step 1 is on only from its ``on_show``, and Textual
+    sends ``Show`` by comparing one layout with the next: hidden and shown again before
+    the screen's next layout pass, the page got none, and the doctor kept the scope of
+    the page just left — for good, not for a frame (~1 in 6 runs of this file, at the
+    test above's "back on Welcome"). Here every time: the switch away and back is made
+    before any layout pass runs."""
+    alpha = ProjectInfo(id="prj_alpha", root=tmp_path / "alpha", onboarded_at=T0)
+    beta = ProjectInfo(id="prj_beta", root=tmp_path / "beta", onboarded_at=T0)
+    with store_session() as store:
+        for project in (alpha, beta):
+            project.root.mkdir()
+            store.onboard_project(ProjectInfo(id=project.id, root=project.root))
+    listed = tuple(Candidate(root=p.root, is_git=True, project=p) for p in (alpha, beta))
+    machine = Machine(claude=[READY], found=Candidates(items=listed))
+    scripted(machine)
+
+    async def go(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> list[str | None]:
+        first_candidate(page).press()  # Use alpha
+        await settle_page(app)
+        await app.on_project_selected(ProjectSelected(beta.id))  # handled: no layout yet
+        away = app.doctor_scope
+        await app.action_welcome()  # `w`, in the same frame
+        await settle_page(app)
+        return [away, app.doctor_scope]
+
+    away, back = in_shell(machine, go)
+    assert away == beta.id, "control: the other page's project"
+    assert back == alpha.id, "back on Welcome, the project step 2 is about"
 
 
 def test_step_one_reads_the_shells_frame_not_a_second_store_open(

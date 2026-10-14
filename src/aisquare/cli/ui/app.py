@@ -1628,6 +1628,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         await self._show("welcome")
         self.sidebar.select(None)
         self._remember_selection(None)
+        # The page says which project step 1 is on from its ``on_show``, but Textual sends
+        # ``Show`` by comparing one layout with the next: a page hidden and shown again
+        # before the next layout pass is sent none, and the doctor kept the scope of the
+        # page just left (~1 in 6 runs of the welcome tests). Asked here as well.
+        self.query_one(WelcomeView).tell_chosen()
 
     def on_welcome_view_progress(self, event: WelcomeView.Progress) -> None:
         """Welcome added a project or started an agent: the sidebar shows it now."""

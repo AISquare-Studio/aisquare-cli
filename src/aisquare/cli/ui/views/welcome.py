@@ -494,11 +494,16 @@ class WelcomeView(VerticalScroll):
             self.look(full=True)
             self.find_candidates()
         self._shown = True
-        self._tell_chosen()
+        self.tell_chosen()
         self.paint()
 
-    def _tell_chosen(self) -> None:
-        """Tell the shell which project step 1 is on (:class:`Chosen`)."""
+    def tell_chosen(self) -> None:
+        """Tell the shell which project step 1 is on (:class:`Chosen`).
+
+        The page says it as it is shown, from :meth:`on_show`; the shell asks for it too
+        when it switches back here (``FleetApp.action_welcome``), since a page hidden and
+        shown again before the screen's next layout pass is sent no ``Show``.
+        """
         self.post_message(self.Chosen(self.project.id if self.project is not None else None))
 
     # ------------------------------------------------------------------ workers
@@ -680,7 +685,7 @@ class WelcomeView(VerticalScroll):
             # *Choose another*, or aimed step 3 at it mid-onboarding (review of #257).
             self.project = first.project
             self._follow_project()
-            self._tell_chosen()
+            self.tell_chosen()
         self._show_candidates()
 
     # ------------------------------------------------------------------ step 1
@@ -818,7 +823,7 @@ class WelcomeView(VerticalScroll):
         self.project = project
         self.project_note = None
         self._follow_project()
-        self._tell_chosen()
+        self.tell_chosen()
         self.paint()
 
     # ------------------------------------------------------------------ buttons
@@ -844,7 +849,7 @@ class WelcomeView(VerticalScroll):
                 self.project = None
                 self.steps = {}
                 self.fleet_error = None
-                self._tell_chosen()
+                self.tell_chosen()
                 self.paint()
         elif button.id == "claude-check":
             self.look(full=True)

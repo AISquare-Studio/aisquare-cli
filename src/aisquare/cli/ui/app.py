@@ -1644,7 +1644,8 @@ REMOTE_QUIT_QUIET_SECONDS = 0.5
 def run_ui(**options: Any) -> None:
     """Run the fleet UI until the user quits; then say what its last saves could not land,
     see out a phone's write that still runs, saying so (a Ctrl-C there quits at once), and
-    hand the terminal to the command Update or Uninstall asked for, if one did.
+    hand the terminal to the command Update or Uninstall asked for, if one did, once the R
+    panel's own writes of ``remote.json`` have landed.
 
     A Remote that was on stops on a thread of its own at quit (``on_unmount``), so the
     screen did not freeze while uvicorn and ngrok wound down; the process waits for
@@ -1661,12 +1662,20 @@ def run_ui(**options: Any) -> None:
     app = FleetApp(**options)
     with ngrok_ends_with():
         app.run()
+        # Read with getattr so an app still needs only `run()`, `unsaved` and `remote` to be
+        # run here.
+        hand_off = getattr(app, "hand_off", None)
         for line in app.unsaved:
             stderr_console().print(f"⚠ {line}", markup=False, highlight=False)
         try:
             if not app.remote.wait_until_off(REMOTE_QUIT_QUIET_SECONDS):
                 stderr_console().print("stopping Remote (its server and ngrok)…", markup=False)
                 app.remote.wait_until_off()
+            if hand_off is not None:
+                # The R panel's writes of remote.json (the write switch, a revoke) run on a
+                # thread an exit joins and the exec skips; the stop above waited for them
+                # only when this asq served Remote (round 4 of #259).
+                app.remote.writes_done()
         except KeyboardInterrupt:
             try:  # the thread that would stop ngrok ends with the process
                 app.remote.stop_tunnel_now()
@@ -1674,10 +1683,8 @@ def run_ui(**options: Any) -> None:
                 remote_server._remote_quit_now()
         # A phone's write still running would hold the exit as long as it runs: said, not silent.
         remote_server.remote_wait_for_writes()
-    # The terminal is ours again, and Remote, its ngrok and the phones' writes are done: give
-    # it to the command, whose exec skips what an exit would run. Read with getattr so an app
-    # still needs only `run()`, `unsaved` and `remote` to be run here.
-    hand_off = getattr(app, "hand_off", None)
+    # The terminal is ours again, and Remote, its ngrok, the panel's writes and the phones'
+    # are done: give it to the command, whose exec skips what an exit would run.
     if hand_off is not None:
         from aisquare.core import selfcli
 

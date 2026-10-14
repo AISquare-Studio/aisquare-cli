@@ -997,6 +997,10 @@ def test_run_ui_hands_over_only_once_remote_and_the_phones_writes_are_done(
             order.append("remote off")
             return True
 
+        def writes_done(self, timeout: float | None = None) -> bool:
+            order.append("the panel's writes")
+            return True
+
     monkeypatch.setattr(
         ui_app, "FleetApp", lambda **_options: _FakeApp(("upgrade", "--reopen"), _Stopping())
     )
@@ -1005,7 +1009,41 @@ def test_run_ui_hands_over_only_once_remote_and_the_phones_writes_are_done(
 
     ui_app.run_ui()
 
-    assert order == ["remote off", "writes", "upgrade --reopen"]
+    assert order == ["remote off", "the panel's writes", "writes", "upgrade --reopen"]
+
+
+def test_run_ui_hands_over_only_once_the_r_panels_writes_have_landed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 4 of #259: the R panel writes ``remote.json`` on a thread of its own, which an exit
+    joins and ``exec_self`` skips. A quit stops nothing when this asq serves no Remote (it is
+    off, or ``aisquare remote serve`` serves it), so nothing waited for a write still waiting
+    on ``remote.json.lock``, and Update dropped it: the write switch the panel showed off
+    stayed on for the phones, and the device it revoked stayed signed in."""
+    from tests.test_remote_control import LockedServer
+
+    server = LockedServer()
+    remote = RemoteController(server=server)
+    remote.set_allow_write(False, wait=False)
+    remote.revoke_device("dev_0000000a", wait=False)
+    assert server.waiting.wait(5), "the switch's write waits for the lock"
+    landed: list[bool] = []
+
+    class _Quit(_FakeApp):
+        def run(self) -> None:
+            self.remote.shutdown_for_exit(wait=False)  # what on_unmount does
+            threading.Timer(0.3, server.free.set).start()
+
+    monkeypatch.setattr(ui_app, "FleetApp", lambda **_options: _Quit(("upgrade",), remote))
+    monkeypatch.setattr(remote_server, "remote_wait_for_writes", lambda: None)
+    monkeypatch.setattr(selfcli, "exec_self", lambda args: landed.append(remote.writes_done(0)))
+    try:
+        ui_app.run_ui()
+    finally:
+        server.free.set()
+
+    assert landed == [True], "the exec came before the panel's writes landed"
+    assert server.allow_write_calls == [False] and server.revoked == ["dev_0000000a"]
 
 
 # --------------------------------------------------------------------------- the exec

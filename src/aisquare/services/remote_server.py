@@ -1038,6 +1038,13 @@ _BLANK_STATE = b" \t\r\n\x00"
 reached the disk and the data did not (``core.state_file`` reads its file the same way)."""
 
 
+def _known_state_version(version: object) -> bool:
+    """Whether ``remote.json``'s ``version`` is one :meth:`Runtime._load_state` can take:
+    :data:`STATE_VERSION`, or 1, which :meth:`_State.migrated` was written for. Never a
+    JSON ``true``, which Python counts as 1."""
+    return type(version) is int and version in (1, STATE_VERSION)
+
+
 def _encoded_state(state: _State) -> bytes:
     """The exact bytes of ``remote.json`` for ``state``: what is written, and what a file
     already written this way compares equal to."""
@@ -1349,6 +1356,14 @@ class Runtime:
                 f"{self._state_path} is not a JSON object — nothing was changed; fix it, "
                 "or move it aside to start over with a new link and password"
             )
+        if "version" in raw and not _known_state_version(raw["version"]):
+            # A later release's file, or a hand edit: migrated as version 1, it lost its
+            # passphrase and every device to a mere read (review of #259, round 6, 2/10).
+            raise RemoteError(
+                f"{self._state_path} is version {raw['version']!r}, which this aisquare does "
+                f"not know (it reads {STATE_VERSION}) — nothing was changed; upgrade "
+                "aisquare, or move the file aside to start over with a new link and password"
+            )
         return data, raw
 
     def _load_state(self) -> _State:
@@ -1358,9 +1373,10 @@ class Runtime:
         that reads the file (``asq remote status``, every CLI toggle) used to rewrite
         it from its own snapshot, and one landing inside a server's unlock dropped
         the device that had just unlocked. A missing or empty file is made and a
-        version-1 one migrated, each under the file lock and re-read there first, so
-        two processes starting at once settle on one file; any other file is refused
-        (:meth:`_read_state_file`), never replaced.
+        version-1 one (no ``version``, as that build wrote it) migrated, each under
+        the file lock and re-read there first, so two processes starting at once
+        settle on one file; any other file is refused (:meth:`_read_state_file`),
+        never replaced.
         """
         found = self._read_state_file()
         if found is not None and found[1].get("version") == STATE_VERSION:

@@ -266,7 +266,11 @@ has passed, since a parked agent fires no hook); otherwise tmux's facts (a dead
 pane → exited with its code; activity → working; else waiting); no pane at all → lost; `· unknown`
 when neither source can answer. A row whose socket another tmux server answers on
 reads `unknown (another tmux server on its socket)` whatever its board says (see
-*The server was stopped outside the CLI*). The detail beside the chip says why
+*The server was stopped outside the CLI*). An agent no hook has spoken for yet
+whose screen is Claude Code's folder-trust question reads `attention` with
+`waiting for folder trust — approve it once, or aisquare accounts trust <dir>`
+(see *Folder trust* under [Accounts](#accounts)); only those rows have their
+screen read. The detail beside the chip says why
 when that is not obvious — an exit code, `no hooks` for a binary without our
 lifecycle hooks, `pane gone`.
 
@@ -657,10 +661,44 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   not move) in a note beside `switched`, and `switched` itself says whether
   the replacement's first line reached it. `doctor` lists parked agents; `doctor --live` warns when every account
   is over the line.
+- **Folder trust.** Claude Code asks *"Is this a project you created or one you
+  trust?"* the first time it starts in a folder, once **per account** — and the
+  answer it highlights is *No, exit*. So a yes on account 2 left every agent on
+  accounts 1, 3, 4… waiting at the question, and the first prompt typed into it
+  ended the agent. Now a launch (`fleet spawn`, `restart`, `switch`, `aisquare
+  launch`, `accounts run`) copies the folder's trust into the account it runs
+  on when any other account has it, and says so on the receipt (*`<folder>` is
+  trusted on account 2 — now on account 3 too*). Only that one entry of the
+  account's `.claude.json` is written — under Claude Code's own lock, every
+  other key byte for byte as it was — and never a trust nobody gave. Claude
+  Code's rules decide what covers what: in a git checkout the yes is the
+  repository's (its worktrees and sub-folders included), outside git a folder's
+  is its sub-folders' too, and a folder above a repository does **not** cover
+  it. `aisquare accounts trust [<dir>]` says yes on every account at once;
+  `--sync` copies every folder any account trusts into all of them. On by
+  default — *share folder trust* in App settings, `accounts.share_trust`. An
+  agent that still meets the question (no account trusts the folder) reads
+  **🔔 NEEDS YOU** *waiting for folder trust — approve it once, or `aisquare
+  accounts trust <dir>`* in `fleet ls`, the sidebar and the Remote, and a spawn
+  does not type its prompt into it: it waits for the answer, then leaves the
+  prompt untyped with a note.
+- **One settings.json.** Opt-in — *share settings.json* in App settings,
+  `accounts.share_settings` — every managed account's `settings.json`
+  (permissions, hooks, model, status line) becomes a link to the plain claude's,
+  so a change made on any account is made on all; the account's own file is
+  kept beside it as `settings.json.own-<stamp>`. Claude Code writes through the
+  link and keeps it. The logins stay apart: `.claude.json` and
+  `.credentials.json` are never shared, and a `settings.json` that sets what
+  decides a login (`apiKeyHelper`, `forceLoginMethod`, `forceLoginOrgUUID`, an
+  `env` API key, OAuth token or cloud provider, `CLAUDE_CONFIG_DIR`) is neither
+  shared nor replaced — the command says which setting stopped it. `aisquare
+  accounts settings --sync` links them now, `--unshare` gives each its own copy
+  back.
 
-Nothing on this page writes into Claude Code's own files: the email and plan
+Nothing on this page writes into Claude Code's login: the email and plan
 are read from what Claude Code recorded, and a token is never refreshed by the
-CLI. Claude Code refreshes it on the account's next session.
+CLI. Claude Code refreshes it on the account's next session. The two things the
+accounts share (above) are the only writes into an account's directory.
 
 Everything the page does is a command, and every reporting one takes `--json`:
 
@@ -684,6 +722,13 @@ aisquare accounts move 3 top           # up · down · top · bottom
 aisquare accounts disable 3            # out of automatic selection; enable puts it back
 aisquare config set accounts.pick default      # spawns stay on the machine default (headroom is the default)
 aisquare config set accounts.on_limit wait     # an agent that hits its limit stays parked (switch is the default)
+aisquare accounts trust                # trust this folder on every account (its repository, in a checkout)
+aisquare accounts trust --sync         # every folder any account trusts, trusted on all of them
+aisquare config set accounts.share_trust false # launches stop copying a folder's trust (on by default)
+aisquare accounts settings             # what each account's settings.json is: shared, its own, none
+aisquare accounts settings --sync      # link every managed account's settings.json to the plain claude's
+aisquare accounts settings --unshare   # each linked account gets its own copy back
+aisquare config set accounts.share_settings true # keep them linked at every launch (off by default)
 aisquare fleet switch coder-auth       # move one now: resumes its session on the account with room
 aisquare fleet restart manager         # an exited (or stuck) agent, back under its label, session resumed
                                        # …launched as it was first launched: the row records the

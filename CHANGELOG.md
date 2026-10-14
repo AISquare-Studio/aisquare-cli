@@ -171,6 +171,26 @@ that reads at a glance.**
   nothing when all is clear) and on the hub's Doctor link, so the run at start
   is seen without opening the page. Opening the page shows that report while
   it runs the checks again (`… running the checks again`).
+- **A folder trusted on one Claude account is trusted on all of them.** Claude
+  Code asks "trust this folder?" once per account, and its highlighted answer is
+  *No, exit*, so agents on the other accounts sat at the question and the first
+  prompt typed into it ended them. A launch (`fleet spawn`, `restart`, `switch`,
+  `aisquare launch`, `accounts run`) now copies the folder's trust from any
+  account that has it into the one it runs on, and the receipt says so. Only
+  that entry of the account's `.claude.json` is written, under Claude Code's own
+  lock, and never a trust nobody gave. `aisquare accounts trust [<dir>]` trusts
+  a folder on every account at once; `--sync` shares every trusted folder. An
+  agent still at the question reads **🔔 NEEDS YOU** (*waiting for folder
+  trust*) in `fleet ls`, `asq` and the Remote, and a spawn never types its
+  prompt into it. On by default: *share folder trust* in App settings
+  (`accounts.share_trust`).
+- **One settings.json for every account, if you want it.** *share settings.json*
+  in App settings (`accounts.share_settings`, off by default) links each
+  managed account's `settings.json` to the plain claude's at launch, keeping its
+  own beside it; `aisquare accounts settings --sync` does it now and
+  `--unshare` undoes it. Logins are never shared: `.claude.json` and
+  `.credentials.json` stay per account, and a `settings.json` that sets an API
+  key, a token, a cloud provider or a forced login is left as it is.
 
 ### Changed
 - **The defaults**: `[accounts] pick = "headroom"` (a launch takes the first

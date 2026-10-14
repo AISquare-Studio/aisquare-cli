@@ -6793,6 +6793,40 @@ def test_attach_argv_finds_an_ended_managers_lingering_window_where_its_row_reco
     assert fleet_service.attach_argv(project)[:3] == ["/fake/tmux", "-L", "asq-test"]
 
 
+def test_attach_argv_asks_no_server_by_the_name_alone_when_a_live_row_recorded_its_own(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 1: the follow-up that asks the ended rows' servers asked this
+    shell's server (`-L`) last whatever the live rows said. With the live manager's
+    recorded server unreachable (its socket file taken), a shell under another
+    `TMUX_TMPDIR` attached to the session of that name on its own server, which round 29
+    of #257 had refused. An ended row that recorded no path is asked by the name too, so it
+    is left out as well. With no live row, both are asked, as the follow-up meant."""
+    manager = fleet_service.spawn(project, "manager").agent
+    manager, stranger = _behind_a_stranger(tmux, project, manager, monkeypatch)
+    session = f"asq-{_codename(project)}"
+    with store_session() as store:
+        store.upsert_fleet_agent(
+            manager.model_copy(
+                update={
+                    "id": "agt_before_v25",
+                    "label": "manager-0",
+                    "socket_path": None,
+                    "ended_at": manager.created_at,
+                }
+            )
+        )
+    tmux.running = False  # no tmux client reaches the manager's server any more
+    stranger.sessions[session] = []  # a session of that name on the server `-L` reaches
+
+    with pytest.raises(FleetError, match="nothing to attach to"):
+        fleet_service.attach_argv(project)
+
+    with store_session() as store:  # the manager ended: no live row says where to look
+        store.end_fleet_agent(manager.id, exit_status=0)
+    assert fleet_service.attach_argv(project)[:3] == ["/fake/tmux", "-L", "asq-test"]
+
+
 def test_attach_argv_refuses_when_there_is_no_session_to_attach_to(
     tmux: FakeTmux, project: ProjectInfo
 ) -> None:

@@ -426,7 +426,10 @@ agents are on, at the socket their spawns recorded (`tmux -S`), the line the
 Manager tab prints, so it works from a shell under another `TMUX_TMPDIR`. With
 no live agent, the servers its ended agents were on are asked, the latest to
 end first: an ended manager's window lingers there and holds the session, the
-screen behind the 💤 row. Last, the socket this shell's tmux looks at.
+screen behind the 💤 row. Last, the socket this shell's tmux looks at, but
+only while no live agent recorded where its server listens: from a shell under
+another `TMUX_TMPDIR` that is another server, and its session of that name is
+not the one the agents are in.
 
 **Scope and exit codes.** `--all` and `--project` name different scopes and are
 refused together rather than one silently winning — a usage error, exit **2**,

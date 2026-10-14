@@ -5565,6 +5565,12 @@ def attach_argv(project: ProjectInfo) -> list[str]:
     holds the session, which is what the 💤 row's attach stands for, and by ``-L`` alone a
     shell under another ``TMUX_TMPDIR`` did not find it (follow-up of #257). Last, where
     this shell's tmux looks, for a session no row points at.
+
+    By the name alone only while no live row recorded where its server listens: an ended
+    row that recorded none, and this shell's own server, are asked then and not
+    otherwise. Asked after the live rows' recorded server lost its socket, they attached
+    to another server's session of that name, from a shell under another ``TMUX_TMPDIR``,
+    which round 29 refused (review of #259, round 1).
     """
     config = settings()
     srv = server(config)
@@ -5579,9 +5585,12 @@ def attach_argv(project: ProjectInfo) -> list[str]:
         key=lambda agent: agent.ended_at or agent.created_at,
         reverse=True,
     )
-    addresses = dict.fromkeys(
-        [*(_address(agent, config) for agent in [*live, *ended]), _Address(config.tmux_socket)]
-    )
+    recorded = any(agent.socket_path is not None for agent in live)
+    if recorded:
+        ended = [agent for agent in ended if agent.socket_path is not None]
+    addresses = dict.fromkeys(_address(agent, config) for agent in [*live, *ended])
+    if not recorded:
+        addresses[_Address(config.tmux_socket)] = None
     for candidate in (_server_at(address, config) for address in addresses):
         if candidate.has_session(name):
             return candidate.attach_argv(name)

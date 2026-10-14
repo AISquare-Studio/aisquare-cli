@@ -335,9 +335,11 @@ agents.
 
 A row whose server did not answer is ended as lost only where it cannot be
 running: it started in another boot, or its socket file is there with nothing
-listening, which is what tmux leaves when its server exits. A row from before
-0.8.0 recorded no boot; it is ended where its socket file is gone and it started
-before this boot did, as a reboot clears `/tmp`. Otherwise
+listening, which is what tmux leaves when its server exits. A row with no boot
+to compare (one from before 0.8.0, or on a machine that keeps no boot id: the
+BSDs, a macOS whose `sysctl` failed) is ended where its socket file is gone, or
+another server answers there, and it started before this boot did, as a reboot
+clears `/tmp`. Otherwise
 its row is **left live**, with what to do, because `aisquare uninstall` asks
 the same socket and would still count it. Most often the socket file is gone
 (systemd-tmpfiles or a logout removed it while the server ran on), so no tmux

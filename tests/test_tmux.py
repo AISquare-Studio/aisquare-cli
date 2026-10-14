@@ -1013,6 +1013,36 @@ def test_a_listener_that_started_at_another_time_is_another_server(
     assert server_may_run(srv, recorded, "0ld", "b00t", then, then) is None, "another boot"
 
 
+def test_a_row_with_no_boot_to_compare_is_not_held_by_the_server_after_a_reboot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 1: with no boot id (the BSDs, a macOS whose `sysctl` failed) a
+    row that recorded its server's start read `"another"` against the server the first
+    spawn after a reboot started, before the boot-start rule was asked: `uninstall`
+    refused, `shutdown` held the row until `--forget`, and `stop` refused, for an agent the
+    reboot ended. Created before this boot started, its server is the reboot's doing, as a
+    socket that is gone is. Since the boot, it is another server's still; and the boot ids,
+    where both are known, decide alone."""
+    booted = datetime(2026, 10, 12, 6, 0, tzinfo=UTC)
+    monkeypatch.setattr(tmux_module, "boot_started", lambda: booted)
+    monkeypatch.setattr(TmuxServer, "listener", lambda _self, _recorded=None: "answers")
+    monkeypatch.setattr(TmuxServer, "started_at", lambda _self: booted + timedelta(minutes=3))
+    recorded = Path("/tmp/tmux-1000/asq")
+    before, after = datetime(2026, 10, 11, tzinfo=UTC), datetime(2026, 10, 12, 7, tzinfo=UTC)
+
+    def may_run(created: datetime, boots: tuple[str | None, str | None]) -> str | None:
+        then = created - timedelta(seconds=1)  # its server started just before the row
+        return server_may_run(TmuxServer("asq"), recorded, *boots, created, then)
+
+    assert may_run(before, (None, None)) is None, "the reboot ended it"
+    assert may_run(before, ("b00t", None)) is None, "this boot's id could not be had"
+    assert may_run(before, (None, "b00t")) is None, "a row that recorded none"
+    assert may_run(after, (None, None)) == "another", "since the boot: its server may run"
+    assert may_run(before, ("b00t", "b00t")) == "another", "the boot ids decide"
+    monkeypatch.setattr(tmux_module, "boot_started", lambda: None)
+    assert may_run(before, (None, None)) == "another", "no boot start to compare"
+
+
 def test_the_boot_start_is_read_where_the_machine_says_and_kept_once_found(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -492,13 +492,16 @@ def server_may_run(
     row that recorded no start, or a start that cannot be asked now (no usable tmux, a
     denied socket), leaves ``"answers"`` standing: a server listens, which may be its.
 
-    With no boot to compare (a row from before v25, or a boot id that could not be had), a
-    socket that is gone is explained by a reboot when the row was ``created`` before this
-    boot started (:func:`boot_started`): a reboot clears ``/tmp``. Without it, every row a
-    0.7.0 fleet left behind at a reboot was held until ``--forget`` (round 28). That start
-    moves with the clock, so it explains only a missing file, never a socket that answers
-    or could not be asked: a row misjudged by a stepped clock is ended only when its socket
-    is gone as well.
+    With no boot to compare (a row from before v25, or a boot id that could not be had: the
+    BSDs, a macOS whose ``sysctl`` failed), a socket the row's server no longer holds, gone
+    or taken by ``"another"``, is explained by a reboot when the row was ``created`` before
+    this boot started (:func:`boot_started`): a reboot clears ``/tmp``, and the first spawn
+    after it starts the server that answers there now. Without it, every row a 0.7.0 fleet
+    left behind at a reboot was held until ``--forget`` (round 28), and so was every row
+    after a reboot on such a host, against the next server (review of #259, round 1). That
+    start moves with the clock, so it explains only a socket the row's server lost, never
+    one that answers as the row's or could not be asked: a row misjudged by a stepped
+    clock is ended only when its server's socket is gone as well.
     """
     if booted is not None and this_boot is not None and booted != this_boot:
         return None
@@ -509,10 +512,11 @@ def server_may_run(
         except TmuxError:  # TmuxUnavailable included: a server listens, and may be the row's
             now = None
         if now is not None and now != started:
-            return "another"
-    if answer == "gone" and (booted is None or this_boot is None) and created is not None:
-        started = boot_started()
-        if started is not None and created < started:
+            answer = "another"
+    unbooted = booted is None or this_boot is None
+    if answer in ("gone", "another") and unbooted and created is not None:
+        booted_at = boot_started()
+        if booted_at is not None and created < booted_at:
             return None
     return answer
 

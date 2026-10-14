@@ -435,7 +435,10 @@ def test_the_line_paints_the_injected_headroom() -> None:
 def test_the_headroom_is_read_at_start_and_never_on_the_refresh_tick() -> None:
     """The usage cache answers it, at most one network read per account per five minutes —
     and the two-second tick never asks: ticks come and go, each one reading the accounts and
-    painting their frame (``_accounts_read``, the 2 s path), and the reader is not called."""
+    painting their frame (``_accounts_read``, the 2 s path), and the reader is not called.
+
+    The ticks are the tick's own call, each settled until its frame is painted — not a fast
+    timer, whose tick could land as the app is torn down, with the sidebar already gone."""
     calls: list[datetime] = []
     frames: list[datetime] = []
 
@@ -453,11 +456,9 @@ def test_the_headroom_is_read_at_start_and_never_on_the_refresh_tick() -> None:
         for _ in range(5):
             app.refresh_data()  # what the tick runs
             await settle_page(app)
-        await asyncio.sleep(0.3)  # and the real tick, at 50 ms, a few times over
-        await settle_page(app)
         return at_start, len(calls), len(frames)
 
-    at_start, after, painted = _drive(go, headroom=reader, refresh_seconds=0.05, accounts=overview)
+    at_start, after, painted = _drive(go, headroom=reader, accounts=overview)
     assert painted >= 6, "the premise: the accounts were read and painted tick after tick"
     assert at_start == 1  # once the first frame landed
     assert after == 1

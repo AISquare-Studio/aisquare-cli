@@ -259,7 +259,7 @@ def usage_(
     """Session (5-hour) and weekly usage per signed-in account — percent USED, as /usage shows it.
 
     40% used is 60% left. A reading is shared for five minutes between this
-    command and `list --usage`; `--refresh` fetches now.
+    command, `list --usage` and asq's Accounts page; `--refresh` fetches now.
     """
     # The arranged list, like every other account surface: priority order, the
     # alias as the label, disabled marked — and one concurrent read for all of

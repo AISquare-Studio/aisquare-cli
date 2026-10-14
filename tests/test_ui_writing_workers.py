@@ -174,8 +174,8 @@ def test_the_overdue_toast_names_every_read_it_waits_for_in_words() -> None:
 
 def test_the_accounts_readers_write_the_store_so_update_waits_for_them(fake_home: Path) -> None:
     """Round 19 of #257: listed here as readers, a usage reading and the reads of the slots
-    let Update quit under them. A usage reading records a sample per account
-    (``read_usage_with_trends``), and a read of the slots, which the shell's header,
+    let Update quit under them. A usage reading records a sample per account it fetches
+    (``cached_usage_with_trends``, the page's), and a read of the slots, which the shell's header,
     Settings, the board and an agent's page each run, adds a registry row for a slot that
     has none (``_arranged``)."""
     account = _slot("work@example.com", "tok-work")
@@ -183,7 +183,7 @@ def test_the_accounts_readers_write_the_store_so_update_waits_for_them(fake_home
         assert store.claude_accounts() == []
 
     accounts_service.slot_labels()
-    accounts_service.read_usage_with_trends(
+    accounts_service.cached_usage_with_trends(
         [account], now=NOW, fetch=_Usage({"tok-work": _payload(40)})
     )
 

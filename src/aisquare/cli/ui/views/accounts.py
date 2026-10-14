@@ -34,8 +34,11 @@ docs/plans/claude-accounts.md. Two halves, one page:
 **The view holds no state that matters** (fleet-tui plan §2). The shell hands
 it a fresh ``AccountsOverview`` on every refresh; what the view owns is the
 transient — a sign-in in flight, a usage fetch — and the usage numbers, which
-are the one thing here that costs a request and so are fetched on their own
-slow cadence (:data:`USAGE_SECONDS`) and only while the page is on screen.
+are the one thing here that costs a request: they are read through the shared
+five-minute cache (``cached_usage``), so an account is asked at most once every
+:data:`USAGE_SECONDS` however often the page is opened, and only while it is on
+screen; *↻ Refresh usage* asks every account now, and the line beside it says
+how old the readings are.
 
 Every visible string is ``rich.text.Text`` built with ``append``: an email,
 a path and a server's reason are DATA (CONTRIBUTING: no markup in data).
@@ -82,8 +85,14 @@ from aisquare.services import destinations, device_flow, iam
 from aisquare.services import fleet as fleet_service
 from aisquare.services.credits import WorkspaceCredits
 
-USAGE_SECONDS = 60.0
-"""How often the usage numbers are re-fetched while the page is on screen."""
+USAGE_SECONDS = accounts_service.USAGE_MAX_AGE_SECONDS
+"""How old a usage reading gets before the page asks again: the shared cache's five minutes."""
+TICK_SECONDS = 60.0
+"""How often the page looks while on screen: the "last refreshed" line, the credits, and
+the usage through the cache, which asks an account only once its reading is
+:data:`USAGE_SECONDS` old. A tick of :data:`USAGE_SECONDS` against a cache of the same
+age drifts: it lands a moment before the reading turns five minutes old, is served it,
+and asks five minutes later — ten between readings."""
 LOGIN_POLL_SECONDS = 1.0
 """How often a sign-in window's directory is checked for a landed login."""
 
@@ -790,6 +799,8 @@ class AccountsView(Vertical):
     AccountsView .actions { height: auto; margin-top: 1; }
     AccountsView .actions Button { margin: 0 1 0 0; }
     AccountsView #claude-table { margin-top: 1; }
+    AccountsView #usage-bar Button { margin: 0 2 0 0; }
+    AccountsView #usage-age { width: auto; height: 1; color: $text-muted; }
     AccountsView #accounts-notice { height: auto; margin-top: 1; }
     AccountsView #login-box { height: 1fr; min-height: 12; border-top: solid $primary; }
     AccountsView #login-header { height: auto; padding: 0 1; }
@@ -824,6 +835,10 @@ class AccountsView(Vertical):
         self.login: _ClaudeLogin | None = None
         self._login_timer: Timer | None = None
         self._usage_timer: Timer | None = None
+        self._usage_worker: Worker[Any] | None = None
+        """The usage read in flight, or the last one."""
+        self._usage_owed = False
+        """A read was asked for while one ran: read once more after it."""
         self._cancel_sign_in: threading.Event | None = None
         self._arranging = threading.Lock()  # one registry write at a time (arrange_accounts)
         self._renames: dict[Worker[Any], _RenameWrite] = {}
@@ -847,6 +862,11 @@ class AccountsView(Vertical):
             yield Static(
                 Text("Claude Code", style="bold"), id="claude-title", classes="section-title"
             )
+            with Horizontal(classes="actions", id="usage-bar"):
+                refresh = Button("↻ Refresh usage", id="usage-refresh", compact=True)
+                refresh.tooltip = "ask every account now — otherwise at most once every 5 minutes"
+                yield refresh
+                yield Static(Text("last refreshed never", style="dim"), id="usage-age")
             with AccountsTable(id="claude-table"):
                 yield AccountsHeader(id="claude-header")
                 yield Vertical(id="claude-rows")
@@ -866,7 +886,7 @@ class AccountsView(Vertical):
         self._paint_aisquare()
         if self.overview is not None:
             self._paint_claude(self.overview)
-        self._usage_timer = self.set_interval(USAGE_SECONDS, self.refresh_readings)
+        self._usage_timer = self.set_interval(TICK_SECONDS, self.refresh_readings)
 
     def on_show(self) -> None:
         self._on_screen = True
@@ -1053,7 +1073,8 @@ class AccountsView(Vertical):
     # --- usage (the one thing here that costs a request) ---------------------------------------
 
     def refresh_readings(self) -> None:
-        """The page's minute tick: the Claude slots' usage and the workspaces' credits.
+        """The page's minute tick (and its ``on_show``): the Claude slots' usage, through the
+        cache, and the workspaces' credits — and the "last refreshed" line, which ages.
 
         Two refreshes side by side, not one riding the other's tail: each has
         its own reason to stop short (no signed-in Claude slot; no AISquare
@@ -1063,9 +1084,17 @@ class AccountsView(Vertical):
         """
         self.refresh_usage()
         self.refresh_credits()
+        self._paint_usage_age()
 
-    def refresh_usage(self) -> None:
-        """Ask about every signed-in slot off the UI thread, if the page is on screen.
+    def refresh_usage(self, *, force: bool = False) -> None:
+        """Read every signed-in slot's usage off the UI thread, if the page is on screen.
+
+        Through the shared five-minute cache (``cached_usage_with_trends``): a
+        slot is asked only when its newest reading is :data:`USAGE_SECONDS` old,
+        so opening the page, its minute tick and a frame with a new slot cost no
+        request while the readings are fresh. ``force`` is *↻ Refresh usage*: it
+        asks every slot now, and takes over from a read already running. A read
+        asked for while one runs is owed, and made once that one ends.
 
         Every signed-in slot, not only those with a readable token: the service
         answers a Keychain-backed (macOS) or expired token with its reason and
@@ -1077,20 +1106,48 @@ class AccountsView(Vertical):
         accounts = [status.account for status in self.overview.accounts if status.signed_in]
         if not accounts:
             return
+        if not force and self._usage_running():
+            self._usage_owed = True
+            return
         self._asked.update(account.slot for account in accounts)
-        # Each reading RECORDED (#146) with the trend it implies, so the minute
-        # tick is what builds the history the trend line reads: one concurrent
-        # round trip and one store open for every account (review of #205,
-        # finding 11 and third round). A store that cannot be written costs the
-        # trends; the readings still paint.
-        self.run_worker(
-            lambda: accounts_service.read_usage_with_trends(accounts),
+        # Each reading fetched is RECORDED (#146), and the trends are read from that
+        # history in one store open: a store that cannot be written costs the trends;
+        # the readings still paint.
+        self._usage_worker = self.run_worker(
+            lambda: accounts_service.cached_usage_with_trends(accounts, force=force),
             name=USAGE_WORKER,
             group=USAGE_WORKER,
             exclusive=True,
             thread=True,
             exit_on_error=False,
         )
+        self._paint_usage_age()
+
+    def _usage_running(self) -> bool:
+        return self._usage_worker is not None and not self._usage_worker.is_finished
+
+    @on(Button.Pressed, "#usage-refresh")
+    def _refresh_usage_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.refresh_usage(force=True)
+
+    def _paint_usage_age(self) -> None:
+        """``last refreshed 3m ago`` — the OLDEST reading the rows show; ``refreshing…`` while
+        a read runs, when *↻ Refresh usage* is off too; ``never`` before the first."""
+        running = self._usage_running()
+        self.query_one("#usage-refresh", Button).disabled = running
+        stamps = [
+            reading.fetched_at
+            for row in self.rows()
+            if (reading := self.usage.get(row.slot)) is not None and reading.fetched_at is not None
+        ]
+        if running:
+            said = "refreshing…"
+        elif stamps:
+            said = f"last refreshed {accounts_service.describe_age(min(stamps))}"
+        else:
+            said = "last refreshed never"
+        self.query_one("#usage-age", Static).update(Text(said, style="dim"))
 
     def refresh_credits(self) -> None:
         """The destination workspaces' credits (#143), off the UI thread, for this session.
@@ -1654,6 +1711,11 @@ class AccountsView(Vertical):
         if worker.name == USAGE_WORKER:
             if state is WorkerState.SUCCESS and isinstance(worker.result, dict):
                 self._show_usage(worker.result)
+            if worker is self._usage_worker:
+                self._paint_usage_age()
+                if self._usage_owed:
+                    self._usage_owed = False
+                    self.refresh_usage()
         elif worker.name == CREDITS_WORKER:
             if state is WorkerState.SUCCESS and isinstance(worker.result, tuple):
                 self._show_credits(*worker.result)

@@ -1167,6 +1167,33 @@ def cached_usage(
     return {account.slot: readings[account.slot] for account in accounts}
 
 
+def cached_usage_with_trends(
+    accounts: Sequence[ClaudeAccount],
+    *,
+    max_age: float = USAGE_MAX_AGE_SECONDS,
+    force: bool = False,
+    now: datetime | None = None,
+    fetch: Fetch | None = None,
+) -> dict[int, tuple[ClaudeUsage, UsageTrend | None]]:
+    """The Accounts page's read: :func:`cached_usage`, and each reading's trend.
+
+    Fetched only when a reading is older than ``max_age`` (``force``: always —
+    the page's *Refresh usage*); the trends are read from the recorded history,
+    which every fetch here still records, in ONE store session after the
+    readings. A store that cannot be opened costs the trends, never the
+    readings, as in :func:`read_usage_with_trends`.
+    """
+    readings = cached_usage(accounts, max_age=max_age, force=force, now=now, fetch=fetch)
+    try:
+        with store_session() as store:
+            return {
+                slot: (reading, usage_trend(slot, reading, now=now, store=store))
+                for slot, reading in readings.items()
+            }
+    except sqlite3.Error:
+        return {slot: (reading, None) for slot, reading in readings.items()}
+
+
 def describe_age(fetched_at: datetime, *, now: datetime | None = None) -> str:
     """``just now`` / ``3m ago`` / ``2h ago``: how old a reading is, for a "refreshed …" line."""
     minutes = max(0, int(((now or _now()) - fetched_at).total_seconds() // 60))

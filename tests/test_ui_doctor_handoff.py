@@ -685,7 +685,7 @@ def _starts_with_a_hand_over(
     app, mounted before the hand-over, and none of its tabs would have a read to start."""
     ui_app._remember_ui_state(ui_app.SELECTED_KEY, None)
     monkeypatch.setattr(accounts_view, "_read_credits", lambda _session: [])
-    monkeypatch.setattr(accounts_service, "read_usage_with_trends", lambda _accounts: {})
+    monkeypatch.setattr(accounts_service, "cached_usage_with_trends", lambda _accounts, **_: {})
     monkeypatch.setattr(explainability_view, "status_report", lambda _project: None)
     # Every start, read as it begins: a quick worker has left ``app.workers`` by the time
     # the steps end, and a read held for the hand-over begins only if it is called off.

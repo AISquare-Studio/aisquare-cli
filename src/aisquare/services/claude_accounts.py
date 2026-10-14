@@ -37,7 +37,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -1023,8 +1023,14 @@ def read_usage(
 # or another login is asked at once, and a slot that would send no token at all
 # (signed out, expired) is told so rather than shown its last figure. Of the two,
 # the NEWER wins: a refresh that found the token rejected is not undone by the
-# success recorded before it. A headroom pick and `doctor --live` still read live
-# (`read_usage`): one decides where an agent runs, the other was asked to look now.
+# success recorded before it. A failure that says nothing of the token (an
+# unreachable endpoint, an HTTP 5xx) is the exception: it never hides a good
+# reading still inside the window, which it does not contradict (review of #261,
+# m4). Calls for the same slot in one process share one fetch: the second waits
+# for the first and is served what it read. A launch's headroom pick reads
+# through the cache too, a minute deep (PICK_MAX_AGE_SECONDS); a hand-over and
+# `doctor --live` still read live (`read_usage`): one moves an agent off a full
+# account, the other was asked to look now.
 
 USAGE_MAX_AGE_SECONDS = 300.0
 """How old a recorded reading may be and still be served instead of a fetch: five minutes."""
@@ -1032,6 +1038,52 @@ USAGE_MAX_AGE_SECONDS = 300.0
 _UNANSWERED: dict[tuple[str, str], ClaudeUsage] = {}
 """Fetches that went out and failed, by (config dir, fingerprint of the token sent): see above."""
 _UNANSWERED_LOCK = threading.Lock()
+_FETCH_LOCKS: dict[str, threading.Lock] = {}
+"""One per config dir, held while that slot is fetched: see :func:`_fetching`."""
+_FETCH_ROUNDS: dict[str, int] = {}
+"""How many fetch rounds each config dir has had in this process: see :func:`_fetching`."""
+_FETCH_LOCKS_LOCK = threading.Lock()
+
+
+def _fetch_rounds(accounts: Sequence[ClaudeAccount]) -> dict[str, int]:
+    """Each account's :data:`_FETCH_ROUNDS` count now, read BEFORE the cache is looked at."""
+    with _FETCH_LOCKS_LOCK:
+        return {
+            str(account.config_dir): _FETCH_ROUNDS.get(str(account.config_dir), 0)
+            for account in accounts
+        }
+
+
+@contextlib.contextmanager
+def _fetching(accounts: Sequence[ClaudeAccount], seen: Mapping[str, int]) -> Iterator[bool]:
+    """Hold each account's fetch lock while its usage is fetched; yields whether another call
+    ended a round for any of them since ``seen`` (:func:`_fetch_rounds`) was read.
+
+    The sidebar's read and the page's, or either and a launch's pick, asked for the same
+    slot at the same moment and each sent a request (review of #261, m4). Now the second
+    waits for the first, and when a round ended since it looked, it looks again and is
+    served what that round read. Counted rounds, not "had to wait": a call can miss the
+    cache just before another records and take the lock just after it is let go. Taken
+    in one order, so two calls over overlapping slots cannot deadlock.
+    """
+    keys = sorted({str(account.config_dir) for account in accounts})
+    with _FETCH_LOCKS_LOCK:
+        locks = [_FETCH_LOCKS.setdefault(key, threading.Lock()) for key in keys]
+    held: list[threading.Lock] = []
+    try:
+        for lock in locks:
+            lock.acquire()
+            held.append(lock)
+        with _FETCH_LOCKS_LOCK:
+            moved = any(_FETCH_ROUNDS.get(key, 0) != seen.get(key, 0) for key in keys)
+        yield moved
+    finally:
+        if len(held) == len(locks):
+            with _FETCH_LOCKS_LOCK:
+                for key in keys:
+                    _FETCH_ROUNDS[key] = _FETCH_ROUNDS.get(key, 0) + 1
+        for lock in reversed(held):
+            lock.release()
 
 
 def _recorded_usage(
@@ -1076,6 +1128,42 @@ def _recorded_usage(
     return found
 
 
+def _served(
+    accounts: Sequence[ClaudeAccount],
+    tokens: Mapping[int, str],
+    *,
+    since: datetime,
+    now: datetime,
+) -> dict[int, ClaudeUsage]:
+    """What the cache answers for each account, from ``since`` on: the reading recorded with
+    the token it holds now, or the failed fetch with that token, the NEWER of the two.
+
+    Except that a failure which says nothing of the token (``needs_login`` False: an
+    unreachable endpoint, an HTTP 5xx) never hides a good reading still in the window: it
+    does not contradict the figure, so the figure is served, and its ``fetched_at`` says
+    how old it is. A 401 does contradict it, and wins when newer.
+    """
+    recorded = _recorded_usage(accounts, tokens, since=since, now=now)
+    served: dict[int, ClaudeUsage] = {}
+    for account in accounts:
+        token = tokens.get(account.slot)
+        if token is None:
+            continue
+        with _UNANSWERED_LOCK:
+            failed = _UNANSWERED.get((str(account.config_dir), token))
+        if failed is not None and (failed.fetched_at is None or failed.fetched_at < since):
+            failed = None
+        good = recorded.get(account.slot)
+        if failed is not None and (
+            good is None
+            or (failed.needs_login and (failed.fetched_at or since) > (good.fetched_at or since))
+        ):
+            served[account.slot] = failed
+        elif good is not None:
+            served[account.slot] = good
+    return served
+
+
 def cached_usage(
     accounts: Sequence[ClaudeAccount],
     *,
@@ -1090,9 +1178,12 @@ def cached_usage(
     it holds now: a reading recorded in ``claude_usage`` with that token, or a
     fetch with it that failed (a rejected token, an unreachable endpoint), so a
     failed fetch is not retried before ``max_age`` either. Whichever of the two
-    is newer wins. The rest are fetched in ONE concurrent, recording round
-    (:func:`read_usage`), and so is an account that holds no token to send —
-    signed out, or expired — which :func:`usage` answers without a request.
+    is newer wins, but a failure that says nothing of the token never hides a
+    good reading (:func:`_served`). The rest are fetched in ONE concurrent,
+    recording round (:func:`read_usage`), and so is an account that holds no
+    token to send — signed out, or expired — which :func:`usage` answers
+    without a request. A slot another call in this process is fetching is
+    waited for, and served what that call read (:func:`_fetching`).
     ``force=True`` fetches every account regardless — the page's refresh key.
     Each reading's ``fetched_at`` says how old it is ("refreshed 3m ago"); a
     reading that could not be taken carries the moment that was found out.
@@ -1106,24 +1197,15 @@ def cached_usage(
         for account in accounts
         if (token := _token_fingerprint(account, moment)) is not None
     }
-    readings: dict[int, ClaudeUsage] = {}
-    if not force:
-        recorded = _recorded_usage(accounts, tokens, since=since, now=moment)
-        for account in accounts:
-            token = tokens.get(account.slot)
-            if token is None:
-                continue
-            with _UNANSWERED_LOCK:
-                failed = _UNANSWERED.get((str(account.config_dir), token))
-            known = [
-                reading
-                for reading in (recorded.get(account.slot), failed)
-                if reading is not None and reading.fetched_at and reading.fetched_at >= since
-            ]
-            if known:
-                readings[account.slot] = max(known, key=lambda reading: reading.fetched_at or since)
+    seen = _fetch_rounds(accounts)
+    readings = {} if force else _served(accounts, tokens, since=since, now=moment)
     stale = [account for account in accounts if account.slot not in readings]
-    if stale:
+    if not stale:
+        return {account.slot: readings[account.slot] for account in accounts}
+    with _fetching(stale, seen) as moved:
+        if moved and not force:  # another call fetched meanwhile: what it read serves
+            readings.update(_served(stale, tokens, since=since, now=moment))
+            stale = [account for account in stale if account.slot not in readings]
         fetched = read_usage(stale, now=now, fetch=fetch)
         for account in stale:
             reading = fetched[account.slot]

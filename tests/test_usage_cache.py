@@ -177,6 +177,70 @@ def test_a_newer_failure_is_not_masked_by_an_older_success(fake_home: Path) -> N
     assert again[work.slot].session_percent == 55 and len(fetch.calls) == 3
 
 
+def _unreachable(url: str, headers: Any, timeout: float) -> tuple[int, bytes]:
+    raise OSError("network is unreachable")
+
+
+@pytest.mark.parametrize("outage", [_unreachable, _Usage({"tok-work": 503})], ids=["down", "503"])
+def test_a_failure_that_says_nothing_of_the_token_never_hides_a_good_reading(
+    fake_home: Path, outage: Any
+) -> None:
+    """Review of #261, m4: a forced refresh that could not reach the endpoint hid the 40 %
+    read a minute before it for five minutes. The good reading serves while it is in the
+    window; the failure says nothing against it. Still at most one try per window."""
+    work = _slot("work@example.com", "tok-work")
+    fetch = _Usage({"tok-work": _payload(40)})
+    service.cached_usage([work], now=NOW, fetch=fetch)
+
+    tried = service.cached_usage([work], now=NOW + timedelta(minutes=1), force=True, fetch=outage)
+    assert not tried[work.slot].available and not tried[work.slot].needs_login  # said, as asked
+
+    for minutes in (2, 4):
+        served = service.cached_usage([work], now=NOW + timedelta(minutes=minutes), fetch=fetch)
+        assert served[work.slot].session_percent == 40
+        assert served[work.slot].fetched_at == NOW  # "3m ago": how old it is, never "now"
+    assert fetch.calls == ["tok-work"]
+
+    # Past the good reading's window, the failure is the newest word until its own ends.
+    gone = service.cached_usage([work], now=NOW + timedelta(minutes=5, seconds=1), fetch=fetch)
+    assert not gone[work.slot].available and fetch.calls == ["tok-work"]
+    back = service.cached_usage([work], now=NOW + timedelta(minutes=6, seconds=1), fetch=fetch)
+    assert back[work.slot].session_percent == 40 and len(fetch.calls) == 2
+
+
+def test_reads_of_one_slot_at_once_share_one_fetch(fake_home: Path) -> None:
+    """Review of #261, m4: the sidebar's read and the page's, at the same moment, each sent
+    a request. The second waits for the first and is served what it read."""
+    import threading
+    import time
+
+    work = _slot("work@example.com", "tok-work")
+    endpoint = _Usage({"tok-work": _payload(40)})
+
+    def slow(url: str, headers: Any, timeout: float) -> tuple[int, bytes]:
+        time.sleep(0.3)
+        return endpoint(url, headers, timeout)
+
+    start = threading.Barrier(3)
+    got: list[float | None] = []
+
+    def read() -> None:
+        start.wait()
+        got.append(service.cached_usage([work], now=NOW, fetch=slow)[work.slot].session_percent)
+
+    readers = [threading.Thread(target=read) for _ in range(3)]
+    for reader in readers:
+        reader.start()
+    for reader in readers:
+        reader.join()
+    assert endpoint.calls == ["tok-work"] and got == [40, 40, 40]
+
+    # A forced read still asks, and a plain one beside it is served what it read.
+    endpoint.by_token["tok-work"] = _payload(55)
+    forced = service.cached_usage([work], now=NOW, force=True, fetch=slow)
+    assert forced[work.slot].session_percent == 55 and len(endpoint.calls) == 2
+
+
 def test_a_signed_out_slot_is_not_shown_its_last_figure(
     fake_home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:

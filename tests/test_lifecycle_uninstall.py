@@ -3397,12 +3397,20 @@ def test_the_plan_finds_every_codex_home_and_its_mcp_server(
     removals = {entry.file.parent: lifecycle.mcp_removal(entry) for entry in plan.mcp}
     assert {entry.name for entry in plan.mcp} == {"aisquare"}, "docs does not run aisquare"
     assert all(entry.agent == "codex" for entry in plan.mcp)
+
+    def aimed(home: Path | None) -> str:
+        if sys.platform == "win32":  # no `env -u` or `VAR=value command`: said after it
+            need = "unset" if home is None else f"set to {home}"
+            return f"codex mcp remove aisquare (run it with CODEX_HOME {need})"
+        prefix = "env -u CODEX_HOME" if home is None else f"CODEX_HOME={home}"
+        return f"{prefix} codex mcp remove aisquare"
+
     assert removals == {
         ambient: "codex mcp remove aisquare",  # the home this shell's codex reads
-        default: "env -u CODEX_HOME codex mcp remove aisquare",
-        sibling: f"CODEX_HOME={sibling} codex mcp remove aisquare",
-        recorded: f"CODEX_HOME={recorded} codex mcp remove aisquare",
-        slot: f"CODEX_HOME={slot} codex mcp remove aisquare",
+        default: aimed(None),
+        sibling: aimed(sibling),
+        recorded: aimed(recorded),
+        slot: aimed(slot),
     }
     assert plan.codex_accounts == (slot,)
 

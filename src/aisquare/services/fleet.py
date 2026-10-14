@@ -2202,8 +2202,8 @@ def _refuse_a_freed_socket(srv: TmuxServer, config: FleetSettings) -> None:
         return
     one = len(stranded) == 1
     raise FleetError(
-        f"not started: the tmux server {', '.join(stranded)} {'runs' if one else 'run'} on "
-        f"lost its socket file {here}, so no tmux client reaches it, and it may still be "
+        f"not started: the tmux server that {', '.join(stranded)} {'runs' if one else 'run'} "
+        f"on lost its socket file {here}, so no tmux client reaches it, and it may still be "
         f"running; a spawn now would start a second server at that path and leave "
         f"{'that agent' if one else 'those agents'} where nothing can reach "
         f"{'it' if one else 'them'} again. If it is running, send that server SIGUSR1, which "

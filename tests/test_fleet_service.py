@@ -2598,7 +2598,8 @@ def test_spawn_refuses_to_start_a_server_at_a_socket_a_running_server_lost(
     with pytest.raises(FleetError, match=r"not started: .* lost its socket file") as refused:
         fleet_service.spawn(project, "coder")
     said = str(refused.value)
-    assert f"coder-1 ({project.root.name})" in said and "may still be running" in said
+    assert f"the tmux server that coder-1 ({project.root.name}) runs on lost its" in said
+    assert "may still be running" in said
     assert "SIGUSR1" in said and "`aisquare fleet shutdown --forget`" in said
     with pytest.raises(FleetError, match="lost its socket file"):
         fleet_service.spawn(plain_project, "manager")  # the server is every project's

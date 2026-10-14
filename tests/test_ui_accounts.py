@@ -31,6 +31,7 @@ from typing import Any, TypeVar
 import pytest
 from textual import events
 from textual.containers import Vertical
+from textual.geometry import Region
 from textual.pilot import Pilot
 from textual.widgets import Button, Static
 from textual.worker import Worker, WorkerState
@@ -1623,6 +1624,36 @@ def test_the_default_is_starred_named_by_its_alias_and_its_row_hides_the_default
     assert buttons[2] == (False, True, False, "Disable")  # no Default; first: ↑ disabled
     assert buttons[1] == (True, False, False, "Disable")  # middle: both arrows live
     assert buttons[3] == (True, False, True, "Enable")  # last: ↓ disabled; disabled → Enable
+
+
+def test_an_emoji_name_shows_whole_and_every_column_stays_under_its_header() -> None:
+    """A compound emoji (joined by U+200D) is one character on screen, two cells wide, and
+    Rich measures it so: the name cell draws it whole, and every column of its row starts
+    where the header's does, as the plain rows' do."""
+    name = "\U0001f469\u200d\U0001f4bb ops \U0001f3f3\ufe0f\u200d\U0001f308"
+    overview = _overview(
+        _arranged(_status(1, "me@example.com"), position=1),
+        _arranged(_status(2, "two@example.com"), alias=name, position=2),
+        _arranged(_status(3, "three@example.com"), alias="work", position=3),
+    )
+
+    async def go(pilot: Pilot[None]) -> tuple[str, list[int], dict[int, list[int]]]:
+        view = await open_accounts(pilot)
+        header = view.query_one(accounts_view.AccountsHeader)
+        # Log in is offered on none of these rows, signed in all three: it is not drawn.
+        columns = [cell.region.x for cell in header.query(".cell").exclude(".col-login")]
+        rows = {
+            slot: [cell.region.x for cell in row(view, slot).query(".cell").exclude(".col-login")]
+            for slot in (1, 2, 3)
+        }
+        named = view.query_one("#account-name-2", accounts_view.NameCell)
+        (strip,) = named.render_lines(Region(0, 0, named.size.width, 1))
+        return strip.text, columns, rows
+
+    drawn, columns, rows = drive(go, overview=overview)
+    assert drawn.rstrip() == name, "whole: no joiner dropped, nothing cut"
+    assert len(columns) == len(accounts_view.LAYOUT) - 1
+    assert rows == {1: columns, 2: columns, 3: columns}, "every column under its header"
 
 
 def test_default_move_and_disable_buttons_write_through_the_service_and_refresh(

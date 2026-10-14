@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-import unicodedata
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -12,6 +11,7 @@ from aisquare.core import paths
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core.config import SnapshotSettings, load_config
 from aisquare.core.entries import new_entry
+from aisquare.core.names import name_flaw
 from aisquare.core.state_file import StateUnwritableError
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.workspace import (
@@ -156,33 +156,32 @@ NICKNAME_MAX = 255
 def set_nickname(project: ProjectInfo, nickname: str | None) -> ProjectInfo:
     """Give ``project`` the name a person sees, or clear it: ``None`` or blank clears.
 
-    Free text, trimmed: spaces, punctuation and any script are kept, and the
-    codename (which names the tmux session and the branches) is not touched.
-    ``ValueError`` for more than :data:`NICKNAME_MAX` characters, a control
-    character (a newline, a tab, an escape) — a nickname is one line on every
-    surface that shows it — an invisible formatting character (a zero-width
-    space, a right-to-left override, which made ``evil\\u202egnp.exe`` list as
-    ``evilexe.png``), as an account's alias refuses them, or a lone surrogate
-    (bytes the terminal's encoding could not decode, which reached the store as
-    a codec error) — and nothing is written. ``KeyError`` when the project is
-    not registered, or is forgotten.
+    Free text, trimmed: spaces, punctuation, any script and any emoji are kept,
+    and the codename (which names the tmux session and the branches) is not
+    touched. ``ValueError`` for more than :data:`NICKNAME_MAX` characters, or
+    for what :func:`core.names.name_flaw` refuses in an account's alias too: a
+    control character (a nickname is one line on every surface that shows it),
+    a lone surrogate (bytes the terminal's encoding could not decode, which
+    reached the store as a codec error), or a character that prints nothing or
+    turns the text round — and nothing is written. ``KeyError`` when the
+    project is not registered, or is forgotten.
     """
     text = (nickname or "").strip()
     if len(text) > NICKNAME_MAX:
         raise ValueError(
             f"a nickname is at most {NICKNAME_MAX} characters; this one has {len(text)}"
         )
-    categories = {unicodedata.category(char) for char in text}
-    if "Cc" in categories:
+    flaw = name_flaw(text)
+    if flaw == "control":
         raise ValueError("a nickname is one line: no newlines, tabs or other control characters")
-    if "Cf" in categories:
+    if flaw == "undecodable":
+        raise ValueError(
+            "a nickname is text: part of this one is bytes the terminal's encoding could not decode"
+        )
+    if flaw == "invisible":
         raise ValueError(
             "a nickname prints as it is typed: no invisible formatting characters "
             "(a zero-width space, a right-to-left override)"
-        )
-    if "Cs" in categories:
-        raise ValueError(
-            "a nickname is text: part of this one is bytes the terminal's encoding could not decode"
         )
     with store_session() as store:
         return store.set_project_nickname(project.id, text or None)

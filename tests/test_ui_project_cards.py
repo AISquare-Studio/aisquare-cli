@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from rich.cells import cell_len
 from textual import events
 from textual.pilot import Pilot
 from textual.widgets import Button, OptionList, Static
@@ -45,6 +46,7 @@ from tests.test_ui_shell import (
     _click,
     _toasts,
     card_for,
+    composited,
     drive,
     fleet_app,
     row_for,
@@ -157,6 +159,35 @@ def test_the_card_shows_the_nickname_and_never_the_codename(tmp_path: Path, scri
     assert plain == "🗂 beta", "no nickname: the folder's name"
     assert chips.strip() == "1"
     assert "amber-otter" not in named + chips and "ruby-fox" not in plain
+
+
+def test_an_emoji_nickname_shows_whole_and_keeps_the_cards_columns(
+    tmp_path: Path, script: Script
+) -> None:
+    """A compound emoji (joined by U+200D) is one character on screen, two cells wide, and
+    Rich measures it so: the name is drawn whole and the chips and the menu stay in the
+    column a plain card has them in."""
+    seed(tmp_path, ("prj_a", "alpha", None), ("prj_b", "beta", None))
+    name = "\U0001f469\u200d\U0001f4bb ops \U0001f3f3\ufe0f\u200d\U0001f308"
+    _nickname("prj_a", name)
+    for project_id in ("prj_a", "prj_b"):
+        script[project_id] = [status(project_id, "manager", "manager", "working")]
+
+    async def go(pilot: Pilot[None]) -> tuple[str, int, tuple[int, int], tuple[int, int]]:
+        app = fleet_app(pilot)
+        a, b = card_for(app, "prj_a"), card_for(app, "prj_b")
+        title = a.query_one(ProjectTitle)
+        return (
+            composited(title),
+            title.size.width,
+            (a.query_one(CardChips).region.x, b.query_one(CardChips).region.x),
+            (a.query_one(CardMenuButton).region.x, b.query_one(CardMenuButton).region.x),
+        )
+
+    drawn, width, chips, menu = drive(go)
+    assert drawn.rstrip() == f"\U0001f5c2 {name}", "whole: no joiner dropped, nothing cut"
+    assert cell_len(drawn) == width, "the row is as wide as the title, no wider"
+    assert chips[0] == chips[1] and menu[0] == menu[1], "in the plain card's columns"
 
 
 @pytest.mark.usefixtures("wide_click_chain")

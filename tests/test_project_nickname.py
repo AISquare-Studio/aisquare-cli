@@ -89,7 +89,7 @@ def test_a_nickname_is_one_line(work_dir: Path, given: str) -> None:
 
 @pytest.mark.parametrize(
     "given",
-    ["evil‮gnp.exe", "zero​width", "byte﻿order"],
+    ["evil\u202egnp.exe", "zero\u200bwidth", "byte\ufefforder"],
     ids=["right-to-left override", "zero-width space", "byte-order mark"],
 )
 def test_a_nickname_has_no_invisible_formatting_characters(work_dir: Path, given: str) -> None:

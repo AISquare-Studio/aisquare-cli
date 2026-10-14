@@ -62,7 +62,6 @@ import os
 import re
 import shutil
 import sys
-import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, tzinfo
@@ -71,6 +70,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aisquare.core import paths
+from aisquare.core.names import name_flaw
 from aisquare.core.version import __version__
 from aisquare.models import ClaudeAccount, ClaudeIdentity
 
@@ -237,9 +237,11 @@ def normalise_alias(raw: str, *, slot: int | None = None) -> str:
     slot, so two accounts would go by one name and a manager's ``--to "account
     3"`` would land on slot 2. Whether that slot exists yet or not: a removed
     slot's number is the next one ``accounts add`` gives out. Without ``slot``,
-    no slot's label is taken. No control or invisible formatting characters
-    (a zero-width space, a right-to-left override), so it stays one line on every
-    surface that prints it and never prints the same as another. The case is
+    no slot's label is taken. Nothing :func:`core.names.name_flaw` refuses in a
+    project's nickname too — a control character, a lone surrogate, a character
+    that prints nothing or turns the text round (a zero-width space, a
+    right-to-left override) — so it stays one line on every surface that prints
+    it and never prints the same as another; any emoji is a name. The case is
     kept as typed and compared without it (``services.claude_accounts``
     refuses ``WORK`` beside ``work``, and resolves either spelling).
     """
@@ -252,9 +254,14 @@ def normalise_alias(raw: str, *, slot: int | None = None) -> str:
         raise ValueError(f"{raw!r} reads as a slot number — an alias cannot be only digits")
     if "@" in alias:
         raise ValueError(f"{raw!r} reads as an email — an alias cannot contain '@'")
-    if any(unicodedata.category(char) == "Cc" for char in alias):
+    flaw = name_flaw(alias)
+    if flaw == "control":
         raise ValueError(f"{raw!r} has a control character — an alias is one line of text")
-    if any(unicodedata.category(char) == "Cf" for char in alias):
+    if flaw == "undecodable":
+        raise ValueError(
+            f"{raw!r} has bytes the terminal's encoding could not decode — an alias is text"
+        )
+    if flaw == "invisible":
         raise ValueError(
             f"{raw!r} has an invisible formatting character — an alias prints as it is typed"
         )

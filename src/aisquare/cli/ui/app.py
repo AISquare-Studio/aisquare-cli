@@ -34,7 +34,7 @@ import shlex
 import threading
 import time
 from collections import Counter
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -72,9 +72,12 @@ from aisquare.cli.ui.groups import (
 from aisquare.cli.ui.project_menu import PIN, REMOVE, RENAME, SETTINGS, ConfirmRemove, ProjectMenu
 from aisquare.cli.ui.remote_control import SWITCHES, RemoteController, ngrok_ends_with
 from aisquare.cli.ui.sidebar import (
+    SETTINGS_KEY,
+    TIMES,
     AccountsSelected,
     AddProject,
     AgentSelected,
+    AppSettingsSelected,
     DoctorSelected,
     OpenProjectMenu,
     ProjectCard,
@@ -82,26 +85,30 @@ from aisquare.cli.ui.sidebar import (
     ProjectSelected,
     RenameProject,
     ResizeSidebar,
+    SettingsSelected,
     Sidebar,
     SpawnAgent,
-    accounts_summary_text,
 )
 from aisquare.cli.ui.terminal import EscapeToSidebar, SelectionHost, TerminalPane
 from aisquare.cli.ui.theme import ThemePicker, restore_theme, theme_autosave
 from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, read_session, summarise
 from aisquare.cli.ui.views.agent import AgentRestarted, AgentView
+from aisquare.cli.ui.views.app_settings import AppSettingsView
 from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
 from aisquare.cli.ui.views.onboard import OnboardFailed, OnboardView, ProjectOnboarded
 from aisquare.cli.ui.views.project import ProjectView
 from aisquare.cli.ui.views.remote import RemotePanel
+from aisquare.cli.ui.views.settings_hub import SettingsHubView
 from aisquare.cli.ui.views.welcome import WelcomeView
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, store_session
 from aisquare.models import (
     AccountsOverview,
     CheckStatus,
+    ClaudeAccount,
     DoctorCheck,
     FleetAgentStatus,
+    HeadroomSummary,
     ProjectForgetReport,
     ProjectInfo,
 )
@@ -111,25 +118,32 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services import project as project_service
 
 DoctorRunner = Callable[[], list[DoctorCheck]]
-"""What the Doctor section runs: ``diagnostics.doctor`` in production, a stub in tests."""
+"""What the Doctor page runs: ``diagnostics.doctor`` in production, a stub in tests."""
 
 AccountsReader = Callable[[], AccountsOverview]
-"""What the Accounts section reads: ``claude_accounts.overview`` in production, a stub in tests."""
+"""What the Accounts page reads: ``claude_accounts.overview`` in production, a stub in tests."""
+
+HeadroomReader = Callable[[Sequence[ClaudeAccount] | None], HeadroomSummary]
+"""What the status line's Claude dot reads: ``claude_accounts.read_fleet_headroom`` (through
+the five-minute usage cache) in production, a stub in tests."""
 
 _DoctorReport = tuple[Path | None, list[DoctorCheck]]
 """What the doctor worker hands back: the scope it ran for, and its checks."""
 
 _DOCTOR_WORKER = "doctor"
 ACCOUNTS_WORKER = "shell-accounts"
-"""The thread worker that reads the Accounts section's frame (``FleetApp.refresh_accounts``)."""
+"""The thread worker that reads the accounts' frame (``FleetApp.refresh_accounts``)."""
+HEADROOM_WORKER = "sidebar-headroom"
+"""The thread worker that reads the status line's headroom (``FleetApp.refresh_headroom``)."""
+HEADROOM_SECONDS = 60.0
+"""How often the status line's headroom is re-read — never on the two-second tick. A read
+goes to the network only for an account whose cached usage is over five minutes old."""
 PROJECT_REMOVE_WORKER = "project-remove"
 """The thread worker a card's *Remove from fleet…* forgets its project on (``project forget``)."""
 _QUIT_POLL = 0.1
 """Seconds between the looks a hand-over takes at the reads it waits out (``_exit_when_read``)."""
 _HAND_OFF_PATIENCE = 10.0
 """Seconds a hand-over waits for the reads running before it names them and can be called off."""
-_CHECK_SYMBOL = {CheckStatus.ok: "✓", CheckStatus.warn: "⚠", CheckStatus.fail: "✗"}
-_CHECK_STYLE = {CheckStatus.ok: "green", CheckStatus.warn: "yellow", CheckStatus.fail: "bold red"}
 
 SIDEBAR_WIDTH_KEY = "sidebar_width"
 """The ``state.json`` key the navigator's width is remembered under (#137) — beside
@@ -155,8 +169,8 @@ UNDO_DEPTH = 50
 """How many layout gestures ``u`` can walk back in one session (#140)."""
 
 SELECTED_KEY = "fleet.selected"
-"""``ui_state`` key for what is open: ``project:<id>``, ``agent:<project>/<id>``,
-``accounts`` or ``doctor:<project or ''>`` (#144)."""
+"""``ui_state`` key for what is open: ``project:<id>``, ``agent:<project>/<id>``, ``settings``
+(the hub), ``app-settings``, ``accounts`` or ``doctor:<project or ''>`` (#144)."""
 SHOW_CAPTURED_KEY = "fleet.show_captured"
 
 
@@ -232,7 +246,7 @@ class HelpScreen(ModalScreen[None]):
         text = Text()
         text.append("aisquare fleet — keys\n\n", style="bold")
         for key, what in (
-            ("click", "select a project, an agent, Accounts, Doctor; + onboards a project"),
+            ("click", "select a project or an agent; ⚙ Settings; + onboards a project"),
             ("↑ ↓ Enter", "move over the sidebar and open the row under the cursor"),
             # Arranging the sidebar (#140): every one of these has a CLI twin.
             ("shift+↑ ↓", "move the row under the cursor one place"),
@@ -261,6 +275,25 @@ class HelpScreen(ModalScreen[None]):
             text.append(f" {what}\n")
         text.append("\nBoard (a project's Board tab, and aisquare board -w)\n", style="bold")
         text.append_text(board_help())
+        text.append("\nThe line under ⚙ Settings", style="bold")
+        text.append(" (a click on it opens Accounts)\n", style="dim")
+        text.append("  ● aisquare", style="bold cyan")
+        text.append("  green signed in · red signed out · grey not known\n")
+        text.append("  ● 3", style="bold cyan")
+        text.append(f"{TIMES} claude", style="bold cyan")
+        text.append("  usable Claude accounts; the dot is the room LEFT across them:\n")
+        text.append("     each account 100 - max(session % used, week % used), averaged —\n")
+        text.append("     ")
+        text.append("●", style="green")
+        text.append(" over 50 %  ")
+        text.append("●", style="yellow")
+        text.append(" 25-50 %  ")
+        text.append("●", style="dark_orange")
+        text.append(" 5-25 %  ")
+        text.append("●", style="red")
+        text.append(" under 5 %  💀 none left  ")
+        text.append("●", style="grey50")
+        text.append(" not read yet; ⚠ an account needs a login\n")
         text.append("\nEsc closes this", style="dim")
         with VerticalScroll(id="helpbox"):
             yield Static(text)
@@ -555,6 +588,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         doctor: DoctorRunner | None = diagnostics.doctor,
         escape_key: str | None = None,
         accounts: AccountsReader | None = accounts_service.overview,
+        headroom: HeadroomReader | None = accounts_service.read_fleet_headroom,
+        headroom_seconds: float = HEADROOM_SECONDS,
         remote: RemoteController | None = None,
     ) -> None:
         super().__init__()
@@ -586,6 +621,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """The accounts read in flight, or the last one; only one runs at a time."""
         self._accounts_owed = False
         """A frame was asked for while a read was in flight: read once more after it."""
+        self._headroom = headroom
+        self.headroom_seconds = headroom_seconds
+        self._headroom_worker: Worker[HeadroomSummary] | None = None
+        """The headroom read in flight, or the last one; only one runs at a time."""
         self.escape_key = escape_key or fleet_service.settings().escape_key
         self.snapshot: FleetSnapshot | None = None
         """The last frame that was read successfully; ``None`` before the first."""
@@ -634,6 +673,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.show_captured = _ui_state(SHOW_CAPTURED_KEY) == "1"
         self.refresh_data()
         self.set_interval(self.refresh_seconds, self.refresh_data)
+        # The status line's headroom is the usage cache's, on its own slow clock: never
+        # on the two-second tick, which would ask the network as often as it went stale.
+        self.refresh_headroom()
+        self.set_interval(self.headroom_seconds, self.refresh_headroom)
         # The doctor runs ONCE at start, about the project the restored view shows;
         # a restored Doctor page runs it itself, as opening it does.
         if not self._restore_selection():
@@ -676,6 +719,12 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         elif kind == "project" and self.snapshot.project(ident) is not None:
             self._set_doctor_scope(ident)
             self.post_message(ProjectSelected(ident))
+            return False
+        elif kind == "settings":
+            self.post_message(SettingsSelected())
+            return False
+        elif kind == "app-settings":
+            self.post_message(AppSettingsSelected())
             return False
         elif kind == "accounts":
             self.post_message(AccountsSelected())
@@ -872,7 +921,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.refresh_accounts()
 
     def refresh_accounts(self) -> None:
-        """Re-read the Claude accounts OFF the UI thread; the section and the page follow.
+        """Re-read the Claude accounts OFF the UI thread; the status line and the page follow.
 
         ``accounts_service.overview`` reads the registry through ``context.db``
         and reconciles it as it reads: a slot ``+ Add`` just made gets its row,
@@ -934,13 +983,43 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             session = read_session()
         except Exception:  # read_session never raises; belt to its braces
             session, session_known = None, False
-        summary = summarise(overview, session, session_known=session_known)
-        sidebar.show_accounts_summary(accounts_summary_text(summary.aisquare), summary.line)
+        sidebar.show_aisquare(summarise(overview, session, session_known=session_known).aisquare)
         if overview is not None:
             for view in self.query(AccountsView):
                 view.show(overview)
         if self._accounts_owed:
             self.refresh_accounts()  # the ticks this read outlived: one read, after it
+
+    def refresh_headroom(self) -> None:
+        """Re-read the status line's headroom OFF the UI thread; :meth:`_headroom_read` paints it.
+
+        Through the usage cache (``claude_accounts.read_fleet_headroom``): the network is
+        asked only for an account whose reading is over five minutes old, and never from
+        the two-second tick — this runs at start, every :attr:`headroom_seconds`, and
+        after the Accounts page changed something. The accounts are the last frame's, so
+        what the dot counts is what the page lists. One read at a time: one still running
+        is left to answer.
+        """
+        if self._headroom is None:
+            return
+        reading = self._headroom_worker
+        if reading is not None and not reading.is_finished:
+            return
+        overview = self.accounts_overview
+        accounts = None if overview is None else [status.account for status in overview.accounts]
+        reader = self._headroom
+        self._headroom_worker = self.run_worker(
+            lambda: reader(accounts),
+            name=HEADROOM_WORKER,
+            group=HEADROOM_WORKER,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _headroom_read(self, event: Worker.StateChanged) -> None:
+        """Paint the headroom a read answered; a read that failed leaves the dot as it was."""
+        if event.state is WorkerState.SUCCESS and isinstance(event.worker.result, HeadroomSummary):
+            self.sidebar.show_headroom(event.worker.result)
 
     def _feed_open_views(self, snapshot: FleetSnapshot) -> None:
         """Hand every open Project/Agent view its row from the new frame.
@@ -1057,10 +1136,13 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             # (`refresh_accounts`), so answers arrive in the order they were read.
             self._accounts_read(event)
             return
+        if event.worker.name == HEADROOM_WORKER:
+            self._headroom_read(event)
+            return
         if event.worker.name != _DOCTOR_WORKER:
             return
         if event.worker is not self._doctor_worker:
-            return  # a superseded run: the newest one owns the section
+            return  # a superseded run: the newest one owns the page
         if event.state is WorkerState.SUCCESS:
             report = _doctor_report(event.worker.result)
             if report is None or report[0] != self._doctor_root:
@@ -1070,27 +1152,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.show_doctor_failure(f"{type(event.worker.error).__name__}: {event.worker.error}")
 
     def show_doctor(self, checks: list[DoctorCheck]) -> None:
-        """Paint a report about :attr:`_doctor_root` on the Doctor page and in the sidebar."""
+        """Paint a report about :attr:`_doctor_root` on the Doctor page."""
         self.doctor_checks = checks
         self._feed_doctor(self.query_one("#doctor", DoctorView), checks, self._doctor_root)
-        counts = {status: 0 for status in CheckStatus}
-        for check in checks:
-            counts[check.status] += 1
-        worst = sorted(
-            (c for c in checks if c.status is not CheckStatus.ok),
-            key=lambda c: c.status is not CheckStatus.fail,
-        )
-        lines: list[Text] = []
-        for check in worst:
-            line = Text()
-            line.append(f"{_CHECK_SYMBOL[check.status]} ", style=_CHECK_STYLE[check.status])
-            line.append(f"{check.name}: {check.detail}")
-            lines.append(line)
-        sidebar = self.sidebar
-        sidebar.show_doctor_summary(
-            counts[CheckStatus.ok], counts[CheckStatus.warn], counts[CheckStatus.fail], lines=lines
-        )
-        sidebar.show_doctor_notice(None)
 
     @staticmethod
     def _feed_doctor(view: DoctorView, checks: list[DoctorCheck], root: Path | None) -> None:
@@ -1107,8 +1171,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         view.show(checks)
 
     def show_doctor_failure(self, reason: str) -> None:
-        """Doctor itself crashed: say so where the counts would be, and in the view."""
-        self.sidebar.show_doctor_notice(f"doctor could not run — {reason}")
+        """Doctor itself crashed: say so on the Doctor page, as its one finding."""
         self.query_one("#doctor", DoctorView).show(
             [
                 DoctorCheck(
@@ -1466,18 +1529,37 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             timeout=6,
         )
 
+    async def on_settings_selected(self, event: SettingsSelected) -> None:
+        """*⚙ Settings*: the hub, with the keyboard on its first link when it came from the
+        keyboard (the sidebar had it)."""
+        from_keyboard = self.focused is self.sidebar
+        await self._show("settings-hub", lambda: SettingsHubView(id="settings-hub"))
+        self.sidebar.select(SETTINGS_KEY)
+        self._remember_selection("settings")
+        if from_keyboard:
+            self.query_one("#settings-hub", SettingsHubView).focus_first()
+
+    async def on_app_settings_selected(self, event: AppSettingsSelected) -> None:
+        """The hub's *App settings*: the machine-wide settings, under *⚙ Settings*."""
+        await self._show("app-settings", lambda: AppSettingsView(id="app-settings"))
+        self.sidebar.select(SETTINGS_KEY)
+        self._remember_selection("app-settings")
+
     async def on_accounts_selected(self, event: AccountsSelected) -> None:
+        """The Accounts page — from the hub or the status line; *⚙ Settings* stays the
+        highlighted row either way, the page being one of Settings' own."""
         await self._show(
             "accounts", lambda: AccountsView(escape_key=self.escape_key, id="accounts")
         )
-        self.sidebar.select("accounts")
+        self.sidebar.select(SETTINGS_KEY)
         self._remember_selection("accounts")
         if self.accounts_overview is not None:
             self.query_one("#accounts", AccountsView).show(self.accounts_overview)
 
     def on_accounts_changed(self, event: AccountsChanged) -> None:
-        """The page added, removed or signed in something: the section follows at once."""
+        """The page added, removed or signed in something: the status line follows at once."""
         self.refresh_accounts()
+        self.refresh_headroom()
 
     async def on_doctor_selected(self, event: DoctorSelected) -> None:
         """Open the Doctor page and run the checks — opening it is what asks for them.
@@ -1487,7 +1569,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """
         scope = event.project_id if event.project_id is not None else self.doctor_scope
         await self._show("doctor")
-        self.sidebar.select("doctor")
+        self.sidebar.select(SETTINGS_KEY)
         self._set_doctor_scope(scope)
         self._remember_selection(f"doctor:{scope or ''}")
         self.run_doctor()
@@ -1693,7 +1775,6 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         this one.
         """
         self.doctor_scope = project_id
-        self.sidebar.set_doctor_scope(project_id)
 
     # --- for tests and callers --------------------------------------------------------
 
@@ -1775,6 +1856,7 @@ def _waited_reads() -> dict[str, str]:
     return {
         _DOCTOR_WORKER: "the doctor's checks",
         ACCOUNTS_WORKER: "the accounts' read",
+        HEADROOM_WORKER: "the accounts' headroom",
         doctor.ROUTE_WORKER: "how aisquare was installed",
         accounts.USAGE_WORKER: "the accounts' usage",
         accounts.CREDITS_WORKER: "the workspaces' credits",

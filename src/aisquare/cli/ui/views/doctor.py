@@ -4,8 +4,8 @@ docs/plans/fleet-tui.md §0 item 4 and §4.2: the findings are visible with the
 fix for each, and where the fix is one of our own commands it is one click
 (``services.onboarding.fix_commands`` decides which — everything else stays
 text). A click runs ``apply_fix`` in a thread worker with the project's cwd,
-then re-runs the doctor and posts :class:`DoctorRefreshed` so the shell and the
-sidebar's Doctor section can follow. The UI process never changes directory.
+then re-runs the doctor and posts :class:`DoctorRefreshed` so the shell's report
+can follow. The UI process never changes directory.
 
 asq's own Doctor (``machine=True``, never the Onboard copy) also carries a
 Re-run button — the shell runs the checks at start, when the page opens and

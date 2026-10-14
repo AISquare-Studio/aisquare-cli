@@ -38,7 +38,6 @@ from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.sidebar import (
     AccountsSelected,
     AgentSelected,
-    DoctorSection,
     DoctorSelected,
     ProjectSelected,
 )
@@ -1505,9 +1504,12 @@ def test_what_the_page_adds_shows_in_the_sidebar_and_the_page_stays(
 
 
 def doctor_lines(app: FleetApp) -> list[str]:
-    """The ⚠/✗ lines the sidebar's Doctor section shows under its counts."""
-    section = app.query_one(DoctorSection)
-    return [shown(line) for line in section.query(".doctor-line").results(Static) if line.display]
+    """The ⚠/✗ findings of the report the shell holds — what its Doctor page shows."""
+    return [
+        f"{'✗' if check.status is CheckStatus.fail else '⚠'} {check.name}: {check.detail}"
+        for check in app.doctor_checks
+        if check.status is not CheckStatus.ok
+    ]
 
 
 def test_connect_brings_the_sidebars_doctor_section_up_to_date(
@@ -1550,7 +1552,7 @@ def test_connect_brings_the_sidebars_doctor_section_up_to_date(
     # Runs before Connect (at start, and for the project step 1 chose) all warned; the
     # run Connect asked for is the last.
     assert machine.connects == 1 and runs[-1] and not any(runs[:-1]), runs
-    assert after == [], "the section dropped the warning Connect answered"
+    assert after == [], "the report dropped the warning Connect answered"
 
 
 def test_the_sidebars_doctor_answers_for_the_project_step_one_chose(

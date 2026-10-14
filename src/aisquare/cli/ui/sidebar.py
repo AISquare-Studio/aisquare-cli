@@ -1,12 +1,13 @@
-"""The left pane: Fleet ▸ projects (alternating background) ▸ agents ▸ Accounts ▸ Doctor.
+"""The left pane, two sections: Fleet ▸ projects (alternating background) ▸ agents, then ⚙ Settings.
 
 docs/plans/fleet-tui.md §4.1. One ``ProjectCard`` per registered project, each
 with a disclosure, its name (the nickname, else the basename — renamed in place),
 chips (agents alive · 🔔 count), a ⋯ menu, and — when two projects share a name —
 the path as a dim subtitle; under it one ``AgentRow`` per fleet agent (role icon,
-label, state chip, exit status) and a spawn-agent row; an Accounts section (the
-AISquare sign-in and the Claude Code accounts, docs/plans/claude-accounts.md) and
-a Doctor section at the bottom.
+label, state chip, exit status) and a spawn-agent row. Below the separator, one
+row, *⚙ Settings* (the Settings hub: App settings, Accounts, Doctor), and under it
+one dim status line (:func:`status_line_text`): the AISquare sign-in and the
+Claude accounts' headroom as two dots. A click on that line opens Accounts.
 
 Two rules shape the code more than the layout does:
 
@@ -17,9 +18,11 @@ Two rules shape the code more than the layout does:
   tick, and nothing flickers. Only a project or agent that appeared or vanished
   mounts or unmounts a widget.
 - **Rows post messages; the app decides.** ``AddProject``, ``ProjectSelected``,
-  ``AgentSelected``, ``SpawnAgent``, ``AccountsSelected``, ``DoctorSelected``,
+  ``AgentSelected``, ``SpawnAgent``, ``SettingsSelected``, ``AccountsSelected``,
   ``RenameProject`` and ``OpenProjectMenu`` are the whole contract between this
-  pane and the shell. Nothing here opens a view or writes the store.
+  pane and the shell (the Settings hub posts ``AppSettingsSelected``,
+  ``AccountsSelected`` and ``DoctorSelected``). Nothing here opens a view or
+  writes the store.
 
 Every visible string is a ``rich.text.Text`` built with ``append`` — a project
 called ``[archive]`` must reach the screen as ``[archive]`` (CONTRIBUTING: no
@@ -54,7 +57,7 @@ from aisquare.cli.ui.groups import (
     TogglePin,
     UndoLayout,
 )
-from aisquare.models import FleetAgentStatus, ProjectGroup, ProjectInfo
+from aisquare.models import FleetAgentStatus, HeadroomSummary, ProjectGroup, ProjectInfo
 from aisquare.services.project import NICKNAME_MAX, display_name
 from aisquare.services.project_groups import Arrangement, GroupEntry, arrange
 
@@ -84,9 +87,6 @@ CUSTOM_ROLE_ICON = "🤖"
 ALIVE_STATES: frozenset[str] = frozenset({"working", "waiting", "attention", "limited", "unknown"})
 """States that count toward the card's "agents alive" chip — a limited agent is
 alive and parked (#146), not gone."""
-
-DOCTOR_LINES = 3
-"""How many ⚠/✗ lines the Doctor section shows under its counts (§4.1)."""
 
 
 class AddProject(Message):
@@ -119,7 +119,15 @@ class DoctorSelected(Message):
 
 
 class AccountsSelected(Message):
-    """The Accounts section: the AISquare sign-in and the Claude Code accounts."""
+    """The Accounts page: the AISquare sign-in and the Claude Code accounts."""
+
+
+class SettingsSelected(Message):
+    """*⚙ Settings*: the Settings hub, with its links to App settings, Accounts and Doctor."""
+
+
+class AppSettingsSelected(Message):
+    """The hub's *App settings*: the machine-wide settings page."""
 
 
 class RenameProject(Message):
@@ -234,28 +242,57 @@ def project_chips_text(project: ProjectInfo, statuses: list[FleetAgentStatus]) -
     return text
 
 
-def accounts_summary_text(aisquare: bool | None) -> Text:
-    """``Accounts  ✓ AISquare`` — the section's first line.
+SETTINGS_KEY = "settings"
+"""The Settings row's selection key: highlighted while the hub or any page it opens shows."""
 
-    ``aisquare`` is signed-in / not / unknown (``None``: the session could not
-    be read). The Claude side goes on the detail line under it (the view's
-    ``summarise``): 28 columns do not hold both beside the title.
+SETTINGS_ICON = "\u2699\ufe0e"
+"""⚙ in its text presentation (VS15): a monotone gear, never the coloured emoji."""
+
+HEADROOM_DOT: dict[str, tuple[str, str]] = {
+    "good": ("●", "green"),
+    "fair": ("●", "yellow"),
+    "low": ("●", "dark_orange"),
+    "critical": ("●", "red"),
+    "empty": ("💀", ""),
+    "unknown": ("●", "grey50"),
+}
+"""The Claude dot per ``HeadroomSummary.level``: over 50 % left green, 25-50 % yellow,
+5-25 % orange-red, under 5 % red, nothing left a skull, not read yet grey."""
+
+
+TIMES = "\N{MULTIPLICATION SIGN}"
+"""The ``x`` in ``3x claude``."""
+
+
+def headroom_dot(headroom: HeadroomSummary | None) -> tuple[str, str]:
+    """The Claude dot and its colour. Grey, never the skull, when nothing could be READ:
+    ``empty`` with no ``percent_left`` is offline, a Keychain login or no usable account
+    — not a fleet at 0 %."""
+    if headroom is None or (headroom.level == "empty" and headroom.percent_left is None):
+        return HEADROOM_DOT["unknown"]
+    return HEADROOM_DOT[headroom.level]
+
+
+def status_line_text(aisquare: bool | None, headroom: HeadroomSummary | None) -> Text:
+    """``● aisquare  ● 3x claude`` (the x a multiplication sign) — the line under *⚙ Settings*.
+
+    The AISquare dot is green signed in, red signed out, grey while unknown. The
+    Claude dot is :func:`headroom_dot`; the count is how many accounts are usable,
+    and a ``⚠`` follows when an account needs a login. ``headroom`` is ``None`` until
+    the first summary lands.
     """
-    text = Text("Accounts  ", style="bold", no_wrap=True, overflow="ellipsis")
-    if aisquare is None:
-        text.append("? AISquare", style="yellow")
-    elif aisquare:
-        text.append("✓ AISquare", style="green")
-    else:
-        text.append("✗ AISquare", style="dim")
-    return text
-
-
-def doctor_summary_text(ok: int, warn: int, fail: int) -> Text:
-    text = Text("Doctor  ", style="bold", no_wrap=True, overflow="ellipsis")
-    text.append(f"✓ {ok}  ", style="green")
-    text.append(f"⚠ {warn}  ", style="yellow")
-    text.append(f"✗ {fail}", style="red")
+    text = Text(no_wrap=True, overflow="ellipsis")
+    colour = "grey50" if aisquare is None else "green" if aisquare else "red"
+    text.append("● ", style=colour)
+    text.append("aisquare", style="dim")
+    text.append("  ")
+    dot, colour = headroom_dot(headroom)
+    text.append(f"{dot} ", style=colour)
+    if headroom is not None:
+        text.append(f"{headroom.usable}{TIMES} ", style="dim")
+    text.append("claude", style="dim")
+    if headroom is not None and headroom.needs_login:
+        text.append(" ⚠", style="yellow")
     return text
 
 
@@ -266,7 +303,7 @@ class Activatable(Static):
     """A sidebar line the user can click or press Enter on.
 
     ``selection_key`` names what it stands for (``project:<id>``,
-    ``agent:<id>``, ``doctor``) so the sidebar can re-apply the highlight
+    ``agent:<id>``, ``settings``) so the sidebar can re-apply the highlight
     after a rebuild without holding widget references.
     """
 
@@ -916,75 +953,58 @@ class ProjectCard(Vertical):
             return
 
 
-class AccountsTitle(Activatable):
-    """The Accounts section's first line. Click → Accounts view."""
-
-    def __init__(self) -> None:
-        super().__init__(Text("Accounts", style="bold"))
-        self.selection_key = "accounts"
-
-    def message(self) -> Message:
-        return AccountsSelected()
-
-
-class AccountsSection(Vertical):
-    """One line of counts and one line of detail: who is signed in, or what is missing."""
+class SettingsRow(Activatable):
+    """*⚙ Settings*: the one row below the separator. Click or Enter → the Settings hub."""
 
     DEFAULT_CSS = """
-    AccountsSection { height: auto; max-height: 3; border-top: solid $primary; padding: 0 1; }
-    AccountsSection .accounts-line { height: 1; color: $text-muted; }
+    SettingsRow { text-style: bold; }
     """
 
-    def compose(self) -> ComposeResult:
-        yield AccountsTitle()
-        yield Static("", classes="accounts-line")
+    def __init__(self) -> None:
+        super().__init__(Text(f"{SETTINGS_ICON} Settings"), id="settings-row")
+        self.selection_key = SETTINGS_KEY
+
+    def message(self) -> Message:
+        return SettingsSelected()
+
+
+class StatusLine(Static):
+    """The dim line under *⚙ Settings* (:func:`status_line_text`). A click opens Accounts.
+
+    Not a row: it is never focused, never under the keyboard cursor and never the
+    highlighted selection — the Accounts page it opens is one of Settings' pages, so
+    *⚙ Settings* stays the highlighted row (the human: "clicking on that should
+    directly take me to accounts page but still that line wont be highlighted").
+    """
+
+    DEFAULT_CSS = """
+    StatusLine { height: 1; color: $text-muted; text-wrap: nowrap; text-overflow: ellipsis; }
+    """
+
+    ALLOW_SELECT = False
 
     def on_click(self, event: events.Click) -> None:
         event.stop()
-        self.query_one(AccountsTitle).activate()
+        self.post_message(AccountsSelected().set_sender(self))
 
 
-class DoctorTitle(Activatable):
-    """The Doctor section's first line: the counts. Click → Doctor view."""
-
-    def __init__(self) -> None:
-        super().__init__(Text("Doctor", style="bold"))
-        self.selection_key = "doctor"
-        self.project_id: str | None = None
-
-    def message(self) -> Message:
-        return DoctorSelected(self.project_id)
-
-
-class DoctorSection(Vertical):
-    """Counts plus the top ⚠/✗ lines for the selected project (global when none)."""
+class OthersSection(Vertical):
+    """Everything that is not a project, under the separator: *⚙ Settings* and its status."""
 
     DEFAULT_CSS = """
-    DoctorSection { height: auto; max-height: 6; border-top: solid $primary; padding: 0 1; }
-    DoctorSection .doctor-line {
-        height: 1; color: $text-muted; text-wrap: nowrap; text-overflow: ellipsis;
-    }
-    DoctorSection .doctor-notice { height: auto; color: $warning; }
+    OthersSection { height: auto; border-top: solid $primary; padding: 0 1; }
     """
 
     def compose(self) -> ComposeResult:
-        yield DoctorTitle()
-        yield Static("", classes="doctor-notice")
-        for _ in range(DOCTOR_LINES):
-            yield Static("", classes="doctor-line")
-
-    def on_click(self, event: events.Click) -> None:
-        # A click anywhere in the section — a finding line, blank space — opens
-        # the Doctor view, exactly as a click on the counts does.
-        event.stop()
-        self.query_one(DoctorTitle).activate()
+        yield SettingsRow()
+        yield StatusLine(status_line_text(None, None), id="status-line")
 
 
 # --- the pane ---------------------------------------------------------------------
 
 
 class Sidebar(Vertical):
-    """Header, the scrolling project list, then the Accounts and Doctor sections at the bottom.
+    """Header and the scrolling project list; under the separator, *⚙ Settings* and its status.
 
     Focusable, because §4.3 puts focus either here or in a terminal pane:
     ↑/↓ move a cursor over the rows, Enter activates the row under it, and the
@@ -1039,7 +1059,12 @@ class Sidebar(Vertical):
     def __init__(self, *, id: str | None = None) -> None:
         super().__init__(id=id)
         self.selected_key: str | None = None
-        """What is highlighted: ``project:<id>``, ``agent:<id>``, ``accounts``, ``doctor``."""
+        """What is highlighted: ``project:<id>``, ``agent:<id>``, or ``settings`` while the hub
+        or a page it opens (App settings, Accounts, Doctor) shows."""
+        self.aisquare: bool | None = None
+        """The AISquare sign-in the status line shows: signed in, out, or unknown."""
+        self.headroom: HeadroomSummary | None = None
+        """The Claude accounts' headroom the status line shows; ``None`` until the first."""
         self._prev_states: dict[str, str] = {}
         self._cursor_key: str | None = None
         self.last_frame: tuple[list[ProjectInfo], dict[str, list[FleetAgentStatus]]] | None = None
@@ -1067,8 +1092,7 @@ class Sidebar(Vertical):
                 Text("No projects yet — press + to onboard one.", style="dim"),
                 id="projects-empty",
             )
-        yield AccountsSection(id="accounts-section")
-        yield DoctorSection(id="doctor-section")
+        yield OthersSection(id="others")
 
     # --- data in -----------------------------------------------------------------
 
@@ -1396,7 +1420,7 @@ class Sidebar(Vertical):
         (into that group, last); a group, onto an unpinned group's header (before
         it). The list's own empty space below the last row is the end: the top
         level for a project, the last group for a group. Nothing else is a place
-        — the main pane, the header, Accounts and Doctor, the Pinned label, a
+        — the main pane, the header, Settings and its status, the Pinned label, a
         pinned card (pin order is ``p``'s), a card for a group, the rows being
         dragged — and a release there changes nothing. Read as "below the list",
         a drag abandoned over the main pane ungrouped its project and moved it
@@ -1445,51 +1469,23 @@ class Sidebar(Vertical):
         notice.update(Text(text or "", style="bold yellow"))
         notice.display = bool(text)
 
-    def show_doctor_summary(
-        self, ok: int, warn: int, fail: int, *, lines: Iterable[Text] = ()
-    ) -> None:
-        """Counts, then up to ``DOCTOR_LINES`` of the worst findings (already ordered)."""
-        section = self.query_one(DoctorSection)
-        section.query_one(DoctorTitle).update(doctor_summary_text(ok, warn, fail))
-        slots = list(section.query(".doctor-line").results(Static))
-        pending = list(lines)[: len(slots)]
-        for slot, line in zip(slots, pending, strict=False):
-            line.no_wrap = True
-            line.overflow = "ellipsis"
-            slot.update(line)
-            slot.display = True
-        for slot in slots[len(pending) :]:
-            slot.update("")
-            slot.display = False
+    def show_aisquare(self, signed_in: bool | None) -> None:
+        """The status line's AISquare dot: signed in, out, or ``None`` when it cannot be read."""
+        self.aisquare = signed_in
+        self._paint_status()
 
-    def show_accounts_summary(self, title: Text, line: Text | None) -> None:
-        """The Accounts section: its first line, and the one detail line under it (or none)."""
-        section = self.query_one(AccountsSection)
-        section.query_one(AccountsTitle).update(title)
-        detail = section.query_one(".accounts-line", Static)
-        if line is None:
-            detail.update("")
-            detail.display = False
-        else:
-            line.no_wrap = True
-            line.overflow = "ellipsis"
-            detail.update(line)
-            detail.display = True
+    def show_headroom(self, headroom: HeadroomSummary) -> None:
+        """The status line's Claude dot, from the usage cache (``FleetApp.refresh_headroom``)."""
+        self.headroom = headroom
+        self._paint_status()
 
-    def show_doctor_notice(self, text: str | None) -> None:
-        """A line in the Doctor section for what doctor itself could not do."""
-        notice = self.query_one(DoctorSection).query_one(".doctor-notice", Static)
-        notice.update(Text(text or "", style="yellow"))
-        notice.display = bool(text)
-
-    def set_doctor_scope(self, project_id: str | None) -> None:
-        """Which project the Doctor section (and a click on it) is about."""
-        self.query_one(DoctorTitle).project_id = project_id
+    def _paint_status(self) -> None:
+        self.query_one(StatusLine).update(status_line_text(self.aisquare, self.headroom))
 
     # --- selection ------------------------------------------------------------------
 
     def select(self, key: str | None) -> None:
-        """Highlight the row for ``key`` (a project, an agent, ``accounts`` or ``doctor``)."""
+        """Highlight the row for ``key`` (a project, an agent or ``settings``)."""
         self.selected_key = key
         self._apply_selection()
 

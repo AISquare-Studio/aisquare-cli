@@ -9,9 +9,12 @@ and you are typing into the session itself.
 
 Three ideas carry the whole feature:
 
-- **One view.** Left: a navigator — `Fleet ▸ projects ▸ agents ▸ Doctor`. Right:
-  whatever you clicked — onboarding for a new directory, a project's manager,
-  an agent's live session, the board, doctor findings with their fixes.
+- **One view.** Left: a navigator — `Fleet ▸ projects ▸ agents`, then under a
+  line *⚙ Settings* (App settings, Accounts, Doctor) with a dim status line: the
+  AISquare sign-in and the Claude accounts' headroom as two dots (`?` explains
+  the colours; a click opens Accounts). Right: whatever you clicked — onboarding
+  for a new directory, a project's manager, an agent's live session, the board,
+  the settings, doctor findings with their fixes.
 - **tmux is the substrate.** Agents run as windows of a per-project session on a
   tmux server that is ours alone (`tmux -L asq`, with a bundled config). Your own
   tmux sessions, config and prefix key are never touched.
@@ -521,8 +524,8 @@ tunnel, with the link, a QR code and the passphrase in one panel — see
 
 ## Accounts
 
-The **Accounts** section at the bottom of the sidebar opens one page for the two
-logins the fleet leans on.
+*⚙ Settings ▸ Accounts* — or a click on the status line under *⚙ Settings* —
+opens one page for the two logins the fleet leans on.
 
 **AISquare** is on top. The card reads the session `aisquare login` stores and
 shows who you are and when it expires. *Sign in* runs the same browser flow the
@@ -1010,7 +1013,7 @@ codename `amber-otter`, session `asq-amber-otter`, branches
 ```text
   asq  — one Textual process, a VIEW                      tmux server  -L asq  — the SUBSTRATE
  ┌────────────────────────────────────────────┐          ┌───────────────────────────────────────────────┐
- │ left : Fleet ▸ projects ▸ agents ▸ Doctor  │ capture  │ session asq-amber-otter                        │
+ │ left : Fleet ▸ projects ▸ agents · Settings│ capture  │ session asq-amber-otter                        │
  │ right: onboard · manager · agent · board · │◄─────────│  ├─ window manager    : aisquare launch manager│
  │        doctor · explainability · settings  │ send-keys│  ├─ window coder-auth : aisquare launch coder …│
  └───────────────────┬────────────────────────┘─────────►│  └─ window tester-1   : aisquare launch tester │
@@ -1041,7 +1044,7 @@ no socket and is asked by name. The Manager tab's attach line names the
 server the same way.
 
 **What the UI remembers.** The view that was open — a project, an agent, the
-Accounts page, the Doctor — comes back at the next launch if its row is still
+Settings hub or a page under it — comes back at the next launch if its row is still
 there (an agent that has gone falls back to its project), and so does the
 captured-directories toggle; both live in the store's `ui_state` table (#144),
 the theme in `state.json` because the board shares it, the navigator width

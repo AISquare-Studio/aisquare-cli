@@ -38,7 +38,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app as cli_app
 from aisquare.cli.ui.app import ACCOUNTS_WORKER, SIDEBAR_WIDTH_KEY, FleetApp
-from aisquare.cli.ui.sidebar import AccountsSection, AccountsSelected, AccountsTitle
+from aisquare.cli.ui.sidebar import SETTINGS_KEY, AccountsSelected, StatusLine
 from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.cli.ui.views.accounts import (
@@ -247,10 +247,11 @@ def fleet_app(pilot: Pilot[None]) -> FleetApp:
 
 
 async def open_accounts(pilot: Pilot[None]) -> AccountsView:
-    """Click the section and wait for the page: the click posts ``AccountsSelected`` to the
-    app, whose handler mounts the page, so one pause could return before it existed."""
+    """Click the status line under *⚙ Settings* and wait for the page: the click posts
+    ``AccountsSelected`` to the app, whose handler mounts the page, so one pause could
+    return before it existed."""
     app = fleet_app(pilot)
-    await pilot.click(app.query_one(AccountsSection))
+    await pilot.click(app.query_one(StatusLine))
     await settle(app)
     view = app.query_one("#accounts", AccountsView)
     assert app.current_view() is view
@@ -429,32 +430,43 @@ def test_summarise_names_the_worst_thing_first() -> None:
         assert summary.line is not None and len(summary.line.plain) <= 28
 
 
-# --- the sidebar section and the page -----------------------------------------------------------
+# --- the sidebar's status line and the page -----------------------------------------------------
 
 
-def test_the_section_summarises_and_opens_the_page(no_network: dict[str, Any]) -> None:
+def test_the_status_line_says_aisquare_and_opens_the_page_with_settings_selected(
+    no_network: dict[str, Any],
+) -> None:
+    """The human: "clicking on that should directly take me to accounts page but still that
+    line wont be highlighted/in focus, still settings would be in focus"."""
     no_network["session"] = _session()
     overview = _overview(_status(1, "me@example.com"), _status(2, "two@example.com"))
 
-    async def go(pilot: Pilot[None]) -> tuple[str, str, str | None, list[str], str, str]:
+    async def go(pilot: Pilot[None]) -> tuple[Any, ...]:
         app = fleet_app(pilot)
-        title = shown(app.query_one(AccountsTitle))
-        detail = shown(app.query_one(AccountsSection).query_one(".accounts-line", Static))
+        signed_in = app.sidebar.aisquare
         before = app.content.current
         view = await open_accounts(pilot)
         rows = [line(view, 1), line(view, 2)]
         status = shown(view.query_one("#aisquare-status", Static))
         claude = shown(view.query_one("#claude-title", Static))
-        return title, detail, before, rows, status, claude
+        return signed_in, before, rows, status, claude, app.sidebar.selected_key, app.focused
 
-    title, detail, before, rows, status, claude = drive(go, overview=overview)
-    assert title == "Accounts  ✓ AISquare"
-    assert detail == "2 Claude · me@example.com"
+    signed_in, before, rows, status, claude, selected, focused = drive(go, overview=overview)
+    assert signed_in is True  # the AISquare dot is green
     assert before == "welcome"
+    assert selected == SETTINGS_KEY  # Settings is the highlighted row, not the line
+    assert not isinstance(focused, StatusLine)
     assert rows[0].startswith("1  plain claude") and "me@example.com" in rows[0]
     assert rows[1].startswith("2  account 2") and "two@example.com" in rows[1]
     assert "Signed in as me@aisquare.studio" in status
     assert claude.startswith("Claude Code 2.1.266")
+
+
+def _claude_count(app: FleetApp) -> int | None:
+    """How many Claude accounts the frame the shell painted last holds: what a test watches
+    to see an accounts read land, now the sidebar carries no line of its frame."""
+    overview = app.accounts_overview
+    return None if overview is None else len(overview.accounts)
 
 
 def test_the_shells_tick_reads_the_accounts_off_the_ui_thread_and_paints_the_answer(
@@ -481,29 +493,28 @@ def test_the_shells_tick_reads_the_accounts_off_the_ui_thread_and_paints_the_ans
             release.wait(10)
         return frames[0]
 
-    async def run() -> tuple[str, bool, str, str]:
+    async def run() -> tuple[int | None, bool, int | None, int | None]:
         app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=reader)
         async with app.run_test(size=SIZE) as pilot:
             await accounts_read(app)
-            detail = app.query_one(AccountsSection).query_one(".accounts-line", Static)
-            first = shown(detail)
+            first = _claude_count(app)
             hold.set()
             frames.pop(0)
             try:
                 app.refresh_data()  # the two-second tick, with the registry held
                 held = await asyncio.to_thread(asked.wait, 5)
                 await pilot.pause()
-                while_held = shown(detail)
+                while_held = _claude_count(app)
             finally:
                 release.set()
             await accounts_read(app)
-            return first, held, while_held, shown(detail)
+            return first, held, while_held, _claude_count(app)
 
     first, held, while_held, after = asyncio.run(run())
     assert threads and threading.main_thread().name not in threads, threads
     assert held, "the tick asked for the accounts"
-    assert first == while_held == "1 Claude · me@example.com"  # the last frame, kept
-    assert after == "2 Claude · me@example.com"  # the answer, painted when it came
+    assert first == while_held == 1  # the last frame, kept
+    assert after == 2  # the answer, painted when it came
 
 
 def test_ticks_while_the_accounts_read_waits_let_it_answer_and_read_once_more_after_it(
@@ -543,11 +554,10 @@ def test_ticks_while_the_accounts_read_waits_let_it_answer_and_read_once_more_af
             with counting:
                 running[0] -= 1
 
-    async def run() -> tuple[str, str, str]:
+    async def run() -> tuple[int | None, int | None, int | None]:
         app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=reader)
         async with app.run_test(size=SIZE) as pilot:
             await accounts_read(app)
-            detail = app.query_one(AccountsSection).query_one(".accounts-line", Static)
             hold.set()
             try:
                 app.refresh_data()  # a tick: the first held read waits on the registry
@@ -555,23 +565,23 @@ def test_ticks_while_the_accounts_read_waits_let_it_answer_and_read_once_more_af
                 app.refresh_data()  # two more ticks while it waits
                 app.refresh_data()
                 await pilot.pause()
-                while_held = shown(detail)
+                while_held = _claude_count(app)
                 gates[1].set()  # the writer lets go
                 # The read the ticks were owed starts once the first one's answer is painted.
                 assert await asyncio.to_thread(asked[2].wait, 5), "a read after the wait"
                 await pilot.pause()
-                answered = shown(detail)
+                answered = _claude_count(app)
                 gates[2].set()
                 await accounts_read(app)
             finally:
                 for gate in gates.values():
                     gate.set()
-            return while_held, answered, shown(detail)
+            return while_held, answered, _claude_count(app)
 
     while_held, answered, after = asyncio.run(run())
-    assert while_held == "1 Claude · me@example.com"  # the last frame, kept
-    assert answered == "2 Claude · me@example.com"  # the waiting read's answer, painted
-    assert after == "3 Claude · me@example.com"  # and the one read after it
+    assert while_held == 1  # the last frame, kept
+    assert answered == 2  # the waiting read's answer, painted
+    assert after == 3  # and the one read after it
     assert peak[0] == 1, f"{peak[0]} reads at once"
     assert held == [1, 2], held  # three ticks during one wait cost one more read
 
@@ -602,11 +612,10 @@ def test_a_tick_the_app_handles_before_a_reads_answer_still_lets_that_answer_pai
         emails = ["me@example.com", *(f"{i}@example.com" for i in range(2, n + 2))]
         return _overview(*(_status(i, email) for i, email in enumerate(emails, 1)))
 
-    async def run() -> tuple[str, str]:
+    async def run() -> tuple[int | None, int | None]:
         app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=reader)
         async with app.run_test(size=SIZE) as pilot:
             await accounts_read(app)
-            detail = app.query_one(AccountsSection).query_one(".accounts-line", Static)
             hold.set()
             try:
                 app.refresh_data()  # a tick: the first held read waits on the registry
@@ -626,17 +635,17 @@ def test_a_tick_the_app_handles_before_a_reads_answer_still_lets_that_answer_pai
                 app.call_later(tick_ahead_of_the_answer)
                 assert await asyncio.to_thread(asked[2].wait, 5), "the tick read again"
                 await pilot.pause()
-                answered = shown(detail)
+                answered = _claude_count(app)
                 gates[2].set()
                 await accounts_read(app)
             finally:
                 for gate in gates.values():
                     gate.set()
-            return answered, shown(detail)
+            return answered, _claude_count(app)
 
     answered, after = asyncio.run(run())
-    assert answered == "2 Claude · me@example.com"  # the first read's answer, painted
-    assert after == "3 Claude · me@example.com"  # and the tick's read after it
+    assert answered == 2  # the first read's answer, painted
+    assert after == 3  # and the tick's read after it
     assert held == [1, 2], held
 
 
@@ -683,20 +692,19 @@ def test_buttons_follow_each_slots_state(no_network: dict[str, Any]) -> None:
 def test_without_claude_code_the_page_says_how_to_install_and_add_is_disabled() -> None:
     overview = _overview(_status(1, None, signed_in=False), installed=False)
 
-    async def go(pilot: Pilot[None]) -> tuple[str, bool, str, str]:
+    async def go(pilot: Pilot[None]) -> tuple[str, bool, bool | None]:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
         return (
             shown(view.query_one("#claude-title", Static)),
             view.query_one("#claude-add", Button).disabled,
-            shown(app.query_one(AccountsTitle)),
-            shown(app.query_one(AccountsSection).query_one(".accounts-line", Static)),
+            app.sidebar.aisquare,
         )
 
-    claude, disabled, title, detail = drive(go, overview=overview)
+    claude, disabled, signed_in = drive(go, overview=overview)
     assert "Claude Code is not installed" in claude and core.INSTALL_COMMAND in claude
     assert disabled
-    assert title == "Accounts  ✗ AISquare" and detail == "⚠ Claude Code not installed"
+    assert signed_in is False  # the status line's AISquare dot is red
 
 
 def test_usage_is_fetched_only_for_signed_in_slots_and_painted_into_their_rows(
@@ -944,7 +952,7 @@ def test_sign_in_shows_the_code_then_the_new_session(
         monkeypatch, no_network, outcome={"access_token": "aisq_new", "expires_in": 1}
     )
 
-    async def go(pilot: Pilot[None]) -> tuple[str, str, bool, str]:
+    async def go(pilot: Pilot[None]) -> tuple[str, str, bool, bool | None]:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
         assert not view.query_one("#aisquare-sign-out", Button).display  # nobody to sign out
@@ -956,10 +964,10 @@ def test_sign_in_shows_the_code_then_the_new_session(
             shown(view.query_one("#aisquare-status", Static)),
             notice(view),
             view.query_one("#aisquare-code", Static).display,
-            shown(app.query_one(AccountsTitle)),
+            app.sidebar.aisquare,
         )
 
-    status, said, code_shown, title = drive(go)
+    status, said, code_shown, signed_in = drive(go)
     assert seen == ["wait:WDJB-MJHT", "complete:aisq_new"]
     # The browser helper decides (an explicit BROWSER beats the headless heuristics),
     # so it is asked even where is_headless() says no.
@@ -967,7 +975,7 @@ def test_sign_in_shows_the_code_then_the_new_session(
     assert "Signed in as new@aisquare.studio" in status
     assert said == "✓ Signed in to AISquare as new@aisquare.studio"
     assert not code_shown  # the card folds away once the session is stored
-    assert "✓ AISquare" in title  # the section was re-read from the stored session
+    assert signed_in is True  # the status line was re-read from the stored session
 
 
 def test_a_sign_in_whose_token_could_not_be_restricted_says_so_on_the_page(
@@ -2250,7 +2258,7 @@ def test_a_frame_read_before_the_write_and_painted_after_it_does_not_bring_the_o
         fresh = await reads.next_held()  # …(the read owed after it starts once it has)
         await pilot.pause()
         after_stale = line(view, 3)
-        await pilot.click(app.query_one(AccountsSection))  # the shell re-hands that frame
+        await pilot.click(app.query_one(StatusLine))  # the shell re-hands that frame
         await settle_until(app, lambda: True, group=accounts_view.RENAME_WORKER)
         after_rehand = line(view, 3)
         await rename(pilot, 3)

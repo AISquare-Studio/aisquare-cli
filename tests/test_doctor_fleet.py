@@ -1361,8 +1361,8 @@ def test_the_fleet_terminal_row_never_starts_a_server_and_survives_an_unknown_te
 
 
 def test_the_fleet_terminal_row_comes_after_the_actionable_checks() -> None:
-    """It can warn (a server's kept prefix), and the fleet sidebar shows only the
-    first three not-ok rows in doctor order (``DOCTOR_LINES``): inserted beside
+    """It can warn (a server's kept prefix), and the not-ok rows are read in doctor
+    order (the fleet sidebar showed only the first three): inserted beside
     tmux, as #147 had it, that warning evicted one of brain / snapshot / a
     logged-out gh — the rows an operator can act on — from the one doctor
     surface visible without a click. So it waits with browser tools."""

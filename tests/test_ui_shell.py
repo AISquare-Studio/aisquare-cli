@@ -54,12 +54,11 @@ from aisquare.cli.ui.sidebar import (
     AgentRow,
     CardChips,
     Disclosure,
-    DoctorSection,
-    DoctorTitle,
     GroupHeader,
     ProjectCard,
     ProjectTitle,
     SectionLabel,
+    SettingsRow,
     ordered_agents,
     short_path,
 )
@@ -271,6 +270,15 @@ async def _toasts(app: FleetApp) -> str:
     """Every toast on screen once the app has gone quiet, oldest first, as one string —
     one save can raise more than one."""
     return " | ".join(await _toast_list(app))
+
+
+async def open_doctor(pilot: Pilot[None]) -> None:
+    """Open the Doctor page as a person now does: *⚙ Settings*, then the hub's *Doctor*."""
+    app = fleet_app(pilot)
+    await pilot.click(app.query_one(SettingsRow))
+    await settle(app)
+    await pilot.click("#hub-doctor")
+    await settle(app)
 
 
 def fleet_app(pilot: Pilot[None]) -> FleetApp:
@@ -888,7 +896,7 @@ def test_plus_opens_onboarding(tmp_path: Path, script: Script) -> None:
     assert drive(go) == ("welcome", "onboard")
 
 
-def test_doctor_section_opens_the_doctor_view_and_paints_the_summary(
+def test_the_hubs_doctor_link_opens_the_doctor_page_and_runs_the_checks(
     tmp_path: Path, script: Script
 ) -> None:
     seed(tmp_path, ("prj_a", "alpha", None))
@@ -909,35 +917,33 @@ def test_doctor_section_opens_the_doctor_view_and_paints_the_summary(
             ),
         ]
 
-    async def go(pilot: Pilot[None]) -> tuple[int, str | None, str, str, list[str], int]:
+    async def go(pilot: Pilot[None]) -> tuple[int, str | None, str, str | None, str | None, int]:
         app = fleet_app(pilot)
         await settle(app)
         await pilot.pause()
         calls_after_mount = len(calls)
         before = app.content.current
-        await pilot.click(app.query_one(DoctorSection))
+        await open_doctor(pilot)
         await pilot.pause()
         await settle(app)
         await pilot.pause()
         report = shown(app.query_one("#doctor", DoctorView).query_one("#doctor-report", Static))
-        summary = shown(app.query_one(DoctorTitle))
-        lines = [
-            shown(line)
-            for line in app.query_one(DoctorSection).query(".doctor-line").results(Static)
-            if line.display
-        ]
-        return calls_after_mount, before, report, summary, lines, len(calls)
+        return (
+            calls_after_mount,
+            before,
+            report,
+            app.content.current,
+            app.sidebar.selected_key,
+            len(calls),
+        )
 
-    at_mount, before, report, summary, lines, total = drive(go, doctor=doctor)
-    assert at_mount == 1  # the counts are painted at start-up…
+    at_mount, before, report, current, selected, total = drive(go, doctor=doctor)
+    assert at_mount == 1  # the checks run at start-up…
     assert before == "welcome"
-    assert total == 2  # …and the click runs the checks again
+    assert total == 2  # …and opening the page runs them again
+    assert current == "doctor" and selected == "settings"  # a page of Settings'
     assert "repomix not found" in report and "→ npm install -g repomix" in report
-    assert "Python 3.14" in report
-    assert summary.startswith("Doctor") and "✓ 1" in summary and "⚠ 1" in summary
-    assert "✗ 1" in summary
-    assert len(lines) == 2 and lines[0].startswith("✗ home") and lines[1].startswith("⚠ repomix")
-    assert not any("python" in line for line in lines)  # only the findings, never the ✓ rows
+    assert "Python 3.14" in report and "~/.aisquare is missing" in report
 
 
 def test_a_crashing_doctor_is_reported_not_raised(tmp_path: Path, script: Script) -> None:
@@ -946,26 +952,24 @@ def test_a_crashing_doctor_is_reported_not_raised(tmp_path: Path, script: Script
     def broken() -> list[DoctorCheck]:
         raise RuntimeError("boom")
 
-    async def go(pilot: Pilot[None]) -> tuple[bool, str, str, int | None]:
+    async def go(pilot: Pilot[None]) -> tuple[str, int | None]:
         app = fleet_app(pilot)
         await settle(app)
         await pilot.pause()
-        notice = app.query_one(DoctorSection).query_one(".doctor-notice", Static)
         report = shown(app.query_one("#doctor", DoctorView).query_one("#doctor-report", Static))
-        return notice.display, shown(notice), report, app.return_code
+        return report, app.return_code
 
-    displayed, notice, report, return_code = drive(go, doctor=broken)
-    assert displayed and "doctor could not run" in notice and "boom" in notice
-    assert "the checks crashed: RuntimeError: boom" in report
+    report, return_code = drive(go, doctor=broken)
+    assert "the checks crashed: RuntimeError: boom" in report  # on the Doctor page
     assert return_code is None  # the app kept running
 
-    async def healthy(pilot: Pilot[None]) -> bool:
+    async def healthy(pilot: Pilot[None]) -> str:
         app = fleet_app(pilot)
         await settle(app)
         await pilot.pause()
-        return app.query_one(DoctorSection).query_one(".doctor-notice", Static).display
+        return shown(app.query_one("#doctor", DoctorView).query_one("#doctor-report", Static))
 
-    assert drive(healthy) is False  # a working doctor leaves no such notice
+    assert "crashed" not in drive(healthy)  # a working doctor reports no such thing
 
 
 SNAPSHOT_WARN = DoctorCheck(
@@ -1013,7 +1017,7 @@ def test_the_doctor_page_arms_project_fixes_for_the_project_it_ran_for(
         await settle(app)
         await pilot.pause()
         selected = (_fix_buttons(shell_doctor), shell_doctor.cwd)
-        await pilot.click(app.query_one(DoctorSection))
+        await open_doctor(pilot)
         await pilot.pause()
         await settle(app)
         await pilot.pause()
@@ -1045,7 +1049,7 @@ def test_the_doctor_page_arms_project_fixes_for_the_project_it_ran_for(
     assert views == 1, "the project page has no Doctor tab of its own"
 
 
-def test_a_doctor_refreshed_message_updates_the_sidebar_counts(
+def test_a_doctor_refreshed_message_updates_the_shells_report(
     tmp_path: Path, script: Script
 ) -> None:
     """A one-click fix re-runs the doctor inside the view; the shell must follow it."""
@@ -1056,12 +1060,17 @@ def test_a_doctor_refreshed_message_updates_the_sidebar_counts(
         calls.append(1)
         return [SNAPSHOT_WARN]
 
+    def counts(app: FleetApp) -> str:
+        """The report the shell holds (its Doctor page shows it), as ``✓ n  ⚠ n``."""
+        ok = sum(check.status is CheckStatus.ok for check in app.doctor_checks)
+        warn = sum(check.status is CheckStatus.warn for check in app.doctor_checks)
+        return f"✓ {ok}  ⚠ {warn}"
+
     async def go(pilot: Pilot[None]) -> tuple[str, int, str, int, str, int]:
         app = fleet_app(pilot)
         await settle(app)
         await pilot.pause()
-        summary = app.query_one(DoctorTitle)
-        before = (shown(summary), len(calls))
+        before = (counts(app), len(calls))
         # The report the view was handed is about the scope on screen: adopt it.
         app.post_message(
             DoctorRefreshed(
@@ -1076,13 +1085,13 @@ def test_a_doctor_refreshed_message_updates_the_sidebar_counts(
         await pilot.pause()
         await settle(app)
         await pilot.pause()
-        adopted = (shown(summary), len(calls))
+        adopted = (counts(app), len(calls))
         # A report about another root (the Onboard view's) says ours is stale.
         app.post_message(DoctorRefreshed([], tmp_path / "elsewhere"))
         await pilot.pause()
         await settle(app)
         await pilot.pause()
-        return (*before, *adopted, shown(summary), len(calls))
+        return (*before, *adopted, counts(app), len(calls))
 
     before, calls_before, adopted, calls_adopted, rerun, calls_rerun = drive(go, doctor=doctor)
     assert "⚠ 1" in before and "✓ 0" in before and calls_before == 1
@@ -1120,7 +1129,7 @@ def test_the_doctor_runs_at_start_and_then_only_when_asked(tmp_path: Path, scrip
         app.refresh_data()
         await settle(app)
         seen["selecting"] = len(calls)
-        await pilot.click(app.query_one(DoctorSection))
+        await open_doctor(pilot)
         await settle(app)
         seen["opened"] = len(calls)
         await pilot.click("#doctor-rerun")
@@ -1215,7 +1224,7 @@ def test_a_doctor_report_is_painted_only_in_the_scope_it_ran_for(
             for card in ("prj_a", "prj_b"):
                 await pilot.click(card_for(app, card).query_one(ProjectTitle))
                 await settle(app)
-                await pilot.click(app.query_one(DoctorSection))  # the page, for that project
+                await open_doctor(pilot)  # the page, for that project
                 await settle(app)
                 await pilot.pause()
                 if card == "prj_a":
@@ -3889,7 +3898,7 @@ def test_the_shell_remembers_the_captured_toggle_and_reopens_a_page(
     tmp_path: Path, script: Script
 ) -> None:
     """Review of #169: what the shell remembers beyond a row came back untested —
-    the captured directories shown with `a`, the Accounts page, the Doctor."""
+    the captured directories shown with `a`, and every page under ⚙ Settings."""
     seed(tmp_path, ("prj_a", "alpha", None))
     with store_session() as store:
         store.ensure_project(ProjectInfo(id="prj_scratch", root=tmp_path / "scratch"))  # a hook
@@ -3916,12 +3925,17 @@ def test_the_shell_remembers_the_captured_toggle_and_reopens_a_page(
         assert store.ui_state("fleet.show_captured") is None, "hiding them again is remembered"
     assert drive(relaunch)[0] == ["prj_a"]
 
-    with store_session() as store:
-        store.set_ui_state("fleet.selected", "accounts")
-    assert drive(relaunch)[1:] == ("accounts", "accounts")
-    with store_session() as store:
-        store.set_ui_state("fleet.selected", "doctor:")
-    assert drive(relaunch)[1:] == ("doctor", "doctor")
+    # Every page under ⚙ Settings reopens with Settings the highlighted row — the two
+    # remembered before the hub existed (`accounts`, `doctor:`) as much as the new ones.
+    for remembered, page in (
+        ("settings", "settings-hub"),
+        ("app-settings", "app-settings"),
+        ("accounts", "accounts"),
+        ("doctor:", "doctor"),
+    ):
+        with store_session() as store:
+            store.set_ui_state("fleet.selected", remembered)
+        assert drive(relaunch)[1:] == (page, "settings"), remembered
 
 
 # --- groups, pins and manual order (#140) ---------------------------------------------------

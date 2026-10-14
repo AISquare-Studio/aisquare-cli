@@ -715,7 +715,8 @@ class TestEnvFiles:
         machine = runner.invoke(app, ["--json", "team", "spawn", "reviewer", "--no-probe"])
 
         assert human.exit_code == 0 and machine.exit_code == 0, human.output + machine.output
-        assert f"GH_TOKEN=\"$(tr -d '\\r\\000' < {shlex.quote(str(token))})\"" in human.output
+        read = f"aisquare team read-env-file GH_TOKEN {shlex.quote(str(token))}"
+        assert f'GH_TOKEN="$({read})"' in human.output
         assert "GH_TOKEN [file]" in human.output
         assert TOKEN not in human.output and TOKEN not in machine.output
         assert json.loads(machine.stdout)["env_files"] == {"GH_TOKEN": str(token)}
@@ -743,6 +744,10 @@ class TestEnvFiles:
         agent.parent.mkdir()
         agent.write_text('#!/bin/sh\nprintf "[%s]" "$GH_TOKEN"\n', encoding="utf-8")
         agent.chmod(0o755)
+        # The `aisquare` the role's terminal has on PATH: this checkout's.
+        cli = agent.with_name("aisquare")
+        cli.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -m aisquare "$@"\n')
+        cli.chmod(0o755)
         _bind("reviewer", bin=str(agent), env_files={"GH_TOKEN": str(token)})
         monkeypatch.setenv("AISQUARE_TEAM", "1")
         result = runner.invoke(app, ["--json", "team", "spawn", "reviewer", "--no-probe"])
@@ -750,37 +755,49 @@ class TestEnvFiles:
         command = json.loads(result.stdout)["command"]
         assert TOKEN not in command, "the line holds the path, never the value"
         assert command.startswith("(GH_TOKEN="), "in a subshell: the paste sets nothing here"
-        shell = {"PATH": "/usr/bin:/bin", "GH_TOKEN": "this-shells-token-that-can-push"}
+        shell = {
+            "PATH": f"{agent.parent}:/usr/bin:/bin",
+            "HOME": str(tmp_path),
+            "GH_TOKEN": "this-shells-token-that-can-push",
+        }
 
         def paste() -> tuple[int, str, str]:
             done = subprocess.run(
-                ["sh", "-c", command], env=shell, capture_output=True, text=True, check=False
-            )
-            return done.returncode, done.stdout, done.stderr
+                ["sh", "-c", command], env=shell, capture_output=True, check=False, timeout=120
+            )  # bytes: text mode would read a CR in the value as a newline
+            return done.returncode, done.stdout.decode(), done.stderr.decode()
 
         assert paste() == (0, f"[{TOKEN}]", ""), "the value as launch reads it, no CR"
         # Review of #259, round 3: a token saved with a byte-order mark (PowerShell 5.1's
         # `Set-Content -Encoding UTF8`, an older Notepad; its `>` writes UTF-16) launched as
-        # `﻿<token>`, which every `gh` call refused. Read without it, here and at launch.
-        for encoding in ("utf-8-sig", "utf-16", "utf-16-le", "utf-16-be"):
-            mark = "﻿" if encoding in ("utf-16-le", "utf-16-be") else ""
-            token.write_bytes(f"{mark}{TOKEN}\r\n".encode(encoding))
-            assert token.read_bytes()[:2] in (b"\xef\xbb", b"\xff\xfe", b"\xfe\xff"), encoding
-            assert harness.resolve_profile("reviewer").file_env == {"GH_TOKEN": TOKEN}, encoding
-            assert paste() == (0, f"[{TOKEN}]", ""), encoding
-        token.write_bytes(b"\xef\xbb\xbf\n")  # a mark and nothing else: empty, both ways
-        assert harness.resolve_profile("reviewer").refusal is not None
-        status, out, err = paste()  # `${KEY:?}`'s status is the shell's: 1 in bash, 2 in dash
-        assert (status != 0, out) == (True, ""), "a mark alone starts nothing"
-        assert "GH_TOKEN: its file is empty or cannot be read" in err
-        token.write_text("\n", encoding="utf-8")
-        status, out, err = paste()
-        assert (status != 0, out) == (True, ""), "an emptied file starts nothing"
-        assert "GH_TOKEN: its file is empty or cannot be read" in err
+        # `﻿<token>`, which every `gh` call refused. Round 4: the paste read it in shell,
+        # and still not as launch does: a CR inside the value deleted, UTF-16 undecoded (a
+        # non-ASCII token mangled), a value of spaces taken. Each file, both ways, the same.
+        files = [
+            (f"{TOKEN}\r\n".encode("utf-8-sig"), "UTF-8 with its mark"),
+            (f"{TOKEN}\r\n".encode("utf-16"), "UTF-16"),
+            (f"\ufeff{TOKEN}\r\n".encode("utf-16-le"), "UTF-16 LE"),
+            (f"\ufeff{TOKEN}\r\n".encode("utf-16-be"), "UTF-16 BE"),
+            ("tökén-ü\r\n".encode("utf-16"), "a non-ASCII token in UTF-16"),
+            (b"ab\rcd\r\n", "a CR inside the value"),
+            (b"   \n", "spaces alone"),
+            (b"\xef\xbb\xbf\n", "a mark and nothing else"),
+            (b"\n", "an emptied file"),
+        ]
+        for content, what in files:
+            token.write_bytes(content)
+            launched = harness.resolve_profile("reviewer")
+            status, out, err = paste()
+            if launched.refusal is None:
+                assert (status, out, err) == (0, f"[{launched.file_env['GH_TOKEN']}]", ""), what
+            else:
+                assert (status, out) == (1, ""), f"{what} starts nothing"
+                assert err.startswith(f"GH_TOKEN: {token} is empty"), (what, err)
+        assert harness.resolve_profile("reviewer").refusal is not None, "control: refused"
         token.unlink()
         status, out, err = paste()
-        assert (status != 0, out) == (True, ""), "a file gone starts nothing"
-        assert str(token) in err or "reviewer-gh-token" in err, err
+        assert (status, out) == (1, ""), "a file gone starts nothing"
+        assert err.startswith(f"GH_TOKEN: {token} cannot be read ("), err
 
     def test_team_harness_names_the_file_bound_key_and_reads_its_file_once(
         self,

@@ -88,6 +88,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "spawn",
             "harness",
             "bind",
+            "read-env-file",
         )
     ),
     *(

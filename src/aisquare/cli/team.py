@@ -634,33 +634,45 @@ def spawn(
 
 def _reading_env_files(command: str, env_files: Mapping[str, str]) -> str:
     """``command`` with each variable bound to a file (``env_files``) read by the paste itself,
-    as ``aisquare launch`` reads it (``harness.read_env_file``): never its value in the line,
-    its carriage returns dropped with the trailing newlines, and a file that cannot be read
-    or holds nothing refusing the line, naming the variable, rather than starting the role
-    without it. In a subshell, so the paste sets nothing in the shell it is pasted into.
+    through ``aisquare team read-env-file`` (:func:`read_env_file_command`), so by the one
+    reader ``--exec``, ``aisquare launch`` and ``fleet spawn`` use (``harness.read_env_file``):
+    never its value in the line, and a file that cannot be read or holds nothing refusing the
+    line, naming the variable, rather than starting the role without it. In a subshell, so
+    the paste sets nothing in the shell it is pasted into.
 
     It was ``KEY="$(cat path)"`` before the command: a file gone or emptied since it was
     printed started the role with ``KEY`` empty, the other login the refusal exists to
-    prevent, said by a ``cat:`` line alone; and one saved with CRLF gave ``KEY=token\\r``
-    where ``--exec`` and ``fleet spawn`` give ``token`` (review of #259, round 2).
-
-    And without the byte-order mark ``launch`` drops (``config.decode_by_bom``): UTF-8's, and
-    UTF-16's once its NULs are dropped, which leaves an ASCII token as it was saved. Kept, a
-    file saved by PowerShell 5.1 gave ``KEY=\\ufefftoken`` (review of #259, round 3).
+    prevent, said by a ``cat:`` line alone (review of #259, round 2). Rounds 2 and 3 then
+    read it in shell, which still read it otherwise: every CR and NUL in the file deleted,
+    UTF-16 undecoded (its NULs dropped, so a non-ASCII token came out mangled), and a value
+    of spaces taken where ``launch`` refuses it as empty (round 4).
     """
     if not env_files:
         return command
     reads = [
-        f"{key}=\"$(tr -d '\\r\\000' < {shlex.quote(path)})\" && "
-        + "".join(f'{key}="${{{key}#"$(printf \'{mark}\')"}}" && ' for mark in _BYTE_ORDER_MARKS)
-        + f': "${{{key}:?its file is empty or cannot be read}}" && export {key}'
+        f'{key}="$(aisquare team read-env-file {shlex.quote(key)} {shlex.quote(path)})" '
+        f"&& export {key}"
         for key, path in env_files.items()
     ]
     return f"({' && '.join([*reads, command])})"
 
 
-_BYTE_ORDER_MARKS = ("\\357\\273\\277", "\\377\\376", "\\376\\377")
-"""UTF-8's, and UTF-16's little- and big-endian marks, as ``printf`` spells their bytes."""
+@app.command("read-env-file", hidden=True)
+def read_env_file_command(key: str, path: str) -> None:
+    """Print what ``path`` binds ``key`` to, read as a launch reads it (``harness.read_env_file``);
+    exit 1 naming ``key`` when the file cannot be read or holds nothing.
+
+    Plumbing for the line ``team spawn`` prints (:func:`_reading_env_files`), which reads a
+    file-bound secret with it, so that a paste and ``--exec`` read one file one way. Kept
+    hidden: ``team bind --env-file`` is what a person types. Later releases must keep it, or
+    a line printed by this one stops starting its role.
+    """
+    try:
+        value = harness.read_env_file(path)
+    except ValueError as exc:
+        typer.echo(f"{key}: {path} {exc} — the role does not start without it", err=True)
+        raise typer.Exit(1) from None
+    typer.echo(value, nl=False)
 
 
 @app.command("harness")

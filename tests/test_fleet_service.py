@@ -2921,6 +2921,42 @@ def test_every_path_that_types_into_or_shows_a_pane_refuses_a_held_rows_id(
     assert newcomer.typed == [], "and still nothing of the newcomer's"
 
 
+def test_a_listing_asks_for_the_boot_only_for_rows_that_may_be_held_and_once_per_read(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 2: `boot_id()` keeps only an id it found (round 28 of #257), so
+    where `sysctl` fails each question is another `sysctl`, with a 5 s timeout. `_observe`
+    asked it of every read with live rows (asq's 2 s tick, needs-you's 3 s scan, every
+    `status_of`), though only a row another server may hold needs it, and asked
+    `boot_started()` once more per such row. Now neither for rows on their own server, and
+    each once per read however many rows need it."""
+    asked = {"id": 0, "started": 0}
+
+    def boot_id() -> str | None:
+        asked["id"] += 1
+        return None  # a macOS whose `sysctl` fails: kept by nothing, asked again each time
+
+    def boot_started() -> datetime | None:
+        asked["started"] += 1
+        return None
+
+    monkeypatch.setattr(tmux_core, "boot_id", boot_id)
+    monkeypatch.setattr(tmux_core, "boot_started", boot_started)
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    coders = [_coder(project) for _ in range(3)]
+    asked.update(id=0, started=0)  # what the spawns recorded
+
+    assert {status.state for status in fleet_service.list_agents(project)} == {"waiting"}
+    fleet_service.status_of(coders[0])
+    assert asked == {"id": 0, "started": 0}, "no row on its own server needs the boot"
+
+    newcomer = FakeTmux()  # three rows another server at their socket may hold
+    newcomer.started = tmux.started + timedelta(minutes=5)
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: newcomer)
+    assert all(status.held for status in fleet_service.list_agents(project))
+    assert asked == {"id": 1, "started": 1}, "once each for the read, not once per row"
+
+
 def test_with_no_boot_id_a_row_from_before_the_boot_is_lost_not_held_by_the_next_server(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

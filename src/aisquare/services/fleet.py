@@ -1094,7 +1094,7 @@ def _outlived(agent: FleetAgent, server_started: datetime | None) -> bool:
 
 
 def _on_another_server(
-    agent: FleetAgent, server_started: datetime | None, this_boot: str | None
+    agent: FleetAgent, server_started: datetime | None, boot: _Boot | None = None
 ) -> bool:
     """Whether the server that answered at ``agent``'s socket, started at ``server_started``,
     is not the one its row was started on, and that one may still run: it recorded its
@@ -1108,13 +1108,44 @@ def _on_another_server(
     :func:`~aisquare.core.tmux.server_may_run` judges it: counted from this boot instead,
     every row was held after a reboot against the server the next spawn started, and
     ``reap``, ``shutdown`` and ``uninstall`` could not end it (review of #259, round 1).
+
+    The boot is asked only here, once a row has passed the test that makes it matter
+    (``boot``: :class:`_Boot`, once per read).
     """
     if agent.server_started_at is None or not _outlived(agent, server_started):
         return False
+    boot = boot or _Boot()
+    this_boot = boot.id()
     if agent.boot_id is not None and this_boot is not None:
         return agent.boot_id == this_boot
-    booted_at = tmux_core.boot_started()
+    booted_at = boot.started()
     return booted_at is None or agent.created_at >= booted_at
+
+
+class _Boot:
+    """This boot's identity and start (``tmux_core.boot_id``, ``boot_started``), each asked
+    of the machine at most once, and only when asked for: one per read of the fleet.
+
+    ``boot_id`` keeps only an id it found (round 28 of #257), so where ``sysctl`` fails each
+    question is another ``sysctl`` run, with a 5 s timeout. :func:`_observe` asked it of
+    every read with live rows, asq's 2 s tick, needs-you's 3 s scan and every
+    ``status_of``, though only a row that may be held needs it, which is rare; and
+    ``boot_started`` once more per such row (review of #259, round 2).
+    """
+
+    def __init__(self) -> None:
+        self._id: tuple[str | None] | None = None
+        self._started: tuple[datetime | None] | None = None
+
+    def id(self) -> str | None:
+        if self._id is None:
+            self._id = (tmux_core.boot_id(),)
+        return self._id[0]
+
+    def started(self) -> datetime | None:
+        if self._started is None:
+            self._started = (tmux_core.boot_started(),)
+        return self._started[0]
 
 
 def _observe(
@@ -1186,12 +1217,12 @@ def _observe(
         if live and not seen and not _server_answers(srv):
             return None
         started = srv.started_at() if seen or live else None
-        this_boot = tmux_core.boot_id() if live else None
+        boot = _Boot()  # asked only for a row that may be held
         views: _Observed = {}
         for agent in agents:
             if agent.id in seen and not _outlived(agent, started):
                 views[agent.id] = seen[agent.id]
-            elif agent.ended_at is None and _on_another_server(agent, started, this_boot):
+            elif agent.ended_at is None and _on_another_server(agent, started, boot):
                 views[agent.id] = None
         return views
     except TmuxError:

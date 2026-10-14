@@ -444,3 +444,56 @@ def test_an_account_that_needs_a_login_counts_in_neither_half_of_the_line(
         "last refreshed just now",
         "last refreshed 6m ago · last try failed just now",
     ]
+
+
+def _503(account: ClaudeAccount) -> ClaudeUsage:
+    """The scripted endpoint, answering with a server error: nothing said of the token."""
+    return ClaudeUsage(available=False, reason="HTTP 503 from the usage endpoint")
+
+
+def test_a_refresh_that_fails_inside_the_window_keeps_the_figure_and_says_the_try_failed(
+    no_network: dict[str, Any], clock: Clock, tmp_path: Path
+) -> None:
+    """The tester's repro (reopen of the m4/m5 fix): 40 % at T0, the endpoint at 503, ↻
+    Refresh usage a minute later put '503' on the row; the next tick put 40 % back and
+    dropped '· last try failed'; the row went 40 % → 503 → 40 % → 503. The row keeps its
+    figure while the figure is in the window, and the line says the try failed throughout.
+    Once the figure is out of the window, the failure is the newest word."""
+    endpoint: dict[str, Callable[[ClaudeAccount], ClaudeUsage]] = {"up": _answering(clock)}
+    no_network["usage"] = lambda account: endpoint["up"](account)
+    frame = _signed_in(2, tmp_path, "tok-two")
+
+    async def go(pilot: Pilot[None]) -> dict[object, tuple[str, str, int]]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle_until(app, lambda: len(no_network["usage_calls"]) >= 1)
+        await settle(app)
+        seen: dict[object, tuple[str, str, int]] = {}
+        endpoint["up"] = _503
+        clock.advance(minutes=1)
+        await pilot.click(view.query_one("#usage-refresh", Button))
+        await settle_until(app, lambda: len(no_network["usage_calls"]) >= 2)
+        await settle(app)
+        seen["refreshed"] = (_age(view), line(view, 2), len(no_network["usage_calls"]))
+        for minute in (2, 3):
+            clock.advance(minutes=1)
+            view.refresh_readings()  # the tick: served, not retried inside five minutes
+            await settle(app)
+            seen[minute] = (_age(view), line(view, 2), len(no_network["usage_calls"]))
+        clock.advance(minutes=2, seconds=30)  # 5m30s: the figure is out, the failure is not
+        view.refresh_readings()
+        await settle(app)
+        seen["aged"] = (_age(view), line(view, 2), len(no_network["usage_calls"]))
+        return seen
+
+    seen = drive(go, overview=frame)
+    said, row, _calls = seen["refreshed"]
+    assert said == "last refreshed 1m ago · last try failed just now"
+    assert "40%" in row and "503" not in row, row
+    for minute, age, tried in ((2, "2m ago", "1m ago"), (3, "3m ago", "2m ago")):
+        said, row, calls = seen[minute]
+        assert said == f"last refreshed {age} · last try failed {tried}", minute
+        assert "40%" in row and calls == 2, (minute, row)
+    said, row, calls = seen["aged"]
+    assert said == "last refreshed 5m ago · last try failed 4m ago"
+    assert "503" in row and calls == 2, row

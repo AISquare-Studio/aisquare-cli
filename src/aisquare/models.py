@@ -311,6 +311,10 @@ class ClaudeUsage(BaseModel):
     week_resets_at: datetime | None = None
     fetched_at: datetime | None = None
     """When the reading was taken — or, when nothing could be read, when that was found out."""
+    last_failed_at: datetime | None = None
+    """When a later try to read failed without replacing this reading: an unreachable
+    endpoint or an HTTP error after it, while it is still within the five-minute cache.
+    The figure stands; the line that says how old it is says the try failed too."""
 
     @computed_field  # type: ignore[prop-decorator]
     @property

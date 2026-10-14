@@ -187,18 +187,24 @@ def test_a_failure_that_says_nothing_of_the_token_never_hides_a_good_reading(
 ) -> None:
     """Review of #261, m4: a forced refresh that could not reach the endpoint hid the 40 %
     read a minute before it for five minutes. The good reading serves while it is in the
-    window; the failure says nothing against it. Still at most one try per window."""
+    window; the failure says nothing against it, and is carried with it
+    (``last_failed_at``) — by the forced round's own answer too, and by every read after:
+    a forced try that failed showed the failure, the next plain read the figure with no
+    word of it (reopened). Still at most one try per window."""
     work = _slot("work@example.com", "tok-work")
     fetch = _Usage({"tok-work": _payload(40)})
     service.cached_usage([work], now=NOW, fetch=fetch)
+    failed_at = NOW + timedelta(minutes=1)
 
-    tried = service.cached_usage([work], now=NOW + timedelta(minutes=1), force=True, fetch=outage)
-    assert not tried[work.slot].available and not tried[work.slot].needs_login  # said, as asked
+    tried = service.cached_usage([work], now=failed_at, force=True, fetch=outage)
+    assert tried[work.slot].session_percent == 40, "the forced round keeps the figure"
+    assert (tried[work.slot].fetched_at, tried[work.slot].last_failed_at) == (NOW, failed_at)
 
     for minutes in (2, 4):
         served = service.cached_usage([work], now=NOW + timedelta(minutes=minutes), fetch=fetch)
         assert served[work.slot].session_percent == 40
         assert served[work.slot].fetched_at == NOW  # "3m ago": how old it is, never "now"
+        assert served[work.slot].last_failed_at == failed_at, "and the failed try with it"
     assert fetch.calls == ["tok-work"]
 
     # Past the good reading's window, the failure is the newest word until its own ends.
@@ -206,6 +212,19 @@ def test_a_failure_that_says_nothing_of_the_token_never_hides_a_good_reading(
     assert not gone[work.slot].available and fetch.calls == ["tok-work"]
     back = service.cached_usage([work], now=NOW + timedelta(minutes=6, seconds=1), fetch=fetch)
     assert back[work.slot].session_percent == 40 and len(fetch.calls) == 2
+    assert back[work.slot].last_failed_at is None, "the latest try read it"
+
+
+def test_a_rejected_token_on_a_forced_read_still_wins_over_the_figure(fake_home: Path) -> None:
+    """The one failure that contradicts a reading: a 401 says the token is refused, so a
+    forced round that meets it shows it, and so does the next read."""
+    work = _slot("work@example.com", "tok-work")
+    service.cached_usage([work], now=NOW, fetch=_Usage({"tok-work": _payload(40)}))
+    later = NOW + timedelta(minutes=1)
+    tried = service.cached_usage([work], now=later, force=True, fetch=_Usage({"tok-work": 401}))
+    assert not tried[work.slot].available and tried[work.slot].needs_login
+    served = service.cached_usage([work], now=later + timedelta(minutes=1))
+    assert served[work.slot].needs_login
 
 
 def test_reads_of_one_slot_at_once_share_one_fetch(fake_home: Path) -> None:
@@ -462,6 +481,31 @@ def test_the_cli_never_calls_a_failed_read_a_refresh(
     refused = runner.invoke(app, ["accounts", "usage", "4"])  # needs a login: its row says so
     assert refused.exit_code == 0, refused.output
     assert "usage as of" not in refused.stdout and "last try" not in refused.stdout
+
+
+def test_a_refresh_that_fails_keeps_the_figure_and_the_cli_says_the_try_failed(
+    fake_home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tester's repro (reopen of the m4/m5 fix): 40 % read at T0, the endpoint at 503,
+    ``--refresh`` a minute later said "no usage read · last try failed just now" though
+    the 40 % stood, and a plain read a minute after that said "usage as of 2m ago" with no
+    word of the try. The figure stays, and the line says both."""
+    _slot("work@example.com", "tok-work")
+    monkeypatch.setattr(service, "_http_get", _Usage({"tok-work": _payload(40)}))
+    first = runner.invoke(app, ["accounts", "usage"])
+    assert "usage as of just now (percent USED" in first.stdout, first.stdout
+
+    monkeypatch.setattr(service, "_http_get", _Usage({"tok-work": 503}))
+    monkeypatch.setattr(service, "_now", lambda: NOW + timedelta(minutes=1))
+    refreshed = runner.invoke(app, ["accounts", "usage", "--refresh"])
+    assert refreshed.exit_code == 0, refreshed.output
+    assert "40%" in refreshed.stdout and "503" not in refreshed.stdout, refreshed.stdout
+    assert "usage as of 1m ago · last try failed just now (percent USED" in refreshed.stdout
+
+    monkeypatch.setattr(service, "_now", lambda: NOW + timedelta(minutes=2))
+    later = runner.invoke(app, ["accounts", "usage"])
+    assert "40%" in later.stdout
+    assert "usage as of 2m ago · last try failed 1m ago (percent USED" in later.stdout
 
 
 def test_the_managers_cycle_says_figures_are_used_and_headroom_is_left() -> None:

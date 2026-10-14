@@ -1136,12 +1136,7 @@ def _served(
     now: datetime,
 ) -> dict[int, ClaudeUsage]:
     """What the cache answers for each account, from ``since`` on: the reading recorded with
-    the token it holds now, or the failed fetch with that token, the NEWER of the two.
-
-    Except that a failure which says nothing of the token (``needs_login`` False: an
-    unreachable endpoint, an HTTP 5xx) never hides a good reading still in the window: it
-    does not contradict the figure, so the figure is served, and its ``fetched_at`` says
-    how old it is. A 401 does contradict it, and wins when newer.
+    the token it holds now, or the failed fetch with that token, by :func:`_preferred`.
     """
     recorded = _recorded_usage(accounts, tokens, since=since, now=now)
     served: dict[int, ClaudeUsage] = {}
@@ -1153,15 +1148,32 @@ def _served(
             failed = _UNANSWERED.get((str(account.config_dir), token))
         if failed is not None and (failed.fetched_at is None or failed.fetched_at < since):
             failed = None
-        good = recorded.get(account.slot)
-        if failed is not None and (
-            good is None
-            or (failed.needs_login and (failed.fetched_at or since) > (good.fetched_at or since))
-        ):
-            served[account.slot] = failed
-        elif good is not None:
-            served[account.slot] = good
+        if (answer := _preferred(recorded.get(account.slot), failed)) is not None:
+            served[account.slot] = answer
     return served
+
+
+def _preferred(good: ClaudeUsage | None, failed: ClaudeUsage | None) -> ClaudeUsage | None:
+    """Which of a slot's good reading and its failed try, both within the window, it is shown.
+
+    The NEWER, except that a failure which says nothing of the token (``needs_login``
+    False: an unreachable endpoint, an HTTP 5xx) never hides a good reading: it does not
+    contradict the figure, so the figure is shown, marked with when the try failed
+    (``last_failed_at``) for the line that says how old it is. A 401 does contradict it,
+    and wins when newer. One rule for a read the cache serves and for a forced round's
+    answer: applied to the plain read alone, a forced refresh that failed showed the
+    failure, and the next plain read showed the figure with no word of it (review of
+    #261, m4, reopened).
+    """
+    if failed is None or good is None:
+        return good or failed
+    if failed.fetched_at is None or (
+        good.fetched_at is not None and failed.fetched_at <= good.fetched_at
+    ):
+        return good  # the latest try read it
+    if failed.needs_login:
+        return failed
+    return good.model_copy(update={"last_failed_at": failed.fetched_at})
 
 
 def cached_usage(
@@ -1220,6 +1232,18 @@ def cached_usage(
                     else:
                         _UNANSWERED[key] = reading
             readings[account.slot] = reading
+        # A try that failed, forced or due, against a good reading still in the window:
+        # the same rule as a served read, so the row keeps its figure (_preferred).
+        failed = [
+            account
+            for account in stale
+            if not readings[account.slot].available and account.slot in tokens
+        ]
+        if failed:
+            recorded = _recorded_usage(failed, tokens, since=since, now=moment)
+            for account in failed:
+                answer = _preferred(recorded.get(account.slot), readings[account.slot])
+                readings[account.slot] = answer or readings[account.slot]
     return {account.slot: readings[account.slot] for account in accounts}
 
 

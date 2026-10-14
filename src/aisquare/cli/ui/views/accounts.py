@@ -1159,29 +1159,31 @@ class AccountsView(Vertical):
     def _paint_usage_age(self) -> None:
         """``last refreshed 3m ago`` — the OLDEST reading the usable rows hold that was
         actually read; ``never`` before the first. A usable row whose latest try read nothing
-        (an unreachable endpoint, an HTTP error) adds ``· last try failed just now``, the
-        newest such try: a failure is never passed off as a refresh. ``refreshing…`` while a
-        read runs, when *↻ Refresh usage* is off too.
+        (an unreachable endpoint, an HTTP error), or whose figure a later try failed to
+        renew (``last_failed_at``: the cache keeps the figure on the row), adds ``· last try
+        failed just now``, the newest such try: a failure is never passed off as a refresh,
+        nor hidden by the figure before it. ``refreshing…`` while a read runs, when
+        *↻ Refresh usage* is off too.
 
         A row that needs a login (signed out, its token expired or refused) or whose token
-        this CLI cannot read (missing, the macOS Keychain) counts in neither half: its own
-        status says so, and an account left expired would otherwise say "failed" every tick.
+        this CLI cannot read (missing, the macOS Keychain) counts in neither half
+        (``usage_is_readable``, the CLI's rule too): its own status says so, and an account
+        left expired would otherwise say "failed" every tick.
         """
         running = self._usage_running()
         self.query_one("#usage-refresh", Button).disabled = running
         slots = [
             row.slot
             for row in self.rows()
-            if row.status.token_state == "ok"
-            and not needs_login(row.status, self.usage.get(row.slot))
+            if accounts_service.usage_is_readable(row.status, self.usage.get(row.slot))
         ]
         read = [self._read_at[slot] for slot in slots if slot in self._read_at]
         failed = [
-            reading.fetched_at
+            when
             for slot in slots
             if (reading := self.usage.get(slot)) is not None
-            and not reading.available
-            and reading.fetched_at is not None
+            and (when := reading.last_failed_at if reading.available else reading.fetched_at)
+            is not None
         ]
         if running:
             said = "refreshing…"

@@ -205,7 +205,8 @@ def _refreshed_line(statuses: list[ClaudeAccountStatus]) -> Text | None:
     """``usage as of 3m ago … --refresh fetches now``, by the Accounts page's rule: the OLDEST
     reading actually read among the rows whose usage can be read
     (``usage_is_readable``), and ``· last try failed just now``, the newest such try, when
-    one of them read nothing (an unreachable endpoint, an HTTP error).
+    one of them read nothing (an unreachable endpoint, an HTTP error) or a try after its
+    reading failed (``last_failed_at``: the cache keeps the figure, and says so).
 
     ``cached_usage`` stamps a failure with the moment it was found out, and aged with the
     readings it said "usage as of just now" with the endpoint down (review of #261, m5). A
@@ -218,7 +219,11 @@ def _refreshed_line(statuses: list[ClaudeAccountStatus]) -> Text | None:
         if status.usage is not None and accounts_service.usage_is_readable(status, status.usage)
     ]
     read = [usage.fetched_at for usage in tried if usage.available and usage.fetched_at]
-    failed = [usage.fetched_at for usage in tried if not usage.available and usage.fetched_at]
+    failed = [
+        when
+        for usage in tried
+        if (when := usage.last_failed_at if usage.available else usage.fetched_at) is not None
+    ]
     if not read and not failed:
         return None
     said = f"usage as of {accounts_service.describe_age(min(read))}" if read else "no usage read"

@@ -589,9 +589,14 @@ def test_a_hand_over_kept_waiting_says_by_what_and_a_second_press_calls_it_off(
     hung mount) left asq with nothing on screen after the first toast and nothing to press.
     Past ``_HAND_OFF_PATIENCE`` it names what still runs, and a second press stays in asq:
     no quit when the read ends, and asq's own reads start again. Before that, a second
-    press changes nothing."""
+    press changes nothing.
+
+    The wait is timed by the test's own clock (``_hand_off_clock``), moved by exactly the
+    patience: on the wall clock, against a 0.3 s patience, a slow runner's toast said
+    "after 1 s" where this one said "after 0 s" (CI on 26fb6543)."""
     monkeypatch.setattr("aisquare.cli.ui.views.doctor._update_refusal", _never_refused)
-    monkeypatch.setattr(ui_app, "_HAND_OFF_PATIENCE", 0.3)
+    now = [1000.0]
+    monkeypatch.setattr(ui_app, "_hand_off_clock", lambda: now[0])
     release = threading.Event()
 
     async def fn(pilot: Pilot[None]) -> tuple[list[str], Any, Any, list[Any], bool]:
@@ -607,6 +612,8 @@ def test_a_hand_over_kept_waiting_says_by_what_and_a_second_press_calls_it_off(
         update.press()  # too soon to call it off
         await settle_page(app, group="held")  # the read is held on purpose: settle no group
         early = app.hand_off
+        assert len(said) == 1, "no time has passed: nothing is named yet"
+        now[0] += ui_app._HAND_OFF_PATIENCE  # the wait has lasted its patience, to the second
         await settle_until(app, lambda: len(said) == 2, group="held")
         overdue = app.hand_off
         update.press()
@@ -624,7 +631,7 @@ def test_a_hand_over_kept_waiting_says_by_what_and_a_second_press_calls_it_off(
     assert early == overdue == ("upgrade", "--reopen"), "waiting, the early press ignored"
     assert said[:2] == [
         "asq quits once the reads running end",
-        "Still waiting for a read after 0 s. Press Update or Uninstall again to stay "
+        "Still waiting for a read after 10 s. Press Update or Uninstall again to stay "
         "in asq; quit, and it runs once they end.",
     ], said
     assert said[2:] == ["Called off: asq carries on"], said

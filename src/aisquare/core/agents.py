@@ -1086,6 +1086,51 @@ def plugin_of(name: str) -> AgentPlugin | None:
     return plugin if plugin is not None and plugin.supported() else None
 
 
+def plugin_stands_down(name: str, config_dir: Path) -> bool:
+    """Whether the plugin's launcher stands down beside ``config_dir``'s own hooks: they
+    hold an aisquare hook whose program can start (:func:`_starts`), as the launcher
+    grades it (``plugins/*/scripts/aisquare-hook``). Beside hooks naming a program that
+    is gone, the plugin runs in their place. For Claude Code the launcher decides per
+    event; this is any event. Read-only."""
+    for command in hook_commands(name, config_dir):
+        binary = hook_binary(command)
+        if binary is not None and _starts(binary.program):
+            return True
+    return False
+
+
+#: :func:`hook_route`'s answers.
+ROUTE_HOOKS = "hooks"
+ROUTE_PLUGIN = "plugin"
+ROUTE_BOTH = "both"
+
+
+def hook_route(name: str, config_dir: Path | None = None) -> str | None:
+    """How aisquare's hooks reach ``name``'s sessions in ``config_dir``, as installed:
+    :data:`ROUTE_HOOKS` (the agent's own hooks file, which ``agents connect`` writes),
+    :data:`ROUTE_PLUGIN` (aisquare's plugin installed there, :func:`plugin_of`),
+    :data:`ROUTE_BOTH` (the plugin standing down beside those hooks), or ``None``. Whether
+    they run -- trust, a switch that turns hooks off -- is :func:`integration_readiness`'s
+    and the doctor's question. Read-only; never raises."""
+    spec = _spec(name, config_dir)
+    if spec is None or not spec.connectable:
+        return None
+    directory = _hook_dir(spec)
+    hooks = bool(hook_commands(name, directory))
+    route = plugin_of(name)
+    plugin = route is not None and route.installed(directory) is not None
+    if hooks and plugin:
+        return ROUTE_BOTH
+    if plugin:
+        return ROUTE_PLUGIN
+    return ROUTE_HOOKS if hooks else None
+
+
+def plugin_label(plugin: PluginInstall) -> str:
+    """``the aisquare plugin <version>``, as the doctor and ``agents status`` name it."""
+    return f"the aisquare plugin {plugin.version}" if plugin.version else "the aisquare plugin"
+
+
 def plugin_route_supported() -> bool:
     """Whether the plugin route runs here: its hooks run ``sh``, so macOS, Linux and WSL.
 
@@ -1483,13 +1528,26 @@ def _to_info(spec: AgentSpec, registry: dict[str, Any], *, ambient: bool = False
         # a --config-dir, which a typo could name), as `agents connect` treats it.
         if not found and ambient and claude_on_path() is not None:
             found = True
+    route = hook_route(spec.name, _hook_dir(spec))
+    plugin = plugin_of(spec.name) if route == ROUTE_BOTH else None
+    install = plugin.installed(_hook_dir(spec)) if plugin is not None else None
+    both = (
+        f"aisquare runs two ways here: the {spec.settings_path.name} hooks and "
+        f"{plugin_label(install)}, whose hooks stand down beside them; keep one "
+        "(aisquare doctor says how)."
+        if install is not None and spec.settings_path is not None
+        else ""
+    )
+    if both and detail and not detail.endswith("."):
+        detail += "."
     return AgentInfo(
         readiness=readiness,
-        detail=" ".join(filter(None, [detail, *context.notes])),
+        detail=" ".join(filter(None, [detail, both, *context.notes])),
         name=spec.name,
         detected=found,
         config_paths=context.paths,
         connected=connected,
+        route=route,
         sites=sites,
     )
 

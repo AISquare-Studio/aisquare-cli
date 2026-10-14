@@ -98,6 +98,11 @@ class AgentInfo(BaseModel):
     connected: bool = False
     readiness: str = "not_connected"
     detail: str = ""
+    route: str | None = None
+    """How aisquare reaches the sessions of the directory a session from this shell reads
+    (``core.agents.hook_route``): ``hooks``, the agent's own hooks file; ``plugin``,
+    aisquare's plugin for it; ``both``, the plugin standing down beside those hooks; or
+    ``None``, neither."""
     sites: list[AgentHookSite] = Field(default_factory=list)
     """Every config dir this agent was connected in, with that dir's hook health."""
 

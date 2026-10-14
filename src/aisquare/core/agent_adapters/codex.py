@@ -1,14 +1,21 @@
 """Codex CLI 0.162.1 integration; native hooks keep the real terminal UI."""
 
+import json
+import os
 import re
-from collections.abc import Sequence
+import shlex
+import sys
+import tomllib
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 from aisquare.core import harness
 from aisquare.core.agent_adapters.types import (
     AgentCapabilities,
     BadEffortError,
     HookSpec,
+    PluginInstall,
     option_values,
 )
 from aisquare.core.codex_accounts import CodexAccounts
@@ -27,6 +34,83 @@ APPROVAL_POLICIES = ("on-request", "never")
 _APPROVAL_SWITCHES = frozenset(
     {"--approve-for-me", "--dangerously-bypass-approvals-and-sandbox", "--yolo"}
 )
+#: aisquare's Codex plugin (``plugins/codex``), by the name ``codex plugin add
+#: aisquare@<marketplace>`` takes and ``config.toml`` keys it under, ``[plugins."aisquare@
+#: aisquare-cli"]`` from this repository's marketplace (``.agents/plugins/marketplace.json``).
+PLUGIN = "aisquare"
+PLUGIN_MARKETPLACE = "aisquare-cli"
+#: Where in the plugin Codex reads its hooks, which keys their trust (``[hooks.state]``).
+PLUGIN_HOOKS = "hooks/hooks.json"
+#: ``codex plugin`` has add, list and remove: no disable (``enabled = false`` is the
+#: ``/plugins`` toggle) and no uninstall, so each verb that stops it is ``remove``.
+_PLUGIN_VERBS = {"disable": "remove", "uninstall": "remove", "install": "add"}
+
+
+class CodexPlugin:
+    """aisquare's Codex plugin (``plugins/codex``), as Codex 0.162.1 installs it (measured):
+    enabled in a Codex home's ``config.toml``, copied into its ``plugins/cache``, and run
+    only once ``/hooks`` trusts its hooks. A plugin belongs to one Codex home, at no other
+    scope. Read-only; never raises."""
+
+    def supported(self) -> bool:
+        from aisquare.core import agents
+
+        return agents.plugin_route_supported()
+
+    def installed(self, config_dir: Path | None) -> PluginInstall | None:
+        """The plugin where the home's ``config.toml`` enables it and ``codex plugin add``
+        installed it, else ``None``.
+
+        Enabled is a ``[plugins."aisquare@<marketplace>"]`` table without ``enabled =
+        false``; installed is its folder in ``plugins/cache/<marketplace>/aisquare/
+        <version>/``, whose manifest names the version. Both, because an enabled table
+        with nothing installed runs nothing (Codex keeps one version there and removes the
+        one it replaces). Trusted is each of its hooks holding a ``trusted_hash`` in
+        ``[hooks.state]``, which ``/hooks`` writes: Codex skips a plugin's hooks until then.
+        A hash for an older definition reads as trusted here; Codex asks again only when
+        ``hooks.json`` itself changes, and keeps the trust across a version that does not.
+        """
+        home = _codex_home(config_dir)
+        found = _enabled_install(home)
+        if found is None:
+            return None
+        plugin_id, root, config = found
+        return PluginInstall(
+            home, _manifest_version(root) or root.name, trusted=_plugin_trusted(config, plugin_id)
+        )
+
+    def repo_installs(self, config_dir: Path | None) -> list[PluginInstall]:
+        return []  # a Codex plugin is installed in a home, never for one repository
+
+    def repo_install_here(self, config_dir: Path | None, cwd: Path | None) -> PluginInstall | None:
+        return None
+
+    def command(
+        self, verb: str, config_dir: Path, *, scope: str = "user", project: Path | None = None
+    ) -> str:
+        """``codex plugin <verb> aisquare@<marketplace>``, aimed at ``config_dir`` as
+        ``aisquare uninstall`` aims it (``lifecycle._codex_command``): nothing for the home
+        this shell's ``codex`` reads, ``env -u CODEX_HOME`` for ``~/.codex`` from a shell
+        that names another, the variable otherwise. ``disable`` and ``uninstall`` are
+        ``remove`` (:data:`_PLUGIN_VERBS`)."""
+        from aisquare.core import agents
+
+        found = _enabled_install(config_dir)
+        plugin_id = found[0] if found is not None else f"{PLUGIN}@{PLUGIN_MARKETPLACE}"
+        argv = ["codex", "plugin", _PLUGIN_VERBS.get(verb, verb), plugin_id]
+        command = shlex.join(argv) if sys.platform != "win32" else " ".join(argv)
+        ambient = os.environ.get("CODEX_HOME", "").strip()
+        default = agents.dir_identity(agents.home() / ".codex")
+        here = agents.dir_identity(Path(ambient)) if ambient else default
+        there = agents.dir_identity(config_dir)
+        if there == here:
+            return command
+        if sys.platform == "win32":
+            need = "unset" if there == default else f"set to {config_dir}"
+            return f"{command} (run it with CODEX_HOME {need})"
+        if there == default:
+            return f"env -u CODEX_HOME {command}"
+        return f"CODEX_HOME={shlex.quote(str(config_dir))} {command}"
 
 
 class CodexAdapter:
@@ -38,7 +122,7 @@ class CodexAdapter:
     settings_name = "hooks.json"
     install_hint = "npm install -g @openai/codex"
     accounts = CodexAccounts()
-    plugin = None
+    plugin = CodexPlugin()
     capabilities = AgentCapabilities(
         hooks=(
             HookSpec("SessionStart", "codex", 120),
@@ -273,6 +357,88 @@ class CodexAdapter:
 
     def disable_native_teams(self) -> tuple[list[str], dict[str, str]]:
         return ["-c", "agents.enabled=false"], {}
+
+
+def _codex_home(config_dir: Path | None) -> Path:
+    """The Codex home ``config_dir`` names, as ``agents connect codex`` resolves it; the one
+    a session from this shell reads when ``None``."""
+    from aisquare.core import agents
+
+    spec = agents.spec(CodexAdapter.id, config_dir)
+    return spec.home if spec is not None else Path(config_dir or ".")
+
+
+def _enabled_install(home: Path) -> tuple[str, Path, dict[str, Any]] | None:
+    """``(plugin id, installed copy, config.toml's table)`` for the first ``aisquare@
+    <marketplace>`` that ``home`` enables and has a copy of, else ``None``."""
+    config = _read_toml(home / "config.toml")
+    tables = config.get("plugins")
+    if not isinstance(tables, dict):
+        return None
+    for plugin_id, table in tables.items():
+        name, _, marketplace = str(plugin_id).partition("@")
+        if name != PLUGIN or not marketplace or Path(marketplace).name != marketplace:
+            continue
+        if not isinstance(table, dict) or table.get("enabled", True) is False:
+            continue
+        root = _installed_root(home / "plugins" / "cache" / marketplace / name)
+        if root is not None:
+            return str(plugin_id), root, config
+    return None
+
+
+def _plugin_trusted(config: Mapping[str, Any], plugin_id: str) -> bool:
+    """Whether ``[hooks.state]`` trusts each hook the plugin's ``hooks.json`` holds: one
+    group of one handler per event, keyed ``<plugin id>:hooks/hooks.json:<event in snake
+    case>:0:0`` (tests/test_codex_plugin.py holds the file to that shape)."""
+    hooks = config.get("hooks")
+    states = hooks.get("state") if isinstance(hooks, dict) else None
+    if not isinstance(states, dict):
+        return False
+    for spec in CodexAdapter.capabilities.hooks:
+        event = re.sub(r"(?<!^)(?=[A-Z])", "_", spec.event).lower()
+        state = states.get(f"{plugin_id}:{PLUGIN_HOOKS}:{event}:0:0")
+        trusted = state.get("trusted_hash") if isinstance(state, dict) else None
+        if not isinstance(trusted, str) or not trusted:
+            return False
+    return True
+
+
+def _read_toml(path: Path) -> dict[str, Any]:
+    """``path``'s TOML table, or ``{}``: absent, not a file, unreadable, or not TOML."""
+    try:
+        if not path.is_file():  # a FIFO would block the read
+            return {}
+        with path.open("rb") as handle:
+            return tomllib.load(handle)
+    except (OSError, ValueError, RecursionError):
+        return {}
+
+
+def _manifest(root: Path) -> Path:
+    return root / ".codex-plugin" / "plugin.json"
+
+
+def _installed_root(plugin_dir: Path) -> Path | None:
+    """The installed copy under ``plugin_dir`` (one folder per version): the one whose
+    manifest was written last, should an older one be left beside it."""
+    try:
+        roots = [root for root in plugin_dir.iterdir() if _manifest(root).is_file()]
+    except OSError:
+        return None
+    try:
+        return max(roots, key=lambda root: _manifest(root).stat().st_mtime, default=None)
+    except OSError:
+        return roots[0]
+
+
+def _manifest_version(root: Path) -> str | None:
+    try:
+        data = json.loads(_manifest(root).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    version = data.get("version") if isinstance(data, dict) else None
+    return version if isinstance(version, str) and version else None
 
 
 def _native_approvals(args: Sequence[str]) -> tuple[str | None, str | None]:

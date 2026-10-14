@@ -2589,7 +2589,7 @@ def test_the_agent_rows_survive_a_damaged_store(
 
 
 def test_the_plugin_route_is_an_adapter_slot(claude_home: Path) -> None:
-    """``AgentAdapter.plugin``: Claude Code's reads its plugin files, Codex has none yet."""
+    """``AgentAdapter.plugin``: Claude Code's reads its plugin files."""
     from aisquare.core.agent_adapters import get_adapter
 
     claude = get_adapter("claude-code").plugin
@@ -2599,5 +2599,5 @@ def test_the_plugin_route_is_an_adapter_slot(claude_home: Path) -> None:
     assert claude.command("disable", claude_home) == agent_core.claude_plugin_command(
         "disable", claude_home
     )
-    assert get_adapter("codex").plugin is None and agent_core.plugin_of("codex") is None
+    assert get_adapter("codex").plugin is not None, "plugins/codex: tests/test_codex_plugin*.py"
     assert agent_core.plugin_of("cursor") is None

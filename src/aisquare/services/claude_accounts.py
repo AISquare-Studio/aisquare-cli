@@ -596,7 +596,7 @@ def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
     work`` cannot tell apart, so another slot's name in any case is taken.
     """
     account = resolve(ref)
-    normalised = core.normalise_alias(alias) if alias is not None else None
+    normalised = core.normalise_alias(alias, slot=account.slot) if alias is not None else None
     try:
         with store_session() as store:
             arranged = _arranged(store)

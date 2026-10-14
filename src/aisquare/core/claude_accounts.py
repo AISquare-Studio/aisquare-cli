@@ -200,7 +200,22 @@ def label(account: ClaudeAccount) -> str:
     """
     if account.alias:
         return account.alias
-    return "plain claude" if account.slot == DEFAULT_SLOT else f"account {account.slot}"
+    return default_label(account.slot)
+
+
+def default_label(slot: int) -> str:
+    """What slot ``slot`` is called while it has no alias (:func:`label`)."""
+    return "plain claude" if slot == DEFAULT_SLOT else f"account {slot}"
+
+
+def _labelled_slot(name: str) -> int | None:
+    """The slot whose :func:`default_label` ``name`` reads as, whatever its case and spacing."""
+    words = name.casefold().split()
+    if words == ["plain", "claude"]:
+        return DEFAULT_SLOT
+    if len(words) == 2 and words[0] == "account" and words[1].isdecimal():
+        return int(words[1])
+    return None
 
 
 ALIAS_MAX = 64
@@ -209,16 +224,23 @@ ALIAS_HINT = "any name up to 64 characters, not only digits, no @"
 """``normalise_alias``'s rules in words: ``accounts alias --help`` and asq's name field."""
 
 
-def normalise_alias(raw: str) -> str:
-    """The stored form of an alias — trimmed, its case kept — or ``ValueError`` saying why not.
+def normalise_alias(raw: str, *, slot: int | None = None) -> str:
+    """``slot``'s alias as stored — trimmed, its case kept — or ``ValueError`` saying why not.
 
     Free text, because a name is the operator's to choose ("anything I want"):
     ``Work laptop`` is as good as ``work``. Two rules keep it from shadowing the
     other spellings ``--account`` takes, since a reference that could be read
     two ways is a launch that could land on two accounts: it is never all
-    digits (a slot number) and has no ``@`` (an email). No control
-    characters, so it stays one line on every surface that prints it. The
-    case is kept as typed and compared without it (``services.claude_accounts``
+    digits (a slot number) and has no ``@`` (an email). Nor is it ANOTHER slot's
+    :func:`default_label` — ``account 3`` on slot 2, ``Plain Claude`` on any slot
+    but 1 — which the board, a headroom note and ``fleet switch`` print for that
+    slot, so two accounts would go by one name and a manager's ``--to "account
+    3"`` would land on slot 2. Whether that slot exists yet or not: a removed
+    slot's number is the next one ``accounts add`` gives out. Without ``slot``,
+    no slot's label is taken. No control or invisible formatting characters
+    (a zero-width space, a right-to-left override), so it stays one line on every
+    surface that prints it and never prints the same as another. The case is
+    kept as typed and compared without it (``services.claude_accounts``
     refuses ``WORK`` beside ``work``, and resolves either spelling).
     """
     alias = raw.strip()
@@ -232,6 +254,16 @@ def normalise_alias(raw: str) -> str:
         raise ValueError(f"{raw!r} reads as an email — an alias cannot contain '@'")
     if any(unicodedata.category(char) == "Cc" for char in alias):
         raise ValueError(f"{raw!r} has a control character — an alias is one line of text")
+    if any(unicodedata.category(char) == "Cf" for char in alias):
+        raise ValueError(
+            f"{raw!r} has an invisible formatting character — an alias prints as it is typed"
+        )
+    labelled = _labelled_slot(alias)
+    if labelled is not None and labelled != slot:
+        raise ValueError(
+            f"{raw!r} is what slot {labelled} is called without an alias — "
+            "an alias cannot be another account's name"
+        )
     return alias
 
 

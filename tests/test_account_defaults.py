@@ -202,6 +202,44 @@ def test_an_alias_is_free_text_up_to_64_characters(fake_home: Path) -> None:
         core.normalise_alias("me@home")
 
 
+def test_a_name_is_never_another_accounts_own_name(fake_home: Path, runner: CliRunner) -> None:
+    """``account 3`` on slot 2 was accepted (reopen of the Accounts page task): two accounts
+    went by ``account 3`` on the board, in headroom notes and in ``fleet switch``, and a
+    manager's ``--to "account 3"`` landed on slot 2. Another slot's label is refused in any
+    case or spacing, whether that slot exists yet or not (``accounts add`` reuses a removed
+    slot's number); a slot's own label is its own, and a name that only starts like one
+    is a name."""
+    core.create_account()
+    core.create_account()
+    for taken, slot in (
+        ("account 3", 3),
+        ("Account  3", 3),
+        ("ACCOUNT 03", 3),
+        ("plain claude", 1),
+        ("Plain Claude", 1),
+        ("account 9", 9),
+    ):
+        with pytest.raises(ValueError, match=f"what slot {slot} is called"):
+            service.set_alias("2", taken)
+    assert service.slot_labels() == {1: "plain claude", 2: "account 2", 3: "account 3"}
+    refused = runner.invoke(app, ["accounts", "alias", "2", "account 3"])
+    assert refused.exit_code != 0 and "slot 3" in refused.output
+    assert service.resolve("2").alias is None
+
+    assert service.set_alias("2", "Account 2").alias == "Account 2"
+    assert service.set_alias("1", "Plain Claude").alias == "Plain Claude"
+    assert service.set_alias("3", "account 3 laptop").alias == "account 3 laptop"
+    assert service.slot_labels() == {1: "Plain Claude", 2: "Account 2", 3: "account 3 laptop"}
+
+
+@pytest.mark.parametrize("name", ["a\u200bb", "evil\u202eexe", "\ufeffwork"])
+def test_a_name_has_no_invisible_formatting_character(name: str) -> None:
+    """A zero-width space or a right-to-left override prints a name the same as another
+    (``a\u200bb`` beside ``ab``) or as something it is not."""
+    with pytest.raises(ValueError, match="invisible"):
+        core.normalise_alias(name)
+
+
 def test_order_and_move_rewrite_positions_densely(fake_home: Path) -> None:
     core.create_account()
     core.create_account()

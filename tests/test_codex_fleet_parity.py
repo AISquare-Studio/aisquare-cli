@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import tomllib
 from collections.abc import Callable
@@ -76,6 +77,15 @@ from tests.test_fleet_service import (  # noqa: F401 - fixtures, by name
     repo,
     tmux,
 )
+
+#: Codex's thread ids are UUIDs (its hooks' ``session_id``, ``codex exec --json``'s
+#: ``thread_id``, 0.162.1): what a resume and a queue put on its command line, and the
+#: only shape they put there (review r3 of #113, finding 2).
+THREAD_ONE = "019a2b3c-4d5e-7f60-8a1b-000000000001"
+THREAD_TWO = "019a2b3c-4d5e-7f60-8a1b-000000000002"
+THREAD_THREE = "019a2b3c-4d5e-7f60-8a1b-000000000003"
+THREAD_OLD = "019a2b3c-4d5e-7f60-8a1b-000000000004"
+THREAD_M = "019a2b3c-4d5e-7f60-8a1b-000000000005"
 
 CODEX = get_adapter("codex")
 PANE_PID = 4242
@@ -167,6 +177,9 @@ def codex_agent(
     assert agent.agent == "codex" and agent.session_id is None, "Codex's id binds at its start"
     home = tmp_path / "codex-home"
     home.mkdir()
+    # The plain Codex home, as the shell the agent was spawned from names it: a home
+    # `codex queue` runs under has to be one of Codex's own (`fleet._native_home`).
+    monkeypatch.setenv("CODEX_HOME", str(home))
     return Codex(agent, project, home, tmux, monkeypatch), task
 
 
@@ -177,16 +190,16 @@ def test_a_codex_clear_moves_the_row_and_its_claims_to_the_new_thread(
     codex_agent: tuple[Codex, TeamTask],
 ) -> None:
     codex, task = codex_agent
-    first = codex.board_id("thread-one")
-    board = codex.start("thread-one")
+    first = codex.board_id(THREAD_ONE)
+    board = codex.start(THREAD_ONE)
     assert f"ASSIGNED TO YOU: {task.id}" in board
     assert team_service.claim_task(task.id, session_ref=first).status == "doing"
 
     # Codex's /clear: no SessionEnd for thread-one, a start of thread-two from the
     # same process (measured on 0.162.1).
-    cleared = codex.start("thread-two", source="clear")
+    cleared = codex.start(THREAD_TWO, source="clear")
 
-    second = codex.board_id("thread-two")
+    second = codex.board_id(THREAD_TWO)
     assert _row(codex.agent.id).session_id == second
     assert _claimed_by(task.id) == second, "kept, and moved with the row"
     assert "You are the one working it" in cleared
@@ -197,8 +210,8 @@ def test_a_codex_clear_moves_the_row_and_its_claims_to_the_new_thread(
     status = fleet_service.status_of(_row(codex.agent.id))
     assert status.session is not None and status.session.id == second
     # And again, from the id the first clear moved to.
-    codex.start("thread-three", source="clear")
-    assert _claimed_by(task.id) == codex.board_id("thread-three")
+    codex.start(THREAD_THREE, source="clear")
+    assert _claimed_by(task.id) == codex.board_id(THREAD_THREE)
 
 
 def test_a_nested_codex_under_the_window_takes_neither_the_row_nor_the_task(
@@ -209,11 +222,11 @@ def test_a_nested_codex_under_the_window_takes_neither_the_row_nor_the_task(
     (``fleet-session:<row>`` took the newest start), so the child became the row with
     the claim left behind; whatever start it reports, it takes nothing now."""
     codex, task = codex_agent
-    first = codex.board_id("thread-one")
-    codex.start("thread-one")
+    first = codex.board_id(THREAD_ONE)
+    codex.start(THREAD_ONE)
     team_service.claim_task(task.id, session_ref=first)
 
-    codex.child("thread-one")
+    codex.child(THREAD_ONE)
     for source in ("startup", "resume", "clear"):
         child = codex.start(f"child-{source}", source=source)
         assert "ASSIGNED TO YOU" not in child
@@ -287,15 +300,15 @@ def test_the_agents_own_resume_to_an_earlier_thread_takes_the_row_and_its_launch
     process goes back to its earlier thread with the row, the claims and the launch; a
     late redelivery of a first start does not."""
     codex, task = codex_agent
-    first, second = codex.board_id("thread-one"), codex.board_id("thread-two")
-    codex.start("thread-one")
-    codex.start("thread-two", source="clear")
+    first, second = codex.board_id(THREAD_ONE), codex.board_id(THREAD_TWO)
+    codex.start(THREAD_ONE)
+    codex.start(THREAD_TWO, source="clear")
     team_service.claim_task(task.id, session_ref=second)
 
-    codex.start("thread-one", source="startup")  # a late redelivery: nothing moves
+    codex.start(THREAD_ONE, source="startup")  # a late redelivery: nothing moves
     with store_session() as store:
         assert store.get_meta(f"launch-session:{codex.launch}") == second
-    back = codex.start("thread-one", source="resume")
+    back = codex.start(THREAD_ONE, source="resume")
 
     assert _row(codex.agent.id).session_id == first and _claimed_by(task.id) == first
     assert "You are the one working it" in back
@@ -311,19 +324,19 @@ def test_an_early_prompt_of_the_cleared_thread_is_the_agent_s_and_a_child_s_is_n
     when the agent's own process sends it (the bind lands a prompt early, as rule 1
     lets it land one late); the same hook from a child's thread moves nothing."""
     codex, task = codex_agent
-    first = codex.board_id("thread-one")
-    codex.start("thread-one")
+    first = codex.board_id(THREAD_ONE)
+    codex.start(THREAD_ONE)
     team_service.claim_task(task.id, session_ref=first)
 
-    codex.child("thread-one")
+    codex.child(THREAD_ONE)
     codex.hook("UserPromptSubmit", "child-thread", prompt="nested", turn_id="turn-child")
     assert _row(codex.agent.id).session_id == first and _claimed_by(task.id) == first
 
     codex.become()
-    codex.hook("UserPromptSubmit", "thread-two", prompt="early", turn_id="turn-early")
-    second = codex.board_id("thread-two")
+    codex.hook("UserPromptSubmit", THREAD_TWO, prompt="early", turn_id="turn-early")
+    second = codex.board_id(THREAD_TWO)
     assert _row(codex.agent.id).session_id == second and _claimed_by(task.id) == second
-    codex.start("thread-two", source="clear")
+    codex.start(THREAD_TWO, source="clear")
     assert _row(codex.agent.id).session_id == second and _claimed_by(task.id) == second
 
 
@@ -373,9 +386,9 @@ def test_restart_of_a_running_codex_agent_resumes_its_bound_thread(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     codex, task = codex_agent
-    _rollout(codex, "thread-one")
-    codex.start("thread-one")
-    first = codex.board_id("thread-one")
+    _rollout(codex, THREAD_ONE)
+    codex.start(THREAD_ONE)
+    first = codex.board_id(THREAD_ONE)
     team_service.claim_task(task.id, session_ref=first)
 
     receipt = fleet_service.restart(codex.project, codex.agent.label)
@@ -389,14 +402,14 @@ def test_restart_of_a_running_codex_agent_resumes_its_bound_thread(
     command = _command(tmux)
     native = _native(command)
     at = native.index("resume")
-    assert native[at : at + 2] == ["resume", "thread-one"], "the thread by its native id"
+    assert native[at : at + 2] == ["resume", THREAD_ONE], "the thread by its native id"
     assert command[-2:] == ["--", fleet_service._restart_prompt(receipt.started)]
     assert "--resume" not in command, "no Claude Code flag"
     # The window's launch puts every option before `resume <id>`, and the continue line
     # after Codex's own `--`: `codex <options> resume <id> -- <prompt>`.
     argv = _launched_argv(command, runner, monkeypatch)
     at = argv.index("resume")
-    assert argv[at : at + 2] == ["resume", "thread-one"]
+    assert argv[at : at + 2] == ["resume", THREAD_ONE]
     assert "--approve-for-me" in argv[:at] and argv[-2:] == command[-2:]
     assert _claimed_by(task.id) == first, "the same thread keeps the claim"
     assert _events(codex.project, "restarted") == [
@@ -425,7 +438,7 @@ def test_a_codex_session_recorded_without_its_native_id_restarts_fresh_and_says_
     tmux: FakeTmux,  # noqa: F811
 ) -> None:
     codex, _ = codex_agent
-    rollout = _rollout(codex, "thread-old")
+    rollout = _rollout(codex, THREAD_OLD)
     now = datetime.now(tz=UTC)
     with store_session() as store:
         store.upsert_session(
@@ -460,9 +473,9 @@ def test_a_fresh_codex_hand_over_is_adopted_by_the_replacements_first_start(
     Its first start under the new window takes them over; the old process's late
     ``SessionEnd`` then has nothing left to release."""
     codex, task = codex_agent
-    _rollout(codex, "thread-one")
-    codex.start("thread-one")
-    first = codex.board_id("thread-one")
+    _rollout(codex, THREAD_ONE)
+    codex.start(THREAD_ONE)
+    first = codex.board_id(THREAD_ONE)
     team_service.claim_task(task.id, session_ref=first)
 
     receipt = fleet_service.restart(codex.project, codex.agent.label, fresh=True)
@@ -470,15 +483,15 @@ def test_a_fresh_codex_hand_over_is_adopted_by_the_replacements_first_start(
     assert receipt.resumed is False and receipt.started.session_id == first, "parked on it"
     assert _claimed_by(task.id) == first
     replacement = Codex(receipt.started, codex.project, codex.home, tmux, monkeypatch, launch="b")
-    board = replacement.start("thread-two")
-    second = replacement.board_id("thread-two")
+    board = replacement.start(THREAD_TWO)
+    second = replacement.board_id(THREAD_TWO)
     assert _row(receipt.started.id).session_id == second
     assert _claimed_by(task.id) == second and "You are the one working it" in board
     codex.become()  # the old process's own SessionEnd, late
-    codex.hook("SessionEnd", "thread-one", reason="other")
+    codex.hook("SessionEnd", THREAD_ONE, reason="other")
     assert _claimed_by(task.id) == second
     # A nested child of the replacement takes nothing.
-    replacement.child("thread-two")
+    replacement.child(THREAD_TWO)
     replacement.start("child", source="startup")
     assert _row(receipt.started.id).session_id == second and _claimed_by(task.id) == second
 
@@ -496,8 +509,8 @@ def test_tell_queues_for_a_busy_codex_agent_through_codex_queue(
     codex_agent: tuple[Codex, TeamTask], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     codex, _ = codex_agent
-    codex.start("thread-one")
-    codex.hook("UserPromptSubmit", "thread-one", prompt="work", turn_id="turn-1")
+    codex.start(THREAD_ONE)
+    codex.hook("UserPromptSubmit", THREAD_ONE, prompt="work", turn_id="turn-1")
     calls: list[tuple[list[str], dict[str, str]]] = []
 
     def run(argv: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -511,7 +524,7 @@ def test_tell_queues_for_a_busy_codex_agent_through_codex_queue(
     assert told.delivered is True and "queued for its next turn" in told.how
     [(argv, env)] = calls
     assert Path(argv[0]).name.startswith("codex")
-    assert argv[1:] == ["queue", "--thread", "thread-one", "--message=rebase on main first"]
+    assert argv[1:] == ["queue", "--thread", THREAD_ONE, "--message=rebase on main first"]
     assert env["CODEX_HOME"] == str(codex.home), "the queue of the home the thread runs under"
     assert _notes_to(codex.project, codex.agent.label) == []
 
@@ -525,9 +538,9 @@ def test_a_told_message_that_starts_with_a_dash_is_the_queues_text_not_an_option
     """``codex queue --message <text>`` reads a text that starts with ``-`` as an option
     and exits "unexpected argument" (0.162.1, measured); joined to ``--message=``, it is the
     message, whatever follows the dash."""
-    argv = CODEX.queue_args("thread-one", text)
+    argv = CODEX.queue_args(THREAD_ONE, text)
 
-    assert argv == ["queue", "--thread", "thread-one", f"--message={text}"]
+    assert argv == ["queue", "--thread", THREAD_ONE, f"--message={text}"]
     assert not any(word == text for word in argv), "never a word of its own"
 
 
@@ -535,8 +548,8 @@ def test_a_queue_that_fails_leaves_the_message_on_the_board(
     codex_agent: tuple[Codex, TeamTask], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     codex, _ = codex_agent
-    codex.start("thread-one")
-    codex.hook("UserPromptSubmit", "thread-one", prompt="work", turn_id="turn-1")
+    codex.start(THREAD_ONE)
+    codex.hook("UserPromptSubmit", THREAD_ONE, prompt="work", turn_id="turn-1")
 
     def refused(argv: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(argv, 1, "", "error: thread not found\n")
@@ -555,8 +568,8 @@ def test_tell_to_a_codex_agent_that_is_not_working_queues_nothing(
 ) -> None:
     """Needing the human (a permission prompt) is not busy: a board note, as before."""
     codex, _ = codex_agent
-    codex.start("thread-one")
-    codex.hook("PermissionRequest", "thread-one")
+    codex.start(THREAD_ONE)
+    codex.hook("PermissionRequest", THREAD_ONE)
     monkeypatch.setattr(fleet_service, "_run_native", Mock(side_effect=AssertionError("queued")))
 
     told = fleet_service.tell(codex.project, codex.agent.label, "hello")
@@ -674,9 +687,9 @@ def test_a_waiting_codex_manager_is_woken_with_the_enter_apart(
     home = tmp_path / "codex-home"
     home.mkdir()
     codex = Codex(manager, project, home, tmux, monkeypatch)
-    codex.start("thread-m")
-    codex.hook("UserPromptSubmit", "thread-m", prompt="run the team", turn_id="turn-1")
-    codex.hook("Stop", "thread-m", turn_id="turn-1", stop_hook_active=False)
+    codex.start(THREAD_M)
+    codex.hook("UserPromptSubmit", THREAD_M, prompt="run the team", turn_id="turn-1")
+    codex.hook("Stop", THREAD_M, turn_id="turn-1", stop_hook_active=False)
     tmux.set_command(manager.pane_id, "codex")
     assert fleet_service.status_of(_row(manager.id)).state == "waiting"
     typed = _timed_input(tmux, clock, monkeypatch)
@@ -902,17 +915,17 @@ def test_an_approval_codex_reviews_itself_rings_no_bell(
     prompt reaches the pane, yet the hook fires all the same: 7 false bells for one small
     task in the t8 smoke. A human-reviewed request still rings, once."""
     codex, _ = codex_agent
-    codex.start("thread-one")
-    _turn_under(codex, "thread-one", "auto_review")
+    codex.start(THREAD_ONE)
+    _turn_under(codex, THREAD_ONE, "auto_review")
 
-    codex.hook("PermissionRequest", "thread-one", **APPROVAL)
-    codex.hook("PostToolUse", "thread-one", turn_id="turn-1", tool_name="Bash")
+    codex.hook("PermissionRequest", THREAD_ONE, **APPROVAL)
+    codex.hook("PostToolUse", THREAD_ONE, turn_id="turn-1", tool_name="Bash")
 
     assert _state(codex) == "working"
     assert _events(codex.project, "attention") == []
 
-    _turn_under(codex, "thread-one", "user")  # /permissions → Ask for approval
-    codex.hook("PermissionRequest", "thread-one", **APPROVAL)
+    _turn_under(codex, THREAD_ONE, "user")  # /permissions → Ask for approval
+    codex.hook("PermissionRequest", THREAD_ONE, **APPROVAL)
 
     assert _state(codex) == "attention"
     assert _events(codex.project, "attention") == ["Codex needs your approval"]
@@ -928,9 +941,9 @@ def test_an_unanswered_codex_approval_holds_the_bell_through_its_redraws(
     answered: '▶ working' for the whole wait. Only a hook moves it: PostToolUse after
     'y', Interrupt after Esc."""
     codex, _ = codex_agent
-    codex.start("thread-one")
-    _turn_under(codex, "thread-one", "user")
-    codex.hook("PermissionRequest", "thread-one", **APPROVAL)
+    codex.start(THREAD_ONE)
+    _turn_under(codex, THREAD_ONE, "user")
+    codex.hook("PermissionRequest", THREAD_ONE, **APPROVAL)
     tmux.printed(codex.agent.pane_id, ago=timedelta(seconds=-2))  # a redraw after the hook
 
     assert _state(codex) == "attention"
@@ -943,11 +956,11 @@ def test_an_unanswered_codex_approval_holds_the_bell_through_its_redraws(
     assert _state(codex) == "attention"
     monkeypatch.setattr(fleet_service, "_now", now)
 
-    codex.hook("PostToolUse", "thread-one", turn_id="turn-1", tool_name="Bash")  # 'y'
+    codex.hook("PostToolUse", THREAD_ONE, turn_id="turn-1", tool_name="Bash")  # 'y'
     assert _state(codex) == "working"
 
-    codex.hook("PermissionRequest", "thread-one", **APPROVAL)
-    codex.hook("Interrupt", "thread-one", turn_id="turn-1")  # Esc
+    codex.hook("PermissionRequest", THREAD_ONE, **APPROVAL)
+    codex.hook("Interrupt", THREAD_ONE, turn_id="turn-1")  # Esc
     assert _state(codex) == "waiting"
 
 
@@ -986,9 +999,9 @@ def test_an_approved_codex_command_reads_working_while_it_runs(
     it."""
     codex, _ = codex_agent
     pane = codex.agent.pane_id
-    codex.start("thread-one")
-    _turn_under(codex, "thread-one", "user")
-    codex.hook("PermissionRequest", "thread-one", **APPROVAL)
+    codex.start(THREAD_ONE)
+    _turn_under(codex, THREAD_ONE, "user")
+    codex.hook("PermissionRequest", THREAD_ONE, **APPROVAL)
     tmux.screens[pane] = ASKING
     tmux.printed(pane, ago=timedelta(seconds=-2))  # a redraw after the hook
 
@@ -999,7 +1012,7 @@ def test_an_approved_codex_command_reads_working_while_it_runs(
     tmux.screens[pane] = APPROVED  # 'y'
 
     assert _state(codex) == "working"
-    codex.hook("PostToolUse", "thread-one", turn_id="turn-1", tool_name="Bash")
+    codex.hook("PostToolUse", THREAD_ONE, turn_id="turn-1", tool_name="Bash")
     assert _state(codex) == "working"
     assert _events(codex.project, "attention") == ["Codex needs your approval"]
 
@@ -1057,12 +1070,8 @@ def test_a_replay_its_agent_refuses_is_refused_before_anything_is_stopped(
     project: ProjectInfo,  # noqa: F811
 ) -> None:
     agent = fleet_service.spawn(project, "coder", agent="codex", worktree=False).agent
-    with store_session() as store:  # a row whose agent and binary disagree
-        assert isinstance(store, SqliteStore)
-        store._conn.execute(
-            "UPDATE fleet_agent SET agent = 'claude-code' WHERE id = ?", (agent.id,)
-        )
-        store._conn.commit()
+    _rewrite("fleet_agent", "agent", "claude-code", agent.id)  # agent and binary disagree
+    assert launch_seal.record(_row(agent.id)) is None, "as if spawn had sealed it so"
     spawned = len(tmux.spawned)
 
     with pytest.raises(fleet_service.FleetError, match="runs codex, but claude-code"):
@@ -1072,11 +1081,12 @@ def test_a_replay_its_agent_refuses_is_refused_before_anything_is_stopped(
     assert len(tmux.spawned) == spawned
 
 
-# --- what a sandbox may write in the aisquare home (review r2 of #113, finding 3) --------
+# --- nothing a sandbox writes in the store chooses what runs outside it -----------------
+# (review r2 of #113, finding 3; r3, findings 1, 2, 3, 5 and 10: `core.launch_seal`)
 
 
-#: What a replacement's receipt says when the row's spec is not the one spawn recorded.
-NOT_RECORDED = "not the one aisquare recorded"
+#: How a replay of a row the store changed since ``fleet spawn`` sealed it is refused.
+UNSEALED = "is not the launch `fleet spawn` sealed"
 
 
 def _tamper(agent: FleetAgent, path: str, value: object) -> None:
@@ -1087,6 +1097,14 @@ def _tamper(agent: FleetAgent, path: str, value: object) -> None:
             "UPDATE fleet_agent SET launch_spec = json_set(launch_spec, ?, json(?)) WHERE id = ?",
             (path, json.dumps(value), agent.id),
         )
+        store._conn.commit()
+
+
+def _rewrite(table: str, column: str, value: object, row_id: str) -> None:
+    """A write to one column of one row in the store, as a sandboxed agent can make one."""
+    with store_session() as store:
+        assert isinstance(store, SqliteStore)
+        store._conn.execute(f"UPDATE {table} SET {column} = ? WHERE id = ?", (value, row_id))
         store._conn.commit()
 
 
@@ -1131,7 +1149,7 @@ def test_the_store_profile_names_a_windows_home_as_codex_reads_it() -> None:
     assert entries[r"C:\Users\me\.aisquare"] == "write"
     assert entries[r"C:\Users\me\.aisquare\cache\oidc"] == "read"
     assert entries[r"C:\Users\me\.aisquare\fleet-tmux.conf"] == "read"
-    assert entries[r"C:\Users\me\.aisquare\launch-specs"] == "read"
+    assert entries[rf"C:\Users\me\.aisquare\{launch_seal.DIR_NAME}"] == "read"
     assert all(key.startswith("C:\\Users\\me\\.aisquare") for key in entries), entries
 
 
@@ -1159,75 +1177,291 @@ def test_a_sandboxed_launch_makes_what_its_profile_names_before_the_sandbox_can(
 
 
 @pytest.mark.parametrize(
-    ("field", "value", "planted"),
+    ("column", "value"),
     [
-        ("$.binary", "/tmp/x", "/tmp/x"),
-        ("$.extra_args", ["-c", 'notify=["sh","-c","/tmp/x"]'], 'notify=["sh","-c","/tmp/x"]'),
+        ("$.binary", "/tmp/x"),  # the program a replay runs
+        ("$.extra_args", ["-c", 'notify=["sh","-c","/tmp/x"]']),  # one Codex runs
+        ("binary", "/tmp/x"),  # the program `fleet tell` queues with
+        ("role", "coder"),  # a reviewer's read-only seat comes back workspace-write
+        ("agent", "claude-code"),  # a Codex row comes back with no OS sandbox
+        ("cwd", "/tmp"),  # a directory the sandbox wrote
+        ("worktree", 1),
+        ("account_slot", 7),
+        ("launch_spec", None),  # no spec: the role as it resolves today
     ],
 )
-def test_a_launch_spec_written_from_a_sandbox_is_never_replayed(
-    field: str,
+def test_a_row_the_store_changed_is_never_replayed(
+    column: str,
     value: object,
-    planted: str,
     tmux: FakeTmux,  # noqa: F811
     codex_on_path: Path,  # noqa: F811
     project: ProjectInfo,  # noqa: F811
 ) -> None:
-    """The store is the board's to write from Codex's sandbox, and the row's launch spec
-    is in it: restart, switch and the usage-limit hand-over replayed whatever binary and
-    arguments it held, outside any sandbox. A spec other than the one ``fleet spawn``
-    recorded is not replayed: the replacement starts as the role resolves today, and
-    says so."""
-    agent = fleet_service.spawn(project, "coder", agent="codex", worktree=False).agent
-    assert agent.launch_spec is not None and launch_seal.holds(agent.id, agent.launch_spec)
-    _tamper(agent, field, value)
+    """The store is writable from Codex's sandbox and the row's launch is replayed outside
+    it, by restart, switch and the usage-limit hand-over. Its spec was sealed and the rest
+    of the row was not (r3 finding 5): the role, the agent and the worktree a replacement
+    ran with came from the row, and a spec that failed its seal fell back to them. Any
+    change since the spawn sealed it is refused now, with the reason, before anything is
+    stopped; nothing falls back."""
+    agent = fleet_service.spawn(project, "reviewer", agent="codex", worktree=False).agent
+    assert launch_seal.holds(_row(agent.id)), "the row as the store holds it is the one sealed"
+    if column.startswith("$."):
+        _tamper(agent, column, value)
+    else:
+        _rewrite("fleet_agent", column, value, agent.id)
+    spawned = len(tmux.spawned)
 
-    receipt = fleet_service.restart(project, agent.label)
+    for replay in (
+        lambda: fleet_service.restart(project, agent.label),
+        lambda: fleet_service.switch(project, agent.label, to="0"),
+        lambda: fleet_service.switch(project, agent.label, automatic=True),
+    ):
+        with pytest.raises(fleet_service.FleetError, match=UNSEALED):
+            replay()
 
-    assert planted not in _command(tmux), "the planted program is not run"
-    assert any(NOT_RECORDED in note for note in receipt.notes), receipt.notes
-    started = receipt.started
-    assert started.launch_spec is not None and launch_seal.holds(started.id, started.launch_spec)
+    assert tmux.typed == [] and agent.pane_id not in tmux.killed, "left running"
+    assert len(tmux.spawned) == spawned, "nothing started"
 
 
-def test_the_specs_recorded_before_the_digests_keep_their_launch_across_the_upgrade(
+def test_a_row_untouched_since_its_seal_is_replayed_as_recorded(
     tmux: FakeTmux,  # noqa: F811
     codex_on_path: Path,  # noqa: F811
     project: ProjectInfo,  # noqa: F811
 ) -> None:
-    """An agent spawned before this version left no digest: there was nowhere to. The
-    first run that makes the digests' directory records what the store holds, so the
-    agents running across an upgrade still restart as recorded; a spec changed AFTER that
-    does not."""
+    """Control: an untouched row still replays, its arguments the recorded ones, and its
+    replacement is sealed in turn."""
     agent = fleet_service.spawn(
         project, "coder", agent="codex", worktree=False, agent_args=["--search"]
     ).agent
-    shutil.rmtree(launch_seal.specs_dir())  # as the previous version left the home
 
     receipt = fleet_service.restart(project, agent.label)
 
     assert "--search" in _command(tmux)
-    assert not any(NOT_RECORDED in note for note in receipt.notes), receipt.notes
+    assert launch_seal.holds(_row(receipt.started.id))
+
+
+def test_the_rows_recorded_before_the_seals_keep_their_launch_across_the_upgrade(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """An agent spawned before this version left no seal: there was nowhere to. The first
+    run that makes the seals' directory records every row the store holds, so the agents
+    running across an upgrade still restart as recorded; a row changed AFTER that does
+    not."""
+    agent = fleet_service.spawn(
+        project, "coder", agent="codex", worktree=False, agent_args=["--search"]
+    ).agent
+    shutil.rmtree(launch_seal.seals_dir())  # as the previous version left the home
+
+    receipt = fleet_service.restart(project, agent.label)
+
+    assert "--search" in _command(tmux)
     _tamper(receipt.started, "$.extra_args", ["--search", "--yolo"])
-    again = fleet_service.restart(project, agent.label)
-    assert any(NOT_RECORDED in note for note in again.notes), again.notes
+    with pytest.raises(fleet_service.FleetError, match=UNSEALED):
+        fleet_service.restart(project, agent.label)
     assert "--yolo" not in _command(tmux)
 
 
-def test_an_untouched_launch_spec_is_replayed_as_recorded(
+def test_a_seal_directory_another_process_is_still_filling_is_filled_before_it_is_read(
     tmux: FakeTmux,  # noqa: F811
     codex_on_path: Path,  # noqa: F811
     project: ProjectInfo,  # noqa: F811
 ) -> None:
-    """Control: an untouched spec still replays, its arguments the recorded ones."""
+    """r3 finding 10: the directory was made before the rows were recorded into it, and a
+    restart in that window read an untouched row as changed, dropping its spec for good.
+    A directory not yet marked ready is filled by whoever reads it."""
     agent = fleet_service.spawn(
         project, "coder", agent="codex", worktree=False, agent_args=["--search"]
     ).agent
+    shutil.rmtree(launch_seal.seals_dir())
+    launch_seal.seals_dir().mkdir()  # made, nothing recorded yet
+
+    fleet_service.restart(project, agent.label)
+
+    assert "--search" in _command(tmux)
+    assert (launch_seal.seals_dir() / launch_seal.READY).is_file()
+
+
+def test_a_store_unreadable_at_the_first_making_leaves_the_seals_to_the_next_run(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """r3 finding 10: a store that could not be read when the directory was first made
+    left every row before it unsealed for good, and the refusal blamed a change. The
+    directory stays unready, the refusal names what happened, and the next run seals."""
+    agent = fleet_service.spawn(
+        project, "coder", agent="codex", worktree=False, agent_args=["--search"]
+    ).agent
+    shutil.rmtree(launch_seal.seals_dir())
+    with monkeypatch.context() as patched:
+        busy = Mock(side_effect=sqlite3.OperationalError("database is locked"))
+        patched.setattr(SqliteStore, "every_fleet_agent", busy)
+        with pytest.raises(fleet_service.FleetError, match="no launch seal could be checked"):
+            fleet_service.restart(project, agent.label)
+        assert not (launch_seal.seals_dir() / launch_seal.READY).exists()
+
+    fleet_service.restart(project, agent.label)
+
+    assert "--search" in _command(tmux)
+
+
+def test_a_home_where_the_seals_cannot_be_made_says_so(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """r3 finding 10: "changed since, or recorded by another version" was said of a home
+    where the directory could not be made at all."""
+    agent = fleet_service.spawn(project, "coder", agent="codex", worktree=False).agent
+    shutil.rmtree(launch_seal.seals_dir())
+    launch_seal.seals_dir().write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(fleet_service.FleetError, match="could not be made") as refused:
+        fleet_service.restart(project, agent.label)
+
+    assert "no launch seal could be checked" in str(refused.value)
+    assert "changed" not in str(refused.value)
+
+
+@pytest.mark.parametrize("forged", ["../planted", "a/../../planted", "{absolute}"])
+def test_a_row_id_the_store_chose_never_names_the_seal_that_is_read(
+    forged: str,
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """r3 finding 3: the seal's file was the row's id joined into the path, so an id with
+    ``..`` or an absolute one named a file the sandbox wrote, holding the digest of
+    whatever the row carries. The file is named by the id's own digest."""
+    forged = forged.format(absolute=tmp_path / "planted")
+    agent = fleet_service.spawn(project, "coder", agent="codex", worktree=False).agent
+    _tamper(agent, "$.binary", "/tmp/x")
+    _rewrite("fleet_agent", "id", forged, agent.id)
+    row = _row(forged)
+    # Where a lookup that joined the id into the path read the seal, planted to hold.
+    planted = Path(os.path.normpath(launch_seal.seals_dir() / f"{forged}.sha256"))
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.write_text(launch_seal.digest(row) + "\n", encoding="ascii")
+
+    with pytest.raises(fleet_service.FleetError, match="no launch seal was recorded"):
+        fleet_service.restart(project, agent.label)
+
+    assert "/tmp/x" not in _command(tmux)
+    assert launch_seal._seal_path(forged).parent == launch_seal.seals_dir()
+
+
+@pytest.mark.parametrize(
+    "native", ["--dangerously-bypass-approvals-and-sandbox", "--last", "a-session-name"]
+)
+def test_a_native_id_the_store_chose_never_reaches_codex_resume(
+    native: str,
+    codex_agent: tuple[Codex, TeamTask],
+    tmux: FakeTmux,  # noqa: F811
+) -> None:
+    """r3 finding 2: ``codex resume <id>`` reads an id that starts with ``-`` as one of its
+    own options (``-c``, ``-s``, ``--dangerously-bypass-approvals-and-sandbox``: 0.162.1's
+    ``--help``) and any other word as a session's name. The id came from the session row,
+    which the sandbox writes; only a UUID, Codex's thread id, is resumed by now."""
+    codex, _ = codex_agent
+    _rollout(codex, THREAD_ONE)
+    codex.start(THREAD_ONE)
+    _rewrite("team_session", "native_session_id", native, codex.board_id(THREAD_ONE))
+
+    receipt = fleet_service.restart(codex.project, codex.agent.label)
+
+    assert receipt.resumed is False
+    assert any(
+        "is not one Codex makes" in note and "starts fresh" in note for note in receipt.notes
+    ), receipt.notes
+    assert "resume" not in _native(_command(tmux)) and native not in _command(tmux)
+
+
+def test_a_transcript_the_store_names_relatively_is_never_resumed(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claude Code resumes ``--resume <transcript>``, the path from the session row: one
+    the store names relatively (``--dangerously-skip-permissions``, a file of that name
+    where the restart runs) would be an option of Claude Code's, not its value."""
+    flag = "--dangerously-skip-permissions"
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / flag).write_text("{}\n", encoding="utf-8")
+    agent = fleet_service.spawn(project, "coder", worktree=False).agent
+    assert agent.session_id is not None
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        store.upsert_session(
+            TeamSession(
+                id=agent.session_id,
+                project_id=agent.project_id,
+                role=agent.role,
+                started_at=now,
+                last_seen_at=now,
+                transcript_path=flag,
+            )
+        )
 
     receipt = fleet_service.restart(project, agent.label)
 
-    assert "--search" in _command(tmux)
-    assert not any(NOT_RECORDED in note for note in receipt.notes)
+    assert receipt.resumed is False and flag not in _command(tmux)
+
+
+def test_tell_never_queues_with_a_binary_the_store_chose(
+    codex_agent: tuple[Codex, TeamTask], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """r3 finding 1: ``fleet tell`` to a busy Codex agent ran the row's ``binary`` as
+    ``<binary> queue …`` with the caller's rights, and a sandboxed agent can rewrite its
+    row. The message goes to the board instead, saying why."""
+    codex, _ = codex_agent
+    codex.start(THREAD_ONE)
+    codex.hook("UserPromptSubmit", THREAD_ONE, prompt="work", turn_id="turn-1")
+    _rewrite("fleet_agent", "binary", "/tmp/x", codex.agent.id)
+    monkeypatch.setattr(fleet_service, "_run_native", Mock(side_effect=AssertionError("ran")))
+
+    told = fleet_service.tell(codex.project, codex.agent.label, "rebase on main first")
+
+    assert told.delivered is False and UNSEALED in told.how, told.how
+    assert _notes_to(codex.project, codex.agent.label) == ["rebase on main first"]
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "why"),
+    [
+        ("native_session_id", "--remote=ws://127.0.0.1:9", "is not one Codex makes"),
+        ("account", "{elsewhere}", "is not one of Codex's account homes"),
+    ],
+)
+def test_tell_never_queues_on_a_thread_or_home_the_store_chose(
+    column: str,
+    value: str,
+    why: str,
+    codex_agent: tuple[Codex, TeamTask],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``codex queue`` runs outside any sandbox with ``--thread`` and ``CODEX_HOME`` from
+    the session row: a thread only in Codex's shape, and a home only one of Codex's own,
+    never a directory whose config the sandbox wrote."""
+    codex, _ = codex_agent
+    codex.start(THREAD_ONE)
+    codex.hook("UserPromptSubmit", THREAD_ONE, prompt="work", turn_id="turn-1")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "config.toml").write_text('notify = ["/tmp/x"]\n', encoding="utf-8")
+    _rewrite("team_session", column, value.format(elsewhere=elsewhere), codex.board_id(THREAD_ONE))
+    monkeypatch.setattr(fleet_service, "_run_native", Mock(side_effect=AssertionError("ran")))
+
+    told = fleet_service.tell(codex.project, codex.agent.label, "rebase on main first")
+
+    assert told.delivered is False and why in told.how, told.how
+    assert _notes_to(codex.project, codex.agent.label) == ["rebase on main first"]
 
 
 # --- one permission per role, mapped per agent (acceptance 4) ----------------------------
@@ -1436,12 +1670,12 @@ def test_a_restart_checks_the_permission_against_the_agent_its_replacement_runs(
     agent's hook wrote (a Claude Code mode passes there) was stopped for a Codex
     replacement that refused the mode."""
     codex, _ = codex_agent
-    codex.start("thread-one")
+    codex.start(THREAD_ONE)
     with store_session() as store:
         assert isinstance(store, SqliteStore)
         store._conn.execute(
             "UPDATE team_session SET agent = 'claude-code' WHERE id = ?",
-            (codex.board_id("thread-one"),),
+            (codex.board_id(THREAD_ONE),),
         )
         store._conn.commit()
     spawned = len(tmux.spawned)
@@ -1489,8 +1723,8 @@ def test_every_read_of_a_row_names_its_own_session_over_its_launch_binding(
     row's, so two reads of one row named two sessions. The row's own id comes first in
     every read; the binding fills only a row that has none."""
     codex, _ = codex_agent
-    codex.start("thread-one")
-    first = codex.board_id("thread-one")
+    codex.start(THREAD_ONE)
+    first = codex.board_id(THREAD_ONE)
     with store_session() as store:
         row = store.get_fleet_agent(codex.agent.id)
         assert row is not None and row.session_id == first, "the launch's binding fills it"
@@ -1668,10 +1902,10 @@ def test_a_prompt_steered_into_a_running_turn_is_its_own_prompt(
     typed as the turn ended was lost from the board). A true redelivery still answers
     as the first time."""
     codex, _ = codex_agent
-    codex.start("thread-one")
-    codex.hook("UserPromptSubmit", "thread-one", prompt="slow work", turn_id="turn-1")
-    codex.hook("UserPromptSubmit", "thread-one", prompt="steered in", turn_id="turn-1")
-    codex.hook("UserPromptSubmit", "thread-one", prompt="steered in", turn_id="turn-1")
+    codex.start(THREAD_ONE)
+    codex.hook("UserPromptSubmit", THREAD_ONE, prompt="slow work", turn_id="turn-1")
+    codex.hook("UserPromptSubmit", THREAD_ONE, prompt="steered in", turn_id="turn-1")
+    codex.hook("UserPromptSubmit", THREAD_ONE, prompt="steered in", turn_id="turn-1")
 
     with store_session() as store:
         said = [prompt.text for prompt in store.recent_prompts(codex.project.id)]
@@ -1685,24 +1919,24 @@ def test_a_turn_a_prompt_was_steered_into_after_its_stop_stops_again(
     Codex's next Stop under the same turn id is a new stop — the agent waits again. A
     Stop redelivered with nothing in between still answers as the first did."""
     codex, _ = codex_agent
-    codex.start("thread-one")
-    first = codex.board_id("thread-one")
+    codex.start(THREAD_ONE)
+    first = codex.board_id(THREAD_ONE)
 
     def state() -> str | None:
         with store_session() as store:
             session = store.get_session(first)
         return session.state if session is not None else None
 
-    codex.hook("UserPromptSubmit", "thread-one", prompt="work", turn_id="turn-1")
-    codex.hook("Stop", "thread-one", turn_id="turn-1", stop_hook_active=False)
+    codex.hook("UserPromptSubmit", THREAD_ONE, prompt="work", turn_id="turn-1")
+    codex.hook("Stop", THREAD_ONE, turn_id="turn-1", stop_hook_active=False)
     assert state() == "waiting"
-    codex.hook("UserPromptSubmit", "thread-one", prompt="one more thing", turn_id="turn-1")
+    codex.hook("UserPromptSubmit", THREAD_ONE, prompt="one more thing", turn_id="turn-1")
     assert state() == "working"
-    codex.hook("Stop", "thread-one", turn_id="turn-1", stop_hook_active=False)
+    codex.hook("Stop", THREAD_ONE, turn_id="turn-1", stop_hook_active=False)
     assert state() == "waiting"
     with store_session() as store:
         store.touch_session(first, state="working")
-    codex.hook("Stop", "thread-one", turn_id="turn-1", stop_hook_active=False)
+    codex.hook("Stop", THREAD_ONE, turn_id="turn-1", stop_hook_active=False)
     assert state() == "working", "a redelivered Stop is answered from the cache"
 
 

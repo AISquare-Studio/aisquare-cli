@@ -1954,10 +1954,14 @@ def spawn(
         boot_id=tmux_core.boot_id(),
         created_at=_now(),
     )
-    if fleet_agent.launch_spec is not None:
-        # What a replay may take back from the row (`core.launch_seal`); the store it is in
-        # is writable from an agent's sandbox, the digest is not.
-        launch_seal.record(fleet_agent.id, fleet_agent.launch_spec)
+    # What a replay may take back from the row, and `tell` may queue with (`core.launch_seal`):
+    # the store it is in is writable from an agent's sandbox, the seal is not.
+    unsealed = launch_seal.record(fleet_agent)
+    if unsealed is not None:
+        notes.append(
+            f"its launch could not be sealed ({unsealed}) — a restart, switch or hand-over "
+            "of it will be refused"
+        )
     stored = _record(
         fleet_agent,
         project,
@@ -2920,7 +2924,7 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
             and session.state == "working"
             and adapter is not None
         ):
-            queued = _queue_message(adapter, agent.binary, session, text)
+            queued = _queue_message(adapter, agent, session, text)
             if queued is True:
                 return TellResult(True, "queued for its next turn (it was working)")
             if queued is not None:
@@ -2956,36 +2960,67 @@ _QUEUE_TIMEOUT = 30.0
 
 
 def _queue_message(
-    adapter: AgentAdapter, binary: str, session: TeamSession, text: str
+    adapter: AgentAdapter, agent: FleetAgent, session: TeamSession, text: str
 ) -> bool | str | None:
-    """Queue ``text`` for ``session``'s next turn through the agent's own queue, with
-    ``binary``, the one the row runs.
+    """Queue ``text`` for ``session``'s next turn through the agent's own queue, run with
+    the binary ``agent``'s row runs.
 
     ``True`` when it was queued; ``None`` when the agent has no queue
     (``AgentAdapter.queue_args``) or the session names no thread or home to queue for;
     otherwise why it failed, for the board note that carries the message instead. Run
     with the agent's home set to the one the session ran under (its ``account``), where
     its queue is; never raises.
+
+    It runs with the caller's rights, outside any sandbox, and everything it is run with
+    is read from the store, which an agent's sandbox writes (``core.launch_seal``): the
+    binary only from a row its seal vouches for (review r3 of #113, finding 1), the thread
+    only in the shape the agent makes it (finding 2), and the home only when it is one of
+    the agent's own (:func:`_native_home`).
     """
-    thread = session.native_session_id
-    if not thread or not session.account:
+    if not session.native_session_id or not session.account:
         return None
-    argv = adapter.queue_args(thread, text)
-    if argv is None:
-        return None
-    executable = shutil.which(binary)
+    if adapter.queue_args(session.native_session_id, text) is None:
+        return None  # no queue: asked before what it would run with
+    thread = launch_seal.native_id(session.native_session_id)
+    if thread is None:
+        return f"its session's native id is not one {adapter.label} makes (a UUID)"
+    home = _native_home(adapter, session.account)
+    if home is None:
+        return f"its session's home is not one of {adapter.label}'s account homes"
+    argv = adapter.queue_args(thread, text) or []
+    refused = launch_seal.refusal(agent)
+    if refused is not None:
+        return f"not queued with its row's binary: {refused}"
+    executable = shutil.which(agent.binary)
     if executable is None:
-        return f"{binary!r} is not on your PATH to queue it"
+        return f"{agent.binary!r} is not on your PATH to queue it"
     try:
-        done = _run_native(
-            [executable, *argv], env={**untraced_env(), adapter.home_env: session.account}
-        )
+        done = _run_native([executable, *argv], env={**untraced_env(), adapter.home_env: str(home)})
     except (OSError, subprocess.SubprocessError) as exc:
         return f"{adapter.label} could not queue it ({type(exc).__name__}: {exc})"
     if done.returncode != 0:
         said = (done.stderr or done.stdout or "").strip().splitlines()
         return f"{adapter.label} could not queue it ({said[-1] if said else done.returncode})"
     return True
+
+
+def _native_home(adapter: AgentAdapter, account: str) -> Path | None:
+    """``account``, the home a session says it ran under, resolved, when it is one of
+    ``adapter``'s: a managed slot's, or its plain home. An unsandboxed native command
+    reads its config there, and the session's word for it is the store's, which an
+    agent's sandbox writes: another directory could hold a config of the sandbox's own.
+    ``None`` otherwise."""
+    try:
+        if claude_accounts_core.managed_slot(account, adapter.id) is not None:
+            home = Path(account)
+        else:
+            home = claude_accounts_core.plain_home(adapter.id)
+        resolved = home.resolve()
+        if resolved != Path(account).resolve():
+            return None
+    except (ValueError, OSError, RuntimeError):  # no slots; a symlink loop, on 3.11/3.12
+        return None
+    return resolved
 
 
 def _run_native(argv: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -4666,6 +4701,8 @@ def switch(
     """
     with store_session() as store:
         agent = _live_agent(store, project, label)
+        # First: every refusal after this one reads the row's role, agent and account.
+        _require_sealed(agent, "switch")
         session = store.get_session(agent.session_id) if agent.session_id else None
         if _handed_over(agent, session, _now()):
             # The automatic path refuses a session already in flight
@@ -4881,18 +4918,22 @@ def _respawn(
     (``spawn(own_worktree=…)``).
     """
     notes: list[str] = []
+    # Asked again of the row the stop returned, read from the store after the agent ran on
+    # through the grace: the replay below takes its role, agent, worktree and spec.
+    _require_sealed(agent, "replace")
     if task is not None and agent.task_id != task.id:
         # Read before the stop, and closed during it: the row the stop ended no longer
         # names it (rule 3), and a hand-off prompt naming it set the replacement on
         # finished work.
         task = None
+    replays = _replayed_agent(agent)
     resume: ResumeSpec | None = None
     if not fresh:
-        resume, why_not = _resumable(session)
+        resume, why_not = _resumable(session, recorded_adapter(replays))
         if why_not is not None:
             notes.append(f"{why_not} — the replacement starts fresh with a hand-off prompt")
     prompt = resume_prompt if resume is not None else _handoff_prompt(agent, task, recent, reason)
-    spec = _sealed_spec(agent, notes)
+    spec = agent.launch_spec
     receipt = spawn(
         project,
         agent.role,
@@ -4909,9 +4950,12 @@ def _respawn(
         # The agent the row ran, never today's resolution of the role: a `--agent codex
         # --bin <wrapper>` row came back with Claude Code's flags, and a role bound to
         # another agent since refused only after the original was stopped (r1 of #113).
-        agent=_replayed_agent(agent, session),
+        agent=replays,
         # The agent whose own hook joined the row to a board session, whatever its
-        # binary is called, resumed or `--fresh`.
+        # binary is called, resumed or `--fresh`: evidence of what KIND of program a
+        # recorded binary that left the PATH was, which only consents to today's
+        # resolution (the read-only config's) taking its place, its arguments the
+        # sealed ones; the agent it runs as is the sealed row's, above.
         family=_family(session),
         takes_over=session.id if takes_over and resume is None and session is not None else None,
         onboard=onboard,
@@ -4946,26 +4990,36 @@ def _same_home(session: TeamSession | None, target: ClaudeAccount) -> bool:
     )
 
 
-def _resumable(session: TeamSession | None) -> tuple[ResumeSpec | None, str | None]:
-    """What resumes ``session``, the board session a row is bound to — or why nothing does.
+def _resumable(
+    session: TeamSession | None, adapter: AgentAdapter | None
+) -> tuple[ResumeSpec | None, str | None]:
+    """What resumes ``session``, the board session a row is bound to, on ``adapter``, the
+    agent the replacement runs (:func:`_replayed_agent`) — or why nothing does.
 
     Its transcript on disk, and the agent's own id for it: Claude Code's IS the board's
     (``capabilities.assigns_session_id``), resumed by the transcript's path; another
     agent's is the native id its first hook bound (Codex resumes ``codex resume <id>``
     from its home). A row whose agent never reached a hook has no session, and a session
     recorded with no native id has nothing to name the thread by: both start fresh and
-    say so.
+    say so. Both go on the replacement's command line from the store, which an agent's
+    sandbox writes (``core.launch_seal``): the transcript only by its absolute path, and
+    the native id only in the shape the agent makes it (a UUID; ``codex resume`` reads
+    one that starts with ``-`` as its own option, review r3 of #113, finding 2).
     """
     if session is None:
         return None, "no session is bound to the row (its agent never reached a hook)"
     transcript = Path(session.transcript_path) if session.transcript_path else None
-    if transcript is None or not transcript.is_file():
+    if transcript is None or not transcript.is_absolute() or not transcript.is_file():
         return None, "no transcript on disk to resume"
-    adapter = recorded_adapter(_family(session))
-    assigned = adapter is None or adapter.capabilities.assigns_session_id
-    native = session.native_session_id
-    if not assigned and (native is None or native == session.id):
-        return None, "no native session id is bound to the row's session"
+    native = launch_seal.native_id(session.native_session_id)
+    if adapter is not None and not adapter.capabilities.assigns_session_id:
+        if native is None and session.native_session_id:
+            return None, (
+                f"the native session id bound to the row's session is not one {adapter.label} "
+                "makes (a UUID)"
+            )
+        if native is None or native == session.id:
+            return None, "no native session id is bound to the row's session"
     return ResumeSpec(session.id, transcript, native), None
 
 
@@ -4981,19 +5035,23 @@ def _refuse_a_replay_that_cannot_start(
     started. Asked here first, with the evidence :func:`_respawn` hands
     :func:`spawn`, a running agent is left running.
 
-    The binary asked about is the one :func:`spawn` will start, chosen by the
-    function spawn asks (:func:`_launch_binary`): the recorded one when the
-    row has a sealed spec (:func:`_sealed_spec`), the agent's as the role resolves
-    it today when it has none (a row spawned before v18, or one whose spec was
-    changed since). Asking the role's for a row with a spec refused the
-    restart of an agent whose recorded binary was still there because the
-    role's binding had moved to one that is not. A refusal names no ``--bin``:
-    ``fleet restart``, ``fleet switch`` and Restart take none. The agent that binary
-    runs as is asked too, as :func:`spawn` asks it (``agent_launch.resolve`` with
-    :func:`_replayed_agent`): a binary another agent's, and a wrapper with nothing to
-    name its agent, are refused here rather than after the stop.
+    Its callers have refused a row the store changed since ``fleet spawn`` sealed it
+    (:func:`_require_sealed`): a replay takes its role, agent, worktree and spec, never
+    the row's values unsealed or today's resolution of a role it names. The binary asked
+    about is the
+    one :func:`spawn` will start, chosen by the function spawn asks
+    (:func:`_launch_binary`): the recorded one when the row has a spec, the agent's as
+    the role resolves it today when it has none (a row spawned before v18). Asking the
+    role's for a row with a spec refused the restart of an agent whose recorded binary
+    was still there because the role's binding had moved to one that is not. A refusal
+    names no ``--bin``: ``fleet restart``, ``fleet switch`` and Restart take none. The
+    agent that binary runs as is asked too, as :func:`spawn` asks it
+    (``agent_launch.resolve`` with :func:`_replayed_agent`): a binary another agent's,
+    and a wrapper with nothing to name its agent, are refused here rather than after the
+    stop.
     """
-    spec = _sealed_spec(agent)
+    spec = agent.launch_spec
+    replays = _replayed_agent(agent)
     chosen: str | None = None
     if spec is not None:
         replayed = _launch_binary(
@@ -5006,9 +5064,7 @@ def _refuse_a_replay_that_cannot_start(
         )
         chosen = replayed.binary if replayed.source != "default" else None
     try:
-        selected = agent_launch.resolve(
-            agent.role, agent=_replayed_agent(agent, session), binary=chosen, cwd=project.root
-        )
+        selected = agent_launch.resolve(agent.role, agent=replays, binary=chosen, cwd=project.root)
     except ValueError as exc:
         raise FleetError(str(exc)) from exc
     if spec is None and agent_launch.executable(selected) is None:
@@ -5021,33 +5077,34 @@ def _refuse_a_replay_that_cannot_start(
         )
 
 
-def _sealed_spec(agent: FleetAgent, notes: list[str] | None = None) -> LaunchSpec | None:
-    """The launch spec a replacement of ``agent`` replays: the row's, when it is the one
-    ``fleet spawn`` recorded (``core.launch_seal``). The store is writable from an agent's
-    sandbox and the spec is replayed outside it, so one changed since (or recorded by an
-    aisquare that kept no digest) is not replayed: the replacement starts as the role
-    resolves today, as a row spawned before specs were recorded does, and ``notes`` says
-    so (review r2 of #113, finding 3)."""
-    spec = agent.launch_spec
-    if spec is None:
-        return None
-    launch_seal.ensure_dir()  # its first making records the specs the store holds
-    if launch_seal.holds(agent.id, spec):
-        return spec
-    if notes is not None:
-        notes.append(
-            "its recorded launch is not the one aisquare recorded (changed since, or "
-            "recorded by another version) — the replacement starts as the role resolves "
-            "today"
-        )
-    return None
+def _require_sealed(agent: FleetAgent, verb: str) -> None:
+    """Raise unless ``agent``'s row is the launch ``fleet spawn`` sealed
+    (``core.launch_seal``). A replacement runs outside any sandbox with the row's role,
+    agent, worktree, account and spec, and the store holding them is writable from an
+    agent's sandbox: a row changed since is refused with the reason, never replayed on
+    the row's values or on today's resolution of a role the row names (review r2 of #113,
+    finding 3; r3, finding 5)."""
+    refused = launch_seal.refusal(agent)
+    if refused is None:
+        return
+    way_out = (
+        f"`aisquare fleet stop {agent.label}`, then spawn a new agent"
+        if agent.ended_at is None
+        else "spawn a new agent"
+    )
+    raise FleetError(
+        f"cannot {verb} {agent.label!r}: {refused} — a replacement takes nothing from the "
+        f"store that its seal does not vouch for; {way_out}"
+    )
 
 
-def _replayed_agent(agent: FleetAgent, session: TeamSession | None) -> str | None:
+def _replayed_agent(agent: FleetAgent) -> str:
     """The agent a replacement of ``agent`` runs: the one its spawn resolved and carried
-    into the window as ``--agent`` (the row's ``agent``), else the one whose hook joined
-    its board session; ``None`` for a row with neither, which the role resolves today."""
-    return agent.agent or _family(session)
+    into the window as ``--agent`` (the row's ``agent``, sealed with it), else Claude Code,
+    the one agent rows were spawned for before they named theirs. Never the board
+    session's: that is the store's, which an agent's sandbox writes (review r3 of #113,
+    finding 5)."""
+    return agent.agent or DEFAULT_AGENT
 
 
 def _family(session: TeamSession | None) -> str | None:
@@ -5150,8 +5207,10 @@ def restart(
             )
         if agent_id is not None and agent.id != agent_id:
             raise _replaced(label, agent, agent_id)
+        # First: every refusal after this one reads the row's role, agent and account.
+        _require_sealed(agent, "restart")
         session = store.get_session(agent.session_id) if agent.session_id else None
-        _refuse_a_permission_the_agent_cannot_take(agent, session, permission_mode)
+        _refuse_a_permission_the_agent_cannot_take(agent, permission_mode)
         if agent.ended_at is None and _handed_over(agent, session, _now()):
             # A `switch` (or another restart) is between its `/exit` and its end: the
             # pane reads dead, the listing leaves the row to it, and a restart that
@@ -5172,7 +5231,7 @@ def restart(
     slot = _account_slot_of(agent, session)
     # An account of the agent the replacement runs: a Codex row's slot is a Codex
     # slot, which the resolver refused as "not a Claude Code account" for want of it.
-    replays = recorded_adapter(_replayed_agent(agent, session))
+    replays = recorded_adapter(_replayed_agent(agent))
     try:
         _require_role(agent.role)
         _refuse_a_replay_that_cannot_start(project, agent, session)
@@ -5300,19 +5359,17 @@ def restart(
     )
 
 
-def _refuse_a_permission_the_agent_cannot_take(
-    agent: FleetAgent, session: TeamSession | None, mode: str | None
-) -> None:
+def _refuse_a_permission_the_agent_cannot_take(agent: FleetAgent, mode: str | None) -> None:
     """Raise when the agent ``agent``'s replacement would run refuses ``mode`` — before
     anything is stopped. The agent is the one the replacement runs
-    (:func:`_replayed_agent`), the row's before its session's: asked of the session's
+    (:func:`_replayed_agent`), the row's, never its session's: asked of the session's
     first, a Codex row bound to a session another agent's hook wrote had a mode checked
     for that agent, the original stopped, and the mode handed to a Codex that refused it
     (review r2 of #113, finding 8). One this install does not know is ``spawn``'s to
     refuse."""
     if not mode:
         return
-    adapter = recorded_adapter(_replayed_agent(agent, session))
+    adapter = recorded_adapter(_replayed_agent(agent))
     if adapter is None:
         return
     why: str | None = None

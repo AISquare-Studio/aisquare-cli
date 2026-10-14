@@ -1242,7 +1242,7 @@ class ContextStore(Protocol):
     def set_codename(self, project_id: str, codename: str) -> ProjectInfo: ...
     def codenames_in_use(self) -> set[str]: ...
     def upsert_fleet_agent(self, agent: FleetAgent) -> FleetAgent: ...
-    def recorded_launch_specs(self) -> list[tuple[str, LaunchSpec]]: ...
+    def every_fleet_agent(self) -> list[FleetAgent]: ...
     def get_fleet_agent(self, ref: str) -> FleetAgent | None: ...
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
     def fleet_agent_for_session(self, project_id: str, session_id: str) -> FleetAgent | None: ...
@@ -3797,15 +3797,13 @@ class SqliteStore:
             )
         self._commit()
 
-    def recorded_launch_specs(self) -> list[tuple[str, LaunchSpec]]:
-        """Every fleet row's id with the launch spec it recorded, of every project; a spec
-        that does not parse is left out. Read once, when the directory of the specs' digests
-        is first made (``core.launch_seal``)."""
+    def every_fleet_agent(self) -> list[FleetAgent]:
+        """Every fleet row of every project, ended ones included, as written: read once,
+        when the directory of the launches' seals is first made (``core.launch_seal``)."""
         rows = self._conn.execute(
-            "SELECT id, launch_spec FROM fleet_agent WHERE launch_spec IS NOT NULL"
+            f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent ORDER BY created_at, id"
         ).fetchall()
-        recorded = [(str(row["id"]), _launch_spec(row["launch_spec"])) for row in rows]
-        return [(agent_id, spec) for agent_id, spec in recorded if spec is not None]
+        return [_row_to_fleet_agent(row) for row in rows]
 
     def get_fleet_agent(self, ref: str) -> FleetAgent | None:
         """A fleet agent by id or unambiguous id prefix (git-style)."""

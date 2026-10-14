@@ -259,9 +259,9 @@ def test_the_store_profile_keeps_what_runs_outside_the_sandbox_read_only(tmp_pat
         assert entries[str(home)] == "write"
         for name in ("codex-accounts", "claude-accounts", "credentials", "config.toml"):
             assert entries[str(home / name)] == "read", name
-        # The digests of the launch specs a replay runs (review r2 of #113, finding 3);
+        # The seals of the launches a replay runs (review r2 of #113, finding 3; r3, 5);
         # never a path denied reading, with which Codex did not start on a GitHub runner.
-        assert entries[str(home / "launch-specs")] == "read"
+        assert entries[str(home / "launch-seals")] == "read"
         assert set(entries.values()) == {"write", "read"}
     assert codex.store_access("full", home) == []
 

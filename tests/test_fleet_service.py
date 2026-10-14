@@ -8354,7 +8354,11 @@ def test_restart_keeps_the_account_a_row_without_a_slot_ran_under(
     transcript.write_text("{}\n", encoding="utf-8")
     now = datetime.now(tz=UTC)
     with store_session() as store:
-        store.upsert_fleet_agent(agent.model_copy(update={"account_slot": None}))
+        # A row from before the column, sealed as the first run after an upgrade seals
+        # the rows it finds (`core.launch_seal`).
+        launch_seal.record(
+            store.upsert_fleet_agent(agent.model_copy(update={"account_slot": None}))
+        )
         store.upsert_session(
             TeamSession(
                 id=agent.session_id,
@@ -8541,7 +8545,11 @@ def test_a_running_agent_is_not_stopped_for_a_restart_its_account_or_binary_woul
     agent = _coder(project)
     now = datetime.now(tz=UTC)
     with store_session() as store:
-        store.upsert_fleet_agent(agent.model_copy(update={"account_slot": None}))
+        # A row from before the column, sealed as the first run after an upgrade seals
+        # the rows it finds (`core.launch_seal`).
+        launch_seal.record(
+            store.upsert_fleet_agent(agent.model_copy(update={"account_slot": None}))
+        )
         store.upsert_session(
             TeamSession(
                 id=agent.session_id or "",
@@ -10008,8 +10016,10 @@ def test_a_launch_that_passed_no_permission_flag_is_restarted_without_one(
     # first run after an upgrade records the specs it finds (`core.launch_seal`).
     legacy = receipt.started.launch_spec.model_copy(update={"permission_mode": None})
     with store_session() as store:
-        store.upsert_fleet_agent(receipt.started.model_copy(update={"launch_spec": legacy}))
-    launch_seal.record(receipt.started.id, legacy)
+        legacy_row = store.upsert_fleet_agent(
+            receipt.started.model_copy(update={"launch_spec": legacy})
+        )
+    launch_seal.record(legacy_row)
     tmux.die(receipt.started.pane_id, 1)
     fleet_service.restart(project, agent.label)
     assert "--permission-mode" not in _command(tmux)
@@ -10295,8 +10305,8 @@ def test_a_spec_that_holds_a_session_choice_does_not_replay_it(
         update={"extra_args": ["--session-id", sid, "--continue", "--verbose"]}
     )
     with store_session() as store:
-        store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
-    launch_seal.record(agent.id, legacy)
+        legacy_row = store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
+    launch_seal.record(legacy_row)
     transcript = tmp_path / "t.jsonl"
     transcript.write_text("{}\n", encoding="utf-8")
     _with_transcript(agent, transcript)
@@ -10347,8 +10357,8 @@ def test_a_reviewer_restarted_from_a_spec_0_7_0_recorded_gets_its_shell_back(
     assert agent.launch_spec is not None and agent.launch_spec.recorded_by == __version__
     legacy = agent.launch_spec.model_copy(update={"recorded_by": None})  # as 0.7.0 wrote it
     with store_session() as store:
-        store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
-    launch_seal.record(agent.id, legacy)
+        legacy_row = store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
+    launch_seal.record(legacy_row)
     transcript = tmp_path / "t.jsonl"
     transcript.write_text("{}\n", encoding="utf-8")
     _with_transcript(agent, transcript)
@@ -10400,8 +10410,8 @@ def test_a_0_7_0_reviewer_is_restarted_with_the_arguments_today_s_config_gives_t
     assert agent.launch_spec is not None
     legacy = agent.launch_spec.model_copy(update={"recorded_by": None})  # as 0.7.0 wrote it
     with store_session() as store:
-        store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
-    launch_seal.record(agent.id, legacy)
+        legacy_row = store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
+    launch_seal.record(legacy_row)
     transcript = tmp_path / "t.jsonl"
     transcript.write_text("{}\n", encoding="utf-8")
     _with_transcript(agent, transcript)
@@ -10438,8 +10448,8 @@ def test_a_0_7_0_reviewer_its_caller_locked_down_is_never_restarted_with_every_t
     assert agent.launch_spec is not None and agent.launch_spec.extra_args == ["--restricted"]
     legacy = agent.launch_spec.model_copy(update={"recorded_by": None})  # as 0.7.0 wrote it
     with store_session() as store:
-        store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
-    launch_seal.record(agent.id, legacy)
+        legacy_row = store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
+    launch_seal.record(legacy_row)
     transcript = tmp_path / "t.jsonl"
     transcript.write_text("{}\n", encoding="utf-8")
     _with_transcript(agent, transcript)
@@ -10523,8 +10533,8 @@ def test_a_0_7_0_reviewer_spawned_with_arguments_of_its_own_gets_its_shell_back(
     assert agent.launch_spec.extra_args == [*role_args, *caller], "the role's, then the caller's"
     legacy = agent.launch_spec.model_copy(update={"recorded_by": None})  # as 0.7.0 wrote it
     with store_session() as store:
-        store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
-    launch_seal.record(agent.id, legacy)
+        legacy_row = store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
+    launch_seal.record(legacy_row)
     transcript = tmp_path / "t.jsonl"
     transcript.write_text("{}\n", encoding="utf-8")
     _with_transcript(agent, transcript)
@@ -10566,8 +10576,8 @@ def test_a_0_7_0_reviewer_whose_config_chose_restricted_is_restarted_without_a_s
     assert agent.launch_spec is not None
     legacy = agent.launch_spec.model_copy(update={"recorded_by": None})  # as 0.7.0 wrote it
     with store_session() as store:
-        store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
-    launch_seal.record(agent.id, legacy)
+        legacy_row = store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
+    launch_seal.record(legacy_row)
     transcript = tmp_path / "t.jsonl"
     transcript.write_text("{}\n", encoding="utf-8")
     _with_transcript(agent, transcript)
@@ -10847,7 +10857,9 @@ def test_a_replay_refused_inside_the_replacements_spawn_names_no_bin_either(
     there with "pass --bin", which neither ``restart`` nor ``switch`` takes."""
     agent = _coder(project)
     with store_session() as store:
-        store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": None}))
+        # A row from before the column, sealed as the first run after an upgrade seals
+        # the rows it finds (`core.launch_seal`).
+        launch_seal.record(store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": None})))
     tmux.die(agent.pane_id, 1)
     # The binary goes after the check before the stop has passed.
     monkeypatch.setattr(
@@ -10880,7 +10892,9 @@ def test_a_row_spawned_before_the_launch_spec_is_refused_its_replay_before_the_s
     agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
     _with_transcript(agent, None)
     with store_session() as store:
-        store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": None}))
+        # A row from before the column, sealed as the first run after an upgrade seals
+        # the rows it finds (`core.launch_seal`).
+        launch_seal.record(store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": None})))
     gone = tmp_path / "gone" / "claude"
     monkeypatch.setenv("AISQUARE_BIN_CODER", str(gone))
     started = len(tmux.spawned)

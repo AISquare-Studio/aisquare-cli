@@ -61,9 +61,9 @@ Codex hooks are on by default. `hooks = false` under `[features]` (or the
 deprecated alias `codex_hooks`, which `hooks` overrides wherever both are set) in
 `CODEX_HOME/config.toml` or a `-p` profile file, or `--disable hooks` /
 `-c features.hooks=false` in a launch, switches every hook off, the way
-`"disableAllHooks": true` does for Claude Code. Doctor and `agents status` say so
-and name the file or the role whose arguments do it; Connect still installs the
-hooks and cannot change the switch.
+`"disableAllHooks": true` does for Claude Code. Doctor says so, naming the file
+or the roles whose arguments do it, and `agents status` names the file; Connect
+still installs the hooks and cannot change the switch.
 
 Selection order is explicit `--agent`, role binding, an exact known binary
 override (legacy shorthand), project preference, inherited launch family,

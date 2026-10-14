@@ -1594,7 +1594,7 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
     if measured and all(pct >= settings.switch_at for _, pct in measured):
         return _warn(
             "claude-account-headroom",
-            f"every account is at or over {settings.switch_at}% of its five-hour or weekly "
+            f"every account has used {settings.switch_at}% or more of its five-hour or weekly "
             f"window: {summary}",
             "Add or sign in another account (aisquare accounts add), or wait for a reset — "
             "a fleet spawned now has nowhere to switch to",
@@ -1607,7 +1607,8 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
         )
     return _ok(
         "claude-account-headroom",
-        f"five-hour and weekly windows ({settings.switch_at}% is the line): {summary}",
+        f"five-hour and weekly windows, percent USED ({settings.switch_at}% used is the line): "
+        f"{summary}",
     )
 
 

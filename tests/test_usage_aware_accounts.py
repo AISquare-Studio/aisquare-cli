@@ -863,7 +863,13 @@ def test_headroom_picks_the_first_account_under_the_line_in_priority_order(
     assert (
         picked is not None and picked.slot == work_slot.slot
     )  # first UNDER 85 in order, not lowest
-    assert any("first under 85%" in note for note in notes)
+    # Every figure says USED, with what is left beside it (an agent read a bare 40% as left).
+    assert any(
+        "account 2 20% used (80% left)" in note
+        and "account 3 90% used (10% left)" in note
+        and "account 2 is first under the 85%-used line" in note
+        for note in notes
+    ), notes
     assert sorted(fetch.calls) == ["tok-personal", "tok-spare", "tok-work"]  # one read each
     # The control: slot 1 (no credentials in this home) was never a candidate.
     assert "tok" not in "".join(n for n in notes if "plain claude" in n)
@@ -880,7 +886,11 @@ def test_headroom_takes_the_most_room_when_every_account_is_over_the_line(
     picked, notes = service.headroom_choice(service.list_accounts(), switch_at=85, fetch=fetch)
 
     assert picked is not None and picked.slot == 3  # 12 % left beats 4 % left
-    assert any("every account is over 85%" in note and "12% left" in note for note in notes)
+    assert any(
+        "every account is over the 85%-used line" in note
+        and "account 3 has the most room (12% left)" in note
+        for note in notes
+    ), notes
 
 
 def test_an_account_that_has_spent_its_week_has_no_headroom_however_empty_its_five_hours(
@@ -911,7 +921,8 @@ def test_an_account_that_has_spent_its_week_has_no_headroom_however_empty_its_fi
     )
     assert picked is not None and picked.slot == 4
     assert any(
-        "account 3 0% (week 100%)" in note and "account 4 is first under 85%" in note
+        "account 3 0% used (week 100% used, 0% left)" in note
+        and "account 4 is first under the 85%-used line" in note
         for note in notes
     ), notes
 
@@ -1042,7 +1053,10 @@ def test_choose_for_handover_asks_headroom_before_the_binding_and_refuses_when_a
         role="coder", project=work, exclude=(2,), automatic=True, fetch=full
     )
     assert automatic.account is None
-    assert any("every account is over 85%; nothing to switch to" in n for n in automatic.notes)
+    assert any(
+        "every account is over the 85%-used line; nothing to switch to" in n
+        for n in automatic.notes
+    )
 
     # An iterator as `exclude` is spent by its first reader: normalised once (third round).
     lazy = service.choose_for_handover(
@@ -1255,7 +1269,8 @@ def test_accounts_usage_and_list_usage_read_every_account_in_one_round_with_labe
     fake_home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The two CLI usage surfaces go through ``read_usage`` (one round trip) and the arranged
-    list — priority order, the alias, ``(disabled)`` — like every other surface (third round)."""
+    list — priority order, the alias, ``(disabled)`` — like every other surface (third round).
+    Both read through the shared five-minute cache, so the second is served without a round."""
     _slot("work@example.com", "tok-work")
     _slot("personal@example.com", "tok-personal")
     service.set_alias("2", "work")
@@ -1280,9 +1295,17 @@ def test_accounts_usage_and_list_usage_read_every_account_in_one_round_with_labe
     assert lines[1].startswith("3") and "(disabled)" in lines[1] and "60%" in lines[1]
     assert lines[2].startswith("2") and "work" in lines[2] and "40%" in lines[2]
 
+    assert "session used" in lines[0] and "week used" in lines[0]
+
+    # The readings `usage` just recorded serve `list --usage`: no request within five minutes…
     rounds.clear()
     listing = runner.invoke(app, ["accounts", "list", "--usage"])
     assert listing.exit_code == 0, listing.output
+    assert rounds == []
+    assert "usage as of just now" in listing.stdout
+    # …unless asked to fetch now, which is one round again.
+    refreshed = runner.invoke(app, ["accounts", "list", "--usage", "--refresh"])
+    assert refreshed.exit_code == 0, refreshed.output
     assert rounds == [[3, 2]]
 
 
@@ -1578,14 +1601,15 @@ def test_doctor_live_headroom_warns_only_when_every_account_is_over_the_line(
     service.list_accounts()  # the registry exists from here on
     check = diagnostics._claude_account_headroom_check()
     assert check is not None and check.status.value == "ok"
-    assert "work@" not in check.detail and "account 2 90%" in check.detail
+    assert "work@" not in check.detail and "account 2 90% used (10% left)" in check.detail
+    assert "percent USED (85% used is the line)" in check.detail
 
     monkeypatch.setattr(
         service, "_http_get", _Usage({"tok-work": _payload(90), "tok-personal": _payload(86)})
     )
     check = diagnostics._claude_account_headroom_check()
     assert check is not None and check.status.value == "warn"
-    assert "every account is at or over 85%" in check.detail
+    assert "every account has used 85% or more" in check.detail
 
     monkeypatch.setattr(service, "_http_get", _Usage({}))
     check = diagnostics._claude_account_headroom_check()
@@ -1614,8 +1638,8 @@ def test_doctor_live_headroom_counts_a_spent_week_as_over_the_line(
     check = diagnostics._claude_account_headroom_check()
 
     assert check is not None and check.status.value == "warn", check
-    assert "every account is at or over 85%" in check.detail
-    assert "account 3 0% (week 100%)" in check.detail
+    assert "every account has used 85% or more" in check.detail
+    assert "account 3 0% used (week 100% used, 0% left)" in check.detail
 
 
 def test_doctor_live_and_the_page_read_every_account_in_one_round(

@@ -13,7 +13,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 _SIGNAL_TEXT = re.compile(r"^([a-z0-9][a-z0-9._-]*): (\S+)(?: \(was (\S+)\))?$")
 """The anchored serialization of a signal event's text: ``name: value`` with
@@ -278,19 +278,59 @@ class ClaudeIdentity(BaseModel):
     account_uuid: str | None = None
 
 
+def _left(used: float | None) -> float | None:
+    return None if used is None else min(100.0, max(0.0, 100.0 - used))
+
+
 class ClaudeUsage(BaseModel):
-    """One account's rate-limit windows, as Claude Code's own ``/usage`` reads them."""
+    """One account's rate-limit windows, as Claude Code's own ``/usage`` reads them.
+
+    Every percentage here is percent USED (0-100), never the share left: 40
+    means 40 % used and 60 % left. An agent on a fresh install read the bare
+    ``session_percent`` as what remained and rationed an account that was
+    nearly empty, so the JSON carries both sides under names that say which:
+    ``*_used_percent`` and ``*_left_percent`` (``session_percent`` and
+    ``week_percent`` stay, for the readers that already know them).
+    """
 
     available: bool
     reason: str | None = None
     """Why nothing could be read, when ``available`` is False."""
+    needs_login: bool = False
+    """Signed in, but the stored token has expired or was rejected: a session on the
+    account refreshes it. False for every other reason nothing could be read."""
     session_percent: float | None = None
-    """The rolling five-hour window, 0-100."""
+    """The rolling five-hour window: percent USED (0-100)."""
     session_resets_at: datetime | None = None
     week_percent: float | None = None
-    """The rolling seven-day window, 0-100."""
+    """The rolling seven-day window: percent USED (0-100)."""
     week_resets_at: datetime | None = None
     fetched_at: datetime | None = None
+    """When the reading was taken — or, when nothing could be read, when that was found out."""
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def session_used_percent(self) -> float | None:
+        """The five-hour window: percent USED (0-100) — ``session_percent``, named for it."""
+        return self.session_percent
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def week_used_percent(self) -> float | None:
+        """The seven-day window: percent USED (0-100) — ``week_percent``, named for it."""
+        return self.week_percent
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def session_left_percent(self) -> float | None:
+        """The five-hour window: percent LEFT (0-100), ``100 - session_used_percent``."""
+        return _left(self.session_percent)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def week_left_percent(self) -> float | None:
+        """The seven-day window: percent LEFT (0-100), ``100 - week_used_percent``."""
+        return _left(self.week_percent)
 
 
 class UsageSample(BaseModel):
@@ -321,6 +361,30 @@ class UsageTrend(BaseModel):
     """At the current rate, how long until 100 %; ``None`` when flat, falling or unknown."""
     span_minutes: float = 0.0
     """How long the samples behind the rate cover — the reader's measure of how much to trust it."""
+
+
+HeadroomLevel = Literal["good", "fair", "low", "critical", "empty", "unknown"]
+"""How much room the fleet's accounts have left, in one word (see ``HeadroomSummary``)."""
+
+
+class HeadroomSummary(BaseModel):
+    """What is LEFT across the fleet's accounts, in one figure and one word.
+
+    Built by ``services.claude_accounts.fleet_headroom``, whose docstring states
+    the formula; the sidebar's dot and ``n x claude`` are drawn from it.
+    """
+
+    level: HeadroomLevel
+    percent_left: float | None = None
+    """The mean share LEFT over the usable accounts (0-100); ``None`` when none is usable."""
+    usable: int = 0
+    """Enabled accounts with a readable reading — what a spawn could run on."""
+    needs_login: int = 0
+    """Signed-in accounts whose token has expired or was rejected: a session on each fixes it."""
+    left_by_slot: dict[int, float] = Field(default_factory=dict)
+    """Each usable account's share LEFT, ``100 - max(session used, week used)``."""
+    fetched_at: datetime | None = None
+    """The OLDEST reading behind the figure: the summary is no staler than this."""
 
 
 class ClaudeAccountStatus(BaseModel):

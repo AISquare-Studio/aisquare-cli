@@ -7251,7 +7251,8 @@ def test_a_switch_picks_by_headroom_before_the_binding_and_the_automatic_one_ref
 
     assert receipt.to_slot == 4  # headroom, not the binding
     assert any(
-        "headroom:" in note and "account 4 is first under 85%" in note for note in receipt.notes
+        "headroom:" in note and "account 4 is first under the 85%-used line" in note
+        for note in receipt.notes
     )
     assert "--to" not in _command(tmux) and _flag(_command(tmux), "--account") == "4"
 
@@ -7266,7 +7267,7 @@ def test_a_switch_picks_by_headroom_before_the_binding_and_the_automatic_one_ref
     )
     manual = fleet_service.switch(project, agent.label, to=None)
     assert manual.to_slot in {2, 3}  # it was on 4; the least-bad of the rest
-    assert any("every account is over 85%" in note for note in manual.notes)
+    assert any("every account is over the 85%-used line" in note for note in manual.notes)
     # …but the automatic hand-over refuses, stops nothing, and says why.
     killed_before = list(tmux.killed)
     with pytest.raises(FleetError, match="no account under the line") as refused:
@@ -7950,7 +7951,7 @@ def test_switch_refuses_without_headroom_the_same_account_or_a_dead_label(
     # the agent is ON 95; the only other one is 99, and that is what it gets, with a note).
     receipt = fleet_service.switch(project, agent.label)
     assert receipt.to_slot == 3
-    assert any("every account is over 85%" in note for note in receipt.notes)
+    assert any("every account is over the 85%-used line" in note for note in receipt.notes)
 
 
 def test_fleet_switch_command_reports_the_move_and_its_json(

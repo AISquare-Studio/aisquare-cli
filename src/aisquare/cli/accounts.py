@@ -32,6 +32,7 @@ from aisquare.core.state import get_state
 from aisquare.models import (
     AccountsOverview,
     ClaudeAccount,
+    ClaudeAccountStatus,
     ClaudeUsage,
     ProjectInfo,
 )
@@ -102,7 +103,10 @@ def _percent(value: float | None) -> str:
 
 
 def _usage_cells(usage: ClaudeUsage | None, *, now: datetime | None = None) -> tuple[str, str]:
-    """``(session, week)`` as the table shows them; the reason when there is nothing to show.
+    """``(session used, week used)`` as the table shows them; the reason when there is nothing.
+
+    The columns say USED in their headers: a bare ``40%`` read as the room left
+    to an agent on a fresh install, which then rationed a nearly empty account.
 
     The reset is ``format_reset``'s string — a distance and a clock time, the
     date when it is not today — shared with the Accounts page so the two
@@ -151,8 +155,8 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
     for column in (" ", "slot", "label", "signed in as", "plan", "hooks"):
         table.add_column(column)
     if with_usage:
-        table.add_column("session")
-        table.add_column("week")
+        table.add_column("session used")
+        table.add_column("week used")
     table.add_column("directory", overflow="fold")
     for status in overview.accounts:
         who = Text(status.identity.email) if status.identity else Text("not signed in", style="dim")
@@ -192,30 +196,53 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
     )
 
 
+_REFRESH_HELP = (
+    "Fetch now instead of serving a reading up to five minutes old (the shared usage cache)."
+)
+
+
+def _refreshed_line(statuses: list[ClaudeAccountStatus]) -> Text | None:
+    """``usage as of 3m ago … --refresh fetches now``: the OLDEST reading shown, cached or not."""
+    taken = [s.usage.fetched_at for s in statuses if s.usage and s.usage.fetched_at is not None]
+    if not taken:
+        return None
+    when = accounts_service.describe_age(min(taken))
+    return Text(
+        f"usage as of {when} (percent USED; refreshed at most every 5 min) — --refresh fetches now",
+        style="dim",
+    )
+
+
 @app.command("list")
 def list_(
     usage: Annotated[
         bool,
         typer.Option(
             "--usage",
-            help="Also fetch each signed-in account's session and weekly usage (one request "
-            "per account).",
+            help="Also show each signed-in account's session and weekly usage (percent USED), "
+            "from the shared five-minute cache.",
         ),
     ] = False,
+    refresh: Annotated[bool, typer.Option("--refresh", help=_REFRESH_HELP)] = False,
 ) -> None:
     """List the accounts: slot, who is signed in, plan, hooks; --usage adds the limits."""
     overview = accounts_service.overview()
     if usage:
-        # One concurrent, RECORDING read for every signed-in slot (#146; review
-        # of #205, third round): a slow endpoint costs one timeout, not one each.
+        # One concurrent, RECORDING read for every signed-in slot that has no
+        # reading younger than five minutes (#146; review of #205, third round):
+        # a slow endpoint costs one timeout, not one each.
         signed = [status for status in overview.accounts if status.signed_in]
-        readings = accounts_service.read_usage([status.account for status in signed])
+        readings = accounts_service.cached_usage(
+            [status.account for status in signed], force=refresh
+        )
         for status in signed:
             status.usage = readings.get(status.account.slot)
     if get_state().json_output:
         typer.echo(_overview_json(overview))
         return
     _emit_overview(overview, with_usage=usage)
+    if usage and (line := _refreshed_line(overview.accounts)) is not None:
+        stdout_console().print(line)
 
 
 @app.command("usage")
@@ -227,15 +254,20 @@ def usage_(
             "order)."
         ),
     ] = None,
+    refresh: Annotated[bool, typer.Option("--refresh", help=_REFRESH_HELP)] = False,
 ) -> None:
-    """Session (5-hour) and weekly usage per signed-in account, as Claude Code's /usage shows it."""
+    """Session (5-hour) and weekly usage per signed-in account — percent USED, as /usage shows it.
+
+    40% used is 60% left. Readings are shared for five minutes between this
+    command, ``list --usage`` and the Accounts page; ``--refresh`` fetches now.
+    """
     # The arranged list, like every other account surface: priority order, the
     # alias as the label, disabled marked — and one concurrent read for all of
-    # them (review of #205, third round).
+    # them (review of #205, third round), skipping what the cache still holds.
     accounts = [_resolve(slot)] if slot is not None else accounts_service.list_accounts()
     statuses = [accounts_service.describe(account) for account in accounts]
     asked = [status for status in statuses if status.signed_in or slot is not None]
-    readings = accounts_service.read_usage([status.account for status in asked])
+    readings = accounts_service.cached_usage([status.account for status in asked], force=refresh)
     for status in asked:
         status.usage = readings.get(status.account.slot)
     if get_state().json_output:
@@ -253,13 +285,15 @@ def usage_(
     # The label is never squeezed: a narrow terminal shortens the email instead.
     widest = max((len(text.plain) for text in labels), default=5)
     table.add_column("label", no_wrap=True, min_width=widest)
-    for column in ("signed in as", "session", "week"):
+    for column in ("signed in as", "session used", "week used"):
         table.add_column(column)
     for status, label in zip(statuses, labels, strict=True):
         who = Text(status.identity.email) if status.identity else Text("not signed in", style="dim")
         session, week = _usage_cells(status.usage)
         table.add_row(str(status.account.slot), label, who, session, week)
     console.print(table)
+    if (line := _refreshed_line(asked)) is not None:
+        console.print(line)
 
 
 # --- arranging: default, alias, order, disable (#145) -----------------------------------------

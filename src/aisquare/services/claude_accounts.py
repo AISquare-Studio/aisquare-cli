@@ -58,6 +58,8 @@ from aisquare.models import (
     ClaudeIdentity,
     ClaudeInstall,
     ClaudeUsage,
+    HeadroomLevel,
+    HeadroomSummary,
     ProjectInfo,
     UsageSample,
     UsageTrend,
@@ -722,6 +724,7 @@ def usage(
         return ClaudeUsage(
             available=False,
             reason="the stored token has expired — open a session on this account to refresh it",
+            needs_login=True,
         )
     headers = {
         "Authorization": f"Bearer {creds.access_token}",
@@ -739,6 +742,7 @@ def usage(
         return ClaudeUsage(
             available=False,
             reason="the token was rejected — open a session on this account to refresh it",
+            needs_login=True,
         )
     if status != 200:
         return ClaudeUsage(available=False, reason=f"HTTP {status} from the usage endpoint")
@@ -992,6 +996,125 @@ def read_usage_with_trends(
     return result
 
 
+# --- the shared five-minute cache -------------------------------------------------------------
+#
+# Every surface that only SHOWS usage — the Accounts page, the sidebar's dot,
+# `accounts usage` — reads through `cached_usage`, so between them an account is
+# asked at most once per USAGE_MAX_AGE_SECONDS. The cache is the `claude_usage`
+# history every recording reader already writes, so it is shared across
+# processes for free: a reading `accounts usage` took two minutes ago serves the
+# page. Only answered readings are recorded there; a fetch that went out and
+# failed (a rejected token, an unreachable endpoint) is remembered in-process,
+# keyed on the token it sent, so a refreshed token is asked at once. A
+# headroom pick and `doctor --live` still read live (`read_usage`): one decides
+# where an agent runs, the other was asked to look now.
+
+USAGE_MAX_AGE_SECONDS = 300.0
+"""How old a recorded reading may be and still be served instead of a fetch: five minutes."""
+
+_UNANSWERED: dict[tuple[str, int], ClaudeUsage] = {}
+"""Fetches that went out and failed, by (config dir, hash of the token sent): see above."""
+_UNANSWERED_LOCK = threading.Lock()
+
+
+def _attempt_key(account: ClaudeAccount, now: datetime) -> tuple[str, int] | None:
+    """What a failed fetch is remembered by; ``None`` when :func:`usage` would not fetch at all."""
+    creds = core.credentials(account)
+    if creds is None or creds.expired(now):
+        return None
+    return str(account.config_dir), hash(creds.access_token)
+
+
+def _recorded_usage(
+    accounts: Sequence[ClaudeAccount], *, since: datetime, now: datetime
+) -> dict[int, ClaudeUsage]:
+    """Each account's newest recorded reading taken at or after ``since``, in one store session.
+
+    A reading one of whose windows has reset since is not served: the window
+    it describes is over, and the new one starts near 0 %.
+    """
+    found: dict[int, ClaudeUsage] = {}
+    try:
+        with store_session() as store:
+            for account in accounts:
+                samples = store.usage_samples(account.slot, since=since)
+                if not samples:
+                    continue
+                newest = samples[-1]
+                resets = (newest.session_resets_at, newest.week_resets_at)
+                if any(when is not None and when <= now for when in resets):
+                    continue
+                found[account.slot] = ClaudeUsage(
+                    available=True,
+                    session_percent=newest.session_percent,
+                    session_resets_at=newest.session_resets_at,
+                    week_percent=newest.week_percent,
+                    week_resets_at=newest.week_resets_at,
+                    fetched_at=newest.fetched_at,
+                )
+    except sqlite3.Error:
+        return {}
+    return found
+
+
+def cached_usage(
+    accounts: Sequence[ClaudeAccount],
+    *,
+    max_age: float = USAGE_MAX_AGE_SECONDS,
+    force: bool = False,
+    now: datetime | None = None,
+    fetch: Fetch | None = None,
+) -> dict[int, ClaudeUsage]:
+    """Every account's reading, fetched only when the last one is older than ``max_age`` seconds.
+
+    Serves each account's newest reading recorded in ``claude_usage`` when it
+    is younger than ``max_age``; the rest are fetched in ONE concurrent,
+    recording round (:func:`read_usage`). ``force=True`` fetches every account
+    regardless — the page's refresh key. Each reading's ``fetched_at`` says how
+    old it is ("refreshed 3m ago"); a reading that could not be taken carries
+    the moment that was found out, and a failed fetch is not retried before
+    ``max_age`` either, unless the account's token has changed since.
+    """
+    if not accounts:
+        return {}
+    moment = now or _now()
+    since = moment - timedelta(seconds=max_age)
+    readings: dict[int, ClaudeUsage] = {}
+    if not force:
+        readings.update(_recorded_usage(accounts, since=since, now=moment))
+        with _UNANSWERED_LOCK:
+            for account in accounts:
+                key = None if account.slot in readings else _attempt_key(account, moment)
+                failed = _UNANSWERED.get(key) if key is not None else None
+                if failed is not None and failed.fetched_at and failed.fetched_at >= since:
+                    readings[account.slot] = failed
+    stale = [account for account in accounts if account.slot not in readings]
+    if stale:
+        fetched = read_usage(stale, now=now, fetch=fetch)
+        for account in stale:
+            reading = fetched[account.slot]
+            key = _attempt_key(account, moment)
+            if not reading.available:
+                reading = reading.model_copy(update={"fetched_at": moment})
+            with _UNANSWERED_LOCK:
+                if key is not None and not reading.available:
+                    _UNANSWERED[key] = reading
+                elif key is not None:
+                    _UNANSWERED.pop(key, None)
+            readings[account.slot] = reading
+    return {account.slot: readings[account.slot] for account in accounts}
+
+
+def describe_age(fetched_at: datetime, *, now: datetime | None = None) -> str:
+    """``just now`` / ``3m ago`` / ``2h ago``: how old a reading is, for a "refreshed …" line."""
+    minutes = max(0, int(((now or _now()) - fetched_at).total_seconds() // 60))
+    if minutes == 0:
+        return "just now"
+    if minutes < 60:
+        return f"{minutes}m ago"
+    return f"{minutes // 60}h ago"
+
+
 def headroom_percent(reading: ClaudeUsage) -> float | None:
     """How full an account reads for a pick: the FULLER of its two windows, or ``None``.
 
@@ -1014,20 +1137,128 @@ def headroom_percent(reading: ClaudeUsage) -> float | None:
 
 
 def describe_headroom(account: ClaudeAccount, reading: ClaudeUsage) -> str:
-    """``account 2 40%`` — and ``account 2 5% (week 100%)`` when the week is the fuller window.
+    """``account 2 40% used (60% left)`` — ``account 2 5% used (week 100% used, 0% left)`` when
+    the week is the fuller window.
 
-    The five-hour figure leads, as it does on the page; the weekly one is
-    named only when it is what ranks the account, so a note never shows a low
-    number beside an account the pick passed over without saying why.
+    Every figure says USED, and what is left is spelled out beside it: an agent
+    read a bare ``40%`` as the room remaining and rationed an account that had
+    plenty. The five-hour figure leads, as it does on the page; the weekly one
+    is named only when it is what ranks the account, so a note never shows a
+    low number beside an account the pick passed over without saying why.
     """
     name = core.label(account)
     session = reading.session_percent
     if session is None:
         return name
+    left = percent_left(reading)
+    spare = "" if left is None else f"{left:.0f}% left"
     week = reading.week_percent
     if week is not None and week > session:
-        return f"{name} {session:.0f}% (week {week:.0f}%)"
-    return f"{name} {session:.0f}%"
+        detail = f"week {week:.0f}% used" + (f", {spare}" if spare else "")
+        return f"{name} {session:.0f}% used ({detail})"
+    return f"{name} {session:.0f}% used" + (f" ({spare})" if spare else "")
+
+
+HEADROOM_GOOD_ABOVE = 50.0
+"""Over this share LEFT across the fleet, the level is ``good``."""
+HEADROOM_FAIR_FROM = 25.0
+"""From this share left up to :data:`HEADROOM_GOOD_ABOVE`, ``fair``."""
+HEADROOM_LOW_FROM = 5.0
+"""From this share left up to :data:`HEADROOM_FAIR_FROM`, ``low``; over 0 below it, ``critical``."""
+
+
+def percent_left(reading: ClaudeUsage) -> float | None:
+    """The share of an account LEFT for a pick: ``100 - max(session used, week used)``, 0-100."""
+    used = headroom_percent(reading)
+    return None if used is None else min(100.0, max(0.0, 100.0 - used))
+
+
+def headroom_level(left: float | None) -> HeadroomLevel:
+    """The word for a fleet-wide share left (:func:`fleet_headroom` states the bands)."""
+    if left is None:
+        return "unknown"
+    if left > HEADROOM_GOOD_ABOVE:
+        return "good"
+    if left >= HEADROOM_FAIR_FROM:
+        return "fair"
+    if left >= HEADROOM_LOW_FROM:
+        return "low"
+    return "critical" if left > 0 else "empty"
+
+
+def fleet_headroom(
+    accounts: Sequence[ClaudeAccount], readings: Mapping[int, ClaudeUsage]
+) -> HeadroomSummary:
+    """How much room the fleet has LEFT, from readings already taken. Pure: no disk, no network.
+
+    The formula, as the help screen quotes it:
+
+    - an account is **usable** when it is enabled and has a readable reading
+      (signed in, token accepted, the five-hour window read);
+    - its share **left** is ``100 - max(session % used, week % used)`` — the
+      fuller window decides, as it does for a pick (:func:`headroom_percent`);
+    - the fleet's **percent left** is the mean of ``left`` over the usable
+      accounts, and **usable** is how many there are;
+    - **needs login** counts the accounts whose token has expired or was
+      rejected (``ClaudeUsage.needs_login``);
+    - the **level**: ``good`` over 50 % left, ``fair`` 25-50 %, ``low`` 5-25 %,
+      ``critical`` under 5 % (but above 0), ``empty`` at 0 % or with no usable
+      account, ``unknown`` while no enabled account has been read yet.
+
+    ``accounts`` are the accounts to summarise (disabled ones are skipped);
+    ``readings`` is slot → reading, and an account without one has not been
+    read yet.
+    """
+    enabled = [account for account in accounts if not account.disabled]
+    read = [readings[account.slot] for account in enabled if account.slot in readings]
+    needs_login = sum(1 for reading in read if reading.needs_login)
+    if not enabled:
+        return HeadroomSummary(level="empty")
+    if not read:
+        return HeadroomSummary(level="unknown")
+    left_by_slot: dict[int, float] = {}
+    taken: list[datetime] = []
+    for account in enabled:
+        reading = readings.get(account.slot)
+        left = percent_left(reading) if reading is not None else None
+        if reading is None or left is None:
+            continue
+        left_by_slot[account.slot] = left
+        if reading.fetched_at is not None:
+            taken.append(reading.fetched_at)
+    if not left_by_slot:
+        return HeadroomSummary(level="empty", needs_login=needs_login)
+    mean = sum(left_by_slot.values()) / len(left_by_slot)
+    return HeadroomSummary(
+        level=headroom_level(mean),
+        percent_left=mean,
+        usable=len(left_by_slot),
+        needs_login=needs_login,
+        left_by_slot=left_by_slot,
+        fetched_at=min(taken, default=None),
+    )
+
+
+def read_fleet_headroom(
+    accounts: Sequence[ClaudeAccount] | None = None,
+    *,
+    max_age: float = USAGE_MAX_AGE_SECONDS,
+    force: bool = False,
+    now: datetime | None = None,
+    fetch: Fetch | None = None,
+) -> HeadroomSummary:
+    """:func:`fleet_headroom` over the enabled, signed-in accounts, read via :func:`cached_usage`.
+
+    ``accounts`` defaults to the arranged list; a slot that is not signed in is
+    never fetched, and with none signed in the level is ``empty``.
+    """
+    candidates = [
+        account
+        for account in (list_accounts() if accounts is None else accounts)
+        if not account.disabled and core.signed_in(account)
+    ]
+    readings = cached_usage(candidates, max_age=max_age, force=force, now=now, fetch=fetch)
+    return fleet_headroom(candidates, readings)
 
 
 def headroom_choice(
@@ -1084,17 +1315,20 @@ def headroom_choice(
     summary = " · ".join(describe_headroom(a, readings[a.slot]) for a, _pct in measured)
     under = next((a for a, pct in measured if pct < switch_at), None)
     if under is not None:
-        notes.append(f"headroom: {summary} — {core.label(under)} is first under {switch_at}%")
+        notes.append(
+            f"headroom: {summary} — {core.label(under)} is first under the {switch_at}%-used line"
+        )
         return under, notes
     if not least_bad:
         notes.append(
-            f"headroom: {summary} — every account is over {switch_at}%; nothing to switch to"
+            f"headroom: {summary} — every account is over the {switch_at}%-used line; "
+            "nothing to switch to"
         )
         return None, notes
     least, pct = min(measured, key=lambda pair: pair[1])
     notes.append(
-        f"headroom: {summary} — every account is over {switch_at}%; "
-        f"{core.label(least)} has the most room ({100 - pct:.0f}% left)"
+        f"headroom: {summary} — every account is over the {switch_at}%-used line; "
+        f"{core.label(least)} has the most room ({max(0, 100 - pct):.0f}% left)"
     )
     return least, notes
 

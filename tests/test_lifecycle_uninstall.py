@@ -878,7 +878,7 @@ def test_a_row_shutdown_cannot_reach_is_named_with_the_way_out(
     assert human.exit_code == 1 and world.events == []
     said = " ".join(human.stderr.split())
     assert "Stop them first: aisquare fleet shutdown --all --yes; it cannot reach coder-1 (" in said
-    assert "send that server SIGUSR1" in said
+    assert "send that server SIGUSR1, which makes tmux create its socket again" in said
     assert "end its row on your word: aisquare fleet shutdown --all --yes --forget" in said
 
 
@@ -909,13 +909,28 @@ def test_a_row_whose_socket_another_server_took_still_counts_and_is_named_unreac
     assert human.exit_code == 1 and world.events == []
     said = " ".join(human.stderr.split())
     assert "it cannot reach coder-1 (repo), as the socket its tmux server listened on" in said
-    assert "has another server on it" in said and "send that server SIGUSR1" in said
+    assert "has another server on it" in said
+    # tmux's SIGUSR1 handler takes the path from whatever listens on it: sent now, it would
+    # strand every agent of the server that answers there (review of #259, round 3).
+    assert "send that server SIGUSR1 once no server answers on that socket, which" in said
     assert "end its row on your word: aisquare fleet shutdown --all --yes --forget" in said
+    assert plan.taken == ("coder-1 (repo)",)
+    # Beside a row whose socket file is gone, the condition is said of the taken one alone.
+    gone = tmp_path / "gone"
+    monkeypatch.setattr(
+        TmuxServer,
+        "listener",
+        lambda _self, recorded=None: "gone" if recorded == gone else "answers",
+    )
+    _live_agent(tmp_path / "web", socket_path=gone, server_started_at=then, agent_id="agt_w")
+    both = " ".join(runner.invoke(app, ["uninstall", "--yes"]).stderr.split())
+    assert "send that server SIGUSR1 (for coder-1 (repo), once no server answers on its " in both
     # Negative control: the server that answers started when the row says: it is the
     # row's, and the row is one `fleet shutdown` stops.
     monkeypatch.setattr(TmuxServer, "started_at", lambda _self: then)
     plan = lifecycle.uninstall_plan()
-    assert plan.listening == ("coder-1 (repo)",) and plan.unreached == ()
+    assert plan.listening == ("coder-1 (repo)",) and plan.unreached == ("coder-1 (web)",)
+    assert plan.taken == ()
 
 
 def test_the_plan_asks_each_server_once_not_once_per_row(

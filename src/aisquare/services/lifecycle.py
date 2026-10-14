@@ -1169,6 +1169,10 @@ class UninstallPlan:
     has another server on it than the one they were started on: no tmux client reaches
     them, so ``fleet shutdown`` leaves them live, and only its ``--forget`` ends their rows
     (round 27 of #257; follow-up)."""
+    taken: tuple[str, ...] = ()
+    """Those of :attr:`unreached` whose socket has another server on it: the way back to
+    their own server, ``SIGUSR1``, waits until no server answers there, as tmux's handler
+    takes the path from whatever listens on it (review of #259, round 3)."""
     listening: tuple[str, ...] = ()
     """The rest of :attr:`live_agents`: a server answers on their socket, so ``--forget``
     leaves them live. Sorted per row, never by subtracting :attr:`unreached` from
@@ -1299,14 +1303,25 @@ class UninstallPlan:
             unreached = ""
             if self.unreached:
                 # `fleet shutdown` cannot reach them, and leaves them live: said, with the
-                # two ways on (round 27 of #257).
+                # two ways on (round 27 of #257). tmux's SIGUSR1 handler unlinks whatever is
+                # at the path and binds it, so sent while another server listens there it
+                # hands that server's path to the old one, and every agent on it is the one
+                # no client reaches: only once no server answers (review of #259, round 3),
+                # as `stop`, `shutdown`, `reap` and the doctor say.
                 one = len(self.unreached) == 1
+                once = ""
+                if self.taken:
+                    once = (
+                        " once no server answers on that socket"
+                        if len(self.taken) == len(self.unreached)
+                        else f" (for {', '.join(self.taken)}, once no server answers on its socket)"
+                    )
                 unreached = (
                     f"; it cannot reach {', '.join(self.unreached)}, as the socket "
                     f"{'its' if one else 'their'} tmux server listened on is gone, could not "
                     f"be asked, or has another server on it. If {'it is' if one else 'they are'} "
-                    f"still running, send that server SIGUSR1, which makes tmux create its "
-                    f"socket again, and run it again; if not, end "
+                    f"still running, send that server SIGUSR1{once}, which makes tmux create "
+                    f"its socket again, and run it again; if not, end "
                     f"{'its row' if one else 'their rows'} on your word: {FLEET_FORGET}"
                 )
             return UninstallRefused(
@@ -2201,6 +2216,7 @@ def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
         fleet_error=fleet_error,
         tmux_unusable=_tmux_unusable() if live else None,
         unreached=tuple(label for label, answer in answers if answer != "answers"),
+        taken=tuple(label for label, answer in answers if answer == "another"),
         listening=tuple(label for label, answer in answers if answer == "answers"),
         plugins=_plugins(claude_dirs),
         plugin_answers=_plugin_answers_there(),

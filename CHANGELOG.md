@@ -202,7 +202,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   answer is refused, nor nothing once its board goes stale), `fleet shutdown`
   leaves it live until `--forget` (and spares none of its project's sessions on
   the server that took its socket, where its agent does not run), and
-  `upgrade` and `uninstall` count it as running and name `--forget`. A
+  `upgrade` and `uninstall` count it as running and name `--forget`
+  (`uninstall` says to send its server `SIGUSR1` only once no server answers
+  on that socket, as tmux's handler takes the path from whatever listens). A
   server that exited (a `kill-server`, a crash) leaves its socket file with
   nothing listening, and the next spawn, in any project, or asq's Accounts
   sign-in window, sees it before it starts a server there: that server's rows

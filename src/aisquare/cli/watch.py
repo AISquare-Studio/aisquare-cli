@@ -117,15 +117,21 @@ def _event_detail(event: TeamEvent, roles: dict[str, str]) -> Text:
 
 
 def _task_detail(task: TeamTask, statuses: dict[str, str]) -> Text:
+    """A task in full: its title, then ``#12 · doing · tsk_… · claimed by …`` — what the
+    board's table leaves out (the number and an icon are all a row shows) — then the rest."""
     text = Text()
     text.append(f"{task.title}\n", style="bold")
-    text.append(f"{task.id} · [{task.status}] · key={task.key}", style="dim")
-    if task.role:
-        text.append(f" · for {task.role}", style="dim")
+    if task.number is not None:
+        text.append(f"#{task.number} · ", style="bold")
+    text.append(task.status, style="bold")
+    text.append(f" · {task.id}", style="dim")
     if task.claimed_by:
-        text.append(f"\nclaimed by {team_service.short_id(task.claimed_by)}")
+        text.append(f" · claimed by {team_service.short_id(task.claimed_by)}")
         if task.claim_expires_at:
             text.append(f" (lease until {local_time(task.claim_expires_at):%H:%M})", style="dim")
+    if task.role:
+        text.append(f" · for {task.role}", style="dim")
+    text.append(f" · key={task.key}", style="dim")
     if task.needs:
         waiting = set(unmet_needs(task, statuses))
         text.append("\nneeds: ")

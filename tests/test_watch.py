@@ -805,3 +805,108 @@ def test_the_board_lines_keep_the_feed_and_the_tasks_on_screen_whatever_the_size
     assert seen["shrunk"] == (67, 32, 20, 8, 4)
     assert seen["narrow"] == (False, False), "the column and the line that resizes it hide"
     assert seen["toggled"] == (False, False)
+
+
+def _statuses_on_the_board(runner: CliRunner) -> dict[str, str]:
+    """One task in every state, by title; returns title → id."""
+    ids = {}
+    for title in ("plan it", "build it", "check it", "stuck on it", "after it", "ship it"):
+        ids[title] = _add(runner, title)
+    ids["wait for it"] = _add(runner, "wait for it", "--needs", ids["after it"])
+    runner.invoke(app, ["task", "claim", ids["build it"]])
+    runner.invoke(app, ["task", "claim", ids["check it"]])
+    runner.invoke(app, ["task", "review", ids["check it"]])
+    runner.invoke(app, ["task", "block", ids["stuck on it"], "--reason", "no key"])
+    runner.invoke(app, ["task", "done", ids["ship it"]])
+    dropped = _add(runner, "forget it")
+    runner.invoke(app, ["task", "drop", dropped])
+    ids["forget it"] = dropped
+    return ids
+
+
+def test_the_tasks_table_is_the_number_an_icon_and_the_title(
+    runner: CliRunner, work_dir: Path
+) -> None:
+    """The human: "status can be just icons, no text … so just id, status and title". The
+    number on the board, one icon per state (a todo waiting on a need gets its own), the
+    title; no who. The done archive keeps its time beside the same icons."""
+    pytest.importorskip("textual", reason="the [tui] extra is not installed")
+    from aisquare.cli import watch as watch_mod
+    from aisquare.cli.ui.board import STATUS_ICONS
+
+    team_service.activate()
+    ids = _statuses_on_the_board(runner)
+    numbers = {
+        title: json.loads(runner.invoke(app, ["--json", "task", "show", task]).stdout)["number"]
+        for title, task in ids.items()
+    }
+
+    def rows(table: Any) -> dict[str, tuple[str, str]]:
+        return {
+            str(row[2].plain): (str(row[0].plain), str(row[1].plain).strip())
+            for row in (table.get_row_at(i) for i in range(table.row_count))
+        }
+
+    async def drive() -> tuple[list[str], dict[str, tuple[str, str]], dict[str, tuple[str, str]]]:
+        app_cls = watch_mod._build_app_class(interval=60.0)
+        async with app_cls().run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            table = pilot.app.query_one("#tasks")
+            labels = [column.label.plain for column in table.columns.values()]
+            open_rows = rows(table)
+            pilot.app.board.action_toggle_done()
+            await pilot.pause()
+            return labels, open_rows, rows(table)
+
+    labels, open_rows, archive = asyncio.run(drive())
+    icon = {state: glyph for state, (glyph, _style, _meaning) in STATUS_ICONS.items()}
+    assert labels == ["#", "st", "title"]
+    assert open_rows == {
+        "plan it": (str(numbers["plan it"]), icon["todo"]),
+        "build it": (str(numbers["build it"]), icon["doing"]),
+        "check it": (str(numbers["check it"]), icon["review"]),
+        "stuck on it": (str(numbers["stuck on it"]), icon["blocked"]),
+        "after it": (str(numbers["after it"]), icon["todo"]),
+        "wait for it": (str(numbers["wait for it"]), icon["waiting"]),
+    }
+    assert set(archive) == {"ship it", "forget it"}
+    assert archive["ship it"][0] == str(numbers["ship it"])
+    assert archive["ship it"][1].startswith(icon["done"]) and ":" in archive["ship it"][1]
+    assert archive["forget it"][1].startswith(icon["dropped"])
+
+
+def test_a_long_title_is_cut_to_the_table_and_the_detail_says_the_rest(
+    runner: CliRunner, work_dir: Path
+) -> None:
+    """The title takes the rest of the width and ends in an ellipsis where it would not
+    fit — the table never scrolls sideways, even after the column is narrowed — and the
+    detail pane's header gives what the row left out: number, status, id, claimant."""
+    pytest.importorskip("textual", reason="the [tui] extra is not installed")
+    from aisquare.cli import watch as watch_mod
+
+    team_service.activate()
+    long_title = "wire the accounts page to the five-minute usage cache " * 3
+    task_id = _add(runner, long_title.strip())
+    runner.invoke(app, ["task", "claim", task_id])
+    number = json.loads(runner.invoke(app, ["--json", "task", "show", task_id]).stdout)["number"]
+
+    async def drive() -> tuple[str, int, str, int, str]:
+        app_cls = watch_mod._build_app_class(interval=60.0)
+        async with app_cls().run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            table = pilot.app.query_one("#tasks")
+            wide = (str(table.get_row_at(0)[2].plain), int(table.max_scroll_x))
+            side = pilot.app.query_one("#side-divider").region
+            await _drag(pilot, (side.x, 10), (36, 10))  # narrow the column
+            await pilot.pause()
+            narrow = (str(table.get_row_at(0)[2].plain), int(table.max_scroll_x))
+            await pilot.click("#tasks", offset=(6, 2))
+            await pilot.pause()
+            detail = str(pilot.app.board.detail_text).splitlines()[1]
+            return (*wide, *narrow, detail)
+
+    wide_title, wide_scroll, narrow_title, narrow_scroll, detail = asyncio.run(drive())
+    assert wide_title.endswith("…") and narrow_title.endswith("…")
+    assert len(narrow_title) < len(wide_title), "the title refits when the column narrows"
+    assert wide_scroll == 0 and narrow_scroll == 0, "never a sideways scroll"
+    assert detail.startswith(f"#{number} · doing · {task_id} · claimed by ")

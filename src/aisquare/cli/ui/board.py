@@ -40,6 +40,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
+from rich.cells import cell_len
 from rich.text import Text
 from textual import events, on
 from textual.app import ComposeResult
@@ -76,6 +77,30 @@ TEAM_HEIGHT_KEY = "board_team_height"
 DETAIL_HEIGHT_KEY = "board_detail_height"
 """The ``state.json`` key of the detail pane's height (the line above it)."""
 
+WAITING = "waiting"
+"""Not a status: a ``todo`` whose ``needs`` are not all done yet, which gets its own icon."""
+STATUS_ICONS: dict[str, tuple[str, str, str]] = {
+    "todo": ("○", "bold", "to do — nobody has it yet"),
+    WAITING: ("⧗", "yellow", "to do, waiting on a task it needs"),
+    "doing": ("▶", "green", "doing — claimed and being worked on"),
+    "review": ("👀", "cyan", "in review — waiting to be checked"),
+    "blocked": ("⛔", "red", "blocked — the detail says on what"),
+    "done": ("✓", "green", "done"),
+    "dropped": ("✗", "dim", "dropped — no longer worth doing"),
+}
+"""status → (glyph, style, what it means): the tasks table's one icon per state, and the
+legend the help screens print from it. Each glyph is one or two cells wide."""
+ICON_CELLS = 2
+TASK_COLUMNS = ("#", "st", "title")
+"""The tasks table: the number on the board, the status icon, the title."""
+"""The status column's width: the widest glyph, so every row's title starts at one column."""
+
+
+def status_icon(status: str, *, waiting: bool = False) -> Text:
+    """The status as its icon, coloured, padded to :data:`ICON_CELLS`."""
+    glyph, style, _meaning = STATUS_ICONS.get(WAITING if waiting else status, ("?", "dim", ""))
+    return Text(glyph + " " * max(0, ICON_CELLS - cell_len(glyph)), style=style)
+
 
 class PickableTable(DataTable[Text]):
     """A DataTable that reports real mouse picks on data rows.
@@ -106,6 +131,12 @@ class PickableTable(DataTable[Text]):
             self.row_key = row_key
             super().__init__()
 
+    class Resized(Message):
+        """The table's width changed (a terminal, a dragged line): titles refit to it."""
+
+    def on_resize(self, event: events.Resize) -> None:
+        self.post_message(self.Resized())
+
     async def _on_click(self, event: events.Click) -> None:
         meta = event.style.meta
         row = meta.get("row", -1)
@@ -135,6 +166,13 @@ class TeamBlock(Static):
 
     def get_content_height(self, container: Size, viewport: Size, width: int) -> int:
         return min(super().get_content_height(container, viewport, width), self.AUTO_ROWS)
+
+
+def _number_cell(task: TeamTask) -> Text:
+    """The task's number on its board; its id's tail, dimmed, for a task that has none."""
+    if task.number is not None:
+        return Text(str(task.number))
+    return Text(task.id[-8:], style="dim")
 
 
 class BoardColumn(Vertical):
@@ -279,7 +317,7 @@ class BoardPanel(Vertical):
 
     def on_mount(self) -> None:
         table = self.query_one("#tasks", DataTable)
-        table.add_columns("id", "st", "who", "title")
+        table.add_columns(*TASK_COLUMNS)
         table.border_title = "tasks"
         self.query_one("#sessions", Static).border_title = "team"
         self.query_one("#feed", OptionList).border_title = "live feed"
@@ -403,41 +441,57 @@ class BoardPanel(Vertical):
         return self._terminal_by_task.get(task_id)
 
     def _refresh_tasks(self, tasks: list[TeamTask]) -> None:
+        """Rebuild the table: the task's number, its status as an icon, and its title.
+
+        Who has it, its full id and the rest are one click away in the detail pane.
+        The title is cut, with an ellipsis, to the room the table has, so it takes
+        the rest of the width and the table never scrolls sideways; a resize
+        rebuilds (``PickableTable.Resized``).
+        """
         table = self.query_one("#tasks", DataTable)
         selected = self._cursor_task_id(table)
-        table.clear()
+        # The columns too: a column keeps the widest cell it ever held, so a title cut
+        # to a narrower table still scrolled sideways to the width of the uncut one.
+        table.clear(columns=True)
+        table.add_columns(*TASK_COLUMNS)
         self._tasks_by_id = {}
+        rows: list[tuple[TeamTask, Text, Text]] = []
         if self._show_done:
             closed = [t for t in tasks if t.status in CLOSED_STATUSES]
             closed.sort(key=lambda t: t.updated_at, reverse=True)
             table.border_title = f"done archive ({len(closed)}) — d for open tasks"
             for task in closed:
-                self._tasks_by_id[task.id] = task
-                event = self._done_event_for(task.id)
-                who = team_service.short_id(event.session_id) if event and event.session_id else ""
                 when = f"{local_time(task.updated_at):%H:%M}"
-                table.add_row(
-                    Text(task.id[-8:], style="dim"),
-                    Text(f"{'✅' if task.status == 'done' else '🗑'} {when}"),
-                    Text(who),
-                    Text(task.title, no_wrap=True, overflow="ellipsis"),
-                    key=task.id,
-                )
+                rows.append((task, _number_cell(task), status_icon(task.status) + f" {when}"))
         else:
             table.border_title = "tasks — d for done archive"
             for task in (t for t in tasks if t.status in OPEN_STATUSES):
-                self._tasks_by_id[task.id] = task
-                marker = "⧗" if unmet_needs(task, self._statuses) else ""
-                who = team_service.short_id(task.claimed_by) if task.claimed_by else ""
-                table.add_row(
-                    Text(task.id[-8:], style="dim"),
-                    Text(f"{task.status}{marker}"),
-                    Text(who),
-                    Text(task.title, no_wrap=True, overflow="ellipsis"),
-                    key=task.id,
-                )
+                waiting = task.status == "todo" and bool(unmet_needs(task, self._statuses))
+                rows.append((task, _number_cell(task), status_icon(task.status, waiting=waiting)))
+        room = self._title_room(table, rows)
+        for task, number, icon in rows:
+            self._tasks_by_id[task.id] = task
+            title = Text(task.title, no_wrap=True, overflow="ellipsis")
+            if room is not None:
+                title.truncate(room, overflow="ellipsis")
+            table.add_row(number, icon, title, key=task.id)
         if selected in self._tasks_by_id:
             table.move_cursor(row=table.get_row_index(selected))
+
+    @staticmethod
+    def _title_room(table: DataTable[Any], rows: list[tuple[TeamTask, Text, Text]]) -> int | None:
+        """The cells the title column may take: what the table has less the other two
+        columns and every column's padding — ``None`` before the table has a size."""
+        width = table.scrollable_content_region.width
+        if width <= 0:
+            return None
+        pad = 2 * table.cell_padding
+        number = max([1, *(row[1].cell_len for row in rows)]) + pad
+        status = max([ICON_CELLS, *(row[2].cell_len for row in rows)]) + pad
+        return max(8, width - number - status - pad)
+
+    def on_pickable_table_resized(self, event: PickableTable.Resized) -> None:
+        self._refresh_tasks(self._all_tasks)
 
     def _cursor_task_id(self, table: DataTable[Any]) -> str | None:
         try:

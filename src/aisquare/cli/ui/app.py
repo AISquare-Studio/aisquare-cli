@@ -1576,6 +1576,7 @@ def _writing_workers() -> dict[str, str]:
         accounts.COMPLETE_WORKER: "a Claude sign-in",
         accounts.REMOVE_WORKER: "an account's removal",
         accounts.ARRANGE_WORKER: "an account change",
+        accounts.RENAME_WORKER: "an account's rename",
     }
 
 

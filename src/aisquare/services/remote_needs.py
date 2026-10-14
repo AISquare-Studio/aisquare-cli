@@ -788,6 +788,39 @@ def _needs_item(
     )
 
 
+_TRUST_PUSH_DELAY = timedelta(seconds=30)
+"""How long after its start an agent at the folder-trust question waits for a push: the
+human who spawned it from the UI is often at its window and answers it first."""
+
+
+def _needs_trust_item(
+    status: FleetAgentStatus, *, project: ProjectInfo, name: str
+) -> NeedsItem | None:
+    """The card of an agent at Claude Code's folder-trust question (``fleet.TRUST_PROMPT``).
+
+    One per row, since the question is asked once per start. No quick answer: the dialog's
+    highlight decides what Enter picks, and a key sent blind could pick "No, exit". The
+    card says how to unblock it (its excerpt, the row's detail); the push says only who.
+    """
+    from aisquare.services.fleet import TRUST_PROMPT
+
+    detail = status.detail or ""
+    if status.state != "attention" or not detail.startswith(TRUST_PROMPT):
+        return None
+    agent = status.agent
+    return _needs_item(
+        "permission",
+        f"trust:{agent.id}",
+        project=project,
+        agent=agent,
+        reason=f"{name} is waiting for folder trust (Claude Code asks before it starts)",
+        excerpt=detail,
+        detail={"text": detail},
+        since=agent.created_at,
+        push_after=agent.created_at + _TRUST_PUSH_DELAY,
+    )
+
+
 def _needs_is_manager(role: str | None) -> bool:
     """Whether ``role`` is the manager's, a numbered seat of it included."""
     from aisquare.core import harness
@@ -816,7 +849,9 @@ def needs_from_agent(
     1. derived ``lost``, its pane gone → ``lost``; and a row held as another tmux server's
        (``FleetAgentStatus.held``), whatever its board says: its agent is one nothing here
        reaches, so it is a ``lost`` card of its own reason, never a prompt (below);
-    2. derived ``limited`` → ``limited``;
+    2. derived ``limited`` → ``limited``; derived ``attention`` at Claude Code's folder-trust
+       question (``fleet.TRUST_PROMPT``) → ``permission``, its own card: the agent has no
+       session, so nothing below can read it, and rule 8's id would move with every scan;
     3. a pending ``AskUserQuestion`` → ``question``;
     4. a pending ``ExitPlanMode`` → ``plan``;
     5. any other pending tool, with attention → ``permission``, about the OLDEST one: each
@@ -917,6 +952,9 @@ def needs_from_agent(
                 accounts=accounts,
             )
         ]
+    trust = _needs_trust_item(status, project=project, name=name)
+    if trust is not None:
+        return [trust]
     pending = _needs_pending(tail, agent)
     asking = next((tool for tool in pending if tool.name == "AskUserQuestion"), None)
     if asking is not None:

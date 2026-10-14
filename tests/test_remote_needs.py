@@ -358,6 +358,27 @@ def test_rule_5_a_pending_tool_with_attention_is_a_prompt_about_the_oldest_tool(
     )
 
 
+def test_an_agent_at_the_folder_trust_question_is_one_card_for_its_row() -> None:
+    """``fleet`` reads an agent at Claude Code's trust question ``attention`` with no session
+    (no hook runs before the yes). It is a card of its own: one id for the row whatever the
+    scan's clock, no quick answer (Enter there picks "No, exit"), pushed after a grace."""
+    row = _row()
+    detail = fleet_service.trust_prompt_detail(PROJECT.root)
+    status = _status(row, "attention", detail=detail)
+    item = _one(_classify(status))
+    later = _one(
+        needs_from_agent(status, None, project=PROJECT, events=[], now=NOW + timedelta(minutes=9))
+    )
+    assert item.kind == "permission" and item.id == later.id
+    assert item.reason == "coder-1 is waiting for folder trust (Claude Code asks before it starts)"
+    assert item.excerpt == detail and "aisquare accounts trust /work/alpha" in detail
+    assert item.answers == ()
+    assert item.since == BORN and item.push_after == BORN + timedelta(seconds=30)
+    # Control: the same state with any other detail is rule 8's dialog card, as before.
+    other = _one(_classify(_status(row, "attention")))
+    assert other.reason == "coder-1 shows a dialog that needs you" and other.id != item.id
+
+
 def test_a_permission_card_shows_the_call_not_eleven_keys_of_it() -> None:
     """Only the scalar values of eleven known keys were kept, and nothing said the rest were
     gone: an MCP merge's owner, repo and pull request showed as ``input: {}``, a
@@ -2506,6 +2527,8 @@ class FakeTmux:
         self.asked: list[str] = []
         """Every pane asked about, once per question."""
         self.typed: list[tuple[str, ...]] = []
+        self.screen: list[str] = []
+        """What the pane shows (``capture``): blank, an agent at no dialog of Claude Code's."""
 
     def output_epoch(self) -> str:
         """``#{window_activity}`` as tmux prints it: whole seconds, or nothing."""
@@ -2529,6 +2552,13 @@ class FakeTmux:
 
     def started_at(self) -> datetime | None:
         return self.started
+
+    def capture(self, pane_id: str, **_: object) -> SimpleNamespace:
+        """The pane's screen, asked of a row no hook has spoken for (``fleet``'s trust check)."""
+        self.asked.append(pane_id)
+        return SimpleNamespace(
+            lines=list(self.screen), facts=self.pane_facts(pane_id), scrollback=0
+        )
 
     def answers(self) -> bool:
         return True

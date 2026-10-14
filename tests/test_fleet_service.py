@@ -34,7 +34,8 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import codenames, paths, selfcli
+from aisquare.core import claude_accounts as accounts_core
+from aisquare.core import claude_sharing, codenames, paths, selfcli
 from aisquare.core import store as core_store
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import (
@@ -76,6 +77,7 @@ from aisquare.services.fleet import (
     ACTIVITY_WINDOW,
     NUDGE_TEXT,
     PROMPT_TIMEOUT,
+    TRUST_PROMPT,
     FleetError,
     FleetUnavailable,
     NoSuchAgent,
@@ -188,6 +190,10 @@ class FakeTmux(TmuxServer):
         words in ``WindowInfo.resize_refused`` (#149; review of #162, round 1)."""
         self.typed: list[tuple[str, str, str]] = []
         """``(pane_id, kind, text)`` with kind ``literal`` / ``paste`` / ``key``."""
+        self.screens: dict[str, list[str]] = {}
+        """What each pane shows — what ``capture`` answers; blank until a test draws one."""
+        self.captured: list[str] = []
+        """Every pane whose screen was asked for, in order."""
         self.killed: list[str] = []
         self.renamed: list[tuple[str, str]] = []
         self._counter = 0
@@ -379,6 +385,23 @@ class FakeTmux(TmuxServer):
         """As the real one, which asks ``#{start_time}`` in the same ``display-message``."""
         facts = self.facts.get(pane_id) if self._read() else None
         return None if facts is None else replace(facts, server_started=self.started)
+
+    def capture(
+        self,
+        pane_id: str,
+        *,
+        scrollback: int = 0,
+        height: int | None = None,
+        flags: bool = False,
+    ) -> Capture:
+        """The pane's screen as a test drew it (:attr:`screens`); a gone pane is an error."""
+        self.binary()
+        self._require_server()
+        facts = self.facts.get(pane_id)
+        if facts is None:
+            raise TmuxError(f"can't find pane: {pane_id}")
+        self.captured.append(pane_id)
+        return Capture(list(self.screens.get(pane_id, [])), facts, 0)
 
     # The strict twins the shutdown paths use: each is the lenient answer UNLESS
     # the server could not be asked, and that single distinction is `reachable()`
@@ -12311,3 +12334,137 @@ def test_a_role_whose_env_file_cannot_be_read_is_refused_before_a_window_or_a_st
     with store_session() as store:
         live = store.fleet_agent_by_label(project.id, reviewer.label, live_only=True)
     assert live is not None and live.id == reviewer.id
+
+
+# --- Claude Code's folder-trust question (core.claude_sharing) ------------------------
+
+TRUST_SCREEN = (
+    (Path(__file__).parent / "fixtures" / "claude_code" / "trust_prompt_2.1.299.txt")
+    .read_text(encoding="utf-8")
+    .splitlines()
+)
+"""The question as ``capture-pane -e`` showed it on Claude Code 2.1.299, escapes and all."""
+
+
+def _signed_in(account: Any, email: str, *, trusted: tuple[str, ...] = ()) -> Path:
+    path = accounts_core.claude_json_path(account)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    projects = {key: {"hasTrustDialogAccepted": True} for key in trusted}
+    body = {"oauthAccount": {"emailAddress": email}, "userID": email, "projects": projects}
+    path.write_text(json.dumps(body, indent=2), encoding="utf-8")
+    return path
+
+
+def test_a_spawn_shares_the_folder_trust_into_the_account_it_picks_and_says_so(
+    fake_home: Path, tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Account 2 said yes to the repository; a coder spawned on account 3 in a worktree of it
+    starts without the question, and the receipt — the manager's view — says why."""
+    root = os.path.realpath(project.root)
+    _signed_in(accounts_core.default_account(), "one@x.dev")
+    second, third = accounts_core.create_account(), accounts_core.create_account()
+    _signed_in(second, "two@x.dev", trusted=(root,))
+    _signed_in(third, "three@x.dev")
+
+    receipt = fleet_service.spawn(project, "coder", worktree=True, account="3")
+
+    assert receipt.agent.cwd != project.root  # its own worktree, covered by the repository
+    data = json.loads(accounts_core.claude_json_path(third).read_text())
+    assert data["projects"] == {root: {"hasTrustDialogAccepted": True}}
+    assert data["oauthAccount"] == {"emailAddress": "three@x.dev"}
+    assert f"accounts: {root} is trusted on account 2 — now on account 3 too" in receipt.notes
+    # The plain claude was not the one launched: nothing written there.
+    plain = json.loads(accounts_core.claude_json_path(accounts_core.default_account()).read_text())
+    assert plain["projects"] == {}
+
+
+def test_an_agent_at_the_trust_question_needs_the_human_until_it_is_answered(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    agent = _coder(project)
+    tmux.set_command(agent.pane_id, "claude")
+    tmux.screens[agent.pane_id] = TRUST_SCREEN
+
+    (status,) = fleet_service.list_agents(project)
+
+    assert status.state == "attention"
+    assert status.detail is not None and status.detail.startswith(TRUST_PROMPT)
+    assert f"aisquare accounts trust {agent.cwd}" in status.detail
+    assert fleet_service.status_of(agent).detail == status.detail
+    # `fleet tell` files a board note instead of typing: Enter there picks "No, exit".
+    told = fleet_service.tell(project, agent.label, "start on the task")
+    assert not told.delivered and told.how.startswith("it is attention") and tmux.typed == []
+    # Answered, the screen moves on and so does the state.
+    tmux.screens[agent.pane_id] = ["╭─ Claude Code ─╮", "\u276f "]
+    assert fleet_service.list_agents(project)[0].state == "waiting"
+
+
+def test_an_agent_whose_hooks_have_run_is_never_asked_for_its_screen(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Claude Code runs no hook in a folder nobody trusted: one that has is past the
+    question, and a healthy fleet pays no capture per agent per tick."""
+    agent = _coder(project)
+    tmux.set_command(agent.pane_id, "claude")
+    tmux.screens[agent.pane_id] = TRUST_SCREEN  # what it showed before the yes
+    _board_session(agent, "waiting")
+    tmux.captured.clear()
+    assert fleet_service.list_agents(project)[0].state == "waiting"
+    assert tmux.captured == []
+    # Control: a row no hook has spoken for yet is asked, and only it.
+    fresh = _coder(project)
+    tmux.set_command(fresh.pane_id, "claude")
+    fleet_service.list_agents(project)
+    assert tmux.captured == [fresh.pane_id]
+
+
+def test_spawn_never_types_its_prompt_into_the_trust_question(
+    tmux: FakeTmux,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = tmux.pane_facts
+
+    def up_at_the_question(pane_id: str) -> PaneFacts | None:
+        tmux.set_command(pane_id, "claude")
+        tmux.screens[pane_id] = TRUST_SCREEN
+        return original(pane_id)
+
+    monkeypatch.setattr(tmux, "pane_facts", up_at_the_question)
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="start on tsk_1")
+    assert tmux.typed == []
+    assert receipt.prompt_typed is False
+    note = next(n for n in receipt.notes if "folder-trust question" in n)
+    assert "NOT typed" in note and f"aisquare accounts trust {receipt.agent.cwd}" in note
+    assert clock.now >= PROMPT_TIMEOUT, "waited for a human to answer it first"
+
+
+def test_spawn_types_its_prompt_once_the_trust_question_is_answered(
+    tmux: FakeTmux,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_facts, original_capture = tmux.pane_facts, tmux.capture
+    asked = 0
+
+    def up_at_the_question(pane_id: str) -> PaneFacts | None:
+        tmux.set_command(pane_id, "claude")
+        return original_facts(pane_id)
+
+    def answered_on_the_third_look(pane_id: str, **kwargs: Any) -> Capture:
+        nonlocal asked
+        asked += 1
+        tmux.screens[pane_id] = TRUST_SCREEN if asked < 3 else ["\u276f "]
+        return original_capture(pane_id, **kwargs)
+
+    monkeypatch.setattr(tmux, "pane_facts", up_at_the_question)
+    monkeypatch.setattr(tmux, "capture", answered_on_the_third_look)
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="start on tsk_1")
+    pane = receipt.agent.pane_id
+    assert tmux.typed == [(pane, "paste", "start on tsk_1"), (pane, "key", "Enter")]
+    assert receipt.notes == [] and clock.now < PROMPT_TIMEOUT
+    assert claude_sharing.shows_trust_prompt(TRUST_SCREEN)  # the fixture is the question

@@ -30,6 +30,7 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -44,7 +45,7 @@ from typing import Any, Literal
 
 from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import codenames, harness, orchestrator, selfcli
+from aisquare.core import claude_sharing, codenames, harness, orchestrator, selfcli
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import (
     CLAUDE_PERMISSION_MODES,
@@ -1484,6 +1485,56 @@ ANOTHER_SERVER = "another tmux server on its socket"
 says (:func:`_derive`): a server answers at its socket, and it is not the one the row was
 started on, which may run on where no client reaches it."""
 
+TRUST_PROMPT = "waiting for folder trust"
+"""How an agent at Claude Code's folder-trust question reads (:func:`_with_trust_prompts`):
+``attention``, its detail starting with this. ``remote_needs`` keys its card on it."""
+
+
+def trust_prompt_detail(folder: Path) -> str:
+    """The detail of an agent at the folder-trust question in ``folder``: what unblocks it."""
+    return (
+        f"{TRUST_PROMPT} — approve it once, or `aisquare accounts trust {shlex.quote(str(folder))}`"
+    )
+
+
+def _with_trust_prompts(
+    statuses: list[FleetAgentStatus],
+    config: FleetSettings,
+    addresses: Mapping[str, _Address] | None = None,
+) -> list[FleetAgentStatus]:
+    """``statuses``, every agent at Claude Code's folder-trust question read ``attention``.
+
+    An agent there fires no hook — Claude Code runs none in a folder nobody trusted — so
+    it read a healthy ``waiting`` (or ``working``, while the dialog drew) with no reason,
+    for as long as nobody looked: the board, the sidebar and the Remote never said it
+    needed the human, and ``fleet tell`` typed into it, where Enter picks "No, exit".
+    Asked only of a live row that tmux reports and whose session has fired no hook since
+    the row began (:func:`_maybe_at_trust_prompt`): one capture each, which an agent
+    whose hooks run never costs. A screen that cannot be read is no question.
+    """
+    shown: list[FleetAgentStatus] = []
+    for status in statuses:
+        if _maybe_at_trust_prompt(status):
+            agent = status.agent
+            try:
+                server = _server_at(_where(agent, config, addresses), config)
+                lines = server.capture(agent.pane_id).lines
+            except TmuxError:
+                lines = []
+            if claude_sharing.shows_trust_prompt(lines):
+                detail = trust_prompt_detail(agent.cwd)
+                status = status.model_copy(update={"state": "attention", "detail": detail})
+        shown.append(status)
+    return shown
+
+
+def _maybe_at_trust_prompt(status: FleetAgentStatus) -> bool:
+    """A live row tmux reports, whose session has said nothing since the row began."""
+    agent, session = status.agent, status.session
+    if agent.ended_at is not None or status.held or status.state not in ("waiting", "working"):
+        return False
+    return session is None or session.last_seen_at < agent.created_at
+
 
 def _status(
     agent: FleetAgent,
@@ -1855,6 +1906,13 @@ def spawn(
             own=own_worktree,
         )
     notes.extend(f"accounts: {note}" for note in choice.notes)
+    if choice.account is not None:
+        # Here as well as in the window's `aisquare launch`, so the receipt — the
+        # manager's one view of the spawn — says when the folder's trust could not be
+        # shared and the agent will stop at Claude Code's question. The launch finds it
+        # done; with no account chosen, only the window knows its environment.
+        shared = claude_accounts_service.share_for_launch(cwd, account=choice.account)
+        notes.extend(f"accounts: {note}" for note in shared)
     # A replayed spec already holds the role's arguments as they were at spawn;
     # adding today's would double them (or add ones the agent never had).
     role_args = [] if spec is not None else list(role_config.extra_args)
@@ -2049,7 +2107,7 @@ def spawn(
         stored = _take_over(stored, takes_over, identity.session_id, moved)
     _supersede(rows, views, stored, config)
     typing: list[str] = []
-    typed = _type_prompt(srv, stored.pane_id, prompt, typing) if prompt else None
+    typed = _type_prompt(srv, stored.pane_id, prompt, typing, folder=cwd) if prompt else None
     return SpawnReceipt(
         agent=stored,
         asked_label=label,
@@ -2619,7 +2677,9 @@ def _verify_cap(store: ContextStore, stored: FleetAgent, cap: int) -> None:
     )
 
 
-def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -> bool:
+def _type_prompt(
+    srv: TmuxServer, pane_id: str, prompt: str, notes: list[str], *, folder: Path | None = None
+) -> bool:
     """Wait (bounded) for the agent to come up, then paste the prompt and press Enter.
 
     Returns whether it was typed; when it was not, a note says why.
@@ -2636,6 +2696,9 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
     has requested nothing — so tmux replaces every LF with a CR and the agent
     reads N submitted messages instead of one. That is not a slow start's cost
     to pay silently, so it is not typed; the note says what to do instead.
+
+    Nor into Claude Code's folder-trust question (:func:`_past_trust_prompt`), whose
+    highlighted answer is "No, exit": the prompt's Enter ended the agent there.
 
     Never raises: it runs after the row is recorded, and ``restart`` and
     ``switch`` read a raise out of ``spawn`` as "no replacement started" — they
@@ -2667,6 +2730,8 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
         _sleep(_POLL_INTERVAL)
     if ready:
         _sleep(_PROMPT_SETTLE)
+        if not _past_trust_prompt(srv, pane_id, notes, folder=folder):
+            return False
     elif "\n" in prompt:
         notes.append(
             f"the agent did not come up within {PROMPT_TIMEOUT:.0f} s and the prompt has "
@@ -2687,6 +2752,41 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
         notes.append(f"could not type the prompt: {exc}")
         return False
     return True
+
+
+def _past_trust_prompt(
+    srv: TmuxServer, pane_id: str, notes: list[str], *, folder: Path | None = None
+) -> bool:
+    """Whether the agent is past Claude Code's folder-trust question, waited for (bounded).
+
+    The question shows when no account trusts the folder (``share_for_launch`` copied
+    nothing). A human at the window may answer it within :data:`PROMPT_TIMEOUT`; after
+    that the prompt is left untyped, with a note — typed, its Enter picks the highlighted
+    "No, exit". A screen tmux will not show is no question: typed as before.
+    """
+    deadline = _monotonic() + PROMPT_TIMEOUT
+    asked = False
+    while True:
+        try:
+            lines = srv.capture(pane_id).lines
+        except TmuxError:
+            return True
+        if not claude_sharing.shows_trust_prompt(lines):
+            if asked:
+                _sleep(_PROMPT_SETTLE)  # answered: the session draws itself first
+            return True
+        asked = True
+        if _monotonic() >= deadline:
+            where = shlex.quote(str(folder)) if folder is not None else "<dir>"
+            notes.append(
+                "the agent is waiting at Claude Code's folder-trust question, which no "
+                "account has said yes to for this folder — the prompt was NOT typed (Enter "
+                'there picks "No, exit"). Approve it once in the agent\'s window '
+                f"(`aisquare fleet attach`), or run `aisquare accounts trust {where}` and "
+                "restart it; then send the prompt: `aisquare fleet tell <label> …`"
+            )
+            return False
+        _sleep(_POLL_INTERVAL)
 
 
 #: How long after its end an agent whose window is still on the tmux server stays in
@@ -2780,7 +2880,7 @@ def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAg
         agents = [ended.get(agent.id, agent) for agent in agents]
     if live_only:
         agents = _with_lingering_windows(agents, views, config, addresses)
-    return [
+    statuses = [
         _status(
             agent,
             sessions.get(agent.session_id) if agent.session_id else None,
@@ -2792,6 +2892,7 @@ def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAg
         )
         for agent in agents
     ]
+    return _with_trust_prompts(statuses, config, addresses)
 
 
 def _end_dead_rows(
@@ -2982,7 +3083,8 @@ def status_of(agent: FleetAgent) -> FleetAgentStatus:
     tmux_session = session_name(project.codename) if project and project.codename else None
     config = settings()
     observed = _observe(server_of(agent, config), tmux_session, [agent])
-    return _status(agent, session, observed, tmux_session, _now(), config)
+    status = _status(agent, session, observed, tmux_session, _now(), config)
+    return _with_trust_prompts([status], config)[0]
 
 
 def manager_of(project: ProjectInfo) -> FleetAgent | None:

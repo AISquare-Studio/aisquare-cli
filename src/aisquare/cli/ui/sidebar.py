@@ -57,6 +57,7 @@ from aisquare.cli.ui.groups import (
     TogglePin,
     UndoLayout,
 )
+from aisquare.cli.ui.terminal import InPlaceField
 from aisquare.models import FleetAgentStatus, HeadroomSummary, ProjectGroup, ProjectInfo
 from aisquare.services.project import NICKNAME_MAX, display_name
 from aisquare.services.project_groups import Arrangement, GroupEntry, arrange
@@ -586,9 +587,10 @@ class ProjectTitle(DragHandle):
             self._opened = True  # and ``Activatable.on_click`` opens it
 
 
-class NicknameInput(Input):
-    """The card's name as a field: Enter submits, Esc posts ``Cancelled``, and leaving it
-    posts ``Left`` — focus-out saves, as Enter does."""
+class NicknameInput(InPlaceField, Input):
+    """The card's name as a field: Enter submits, Esc posts ``Cancelled``, and leaving it —
+    a press anywhere outside it too (:class:`InPlaceField`) — posts ``Left``: focus-out
+    saves, as Enter does."""
 
     BINDINGS: ClassVar = [Binding("escape", "cancel_rename", "cancel", show=False)]
 

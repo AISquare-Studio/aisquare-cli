@@ -67,7 +67,7 @@ from textual.widgets import Button, Input, Static
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.common import format_reset, local_time
-from aisquare.cli.ui.terminal import TerminalPane
+from aisquare.cli.ui.terminal import InPlaceField, TerminalPane
 from aisquare.cli.ui.ticks import while_running
 from aisquare.core import browser, paths
 from aisquare.core import claude_accounts as core
@@ -525,9 +525,10 @@ class AccountsHeader(Horizontal):
             yield Static(Text(column.title, no_wrap=True), classes=f"cell col-{column.key}")
 
 
-class AliasInput(Input):
+class AliasInput(InPlaceField, Input):
     """The name cell's field: Enter submits (``Input.Submitted``), Esc posts ``Cancelled``,
-    and leaving it posts ``Left`` — focus-out saves, as Enter does."""
+    and leaving it — a press anywhere outside it too (:class:`InPlaceField`) — posts
+    ``Left``: focus-out saves, as Enter does."""
 
     BINDINGS: ClassVar = [Binding("escape", "cancel_rename", "cancel", show=False)]
 

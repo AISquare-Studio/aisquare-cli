@@ -22,6 +22,7 @@ import pytest
 from rich.cells import cell_len
 from textual import events
 from textual.pilot import Pilot
+from textual.widget import Widget
 from textual.widgets import Button, OptionList, Static
 
 from aisquare.cli.ui.app import FleetApp, HelpScreen
@@ -33,6 +34,7 @@ from aisquare.cli.ui.sidebar import (
     NicknameInput,
     ProjectCard,
     ProjectTitle,
+    SettingsRow,
 )
 from aisquare.cli.ui.views.agent import AgentView
 from aisquare.cli.ui.views.project import ProjectView
@@ -321,6 +323,66 @@ def test_leaving_the_field_saves_and_esc_cancels(tmp_path: Path, script: Script)
     assert (_stored("prj_a") or ProjectInfo(id="x", root=Path("/"))).nickname == "docs"
     assert kept == "🗂 beta" and not still_open
     assert (_stored("prj_b") or ProjectInfo(id="x", root=Path("/"))).nickname is None
+
+
+async def _pilot_click(pilot: Pilot[None], widget: Widget) -> None:
+    """``Pilot``'s click: straight to the screen, past ``App.on_event`` (``_click`` is the
+    terminal's) — the way the validator's probe pressed."""
+    await pilot.click(widget, offset=(1, 0))
+    await settle(fleet_app(pilot))
+
+
+@pytest.mark.usefixtures("wide_click_chain")
+@pytest.mark.parametrize("deliver", [_click, _pilot_click], ids=["terminal", "pilot"])
+@pytest.mark.parametrize("page", ["manager tab", "settings hub"])
+def test_a_press_on_a_page_body_that_takes_no_focus_saves_the_name(
+    tmp_path: Path,
+    script: Script,
+    page: str,
+    deliver: Callable[[Pilot[None], Widget], Awaitable[None]],
+) -> None:
+    """Leaving the field saves — its blur — but Textual moves the focus on a press only to
+    a FOCUSABLE widget under it. A project with no manager yet shows a header and a button,
+    and the double-click that renames opens that page first: a press on its header left
+    the field open, unsaved and focused, and so did one on the Settings hub (validator of
+    PR #261, MINOR 1). The press hands the focus to the sidebar, as Enter does, and saves."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, str, bool, str, bool, bool, str | None]:
+        app = fleet_app(pilot)
+        if page == "settings hub":
+            await _click(pilot, app.query_one(SettingsRow))
+            app.sidebar.open_rename("prj_a")  # F2 on its card: the page stays the hub
+            await settle(app)
+            body: Static = app.query_one("#settings-title", Static)
+        else:
+            await _double_click(pilot, card_for(app, "prj_a").query_one(ProjectTitle))
+            body = app.query_one("#manager-header", Static)
+        field = _field(app, "prj_a")
+        opened = bool(field.display) and app.focused is field
+        view = _view_id(app)
+        await pilot.press(*"docs")  # over the name, all of it selected
+        x, y = body.region.x + 1, body.region.y  # where the press lands
+        nothing_focusable = app.screen.get_focusable_widget_at(x, y) is None
+        await deliver(pilot, body)
+        return (
+            opened,
+            shown(body),
+            nothing_focusable,
+            _title(app, "prj_a"),
+            bool(field.display),
+            app.focused is app.sidebar,
+            view if view == _view_id(app) else f"{view} -> {_view_id(app)}",
+        )
+
+    opened, said, nothing_focusable, title, still_open, on_sidebar, view = drive(go)
+    assert opened, "the premise: the field is open and has the keys"
+    assert ("has no manager yet" if page == "manager tab" else "Settings") in said
+    assert nothing_focusable, "the premise: the press lands on nothing Textual would focus"
+    assert title == "🗂 docs" and not still_open
+    assert (_stored("prj_a") or ProjectInfo(id="x", root=Path("/"))).nickname == "docs"
+    assert on_sidebar, "the keys go back to the sidebar, as after Enter"
+    assert view == ("settings-hub" if page == "settings hub" else "project-prj_a"), view
 
 
 def test_an_empty_name_is_the_folders_and_the_field_holds_255_characters(

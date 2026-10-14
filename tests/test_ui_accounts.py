@@ -2064,6 +2064,32 @@ def test_a_blank_name_clears_the_alias(fake_home: Path, monkeypatch: pytest.Monk
     assert after.startswith("2  account 2")
 
 
+def test_a_press_outside_the_name_on_nothing_focusable_saves_it(fake_home: Path) -> None:
+    """Leaving the field saves — its blur — but Textual moves the focus on a press only to a
+    FOCUSABLE widget under it: one on the page's own margin left the field open, unsaved
+    and focused, as on a project's page (validator of PR #261, MINOR 1). The press hands the
+    focus to the row, as Enter does, and saves."""
+    core.create_account()
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, bool, bool, str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await rename(pilot, 2)
+        await pilot.press(*"Work")  # over the name, all of it selected
+        x, y = view.region.offset  # the page's padding, top left
+        nothing_focusable = app.screen.get_focusable_widget_at(x, y) is None
+        await pilot.click(view, offset=(0, 0))
+        await settle(app)
+        await accounts_read(app)
+        return nothing_focusable, row(view, 2).renaming, app.focused is row(view, 2), line(view, 2)
+
+    nothing_focusable, still_open, on_row, after = drive_registry(go)
+    assert nothing_focusable, "the premise: the press lands on nothing Textual would focus"
+    assert not still_open and on_row
+    assert aliases() == {1: None, 2: "Work"}
+    assert after.startswith("2  Work")
+
+
 @pytest.mark.parametrize(
     "typed",
     ["123", "me@example.com", "a" + "b" * 64, "Work", "WORK"],

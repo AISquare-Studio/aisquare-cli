@@ -247,7 +247,7 @@ def spawn(
         f"{receipt.tmux_session} {receipt.agent.pane_id}"
     )
     for note in receipt.notes:
-        console.print(f"  ⚠ {note}")
+        console.print(f"  {'✓' if note in receipt.shared else '⚠'} {note}")
 
 
 @app.command("ls")

@@ -240,6 +240,9 @@ class SpawnReceipt:
     """The notes about what did NOT happen once the agent was up: the prompt not typed,
     the claims of a hand-over not moved, the previous session not marked ended. Each
     is in ``notes`` too; a prompt typed past the wait is typed, and is not here."""
+    shared: list[str] = field(default_factory=list)
+    """The notes that say a share was made into the agent's account (a folder's trust
+    copied, its settings.json linked): done, not a warning. Each is in ``notes`` too."""
 
 
 @dataclass(frozen=True)
@@ -1911,6 +1914,7 @@ def spawn(
             own=own_worktree,
         )
     notes.extend(f"accounts: {note}" for note in choice.notes)
+    made: list[str] = []
     if choice.account is not None:
         # Here as well as in the window's `aisquare launch`, so the receipt — the
         # manager's one view of the spawn — says when the folder's trust could not be
@@ -1918,6 +1922,11 @@ def spawn(
         # done; with no account chosen, only the window knows its environment.
         shared = claude_accounts_service.share_for_launch(cwd, account=choice.account)
         notes.extend(f"accounts: {note}" for note in shared)
+        made = [
+            f"accounts: {note}"
+            for note in shared
+            if isinstance(note, claude_accounts_service.SharedNote)
+        ]
     # A replayed spec already holds the role's arguments as they were at spawn;
     # adding today's would double them (or add ones the agent never had).
     role_args = [] if spec is not None else list(role_config.extra_args)
@@ -2121,6 +2130,7 @@ def spawn(
         notes=[*notes, *moved, *typing],
         prompt_typed=typed,
         failures=[*moved, *(typing if typed is False else [])],
+        shared=made,
     )
 
 

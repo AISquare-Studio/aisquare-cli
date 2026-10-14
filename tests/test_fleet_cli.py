@@ -204,6 +204,30 @@ def test_spawn_says_which_label_was_asked_when_the_fleet_suffixed_it(
     assert "⚠ label coder-auth is held by a live agent" in line
 
 
+def test_spawn_marks_a_share_made_into_its_account_as_done_not_as_a_warning(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final gate NIT 3: '⚠ accounts: <folder> is trusted on plain claude — now on account 2
+    too' read as a problem. A share that was made is a ✓ line; a note that something did
+    not happen keeps its ⚠."""
+    shared = "accounts: /work is trusted on plain claude — now on account 2 too"
+    receipt = SpawnReceipt(
+        agent=_agent("coder-1"),
+        asked_label=None,
+        tmux_session=SESSION,
+        notes=[shared, "the agent exited before the prompt could be typed"],
+        shared=[shared],
+    )
+    _install(monkeypatch, "spawn", receipt)
+
+    result = runner.invoke(app, ["fleet", "spawn", "coder"])
+
+    assert result.exit_code == 0, result.output
+    line = _plain(result.stdout)
+    assert f"✓ {shared}" in line and "⚠ accounts:" not in line
+    assert "⚠ the agent exited before the prompt could be typed" in line
+
+
 def test_spawn_with_no_asked_label_prints_no_asked_suffix(
     runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
 ) -> None:

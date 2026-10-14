@@ -1973,6 +1973,14 @@ class SettingsChange:
     reason: str | None = None
 
 
+class SharedNote(str):
+    """A :func:`share_for_launch` note that says a share was made (a folder's trust
+    copied, settings.json linked), not one that could not be: a receipt shows it as done,
+    not as a warning. Still a ``str``, so a caller that prints the notes needs nothing."""
+
+    __slots__ = ()
+
+
 def share_for_launch(
     folder: Path | None = None,
     *,
@@ -2061,7 +2069,7 @@ def _share_trust_into(
             sharing.grant_trust(core.claude_json_path(target), key)
         except sharing.SharingError as exc:
             return [_trust_not_shared(name, scope, exc)]
-        return [f"{key} is trusted on {core.label(other)} — now on {name} too"]
+        return [SharedNote(f"{key} is trusted on {core.label(other)} — now on {name} too")]
     return []
 
 
@@ -2212,7 +2220,7 @@ def _share_settings_into(target: ClaudeAccount) -> list[str]:
     change = _link_settings(target, source, _now())
     if change.outcome == "shared":
         kept = f" (its own kept as {change.backup.name})" if change.backup is not None else ""
-        return [f"{name} now reads the plain claude's settings.json{kept}"]
+        return [SharedNote(f"{name} now reads the plain claude's settings.json{kept}")]
     return [f"settings.json is not shared into {name}: {change.reason}"]
 
 

@@ -268,7 +268,13 @@ class ManagerTab(Vertical):
                     markup=False,
                 )
                 for note in receipt.notes:
-                    self.notify(note, severity="warning", timeout=8, markup=False)
+                    done = note in receipt.shared
+                    self.notify(
+                        note,
+                        severity="information" if done else "warning",
+                        timeout=8,
+                        markup=False,
+                    )
             self.refresh_from_service()
         elif event.state is WorkerState.ERROR:
             self.notify(

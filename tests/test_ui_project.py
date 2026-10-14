@@ -426,6 +426,38 @@ def test_start_manager_button_spawns_once_and_attaches_the_pane(
     assert pane_id == "%7"  # attached to the pane the receipt named
 
 
+def test_a_share_the_manager_spawn_made_is_told_as_done_not_as_a_warning(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final gate NIT 3: a folder's trust copied into the manager's account is good news; it
+    came up as a warning beside the ones that are (a prompt not typed)."""
+    shared = "accounts: /work is trusted on plain claude — now on account 2 too"
+    warning = "the agent exited before the prompt could be typed"
+    fleet: dict[str, FleetAgent | None] = {"manager": None}
+
+    def spawn(target: ProjectInfo, role: str, **_: object) -> fleet_service.SpawnReceipt:
+        fleet["manager"] = fake_agent(target)
+        return fleet_service.SpawnReceipt(
+            agent=fake_agent(target),
+            asked_label=None,
+            tmux_session="asq-amber-otter",
+            notes=[shared, warning],
+            shared=[shared],
+        )
+
+    monkeypatch.setattr(fleet_service, "spawn", spawn)
+    monkeypatch.setattr(fleet_service, "manager_of", lambda target: fleet["manager"])
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
+        await pilot.click("#start-manager")
+        await settle(pilot)
+        return host.notices
+
+    notices = drive(project, scenario)
+    assert (shared, "information") in notices
+    assert (warning, "warning") in notices
+
+
 def test_the_manager_pane_is_scripted_and_never_addresses_the_real_fleet(
     project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, no_real_tmux: NoTmux
 ) -> None:

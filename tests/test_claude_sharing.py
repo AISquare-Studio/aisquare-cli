@@ -338,6 +338,7 @@ def test_a_parents_trust_is_copied_as_the_parents_entry(
     notes = service.share_for_launch(child, account=third)
     assert _trusted(third) == [_key(parent)]
     assert notes == [f"{_key(parent)} is trusted on account 2 — now on account 3 too"]
+    assert isinstance(notes[0], service.SharedNote)  # a share made: the receipt's ✓
 
 
 def test_no_account_trusts_the_folder_so_nothing_is_written(
@@ -375,6 +376,8 @@ def test_a_damaged_target_costs_the_trust_with_a_note_never_the_launch(
         in stderr
     )
     assert "aisquare accounts trust" in stderr
+    notes = service.share_for_launch(folder, account=third)
+    assert notes and not any(isinstance(note, service.SharedNote) for note in notes)  # a ⚠
 
 
 def test_with_share_trust_off_a_launch_writes_nothing(
@@ -583,6 +586,7 @@ def test_share_settings_links_the_account_a_launch_runs_on(
     save_config(config)
     notes = service.share_for_launch(tmp_path, account=third)
     assert notes == ["account 3 now reads the plain claude's settings.json"]
+    assert isinstance(notes[0], service.SharedNote)
     assert sharing.settings_path(third).is_symlink()
     assert not sharing.settings_path(second).exists()  # only the one launched
     assert service.share_for_launch(tmp_path, account=third) == []  # already

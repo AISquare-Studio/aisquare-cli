@@ -12608,7 +12608,9 @@ def test_a_spawn_shares_the_folder_trust_into_the_account_it_picks_and_says_so(
     data = json.loads(accounts_core.claude_json_path(third).read_text())
     assert data["projects"] == {root: {"hasTrustDialogAccepted": True}}
     assert data["oauthAccount"] == {"emailAddress": "three@x.dev"}
-    assert f"accounts: {root} is trusted on account 2 — now on account 3 too" in receipt.notes
+    shared = f"accounts: {root} is trusted on account 2 — now on account 3 too"
+    assert shared in receipt.notes
+    assert receipt.shared == [shared]  # done, not a warning: the receipt says it with a ✓
     # The plain claude was not the one launched: nothing written there.
     plain = json.loads(accounts_core.claude_json_path(accounts_core.default_account()).read_text())
     assert plain["projects"] == {}

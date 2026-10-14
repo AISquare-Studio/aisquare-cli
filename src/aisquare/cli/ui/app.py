@@ -85,6 +85,7 @@ from aisquare.cli.ui.sidebar import (
     ProjectSelected,
     RenameProject,
     ResizeSidebar,
+    SettingsRow,
     SettingsSelected,
     Sidebar,
     SpawnAgent,
@@ -634,9 +635,12 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.store_error: str | None = None
         """Why the newest refresh kept the previous frame, or ``None`` when it did not."""
         self.doctor_checks: list[DoctorCheck] = []
+        """The newest report on the Doctor page; its ✗/⚠ counts are beside *⚙ Settings*."""
         self.doctor_scope: str | None = None
         """The project the doctor answers for when it NEXT runs — the one most recently
-        selected; ``None`` = global checks. Selecting changes it and runs nothing."""
+        selected; ``None`` = global checks. Selecting changes it and runs nothing: the
+        report on screen keeps the root it ran in (:attr:`_doctor_root`), so its fixes
+        never run in the project just selected."""
         self._doctor_root: Path | None = None
         """The root the report on screen — or the run under way — is about: the cwd its
         project fixes run in. Set only when a run starts, never by a selection."""
@@ -712,15 +716,15 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if kind == "agent":
             project_id, _, agent_id = ident.partition("/")
             if self.snapshot.agent(project_id, agent_id) is not None:
-                self._set_doctor_scope(project_id)
+                self.doctor_scope = project_id
                 self.post_message(AgentSelected(project_id, agent_id))
                 return False
             if self.snapshot.project(project_id) is not None:
-                self._set_doctor_scope(project_id)
+                self.doctor_scope = project_id
                 self.post_message(ProjectSelected(project_id))
                 return False
         elif kind == "project" and self.snapshot.project(ident) is not None:
-            self._set_doctor_scope(ident)
+            self.doctor_scope = ident
             self.post_message(ProjectSelected(ident))
             return False
         elif kind == "settings":
@@ -1114,6 +1118,16 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             thread=True,
             exit_on_error=False,
         )
+        self.query_one("#doctor", DoctorView).show_running(self._doctor_subject(scope))
+
+    def _doctor_subject(self, root: Path | None) -> str:
+        """What a report about ``root`` is about, as the Doctor page's header names it: the
+        project's name, or "this machine" for the global checks."""
+        if root is None:
+            return "this machine"
+        snapshot = self.snapshot
+        project = next((p for p in snapshot.projects if p.root == root), None) if snapshot else None
+        return project_service.display_name(project) if project is not None else root.name
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         """Paint what the app's own workers answered: the accounts read and the doctor.
@@ -1155,13 +1169,34 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.show_doctor_failure(f"{type(event.worker.error).__name__}: {event.worker.error}")
 
     def show_doctor(self, checks: list[DoctorCheck]) -> None:
-        """Paint a report about :attr:`_doctor_root` on the Doctor page."""
+        """Paint a report about :attr:`_doctor_root` on the Doctor page, and its counts beside
+        *⚙ Settings* and the hub's Doctor link."""
         self.doctor_checks = checks
-        self._feed_doctor(self.query_one("#doctor", DoctorView), checks, self._doctor_root)
+        self._feed_doctor(
+            self.query_one("#doctor", DoctorView),
+            checks,
+            self._doctor_root,
+            self._doctor_subject(self._doctor_root),
+        )
+        self._show_doctor_findings()
+
+    def _show_doctor_findings(self) -> None:
+        """The newest report's ✗/⚠ counts on *⚙ Settings* and on the hub's Doctor link.
+
+        The doctor runs at start with its page hidden, and these are the only places
+        that say what it found before someone opens the page (review of #261, m9).
+        """
+        failing = sum(check.status is CheckStatus.fail for check in self.doctor_checks)
+        warning = sum(check.status is CheckStatus.warn for check in self.doctor_checks)
+        self.query_one(SettingsRow).show_findings(failing, warning)
+        for hub in self.query(SettingsHubView):
+            hub.show_findings(failing, warning)
 
     @staticmethod
-    def _feed_doctor(view: DoctorView, checks: list[DoctorCheck], root: Path | None) -> None:
-        """Hand a Doctor view the report AND the root its project fixes run in.
+    def _feed_doctor(
+        view: DoctorView, checks: list[DoctorCheck], root: Path | None, about: str
+    ) -> None:
+        """Hand a Doctor view the report, what it is about AND the root its project fixes run in.
 
         Without the root every ``scope == "project"`` fix renders disabled with
         "(select a project first)" — while a project is selected — so the
@@ -1171,20 +1206,22 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         machine-wide one, or a button would run in a project the user has left.
         """
         view.cwd = root
-        view.show(checks)
+        view.show(checks, about=about)
 
     def show_doctor_failure(self, reason: str) -> None:
         """Doctor itself crashed: say so on the Doctor page, as its one finding."""
+        self.doctor_checks = [
+            DoctorCheck(
+                name="doctor",
+                status=CheckStatus.fail,
+                detail=f"the checks crashed: {reason}",
+                fix="Run it in a terminal for the full traceback: aisquare doctor",
+            )
+        ]
         self.query_one("#doctor", DoctorView).show(
-            [
-                DoctorCheck(
-                    name="doctor",
-                    status=CheckStatus.fail,
-                    detail=f"the checks crashed: {reason}",
-                    fix="Run it in a terminal for the full traceback: aisquare doctor",
-                )
-            ]
+            self.doctor_checks, about=self._doctor_subject(self._doctor_root)
         )
+        self._show_doctor_findings()
 
     # --- selection → content ----------------------------------------------------------
 
@@ -1212,7 +1249,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         view_id = f"project-{project.id}"
         await self._show(view_id, lambda: ProjectView(project, id=view_id))
         self.sidebar.select(f"project:{project.id}")
-        self._set_doctor_scope(project.id)
+        self.doctor_scope = project.id
         self._remember_selection(f"project:{project.id}")
 
     async def on_agent_selected(self, event: AgentSelected) -> None:
@@ -1223,7 +1260,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         view_id = f"agent-{status.agent.id}"
         await self._show(view_id, lambda: AgentView(status, id=view_id))
         self.sidebar.select(f"agent:{status.agent.id}")
-        self._set_doctor_scope(event.project_id)
+        self.doctor_scope = event.project_id
         self._remember_selection(f"agent:{event.project_id}/{status.agent.id}")
         self._focus_pane(view_id)
 
@@ -1270,7 +1307,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         view_id = f"agent-{status.agent.id}"
         await self._show(view_id, lambda: AgentView(status, id=view_id))
         self.sidebar.select(f"agent:{status.agent.id}")
-        self._set_doctor_scope(started.project_id)
+        self.doctor_scope = started.project_id
         self._remember_selection(f"agent:{started.project_id}/{status.agent.id}")
         self._focus_pane(view_id)
 
@@ -1537,6 +1574,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         keyboard (the sidebar had it)."""
         from_keyboard = self.focused is self.sidebar
         await self._show("settings-hub", lambda: SettingsHubView(id="settings-hub"))
+        self._show_doctor_findings()  # a hub built just now has not been told yet
         self.sidebar.select(SETTINGS_KEY)
         self._remember_selection("settings")
         if from_keyboard:
@@ -1573,7 +1611,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         scope = event.project_id if event.project_id is not None else self.doctor_scope
         await self._show("doctor")
         self.sidebar.select(SETTINGS_KEY)
-        self._set_doctor_scope(scope)
+        self.doctor_scope = scope
         self._remember_selection(f"doctor:{scope or ''}")
         self.run_doctor()
 
@@ -1645,7 +1683,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     def on_welcome_view_chosen(self, event: WelcomeView.Chosen) -> None:
         """While Welcome is shown, the Doctor answers for the project its step 2 answers for."""
         if self.content.current == "welcome":
-            self._set_doctor_scope(event.project_id)
+            self.doctor_scope = event.project_id
 
     hand_off: tuple[str, ...] | None = None
     """The ``aisquare`` command this terminal goes to when asq quits (``run_ui``)."""
@@ -1773,16 +1811,6 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.show_doctor(list(event.checks))
         else:
             self.run_doctor()
-
-    def _set_doctor_scope(self, project_id: str | None) -> None:
-        """Remember the project the doctor answers for next — and run nothing.
-
-        The report on screen stays the one it is, with the root it was run in
-        (:attr:`_doctor_root`), so its fixes never run in the project just
-        selected; the next run — opening the page, Re-run, a fix — is about
-        this one.
-        """
-        self.doctor_scope = project_id
 
     # --- for tests and callers --------------------------------------------------------
 

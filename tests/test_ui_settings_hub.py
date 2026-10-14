@@ -13,8 +13,10 @@ be in focus".
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, TypeVar
 
 import pytest
@@ -33,8 +35,17 @@ from aisquare.cli.ui.sidebar import (
 )
 from aisquare.cli.ui.views.app_settings import AppSettingsView
 from aisquare.cli.ui.views.settings_hub import SettingsHubView
-from aisquare.models import ClaudeAccount, HeadroomSummary
-from tests.ui_workers import settle_page
+from aisquare.core.store import store_session
+from aisquare.models import (
+    CheckStatus,
+    ClaudeAccount,
+    DoctorCheck,
+    FleetAgentStatus,
+    HeadroomSummary,
+    ProjectInfo,
+)
+from aisquare.services import fleet as fleet_service
+from tests.ui_workers import settle_page, settle_until
 
 T = TypeVar("T")
 SIZE = (140, 40)
@@ -46,13 +57,15 @@ def _drive(
     *,
     headroom: Callable[[Sequence[ClaudeAccount] | None], HeadroomSummary] | None = None,
     refresh_seconds: float = 3600,
+    doctor: Callable[[], list[DoctorCheck]] | None = None,
 ) -> T:
-    """``fn`` against a ``FleetApp`` with no accounts reader and a scripted headroom."""
+    """``fn`` against a ``FleetApp`` with no accounts reader, a scripted headroom and a stub
+    doctor (no findings unless told), once the doctor's run at start has been painted."""
 
     async def run() -> T:
         app = FleetApp(
             refresh_seconds=refresh_seconds,
-            doctor=lambda: [],
+            doctor=doctor or (lambda: []),
             accounts=None,
             headroom=headroom or (lambda accounts: GOOD),
             headroom_seconds=3600,
@@ -201,6 +214,149 @@ def test_the_hub_is_titled_settings_and_says_what_each_link_opens() -> None:
     assert title.endswith("Settings")
     assert links == ["App settings", "Accounts", "Doctor"]
     assert len(about) == 3 and all(about)
+
+
+# --- what the doctor found (review of #261, m9) ----------------------------------------
+
+FAILING = DoctorCheck(name="tmux", status=CheckStatus.fail, detail="not installed")
+WARNING = DoctorCheck(name="snapshot", status=CheckStatus.warn, detail="packed 9 days ago")
+PASSING = DoctorCheck(name="store", status=CheckStatus.ok, detail="v30")
+NOT_THE_DOCTOR = "no-such-group"
+"""A worker group nothing runs in: ``settle_page`` then waits for the messages alone, and not
+for a doctor run the test is holding on purpose."""
+
+
+class HeldDoctor:
+    """The doctor at start answers ``first`` at once; a later run waits for :meth:`release`
+    and then answers ``then`` — a run the test reads the page in the middle of."""
+
+    def __init__(self, first: list[DoctorCheck], then: list[DoctorCheck]) -> None:
+        self.first, self.then = first, then
+        self.runs = 0
+        self._go = threading.Event()
+
+    def __call__(self) -> list[DoctorCheck]:
+        self.runs += 1
+        if self.runs == 1:
+            return list(self.first)
+        self._go.wait(timeout=10)
+        return list(self.then)
+
+    def release(self) -> None:
+        self._go.set()
+
+
+def _doctor_page(app: FleetApp) -> tuple[str, str, str]:
+    """The Doctor page's header, report and status line, as they read."""
+    return (
+        _shown(app.query_one("#doctor-scope", Static)),
+        _shown(app.query_one("#doctor-report", Static)),
+        _shown(app.query_one("#doctor-status", Static)),
+    )
+
+
+async def _open_doctor(pilot: Pilot[None], *, group: str | None = None) -> None:
+    app = _app(pilot)
+    await pilot.click(app.query_one(SettingsRow))
+    await settle_page(app)
+    await pilot.click("#hub-doctor")
+    await settle_page(app, group=group)
+
+
+def test_what_the_doctor_found_at_start_is_beside_settings_and_on_the_hubs_doctor_link() -> None:
+    """The run at start paints a hidden page: the counts beside *⚙ Settings*, muted, and on
+    the hub's Doctor link are what say it found something before anyone opens it."""
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str, str]:
+        app = _app(pilot)
+        row = app.query_one(SettingsRow)
+        badge_style = str(row.visual.spans[-1].style)  # type: ignore[attr-defined]
+        await pilot.click(row)
+        await settle_page(app)
+        return _shown(row), badge_style, _shown(app.query_one("#hub-doctor-about", Static))
+
+    row, style, about = _drive(go, doctor=lambda: [FAILING, WARNING, WARNING, PASSING])
+    assert row == "⚙︎ Settings  ✗ 1  ⚠ 2"
+    assert "dim" in style and "not bold" in style, "a muted badge beside the bold name"
+    assert about == "the checks — they run when the page opens · the last run found ✗ 1  ⚠ 2"
+
+
+def test_all_clear_puts_nothing_beside_settings() -> None:
+    async def go(pilot: Pilot[None]) -> tuple[str, str]:
+        app = _app(pilot)
+        await pilot.click(app.query_one(SettingsRow))
+        await settle_page(app)
+        about = app.query_one("#hub-doctor-about", Static)
+        return _shown(app.query_one(SettingsRow)), _shown(about)
+
+    row, about = _drive(go, doctor=lambda: [PASSING])
+    assert row == "⚙︎ Settings"
+    assert about == "the checks — they run when the page opens"
+
+
+def test_doctor_shows_the_report_from_start_while_it_runs_the_checks_again() -> None:
+    """The human: the doctor "runs just once when the app starts and then again when someone
+    opens it via setting". Opening it runs them again, and until they answer the page is
+    the report from start, saying so — then the new one, and the badge follows it."""
+    doctor = HeldDoctor(first=[WARNING], then=[PASSING])
+
+    Page = tuple[str, str, str]
+
+    async def go(pilot: Pilot[None]) -> tuple[Page, int, Page, str]:
+        app = _app(pilot)
+        await _open_doctor(pilot, group=NOT_THE_DOCTOR)
+        # The page's own run has reached the doctor, which holds it: the page is mid-run.
+        await settle_until(app, lambda: doctor.runs == 2, group=NOT_THE_DOCTOR)
+        during = _doctor_page(app)
+        runs = doctor.runs
+        doctor.release()
+        await settle_page(app)
+        return during, runs, _doctor_page(app), _shown(app.query_one(SettingsRow))
+
+    during, runs, after, row = _drive(go, doctor=doctor)
+    header, report, status = during
+    assert header == "checks for this machine"
+    assert "⚠ snapshot: packed 9 days ago" in report, "the report from start, at once"
+    assert status == "… running the checks again"
+    assert runs == 2, "start, then the page's own run (still held)"
+    header, report, status = after
+    assert "✓ store: v30" in report and "snapshot" not in report
+    assert status == "", "answered: the status line is clear again"
+    assert row == "⚙︎ Settings", "the badge follows the newest report"
+
+
+def test_the_doctor_page_names_the_project_its_checks_are_about(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Settings → Doctor runs for the project most recently selected, and with *⚙ Settings*
+    highlighted nothing on screen said which: the header names it, by its nickname."""
+    root = tmp_path / "alpha"
+    root.mkdir()
+    with store_session() as store:
+        store.onboard_project(ProjectInfo(id="prj_a", root=root))
+        store.set_project_nickname("prj_a", "Payments [v2]")
+
+    def no_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        return []
+
+    monkeypatch.setattr(fleet_service, "list_agents", no_agents)
+    doctor = HeldDoctor(first=[WARNING], then=[PASSING])
+
+    async def go(pilot: Pilot[None]) -> tuple[tuple[str, str, str], tuple[str, str, str]]:
+        app = _app(pilot)
+        app.doctor_scope = "prj_a"  # what selecting the project does: it runs nothing
+        await _open_doctor(pilot, group=NOT_THE_DOCTOR)
+        during = _doctor_page(app)
+        doctor.release()
+        await settle_page(app)
+        return during, _doctor_page(app)
+
+    during, after = _drive(go, doctor=doctor)
+    assert during[0] == "checks for this machine", (
+        "the report on screen is still the one from start"
+    )
+    assert during[2] == "… running the checks for Payments [v2]"
+    assert after[0] == "checks for Payments [v2]" and after[2] == ""
 
 
 # --- the status line --------------------------------------------------------------------

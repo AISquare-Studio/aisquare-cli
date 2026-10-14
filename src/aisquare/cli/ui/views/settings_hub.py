@@ -24,6 +24,7 @@ from aisquare.cli.ui.sidebar import (
     AccountsSelected,
     AppSettingsSelected,
     DoctorSelected,
+    doctor_badge,
 )
 
 LINKS: tuple[tuple[str, str, str], ...] = (
@@ -59,7 +60,15 @@ class SettingsHubView(Vertical):
         for stem, label, about in LINKS:
             with Vertical(classes="hub-row"):
                 yield Button(label, id=f"hub-{stem}", classes="hub-link", compact=True)
-                yield Static(Text(about), classes="hub-about")
+                yield Static(Text(about), classes="hub-about", id=f"hub-{stem}-about")
+
+    def show_findings(self, failing: int, warning: int) -> None:
+        """What the newest doctor run found, under the Doctor link; nothing when all clear."""
+        about = Text(next(line for stem, _, line in LINKS if stem == "doctor"))
+        badge = doctor_badge(failing, warning)
+        if badge:
+            about.append(f" · the last run found {badge}")
+        self.query_one("#hub-doctor-about", Static).update(about)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         stem = (event.button.id or "").removeprefix("hub-")

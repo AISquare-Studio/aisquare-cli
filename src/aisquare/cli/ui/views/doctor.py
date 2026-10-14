@@ -131,6 +131,7 @@ class DoctorView(VerticalScroll):
 
     DEFAULT_CSS = """
     DoctorView { padding: 1 2; }
+    DoctorView #doctor-scope { height: auto; margin-bottom: 1; text-style: bold; }
     DoctorView #doctor-rerun { margin-bottom: 1; }
     DoctorView #doctor-status { height: auto; margin-top: 1; }
     DoctorView #doctor-fixes { height: auto; }
@@ -171,11 +172,16 @@ class DoctorView(VerticalScroll):
         self.fixes: dict[str, FixCommand] = {}
         """Button id → the fix it runs, for the report currently shown."""
         self.busy = False
+        self.about: str | None = None
+        """What the report on screen is about — a project's name, or "this machine" — named
+        in the machine Doctor's header (review of #261, m9: nothing on screen said which
+        project the rows described)."""
         self._rerunning = False
-        """Re-run was pressed and no report has arrived since: the status line says so."""
+        """A run is under way and no report has arrived since: the status line says so."""
 
     def compose(self) -> ComposeResult:
         if self.machine:
+            yield Static("", id="doctor-scope")
             rerun = Button("Re-run checks", id="doctor-rerun")
             rerun.tooltip = "Run every check again now"
             yield rerun
@@ -221,17 +227,21 @@ class DoctorView(VerticalScroll):
 
     # ---------------------------------------------------------------- the report
 
-    def show(self, checks: Iterable[DoctorCheck], *, cwd: Path | None = None) -> None:
-        """Replace the report (and, when given, the cwd the fixes run in).
+    def show(
+        self, checks: Iterable[DoctorCheck], *, cwd: Path | None = None, about: str | None = None
+    ) -> None:
+        """Replace the report (and, when given, the cwd the fixes run in and what it is about).
 
         ``cwd=None`` means "keep the one you have": most callers show a new
         report for the same project. A caller that has to go BACK to no project
         — the shell, when the report becomes the machine-wide one — sets
         :attr:`cwd` itself before calling this, or a project fix button would
-        stay armed on a root the user has left.
+        stay armed on a root the user has left. ``about=None`` keeps :attr:`about`.
         """
         if cwd is not None:
             self.cwd = cwd
+        if about is not None:
+            self.about = about
         self.checks = list(checks)
         if self._rerunning:
             self._rerunning = False
@@ -240,9 +250,35 @@ class DoctorView(VerticalScroll):
         if self.is_mounted:
             self._redraw()
 
+    def show_running(self, about: str | None = None) -> None:
+        """A run of the checks about ``about`` (default: :attr:`about`) is under way.
+
+        The report on screen stays until the run answers — the one from asq's start
+        is there at once when the page opens — and the status line says the checks
+        are running again, or for what, when the report shown is about something else.
+        """
+        about = about or self.about
+        self._rerunning = True
+        if not self.checks:
+            self.about = about  # nothing on screen is about anything else yet
+            status = "… running the checks"
+        elif about == self.about:
+            status = "… running the checks again"
+        else:
+            status = f"… running the checks for {about}"
+        if self.is_mounted:
+            self._set_status(Text(status, style="dim"))
+            self._show_about()
+
     def _redraw(self) -> None:
+        self._show_about()
         self.query_one("#doctor-report", Static).update(render_checks(self.checks))
         self.call_later(self._rebuild_fixes)
+
+    def _show_about(self) -> None:
+        if self.machine:
+            header = Text(f"checks for {self.about}") if self.about else Text("")
+            self.query_one("#doctor-scope", Static).update(header)
 
     async def _rebuild_fixes(self) -> None:
         """Replace the buttons for the report now shown.
@@ -282,8 +318,7 @@ class DoctorView(VerticalScroll):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if self.machine and event.button.id == "doctor-rerun":
             event.stop()
-            self._rerunning = True
-            self._set_status(Text("… running the checks again", style="dim"))
+            self.show_running()
             self.post_message(self.Rerun())
             return
         hand_off = HAND_OFFS.get(event.button.id or "") if self.machine else None

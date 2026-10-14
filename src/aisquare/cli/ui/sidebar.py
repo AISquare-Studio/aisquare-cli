@@ -967,6 +967,26 @@ class SettingsRow(Activatable):
     def message(self) -> Message:
         return SettingsSelected()
 
+    def show_findings(self, failing: int, warning: int) -> None:
+        """The newest doctor report's ✗/⚠ counts beside the name, muted; none when all clear.
+
+        The doctor runs at start behind a hidden page: without this nothing said what it
+        found until someone opened Doctor (review of #261, m9).
+        """
+        text = Text(f"{SETTINGS_ICON} Settings")
+        badge = doctor_badge(failing, warning)
+        if badge:
+            text.append(f"  {badge}", style="dim not bold")
+        self.update(text)
+
+
+def doctor_badge(failing: int, warning: int) -> str:
+    """A doctor report's counts, the nonzero ones: ``✗ 1  ⚠ 2``; ``""`` when nothing failed
+    or warned."""
+    return "  ".join(
+        f"{glyph} {count}" for glyph, count in (("✗", failing), ("⚠", warning)) if count
+    )
+
 
 class StatusLine(Static):
     """The dim line under *⚙ Settings* (:func:`status_line_text`). A click opens Accounts.

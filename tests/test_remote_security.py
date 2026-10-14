@@ -281,6 +281,27 @@ def test_a_second_ctrl_c_to_one_agent_within_3_s_is_a_double_press(
     assert pane.sent == [("keys", "C-c"), ("keys", "C-c"), ("keys", "C-d")]
 
 
+def test_a_ctrl_c_whose_send_failed_is_no_first_press_for_the_double_press_guard(
+    pane: FakePane, clock: Clock
+) -> None:
+    """Review of #259, round 6, 5/10: the guard noted the press before the keys went out, so
+    a send that failed (400 ``write_failed``, nothing reached the pane) made the next tap
+    within 3 s a 409 ``double_press``, a second Ctrl-C "that exits Claude Code" though no
+    first one was ever delivered."""
+    send = live_writes().handlers["send-keys"]
+    pane.fail_keys = True
+    with pytest.raises(RequestError) as failed:
+        send({"agent": "coder-1", "keys": ["C-c"]})
+    assert (failed.value.status, failed.value.error) == (400, "write_failed")
+    pane.fail_keys = False
+    clock.advance(seconds=1)
+    send({"agent": "coder-1", "keys": ["C-c"]})  # the first Ctrl-C that reached the pane
+    assert pane.sent == [("keys", "C-c")]
+    with pytest.raises(RequestError) as again:  # the control: a delivered one still counts
+        send({"agent": "coder-1", "keys": ["C-c"]})
+    assert again.value.error == "double_press"
+
+
 def test_two_exit_keys_in_one_body_are_a_double_press_unless_confirmed(pane: FakePane) -> None:
     send = live_writes().handlers["send-keys"]
     with pytest.raises(RequestError) as refused:

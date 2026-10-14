@@ -3181,6 +3181,12 @@ class _ExitKeyGuard:
     wakes the manager: two taps on a phone that lagged, or two in one body, are
     refused unless the body says ``confirm_exit: true``. Per ``(project id,
     label)``, whichever phone sent the first.
+
+    A press counts once it was sent (:meth:`exit_keys_sent`), not as it is let through: a
+    send that failed (400 ``write_failed``) reached no pane, and the tap that followed was
+    refused as a second press of a Ctrl-C never delivered (review of #259, round 6, 5/10).
+    The check and the send run in one turn of the agent's lock (``_remote_keys_turn``), so
+    no other press comes between them.
     """
 
     def __init__(self) -> None:
@@ -3188,16 +3194,18 @@ class _ExitKeyGuard:
         self._lock = threading.Lock()
 
     def exit_keys_allowed(self, agent: tuple[str, str], exits: int, *, confirmed: bool) -> bool:
-        """Note ``exits`` exit keys about to go to ``agent``; ``False``, noting nothing, when
-        they would be a second press and are not ``confirmed``."""
+        """Whether ``exits`` exit keys may go to ``agent``: ``False`` when they would be a
+        second press and are not ``confirmed``. Notes nothing."""
         now = _remote_now()
         with self._lock:
             last = self._sent.get(agent)
             recent = last is not None and (now - last).total_seconds() < EXIT_KEY_REPEAT_SECONDS
-            if not confirmed and (exits > 1 or recent):
-                return False
-            self._sent[agent] = now
-            return True
+            return confirmed or (exits <= 1 and not recent)
+
+    def exit_keys_sent(self, agent: tuple[str, str]) -> None:
+        """Note that exit keys reached ``agent``'s pane just now."""
+        with self._lock:
+            self._sent[agent] = _remote_now()
 
 
 @contextlib.contextmanager
@@ -3543,6 +3551,8 @@ def live_writes() -> Writes:
                     server.send_literal(agent.pane_id, text)
                 if keys:
                     server.send_keys(agent.pane_id, *keys)
+                    if exits:
+                        exit_keys.exit_keys_sent((target.id, label))
                 if enter:
                     server.send_keys(agent.pane_id, "Enter")
             except Exception as exc:

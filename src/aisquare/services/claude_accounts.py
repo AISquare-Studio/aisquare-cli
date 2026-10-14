@@ -1511,7 +1511,7 @@ def headroom_choice(
     if max_age is None:
         readings = read_usage(candidates, now=now, fetch=fetch)
     elif len(candidates) == 1 and least_bad:
-        return candidates[0], []
+        return candidates[0], _over_the_line(candidates[0], switch_at, now=now)
     else:
         readings = cached_usage(candidates, max_age=max_age, now=now, fetch=fetch)
     measured: list[tuple[ClaudeAccount, float]] = []
@@ -1547,6 +1547,29 @@ def headroom_choice(
         f"{core.label(least)} has the most room ({max(0, 100 - pct):.0f}% left)"
     )
     return least, notes
+
+
+def _over_the_line(account: ClaudeAccount, switch_at: int, *, now: datetime | None) -> list[str]:
+    """For the one account a launch takes without asking: the note the pick of several gives
+    when every account is over the line, when the cache already says so of this one — its
+    newest reading recorded in the last :data:`USAGE_MAX_AGE_SECONDS` for the token it holds
+    now. Nothing is fetched; no reading, no note (review of #261, N4)."""
+    moment = now or _now()
+    token = _token_fingerprint(account, moment)
+    if token is None:
+        return []
+    since = moment - timedelta(seconds=USAGE_MAX_AGE_SECONDS)
+    reading = _recorded_usage([account], {account.slot: token}, since=since, now=moment).get(
+        account.slot
+    )
+    percent = headroom_percent(reading) if reading is not None else None
+    if reading is None or percent is None or percent < switch_at:
+        return []
+    return [
+        f"headroom: {describe_headroom(account, reading)} — every account is over the "
+        f"{switch_at}%-used line; {core.label(account)} has the most room "
+        f"({max(0, 100 - percent):.0f}% left)"
+    ]
 
 
 def choose_for_handover(

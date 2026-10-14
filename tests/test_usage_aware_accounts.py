@@ -1007,6 +1007,39 @@ def test_choose_uses_headroom_only_when_configured_and_falls_back_to_the_default
     assert any("no account's usage could be read" in note for note in offline.notes)
 
 
+def test_a_launch_on_one_account_says_it_is_over_the_line_from_the_cache_and_asks_nothing(
+    fake_home: Path, work: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One candidate is the answer whatever it reads, so its pick asks nothing (m1) — and so
+    lost the only word at launch that the one account is nearly full (review of #261, N4).
+    The cache still says it: a reading recorded in the last five minutes, no request."""
+    only = _slot("work@example.com", "tok-work")
+    _settings(switch_at=85)  # pick=headroom
+    service.cached_usage([only], fetch=_Usage({"tok-work": _payload(97)}))  # recorded at NOW
+
+    def never(url: str, headers: Mapping[str, str], timeout: float) -> tuple[int, bytes]:
+        raise AssertionError("a one-account launch must not ask the endpoint")
+
+    later = NOW + timedelta(minutes=2)  # past a launch's minute, inside the five
+    monkeypatch.setattr(service, "_now", lambda: later)
+    full = service.choose(role="coder", project=work, fetch=never)
+    assert full.account is not None and full.account.slot == only.slot
+    assert any(
+        "every account is over the 85%-used line" in note and "3% left" in note
+        for note in full.notes
+    ), full.notes
+
+    _settings(switch_at=99)  # the same reading, under the line now: nothing to say
+    assert not any(
+        "over the" in note for note in service.choose(role="coder", project=work, fetch=never).notes
+    )
+
+    monkeypatch.setattr(service, "_now", lambda: NOW + timedelta(minutes=6))  # nothing cached
+    quiet = service.choose(role="coder", project=work, fetch=never)
+    assert quiet.account is not None and quiet.account.slot == only.slot
+    assert not any("over the" in note for note in quiet.notes)
+
+
 def test_a_hand_over_never_re_picks_the_account_it_is_leaving_on_an_arranged_machine(
     fake_home: Path, work: ProjectInfo
 ) -> None:
@@ -1112,12 +1145,17 @@ def test_a_launch_picks_from_a_reading_a_minute_old_and_a_hand_over_reads_live(
     assert handed.account is not None and handed.account.slot == personal.slot
     assert len(fetch.calls) == 5  # live, though the launch just read it
 
-    # One candidate is the answer whatever it reads: no request at all.
+    # One candidate is the answer whatever it reads: no request at all. The cache's
+    # reading of it, 95% used, still says it is over the line (N4).
     service.set_disabled(str(personal.slot), True)
-    alone = service.choose(role="tester", project=work, fetch=_Usage({}))
+    lone_fetch = _Usage({})
+    alone = service.choose(role="tester", project=work, fetch=lone_fetch)
     assert alone.account is not None and alone.account.slot == work_slot.slot
-    assert alone.source == "headroom" and alone.notes == []
-    assert len(fetch.calls) == 5
+    assert alone.source == "headroom"
+    assert [note.split(" — ")[1] for note in alone.notes] == [
+        "every account is over the 85%-used line; account 2 has the most room (5% left)"
+    ]
+    assert len(fetch.calls) == 5 and lone_fetch.calls == []
 
 
 def test_a_hand_over_picks_nothing_from_a_registry_it_cannot_read(

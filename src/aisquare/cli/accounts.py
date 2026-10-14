@@ -717,7 +717,7 @@ def trust(
 
     Claude Code asks "trust this folder?" once per account, and an agent on an account
     that was never asked waits there for a human. A launch copies the trust from any
-    account that has it (`[accounts] share_trust`); this does it now, for every account.
+    account that has it (`\\[accounts] share_trust`); this does it now, for every account.
     Only the folder's trust entry in each account's .claude.json is written.
     """
     if sync and folder is not None:
@@ -762,11 +762,11 @@ def _trust_report(
     else:
         console = stdout_console()
         if scope is not None:
-            head = f"{scope.key} on every account"
+            head = f"{scope.key} on every account that has started"
             if scope.key != claude_sharing.project_key(scope.folder):
                 head += f" (it covers {scope.folder})"
         else:
-            head = "every trusted folder on every account"
+            head = "every trusted folder on every account that has started"
         mark, style = ("✗ ", "red") if failed else ("✓ ", "green")
         console.print(Text.assemble((mark, style), head))
         for change in changes:

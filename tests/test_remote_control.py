@@ -1998,11 +1998,12 @@ def test_quitting_after_the_auto_off_time_came_turns_remote_off_as_auto_off() ->
     )
     controller.save_switch = saved.__setitem__
     controller.turn_on()
-    assert saved == {"remote_enabled": True}
+    assert saved == {"remote_enabled": True, "remote_auto_off_at": "2026-09-11T19:00:00+00:00"}
     clock[0] += timedelta(minutes=61)  # past the hour; the 30 s check has not run yet
     controller.shutdown_for_exit()
     assert server.revoked_every == ["auto-off"]
-    assert saved == {"remote_enabled": False}, "the next start brings back no Remote"
+    off = {"remote_enabled": False, "remote_auto_off_at": None}
+    assert saved == off, "the next start brings back no Remote"
     assert not controller.running and "stop_remote_server" in server.calls
     in_time = fake_server()
     leaving = RemoteController(
@@ -2012,7 +2013,8 @@ def test_quitting_after_the_auto_off_time_came_turns_remote_off_as_auto_off() ->
     leaving.turn_on()
     clock[0] += timedelta(minutes=59)
     leaving.shutdown_for_exit()
-    assert in_time.revoked_every == [] and saved == {"remote_enabled": True}
+    assert in_time.revoked_every == []
+    assert saved == {"remote_enabled": True, "remote_auto_off_at": None}, "a quit is no deadline"
 
 
 def test_the_first_read_of_remote_json_never_waits_for_its_lock_on_the_callers_thread(
@@ -2315,34 +2317,77 @@ def test_a_remote_whose_auto_off_passed_while_asq_was_down_stays_off_at_the_next
     crash after its deadline left the switch on and the deadline in ``remote.json``, and the
     next ``asq`` put the public link back up with a fresh deadline, though the auto-off the
     human picked had run out. That start saves the switch off and says so; a deadline still
-    ahead, or none (a clean quit clears it), brings Remote back as before."""
-    clock = datetime(2026, 10, 14, 9, 0, tzinfo=UTC)
+    ahead, a phone's later one included, brings Remote back as before."""
+    clock = [datetime(2026, 10, 14, 8, 0, tzinfo=UTC)]
     server = fake_server()
-    update_state("remote_enabled", True)
-    server.server_auto_off_at = clock - timedelta(minutes=1)  # what the killed UI left
+
+    def left_on() -> None:  # a fleet UI that turns Remote on and never gets to turn it off
+        RemoteController(
+            server=server, tunnel_factory=fake_tunnel_factory(url="x"), now=lambda: clock[0]
+        ).turn_on()
+        server.running = False
+
+    left_on()
+    assert load_remote_state().remote_auto_off_at == clock[0] + timedelta(minutes=60)
+    clock[0] += timedelta(minutes=61)
     missed = RemoteController(
-        server=server, tunnel_factory=fake_tunnel_factory(url="x"), now=lambda: clock
+        server=server, tunnel_factory=fake_tunnel_factory(url="x"), now=lambda: clock[0]
     )
     heard = heard_news(missed)
     missed.restore()
     assert not missed.running and not server.running, "no server, no tunnel"
     assert heard == [(remote_control.AUTO_OFF_MISSED, True)]
-    assert load_remote_state().remote_enabled is False
+    assert load_remote_state() == RemoteState(), "switch off, deadline gone"
     assert missed.status_line() == remote_control.AUTO_OFF_MISSED
     after = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
     after.restore()
     assert not after.running, "the next start leaves it off too"
 
-    for left in (clock + timedelta(minutes=1), None):  # not passed, or a clean quit's none
-        update_state("remote_enabled", True)
-        server.server_auto_off_at = left
-        back = RemoteController(
-            server=server, tunnel_factory=fake_tunnel_factory(url="x"), now=lambda: clock
-        )
-        heard = heard_news(back)
-        back.restore()
-        assert back.running and heard[0][0].startswith("Remote is back on")
-        back.turn_off()
+    left_on()
+    assert server.server_auto_off_at is not None
+    server.server_auto_off_at += timedelta(minutes=30)  # a phone's "another hour", capped
+    clock[0] += timedelta(minutes=61)
+    back = RemoteController(
+        server=server, tunnel_factory=fake_tunnel_factory(url="x"), now=lambda: clock[0]
+    )
+    heard = heard_news(back)
+    back.restore()
+    assert back.running and heard[0][0].startswith("Remote is back on")
+    back.turn_off()
+
+
+@pytest.mark.parametrize("left_by", ["a killed serve", "a quit's clear that failed"])
+def test_a_deadline_the_fleet_ui_did_not_leave_never_keeps_its_remote_off(left_by: str) -> None:
+    """Review of #259, round 7, 2/9: the start took any past deadline in ``remote.json`` for
+    the auto-off of the Remote it would bring back, though a clean quit had turned that one
+    off: a deadline an ``asq remote serve`` killed after the quit left, or the one the quit
+    could not clear. Remote stayed off, its switch saved off, and the sentence blamed asq.
+    Only a deadline that fleet UI saved and never turned off counts; any other is the start's
+    own check's (``_remote_auto_off_missed``), and Remote comes back as saved."""
+    clock = [datetime(2026, 10, 14, 8, 0, tzinfo=UTC)]
+    server = fake_server()
+    quit_ = RemoteController(
+        server=server, tunnel_factory=fake_tunnel_factory(url="x"), now=lambda: clock[0]
+    )
+    quit_.turn_on()
+    left = server.server_auto_off_at
+    if left_by == "a quit's clear that failed":
+        server.unwritable = OSError("no space left on device")
+    quit_.shutdown_for_exit()  # before the deadline: the switch stays on, for the next start
+    server.unwritable = None
+    if left_by == "a killed serve":
+        left = clock[0] + timedelta(minutes=10)  # serve --auto-off 10, then a SIGKILL
+    server.server_auto_off_at = left  # what remote.json holds
+    assert load_remote_state() == RemoteState(remote_enabled=True)
+    clock[0] += timedelta(minutes=61)
+    back = RemoteController(
+        server=server, tunnel_factory=fake_tunnel_factory(url="x"), now=lambda: clock[0]
+    )
+    heard = heard_news(back)
+    back.restore()
+    assert back.running and heard[0][0].startswith("Remote is back on")
+    assert load_remote_state().remote_enabled is True
+    back.turn_off()
 
 
 def test_a_remote_another_process_serves_is_no_news_at_start_and_keeps_the_saved_switch() -> None:

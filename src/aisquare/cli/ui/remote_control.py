@@ -70,8 +70,13 @@ explicit pick (persisted as :data:`NEVER`) switches the timer off."""
 DEFAULT_AUTO_OFF = 60
 NEVER = "never"
 """How Never is stored under ``auto_off_minutes`` in ``state.json``."""
-SWITCHES = {"remote_enabled": "Remote's on/off switch", "auto_off_minutes": "the auto-off timer"}
-"""The two switches ``state.json`` keeps, by key, as a sentence names them."""
+SWITCHES = {
+    "remote_enabled": "Remote's on/off switch",
+    "auto_off_minutes": "the auto-off timer",
+    "remote_auto_off_at": "Remote's auto-off time",
+}
+"""What ``state.json`` keeps of Remote, by key, as a sentence names it: the two switches, and
+the deadline of a Remote this fleet UI has on (:attr:`RemoteState.remote_auto_off_at`)."""
 PORT_ENV = "AISQUARE_REMOTE_PORT"
 """``serve --port``'s variable, read by ``status`` and ``regenerate-password`` for the link
 they print: the panel serves on it too, so one export moves all of them. The panel always
@@ -171,6 +176,11 @@ class RemoteState:
     remote_enabled: bool = False
     auto_off_minutes: int | None = DEFAULT_AUTO_OFF
     """``None`` = Never; see :data:`AUTO_OFF_CHOICES`."""
+    remote_auto_off_at: datetime | None = None
+    """The deadline of the Remote a fleet UI has on, while it does: saved as the UI sets it,
+    dropped by every turn-off of that UI's own, a quit's included. A start finds one only
+    after a fleet UI that never turned its Remote off (:meth:`RemoteController.
+    _auto_off_missed`); ``None`` for Never too. A phone's extension is ``remote.json``'s."""
 
 
 def load_remote_state() -> RemoteState:
@@ -183,9 +193,15 @@ def load_remote_state() -> RemoteState:
     minutes = data.get("auto_off_minutes", DEFAULT_AUTO_OFF)
     if minutes == NEVER:
         minutes = None
+    left_on = data.get("remote_auto_off_at")
+    try:
+        until = _aware(datetime.fromisoformat(left_on)) if isinstance(left_on, str) else None
+    except ValueError:  # a hand edit: no deadline of a fleet UI's to hold a start to
+        until = None
     return RemoteState(
         remote_enabled=data.get("remote_enabled") is True,
         auto_off_minutes=minutes if minutes in AUTO_OFF_CHOICES else DEFAULT_AUTO_OFF,
+        remote_auto_off_at=until,
     )
 
 
@@ -486,7 +502,7 @@ class RemoteController:
         """Save that Remote is on, on the thread that drives the controller, where a turn-off
         saves its own off: one that came before this step found the Remote gone."""
         if self.info is info:
-            self._set_state(remote_enabled=True)
+            self._set_state(remote_enabled=True, remote_auto_off_at=self.auto_off_at)
 
     def _watched_tunnel(self) -> NgrokTunnel:
         """A tunnel for this Remote's port that hands every URL it announces to
@@ -608,6 +624,10 @@ class RemoteController:
             self.auto_off_at = None
         if persist:
             self._set_state(remote_enabled=False)
+        if served and serving is None:
+            # This UI's Remote is off: a deadline still in remote.json is no longer its own.
+            # Not on a start's own failure, from the writer's thread: that start saved none.
+            self._set_state(remote_auto_off_at=None)
         if not served and tunnel is None:
             self.message = status
             return False
@@ -681,7 +701,7 @@ class RemoteController:
         try:
             self._server.note_public_url(None)
             self._server.set_auto_off(None)
-        except Exception as exc:  # a deadline left in the file ends nothing
+        except Exception as exc:  # a deadline left in the file is the next server start's
             failure = failure or f"Remote is off, but remote.json was not updated — {exc}"
         else:
             self.save_problem = None  # that write put the whole state
@@ -766,14 +786,24 @@ class RemoteController:
         next ``asq`` put the public link back up with a fresh deadline: the auto-off the human
         had picked had run out, yet the Remote came back (review of #259, round 6, 1/10). The
         next start of a Remote still signs every phone out (``_remote_auto_off_missed``).
+
+        The deadline is the one that UI saved (:attr:`RemoteState.remote_auto_off_at`), or
+        ``remote.json``'s when a phone moved it later. ``remote.json``'s alone blamed this UI
+        for a deadline a killed ``asq remote serve`` left after a clean quit, or one that quit
+        could not clear, and kept Remote off for it (review of #259, round 7, 2/9): such a
+        deadline is the start's own check's, which signs the phones out and brings Remote back.
         """
+        left_on = self.state.remote_auto_off_at
+        if left_on is None:
+            return False
         try:
             deadline = self._server.remote_auto_off_at()
         except Exception:  # unreadable: the start says why, as it would have
             return False
-        if deadline is None or _aware(self._now()) < _aware(deadline):
+        ends = _aware(left_on) if deadline is None else max(_aware(left_on), _aware(deadline))
+        if _aware(self._now()) < ends:
             return False
-        self._set_state(remote_enabled=False)
+        self._set_state(remote_enabled=False, remote_auto_off_at=None)
         self.message = AUTO_OFF_MISSED
         self._remote_news(AUTO_OFF_MISSED)
         return True
@@ -865,6 +895,7 @@ class RemoteController:
         if not self.running:
             return
         deadline = self._hold_deadline()
+        self._set_state(remote_auto_off_at=deadline)
 
         def remote_json_job() -> None:
             try:
@@ -1281,6 +1312,8 @@ class RemoteController:
         self.state = replace(self.state, **changes)
         for key, value in changes.items():
             stored = NEVER if key == "auto_off_minutes" and value is None else value
+            if isinstance(stored, datetime):
+                stored = stored.isoformat(timespec="seconds")
             try:
                 self.save_switch(key, stored)
             except StateUnwritableError as exc:

@@ -558,7 +558,7 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   bounds them. Either, once the auto-off time has come, is auto-off. A Remote that
   ended with no way out at all (killed, or a fleet UI ended by a signal) has its
   auto-off run when Remote next comes on, if its time came meanwhile, and a fleet
-  UI's start then leaves it off rather than bring it back. Its ngrok
+  UI's start leaves a Remote that UI had on off rather than bring it back. Its ngrok
   does not outlive it, so nothing reaches `127.0.0.1:8750` through the link while
   Remote is gone; but nothing signed the phones out either, so their cookies open
   the next Remote. Turn Remote off in the panel, or run

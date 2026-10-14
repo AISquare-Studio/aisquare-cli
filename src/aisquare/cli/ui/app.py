@@ -559,7 +559,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self._remote_savers = {
             key: Autosave(self, key, what=what) for key, what in SWITCHES.items()
         }
-        """Remote's two switches' saves, as the theme's (``autosave.py``)."""
+        """Remote's switches' saves, and its deadline's, as the theme's (``autosave.py``)."""
         self.remote.save_switch = self._save_remote_switch
         self.remote.on_news = self._post_remote_news
         self.remote.on_done = self._post_remote_done

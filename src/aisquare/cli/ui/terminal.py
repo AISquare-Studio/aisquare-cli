@@ -2154,21 +2154,28 @@ class TerminalPane(Widget, can_focus=True):
         the clipboard written by a gesture that was one left click (review of
         the eighth version; review of #135, second round, finding 2). Any other
         button breaks the run, so the next left click starts one afresh.
+
+        Timed by the module's clock (:data:`_monotonic`), as the duplicate-press
+        window is, and not by the event's own stamp, which Textual takes from the
+        wall clock as it makes the event: a test then judges a double click by the
+        clock it controls, not by how fast the loop turned between its two clicks
+        on a loaded runner (CI of #259, run 38482592483, attempt 2).
         """
         if event.button != 1:
             self._clicks = 0
             self._last_click = None
             return 0
+        now = _monotonic()
         moved = self._press is not None and event.offset != self._press
         threshold = self.app.CLICK_CHAIN_TIME_THRESHOLD
         last = self._last_click
         if moved:
             self._clicks = 0
-        elif last is not None and last[0] == event.offset and event.time - last[1] <= threshold:
+        elif last is not None and last[0] == event.offset and now - last[1] <= threshold:
             self._clicks += 1
         else:
             self._clicks = 1
-        self._last_click = None if moved else (event.offset, event.time)
+        self._last_click = None if moved else (event.offset, now)
         return self._clicks
 
     def _select_word(self, x: int, y: int) -> None:

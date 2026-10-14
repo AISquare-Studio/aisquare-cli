@@ -266,6 +266,26 @@ def scroll_event(pane: TerminalPane, *, up: bool) -> events.MouseScrollUp | even
     return cls(pane, 1, 1, 0, -1 if up else 1, 0, False, False, False)
 
 
+class Clock:
+    """The pane's clock, which only the test moves: ``terminal._monotonic``, read for the
+    duplicate-press window and for the click chain. A double click is then two clicks the
+    TEST says came within the threshold, and never two the runner happened to deliver
+    fast enough (follow-up of #259)."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
+    ticking = Clock()
+    monkeypatch.setattr(terminal_module, "_monotonic", ticking)
+    return ticking
+
+
 @pytest.fixture
 def fake() -> FakeTmux:
     tmux = FakeTmux()
@@ -1977,10 +1997,15 @@ def test_a_gesture_that_touches_no_pane_row_leaves_the_clipboard_alone(
     assert toasts_after == toasts, "and nothing claims a copy that did not happen"
 
 
-def test_a_double_click_does_not_leak_into_the_next_gesture(fake: FakeTmux, tmp_path: Path) -> None:
+def test_a_double_click_does_not_leak_into_the_next_gesture(
+    fake: FakeTmux, tmp_path: Path, clock: Clock
+) -> None:
     """A double click selects its word AFTER the gesture that caused it ended,
     so the selection change it makes must not count as taking part in the next
-    one — measured re-copying the word on the following release."""
+    one — measured re-copying the word on the following release. The two clicks
+    are a double click by the pane's clock, which stands still between them
+    (``clock``): on a loaded runner the loop's turn between them outran the
+    threshold, and the word was never selected (CI of #259)."""
 
     async def drive() -> tuple[str, int, str, int]:
         host = Host(fake.server(tmp_path), "%1", with_footer=True)
@@ -1991,6 +2016,7 @@ def test_a_double_click_does_not_leak_into_the_next_gesture(fake: FakeTmux, tmp_
             await click(pilot, pane, (8, 1), times=2)
             await pilot.pause()
             word, toasts = host.clipboard, len(host.notices)
+            clock.now += 5.0  # the next gesture comes a while later, as a person's does
             await press(pilot, footer, (1, 0))
             await move(pilot, footer, (6, 0), button=1)
             await release(pilot, footer, (6, 0))
@@ -2000,6 +2026,40 @@ def test_a_double_click_does_not_leak_into_the_next_gesture(fake: FakeTmux, tmp_
     word, toasts, after, toasts_after = run(drive())
     assert word == "row" and toasts == 1
     assert after == word and toasts_after == toasts
+
+
+def test_a_double_click_is_judged_by_the_panes_clock_not_the_runners(
+    fake: FakeTmux, tmp_path: Path, clock: Clock
+) -> None:
+    """Follow-up of #259: the chain was timed by each Click's own stamp, Textual's wall
+    clock, so whether two clicks made a double click depended on how fast the loop turned
+    between them. By the pane's clock: two clicks 0.2 s apart select their word, and two
+    0.6 s apart — past the app's threshold — select nothing, however fast the test
+    delivers them (timed by the wall clock, the late pair copied "third" too)."""
+    threshold = Host.CLICK_CHAIN_TIME_THRESHOLD
+
+    async def drive() -> tuple[str, int, str, int]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 10)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            await click(pilot, pane, (8, 1))
+            clock.now += threshold - 0.3
+            await click(pilot, pane, (8, 1))
+            await pilot.pause()
+            word, toasts = host.clipboard, len(host.notices)
+            host.screen.clear_selection()
+            await pilot.pause()
+            clock.now += 10.0
+            await click(pilot, pane, (1, 2))  # "third": a double click here would copy it
+            clock.now += threshold + 0.1
+            await click(pilot, pane, (1, 2))
+            await pilot.pause()
+            return word, toasts, host.clipboard, len(host.notices)
+
+    word, toasts, late, toasts_late = run(drive())
+    assert word == "row" and toasts == 1, "within the threshold by the pane's clock"
+    assert late == word and toasts_late == toasts, "past it: two single clicks, nothing copied"
 
 
 def test_a_right_button_drag_from_outside_the_pane_does_not_copy(

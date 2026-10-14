@@ -803,7 +803,12 @@ def connected(name: str, config_dir: Path | None = None, *, cwd: Path | None = N
     plugin = plugin_of(name)
     if plugin is None:
         return False
-    if plugin.installed(config_dir) is not None:
+    if plugin.installed(config_dir) is not None and (
+        plugin.stands_down_per_event or not plugin_stands_down(name, config_dir)
+    ):
+        # A launcher that stands down only where the hooks file runs an event covers a
+        # partial install; one that stands down beside any runnable hook of ours covers
+        # it only where none can start (its hooks run in their place).
         return True
     if hook_commands(name, config_dir):
         # Its own hooks, partial ones included, are what every other repository runs on;
@@ -1026,7 +1031,7 @@ ClaudePlugin = PluginInstall
 install`` was given."""
 
 
-def plugin_stands_down(name: str, config_dir: Path) -> bool:
+def plugin_stands_down(name: str, config_dir: Path | None = None) -> bool:
     """Whether the plugin's launcher stands down beside ``config_dir``'s own hooks: they
     hold an aisquare hook whose program can start (:func:`_starts`), as the launcher
     grades it (``plugins/*/scripts/aisquare-hook``). Beside hooks naming a program that
@@ -1668,7 +1673,8 @@ def integration_readiness(name: str, config_dir: Path) -> tuple[str, str]:
     ``unverified`` until AISquare has seen this definition run, then ``observed``.
 
     ``configured`` is :func:`connected`, the one "connected?" answer, so a plugin-only
-    directory reads as configured here too.
+    directory reads as configured here too, or ``unverified`` while the agent has not
+    trusted the plugin's hooks (``PluginInstall.trusted``).
     """
     try:
         adapter = get_adapter(name)
@@ -1682,6 +1688,18 @@ def integration_readiness(name: str, config_dir: Path) -> tuple[str, str]:
         return "unreadable", str(exc)
     if not connected(name, config_dir):
         return "not_configured", ""
+    if not hooks_installed(name, config_dir):
+        # Through the plugin alone: its hooks carry no definition of ours to observe, and
+        # the agent's own record says whether it runs them.
+        route = plugin_of(name)
+        install = route.installed(config_dir) if route is not None else None
+        if install is not None and not install.trusted:
+            return (
+                "unverified",
+                f"Through {plugin_label(install)}, whose hooks {adapter.label} skips until "
+                f"they are trusted: open /hooks in {adapter.label} to review and trust them.",
+            )
+        return "configured", ""
     if not adapter.capabilities.requires_hook_trust:
         return "configured", ""
     observed = _read_settings(_observation_path(name, config_dir))
@@ -1693,7 +1711,7 @@ def integration_readiness(name: str, config_dir: Path) -> tuple[str, str]:
         return "observed", "Native hooks observed working; current session policy still applies"
     return (
         "unverified",
-        "Hooks configured; open /hooks in Codex to review and trust them. "
+        f"Hooks configured; open /hooks in {adapter.label} to review and trust them. "
         "AISquare has not yet observed this definition run.",
     )
 

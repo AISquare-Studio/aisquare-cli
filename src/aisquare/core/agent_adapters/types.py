@@ -273,6 +273,12 @@ class AgentPlugin(Protocol):
     stand down where the agent's hooks file already runs aisquare's. Read-only; never
     raises. ``config_dir`` ``None`` is the dir a session from this shell reads."""
 
+    stands_down_per_event: bool
+    """The plugin's launcher stands down only for the events the hooks file already runs
+    (Claude Code's), so it covers a partial install; otherwise it stands down beside any
+    of our hooks there whose program can start (``core.agents.plugin_stands_down``), and
+    a partial install is not covered."""
+
     def supported(self) -> bool:
         """Whether the plugin's hooks can run on this platform."""
         ...

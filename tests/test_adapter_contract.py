@@ -39,6 +39,7 @@ from aisquare.core.agent_adapters.types import (
     AgentAdapter,
     Approvals,
     PermissionIntent,
+    PluginInstall,
     WriteScope,
     executable_name,
     hook_args,
@@ -207,6 +208,40 @@ def test_the_hooks_off_switch_silences_a_complete_install(
     assert found is not None and found.setting
     assert agent_core.hooks_installed(adapter.id, home)
     assert not agent_core.connected(adapter.id, home), "switched off is not connected"
+
+
+@pytest.mark.parametrize("trusted", [True, False])
+@pytest.mark.parametrize("per_event", [True, False])
+def test_a_plugin_only_home_is_configured_once_its_hooks_are_trusted(
+    adapter: AgentAdapter,
+    trusted: bool,
+    per_event: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A home connected through the plugin route alone: ``unverified`` until the agent
+    trusts the plugin's hooks, whichever agent it is; beside a partial install of ours,
+    covered only by a launcher that stands down per event."""
+    home = _home(adapter, tmp_path)
+    install = PluginInstall(home, "0.9.0", trusted=trusted)
+    route = Mock(
+        stands_down_per_event=per_event,
+        installed=Mock(return_value=install),
+        repo_install_here=Mock(return_value=None),
+    )
+    monkeypatch.setattr(agent_core, "plugin_of", lambda name: route)
+    assert agent_core.connected(adapter.id, home)
+    state, detail = agent_core.integration_readiness(adapter.id, home)
+    if trusted:
+        assert state == "configured"
+    else:
+        assert state == "unverified"
+        assert "aisquare plugin 0.9.0" in detail and f"/hooks in {adapter.label}" in detail
+    agent_core.install_hooks(adapter.id, home)
+    settings = json.loads((home / adapter.settings_name).read_text(encoding="utf-8"))
+    del settings["hooks"][adapter.capabilities.hooks[0].event]  # partial: ours, not the plugin's
+    (home / adapter.settings_name).write_text(json.dumps(settings), encoding="utf-8")
+    assert agent_core.connected(adapter.id, home) is per_event
 
 
 def test_an_installed_hook_command_reaches_its_adapter(

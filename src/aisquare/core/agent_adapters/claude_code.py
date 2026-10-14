@@ -40,6 +40,8 @@ def _effort_level(payload: Mapping[str, Any]) -> str | None:
 class ClaudeCodePlugin:
     """The aisquare Claude Code plugin (``plugins/claude-code``), as ``core.agents`` reads it."""
 
+    stands_down_per_event = True
+
     def supported(self) -> bool:
         from aisquare.core import agents
 

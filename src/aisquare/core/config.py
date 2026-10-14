@@ -4,7 +4,8 @@ Two layers. The SYSTEM defaults are the field defaults of the models below and
 live nowhere else (:func:`system_defaults` dumps them). The USER's file,
 ``config.toml``, holds only what the user changed: :func:`save_config` writes the
 keys that differ from the system defaults, and :func:`load_config` lays the file
-over them, so a key nobody set follows the system default even after it changes.
+over them, so a key nobody set follows the system default even after it changes,
+and :func:`reset_config` moving the file aside is a reset of every setting.
 Unknown keys in the file are ignored so old configs keep loading.
 """
 
@@ -16,8 +17,10 @@ import contextvars
 import errno
 import os
 import re
+import shutil
 import tomllib
 from collections.abc import Callable, Iterator, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -1005,3 +1008,41 @@ def save_config(
         except TypeError:  # an OSError subclass with an unusual signature
             raise OSError(exc.errno, detail, str(written)) from exc
     return target
+
+
+#: The UTC stamp a reset's backup is named with: ``config.toml.bak-20261014T031700Z``, the
+#: shape ``accounts remove`` names a retired slot with.
+_BACKUP_STAMP = "%Y%m%dT%H%M%SZ"
+
+
+def reset_config(path: Path | None = None) -> Path | None:
+    """Every setting back to its system default: returns where the user's file went, or ``None``.
+
+    The file at ``path`` (default: the standard location) moves aside to
+    ``config.toml.bak-<UTC stamp>`` beside it — a ``-2``, ``-3`` after the stamp when
+    that name is taken — and nothing takes its place, so everything loads as the system
+    default (:func:`load_config`). Moving it back undoes the reset. Nothing to move — no
+    file, or a reset already made since the last change — returns ``None``. The file is
+    not read, so one that no longer parses is reset like any other.
+
+    Through a symlink the file it points at is copied aside and emptied, never the link
+    moved: moved, the next save would put a regular file where it was, the severed
+    dotfiles link :func:`save_config` takes care never to make.
+    """
+    target = path or paths.config_path()
+    written = Path(os.path.realpath(target))
+    if not written.is_file():
+        return None
+    stamp = datetime.now(UTC).strftime(_BACKUP_STAMP)
+    backup = target.with_name(f"{target.name}.bak-{stamp}")
+    counter = 1
+    while backup.exists() or backup.is_symlink():
+        counter += 1
+        backup = target.with_name(f"{target.name}.bak-{stamp}-{counter}")
+    if written == target:
+        despite_windows_contention(lambda: os.replace(target, backup))
+    else:
+        # copy2: the mode too, so a config tightened to 0600 is not copied out readable.
+        despite_windows_contention(lambda: shutil.copy2(written, backup))
+        write_replacing(written, "", keep_mode=True)
+    return backup

@@ -93,7 +93,8 @@ aisquare
 │                   take [--as SESSION])
 ├── login [--no-browser] [--with-token] [--api-url URL] · logout · whoami
 ├── auth            status [--live] · token
-├── config          list · get <key> · set <key> <value> · redaction <off|standard|strict>
+├── config          list [--overrides] · get <key> · set <key> <value> · reset [--yes]
+│                   redaction <off|standard|strict>
 └── metrics         show · list  [-n N] [--session S] [--project P | --all]   (CI test bed; hidden)
 ```
 

@@ -3,19 +3,25 @@
 The human's words: "an internal system recommended settings things pre set, and a user
 setting config which will be empty unless user makes a change and saves it, it will use
 the same key … so that users preference overrides system, if user does nothing he
-always gets system settings". Up to version 1 every save wrote every setting out, so a user's
+always gets system settings", and "a reset all settings to default button for wiping
+user preference file". Up to version 1 every save wrote every setting out, so a user's
 choice could not be told from a default, and a default that moved on stayed pinned in
 every file a save had touched.
 """
 
 from __future__ import annotations
 
+import os
+import sys
 import tomllib
 from pathlib import Path
 from typing import Any
 
+import pytest
 import tomli_w
+from typer.testing import CliRunner
 
+from aisquare.cli.app import app
 from aisquare.core.config import (
     _V1_DEFAULTS,
     CONFIG_VERSION,
@@ -26,6 +32,7 @@ from aisquare.core.config import (
     RoleLaunchProfile,
     _overlay,
     load_config,
+    reset_config,
     save_config,
     system_defaults,
 )
@@ -183,6 +190,24 @@ def test_the_user_file_wins_and_whatever_it_leaves_out_is_the_default(tmp_path: 
     assert set(loaded.fleet.roles) == set(AppConfig().fleet.roles)
 
 
+def test_config_list_overrides_shows_only_what_the_user_changed(runner: CliRunner) -> None:
+    assert runner.invoke(app, ["config", "set", "accounts.switch_at", "70"]).exit_code == 0
+    shown = runner.invoke(app, ["config", "list", "--overrides"])
+    assert shown.exit_code == 0, shown.output
+    assert tomllib.loads(shown.output) == {"accounts": {"switch_at": 70}}
+    as_json = runner.invoke(app, ["--json", "config", "list", "--overrides"])
+    assert as_json.exit_code == 0 and '"switch_at": 70' in as_json.output
+    full = runner.invoke(app, ["config", "list"])
+    assert tomllib.loads(full.output)["accounts"]["pick"] == "headroom"  # resolved, in full
+
+
+def test_config_list_overrides_with_none_still_prints_toml(runner: CliRunner) -> None:
+    shown = runner.invoke(app, ["config", "list", "--overrides"])
+    assert shown.exit_code == 0
+    assert tomllib.loads(shown.output) == {}
+    assert "system default" in shown.output
+
+
 # --- version 1 -> 2 --------------------------------------------------------------------
 
 
@@ -255,3 +280,97 @@ def test_a_v0_file_takes_both_steps(tmp_path: Path) -> None:
     assert loaded.fleet.roles["reviewer"].extra_args == list(REVIEWER_ARGS)
     save_config(loaded, target)
     assert _file(target) == {"config_version": CONFIG_VERSION}
+
+
+# --- reset -----------------------------------------------------------------------------
+
+
+def test_reset_moves_the_user_file_aside_and_everything_is_the_default() -> None:
+    settings_service.set_value("accounts.pick", "default")
+    before = config_path().read_bytes()
+
+    backup = settings_service.reset_settings()
+
+    assert backup is not None and backup.parent == config_path().parent
+    assert backup.name.startswith("config.toml.bak-")
+    assert backup.read_bytes() == before  # the one recoverable copy
+    assert not config_path().exists()
+    assert load_config() == AppConfig()
+    assert settings_service.reset_settings() is None  # nothing left to move
+
+
+def test_reset_never_overwrites_an_earlier_backup(monkeypatch: pytest.MonkeyPatch) -> None:
+    from aisquare.core import config as core_config
+
+    monkeypatch.setattr(core_config, "_BACKUP_STAMP", "same")
+    settings_service.set_value("fleet.escape_key", "f11")
+    first = settings_service.reset_settings()
+    settings_service.set_value("fleet.escape_key", "f10")
+    second = settings_service.reset_settings()
+    assert first is not None and second is not None and first != second
+    assert second.name == "config.toml.bak-same-2"
+    assert "f11" in first.read_text(encoding="utf-8")
+    assert "f10" in second.read_text(encoding="utf-8")
+
+
+def test_reset_repairs_a_file_that_does_not_parse(tmp_path: Path) -> None:
+    target = tmp_path / "config.toml"
+    target.write_text("this is [not toml", encoding="utf-8")
+    backup = reset_config(target)
+    assert backup is not None and backup.read_text(encoding="utf-8") == "this is [not toml"
+    assert load_config(target) == AppConfig()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+def test_reset_through_a_symlink_keeps_the_link(tmp_path: Path) -> None:
+    """A dotfiles link stays a link: the file it points at is copied aside and emptied, so
+    the next save writes through the link, not over it."""
+    real = tmp_path / "dotfiles" / "aisquare.toml"
+    real.parent.mkdir()
+    real.write_text('[fleet]\nescape_key = "f11"\n', encoding="utf-8")
+    real.chmod(0o600)
+    link = tmp_path / "home" / "config.toml"
+    link.parent.mkdir()
+    link.symlink_to(real)
+
+    backup = reset_config(link)
+
+    assert link.is_symlink() and os.path.realpath(link) == str(real)
+    assert real.read_text(encoding="utf-8") == ""
+    assert load_config(link) == AppConfig()
+    assert backup is not None and backup.parent == link.parent and not backup.is_symlink()
+    assert 'escape_key = "f11"' in backup.read_text(encoding="utf-8")
+    assert backup.stat().st_mode & 0o777 == 0o600
+
+
+def test_config_reset_asks_first_and_changes_nothing_without_yes(runner: CliRunner) -> None:
+    """Off a terminal — CliRunner's stdin is not one — and under --json, no --yes is a dry run."""
+    settings_service.set_value("fleet.escape_key", "f11")
+    dry = runner.invoke(app, ["config", "reset"])
+    assert dry.exit_code == 0 and "dry run" in dry.output
+    as_json = runner.invoke(app, ["--json", "config", "reset"])
+    assert as_json.exit_code == 0 and '"reset": false' in as_json.output
+    assert load_config().fleet.escape_key == "f11"
+
+    done = runner.invoke(app, ["config", "reset", "--yes"])
+    assert done.exit_code == 0, done.output
+    assert "system default" in done.output and "config.toml.bak-" in done.output
+    assert load_config().fleet.escape_key == "f12"
+
+    again = runner.invoke(app, ["--json", "config", "reset", "--yes"])
+    assert again.exit_code == 0 and '"reset": false' in again.output
+
+
+def test_config_reset_at_a_terminal_asks(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.cli import config as config_cli
+
+    settings_service.set_value("fleet.escape_key", "f11")
+    monkeypatch.setattr(config_cli, "_stdin_is_a_terminal", lambda: True)
+    declined = runner.invoke(app, ["config", "reset"], input="n\n")
+    assert declined.exit_code == 0 and "nothing reset" in declined.output
+    assert load_config().fleet.escape_key == "f11"
+    accepted = runner.invoke(app, ["config", "reset"], input="y\n")
+    assert accepted.exit_code == 0, accepted.output
+    assert load_config().fleet.escape_key == "f12"

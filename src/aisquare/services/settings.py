@@ -8,6 +8,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from aisquare.core import config as core_config
 from aisquare.core import paths
 from aisquare.core.config import AppConfig, RoleLaunchProfile, load_config, save_config
 from aisquare.models import RedactionLevel
@@ -16,6 +17,20 @@ from aisquare.models import RedactionLevel
 def list_values() -> AppConfig:
     """Return the fully-resolved configuration."""
     return load_config()
+
+
+def overrides() -> dict[str, Any]:
+    """The settings the user's file changes from the system defaults, nested as it holds them."""
+    return core_config.overrides(load_config())
+
+
+def reset_settings() -> Path | None:
+    """Every setting back to its system default; returns where the user's file was moved.
+
+    ``None`` when there was no file to move: every setting is at its default already.
+    See ``core.config.reset_config``.
+    """
+    return core_config.reset_config()
 
 
 def get_value(key: str) -> str:

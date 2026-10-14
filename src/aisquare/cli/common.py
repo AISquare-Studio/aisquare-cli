@@ -8,7 +8,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
 
 import tomli_w
 import typer
@@ -491,6 +491,38 @@ def emit_config(config: AppConfig) -> None:
         typer.echo(config.model_dump_json())
     else:
         typer.echo(tomli_w.dumps(config.model_dump(mode="json", exclude_none=True)), nl=False)
+
+
+def emit_config_overrides(overrides: Mapping[str, Any]) -> None:
+    """Render the settings the user changed — a JSON object under ``--json``, TOML otherwise.
+
+    The TOML goes through ``typer.echo`` as :func:`emit_config`'s does, never the Rich
+    console, which would take ``[fleet.roles.coder]`` for markup and print nothing of
+    it. Nothing changed prints one TOML comment, so the output still parses.
+    """
+    if get_state().json_output:
+        typer.echo(json.dumps(overrides))
+    elif overrides:
+        typer.echo(tomli_w.dumps(dict(overrides)), nl=False)
+    else:
+        typer.echo("# no overrides: every setting is at its system default")
+
+
+def emit_config_reset(config: Path, backup: Path | None) -> None:
+    """Report ``config reset``: where the user's file went, or that there was none to move."""
+    if get_state().json_output:
+        payload = {"config": str(config), "reset": backup is not None, "backup": None}
+        if backup is not None:
+            payload["backup"] = str(backup)
+        typer.echo(json.dumps(payload))
+    elif backup is None:
+        stdout_console().print(
+            f"nothing to reset: there is no {config}, so every setting is at its system default"
+        )
+    else:
+        stdout_console().print(
+            f"✓ every setting is back at its system default; your file is kept as {backup}"
+        )
 
 
 def emit_config_value(key: str, value: str) -> None:

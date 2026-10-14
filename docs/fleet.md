@@ -755,6 +755,15 @@ even when a release changes it. A config 0.8 saved holds every setting; it loads
 with the values that differ from 0.8's defaults kept as yours and the rest
 following today's, and the next save writes it down to yours.
 
+```sh
+aisquare config list --overrides   # what you changed, and nothing else
+aisquare config reset              # every setting back to its default; asks first, --yes off a terminal
+```
+
+`config reset` moves the file aside to `config.toml.bak-<stamp>` beside it, so
+moving it back undoes the reset; through a symlink, the file it points at is
+copied there and emptied, and the link stays.
+
 The whole `[fleet]` section at its defaults — what you get with no `[fleet]` in
 your file at all:
 

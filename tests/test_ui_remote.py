@@ -34,7 +34,7 @@ from textual.widgets import Button, DataTable, Select, Static, Switch
 from aisquare.cli.ui import app as app_mod
 from aisquare.cli.ui import remote_control
 from aisquare.cli.ui.app import FleetApp, HelpScreen
-from aisquare.cli.ui.remote_control import READ_ONLY_REASON, RemoteController
+from aisquare.cli.ui.remote_control import READ_ONLY_REASON, RemoteController, load_remote_state
 from aisquare.cli.ui.views import remote as remote_view
 from aisquare.cli.ui.views.remote import RemotePanel, qr_text
 from aisquare.core import paths, state_file
@@ -1788,6 +1788,40 @@ def test_a_tunnel_that_does_not_come_up_after_a_restore_is_toasted_from_its_thre
         )
 
     drive_controller(go, controller)
+
+
+@pytest.mark.parametrize(("command", "off"), [("uninstall", True), ("upgrade", False)])
+def test_asqs_own_remote_is_off_before_its_uninstall_and_only_stopped_before_its_update(
+    command: str, off: bool
+) -> None:
+    """Review of #259, remote focus, 12/12: docs/remote.md said asq's own Remote is turned off
+    before its Update or Uninstall starts. The hand-over's quit only stopped it, as any quit
+    does: no phone signed out and the switch kept, so after an Uninstall without --purge
+    ``remote.json`` kept the devices, the link and the passphrase, and the first asq after a
+    reinstall brought Remote back with its phones let in. Before an Uninstall it is turned
+    off: every device revoked and the switch saved off. An Update's reopened asq brings it
+    back, so it is stopped, as the doc now says."""
+    from aisquare.cli.ui.views.doctor import DoctorView
+
+    server = FakeServer()
+    controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url=PUBLIC))
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        app.remote.turn_on()
+        assert app.remote.running
+        app.on_doctor_view_hand_off(DoctorView.HandOff((command, "--reopen")))
+        for _ in range(500):  # the start-up reads end, then it quits
+            if app._exit:
+                break
+            await asyncio.sleep(0.01)
+        assert app._exit, "the hand-over never quit"
+
+    drive_controller(go, controller)
+    assert controller.wait_until_off(10)
+    assert server.revoked_every == (["remote off"] if off else [])
+    assert load_remote_state().remote_enabled is (not off)
 
 
 def test_auto_off_is_toasted_unless_the_panel_says_it() -> None:

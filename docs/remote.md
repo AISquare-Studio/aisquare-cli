@@ -753,8 +753,10 @@ shell or another asq's R panel, with its port and process id. An upgrade replace
 the install under that server, which keeps running the old release until it is
 started again, so turn it off first. An uninstall would leave it running with no
 aisquare to turn it off, sign its phones out or switch its writes off, so it
-refuses until it is off. asq's own Remote is turned off before its Update or
-Uninstall starts.
+refuses until it is off. asq's own Remote is turned off before its Uninstall
+starts: every phone is signed out and it stays off. Before an Update it is only
+stopped, as quitting asq stops it: its phones stay signed in, and the asq the
+Update reopens brings it back, with writes off.
 
 **`serve` says the port is in use.** Something else took 8750. Pass `--port` and
 give ngrok (and `status`) the same port.

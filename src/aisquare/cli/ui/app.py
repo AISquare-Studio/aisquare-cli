@@ -1445,6 +1445,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         running = self._holding_the_quit()
         if not running:
             self._worker_threads.drop_held()
+            if self.hand_off[:1] == ("uninstall",):
+                # Off, not only stopped as a quit leaves it: every phone signed out (its
+                # farewell drained before the exec, run_ui) and the switch saved off. Stopped,
+                # remote.json kept the devices, the link and the passphrase past an Uninstall
+                # without --purge, and the first asq after a reinstall brought Remote back,
+                # its phones let in by their cookies (review of #259, remote focus, 12/12).
+                # An Update's asq --reopen brings it back, read-only.
+                self.remote.turn_off(wait=False)
             self.exit()
             return
         waited = _hand_off_clock() - self._hand_off_since

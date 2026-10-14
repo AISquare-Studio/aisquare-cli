@@ -265,9 +265,13 @@ TIMES = "\N{MULTIPLICATION SIGN}"
 
 
 def headroom_dot(headroom: HeadroomSummary | None) -> tuple[str, str]:
-    """The Claude dot and its colour. Grey, never the skull, when nothing could be READ:
-    ``empty`` with no ``percent_left`` is offline, a Keychain login or no usable account
-    — not a fleet at 0 %."""
+    """The Claude dot and its colour. Red when no account is usable because each needs a
+    login (signed out, its token expired or refused): something to do, not "not read".
+    Grey, never the skull, when nothing could be READ otherwise: ``empty`` with no
+    ``percent_left`` is offline, a Keychain login or no usable account — not a fleet at 0 %.
+    """
+    if headroom is not None and headroom.usable == 0 and headroom.needs_login:
+        return ("●", "red")
     if headroom is None or (headroom.level == "empty" and headroom.percent_left is None):
         return HEADROOM_DOT["unknown"]
     return HEADROOM_DOT[headroom.level]

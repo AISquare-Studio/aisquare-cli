@@ -35,16 +35,22 @@ from aisquare.cli.ui.sidebar import (
 )
 from aisquare.cli.ui.views.app_settings import AppSettingsView
 from aisquare.cli.ui.views.settings_hub import SettingsHubView
+from aisquare.core import claude_accounts as core
 from aisquare.core.store import store_session
 from aisquare.models import (
+    AccountsOverview,
     CheckStatus,
     ClaudeAccount,
+    ClaudeUsage,
     DoctorCheck,
     FleetAgentStatus,
     HeadroomSummary,
     ProjectInfo,
 )
+from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
+from tests.test_claude_accounts import _sign_in
+from tests.test_ui_accounts import _overview, _status
 from tests.ui_workers import settle_page, settle_until
 
 T = TypeVar("T")
@@ -58,15 +64,17 @@ def _drive(
     headroom: Callable[[Sequence[ClaudeAccount] | None], HeadroomSummary] | None = None,
     refresh_seconds: float = 3600,
     doctor: Callable[[], list[DoctorCheck]] | None = None,
+    accounts: Callable[[], AccountsOverview] | None = None,
 ) -> T:
-    """``fn`` against a ``FleetApp`` with no accounts reader, a scripted headroom and a stub
-    doctor (no findings unless told), once the doctor's run at start has been painted."""
+    """``fn`` against a ``FleetApp`` with a scripted headroom, a stub doctor (no findings
+    unless told) and no accounts reader unless ``accounts`` is one, once the doctor's run at
+    start has been painted."""
 
     async def run() -> T:
         app = FleetApp(
             refresh_seconds=refresh_seconds,
             doctor=doctor or (lambda: []),
-            accounts=None,
+            accounts=accounts,
             headroom=headroom or (lambda accounts: GOOD),
             headroom_seconds=3600,
         )
@@ -374,8 +382,20 @@ def test_the_doctor_page_names_the_project_its_checks_are_about(
         (HeadroomSummary(level="empty"), "●", "grey50"),
         (HeadroomSummary(level="unknown"), "●", "grey50"),
         (None, "●", "grey50"),
+        # Nothing usable because each account needs a login: something to do, so red.
+        (HeadroomSummary(level="empty", needs_login=2), "●", "red"),
     ],
-    ids=["good", "fair", "low", "critical", "empty", "unread", "unknown", "before-the-first"],
+    ids=[
+        "good",
+        "fair",
+        "low",
+        "critical",
+        "empty",
+        "unread",
+        "unknown",
+        "before-the-first",
+        "all-need-a-login",
+    ],
 )
 def test_the_claude_dot_follows_the_headroom_level(
     summary: HeadroomSummary | None, dot: str, colour: str
@@ -414,25 +434,105 @@ def test_the_line_paints_the_injected_headroom() -> None:
 
 def test_the_headroom_is_read_at_start_and_never_on_the_refresh_tick() -> None:
     """The usage cache answers it, at most one network read per account per five minutes —
-    and the two-second tick never asks: ticks come and go and the reader is not called."""
+    and the two-second tick never asks: ticks come and go, each one reading the accounts and
+    painting their frame (``_accounts_read``, the 2 s path), and the reader is not called."""
     calls: list[datetime] = []
+    frames: list[datetime] = []
 
     def reader(accounts: Sequence[ClaudeAccount] | None) -> HeadroomSummary:
         calls.append(datetime.now(UTC))
         return GOOD
 
-    async def go(pilot: Pilot[None]) -> tuple[int, int]:
+    def overview() -> AccountsOverview:
+        frames.append(datetime.now(UTC))
+        return _overview(_status(1, "me@example.com"), _status(2, "two@example.com"))
+
+    async def go(pilot: Pilot[None]) -> tuple[int, int, int]:
         app = _app(pilot)
         at_start = len(calls)
         for _ in range(5):
             app.refresh_data()  # what the tick runs
+            await settle_page(app)
         await asyncio.sleep(0.3)  # and the real tick, at 50 ms, a few times over
         await settle_page(app)
-        return at_start, len(calls)
+        return at_start, len(calls), len(frames)
 
-    at_start, after = _drive(go, headroom=reader, refresh_seconds=0.05)
-    assert at_start == 1
+    at_start, after, painted = _drive(go, headroom=reader, refresh_seconds=0.05, accounts=overview)
+    assert painted >= 6, "the premise: the accounts were read and painted tick after tick"
+    assert at_start == 1  # once the first frame landed
     assert after == 1
+
+
+def test_a_read_asked_for_while_one_runs_is_made_once_after_it() -> None:
+    """``refresh_headroom`` dropped a request made while a read was in flight, so a login
+    landing mid-read was not counted until the next minute (review of #261, m3)."""
+    started: list[int] = []
+    release = threading.Event()
+
+    def reader(accounts: Sequence[ClaudeAccount] | None) -> HeadroomSummary:
+        started.append(len(started) + 1)
+        if len(started) == 2:
+            assert release.wait(10)  # the second read is held, as a slow cache read is
+        return GOOD
+
+    async def go(pilot: Pilot[None]) -> list[int]:
+        app = _app(pilot)
+        app.refresh_headroom()  # the second read: held
+        await asyncio.sleep(0.1)
+        for _ in range(3):
+            app.refresh_headroom()  # asked three times meanwhile
+        release.set()
+        await settle_page(app)
+        return list(started)
+
+    assert _drive(go, headroom=reader) == [1, 2, 3], "one read owed, made once, after it"
+
+
+@pytest.mark.parametrize("slot_1", ["never-signed-in", "token-gone"])
+def test_a_signed_out_account_puts_a_warning_on_the_line(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch, slot_1: str
+) -> None:
+    """The real readers, with the accounts on disk: a slot whose login is gone gets *Log in*
+    on the Accounts page, and the line's ⚠ — it never reached the summary, which reads only
+    signed-in slots (review of #261, m2). A disabled one counts for nothing."""
+    calls: list[int] = []
+
+    def usage(account: ClaudeAccount, **kwargs: Any) -> ClaudeUsage:
+        calls.append(account.slot)
+        return ClaudeUsage(available=True, session_percent=40.0, week_percent=10.0)
+
+    monkeypatch.setattr(accounts_service, "usage", usage)
+    good = core.create_account()  # slot 2
+    _sign_in(good, "two@example.com")
+    gone = core.create_account()  # slot 3: signed out, and disabled
+    accounts_service.set_disabled(str(gone.slot), True)
+    if slot_1 == "token-gone":
+        _sign_in(core.default_account(), "me@example.com", credentials=False)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, HeadroomSummary | None]:
+        app = _app(pilot)
+        await settle_until(app, lambda: app.sidebar.headroom is not None)
+        return _shown(app.query_one(StatusLine)), app.sidebar.headroom
+
+    line, headroom = _drive(
+        go, headroom=accounts_service.read_fleet_headroom, accounts=accounts_service.overview
+    )
+    assert line.endswith(f"● 1{TIMES} claude ⚠"), line  # slot 1 signed out, slot 2 good
+    assert headroom is not None and headroom.needs_login == 1 and headroom.usable == 1
+    assert calls == [good.slot], "only the signed-in slot was asked"
+
+
+def test_every_account_signed_out_is_a_red_dot_and_a_warning_not_grey(fake_home: Path) -> None:
+    async def go(pilot: Pilot[None]) -> tuple[str, HeadroomSummary | None]:
+        app = _app(pilot)
+        await settle_until(app, lambda: app.sidebar.headroom is not None)
+        return _shown(app.query_one(StatusLine)), app.sidebar.headroom
+
+    line, headroom = _drive(
+        go, headroom=accounts_service.read_fleet_headroom, accounts=accounts_service.overview
+    )
+    assert line.endswith(f"● 0{TIMES} claude ⚠"), line
+    assert headroom_dot(headroom) == ("●", "red")
 
 
 def test_a_page_change_to_the_accounts_reads_the_headroom_again() -> None:

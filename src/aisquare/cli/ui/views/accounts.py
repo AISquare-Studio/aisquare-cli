@@ -161,20 +161,9 @@ class AccountsChanged(Message):
     """Something on the page changed what the sidebar summarises — an account added, a sign-in."""
 
 
-@dataclass(frozen=True)
-class AccountsSummary:
-    """What the sidebar's Accounts section says — built here so the words live in one place.
-
-    The section is 28 columns wide, so the first line carries only the AISquare
-    state beside the title and the second line carries the Claude count plus
-    the one thing most worth knowing: a slot with no login, an AISquare sign-in
-    still to do, or who slot 1 is.
-    """
-
-    aisquare: bool | None
-    """Signed in, not, or ``None`` when the session could not be read."""
-    line: Text | None
-    """The detail line under the title, or nothing worth a line."""
+class UsageRead(Message):
+    """The page's usage read landed (a tick, or *↻ Refresh usage*): the sidebar's status line
+    reads the same cache again now, at no request, rather than at its next minute."""
 
 
 # --- pure helpers (unit-testable without a running app) ----------------------------------
@@ -463,28 +452,6 @@ def claude_title_text(overview: AccountsOverview) -> Text:
     if claude.binary:
         text.append(f" · {claude.binary}", style="dim")
     return text
-
-
-def summarise(
-    overview: AccountsOverview | None, session: iam.Session | None, *, session_known: bool = True
-) -> AccountsSummary:
-    """What the sidebar shows, from the same facts the page shows."""
-    aisquare: bool | None = (session is not None) if session_known else None
-    if overview is None:
-        return AccountsSummary(aisquare, Text("accounts unreadable", style="yellow"))
-    if not overview.claude.installed:
-        return AccountsSummary(aisquare, Text("⚠ Claude Code not installed", style="yellow"))
-    signed = [status for status in overview.accounts if status.signed_in]
-    unsigned = [status for status in overview.accounts if not status.signed_in]
-    line = Text(f"{len(signed)} Claude", style="dim", no_wrap=True, overflow="ellipsis")
-    if unsigned:
-        line.append(" · ", style="dim")
-        line.append(f"⚠ #{unsigned[0].account.slot} no login", style="yellow")
-    elif aisquare is False:
-        line.append(" · AISquare: sign in", style="dim")
-    elif signed and signed[0].identity is not None:
-        line.append(f" · {signed[0].identity.email}", style="dim")
-    return AccountsSummary(aisquare, line)
 
 
 def _host(url: str) -> str:
@@ -863,6 +830,8 @@ class AccountsView(Vertical):
         """The usage read in flight, or the last one."""
         self._usage_owed = False
         """A read was asked for while one ran: read once more after it."""
+        self._usage_forced = False
+        """The read in flight is *↻ Refresh usage*'s, which asks every slot: "refreshing…"."""
         self._cancel_sign_in: threading.Event | None = None
         self._arranging = threading.Lock()  # one registry write at a time (arrange_accounts)
         self._renames: dict[Worker[Any], _RenameWrite] = {}
@@ -1135,6 +1104,7 @@ class AccountsView(Vertical):
             self._usage_owed = True
             return
         self._asked.update(account.slot for account in accounts)
+        self._usage_forced = force
         # Each reading fetched is RECORDED (#146), and the trends are read from that
         # history in one store open: a store that cannot be written costs the trends;
         # the readings still paint.
@@ -1162,16 +1132,19 @@ class AccountsView(Vertical):
         (an unreachable endpoint, an HTTP error), or whose figure a later try failed to
         renew (``last_failed_at``: the cache keeps the figure on the row), adds ``· last try
         failed just now``, the newest such try: a failure is never passed off as a refresh,
-        nor hidden by the figure before it. ``refreshing…`` while a read runs, when
-        *↻ Refresh usage* is off too.
+        nor hidden by the figure before it. ``refreshing…`` — and *↻ Refresh usage* off —
+        while a read that asks runs: the button's, or the first; a tick's read is the
+        cache's, and the line stays as it is through it.
 
         A row that needs a login (signed out, its token expired or refused) or whose token
         this CLI cannot read (missing, the macOS Keychain) counts in neither half
         (``usage_is_readable``, the CLI's rule too): its own status says so, and an account
         left expired would otherwise say "failed" every tick.
         """
+        # A tick's read is the cache's: it asks nothing while the readings are fresh, and
+        # said "refreshing…" (the button off) every minute for no request. Said for a read
+        # that asks — *↻ Refresh usage*'s, or the first, with nothing read yet.
         running = self._usage_running()
-        self.query_one("#usage-refresh", Button).disabled = running
         slots = [
             row.slot
             for row in self.rows()
@@ -1185,7 +1158,9 @@ class AccountsView(Vertical):
             and (when := reading.last_failed_at if reading.available else reading.fetched_at)
             is not None
         ]
-        if running:
+        refreshing = running and (self._usage_forced or not read)
+        self.query_one("#usage-refresh", Button).disabled = refreshing
+        if refreshing:
             said = "refreshing…"
         else:
             age = accounts_service.describe_age(min(read)) if read else "never"
@@ -1758,6 +1733,7 @@ class AccountsView(Vertical):
         if worker.name == USAGE_WORKER:
             if state is WorkerState.SUCCESS and isinstance(worker.result, dict):
                 self._show_usage(worker.result)
+                self.post_message(UsageRead())
             if worker is self._usage_worker:
                 self._paint_usage_age()
                 if self._usage_owed:

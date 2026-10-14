@@ -92,7 +92,7 @@ from aisquare.cli.ui.sidebar import (
 )
 from aisquare.cli.ui.terminal import EscapeToSidebar, SelectionHost, TerminalPane
 from aisquare.cli.ui.theme import ThemePicker, restore_theme, theme_autosave
-from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, read_session, summarise
+from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, UsageRead, read_session
 from aisquare.cli.ui.views.agent import AgentRestarted, AgentView
 from aisquare.cli.ui.views.app_settings import AppSettingsView
 from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
@@ -297,7 +297,11 @@ class HelpScreen(ModalScreen[None]):
         text.append("●", style="red")
         text.append(" under 5 %  💀 none left  ")
         text.append("●", style="grey50")
-        text.append(" not read yet; ⚠ an account needs a login\n")
+        text.append(" usage could not be read (offline, Keychain-only, nothing usable)\n")
+        text.append("     ")
+        text.append("●", style="red")
+        text.append(" and ⚠ — accounts that need a login (signed out, token expired or refused);\n")
+        text.append("     the dot is red when no account is usable for want of one\n")
         text.append("\nEsc closes this", style="dim")
         with VerticalScroll(id="helpbox"):
             yield Static(text)
@@ -629,6 +633,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.headroom_seconds = headroom_seconds
         self._headroom_worker: Worker[HeadroomSummary] | None = None
         """The headroom read in flight, or the last one; only one runs at a time."""
+        self._headroom_owed = False
+        """A headroom read was asked for while one ran: read once more after it."""
+        self._headroom_due = True
+        """Read the headroom once the next accounts frame lands: the first frame at start,
+        and the one after the Accounts page changed something (``AccountsChanged``)."""
         self.escape_key = escape_key or fleet_service.settings().escape_key
         self.snapshot: FleetSnapshot | None = None
         """The last frame that was read successfully; ``None`` before the first."""
@@ -682,7 +691,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.set_interval(self.refresh_seconds, self.refresh_data)
         # The status line's headroom is the usage cache's, on its own slow clock: never
         # on the two-second tick, which would ask the network as often as it went stale.
-        self.refresh_headroom()
+        # Its first read waits for the first accounts frame, whose signed-out slots it
+        # counts (`_accounts_read`); with no accounts reader there is no frame to wait for.
+        if self._accounts is None:
+            self.refresh_headroom()
         self.set_interval(self.headroom_seconds, self.refresh_headroom)
         # The doctor runs ONCE at start, about the project the restored view shows;
         # a restored Doctor page runs it itself, as opening it does.
@@ -990,10 +1002,13 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             session = read_session()
         except Exception:  # read_session never raises; belt to its braces
             session, session_known = None, False
-        sidebar.show_aisquare(summarise(overview, session, session_known=session_known).aisquare)
+        sidebar.show_aisquare((session is not None) if session_known else None)
         if overview is not None:
             for view in self.query(AccountsView):
                 view.show(overview)
+        if self._headroom_due:
+            self._headroom_due = False
+            self.refresh_headroom()
         if self._accounts_owed:
             self.refresh_accounts()  # the ticks this read outlived: one read, after it
 
@@ -1002,21 +1017,43 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
         Through the usage cache (``claude_accounts.read_fleet_headroom``): the network is
         asked only for an account whose reading is over five minutes old, and never from
-        the two-second tick — this runs at start, every :attr:`headroom_seconds`, and
-        after the Accounts page changed something. The accounts are the last frame's, so
-        what the dot counts is what the page lists. One read at a time: one still running
-        is left to answer.
+        the two-second tick — this runs once the first accounts frame lands, every
+        :attr:`headroom_seconds`, after the Accounts page changed something, and when its
+        usage read lands (``UsageRead``: the same cache, no request). The accounts are the
+        last frame's, so what the dot counts is what the page lists.
+
+        The ⚠ counts every enabled slot that needs a login — the page's *Log in* rows: an
+        expired or refused token is in the summary (its reading says so), and a signed-out
+        slot, which the reader never asks, is added from the frame (review of #261, m2).
+
+        One read at a time. One asked for while another runs is owed, and made once that
+        one has painted, as :meth:`refresh_accounts` does: a login landing mid-read is
+        counted then, not a minute later (review of #261, m3).
         """
         if self._headroom is None:
             return
         reading = self._headroom_worker
         if reading is not None and not reading.is_finished:
+            self._headroom_owed = True
             return
+        self._headroom_owed = False
         overview = self.accounts_overview
         accounts = None if overview is None else [status.account for status in overview.accounts]
-        reader = self._headroom
+        signed_out = (
+            0
+            if overview is None
+            else sum(1 for s in overview.accounts if not s.account.disabled and not s.signed_in)
+        )
+        read_headroom = self._headroom
+
+        def read() -> HeadroomSummary:
+            summary = read_headroom(accounts)
+            if not signed_out:
+                return summary
+            return summary.model_copy(update={"needs_login": summary.needs_login + signed_out})
+
         self._headroom_worker = self.run_worker(
-            lambda: reader(accounts),
+            read,
             name=HEADROOM_WORKER,
             group=HEADROOM_WORKER,
             thread=True,
@@ -1024,9 +1061,12 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         )
 
     def _headroom_read(self, event: Worker.StateChanged) -> None:
-        """Paint the headroom a read answered; a read that failed leaves the dot as it was."""
+        """Paint the headroom a read answered (a read that failed leaves the dot as it was),
+        then make the read that was owed while it ran, if one was."""
         if event.state is WorkerState.SUCCESS and isinstance(event.worker.result, HeadroomSummary):
             self.sidebar.show_headroom(event.worker.result)
+        if event.state in (WorkerState.SUCCESS, WorkerState.ERROR) and self._headroom_owed:
+            self.refresh_headroom()
 
     def _feed_open_views(self, snapshot: FleetSnapshot) -> None:
         """Hand every open Project/Agent view its row from the new frame.
@@ -1598,8 +1638,17 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.query_one("#accounts", AccountsView).show(self.accounts_overview)
 
     def on_accounts_changed(self, event: AccountsChanged) -> None:
-        """The page added, removed or signed in something: the status line follows at once."""
+        """The page added, removed or signed in something: the status line follows once the
+        frame that shows it is read (a slot signed out or in counts in the ⚠ from it)."""
+        if self._accounts is None:
+            self.refresh_headroom()
+            return
+        self._headroom_due = True
         self.refresh_accounts()
+
+    def on_usage_read(self, event: UsageRead) -> None:
+        """The Accounts page read usage (a tick, or *↻ Refresh usage*): the dot reads the
+        same cache now, at no request, rather than up to a minute later (review of #261, m3)."""
         self.refresh_headroom()
 
     async def on_doctor_selected(self, event: DoctorSelected) -> None:

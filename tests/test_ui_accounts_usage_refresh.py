@@ -12,6 +12,7 @@ the cache serves a reading only to the token that took it.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 from collections.abc import Callable
@@ -195,6 +196,82 @@ def test_refresh_usage_asks_every_account_now_and_is_off_while_it_runs(
     assert seen["after"] == (False, "last refreshed just now")
     # One forced request, inside the five minutes; the tick's owed read was served.
     assert seen["calls"] == 2
+
+
+def test_a_tick_the_cache_answers_never_says_refreshing(
+    no_network: dict[str, Any], clock: Clock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The minute tick's read is the cache's and asks nothing while the readings are fresh,
+    yet the line said "refreshing…" and the button went off for it, every minute (review of
+    #261, a nit). Held open here, as a busy store holds it: the line and the button stay."""
+    no_network["usage"] = _answering(clock)
+    frame = _signed_in(2, tmp_path, "tok-two")
+    real = accounts_service.cached_usage_with_trends
+    hold, entered = threading.Event(), threading.Event()
+    hold.set()
+
+    def held(*args: Any, **kwargs: Any) -> Any:
+        if not hold.is_set():
+            entered.set()
+            assert hold.wait(10)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(accounts_service, "cached_usage_with_trends", held)
+
+    async def go(pilot: Pilot[None]) -> tuple[tuple[bool, str], int]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle_until(app, lambda: len(no_network["usage_calls"]) >= 1)
+        await settle(app)
+        clock.advance(minutes=1)
+        hold.clear()
+        view.refresh_readings()  # the minute tick: the cache's read, held open
+        assert await asyncio.to_thread(entered.wait, 5), "the tick's read started"
+        await pilot.pause()
+        during = (view.query_one("#usage-refresh", Button).disabled, _age(view))
+        hold.set()
+        await settle(app)
+        return during, len(no_network["usage_calls"])
+
+    during, calls = drive(go, overview=frame)
+    assert during == (False, "last refreshed 1m ago")
+    assert calls == 1, "the cache answered the tick"
+
+
+def test_the_status_line_reads_the_cache_again_when_the_page_reads_usage(
+    no_network: dict[str, Any], clock: Clock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After *↻ Refresh usage* showed 95 % used, the sidebar's dot stayed green until its
+    next minute: only ``AccountsChanged`` re-read it (review of #261, m3). Each usage read
+    the page makes now re-reads it, from the cache the page just filled: no request more."""
+    from aisquare.cli.ui.app import FleetApp
+
+    asked: list[int] = []
+    real = FleetApp.refresh_headroom
+
+    def counting(self: FleetApp) -> None:
+        asked.append(len(no_network["usage_calls"]))
+        real(self)
+
+    monkeypatch.setattr(FleetApp, "refresh_headroom", counting)
+    no_network["usage"] = _answering(clock, 95.0)
+    frame = _signed_in(2, tmp_path, "tok-two")
+
+    async def go(pilot: Pilot[None]) -> tuple[int, int, int]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle_until(app, lambda: len(no_network["usage_calls"]) >= 1)
+        await settle(app)
+        opened = len(asked)
+        await pilot.click(view.query_one("#usage-refresh", Button))
+        await settle_until(app, lambda: len(no_network["usage_calls"]) >= 2)
+        await settle(app)
+        return opened, len(asked), len(no_network["usage_calls"])
+
+    opened, after, requests = drive(go, overview=frame)
+    assert opened >= 2, "the page's first read asked the dot again"
+    assert after > opened, "the refresh's read asked it again"
+    assert requests == 2, "the dot's reads were the cache's: the page's two requests only"
 
 
 def test_the_line_says_never_until_a_reading_and_the_oldest_one_after(

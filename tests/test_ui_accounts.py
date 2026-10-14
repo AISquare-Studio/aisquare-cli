@@ -52,7 +52,6 @@ from aisquare.cli.ui.views.accounts import (
     aisquare_status_text,
     grant_text,
     needs_login,
-    summarise,
     usage_bar,
 )
 from aisquare.core import browser, credentials, paths
@@ -405,33 +404,6 @@ def test_grant_text_puts_the_code_first_and_says_what_the_browser_did() -> None:
     assert "Opening your browser" in opened
     assert "No browser opened here" in grant_text(grant, opened=False).plain
     assert "Waiting for the approval" in grant_text(grant, opened=None).plain
-
-
-def test_summarise_names_the_worst_thing_first() -> None:
-    both = summarise(_overview(_status(1, "me@example.com"), _status(2, "two@x")), _session())
-    assert both.aisquare is True
-    assert both.line is not None and both.line.plain == "2 Claude · me@example.com"
-
-    gap = summarise(_overview(_status(1, "me@example.com"), _status(3, None)), _session())
-    assert gap.line is not None and gap.line.plain == "1 Claude · ⚠ #3 no login"
-
-    no_aisquare = summarise(_overview(_status(1, "me@example.com")), None)
-    assert no_aisquare.aisquare is False
-    assert no_aisquare.line is not None
-    assert no_aisquare.line.plain == "1 Claude · AISquare: sign in"
-
-    missing = summarise(_overview(installed=False), None)
-    assert missing.line is not None and missing.line.plain == "⚠ Claude Code not installed"
-
-    unreadable = summarise(None, None, session_known=False)
-    assert unreadable.aisquare is None
-    assert unreadable.line is not None and "unreadable" in unreadable.line.plain
-    # Every line fits the section's 28 columns without an ellipsis.
-    for summary in (both, gap, no_aisquare, missing):
-        assert summary.line is not None and len(summary.line.plain) <= 28
-
-
-# --- the sidebar's status line and the page -----------------------------------------------------
 
 
 def test_the_status_line_says_aisquare_and_opens_the_page_with_settings_selected(

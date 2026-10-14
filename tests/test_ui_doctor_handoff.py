@@ -937,6 +937,8 @@ def test_no_start_on_asqs_own_schedule_begins_once_a_hand_over_is_pending(
             explainability_view.STATUS_WORKER,
             ui_app._DOCTOR_WORKER,  # the shell's, for the project now chosen
             accounts_view.USAGE_WORKER,
+            # The status line's dot, read again from the cache as the page's usage lands.
+            ui_app.HEADROOM_WORKER,
             accounts_view.CREDITS_WORKER,
             welcome_view.worker_name("look"),
             welcome_view.worker_name("candidates"),

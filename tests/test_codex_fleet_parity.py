@@ -774,6 +774,59 @@ def test_an_unanswered_codex_approval_holds_the_bell_through_its_redraws(
     assert _state(codex) == "waiting"
 
 
+#: Codex 0.162.1's screen under tmux 3.7c, trimmed: its approval view waiting on the human,
+#: then the moment they answered ``y``, the approved command still running.
+ASKING = [
+    f"{CHEVRON} ESC sleep 12; echo slow-done",
+    "• Running sleep 12; echo slow-done",
+    "  Would you like to run the following command?",
+    "  Reason: reach the aisquare board",
+    "  $ sleep 12; echo slow-done",
+    f"{CHEVRON} 1. Yes, proceed (y)",
+    "  2. Yes, and don't ask again for commands that start with `sleep 12` (p)",
+    "  3. No, and tell Codex what to do differently (esc)",
+    "  Press enter to confirm or esc to cancel",
+]
+APPROVED = [
+    f"{CHEVRON} ESC sleep 12; echo slow-done",
+    "✔ You approved codex to run sleep 12; echo slow-done this time",
+    "• Running sleep 12; echo slow-done",
+    "• Working (7s • esc to interrupt)",
+    f"{CHEVRON} Ask Codex to do anything",
+    "  gpt-5.5 default · /work/repo                              ⚠ 3 warnings · f2 to view",
+]
+
+
+def test_an_approved_codex_command_reads_working_while_it_runs(
+    codex_agent: tuple[Codex, TeamTask],
+    tmux: FakeTmux,  # noqa: F811
+) -> None:
+    """Review r2 of #113, finding 7: after 'y' Codex's next hook is the approved command's
+    PostToolUse, which fires when the command FINISHES, so a 12-minute suite read
+    attention for 12 minutes: the bell on, and ``tell`` a board note. The approval view
+    gives way to Codex's working line the moment the human allows (0.162.1, measured),
+    and that ends the bell; the view itself, redrawn, and a screen tmux cannot read, keep
+    it."""
+    codex, _ = codex_agent
+    pane = codex.agent.pane_id
+    codex.start("thread-one")
+    _turn_under(codex, "thread-one", "user")
+    codex.hook("PermissionRequest", "thread-one", **APPROVAL)
+    tmux.screens[pane] = ASKING
+    tmux.printed(pane, ago=timedelta(seconds=-2))  # a redraw after the hook
+
+    assert _state(codex) == "attention"
+    tmux.screens.pop(pane)
+    assert _state(codex) == "attention", "nothing on the screen says it was answered"
+
+    tmux.screens[pane] = APPROVED  # 'y'
+
+    assert _state(codex) == "working"
+    codex.hook("PostToolUse", "thread-one", turn_id="turn-1", tool_name="Bash")
+    assert _state(codex) == "working"
+    assert _events(codex.project, "attention") == ["Codex needs your approval"]
+
+
 # --- a replacement runs the row's own agent (review r1 of #113, finding 1) ---------------
 
 

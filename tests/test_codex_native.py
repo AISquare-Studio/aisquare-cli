@@ -847,7 +847,8 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             coder, pane = restarted.started, restarted.started.pane_id
             until(lambda: state(coder) == "waiting", 40, "waiting after the restart", pane)
             seen, reviewed = len(outputs()), reviews()
-            assert fleet.tell(project, label, f"ESC {cli} note 'asked first'").delivered
+            asked = f"ESC sleep 8; {cli} note 'asked first'"
+            assert fleet.tell(project, label, asked).delivered
 
             def asking() -> bool:
                 return "Would you like to run" in srv.run("capture-pane", "-p", "-t", pane)
@@ -860,6 +861,10 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             assert fleet._activity_times(srv).get(pane) != first, "the view redraws"
             assert reviews() == reviewed and not answered(seen)
             srv.send_keys(pane, "y")
+            # Working the moment the human allows, not when the command's PostToolUse
+            # fires at its end (review r2 of #113, finding 7).
+            until(lambda: state(coder) == "working", 5, "working once allowed", pane)
+            assert not answered(seen), "the approved command still runs"
             until(lambda: answered(seen), 30, "the approved note ran", pane)
             assert "shared (note)" in outputs()[-1]
             until(lambda: state(coder) in {"working", "waiting"}, 20, "the bell cleared", pane)

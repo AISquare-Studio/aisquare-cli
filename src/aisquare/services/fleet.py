@@ -1203,6 +1203,7 @@ def _derive(
     *,
     observed: bool,
     now: datetime,
+    screen: Callable[[], Sequence[str] | None] | None = None,
 ) -> tuple[FleetAgentState, str | None]:
     """State from the board first, tmux second (§5.1) — with one honest exception.
 
@@ -1212,7 +1213,8 @@ def _derive(
     ``waiting`` for ``_STALE_AFTER`` otherwise. So death and absence are read
     first; then a fresh ``team_session`` row (not ended, seen within
     ``_STALE_AFTER``) decides between working, waiting and attention, and the
-    attention of an agent that redraws while it asks (Codex) holds, fresh or not; then
+    attention of an agent that redraws while it asks (Codex) holds, fresh or not, until
+    ``screen`` (the pane's visible rows, read only then) shows it working again; then
     recent output (:data:`ACTIVITY_WINDOW`) means working; and when tmux cannot
     be asked at all the answer is ``unknown``, never a guess.
     """
@@ -1240,8 +1242,12 @@ def _derive(
             # Codex redraws its approval view every second, the screen unchanged, for
             # as long as it waits (0.162.1), so its pane's output answers nothing and
             # a wait past the stale window fires no hook either: the bell holds until
-            # a hook moves the row — PostToolUse once allowed, Interrupt on Esc, Stop,
-            # the next prompt.
+            # a hook moves the row — Interrupt on Esc, Stop, the next prompt — or the
+            # screen shows it working: the view gives way to its working line the
+            # moment the human allows, and the first hook after that is the command's
+            # PostToolUse, when it finishes (review r2 of #113, finding 7).
+            if _working_on_screen(agent, session, screen):
+                return "working", None
             return "attention", None
         elif fresh and board_state == "attention":
             # The bell clears when the pane moves on, not only on the next human
@@ -1289,6 +1295,29 @@ def _redraws_while_asking(agent: FleetAgent, session: TeamSession) -> bool:
     return adapter is not None and adapter.capabilities.redraws_while_asking
 
 
+def _working_on_screen(
+    agent: FleetAgent,
+    session: TeamSession,
+    screen: Callable[[], Sequence[str] | None] | None,
+) -> bool:
+    """Whether ``screen`` shows the agent whose hook wrote ``session`` running a turn
+    unblocked (``AgentCapabilities.working_mark``); ``False`` when it cannot be read."""
+    adapter = recorded_adapter(_family(session) or agent.agent)
+    mark = adapter.capabilities.working_mark if adapter is not None else None
+    if not mark or screen is None:
+        return False
+    rows = screen()
+    return rows is not None and any(mark in row for row in rows)
+
+
+def _screen_of(agent: FleetAgent, config: FleetSettings) -> list[str] | None:
+    """The rows on ``agent``'s screen now; ``None`` when its server does not answer."""
+    try:
+        return server_of(agent, config).screen_text(agent.pane_id)
+    except TmuxError:
+        return None
+
+
 _LIMIT_GRACE = timedelta(minutes=10)
 """How long past its named reset a ``limited`` row is still believed (the reset
 is a clock time from an error message; Claude Code's own continue lands shortly
@@ -1315,7 +1344,14 @@ def _status(
     config: FleetSettings,
 ) -> FleetAgentStatus:
     pane = observed.get(agent.id) if observed is not None else None
-    state, detail = _derive(agent, session, pane, observed=observed is not None, now=now)
+    state, detail = _derive(
+        agent,
+        session,
+        pane,
+        observed=observed is not None,
+        now=now,
+        screen=(lambda: _screen_of(agent, config)) if pane is not None else None,
+    )
     return FleetAgentStatus(
         agent=agent,
         state=state,

@@ -1,4 +1,5 @@
-"""The Accounts page and its sidebar section, driven headless through Textual's Pilot.
+"""The Accounts page — opened from the status line under ⚙ Settings — driven headless
+through Textual's Pilot.
 
 docs/plans/claude-accounts.md. The shell is the real ``FleetApp`` with the
 Accounts reader scripted (``accounts=``), the AISquare session scripted through
@@ -192,11 +193,12 @@ def drive(
 ) -> T:
     """Run ``fn`` against a mounted ``FleetApp`` whose Accounts reader answers ``overview``.
 
-    The start-up doctor run has been painted before ``fn`` starts. Painting its report
-    resizes the Doctor section above the Accounts section and moves it (from row 30 to
-    row 34 here), and a report that landed between the press and the click of
-    ``open_accounts`` moved the section out from under the pointer: the click reached
-    another row and the page never opened (reproduced with every worker held 0.3 s).
+    The start-up doctor run has been painted before ``fn`` starts. Its report once
+    resized the sidebar's Doctor section, above an Accounts section, and a report that
+    landed between the press and the click of ``open_accounts`` moved the row out from
+    under the pointer: the click reached another row and the page never opened. Both
+    sections are gone — their pages open from ⚙ Settings — and the wait stays, so
+    nothing the start-up run paints lands in the middle of a gesture.
     """
     frame = overview if overview is not None else _overview(_status(1, "me@example.com"))
 

@@ -27,6 +27,60 @@ from aisquare.core.store import store_session
 from aisquare.services import agent_launch, fleet, native_telemetry, team
 
 
+def _user_texts(request: dict[str, Any]) -> list[str]:
+    """The user messages a provider request carries, oldest first."""
+    return [
+        part["text"]
+        for item in request.get("input", [])
+        if item.get("role") == "user"
+        for part in item.get("content", [])
+        if part.get("type") == "input_text"
+    ]
+
+
+def _answer(handler: BaseHTTPRequestHandler, item: dict[str, Any]) -> None:
+    """Answer a Responses request with ``item`` as its one output, streamed as Codex reads it."""
+    response = {
+        "id": "resp_local",
+        "object": "response",
+        "status": "completed",
+        "output": [item],
+        "usage": {
+            "input_tokens": 19,
+            "output_tokens": 3,
+            "total_tokens": 22,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens_details": {"reasoning_tokens": 0},
+        },
+    }
+    stream: list[dict[str, Any]] = [
+        {
+            "type": "response.created",
+            "response": {**response, "status": "in_progress", "output": []},
+        },
+        {"type": "response.output_item.done", "output_index": 0, "item": item},
+        {"type": "response.completed", "response": response},
+    ]
+    data = "".join(
+        f"event: {entry['type']}\ndata: {json.dumps(entry)}\n\n" for entry in stream
+    ).encode()
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/event-stream")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.end_headers()
+    handler.wfile.write(data)
+
+
+def _message(text: str) -> dict[str, Any]:
+    return {
+        "id": "msg_local",
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": text, "annotations": []}],
+    }
+
+
 @pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
 def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     binary = shutil.which("codex")
@@ -46,16 +100,6 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
             return [name for v in value for name in names(v)]
         return []
 
-    def user_texts(request: dict[str, Any]) -> list[str]:
-        """The user messages a provider request carries, oldest first."""
-        return [
-            part["text"]
-            for item in request.get("input", [])
-            if item.get("role") == "user"
-            for part in item.get("content", [])
-            if part.get("type") == "input_text"
-        ]
-
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
             raw = self.rfile.read(int(self.headers["Content-Length"]))
@@ -65,18 +109,10 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
                 self.wfile.write(b"{}")
                 return
             requests.append(json.loads(raw))
-            said = user_texts(requests[-1])
+            said = _user_texts(requests[-1])
             if said and said[-1] == "SLOW busy fixture":
                 time.sleep(8)  # a turn long enough to tell the agent something mid-turn
-            item = {
-                "id": "msg_local",
-                "type": "message",
-                "role": "assistant",
-                "status": "completed",
-                "content": [
-                    {"type": "output_text", "text": "local fixture complete", "annotations": []}
-                ],
-            }
+            item = _message("local fixture complete")
             if len(requests) == 1:
                 item = {
                     "id": "call_local",
@@ -95,35 +131,7 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
                     "namespace": "mcp__aisquare",
                     "arguments": "{}",
                 }
-            response = {
-                "id": "resp_local",
-                "object": "response",
-                "status": "completed",
-                "output": [item],
-                "usage": {
-                    "input_tokens": 19,
-                    "output_tokens": 3,
-                    "total_tokens": 22,
-                    "input_tokens_details": {"cached_tokens": 0},
-                    "output_tokens_details": {"reasoning_tokens": 0},
-                },
-            }
-            stream: list[dict[str, Any]] = [
-                {
-                    "type": "response.created",
-                    "response": {**response, "status": "in_progress", "output": []},
-                },
-                {"type": "response.output_item.done", "output_index": 0, "item": item},
-                {"type": "response.completed", "response": response},
-            ]
-            data = "".join(
-                f"event: {entry['type']}\ndata: {json.dumps(entry)}\n\n" for entry in stream
-            ).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+            _answer(self, item)
 
         def log_message(self, format: str, *args: object) -> None:
             pass
@@ -310,7 +318,7 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
                     return session.state if session is not None else None
 
                 def ran(text: str) -> bool:
-                    return any((user_texts(request) or [""])[-1] == text for request in requests)
+                    return any((_user_texts(request) or [""])[-1] == text for request in requests)
 
                 # A busy agent is told through `codex queue`, which reaches the
                 # interactive session: the message runs as its next turn.
@@ -338,8 +346,8 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
                 pane = restarted.started.pane_id
                 until(
                     lambda: any(
-                        (user_texts(request) or [""])[-1] == line
-                        and "queued fixture line" in user_texts(request)
+                        (_user_texts(request) or [""])[-1] == line
+                        and "queued fixture line" in _user_texts(request)
                         for request in requests
                     ),
                     40,
@@ -435,5 +443,155 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
                 assert requests[-1]["model"] == "gpt-5.4"
                 assert requests[-1]["reasoning"]["effort"] == level
         finally:
+            server.shutdown()
+            thread.join(timeout=2)
+
+
+@pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
+def test_real_codex_panes_take_a_told_line_before_any_hook_and_the_managers_nudge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """How a line gets into Codex's TUI (lane B of #113's live smoke): at its empty prompt,
+    the Enter after a gap. A coder started with no prompt has fired no hook, and is told
+    through its pane; one at the hook-review dialog, as quiet, is not typed into; a manager
+    waiting at its prompt is woken by a coder's ``task review``."""
+    binary = shutil.which("codex")
+    assert binary, "AISQUARE_TEST_CODEX requires an installed Codex"
+    native_home = tmp_path / "codex"
+    native_home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    requests: list[dict[str, Any]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            raw = self.rfile.read(int(self.headers["Content-Length"]))
+            if not self.path.endswith("/responses"):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+                return
+            requests.append(json.loads(raw))
+            _answer(self, _message("ok"))
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        (native_home / "config.toml").write_text(
+            'model = "local-fixture"\nmodel_provider = "local"\n'
+            '[model_providers.local]\nname = "Local fixture"\nwire_api = "responses"\n'
+            f'base_url = "http://127.0.0.1:{server.server_port}/v1"\n'
+            "requires_openai_auth = false\n"
+            f'[projects.{json.dumps(str(workspace))}]\ntrust_level = "trusted"\n',
+            encoding="utf-8",
+        )
+        for key in tuple(os.environ):
+            if key.startswith(("OPENAI_", "ANTHROPIC_", "CODEX_")):
+                monkeypatch.delenv(key)
+        monkeypatch.setenv("CODEX_HOME", str(native_home))
+        monkeypatch.setattr(agents, "_aisquare_command", lambda: shlex.join(selfcli.argv_for([])))
+        agents.install_hooks("codex", native_home)
+        config = load_config()
+        config.fleet.tmux_socket = f"asq-codex-panes-{os.getpid()}"
+        save_config(config)
+        project = team.activate(workspace)
+        srv = fleet.server(config.fleet)
+        # Only this test's owned hook definitions are trusted by this flag.
+        trusted = ["--dangerously-bypass-hook-trust"]
+
+        def screen(pane: str) -> str:
+            return srv.run("capture-pane", "-p", "-t", pane)
+
+        def until(check: Any, seconds: float, what: str, pane: str) -> None:
+            deadline = time.monotonic() + seconds
+            while not check():
+                if time.monotonic() >= deadline:
+                    raise AssertionError(f"{what}:\n{screen(pane)}")
+                time.sleep(0.2)
+
+        def ran(text: str) -> bool:
+            return any(text in _user_texts(request) for request in requests)
+
+        def quiet_at_its_prompt(agent: Any) -> bool:
+            lines = [line.strip() for line in screen(agent.pane_id).splitlines() if line.strip()]
+            return (
+                fleet.status_of(agent).state == "waiting"
+                and bool(lines)
+                and lines[-1].startswith("? for shortcuts")
+            )
+
+        try:
+            # Welcome's coder: started with no prompt, so Codex has fired no hook.
+            coder = fleet.spawn(
+                project, "coder", agent="codex", worktree=False, agent_args=trusted
+            ).agent
+            until(
+                lambda: quiet_at_its_prompt(coder),
+                30,
+                "a quiet empty prompt",
+                coder.pane_id,
+            )
+            assert fleet.status_of(coder).session is None, "no hook before the first prompt"
+            told = fleet.tell(project, coder.label, "reply ok")
+            assert told.delivered and "typed" in told.how, told
+            until(lambda: ran("reply ok"), 20, "the told line ran", coder.pane_id)
+
+            def bound() -> str | None:
+                with store_session() as store:
+                    row = store.get_fleet_agent(coder.id)
+                return row.session_id if row is not None else None
+
+            until(lambda: bound() is not None, 20, "its first prompt bound the row", coder.pane_id)
+            # A Codex whose hooks are not trusted opens at the hook review, as quiet as its
+            # prompt: an Enter there would answer it, so the line is a board note.
+            untrusted = fleet.spawn(project, "coder", agent="codex", worktree=False).agent
+            until(
+                lambda: (
+                    fleet.status_of(untrusted).state == "waiting"
+                    and "Hooks need review" in screen(untrusted.pane_id)
+                ),
+                30,
+                "a quiet hook review",
+                untrusted.pane_id,
+            )
+            refused = fleet.tell(project, untrusted.label, "not into a dialog")
+            assert not refused.delivered and "board note" in refused.how, refused
+            time.sleep(1)
+            assert "Hooks need review" in screen(untrusted.pane_id)
+            assert "not into a dialog" not in screen(untrusted.pane_id)
+            # The manager waits at its prompt; a coder's task review wakes it.
+            manager = fleet.spawn(
+                project,
+                "manager",
+                agent="codex",
+                worktree=False,
+                prompt="manager fixture",
+                agent_args=trusted,
+            ).agent
+
+            def waiting(agent: Any) -> bool:
+                session = fleet.status_of(agent).session
+                return session is not None and session.state == "waiting"
+
+            until(lambda: waiting(manager), 40, "the manager waiting", manager.pane_id)
+            coder_session = bound()
+            task, _ = team.add_task("lane B wake fixture", cwd=workspace)
+            team.claim_task(task.id, session_ref=coder_session)
+            team.review_task(task.id, note="ready", session_ref=coder_session)
+            until(lambda: ran(fleet.NUDGE_TEXT), 20, "the nudge woke the manager", manager.pane_id)
+            with store_session() as store:
+                prompts = store.recent_prompts(project.id, limit=50)
+            assert any(
+                prompt.text == fleet.NUDGE_TEXT and prompt.source == "codex" for prompt in prompts
+            ), [(prompt.text, prompt.source) for prompt in prompts]
+            assert fleet.NUDGE_TEXT not in screen(manager.pane_id).splitlines()[-4:], (
+                "nothing left unsent in its prompt"
+            )
+        finally:
+            if srv.has_session(fleet.session_name(fleet.ensure_codename(project).codename or "")):
+                srv.run("kill-server")
             server.shutdown()
             thread.join(timeout=2)

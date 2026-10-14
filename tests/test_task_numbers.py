@@ -236,6 +236,37 @@ def test_tasks_an_older_build_adds_unnumbered_are_numbered_on_the_next_open(
         assert {t.key: t.number for t in store.team_tasks(here.id)}["fourth"] == 4
 
 
+def test_a_v30_store_an_earlier_build_of_this_line_made_gets_the_board_stamps_index_on_open(
+    work_dir: Path,
+) -> None:
+    """Integrate #3: rc/0.8.1 put ``team_event_project_created`` into its v26 step after this
+    line had stamped stores v30 without it, and added no version. The presence pass checks
+    every product at every open, so such a store gets the index at its next open, with its
+    task numbers and their index as they were and its version still 30."""
+    here = _board(work_dir)
+    first = _add(here, "a")
+    raw = sqlite3.connect(str(paths.db_path()))
+    try:
+        raw.execute("DROP INDEX team_event_project_created")  # this line's v30, before the merge
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 30
+    finally:
+        raw.close()
+
+    open_store().close()
+
+    raw = sqlite3.connect(str(paths.db_path()))
+    try:
+        indexes = {name for (name,) in raw.execute("SELECT name FROM sqlite_master")}
+        version = raw.execute("PRAGMA user_version").fetchone()[0]
+    finally:
+        raw.close()
+    assert {"team_event_project_created", "team_task_number"} <= indexes
+    assert version == 30
+    with store_session() as store:
+        assert store.missing_schema() == []
+        assert _number(store.get_task(first.id)) == 1
+
+
 # --- resolution -------------------------------------------------------------------------
 
 

@@ -604,6 +604,43 @@ def _number_existing_tasks(connection: sqlite3.Connection) -> None:
     )
 
 
+def _number_unnumbered_tasks(connection: sqlite3.Connection) -> None:
+    """Every task stored without a number gets one on open: its board's highest plus one,
+    in the order the tasks were added (``created_at``, the id breaking a tie).
+
+    v29's backfill numbers what a store holds when the column is added, and only then. A
+    build from before v29 opens a v30 store without complaint and inserts with ``number``
+    NULL, so the tasks it adds would show an id tail and an empty ``#`` for good (review
+    of #261, m6). Each one is numbered as an add here numbers it (:meth:`SqliteStore.
+    upsert_task`), under the write lock, so a racing add or opener cannot take the same
+    number. A store with every task numbered pays two reads, and a store without
+    ``team_task`` (doctor's damaged-store case) is left to be described.
+    """
+    query = "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'team_task'"
+    if connection.execute(query).fetchone() is None:
+        return
+    query = "SELECT 1 FROM team_task WHERE number IS NULL LIMIT 1"
+    if connection.execute(query).fetchone() is None:
+        return
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        unnumbered = connection.execute(
+            "SELECT id FROM team_task WHERE number IS NULL ORDER BY created_at, id"
+        ).fetchall()
+        for row in unnumbered:
+            connection.execute(
+                "UPDATE team_task SET number = (SELECT COALESCE(MAX(number), 0) + 1 "
+                "FROM team_task AS board WHERE board.project_id = team_task.project_id) "
+                "WHERE id = ?",
+                (row[0],),
+            )
+        connection.execute("COMMIT")
+    except sqlite3.Error:
+        with contextlib.suppress(sqlite3.Error):
+            connection.execute("ROLLBACK")
+        raise
+
+
 #: Backfills that belong to a column, keyed ``(table, column)``. Each runs in the
 #: transaction that adds its column, right after the ALTER, and only when the
 #: column was actually added: by its step on the ladder or by
@@ -4278,6 +4315,7 @@ def _migrate(connection: sqlite3.Connection) -> None:
     ``onboarded_at``, which a store stamped 17 by #113 does not have. After the
     last, because a store stamped current never enters the loop, including one
     that a build without this pass carried to current past a step it skipped.
+    Then :func:`_number_unnumbered_tasks` numbers any task an older build added.
     """
     while True:
         if int(connection.execute("PRAGMA user_version").fetchone()[0]) >= len(_MIGRATIONS):
@@ -4296,16 +4334,16 @@ def _migrate(connection: sqlite3.Connection) -> None:
             with contextlib.suppress(sqlite3.Error):
                 connection.execute("ROLLBACK")
             raise
-    if not _steps_missing(connection, len(_MIGRATIONS)):
-        return
-    try:
-        connection.execute("BEGIN IMMEDIATE")
-        _converge_by_presence(connection, len(_MIGRATIONS))
-        connection.execute("COMMIT")
-    except sqlite3.Error:
-        with contextlib.suppress(sqlite3.Error):
-            connection.execute("ROLLBACK")
-        raise
+    if _steps_missing(connection, len(_MIGRATIONS)):
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            _converge_by_presence(connection, len(_MIGRATIONS))
+            connection.execute("COMMIT")
+        except sqlite3.Error:
+            with contextlib.suppress(sqlite3.Error):
+                connection.execute("ROLLBACK")
+            raise
+    _number_unnumbered_tasks(connection)
 
 
 #: The suffixes of the shadow tables FTS5 keeps a table's index in, ``entry_fts_data``

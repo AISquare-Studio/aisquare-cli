@@ -180,6 +180,64 @@ def test_a_store_from_before_numbers_gets_them_per_board_in_the_order_tasks_were
         assert _number(store.get_task(added["late"])) == 3
 
 
+def test_tasks_an_older_build_adds_unnumbered_are_numbered_on_the_next_open(
+    work_dir: Path, other_dir: Path
+) -> None:
+    """Review of #261, m6: a build from before numbers opens a v30 store and inserts with
+    ``number`` NULL. The next open numbers those tasks after the board's highest, in the
+    order they were added, so none is left with an id tail and an empty ``#`` for good."""
+    here, there = _board(work_dir), _board(other_dir)
+    for key in ("a", "b", "c"):
+        _add(here, key)  # #1-#3, then the older build adds five
+    start = datetime(2026, 10, 2, tzinfo=UTC)
+    older = {  # ids sort one way, the times another: the order ADDED numbers
+        "fourth": (here, "tsk_zz", 1),
+        "sixth": (here, "tsk_aa", 3),
+        "fifth": (here, "tsk_mm", 2),
+        "eighth": (here, "tsk_bb", 5),
+        "seventh": (here, "tsk_yy", 4),
+        "elsewhere": (there, "tsk_cc", 1),
+    }
+    raw = sqlite3.connect(str(paths.db_path()))
+    try:
+        raw.executemany(  # the INSERT a build from before v29 runs: no number
+            "INSERT INTO team_task (id, project_id, key, title, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (prefix + new_task_id()[6:], project.id, key, key, when, when)
+                for key, (project, prefix, minutes) in older.items()
+                for when in [(start + timedelta(minutes=minutes)).isoformat()]
+            ],
+        )
+        raw.commit()
+        unnumbered = raw.execute("SELECT COUNT(*) FROM team_task WHERE number IS NULL")
+        assert unnumbered.fetchone()[0] == 6
+    finally:
+        raw.close()
+
+    with store_session() as store:  # the next open, by this build
+        numbers = {t.key: t.number for t in store.team_tasks(here.id)}
+        fresh, _ = store.upsert_task(_task(here.id, "ninth"))
+        elsewhere = [t.number for t in store.team_tasks(there.id)]
+    assert numbers == {
+        "a": 1,
+        "b": 2,
+        "c": 3,
+        "fourth": 4,
+        "fifth": 5,
+        "sixth": 6,
+        "seventh": 7,
+        "eighth": 8,
+    }
+    assert fresh.number == 9
+    assert elsewhere == [1]  # per board
+    open_store().close()  # opened again: nothing renumbered
+    with store_session() as store:
+        assert {t.key: t.number for t in store.team_tasks(here.id)}["fourth"] == 4
+
+
+# --- resolution -------------------------------------------------------------------------
+
 
 def test_a_number_names_the_task_on_the_callers_board_first(
     work_dir: Path, other_dir: Path, runner: CliRunner

@@ -509,7 +509,7 @@ def emit_config_overrides(overrides: Mapping[str, Any]) -> None:
 
 
 def emit_config_reset(config: Path, backup: Path | None) -> None:
-    """Report ``config reset``: where the user's file went, or that there was none to move."""
+    """Report ``config reset``: where the user's file went, or that there was nothing to reset."""
     if get_state().json_output:
         payload = {"config": str(config), "reset": backup is not None, "backup": None}
         if backup is not None:
@@ -517,7 +517,8 @@ def emit_config_reset(config: Path, backup: Path | None) -> None:
         typer.echo(json.dumps(payload))
     elif backup is None:
         stdout_console().print(
-            f"nothing to reset: there is no {config}, so every setting is at its system default"
+            f"nothing to reset: {config} holds no setting, so every setting is at its "
+            "system default"
         )
     else:
         stdout_console().print(

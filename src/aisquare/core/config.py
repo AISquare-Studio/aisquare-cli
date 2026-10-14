@@ -512,15 +512,41 @@ _MIGRATIONS: tuple[Callable[[dict[str, Any]], None], ...] = (
 )
 
 
+#: The top-level keys every release up to 0.8.1 wrote into the file whatever their value,
+#: and that this build writes only when changed: a file holding all three was written whole.
+_WRITTEN_WHOLE_BY = ("profile", "api_url", "default_pool")
+
+
+def _written_whole(data: dict[str, Any]) -> bool:
+    """Whether ``data`` is a file a release before the layers saved, every setting written out.
+
+    Such a release keeps a higher ``config_version`` it finds (it does not know the
+    version's steps, and must not undo them), so a version-2 file one of them saved again
+    — an older install sharing ``~/.aisquare``, or a move back and forth — says 2 while
+    holding every value that release's defaults gave it. A version cannot record that; the
+    file's shape can. This build never writes ``profile``, ``api_url`` and
+    ``default_pool`` at their defaults, and those releases always wrote all three.
+    """
+    return all(key in data for key in _WRITTEN_WHOLE_BY)
+
+
 def _migrate(data: dict[str, Any]) -> None:
     """Bring a parsed config file to :data:`CONFIG_VERSION`, in place: every step of
     :data:`_MIGRATIONS` from the file's own version on. The version is taken out, not
-    being a setting."""
+    being a setting.
+
+    A file at version 2 or later that an older release has saved again whole
+    (:func:`_written_whole`) takes the version-1 step once more: taken as written, that
+    release's defaults — ``pick = "default"``, ``on_limit = "wait"`` — would read as the
+    user's own choices from then on (review of #261, M2). The next save writes it sparse.
+    """
     version = data.pop(_VERSION_KEY, None)
     if not isinstance(version, int) or isinstance(version, bool) or version < 0:
         version = 0
     for step in _MIGRATIONS[version:]:
         step(data)
+    if version >= len(_MIGRATIONS) and _written_whole(data):
+        _keep_only_what_v1_did_not_write_by_default(data)
 
 
 def _versioned(dumped: dict[str, Any]) -> dict[str, Any]:
@@ -693,6 +719,74 @@ def _overrides(
         else:
             kept[key] = value
     return kept
+
+
+def _with_whole_role_tables(sparse: dict[str, Any], full: dict[str, Any]) -> dict[str, Any]:
+    """``sparse``, with every ``[fleet.roles.<role>]`` table of ``full`` written whole.
+
+    A release before the layers (0.8.1 and earlier) reads the file as it stands, not over
+    the defaults. Given one key of one role, it took ``fleet.roles`` to be that role
+    alone: the reviewer launched there without ``--disallowedTools`` and every coder in
+    the main checkout (review of #261, M2). Whole, every role reads the same in either
+    build; everything else stays sparse, where an older build's own defaults apply. The
+    price: a later change to a role's default reaches a saved file only through a step
+    of :data:`_MIGRATIONS`, as the reviewer's did.
+    """
+    fleet = full.get("fleet")
+    roles = fleet.get("roles") if isinstance(fleet, dict) else None
+    if not isinstance(roles, dict) or not roles:
+        return sparse
+    whole = dict(sparse)
+    whole["fleet"] = {**sparse.get("fleet", {}), "roles": roles}
+    return whole
+
+
+def _flat(values: dict[str, Any], prefix: str = "") -> dict[str, Any]:
+    """``values`` as dotted keys to their leaf values: ``{"accounts.pick": "headroom", …}``."""
+    flat: dict[str, Any] = {}
+    for key, value in values.items():
+        if isinstance(value, dict) and value:
+            flat.update(_flat(value, f"{prefix}{key}."))
+        else:
+            flat[f"{prefix}{key}"] = value
+    return flat
+
+
+def defaults_a_whole_file_reader_lacks(config: AppConfig) -> list[tuple[str, Any, Any]]:
+    """The settings ``config`` takes from a system default that version 1 had otherwise:
+    ``(key, today's default, version 1's)`` for each, in the file's order.
+
+    What a release that reads the file without the defaults under it (0.8.1 and earlier)
+    reads differently from a file this build saved: the file says nothing of them, so
+    that release applies its own default (``accounts.pick``: ``default``, not
+    ``headroom``). A value the user set is in the file and reads the same in both.
+    """
+    today, then, ours = _flat(system_defaults()), _flat(_V1_DEFAULTS), _flat(_dumped(config))
+    return [
+        (key, value, then[key])
+        for key, value in today.items()
+        if key in then and then[key] != value and ours.get(key) == value
+    ]
+
+
+def holds_a_setting(path: Path | None = None) -> bool:
+    """Whether the file at ``path`` (default: the standard location) holds anything a reset
+    would undo: a value that is not the system default, or a key this build does not know.
+
+    Not whether a file is there: every save leaves one, holding at least its
+    ``config_version`` and the whole role tables, and a reset of that kept a backup of
+    nothing and said the user's settings were in it (review of #261, m8). A file that
+    cannot be read holds something, and resetting it is the repair.
+    """
+    target = Path(os.path.realpath(path or paths.config_path()))
+    try:
+        data = _parse_toml(despite_windows_contention(target.read_bytes))
+    except FileNotFoundError:
+        return False
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+        return True
+    _migrate(data)
+    return bool(_overrides(data, system_defaults()))
 
 
 def _overlay(defaults: Any, layer: Any) -> Any:
@@ -962,7 +1056,7 @@ def save_config(
             dumped = _keep_unknown(existing, dumped, config)
     # Kept in full until here: _keep_unknown follows the model into every section, and
     # a section at its defaults may still hold keys this build does not know.
-    dumped = _overrides(dumped, system_defaults(), config)
+    dumped = _with_whole_role_tables(_overrides(dumped, system_defaults(), config), dumped)
     # What this writes is this build's, at the version every step has reached (_migrate).
     payload = tomli_w.dumps(_versioned(dumped))
 
@@ -1021,9 +1115,10 @@ def reset_config(path: Path | None = None) -> Path | None:
     The file at ``path`` (default: the standard location) moves aside to
     ``config.toml.bak-<UTC stamp>`` beside it — a ``-2``, ``-3`` after the stamp when
     that name is taken — and nothing takes its place, so everything loads as the system
-    default (:func:`load_config`). Moving it back undoes the reset. Nothing to move — no
-    file, or a reset already made since the last change — returns ``None``. The file is
-    not read, so one that no longer parses is reset like any other.
+    default (:func:`load_config`). Moving it back undoes the reset. Nothing to reset — no
+    file, or one that holds no setting (:func:`holds_a_setting`), such as a reset or a
+    save of the defaults leaves — returns ``None`` and moves nothing. One that no longer
+    parses is reset like any other.
 
     Through a symlink the file it points at is copied aside and emptied, never the link
     moved: moved, the next save would put a regular file where it was, the severed
@@ -1031,7 +1126,7 @@ def reset_config(path: Path | None = None) -> Path | None:
     """
     target = path or paths.config_path()
     written = Path(os.path.realpath(target))
-    if not written.is_file():
+    if not written.is_file() or not holds_a_setting(target):
         return None
     stamp = datetime.now(UTC).strftime(_BACKUP_STAMP)
     backup = target.with_name(f"{target.name}.bak-{stamp}")

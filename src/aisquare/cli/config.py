@@ -94,7 +94,10 @@ def reset(
     unless --yes, and under --json without --yes it changes nothing.
     """
     config = settings_service.config_path()
-    if not yes and config.exists():
+    if not settings_service.anything_to_reset():
+        emit_config_reset(config, None)  # nothing to ask about, and nothing to back up
+        return
+    if not yes:
         if get_state().json_output:
             emit_config_reset(config, None)
             return

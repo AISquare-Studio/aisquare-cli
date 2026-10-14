@@ -285,7 +285,9 @@ def test_a_reviewer_saved_with_the_former_restricted_default_loads_with_a_shell(
     assert reviewer.worktree is True, "only the old default goes; the rest stays as saved"
     save_config(loaded, target)
     saved = tomllib.loads(target.read_text(encoding="utf-8"))
-    assert "fleet" not in saved, "today's default, which a save no longer writes out"
+    assert saved["fleet"]["roles"]["reviewer"]["extra_args"] == list(REVIEWER_ARGS), (
+        "today's default, in the reviewer's table written whole for older builds"
+    )
     assert load_config(target).fleet.roles["reviewer"].extra_args == list(REVIEWER_ARGS)
 
 

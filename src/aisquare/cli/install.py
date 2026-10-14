@@ -76,6 +76,8 @@ def _plan_json(plan: lifecycle_service.UpgradePlan) -> dict[str, Any]:
         "live_agents": list(plan.live_agents),
         "fleet_error": plan.fleet_error,
         "remote": plan.remote,
+        # The settings a move back reads from that release's defaults, not this one's.
+        "config_defaults_lost": list(plan.config_defaults_lost),
     }
 
 
@@ -193,14 +195,16 @@ def _emit_plan(plan: lifecycle_service.UpgradePlan) -> None:
 
 
 def _fleet_lines(plan: lifecycle_service.UpgradePlan) -> None:
-    """The live fleet and a Remote on elsewhere, said before anything is installed: in the
-    plan, and under --yes."""
+    """The live fleet, a Remote on elsewhere, and what a move back reads otherwise in
+    config.toml, said before anything is installed: in the plan, and under --yes."""
     if plan.fleet_warning is not None:
         _say(f"⚠ {plan.fleet_warning}")
     elif plan.fleet_error is not None:
         _say(f"⚠ the fleet's agents could not be counted ({plan.fleet_error}); make sure none run")
     if plan.remote_warning is not None:
         _say(f"⚠ {plan.remote_warning}")
+    if plan.config_warning is not None:
+        _say(f"⚠ {plan.config_warning}")
 
 
 def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
@@ -229,6 +233,7 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
                 "hooks_left": [_site_json(site) for site in plan.left],
                 "live_agents": list(plan.live_agents),
                 "remote": plan.remote,
+                "config_defaults_lost": list(plan.config_defaults_lost),
                 "notes": list(report.notes),
             }
         )

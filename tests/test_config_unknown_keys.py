@@ -199,6 +199,6 @@ def test_an_unknown_field_inside_a_role_entry_survives_and_a_removed_entry_stays
     assert coder["account"] == "4", "the edit to the entry did not land"
     assert "tester" not in team["profiles"], "a removed entry came back"
     assert fleet["roles"]["coder"]["persona"] == "architect"
-    assert "worktree" not in fleet["roles"]["coder"], "the coder's default, not written out"
+    assert fleet["roles"]["coder"]["worktree"] is True, "the coder's table, written whole"
     assert load_config(target).fleet.roles["coder"].worktree is True
     assert data["future_section"] == {"kept": 1}

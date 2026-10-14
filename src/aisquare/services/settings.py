@@ -27,10 +27,19 @@ def overrides() -> dict[str, Any]:
 def reset_settings() -> Path | None:
     """Every setting back to its system default; returns where the user's file was moved.
 
-    ``None`` when there was no file to move: every setting is at its default already.
-    See ``core.config.reset_config``.
+    ``None`` when there was nothing to reset — no file, or one that holds no setting —
+    and nothing moved: every setting is at its default already. See
+    ``core.config.reset_config``.
     """
     return core_config.reset_config()
+
+
+def anything_to_reset() -> bool:
+    """Whether the user's file holds a setting a reset would undo.
+
+    See ``core.config.holds_a_setting``.
+    """
+    return core_config.holds_a_setting()
 
 
 def get_value(key: str) -> str:

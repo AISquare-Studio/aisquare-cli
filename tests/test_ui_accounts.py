@@ -2741,8 +2741,8 @@ def test_the_row_says_how_long_the_window_has_at_the_current_pace(
         recorded.append(account.slot)
         return real_usage(account, **kwargs)
 
-    # The tick fetches through `read_usage(record=False)` and records in one store
-    # session of its own (third round): the reading is spied, the sample is checked below.
+    # The tick fetches through `cached_usage`, whose round records every answered reading
+    # in one store session (third round): the reading is spied, the sample is checked below.
     monkeypatch.setattr(accounts_service, "usage", usage_spy)
     monkeypatch.setattr(
         accounts_service, "usage_trend", lambda slot, latest, **kwargs: trends.get(slot)
@@ -2758,7 +2758,7 @@ def test_the_row_says_how_long_the_window_has_at_the_current_pace(
 
     one, two = drive(go, overview=overview)
     assert sorted(recorded) == [1, 2]  # every signed-in slot was read…
-    with store_session() as store:  # …and SAMPLED, in the page's one store open
+    with store_session() as store:  # …and SAMPLED, in the round's one store open
         assert len(store.usage_samples(1, since=NOW - timedelta(days=1))) == 1
         assert len(store.usage_samples(2, since=NOW - timedelta(days=1))) == 1
     assert "▮▮▮▯▯ 60%" in one and "≈ 1.3 h to the limit" in one

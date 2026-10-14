@@ -1328,10 +1328,12 @@ def test_reorder_and_move_read_the_registry_once(
     assert len(reads) == 1
 
 
-def test_the_pages_tick_opens_the_store_once_for_every_sample_and_trend(
+def test_the_pages_read_opens_the_store_three_times_however_many_accounts(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Eight opens a minute for four accounts before: one now (third round)."""
+    """Eight opens a minute for four accounts before (third round). The page's read
+    (``cached_usage_with_trends``) opens it once to look in the cache, once to record what
+    it fetched and once for every trend, whatever the number of accounts."""
     import contextlib
 
     a = _slot("work@example.com", "tok-work")
@@ -1350,9 +1352,9 @@ def test_the_pages_tick_opens_the_store_once_for_every_sample_and_trend(
             yield store
 
     monkeypatch.setattr("aisquare.services.claude_accounts.store_session", counted_session)
-    fetched = service.read_usage_with_trends([a, b], now=NOW, fetch=fetch)
+    fetched = service.cached_usage_with_trends([a, b], now=NOW, fetch=fetch)
 
-    assert opens == [1]
+    assert opens == [1, 1, 1]
     assert fetched[a.slot][0].session_percent == 40 and fetched[b.slot][0].session_percent == 60
     trend = fetched[a.slot][1]
     assert trend is not None and trend.per_hour == pytest.approx(40.0)  # 20 → 40 in 30 min
@@ -1395,9 +1397,6 @@ def test_a_recording_usage_round_opens_the_store_once_on_the_callers_thread(
         assert len(store.usage_samples(a.slot, since=since)) == 1
         assert len(store.usage_samples(b.slot, since=since)) == 1
         assert store.usage_samples(c.slot, since=since) == []
-    opens.clear()
-    service.read_usage([a], now=NOW, fetch=fetch, record=False)
-    assert opens == []  # the page's path records in a session of its own
 
 
 def test_the_board_and_watch_name_an_aliased_slot_1_as_the_rest_does(
@@ -1643,7 +1642,8 @@ def test_doctor_live_headroom_counts_a_spent_week_as_over_the_line(
 def test_doctor_live_and_the_page_read_every_account_in_one_round(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Both go through ``read_usage``, once, with every account (review of #205, finding 11)."""
+    """Both go through ``read_usage``, once, with every account (review of #205, finding 11);
+    the page through the shared cache, which doctor's live round has just filled."""
     _slot("work@example.com", "tok-work")
     _slot("personal@example.com", "tok-personal")
     monkeypatch.setattr(
@@ -1664,10 +1664,12 @@ def test_doctor_live_and_the_page_read_every_account_in_one_round(
 
     rounds.clear()
     accounts = [a for a in service.list_accounts() if a.slot != 1]
-    fetched = service.read_usage_with_trends(accounts)  # what the page's usage worker runs
-    assert rounds == [[2, 3]]
+    fetched = service.cached_usage_with_trends(accounts)  # what the page's usage worker runs
+    assert rounds == []  # doctor's round was recorded: the page is served it
     assert fetched[2][0].session_percent == 10 and fetched[3][0].session_percent == 20
     assert fetched[2][1] is not None  # the reading was recorded, so a trend object exists
+    service.cached_usage_with_trends(accounts, force=True)  # ↻ Refresh usage
+    assert rounds == [[2, 3]]
 
 
 def test_the_accounts_section_defaults_and_round_trips_through_config_set(

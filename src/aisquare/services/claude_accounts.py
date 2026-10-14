@@ -965,12 +965,12 @@ def read_usage(
     *,
     now: datetime | None = None,
     fetch: Fetch | None = None,
-    record: bool = True,
 ) -> dict[int, ClaudeUsage]:
     """Every account's reading, RECORDED, read concurrently: one round trip, not one per account.
 
-    The one reader behind a headroom pick, ``accounts usage``, ``list --usage``
-    and ``doctor --live`` (review of #205, finding 11): four accounts and a slow
+    The one fetcher behind every usage surface — a hand-over's pick and
+    ``doctor --live`` call it directly, everything else through
+    :func:`cached_usage` (review of #205, finding 11): four accounts and a slow
     endpoint cost one ``USAGE_TIMEOUT_SECONDS``, not four. A reader that raises
     costs its own slot a reading, never the others'.
 
@@ -978,11 +978,8 @@ def read_usage(
     store session, after the round. Recorded by each thread, a headroom pick —
     every launch under ``pick = "headroom"``, every hand-over — was up to four
     concurrent writers on ``context.db``'s one write lock, on the launch path
-    (review of #205, fourth round; :func:`read_usage_with_trends` had the same
-    shape from the third). Best effort, as :func:`sample_usage` is: a store
-    that cannot be opened costs the history, never the readings.
-    ``record=False`` fetches without touching the store, for a caller that
-    records in a session of its own (:func:`read_usage_with_trends`).
+    (review of #205, fourth round). Best effort, as :func:`sample_usage` is: a
+    store that cannot be opened costs the history, never the readings.
     """
     if not accounts:
         return {}
@@ -999,40 +996,11 @@ def read_usage(
                     available=False, reason=f"usage read failed ({type(exc).__name__})"
                 )
     answered = [account for account in accounts if readings[account.slot].available]
-    if record and answered:
+    if answered:
         with contextlib.suppress(sqlite3.Error), store_session() as store:
             for account in answered:
                 _record_sample(store, account, readings[account.slot], now)
     return readings
-
-
-def read_usage_with_trends(
-    accounts: Sequence[ClaudeAccount], *, now: datetime | None = None, fetch: Fetch | None = None
-) -> dict[int, tuple[ClaudeUsage, UsageTrend | None]]:
-    """The Accounts page's tick: every reading, recorded, and its trend — ONE store open.
-
-    ``read_usage`` fetches without recording (the network part, concurrent),
-    then one session writes every sample and reads every trend; before, each
-    reader thread opened the store to write and each trend opened it again to
-    read, eight opens a minute for four accounts (review of #205, third round).
-    A store that cannot be opened costs the trends, never the readings.
-    """
-    readings = read_usage(accounts, now=now, fetch=fetch, record=False)
-    unread = ClaudeUsage(available=False, reason="no reading")
-    result: dict[int, tuple[ClaudeUsage, UsageTrend | None]] = {}
-    try:
-        with store_session() as store:
-            for account in accounts:
-                reading = readings.get(account.slot) or unread
-                if reading.available:
-                    _record_sample(store, account, reading, now)
-                result[account.slot] = (
-                    reading,
-                    usage_trend(account.slot, reading, now=now, store=store),
-                )
-    except sqlite3.Error:
-        return {a.slot: (readings.get(a.slot) or unread, None) for a in accounts}
-    return result
 
 
 # --- the shared five-minute cache -------------------------------------------------------------
@@ -1181,7 +1149,7 @@ def cached_usage_with_trends(
     the page's *Refresh usage*); the trends are read from the recorded history,
     which every fetch here still records, in ONE store session after the
     readings. A store that cannot be opened costs the trends, never the
-    readings, as in :func:`read_usage_with_trends`.
+    readings.
     """
     readings = cached_usage(accounts, max_age=max_age, force=force, now=now, fetch=fetch)
     try:

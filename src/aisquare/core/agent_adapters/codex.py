@@ -181,6 +181,7 @@ class CodexAdapter:
         positional_prompt=True,
         first_context_file_only=True,
         sandbox_permissions=True,
+        tool_shell_env="CODEX_THREAD_ID",
         value_options=frozenset(
             {
                 "--model",

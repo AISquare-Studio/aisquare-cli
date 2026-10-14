@@ -92,10 +92,14 @@ class AgentCapabilities:
     thread lives in its home and the replacement starts fresh with a hand-off prompt."""
     pid_env: str | None = None
     """The variable in which the agent hands each hook its own pid (Claude Code's
-    ``CLAUDE_PID``): the process identity ``services.team`` binds a fleet row to. Without
-    one, the row's launch tokens and the start's ``source`` stand in (rule 1 of the
-    fleet-row section), and any such variable in the hook's environment is another
-    process's, inherited."""
+    ``CLAUDE_PID``): the process identity ``services.team`` binds a fleet row to. Any such
+    variable a hook of another agent finds is some other process's, inherited."""
+    tool_shell_env: str | None = None
+    """The variable the agent sets in the shells its tools run in, and never in its own
+    hooks (Codex's ``CODEX_THREAD_ID``, measured on 0.162.1): a hook that finds it set
+    belongs to a process one of those tools started (a nested ``codex exec``), never to
+    the agent ``aisquare launch`` started, which clears it (``core.agent_sessions.
+    own_process``; rule 1 of ``services.team``'s fleet-row section)."""
     exports_home_env: bool = True
     """A launch sets :attr:`AgentAdapter.home_env` to the config dir it resolved; Claude
     Code's ``CLAUDE_CONFIG_DIR`` stays as the shell or the binding wrote it."""

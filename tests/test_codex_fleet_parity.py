@@ -4,7 +4,9 @@ Every hook here goes through Codex's own decoder (``services.agent_events.handle
 payloads shaped as Codex 0.162.1 sends them, measured against the real binary (the
 loopback fixture in ``tests/test_codex_native.py`` covers the same paths live): a
 ``/clear`` fires NO ``SessionEnd`` for the thread it leaves, only ``SessionStart(source=
-clear)`` for a new id, from the same process, under the same launch variables.
+clear)`` for a new id, from the same process, under the same launch variables; and
+Codex sets ``CODEX_THREAD_ID`` in its tools' shells, never in its own hooks, so a
+``codex exec`` one of its tools runs fires every hook with the parent's thread there.
 
 A Codex hook has no pid of the agent's own. The ``CLAUDE_PID`` a Codex hook finds is
 whoever started the tmux server's — a Claude Code session's as often as not — so every
@@ -13,6 +15,7 @@ test here runs with a stale one in the environment, which must decide nothing.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from datetime import UTC, datetime
 from importlib import import_module
@@ -35,7 +38,7 @@ from aisquare.core.config import (
 )
 from aisquare.core.store import SqliteStore, store_session
 from aisquare.models import FleetAgent, ProjectInfo, TeamSession, TeamTask
-from aisquare.services import agent_events, auto_mode
+from aisquare.services import agent_events, agent_launch, auto_mode
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from tests import fakebin
@@ -95,12 +98,20 @@ class Codex:
         server.pids[agent.pane_id] = PANE_PID
         self.become()
 
-    def become(self, *, launch: str | None = None) -> None:
-        """Run under the row's window: its variables, a launch id, a stale CLAUDE_PID."""
+    def become(self) -> None:
+        """Run as the agent itself: the window's variables, a stale CLAUDE_PID, and no
+        tool-shell marker, which ``aisquare launch`` clears for the agent it starts."""
         self.monkeypatch.setenv("AISQUARE_FLEET_AGENT", self.agent.id)
-        self.monkeypatch.setenv("AISQUARE_LAUNCH_ID", launch or self.launch)
+        self.monkeypatch.setenv("AISQUARE_LAUNCH_ID", self.launch)
         self.monkeypatch.setenv("AISQUARE_ROLE", "coder")
         self.monkeypatch.setenv("CLAUDE_PID", STALE_CLAUDE_PID)
+        self.monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+
+    def child(self, parent_native: str) -> None:
+        """Run as a ``codex exec`` one of the agent's tools started: the same window
+        variables, and the parent's thread in ``CODEX_THREAD_ID``."""
+        self.become()
+        self.monkeypatch.setenv("CODEX_THREAD_ID", parent_native)
 
     def board_id(self, native: str) -> str:
         return agent_events.session_key(CODEX, self.home, native)
@@ -172,15 +183,16 @@ def test_a_nested_codex_under_the_window_takes_neither_the_row_nor_the_task(
     codex_agent: tuple[Codex, TeamTask],
 ) -> None:
     """A ``codex exec`` the agent runs inherits the window's variables, launch id
-    included, and starts ``startup`` (or ``resume``) — never ``clear``. Every newly
-    started session under the window used to rebind the row (``fleet-session:<row>``
-    took the newest start), so the child became the row with the claim left behind."""
+    included. Every newly started session under the window used to rebind the row
+    (``fleet-session:<row>`` took the newest start), so the child became the row with
+    the claim left behind; whatever start it reports, it takes nothing now."""
     codex, task = codex_agent
     first = codex.board_id("thread-one")
     codex.start("thread-one")
     team_service.claim_task(task.id, session_ref=first)
 
-    for source in ("startup", "resume"):
+    codex.child("thread-one")
+    for source in ("startup", "resume", "clear"):
         child = codex.start(f"child-{source}", source=source)
         assert "ASSIGNED TO YOU" not in child
 
@@ -192,43 +204,69 @@ def test_a_nested_codex_under_the_window_takes_neither_the_row_nor_the_task(
         assert (
             store.fleet_agent_for_session(codex.project.id, codex.board_id("child-resume")) is None
         )
+        assert store.get_meta(f"launch-session:{codex.launch}") == first, "MCP stays the agent's"
     assert [row.session_id for row in listed if row.id == codex.agent.id] == [first]
 
 
-def test_a_clear_from_another_launch_cannot_take_the_row(
+def test_the_agents_own_resume_to_an_earlier_thread_takes_the_row_and_its_launch_back(
     codex_agent: tuple[Codex, TeamTask],
 ) -> None:
-    """``source=clear`` alone proves nothing: a nested ``aisquare launch`` is a launch of
-    its own, and its interactive child's ``/clear`` is not the pane's."""
+    """Review r1 of #113, finding 6: a ``/resume`` to a thread the launch had already
+    seen left the launch (the MCP server's identity) and the row on the abandoned one,
+    and the MCP server's calls revived it and recorded claims under it. The pane's own
+    process goes back to its earlier thread with the row, the claims and the launch; a
+    late redelivery of a first start does not."""
     codex, task = codex_agent
-    first = codex.board_id("thread-one")
+    first, second = codex.board_id("thread-one"), codex.board_id("thread-two")
     codex.start("thread-one")
-    team_service.claim_task(task.id, session_ref=first)
-
-    codex.become(launch="launch-nested")
-    foreign = codex.start("thread-foreign", source="clear")
-
-    assert "ASSIGNED TO YOU" not in foreign
-    assert _row(codex.agent.id).session_id == first and _claimed_by(task.id) == first
-
-
-def test_an_early_prompt_of_the_cleared_thread_neither_takes_nor_loses_the_row(
-    codex_agent: tuple[Codex, TeamTask],
-) -> None:
-    """The race the other way round: a hook of the new thread that is not its start
-    arrives first. A prompt carries no ``source``, so it proves nothing and moves
-    nothing; the start that follows moves the row and the claims."""
-    codex, task = codex_agent
-    first = codex.board_id("thread-one")
-    codex.start("thread-one")
-    team_service.claim_task(task.id, session_ref=first)
-
-    codex.hook("UserPromptSubmit", "thread-two", prompt="early", turn_id="turn-early")
-    assert _row(codex.agent.id).session_id == first and _claimed_by(task.id) == first
-
     codex.start("thread-two", source="clear")
+    team_service.claim_task(task.id, session_ref=second)
+
+    codex.start("thread-one", source="startup")  # a late redelivery: nothing moves
+    with store_session() as store:
+        assert store.get_meta(f"launch-session:{codex.launch}") == second
+    back = codex.start("thread-one", source="resume")
+
+    assert _row(codex.agent.id).session_id == first and _claimed_by(task.id) == first
+    assert "You are the one working it" in back
+    with store_session() as store:
+        assert store.get_meta(f"launch-session:{codex.launch}") == first
+        assert store.get_meta(f"fleet-session:{codex.agent.id}") == first
+
+
+def test_an_early_prompt_of_the_cleared_thread_is_the_agent_s_and_a_child_s_is_not(
+    codex_agent: tuple[Codex, TeamTask],
+) -> None:
+    """A hook of the new thread that is not its start, arriving first, moves the row
+    when the agent's own process sends it (the bind lands a prompt early, as rule 1
+    lets it land one late); the same hook from a child's thread moves nothing."""
+    codex, task = codex_agent
+    first = codex.board_id("thread-one")
+    codex.start("thread-one")
+    team_service.claim_task(task.id, session_ref=first)
+
+    codex.child("thread-one")
+    codex.hook("UserPromptSubmit", "child-thread", prompt="nested", turn_id="turn-child")
+    assert _row(codex.agent.id).session_id == first and _claimed_by(task.id) == first
+
+    codex.become()
+    codex.hook("UserPromptSubmit", "thread-two", prompt="early", turn_id="turn-early")
     second = codex.board_id("thread-two")
     assert _row(codex.agent.id).session_id == second and _claimed_by(task.id) == second
+    codex.start("thread-two", source="clear")
+    assert _row(codex.agent.id).session_id == second and _claimed_by(task.id) == second
+
+
+def test_the_window_s_inherited_tool_marker_is_cleared_for_the_agent_launch_starts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A tmux server a Codex tool started hands ``CODEX_THREAD_ID`` to every window;
+    the agent ``aisquare launch`` starts there must not read as somebody's child."""
+    monkeypatch.setenv("CODEX_THREAD_ID", "a-manager-thread")
+    selected = agent_launch.resolve("coder", agent="codex", cwd=tmp_path)
+    env = dict(os.environ)
+    agent_launch.launch_identity(env, selected, None)
+    assert "CODEX_THREAD_ID" not in env
 
 
 # --- restart resumes the bound thread (acceptance 1) -------------------------------------
@@ -369,8 +407,8 @@ def test_a_fresh_codex_hand_over_is_adopted_by_the_replacements_first_start(
     codex.become()  # the old process's own SessionEnd, late
     codex.hook("SessionEnd", "thread-one", reason="other")
     assert _claimed_by(task.id) == second
-    # A nested child of the replacement is no first arrival and takes nothing.
-    replacement.become()
+    # A nested child of the replacement takes nothing.
+    replacement.child("thread-two")
     replacement.start("child", source="startup")
     assert _row(receipt.started.id).session_id == second and _claimed_by(task.id) == second
 
@@ -670,3 +708,30 @@ def test_an_intent_is_classifier_auto_only_where_its_approvals_are_auto() -> Non
         }
     )
     assert "coder" not in auto_mode.auto_roles(roles) and "tester" in auto_mode.auto_roles(roles)
+
+
+def test_every_read_of_a_row_names_its_own_session_over_its_launch_binding(
+    codex_agent: tuple[Codex, TeamTask],
+) -> None:
+    """Review r1 of #113, finding 7: ``fleet_agents`` (``fleet ls``, the sidebar) put the
+    launch's binding over a row's own session id while ``get_fleet_agent`` kept the
+    row's, so two reads of one row named two sessions. The row's own id comes first in
+    every read; the binding fills only a row that has none."""
+    codex, _ = codex_agent
+    codex.start("thread-one")
+    first = codex.board_id("thread-one")
+    with store_session() as store:
+        row = store.get_fleet_agent(codex.agent.id)
+        assert row is not None and row.session_id == first, "the launch's binding fills it"
+        store.upsert_fleet_agent(row.model_copy(update={"session_id": "its-own-id"}))
+        store.set_meta(f"fleet-session:{codex.agent.id}", "a-stale-binding")
+        listed = [
+            agent.session_id
+            for agent in store.fleet_agents(codex.project.id)
+            if agent.id == codex.agent.id
+        ]
+        got = store.get_fleet_agent(codex.agent.id)
+        by_session = store.fleet_agent_for_session(codex.project.id, "its-own-id")
+        stale = store.fleet_agent_for_session(codex.project.id, "a-stale-binding")
+    assert listed == ["its-own-id"] and got is not None and got.session_id == "its-own-id"
+    assert by_session is not None and by_session.id == codex.agent.id and stale is None

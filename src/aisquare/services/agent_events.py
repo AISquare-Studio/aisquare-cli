@@ -55,10 +55,10 @@ def handle(
         # These are exact launch tokens supplied by AISquare, never a search for
         # the newest transcript. Metadata may precede the fleet row without a race.
         with store_session() as store:
-            from aisquare.core.agent_sessions import bind_launch_session
+            from aisquare.core.agent_sessions import bind_launch_session, own_process
 
             if not adapter.capabilities.assigns_session_id:
-                bind_launch_session(store, session_id)
+                bind_launch_session(store, session_id, own=own_process(adapter))
             if cacheable:
                 pending = json.dumps(
                     {

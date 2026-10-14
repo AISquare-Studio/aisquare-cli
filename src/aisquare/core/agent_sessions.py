@@ -7,10 +7,14 @@ import os
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from time import time as _now
+from typing import TYPE_CHECKING
 
 from aisquare.core.orchestrator import lease_minutes
 from aisquare.core.store import ContextStore
 from aisquare.models import TeamSession
+
+if TYPE_CHECKING:
+    from aisquare.core.agent_adapters.types import AgentAdapter
 
 NATIVE_METADATA_TTL = 24 * 60 * 60
 METADATA_PRUNE_INTERVAL = 60
@@ -51,27 +55,43 @@ def launch_tokens() -> list[tuple[str, str]]:
     ]
 
 
-def fleet_binding(store: ContextStore, agent_id: str) -> str | None:
-    """The session first bound to fleet row ``agent_id``'s window (its launch's own)."""
-    return store.get_meta(f"{_FLEET}-session:{agent_id}")
+#: The ``SessionStart`` source of a session the agent went back to (``/resume``).
+RESUME_SOURCE = "resume"
 
 
-def started_under_this_launch(store: ContextStore, session_id: str) -> bool:
-    """Whether ``session_id`` STARTED under this process's ``AISQUARE_LAUNCH_ID``: the
-    same ``aisquare launch``, which every session of one agent process shares."""
-    token = os.environ.get("AISQUARE_LAUNCH_ID")
-    return bool(token) and store.get_meta(f"{_LAUNCH}-seen:{token}:{session_id}") is not None
+def own_process(adapter: AgentAdapter) -> bool | None:
+    """Whether this hook runs in the agent process ``aisquare launch`` started (``True``)
+    or in one a tool of some agent started (``False``) — for an agent that marks the
+    shells its tools run in (``capabilities.tool_shell_env``: Codex's ``CODEX_THREAD_ID``,
+    which its own hooks never see and a nested ``codex exec``'s always inherit, measured
+    on 0.162.1). ``None`` for an agent that does not."""
+    variable = adapter.capabilities.tool_shell_env
+    if variable is None:
+        return None
+    return not os.environ.get(variable)
 
 
-def bind_launch_session(store: ContextStore, session_id: str, *, started: bool = False) -> None:
+def bind_launch_session(
+    store: ContextStore,
+    session_id: str,
+    *,
+    started: bool = False,
+    source: str | None = None,
+    own: bool | None = None,
+) -> None:
     """Bind ``session_id`` to this process's launch tokens (:func:`launch_tokens`).
 
     The first session to send an event under a token is bound to it. A session that
     STARTS later under a launch token takes that binding over (a ``/clear`` is the
     launch's newest session), but never a fleet row's: a nested child inherits the
     window's ``AISQUARE_FLEET_AGENT`` as much as the agent's own ``/clear`` does, and
-    the row moves only with its claims (``services.team._adopt``).
+    the row moves only with its claims (``services.team._adopt``). A session started
+    before takes the launch back only when the launch's own process (``own``,
+    :func:`own_process`) went back to it (``source`` ``resume``): a late redelivery of
+    its first start must not. A hook ``own`` says a tool started binds nothing.
     """
+    if own is False:
+        return
     tokens = launch_tokens()
     if not tokens:
         if started:
@@ -97,6 +117,8 @@ def bind_launch_session(store: ContextStore, session_id: str, *, started: bool =
                         store.set_meta(binding, session_id)
                     elif current == session_id:
                         store.touch_meta(binding)
+                    elif own and source == RESUME_SOURCE and prefix != _FLEET:
+                        store.set_meta(binding, session_id)
             else:
                 store.set_meta_once(binding, session_id)
     if started:

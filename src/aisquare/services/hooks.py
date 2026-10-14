@@ -91,9 +91,17 @@ def session_start_context(
     record_trace_join(session_id)
     if session_id:
         with store_session() as store:
-            from aisquare.core.agent_sessions import bind_launch_session
+            from aisquare.core.agent_adapters import recorded_adapter
+            from aisquare.core.agent_sessions import bind_launch_session, own_process
 
-            bind_launch_session(store, session_id, started=True)
+            adapter = recorded_adapter(agent)
+            bind_launch_session(
+                store,
+                session_id,
+                started=True,
+                source=source,
+                own=own_process(adapter) if adapter is not None else None,
+            )
     with store_session() as store:
         project = active_project(store, cwd)
         entries = store.entries(project_id=project.id)

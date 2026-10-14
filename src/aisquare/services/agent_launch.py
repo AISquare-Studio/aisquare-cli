@@ -82,6 +82,12 @@ def launch_identity(env: dict[str, str], selected: ResolvedAgent, hub: Path | No
         env["AISQUARE_FLEET_AGENT"] = fleet
     env["AISQUARE_LAUNCH_ID"] = str(uuid.uuid4())
     env[LAUNCH_AGENT_ENV] = selected.adapter.id
+    # The agent started here is its own process, not one a tool started: the variable
+    # its kind marks its tools' shells with (Codex's CODEX_THREAD_ID), inherited from
+    # wherever this runs — a window of a tmux server a Codex tool started — would make
+    # its own hooks read as a nested child's (`agent_sessions.own_process`).
+    if selected.adapter.capabilities.tool_shell_env is not None:
+        env.pop(selected.adapter.capabilities.tool_shell_env, None)
     # Claude Code's CLAUDE_CONFIG_DIR stays as the shell or the binding wrote it.
     if selected.adapter.capabilities.exports_home_env:
         env[selected.adapter.home_env] = str(selected.config_dir)

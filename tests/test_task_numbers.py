@@ -180,8 +180,6 @@ def test_a_store_from_before_numbers_gets_them_per_board_in_the_order_tasks_were
         assert _number(store.get_task(added["late"])) == 3
 
 
-# --- resolution -------------------------------------------------------------------------
-
 
 def test_a_number_names_the_task_on_the_callers_board_first(
     work_dir: Path, other_dir: Path, runner: CliRunner
@@ -217,25 +215,77 @@ def test_a_number_names_the_task_on_the_callers_board_first(
     assert f"no task #7 on this board ({work_dir.name})" in said.stderr
 
 
-def test_a_bare_number_the_board_lacks_falls_back_to_an_id_tail(work_dir: Path) -> None:
-    """Today's behaviour, kept for a number the board does not have: board lines showed id
-    tails, and a tail of digits typed from one must still find its task."""
-    here = _board(work_dir)
+def _tailed(project: ProjectInfo, key: str, tail: str) -> TeamTask:
+    """A task whose id ends in ``tail``: what a number used to tail-match (review of #261)."""
     now = datetime.now(tz=UTC)
-    tailed = TeamTask(
-        id="tsk_0000000000aaaaaaaa77777777",
-        project_id=here.id,
-        key="tailed",
-        title="tailed",
+    task = TeamTask(
+        id=new_task_id()[: -len(tail)] + tail,
+        project_id=project.id,
+        key=key,
+        title=key,
         created_at=now,
         updated_at=now,
     )
     with store_session() as store:
-        store.upsert_task(tailed)  # #1
-        assert team_service.find_task(store, "1", here.id) == store.get_task(tailed.id)
-        assert team_service.find_task(store, "77777777", here.id) == store.get_task(tailed.id)
-        with pytest.raises(team_service.NoSuchTaskNumber):
-            team_service.find_task(store, "#77", here.id)  # `#` is a number, or nothing
+        stored, _ = store.upsert_task(task)
+    return stored
+
+
+def test_a_number_the_board_lacks_is_refused_never_looked_for_as_an_id_tail(
+    work_dir: Path, other_dir: Path
+) -> None:
+    """Review of #261, M1: a bare number missing from the board fell back to the id tail
+    lookup, which spans every board. Old board lines showed eight-character tails, which
+    are not numbers, so they still resolve; a number never does, here or elsewhere."""
+    here, there = _board(work_dir), _board(other_dir)
+    mine = _tailed(here, "mine", "77777777")  # #1, and its id ends in 7
+    _tailed(there, "theirs", "12")
+    with store_session() as store:
+        assert team_service.find_task(store, "1", here.id) == mine
+        assert team_service.find_task(store, "77777777", here.id) == mine  # a tail, not a number
+        for ref in ("12", "#12", "7", "#7"):  # another board's tail; this board's own
+            with pytest.raises(team_service.NoSuchTaskNumber, match=r"no task #\d+ on this board"):
+                team_service.find_task(store, ref, here.id)
+
+
+def test_a_number_never_moves_a_task_on_another_projects_board(
+    work_dir: Path,
+    other_dir: Path,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reviewer's repro: alpha has #1-#3, beta a task whose id ends in ``…12``. From
+    alpha, ``task done 12`` closed beta's task and exited 0. In this order every verb would
+    have moved it: claim, release, done, reopen, drop."""
+    from aisquare.services import fleet as fleet_service
+
+    _start(runner, CODER, work_dir, monkeypatch)
+    alpha, beta = _board(work_dir), _board(other_dir)
+    for key in ("a", "b", "c"):
+        _add(alpha, key)
+    theirs = _tailed(beta, "release the payments migration", "12")
+    refusal = f"✗ no task #12 on this board ({work_dir.name})"
+
+    for verb, extra in (
+        ("claim", []),
+        ("release", []),
+        ("done", []),
+        ("reopen", ["--reason", "again"]),
+        ("drop", []),
+    ):
+        for attributed in (["--as", CODER[:8]], []):
+            refused = runner.invoke(app, ["task", verb, "12", *extra, *attributed])
+            assert refused.exit_code == 1, (verb, attributed, refused.output)
+            assert refusal in refused.stderr, (verb, refused.stderr)
+    monkeypatch.setattr(mcp_server, "_ensure_virtual_session", lambda: CODER)
+    for action in ("done", "review", "block", "reopen", "release", "drop"):
+        with pytest.raises(Exception, match=r"no task #12 on this board"):
+            mcp_server.task_update("12", action, note="why")
+    with store_session() as store:
+        with pytest.raises(fleet_service.FleetError, match=r"no task #12 on this board"):
+            fleet_service._task_for(store, alpha, "12")  # never "belongs to another project"
+        assert store.get_task(theirs.id) == theirs  # not claimed, not closed, not dropped
+        assert store.recent_events(beta.id) == []
 
 
 def test_every_task_command_takes_a_number_and_says_it(

@@ -208,7 +208,8 @@ class DeliveryUnconfirmedError(RuntimeError):
 
 
 class NoSuchTaskNumber(KeyError):
-    """``#12`` names no task on the caller's board — said so, never looked for elsewhere."""
+    """``12`` / ``#12`` names no task on the caller's board — said so, never looked for
+    elsewhere."""
 
     def __init__(self, number: int, board: str) -> None:
         super().__init__(f"#{number}")
@@ -412,19 +413,21 @@ def find_task(store: ContextStore, ref: str, board_id: str) -> TeamTask | None:
     """The task ``ref`` names, a board number first: ``12`` or ``#12`` on ``board_id``.
 
     ``board_id`` is the CALLER's board (:func:`_caller_board_id`): numbers are per
-    project, so ``7`` means this board's seventh task, never another's. A bare number
-    the board does not have falls back to the id lookup it always was (a prefix, then a
-    tail: ``get_task``), so a tail typed from an old board line still resolves; ``#12``
-    never falls back — it can only be a number — and raises :class:`NoSuchTaskNumber`.
+    project, so ``7`` means this board's seventh task, never another's. A number the
+    board does not have, ``12`` or ``#12``, raises :class:`NoSuchTaskNumber` and is never
+    looked for as an id: the tail lookup (``get_task``) spans every board, so ``12``
+    would close whichever task's id happens to end in ``12``, here or on another
+    project's board (review of #261, M1). No real ref needs it: old board lines showed
+    eight-character tails, which :data:`TASK_NUMBER_REF` never matches. Anything else is
+    the id lookup it always was: a full id, a prefix, a tail.
     """
     number = task_number_of(ref)
-    if number is not None:
-        task = store.task_by_number(board_id, number)
-        if task is not None:
-            return task
-        if ref.strip().startswith("#"):
-            raise NoSuchTaskNumber(number, _board_of(store, board_id).name)
-    return store.get_task(ref)
+    if number is None:
+        return store.get_task(ref)
+    task = store.task_by_number(board_id, number)
+    if task is None:
+        raise NoSuchTaskNumber(number, _board_of(store, board_id).name)
+    return task
 
 
 def _caller_board_id(store: ContextStore, session: TeamSession | None, cwd: Path | None) -> str:
@@ -2304,6 +2307,7 @@ def _render_board(
     labels: Mapping[int, str] | Callable[[], Mapping[int, str]] | None = None,
 ) -> str:
     now = _now()
+    numbers = {t.id: t.number for t in tasks if t.number is not None}
     lines = ["<aisquare-team>"]
     if me is not None:
         lines.append(
@@ -2352,7 +2356,6 @@ def _render_board(
         )
         lines.append(f"tasks ({counts}):")
         statuses = {t.id: t.status for t in tasks}
-        numbers = {t.id: t.number for t in tasks if t.number is not None}
         for task in open_tasks[:_BOARD_TASKS]:
             claim = f" @{short_id(task.claimed_by)}" if task.claimed_by else ""
             waiting = unmet_needs(task, statuses)
@@ -2369,9 +2372,8 @@ def _render_board(
             lines.append(f"  … {len(open_tasks) - _BOARD_TASKS} more — `aisquare task list`")
     if events:
         roles = {s.id: s.role for s in sessions}
-        known = {t.id: t.number for t in tasks if t.number is not None}
         lines.append("recent updates:")
-        lines.extend(f"  - {event_line(event, roles, known)}" for event in events)
+        lines.extend(f"  - {event_line(event, roles, numbers)}" for event in events)
     if me is not None:
         lines += [
             "Protocol: check this board before starting work; teammate updates",

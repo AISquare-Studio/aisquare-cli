@@ -2518,20 +2518,26 @@ def _table_usage(account: ClaudeAccount) -> ClaudeUsage:
 
 
 def _columns_at(view: AccountsView) -> dict[str, list[tuple[int, int]]]:
-    """Each line's ``(x, width)`` per column — the header's first, then each row's — and the
-    action buttons' x, so the action column is held to the same rule."""
+    """Each line's ``(x, width)`` per data column — the header's first, then each row's — and
+    every button's, by id stem, so *Log in*'s column and the arranging buttons are held to
+    the same rule (``header-login`` is the header's gap over *Log in*)."""
     header = view.query_one("#claude-header")
     lines: dict[str, list[tuple[int, int]]] = {
-        "header": [(cell.region.x, cell.region.width) for cell in header.query(".cell")]
+        "header": [
+            (cell.region.x, cell.region.width)
+            for cell in header.query(".cell")
+            if not cell.has_class("col-login")
+        ],
+        "header-login": [(cell.region.x, cell.region.width) for cell in header.query(".col-login")],
     }
     for account_row in view.rows():
         spans = [
             (cell.region.x, cell.region.width)
             for cell in account_row.query(".cell")
-            if cell.parent is account_row
+            if cell.parent is account_row and not isinstance(cell, Button)
         ]
         lines[f"row {account_row.slot}"] = spans
-        for button in account_row.query(".account-actions Button"):
+        for button in account_row.query(Button):
             if button.visible:  # a hidden one keeps its place but has no region to measure
                 stem = (button.id or "").rsplit("-", 1)[0]
                 lines.setdefault(stem, []).append((button.region.x, button.region.width))
@@ -2575,29 +2581,72 @@ def test_the_table_lines_its_columns_up_on_every_row_whatever_the_values(
 
     out = asyncio.run(run())
     closed = out["closed"]
-    widths = [column.width for column in COLUMNS]
+    widths = [column.width for column in accounts_view.LAYOUT if column.key != "login"]
     for name, spans in closed.items():
         if name.startswith("account-"):  # one button on every row that offers it
             assert len(set(spans)) == 1, name  # the action column lines up too
+        elif name == "header-login":  # the gap over Log in is where Log in is
+            assert spans == closed["account-login"][:1], name
         else:
             assert spans == closed["header"], name  # every column at the header's x
             assert [width for _, width in spans] == widths, name
     starts = [x for x, _ in closed["header"]]
     assert starts == sorted(starts) and len(set(starts)) == len(starts)  # left to right
     assert out["heights"] == [1, 1, 1, 1]  # never wrapped onto a second line
-    assert "used" in out["header"][5] and "used" in out["header"][7]  # the percent is USED
+    assert out["header"][5:9] == ["session used", "week used", "status", ""]  # USED; Log in
+    assert out["header"][9:] == ["session resets", "week resets"]  # then when each resets
     assert out["name 2"].rstrip().endswith("…") and out["email 2"].rstrip().endswith("…")
     assert out["open"] == closed  # the open field moved no column on any row…
     field_region, name_box = out["field"]
     assert field_region == name_box  # …and sits exactly in the name's cell
     assert len(closed["account-login"]) == 3  # rejected, unsigned and expired: Log in on each
     for name, spans in out["scrolled"].items():  # scrolled sideways, all lines moved as one
-        if not name.startswith("account-"):
+        if name.startswith("row "):
             assert spans == out["scrolled"]["header"], name
     if size[0] >= 240:
         assert out["scrolls"] == 0  # it fits: nothing scrolls
     else:
         assert out["scrolls"] > 0 and out["scrolled"] != closed
+
+
+def test_an_expired_rows_status_and_log_in_are_on_screen_at_160_columns_unscrolled(
+    no_network: dict[str, Any],
+) -> None:
+    """The human: "it does tell me when something is logged out or login has expired etc,
+    make that also surface a login button next to it". At 160 columns with the sidebar at
+    its default width the status and *Log in* sat past the right edge, behind both resets
+    columns (the tester's measure). They come before the resets now: on screen, no scroll."""
+    no_network["usage"] = _table_usage
+
+    async def run() -> dict[str, Any]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=_table_frame)
+        async with app.run_test(size=(160, 50)) as pilot:
+            await settle(app)
+            view = await open_accounts(pilot)
+            await settle_until(app, lambda: painted(view, 1, 2, 4))
+            table = view.query_one("#claude-table")
+            seen = table.scrollable_content_region
+            expired = row(view, 4)  # slot 4: the token expired
+            status, login = expired.cell("status"), expired.query_one("#account-login-4", Button)
+            return {
+                "sidebar": app.sidebar.outer_size.width,
+                "scroll": table.scroll_x,
+                "status": (shown(status), seen.contains_region(status.region)),
+                "login": (
+                    offered(view, 4, "login"),
+                    seen.contains_region(login.region),
+                    login.region.right <= app.size.width,
+                    login.region.x - status.region.right,
+                ),
+            }
+
+    out = asyncio.run(run())
+    assert out["sidebar"] == 30 and out["scroll"] == 0  # the default sidebar; never scrolled
+    text, status_seen = out["status"]
+    assert text.startswith("⚠ token expired") and status_seen
+    offered_here, login_seen, on_screen, gap = out["login"]
+    assert offered_here and login_seen and on_screen
+    assert gap == 1  # right beside the status: one cell apart
 
 
 @pytest.mark.parametrize(
@@ -2626,7 +2675,7 @@ def test_every_button_can_be_reached_at_any_width(
             unreachable: list[str] = []
             reached = 0
             for account_row in view.rows():
-                for button in account_row.query(".account-actions Button"):
+                for button in account_row.query(Button):
                     if not (button.visible and not button.disabled):
                         continue
                     button.focus()  # Textual scrolls the focused widget into view…

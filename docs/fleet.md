@@ -533,8 +533,8 @@ revokes the session exactly as `aisquare logout` does. A token supplied through
 
 **Claude Code** is below it: a table, one aligned row per account — ★ for the
 default, the slot, its name, who is signed in, the plan, the five-hour and
-seven-day windows (a bar and the percent **used**, then when each resets) and a
-status. A value too long for its column ends in `…` (hover it for the whole
+seven-day windows (a bar and the percent **used**), a status with **Log in**
+beside it when a login is due, then when each window resets. A value too long for its column ends in `…` (hover it for the whole
 text); on a narrow page the table scrolls sideways as one, header included.
 Slot **1** is the plain `claude` of your machine (whatever `CLAUDE_CONFIG_DIR`
 was in the shell you started `asq` from, `~/.claude` otherwise). Every other

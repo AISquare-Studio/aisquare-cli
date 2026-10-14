@@ -11,11 +11,11 @@ docs/plans/claude-accounts.md. Two halves, one page:
 - **Claude Code** — a table (:data:`COLUMNS`), one aligned row per slot that
   ``services.claude_accounts`` knows: the default's ★, the slot, its name, who
   is signed in, the plan, the five-hour and seven-day windows (a bar and the
-  percent USED, then when each resets) and a status. *Add* makes a fresh slot
-  and opens Claude Code's own login in a tmux window rendered right here (a
-  ``TerminalPane``); the view polls the slot's directory and, the moment
-  Claude Code has written a login into it, records the account, installs
-  aisquare's hooks and closes the window. *Log in* on a row does the same for
+  percent USED), a status with *Log in* beside it, then when each window resets.
+  *Add* makes a fresh slot and opens Claude Code's own login in a tmux window
+  rendered right here (a ``TerminalPane``); the view polls the slot's
+  directory and, the moment Claude Code has written a login into it, records
+  the account, installs aisquare's hooks and closes the window. *Log in* on a row does the same for
   that slot when it has no login or its token is missing, expired or rejected
   (:func:`needs_login`) — then the window waits for a NEW login, not the stale
   one on disk. Nothing is typed for the user and nothing is written into
@@ -334,18 +334,33 @@ COLUMNS: tuple[Column, ...] = (
     Column("email", "signed in as", 24),
     Column("plan", "plan", 7),
     Column("session", "session used", 12),
-    Column("session-resets", "resets", 21),
     Column("week", "week used", 10),
-    Column("week-resets", "resets", 21),
     Column("status", "status", 20),
+    Column("session-resets", "session resets", 21),
+    Column("week-resets", "week resets", 21),
 )
-"""The table's columns, left to right; the header and every row are cut from this one list.
+"""The table's data columns, left to right; the header and every row are cut from them.
 
 Fixed widths, so a column starts at the same x on every row whatever its values:
 a value too long for its cell ends in ``…`` and never wraps (the whole text is the
 cell's tooltip). The resets columns fit :func:`format_reset`'s longest answer,
 ``in 6d 12h (Tue 02:00)``; the usage columns fit ``▮▮▮▮▮ 100%``.
+
+The status comes before the resets, and *Log in* right after it (:data:`LAYOUT`): what
+needs doing reads, and can be done, without scrolling sideways at 160 columns with the
+sidebar at its default width. When each window resets is the detail that can wait.
 """
+
+LOGIN_COLUMN = Column("login", "", 8)
+"""*Log in*'s column, beside the status that says why it is there."""
+
+LAYOUT: tuple[Column, ...] = (
+    *(column for column in COLUMNS if not column.key.endswith("-resets")),
+    LOGIN_COLUMN,
+    *(column for column in COLUMNS if column.key.endswith("-resets")),
+)
+"""Every column of a line as laid out — :data:`COLUMNS` with *Log in* after the status —
+then the arranging buttons (:data:`_ACTIONS`)."""
 
 
 def needs_login(status: ClaudeAccountStatus, usage: ClaudeUsage | None) -> bool:
@@ -498,20 +513,19 @@ class _ClaudeLogin:
 def _column_css() -> str:
     """Every column's width, for the header and the rows alike: one rule per column."""
     return "\n".join(
-        f"AccountsTable .col-{column.key} {{ width: {column.width}; }}" for column in COLUMNS
+        f"AccountsTable .col-{column.key} {{ width: {column.width}; }}" for column in LAYOUT
     )
 
 
 _ACTIONS: tuple[tuple[str, str, int], ...] = (
-    ("login", "Log in", 8),
     ("default", "Default", 9),
     ("up", "↑", 3),
     ("down", "↓", 3),
     ("toggle", "Disable", 9),
     ("remove", "Remove", 8),
 )
-"""The action column, left to right: each button's id stem, label and width. *Log in* is
-first, beside the status that says why it is there."""
+"""The arranging buttons at the end of a line, left to right: id stem, label and width.
+*Log in* is not one of them: it has its column beside the status (:data:`LAYOUT`)."""
 
 
 class AccountsTable(Vertical):
@@ -538,7 +552,7 @@ class AccountsHeader(Horizontal):
     """
 
     def compose(self) -> ComposeResult:
-        for column in COLUMNS:
+        for column in LAYOUT:
             yield Static(Text(column.title, no_wrap=True), classes=f"cell col-{column.key}")
 
 
@@ -584,14 +598,15 @@ class NameCell(Static):
 
 
 class AccountRow(Horizontal, can_focus=True):
-    """One slot as a table row: its cells (:data:`COLUMNS`), then its action buttons.
+    """One slot as a table row: its cells (:data:`LAYOUT`), then its arranging buttons.
 
-    *Log in* shows when the slot has no login or its token is missing, expired or
-    rejected (:func:`needs_login`); *Default* makes it the machine default (not on
-    the default's own row); *↑*/*↓* move it in the priority order (the end stops
-    are disabled); *Disable*/*Enable* take it out of or back into automatic
-    selection; *Remove* shows when the CLI owns the directory. A button that does
-    not apply keeps its place, so the action column stays aligned too. Every
+    *Log in*, beside the status, shows when the slot has no login or its token is
+    missing, expired or rejected (:func:`needs_login`); *Default* makes it the
+    machine default (not on the default's own row); *↑*/*↓* move it in the
+    priority order (the end stops are disabled); *Disable*/*Enable* take it out of
+    or back into automatic selection; *Remove* shows when the CLI owns the
+    directory. A button that does not apply keeps its place, so the buttons stay
+    in columns too. Every
     button is a command (``aisquare accounts
     default|move|disable|enable|run|remove``), and the row shows what the shell's
     next frame says rather than guessing.
@@ -610,7 +625,7 @@ class AccountRow(Horizontal, can_focus=True):
     AccountRow .col-name { layout: horizontal; }
     AccountRow NameCell { width: 1fr; height: 1; text-wrap: nowrap; text-overflow: ellipsis; }
     AccountRow AliasInput { width: 1fr; height: 1; }
-    AccountRow .account-actions Button { height: 1; min-width: 1; margin: 0 1 0 0; }
+    AccountRow Button { height: 1; min-width: 1; margin: 0 1 0 0; }
     """
 
     BINDINGS: ClassVar = [
@@ -642,8 +657,17 @@ class AccountRow(Horizontal, can_focus=True):
         return self.status.account.slot
 
     def compose(self) -> ComposeResult:
-        for column in COLUMNS:
+        for column in LAYOUT:
             classes = f"cell col-{column.key}"
+            if column is LOGIN_COLUMN:
+                yield Button(
+                    "Log in",
+                    id=f"account-login-{self.slot}",
+                    classes=classes,
+                    variant="primary",
+                    compact=True,
+                )
+                continue
             if column.key != "name":
                 yield Static(classes=classes, id=f"account-cell-{column.key}-{self.slot}")
                 continue
@@ -663,10 +687,7 @@ class AccountRow(Horizontal, can_focus=True):
                 yield field
         with Horizontal(classes="account-actions"):
             for stem, label, width in _ACTIONS:
-                variant: Any = "primary" if stem == "login" else "default"
-                button = Button(
-                    label, id=f"account-{stem}-{self.slot}", variant=variant, compact=True
-                )
+                button = Button(label, id=f"account-{stem}-{self.slot}", compact=True)
                 button.styles.width = width
                 yield button
 

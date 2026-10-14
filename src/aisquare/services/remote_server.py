@@ -2463,14 +2463,18 @@ PANE_OUTLIVED = (
 """409 ``not_agent`` for a row that outlived its tmux server (:func:`_remote_facts_refusal`)."""
 
 
-def _remote_live_row(target: ProjectInfo, label: str) -> FleetAgent:
-    """The newest live row holding ``label`` in ``target``; :class:`NoSuchAgent` when none does."""
-    from aisquare.core.store import store_session
+def _no_live_agent(target: ProjectInfo, label: str) -> NoSuchAgent:
+    """The one :class:`NoSuchAgent` for a label no live row of ``target`` holds: every read and
+    write that wants a live row says it in these words, which the page maps on."""
+    return NoSuchAgent(f"no live agent {label!r} in {target.root.name or target.id}")
 
-    with store_session() as store:
-        agent = store.fleet_agent_by_label(target.id, label, live_only=True)
+
+def _remote_live_row(target: ProjectInfo, label: str) -> FleetAgent:
+    """The newest live row holding ``label`` in ``target`` (:func:`remote_turn_row`);
+    :func:`_no_live_agent` when none does."""
+    agent = remote_turn_row(target, label, live_only=True)
     if agent is None:
-        raise NoSuchAgent(f"no live agent {label!r} in {target.root.name or target.id}")
+        raise _no_live_agent(target, label)
     return agent
 
 
@@ -2563,11 +2567,11 @@ def _remote_turn_pinned(
     come back to (merge of round 5 of #243). Unpinned it is :class:`NoSuchAgent` for a live
     row, and 404 ``no_such_agent`` naming ``fleet ls --all`` for any row.
     """
+    if live_only and pin is None:
+        return _remote_live_row(target, label)
     row = remote_turn_row(target, label, live_only=live_only)
     if row is None and pin is None:
         where = target.root.name or target.id
-        if live_only:
-            raise NoSuchAgent(f"no live agent {label!r} in {where}")
         said = f"no agent {label!r} in {where} — `aisquare fleet ls --all` shows every row"
         raise RequestError(404, "no_such_agent", said)
     if row is None or (pin is not None and row.id != pin):
@@ -2719,7 +2723,7 @@ def _live_transcript(
     with store_session() as store:
         agent = store.fleet_agent_by_label(target.id, label, live_only=True)
         if agent is None:
-            raise NoSuchAgent(f"no live agent {label!r} in {target.root.name or target.id}")
+            raise _no_live_agent(target, label)
         session = store.get_session(agent.session_id) if agent.session_id else None
     offset = None
     if before is not None:
@@ -3108,7 +3112,7 @@ def _live_explainability(label: str, project: str | None = None) -> dict[str, ob
     with store_session() as store:
         agent = store.fleet_agent_by_label(target.id, label, live_only=True)
         if agent is None:
-            raise NoSuchAgent(f"no live agent {label!r} in {target.root.name or target.id}")
+            raise _no_live_agent(target, label)
         session = store.get_session(agent.session_id) if agent.session_id else None
     turns: list[TurnMetric] = []
     if agent.session_id:

@@ -44,6 +44,10 @@ ACCEPTED = [
     pytest.param("1\ufe0f\u20e3 ops", id="keycap"),
     pytest.param("\u203c\ufe0f urgent", id="double exclamation"),
     pytest.param("\u2764\ufe0f", id="red heart"),
+    # Not symbols (a letter, punctuation), yet each has an emoji presentation (re-check of N3).
+    pytest.param("\u2139\ufe0f info", id="information"),
+    pytest.param("\u3030\ufe0f", id="wavy dash"),
+    pytest.param("\u303d\ufe0e ops", id="part alternation mark"),
 ]
 REFUSED = [
     pytest.param("evil\u202egnp.exe", id="right-to-left override"),
@@ -62,7 +66,7 @@ REFUSED = [
     # `work` U+FE0F reads `work` (review of #261, N3).
     pytest.param("work\ufe0f", id="emoji selector after a letter"),
     pytest.param("work\ufe0e", id="text selector after a letter"),
-    pytest.param("1\ufe0f", id="digit without its keycap"),
+    pytest.param("ops 1\ufe0f", id="digit without its keycap"),
     pytest.param("!\ufe0f", id="punctuation with no emoji"),
 ]
 
@@ -121,3 +125,31 @@ def test_a_name_that_differs_only_by_a_variation_selector_is_taken(fake_home: Pa
         accounts_service.set_alias("3", "work\ufe00")
     assert accounts_service.resolve("work").slot == 2
     assert accounts_service.resolve("WORK\ufe00").slot == 2  # typed with one, found all the same
+
+
+@pytest.mark.parametrize(
+    ("name", "why"),
+    [
+        pytest.param("account 3\ufe00", "what slot 3 is called", id="slot 3's label"),
+        pytest.param("ACCOUNT 3\U000e0100", "what slot 3 is called", id="ideographic selector"),
+        pytest.param("Plain Claude\ufe00", "what slot 1 is called", id="slot 1's label"),
+        pytest.param("3\ufe00", "reads as a slot number", id="a slot number"),
+    ],
+)
+def test_an_alias_cannot_be_another_slots_name_behind_a_variation_selector(
+    fake_home: Path, name: str, why: str
+) -> None:
+    """``account 3`` U+FE00 prints as slot 3's label, and ``resolve("account 3")`` then
+    landed on slot 2: the label rule compared case alone (re-check of N3). It compares as
+    every other name check does now, without the selector (``core.names.name_key``)."""
+    from aisquare.services import claude_accounts as accounts_service
+
+    accounts_core.create_account()  # slot 2
+    accounts_core.create_account()  # slot 3
+    with pytest.raises(ValueError, match=why):
+        accounts_core.normalise_alias(name, slot=2)
+    with pytest.raises(ValueError, match=why):
+        accounts_service.set_alias("2", name)
+    assert accounts_service.resolve("2").alias is None, "nothing stored"
+    with pytest.raises(accounts_service.NoSuchAccount):
+        accounts_service.resolve("account 3")

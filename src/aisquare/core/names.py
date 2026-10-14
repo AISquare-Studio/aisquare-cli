@@ -19,13 +19,13 @@ What an emoji is made of is kept: the zero-width joiner between its parts (woman
 U+200D + laptop is the technologist, the white flag + U+FE0F + U+200D + rainbow is the
 rainbow flag, the slightly smiling face + U+200D + left-right arrow + U+FE0F is the head
 shaking), the emoji and text variation selectors after a character that has the two
-presentations (a symbol, ‼ and ⁉, a keycap's digit), skin tones, and the tag characters
-of a subdivision flag. After a letter a variation selector draws nothing — ``work``
-U+FE0F prints as ``work`` — and is refused; any variation selector is left out when two
-names are compared (:func:`name_key`). A joiner is kept, too, where a script draws
-with it: after a virama (Sinhala's "Sri") and between the letters of a cursive script
-(the non-joiner in Persian). Between two letters
-that draw the same either way a joiner is an invisible look-alike, and refused.
+presentations (a symbol; ‼, ⁉, U+2139 information, 〰 and 〽; a keycap's digit), skin
+tones, and the tag characters of a subdivision flag. After a letter a variation selector
+draws nothing — ``work`` U+FE0F prints as ``work`` — and is refused; any variation
+selector is left out when two names are compared (:func:`name_key`). A joiner is kept,
+too, where a script draws with it: after a virama (Sinhala's "Sri") and between the
+letters of a cursive script (the non-joiner in Persian). Between two letters that draw
+the same either way a joiner is an invisible look-alike, and refused.
 """
 
 from __future__ import annotations
@@ -42,8 +42,9 @@ _JOINERS = frozenset({"\u200c", "\u200d"})
 _SKIN_TONES = range(0x1F3FB, 0x1F400)
 _VARIATION_SELECTORS = frozenset({"\ufe0e", "\ufe0f"})
 """The text and emoji presentation selectors (VS15, VS16)."""
-_EMOJI_PUNCTUATION = frozenset({"\u203c", "\u2049"})
-"""‼ and ⁉: punctuation with an emoji presentation."""
+_EMOJI_BESIDE_SYMBOLS = frozenset({"\u203c", "\u2049", "\u2139", "\u3030", "\u303d"})
+"""‼ ⁉ U+2139 〰 〽: punctuation and a letter, not symbols, each with an emoji presentation
+(Unicode's emoji-variation-sequences.txt; every other base there but a keycap's is So/Sm)."""
 _KEYCAP_BASES = frozenset("#*0123456789")
 _KEYCAP = "\u20e3"
 _ANY_VARIATION_SELECTOR = (range(0xFE00, 0xFE10), range(0xE0100, 0xE01F0), range(0x180B, 0x1810))
@@ -135,12 +136,12 @@ def _starts_an_emoji_part(text: str, at: int) -> bool:
 
 def _selects_a_presentation(text: str, at: int) -> bool:
     """Whether the VS15 or VS16 at ``at`` follows a character with a text and an emoji
-    presentation to choose between: a symbol, ‼ or ⁉, or a keycap's ``#``, ``*`` or digit
-    (then U+20E3). After anything else it draws nothing."""
+    presentation to choose between: a symbol, one of ‼ ⁉ U+2139 〰 〽, or a keycap's ``#``,
+    ``*`` or digit (then U+20E3). After anything else it draws nothing."""
     if at == 0:
         return False
     base = text[at - 1]
-    if unicodedata.category(base) in ("So", "Sm") or base in _EMOJI_PUNCTUATION:
+    if unicodedata.category(base) in ("So", "Sm") or base in _EMOJI_BESIDE_SYMBOLS:
         return True
     return base in _KEYCAP_BASES and text[at + 1 : at + 2] == _KEYCAP
 

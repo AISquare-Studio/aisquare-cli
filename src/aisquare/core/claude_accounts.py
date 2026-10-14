@@ -72,7 +72,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aisquare.core import paths
-from aisquare.core.names import name_flaw
+from aisquare.core.names import name_flaw, name_key
 from aisquare.core.version import __version__
 from aisquare.models import ClaudeAccount, ClaudeIdentity
 
@@ -211,8 +211,9 @@ def default_label(slot: int) -> str:
 
 
 def _labelled_slot(name: str) -> int | None:
-    """The slot whose :func:`default_label` ``name`` reads as, whatever its case and spacing."""
-    words = name.casefold().split()
+    """The slot whose :func:`default_label` ``name`` reads as, whatever its case, spacing and
+    variation selectors (:func:`core.names.name_key`): ``account 3`` U+FE00 prints as slot 3's."""
+    words = name_key(name).split()
     if words == ["plain", "claude"]:
         return DEFAULT_SLOT
     if len(words) == 2 and words[0] == "account" and words[1].isdecimal():
@@ -252,7 +253,7 @@ def normalise_alias(raw: str, *, slot: int | None = None) -> str:
         raise ValueError("an alias cannot be empty")
     if len(alias) > ALIAS_MAX:
         raise ValueError(f"{raw!r} is {len(alias)} characters — an alias is at most {ALIAS_MAX}")
-    if alias.isdigit():
+    if name_key(alias).isdigit():
         raise ValueError(f"{raw!r} reads as a slot number — an alias cannot be only digits")
     if "@" in alias:
         raise ValueError(f"{raw!r} reads as an email — an alias cannot contain '@'")

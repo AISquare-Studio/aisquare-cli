@@ -391,8 +391,9 @@ def test_the_doctor_page_names_the_project_its_checks_are_about(
         (HeadroomSummary(level="empty"), "●", "grey50"),
         (HeadroomSummary(level="unknown"), "●", "grey50"),
         (None, "●", "grey50"),
-        # Nothing usable because each account needs a login: something to do, so red.
-        (HeadroomSummary(level="empty", needs_login=2), "●", RED),
+        # Nothing usable and an account needs a login — red only when told EVERY enabled
+        # one does (``every_needs_login``, the shell's count); alone it is grey (N2).
+        (HeadroomSummary(level="empty", needs_login=2), "●", "grey50"),
     ],
     ids=[
         "good",
@@ -403,7 +404,7 @@ def test_the_doctor_page_names_the_project_its_checks_are_about(
         "unread",
         "unknown",
         "before-the-first",
-        "all-need-a-login",
+        "a-login-due-but-not-every",
     ],
 )
 def test_the_claude_dot_follows_the_headroom_level(
@@ -571,16 +572,18 @@ def test_a_signed_out_account_puts_a_warning_on_the_line(
 
 
 def test_every_account_signed_out_is_a_red_dot_and_a_warning_not_grey(fake_home: Path) -> None:
-    async def go(pilot: Pilot[None]) -> tuple[str, HeadroomSummary | None]:
+    async def go(pilot: Pilot[None]) -> tuple[str, tuple[str, str]]:
         app = _app(pilot)
         await settle_until(app, lambda: app.sidebar.headroom is not None)
-        return _shown(app.query_one(StatusLine)), app.sidebar.headroom
+        sidebar = app.sidebar
+        dot = headroom_dot(sidebar.headroom, every_needs_login=sidebar.every_needs_login)
+        return _shown(app.query_one(StatusLine)), dot
 
-    line, headroom = _drive(
+    line, dot = _drive(
         go, headroom=accounts_service.read_fleet_headroom, accounts=accounts_service.overview
     )
     assert line.endswith(f"● 0{TIMES} claude ⚠"), line
-    assert headroom_dot(headroom) == ("●", RED)
+    assert dot == ("●", RED)  # every enabled account needs a login
 
 
 def test_a_page_change_to_the_accounts_reads_the_headroom_again() -> None:
@@ -597,3 +600,85 @@ def test_a_page_change_to_the_accounts_reads_the_headroom_again() -> None:
         return len(calls) - before
 
     assert _drive(go, headroom=lambda accounts: calls.append(accounts) or GOOD) == 1  # type: ignore[func-returns-value]
+
+
+def test_red_only_when_every_enabled_account_needs_a_login() -> None:
+    nothing_usable = HeadroomSummary(level="empty", needs_login=1)
+    assert headroom_dot(nothing_usable, every_needs_login=True) == ("●", RED)
+    assert headroom_dot(nothing_usable) == ("●", "grey50")
+    usable = HeadroomSummary(level="good", percent_left=80.0, usable=1, needs_login=1)
+    assert headroom_dot(usable, every_needs_login=True) == ("●", GREEN), "one is usable"
+
+
+def test_an_unreachable_main_account_beside_a_signed_out_spare_is_grey_with_a_warning(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reviewer's repro (review of #261, N2): slot 1 signed in but the endpoint
+    unreachable, slot 2 a spare never signed in. Nothing is usable because nothing could
+    be READ — grey, with the ⚠ for the spare; red was "for want of a login"."""
+
+    def usage(account: ClaudeAccount, **kwargs: Any) -> ClaudeUsage:
+        return ClaudeUsage(available=False, reason="could not reach the usage endpoint")
+
+    monkeypatch.setattr(accounts_service, "usage", usage)
+    _sign_in(core.default_account(), "me@example.com")
+    core.create_account()  # slot 2, never signed in
+
+    async def go(pilot: Pilot[None]) -> tuple[str, tuple[str, str]]:
+        app = _app(pilot)
+        await settle_until(app, lambda: app.sidebar.headroom is not None)
+        sidebar = app.sidebar
+        dot = headroom_dot(sidebar.headroom, every_needs_login=sidebar.every_needs_login)
+        return _shown(app.query_one(StatusLine)), dot
+
+    line, dot = _drive(
+        go, headroom=accounts_service.read_fleet_headroom, accounts=accounts_service.overview
+    )
+    assert line.endswith(f"● 0{TIMES} claude ⚠"), line
+    assert dot == ("●", "grey50")
+
+
+def test_a_sign_out_while_an_accounts_read_is_in_flight_reaches_the_warning_at_once() -> None:
+    """The reviewer's repro (review of #261, N1): ``AccountsChanged`` marks the headroom due
+    and asks for a frame, but the tick's read already in flight carries the frame from
+    BEFORE the change. The due read was spent on that frame, and the owed read that held
+    the sign-out was painted with no headroom read after it: the ⚠ waited a minute."""
+    from aisquare.cli.ui.views.accounts import AccountsChanged
+
+    state = {"signed_out": False}
+    hold, entered, release = threading.Event(), threading.Event(), threading.Event()
+
+    def overview() -> AccountsOverview:
+        signed_out = state["signed_out"]  # what the files say as the read begins
+        if hold.is_set():
+            hold.clear()
+            entered.set()
+            assert release.wait(10)  # then held, as a writer holds the store
+        return _overview(
+            _status(1, "me@example.com"),
+            _status(2, "two@example.com", signed_in=not signed_out),
+        )
+
+    async def go(pilot: Pilot[None]) -> tuple[int, int]:
+        app = _app(pilot)
+        await settle_until(app, lambda: app.sidebar.headroom is not None)
+        assert app.sidebar.headroom is not None
+        before = app.sidebar.headroom.needs_login
+        hold.set()
+        app.refresh_data()  # the two-second tick: its read takes the files, then waits
+        assert await asyncio.to_thread(entered.wait, 5), "the tick's read began"
+        state["signed_out"] = True  # a sign-out lands meanwhile…
+        app.post_message(AccountsChanged())  # …and the page says so
+        await pilot.pause()
+        release.set()
+        await settle_until(
+            app,
+            lambda: app.sidebar.headroom is not None and app.sidebar.headroom.needs_login == 1,
+            timeout=5,
+        )
+        assert app.sidebar.headroom is not None
+        return before, app.sidebar.headroom.needs_login
+
+    before, after = _drive(go, headroom=lambda accounts: GOOD, accounts=overview)
+    assert before == 0, "the premise: both signed in at first"
+    assert after == 1, "the ⚠ follows the sign-out, not a minute later"

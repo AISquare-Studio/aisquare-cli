@@ -318,7 +318,7 @@ class HelpScreen(ModalScreen[None]):
         text.append("     ")
         text.append("●", style=RED)
         text.append(" and ⚠ — accounts that need a login (signed out, token expired or refused);\n")
-        text.append("     the dot is red when no account is usable for want of one\n")
+        text.append("     the dot is red when every enabled account needs one\n")
         text.append("\nEsc closes this", style="dim")
         with VerticalScroll(id="helpbox"):
             yield Static(text)
@@ -664,7 +664,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """A frame was asked for while a read was in flight: read once more after it."""
         self._headroom = headroom
         self.headroom_seconds = headroom_seconds
-        self._headroom_worker: Worker[HeadroomSummary] | None = None
+        self._headroom_worker: Worker[tuple[HeadroomSummary, bool]] | None = None
         """The headroom read in flight, or the last one; only one runs at a time."""
         self._headroom_owed = False
         """A headroom read was asked for while one ran: read once more after it."""
@@ -1049,11 +1049,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if overview is not None:
             for view in self.query(AccountsView):
                 view.show(overview)
-        if self._headroom_due:
-            self._headroom_due = False
-            self.refresh_headroom()
+        # The read owed first: an AccountsChanged that landed while this read was in flight
+        # asked for the frame AFTER the change, and the headroom it is due waits for that
+        # frame — spent on this one, the ⚠ lagged a sign-out by a minute (review of #261, N1).
         if self._accounts_owed:
             self.refresh_accounts()  # the ticks this read outlived: one read, after it
+        elif self._headroom_due:
+            self._headroom_due = False
+            self.refresh_headroom()
 
     @while_running
     def refresh_headroom(self) -> None:
@@ -1083,18 +1086,20 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self._headroom_owed = False
         overview = self.accounts_overview
         accounts = None if overview is None else [status.account for status in overview.accounts]
-        signed_out = (
-            0
-            if overview is None
-            else sum(1 for s in overview.accounts if not s.account.disabled and not s.signed_in)
+        enabled = (
+            [] if overview is None else [s for s in overview.accounts if not s.account.disabled]
         )
+        signed_out = sum(1 for s in enabled if not s.signed_in)
         read_headroom = self._headroom
 
-        def read() -> HeadroomSummary:
+        def read() -> tuple[HeadroomSummary, bool]:
             summary = read_headroom(accounts)
-            if not signed_out:
-                return summary
-            return summary.model_copy(update={"needs_login": summary.needs_login + signed_out})
+            if signed_out:
+                needs = summary.needs_login + signed_out
+                summary = summary.model_copy(update={"needs_login": needs})
+            # Every enabled slot needs a login — the one case the dot is red for want of
+            # one; an unreadable slot beside a signed-out one is grey with the ⚠ (N2).
+            return summary, bool(enabled) and summary.needs_login >= len(enabled)
 
         self._headroom_worker = self.run_worker(
             read,
@@ -1107,8 +1112,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     def _headroom_read(self, event: Worker.StateChanged) -> None:
         """Paint the headroom a read answered (a read that failed leaves the dot as it was),
         then make the read that was owed while it ran, if one was."""
-        if event.state is WorkerState.SUCCESS and isinstance(event.worker.result, HeadroomSummary):
-            self.sidebar.show_headroom(event.worker.result)
+        result = event.worker.result
+        if event.state is WorkerState.SUCCESS and isinstance(result, tuple):
+            summary, every_needs_login = result
+            self.sidebar.show_headroom(summary, every_needs_login=every_needs_login)
         if event.state in (WorkerState.SUCCESS, WorkerState.ERROR) and self._headroom_owed:
             self.refresh_headroom()
 

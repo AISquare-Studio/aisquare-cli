@@ -271,20 +271,26 @@ TIMES = "\N{MULTIPLICATION SIGN}"
 """The ``x`` in ``3x claude``."""
 
 
-def headroom_dot(headroom: HeadroomSummary | None) -> tuple[str, str]:
-    """The Claude dot and its colour. Red when no account is usable because each needs a
-    login (signed out, its token expired or refused): something to do, not "not read".
-    Grey, never the skull, when nothing could be READ otherwise: ``empty`` with no
-    ``percent_left`` is offline, a Keychain login or no usable account — not a fleet at 0 %.
+def headroom_dot(
+    headroom: HeadroomSummary | None, *, every_needs_login: bool = False
+) -> tuple[str, str]:
+    """The Claude dot and its colour. Red when no account is usable because EVERY enabled
+    account needs a login (signed out, its token expired or refused) — ``every_needs_login``,
+    which the shell counts against its frame: something to do, not "not read". Grey, never
+    the skull, when nothing could be READ otherwise: ``empty`` with no ``percent_left`` is
+    offline, a Keychain login or no usable account — not a fleet at 0 %, and not red because
+    a spare beside them is signed out (review of #261, N2).
     """
-    if headroom is not None and headroom.usable == 0 and headroom.needs_login:
+    if headroom is not None and headroom.usable == 0 and every_needs_login:
         return ("●", RED)
     if headroom is None or (headroom.level == "empty" and headroom.percent_left is None):
         return HEADROOM_DOT["unknown"]
     return HEADROOM_DOT[headroom.level]
 
 
-def status_line_text(aisquare: bool | None, headroom: HeadroomSummary | None) -> Text:
+def status_line_text(
+    aisquare: bool | None, headroom: HeadroomSummary | None, *, every_needs_login: bool = False
+) -> Text:
     """``● aisquare  ● 3x claude`` (the x a multiplication sign) — the line under *⚙ Settings*.
 
     The AISquare dot is green signed in, red signed out, grey while unknown. The
@@ -297,7 +303,7 @@ def status_line_text(aisquare: bool | None, headroom: HeadroomSummary | None) ->
     text.append("● ", style=colour)
     text.append("aisquare", style="dim")
     text.append("  ")
-    dot, colour = headroom_dot(headroom)
+    dot, colour = headroom_dot(headroom, every_needs_login=every_needs_login)
     text.append(f"{dot} ", style=colour)
     if headroom is not None:
         text.append(f"{headroom.usable}{TIMES} ", style="dim")
@@ -1097,6 +1103,8 @@ class Sidebar(Vertical):
         """The AISquare sign-in the status line shows: signed in, out, or unknown."""
         self.headroom: HeadroomSummary | None = None
         """The Claude accounts' headroom the status line shows; ``None`` until the first."""
+        self.every_needs_login = False
+        """Whether every enabled account needs a login: the one case the dot is red for it."""
         self._prev_states: dict[str, str] = {}
         self._cursor_key: str | None = None
         self.last_frame: tuple[list[ProjectInfo], dict[str, list[FleetAgentStatus]]] | None = None
@@ -1506,13 +1514,17 @@ class Sidebar(Vertical):
         self.aisquare = signed_in
         self._paint_status()
 
-    def show_headroom(self, headroom: HeadroomSummary) -> None:
+    def show_headroom(self, headroom: HeadroomSummary, *, every_needs_login: bool = False) -> None:
         """The status line's Claude dot, from the usage cache (``FleetApp.refresh_headroom``)."""
         self.headroom = headroom
+        self.every_needs_login = every_needs_login
         self._paint_status()
 
     def _paint_status(self) -> None:
-        self.query_one(StatusLine).update(status_line_text(self.aisquare, self.headroom))
+        line = status_line_text(
+            self.aisquare, self.headroom, every_needs_login=self.every_needs_login
+        )
+        self.query_one(StatusLine).update(line)
 
     # --- selection ------------------------------------------------------------------
 

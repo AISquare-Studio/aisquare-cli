@@ -896,6 +896,42 @@ class TestBindEnvFile:
             assert f"reads GH_TOKEN from {token.name}, a relative path" in got.refusal
             assert "aisquare team bind reviewer --env-file GH_TOKEN=<path>" in got.refusal
 
+    @pytest.mark.parametrize("flag", ["--env", "--env-file"])
+    @pytest.mark.parametrize("key", ["GH-TOKEN", "GH TOKEN", "X;touch pwned", "1ST"])
+    def test_a_key_no_shell_can_set_is_refused_at_bind(
+        self, runner: CliRunner, work_dir: Path, tmp_path: Path, flag: str, key: str
+    ) -> None:
+        """Review of #259, round 3: `parse_env_pairs` took any key with no `=`, and `team
+        spawn` prints each bound key as a shell word: `GH-TOKEN="$(tr …)"` is a command
+        name, so the paste failed with 'command not found', and a key holding `;` ran what
+        followed it. `team bind` refuses such a key, for `--env` and `--env-file` alike."""
+        value = str(_token_file(tmp_path)) if flag == "--env-file" else "x"
+
+        result = runner.invoke(app, ["--json", "team", "bind", "reviewer", flag, f"{key}={value}"])
+
+        assert result.exit_code != 0, result.output
+        said = json.loads(result.stdout)
+        assert said["error"] == "bad_env_pair" and repr(key) in said["detail"], said
+        assert "reviewer" not in load_config().team.profiles, "nothing bound"
+        assert not (work_dir / "pwned").exists()
+
+    def test_spawn_refuses_to_print_a_line_for_a_key_written_into_the_config_by_hand(
+        self, runner: CliRunner, work_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A config.toml synced from another machine, or edited by hand, can still hold such a
+        key: `team spawn` says which, and how to unbind it, rather than print a line that
+        breaks when pasted, or runs part of the key."""
+        _bind("reviewer", env_files={"GH-TOKEN": str(_token_file(tmp_path))})
+        monkeypatch.setenv("AISQUARE_TEAM", "1")
+
+        result = runner.invoke(app, ["--json", "team", "spawn", "reviewer", "--no-probe"])
+
+        assert result.exit_code != 0, result.output
+        said = json.loads(result.stdout)
+        assert said["error"] == "bad_env_key", said
+        assert "aisquare team bind reviewer --unset GH-TOKEN" in said["detail"]
+        assert TOKEN not in result.output
+
     def test_a_file_it_cannot_read_is_refused_at_bind(
         self, runner: CliRunner, work_dir: Path, tmp_path: Path
     ) -> None:

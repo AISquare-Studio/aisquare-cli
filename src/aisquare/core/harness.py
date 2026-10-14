@@ -1224,6 +1224,17 @@ def read_env_file(path: str) -> str:
     return value
 
 
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def is_env_name(key: str) -> bool:
+    """Whether ``key`` is a variable name a POSIX shell can set and export: letters, digits
+    and ``_``, not starting with a digit. ``team spawn``'s printed line sets a binding's
+    variables as shell words, where ``GH-TOKEN=…`` is a command name and a ``;`` in a key
+    runs whatever follows it (review of #259, round 3)."""
+    return _ENV_NAME.match(key) is not None
+
+
 def parse_env_pairs(pairs: Sequence[str]) -> dict[str, str]:
     """``["K=V", ...]`` -> ``{"K": "V"}``.
 

@@ -279,11 +279,22 @@ def _bin_env_hint(role: str) -> str:
 
 
 def _parse_env(pairs: list[str]) -> dict[str, str]:
-    """``KEY=VALUE`` pairs from the command line, or a usage error."""
+    """``KEY=VALUE`` pairs from the command line, or a usage error: a pair with no ``=``, or a
+    KEY that is not a variable name a shell can set (:func:`harness.is_env_name`). Every
+    pair here ends up in ``team spawn``'s printed shell line, bound (``team bind``) or not,
+    where such a key broke the paste, or ran as shell code (review of #259, round 3)."""
     try:
-        return harness.parse_env_pairs(pairs)
+        parsed = harness.parse_env_pairs(pairs)
     except ValueError as exc:
         fail(str(exc), error="bad_env_pair")
+    for key in parsed:
+        if not harness.is_env_name(key):
+            message = f"{key!r} is not a variable name: {_ENV_NAME_RULE}"
+            fail(message, error="bad_env_pair", detail=message)
+    return parsed
+
+
+_ENV_NAME_RULE = "letters, digits and _, not starting with a digit"
 
 
 @app.command("spawn")
@@ -405,6 +416,20 @@ def spawn(
         )
     if launch_profile.refusal is not None:
         fail(launch_profile.refusal, error="env_file_unreadable", detail=launch_profile.refusal)
+    # A key written into config.toml by hand (`team bind` refuses one) is set as a shell word
+    # in the line below, where it is no assignment: refused, as no paste could start the role.
+    unnamed = sorted(
+        key
+        for key in {*launch_profile.env, *launch_profile.env_files}
+        if not harness.is_env_name(key)
+    )
+    if unnamed:
+        message = (
+            f"{role_name}'s binding sets {', '.join(map(repr, unnamed))}, which a shell line "
+            f"cannot set ({_ENV_NAME_RULE}) — unbind it: aisquare team bind {role_name} "
+            f"--unset {shlex.quote(unnamed[0])}"
+        )
+        fail(message, error="bad_env_key", detail=message)
     # Put the profile's vars IN the printed command, not just in --exec's env.
     # The banner is meant to be pasted, and a printed command that silently
     # launches with different variables than the one it just reported is worse

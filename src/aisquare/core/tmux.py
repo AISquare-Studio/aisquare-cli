@@ -510,6 +510,11 @@ class SocketReads:
                 self._starts[key] = None
         return self._starts[key]
 
+    def heard_started(self, srv: TmuxServer, recorded: Path | None, started: datetime) -> None:
+        """Keep when the server answering at ``recorded`` started, as an answer that named one
+        of its panes said it (``#{start_time}``), so :meth:`started` does not ask it again."""
+        self._starts.setdefault(self._key(srv, recorded), started)
+
     def boot_started(self) -> datetime | None:
         """:func:`boot_started`, asked once."""
         if self._booted is None:

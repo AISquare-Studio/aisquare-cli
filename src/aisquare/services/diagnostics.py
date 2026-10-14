@@ -2953,7 +2953,7 @@ def _check_fleet(
             live = [a for p in projects for a in store.fleet_agents(p.id, live_only=True)]
         gone: list[FleetAgent] = []
         exited: list[FleetAgent] = []
-        started: dict[fleet_service._Address, datetime | None] = {}
+        started: dict[fleet_service._Address, datetime] = {}
         for agent in live:
             address = fleet_service._address(agent, config)
             if address not in servers:
@@ -2963,17 +2963,17 @@ def _check_fleet(
                 facts = server.pane_facts(agent.pane_id)
             except tmux_core.TmuxError:
                 facts = None
-            if facts is not None and address not in started:
-                try:
-                    started[address] = server.started_at()
-                except tmux_core.TmuxError:
-                    started[address] = None  # judges nothing, as in the fleet
+            if facts is not None and facts.server_started is not None:
+                # One server, one start, said in the answer that named the pane
+                # (`#{start_time}`), not asked in a display-message of its own (review of
+                # #259, round 5, as `_observe` reads it since round 4). None judges nothing.
+                started.setdefault(address, facts.server_started)
             # tmux 3.7c answers a vanished target with exit 0 and every field
             # empty, so "gone" is "no facts OR facts about no pane", not only None.
             if (
                 facts is None
                 or facts.pane_id != agent.pane_id
-                or fleet_service._outlived(agent, started[address])
+                or fleet_service._outlived(agent, started.get(address))
             ):
                 gone.append(agent)
             elif facts.dead:
@@ -2996,6 +2996,8 @@ def _check_fleet(
                 taken: list[FleetAgent] = []
                 vanished: list[FleetAgent] = []
                 for agent in agents:
+                    if sock in started:  # said already: the server is asked once at most
+                        reads.heard_started(servers[sock], agent.socket_path, started[sock])
                     answer = tmux_core.server_may_run(
                         servers[sock],
                         agent.socket_path,

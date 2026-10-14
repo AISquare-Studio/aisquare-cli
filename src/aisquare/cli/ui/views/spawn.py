@@ -64,14 +64,23 @@ FACTS_WORKER = "spawn-facts"
 """The worker that reads the role's agent and the accounts, off the UI thread."""
 
 
-def account_choices(accounts: list[ClaudeAccount], agent: str) -> list[tuple[str, str]]:
-    """``(label, slot)`` for ``agent``'s accounts, after the ladder's own answer."""
+def signed_in_as(account: ClaudeAccount) -> str:
+    """Who an account is signed in as, for :func:`account_choices`: read in the facts
+    worker, since a Claude slot's identity is its ``.claude.json`` (tens of MB, maybe)."""
+    identity = accounts_core.identity(account)
+    return identity.email if identity else "not signed in"
+
+
+def account_choices(accounts: list[tuple[ClaudeAccount, str]], agent: str) -> list[tuple[str, str]]:
+    """``(label, slot)`` for ``agent``'s accounts, after the ladder's own answer.
+
+    Each account comes with who it is signed in as (:func:`signed_in_as`): this runs
+    on the UI thread on every change of role or agent, and reads nothing.
+    """
     choices: list[tuple[str, str]] = [("Account: role / project / machine default", DEFAULT)]
-    for account in accounts:
+    for account, who in accounts:
         if account.agent != agent:
             continue  # the launch refuses another agent's account for this one
-        identity = accounts_core.identity(account)
-        who = identity.email if identity else "not signed in"
         choices.append(
             (f"{account.slot} · {accounts_core.label(account)} · {who}", str(account.slot))
         )
@@ -96,7 +105,8 @@ class SpawnScreen(ModalScreen[fleet.SpawnReceipt | None]):
         self.busy = False
         self.role_agents: dict[str, str] = {}
         """The agent each role launches on with no ``--agent``, as ``agent_launch`` says."""
-        self.accounts: list[ClaudeAccount] = []
+        self.accounts: list[tuple[ClaudeAccount, str]] = []
+        """Every account, with who it is signed in as, as the facts worker read them."""
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -140,7 +150,7 @@ class SpawnScreen(ModalScreen[fleet.SpawnReceipt | None]):
         self._paint()
         root = self.project.root
 
-        def facts() -> tuple[dict[str, str], list[ClaudeAccount]]:
+        def facts() -> tuple[dict[str, str], list[tuple[ClaudeAccount, str]]]:
             agents: dict[str, str] = {}
             for role in fleet.FLEET_ROLES:
                 try:
@@ -148,7 +158,9 @@ class SpawnScreen(ModalScreen[fleet.SpawnReceipt | None]):
                 except Exception:  # the spawn says why; the dialog still opens
                     continue
             try:
-                accounts = accounts_service.list_accounts()
+                accounts = [
+                    (account, signed_in_as(account)) for account in accounts_service.list_accounts()
+                ]
             except Exception:  # no accounts to offer is the ladder's choice, not a crash
                 accounts = []
             return agents, accounts

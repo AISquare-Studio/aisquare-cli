@@ -145,7 +145,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   read, or holds nothing, refuses the launch (`env_file_unreadable`) rather
   than start the role on this shell's credentials. `fleet spawn`, `restart`
   and `switch` refuse before a window opens or a running agent is stopped.
-  `team bind` reads the file when it binds. A key lives in `env` or
+  `team bind` reads the file when it binds, and keeps a relative PATH as the
+  full path of the file it read; a relative path written into config.toml by
+  hand refuses every launch, wherever it is launched from. A key lives in `env` or
   `env_files`, never both, and `--unset` removes it from either. `team
   harness` names the key, and `team harness --json` carries `env_files`, each
   key to its path, on every role. `aisquare upgrade --version` to a release

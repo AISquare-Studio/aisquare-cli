@@ -14,6 +14,7 @@ import shutil
 import sqlite3
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Annotated, NoReturn
 
 import typer
@@ -835,8 +836,8 @@ def bind(
                 "--clear-account or --clear",
                 error="nothing_to_bind",
             )
-        env_files = _parse_env(env_file_pairs or [])
-        for key, typed in env_files.items():
+        env_files: dict[str, str] = {}
+        for key, typed in _parse_env(env_file_pairs or []).items():
             # Read NOW, as --account is resolved now: a typo is a usage error rather than
             # a binding that refuses every later launch of the role.
             where = harness.expand_value(typed)
@@ -845,6 +846,10 @@ def bind(
             except ValueError as exc:
                 message = f"--env-file {key}: {where} {exc}"
                 fail(message, error="env_file_unreadable", detail=message)
+            # Kept as typed where that names a full path (`~`, `$HOME`: portable), else as
+            # the file read here: kept relative, every launch looked for it in its own
+            # working directory, and the role's window refused (review of #259, round 3).
+            env_files[key] = typed if Path(where).is_absolute() else str(Path(where).absolute())
         if account is not None:
             # Resolved NOW, so a typo is a usage error rather than a binding
             # that refuses every later launch of the role.

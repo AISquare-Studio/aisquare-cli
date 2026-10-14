@@ -1271,6 +1271,16 @@ def resolve_profile(
     for key, path in files.items():
         if sources.get(key) == "flag":
             continue
+        if not Path(path).is_absolute():
+            # Read against whatever directory each launch runs in: the bind's shell read it,
+            # the fleet's pre-check read asq's, and the window's `launch` its worktree's, where
+            # it was refused (review of #259, round 3). `team bind` stores a full path now.
+            refusal = (
+                f"{role} reads {key} from {path}, a relative path, which each launch would "
+                f"look for in its own working directory — not launching {role} without it. "
+                f"Bind it by its full path: aisquare team bind {role} --env-file {key}=<path>"
+            )
+            break
         try:
             file_env[key] = read_env_file(path)
         except ValueError as exc:

@@ -818,6 +818,44 @@ class TestBindEnvFile:
         assert TOKEN not in paths.config_path().read_text(encoding="utf-8")
         assert TOKEN not in result.output
 
+    def test_a_relative_path_is_stored_as_the_file_it_named_where_it_was_bound(
+        self, runner: CliRunner, work_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review of #259, round 3: `team bind` read a relative PATH from the bind shell's
+        working directory and stored it relative, so every launch resolved it against its
+        own: `cd ~/.config/aisquare && team bind reviewer --env-file GH_TOKEN=reviewer-token`
+        succeeded, and every window's `launch`, in its worktree, refused the role, while the
+        fleet's pre-check read asq's directory and could pass. It stores the file it read."""
+        token = _token_file(tmp_path)
+        monkeypatch.chdir(token.parent)
+        here = Path.cwd() / token.name
+
+        result = runner.invoke(
+            app, ["team", "bind", "reviewer", "--env-file", f"GH_TOKEN={token.name}"]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert load_config().team.profiles["reviewer"].env_files == {"GH_TOKEN": str(here)}
+        monkeypatch.chdir(work_dir)  # where the role launches: its worktree
+        launched = harness.resolve_profile("reviewer")
+        assert launched.refusal is None and launched.file_env == {"GH_TOKEN": TOKEN}
+
+    def test_a_relative_path_in_the_config_refuses_every_launch_alike(
+        self, work_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One written into config.toml by hand: each launch would look for it in its own
+        working directory, so whether the role starts would depend on where it is launched
+        from. Every launch refuses it, wherever, naming the way to bind it by its full path."""
+        token = _token_file(tmp_path)
+        _bind("reviewer", env_files={"GH_TOKEN": token.name})
+
+        for where in (work_dir, token.parent):  # even where the file would be found
+            monkeypatch.chdir(where)
+            got = harness.resolve_profile("reviewer")
+            assert got.refusal is not None and got.file_env == {}
+            assert f"reads GH_TOKEN from {token.name}, a relative path" in got.refusal
+            assert "aisquare team bind reviewer --env-file GH_TOKEN=<path>" in got.refusal
+
     def test_a_file_it_cannot_read_is_refused_at_bind(
         self, runner: CliRunner, work_dir: Path, tmp_path: Path
     ) -> None:

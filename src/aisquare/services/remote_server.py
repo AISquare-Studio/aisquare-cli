@@ -6227,8 +6227,10 @@ _quitting = False
 Ctrl-C's handler may run it again while it waits for a push."""
 
 
-def _remote_quit_now() -> NoReturn:
-    """End the process at once, saying which writes it leaves unfinished.
+def _remote_quit_now(undone: str | None = None) -> NoReturn:
+    """End the process at once, saying which writes it leaves unfinished, then ``undone``,
+    what else the quit was to do that it now will not (asq's Update or Uninstall, which
+    ``run_ui`` was to hand the terminal to once the waits were over).
 
     At once is the point: Python's own exit waits for every worker thread, the ones
     still running a write included (``concurrent.futures`` joins them all), so an exit
@@ -6253,6 +6255,8 @@ def _remote_quit_now() -> NoReturn:
                 f"Remote quit with {', '.join(left)} unfinished: "
                 "`aisquare fleet ls` shows where the agent is"
             )
+        if undone is not None:
+            _remote_say(undone)
         pushes = sys.modules.get("aisquare.services.remote_push")  # loaded by all that push
         if pushes is not None:
             pushes.push_drain(REMOTE_QUIT_PUSH_SECONDS)
@@ -6260,9 +6264,9 @@ def _remote_quit_now() -> NoReturn:
         os._exit(130)
 
 
-def remote_wait_for_writes() -> None:
+def remote_wait_for_writes(undone: str | None = None) -> None:
     """Once the fleet UI is gone: see out the writes phones started that still run, saying
-    so, and quit at once on Ctrl-C (:func:`_remote_quit_now`).
+    so, and quit at once on Ctrl-C (:func:`_remote_quit_now`), saying ``undone`` too.
 
     Quitting stopped the server and returned after 5 s whatever it was doing, and then
     the process waited, silently, for any write still running: a restart or a switch
@@ -6280,7 +6284,7 @@ def remote_wait_for_writes() -> None:
         for server in stopped:
             server.wound_down(max(0.0, deadline - time.monotonic()))
     except KeyboardInterrupt:
-        _remote_quit_now()
+        _remote_quit_now(undone)
 
 
 def _remote_serve_server(config: uvicorn.Config) -> uvicorn.Server:

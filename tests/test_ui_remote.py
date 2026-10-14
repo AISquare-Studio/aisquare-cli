@@ -1719,7 +1719,7 @@ def test_run_ui_ends_its_ngrok_on_a_hangup_or_a_sigterm_and_puts_the_signals_bac
 
     monkeypatch.setattr(app_mod, "FleetApp", Quit)
     monkeypatch.setattr(remote_control, "end_every_tunnel_now", lambda: ended.append("ngrok"))
-    monkeypatch.setattr(remote_server, "remote_wait_for_writes", lambda: None)
+    monkeypatch.setattr(remote_server, "remote_wait_for_writes", lambda undone=None: None)
     with at_their_default(ending):
         app_mod.run_ui()
         assert all(callable(handler) for handler in during.values()), during

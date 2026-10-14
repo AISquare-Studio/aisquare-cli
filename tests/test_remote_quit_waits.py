@@ -246,7 +246,9 @@ def test_run_ui_waits_for_the_writes_once_the_fleet_ui_is_gone(
             order.append("the UI is gone")
 
     monkeypatch.setattr(app_module, "FleetApp", Quit)
-    monkeypatch.setattr(remote_server, "remote_wait_for_writes", lambda: order.append("writes"))
+    monkeypatch.setattr(
+        remote_server, "remote_wait_for_writes", lambda undone=None: order.append("writes")
+    )
     app_module.run_ui()
     assert order == ["the UI is gone", "writes"]
 
@@ -311,6 +313,75 @@ def test_a_ctrl_c_while_quit_waits_for_remote_to_stop_quits_at_once_and_stops_ng
     finally:
         server.release.set()
         assert waited(5)
+
+
+@pytest.mark.parametrize(
+    ("where", "hand_off", "button"),
+    [
+        ("Remote stopping", ("upgrade", "--reopen"), "Update"),
+        ("the panel's writes", ("uninstall", "--reopen"), "Uninstall"),
+        ("a phone's write", ("upgrade", "--reopen"), "Update"),
+    ],
+)
+def test_a_ctrl_c_in_the_quits_waits_says_the_hand_over_did_not_run_and_what_runs_it(
+    where: str,
+    hand_off: tuple[str, ...],
+    button: str,
+    said: list[str],
+    quit_now: list[int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 4 of #259: after Update or Uninstall, the quit waits for Remote to stop, for the
+    R panel's writes and for a phone's write, each of which can take seconds. A Ctrl-C in any
+    of them ends the process at once, and said nothing of the hand-over it dropped: a user
+    who pressed it to hurry the upgrade along could not tell that it never ran. It says so,
+    and the command that runs it, with the global flags asq was started with."""
+    from aisquare.core import selfcli
+
+    def ctrl_c(*_args: object, **_kwargs: object) -> bool:
+        raise KeyboardInterrupt
+
+    def done(timeout: float | None = None) -> bool:
+        return True
+
+    class Quit:
+        """A fleet UI that quits for a hand-over, its Remote off already."""
+
+        def __init__(self, **options: object) -> None:
+            self.unsaved: list[str] = []
+            self.hand_off = hand_off
+            self.remote = SimpleNamespace(
+                wait_until_off=ctrl_c if where == "Remote stopping" else done,
+                writes_done=ctrl_c if where == "the panel's writes" else done,
+                stop_tunnel_now=lambda: None,
+            )
+
+        def run(self) -> None:
+            return None
+
+    execs: list[object] = []
+    monkeypatch.setattr(app_module, "FleetApp", Quit)
+    monkeypatch.setattr(selfcli, "exec_self", execs.append)
+    monkeypatch.setattr(selfcli, "global_flags", lambda: ["--profile=work"])
+    phones: list[str] = []
+    running: contextlib.AbstractContextManager[None] = contextlib.nullcontext()
+    if where == "a phone's write":
+        monkeypatch.setattr(remote_server, "_remote_writes_announced", ctrl_c)
+        running = remote_server._remote_write_running("agent/restart for coder-1")
+        phones = [
+            "Remote quit with agent/restart for coder-1 unfinished: "
+            "`aisquare fleet ls` shows where the agent is"
+        ]
+    with running, pytest.raises(SystemExit):
+        app_module.run_ui()
+
+    assert quit_now == [130]
+    assert execs == [], "the hand-over never runs after a Ctrl-C"
+    command = f"aisquare --profile=work {hand_off[0]}"
+    assert said == [
+        *phones,
+        f"⚠ {button} did not run: asq quit at the Ctrl-C — `{command}` runs it",
+    ]
 
 
 # --- serve's Ctrl-C ----------------------------------------------------------------------------

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import shlex
 import threading
 import time
 from collections import Counter
@@ -1640,6 +1641,26 @@ def _cut_off_workers() -> frozenset[str]:
 REMOTE_QUIT_QUIET_SECONDS = 0.5
 """How long ``run_ui`` waits for a Remote still stopping before it says that it is."""
 
+_HANDED_OVER = {"upgrade": "Update", "uninstall": "Uninstall"}
+"""The Doctor's button for each command it hands over (``doctor.HAND_OFFS``)."""
+
+
+def _hand_off_undone(hand_off: tuple[str, ...]) -> str:
+    """What a Ctrl-C in the quit's waits says of the hand-over it ends: that the Update or
+    Uninstall did not run, and the command that runs it, with this process's global flags.
+
+    The Ctrl-C ends the process at once (``remote_server._remote_quit_now``), and said
+    nothing of it: a user who pressed it to hurry the upgrade along could not tell that
+    ``aisquare upgrade`` never ran (round 4 of #259). ``--reopen`` is asq's own, to open it
+    again once the command is done, and not asked of a command typed in a shell.
+    """
+    from aisquare.core import selfcli
+
+    args = [arg for arg in hand_off if arg != "--reopen"]
+    button = _HANDED_OVER.get(args[0], args[0]) if args else "the hand-over"
+    command = shlex.join(["aisquare", *selfcli.global_flags(), *args])
+    return f"⚠ {button} did not run: asq quit at the Ctrl-C — `{command}` runs it"
+
 
 def run_ui(**options: Any) -> None:
     """Run the fleet UI until the user quits; then say what its last saves could not land,
@@ -1654,8 +1675,9 @@ def run_ui(**options: Any) -> None:
     running is what holds a stop up (uvicorn waits for the request), and raised out of
     here the Ctrl-C was Click's "Aborted!", after which Python's exit waited for the
     write all the same, silently. What the quit could not save is said before either
-    wait, so a quit at once keeps it. A hangup or a SIGTERM ends the process as ever, its
-    ngrok first (``ngrok_ends_with``).
+    wait, so a quit at once keeps it; an Update or Uninstall it drops is said as it quits
+    (:func:`_hand_off_undone`). A hangup or a SIGTERM ends the process as ever, its ngrok
+    first (``ngrok_ends_with``).
     """
     from aisquare.services import remote_server
 
@@ -1665,6 +1687,7 @@ def run_ui(**options: Any) -> None:
         # Read with getattr so an app still needs only `run()`, `unsaved` and `remote` to be
         # run here.
         hand_off = getattr(app, "hand_off", None)
+        undone = None if hand_off is None else _hand_off_undone(hand_off)
         for line in app.unsaved:
             stderr_console().print(f"⚠ {line}", markup=False, highlight=False)
         try:
@@ -1680,9 +1703,9 @@ def run_ui(**options: Any) -> None:
             try:  # the thread that would stop ngrok ends with the process
                 app.remote.stop_tunnel_now()
             finally:
-                remote_server._remote_quit_now()
+                remote_server._remote_quit_now(undone)
         # A phone's write still running would hold the exit as long as it runs: said, not silent.
-        remote_server.remote_wait_for_writes()
+        remote_server.remote_wait_for_writes(undone)
     # The terminal is ours again, and Remote, its ngrok, the panel's writes and the phones'
     # are done: give it to the command, whose exec skips what an exit would run.
     if hand_off is not None:

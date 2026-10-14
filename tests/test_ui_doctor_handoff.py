@@ -1004,7 +1004,9 @@ def test_run_ui_hands_over_only_once_remote_and_the_phones_writes_are_done(
     monkeypatch.setattr(
         ui_app, "FleetApp", lambda **_options: _FakeApp(("upgrade", "--reopen"), _Stopping())
     )
-    monkeypatch.setattr(remote_server, "remote_wait_for_writes", lambda: order.append("writes"))
+    monkeypatch.setattr(
+        remote_server, "remote_wait_for_writes", lambda undone=None: order.append("writes")
+    )
     monkeypatch.setattr(selfcli, "exec_self", lambda args: order.append(" ".join(args)))
 
     ui_app.run_ui()
@@ -1035,7 +1037,7 @@ def test_run_ui_hands_over_only_once_the_r_panels_writes_have_landed(
             threading.Timer(0.3, server.free.set).start()
 
     monkeypatch.setattr(ui_app, "FleetApp", lambda **_options: _Quit(("upgrade",), remote))
-    monkeypatch.setattr(remote_server, "remote_wait_for_writes", lambda: None)
+    monkeypatch.setattr(remote_server, "remote_wait_for_writes", lambda undone=None: None)
     monkeypatch.setattr(selfcli, "exec_self", lambda args: landed.append(remote.writes_done(0)))
     try:
         ui_app.run_ui()

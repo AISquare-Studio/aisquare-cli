@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import threading
 import time
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -280,7 +281,25 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
                 while len(requests) < 6 and time.monotonic() < deadline:
                     time.sleep(0.1)
                 assert len(requests) >= 6
-                fleet.stop(project, receipt.agent.label, grace=2)
+                # A graceful stop: Codex's own SessionEnd hook gives the claim back
+                # ("session ended") before the window goes; a window kill fires no
+                # hook and leaves the release to stop ("agent stopped").
+                task, _ = team.add_task("graceful stop fixture", cwd=workspace)
+                with store_session() as store:
+                    assert store.claim_task(
+                        task.id, status.session.id, datetime.now(UTC) + timedelta(minutes=5)
+                    )
+                stopped = fleet.stop(project, receipt.agent.label, grace=10)
+                assert not stopped.released, stopped
+                with store_session() as store:
+                    ended = store.get_session(status.session.id)
+                    released = [
+                        event.text
+                        for event in store.recent_events(project.id, limit=50)
+                        if event.kind == "task_released" and event.task_id == task.id
+                    ]
+                assert ended is not None and ended.ended_at is not None
+                assert released == ["graceful stop fixture (session ended)"], released
             finally:
                 if srv.has_session(
                     fleet.session_name(fleet.ensure_codename(project).codename or "")
@@ -305,8 +324,10 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
                 assert requests[-1]["model"] == expected
             # Observe the provider request too: accepting/reporting an alias
             # is insufficient if whitespace sends it to an unused TOML key.
+            # Codex's own max passes unchanged; ultracode is max. (A level the model
+            # lacks is Codex's to settle: gpt-5.4 given ultra sends its default.)
             selected = agent_launch.resolve(agent="codex")
-            for alias in ("max", "ultracode"):
+            for alias, level in (("max", "max"), ("ultracode", "max")):
                 arguments = agent_launch.prepare_arguments(
                     selected,
                     [],
@@ -328,7 +349,7 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
                 )
                 assert result.returncode == 0, result.stdout + result.stderr
                 assert requests[-1]["model"] == "gpt-5.4"
-                assert requests[-1]["reasoning"]["effort"] == "xhigh"
+                assert requests[-1]["reasoning"]["effort"] == level
         finally:
             server.shutdown()
             thread.join(timeout=2)

@@ -5,8 +5,9 @@ the task board, claims, manager continuation, CI delivery, tmux, worktrees and t
 terminal UI are shared. An adapter supplies native hooks, config locations,
 model options, permission options and MCP configuration.
 
-Codex compatibility is tested against **CLI 0.153.4**. Use this version or a
-newer compatible release; older releases may lack the required hooks. Cursor
+Codex compatibility is tested against **CLI 0.162.1**. Use this version or a
+newer compatible release; older releases may lack the required hooks and flags
+(`--approve-for-me`). Cursor
 remains a detection-only legacy entry. No Gemini or Antigravity adapter ships
 with this change.
 
@@ -51,8 +52,18 @@ open session cannot verify newly installed hooks. Reconnect after upgrading,
 then review the updated hooks in Codex. Doctor reports missing hooks, stale AISquare executables,
 short context timeouts and the review step, including account homes discovered
 on disk. End and interrupt handlers are local and use Codex's three-second
-timeout. Reconnect preserves extra headroom for the two context hooks and
-restores the bounded timeouts for the other lifecycle hooks.
+maximum. Reconnect preserves extra headroom for the two context hooks and
+restores the bounded timeouts for the other lifecycle hooks. Events AISquare does
+not install (`SubagentStart`, `PreCompact` and later additions) are ignored
+without output.
+
+Codex hooks are on by default. `hooks = false` under `[features]` (or the
+deprecated alias `codex_hooks`, which `hooks` overrides wherever both are set) in
+`CODEX_HOME/config.toml` or a `-p` profile file, or `--disable hooks` /
+`-c features.hooks=false` in a launch, switches every hook off, the way
+`"disableAllHooks": true` does for Claude Code. Doctor and `agents status` say so
+and name the file or the role whose arguments do it; Connect still installs the
+hooks and cannot change the switch.
 
 Selection order is explicit `--agent`, role binding, an exact known binary
 override (legacy shorthand), project preference, inherited launch family,
@@ -119,16 +130,19 @@ bin = "codex"
 env = { CODEX_HOME = "/path/to/codex-account" }
 
 [fleet.roles.coder]
+approve_for_me = false        # the default is Codex's --approve-for-me
 sandbox = "workspace-write"
 approval_policy = "on-request"
 agent_args = { codex = ["--no-alt-screen"] }
 ```
 
 `AISQUARE_MODEL_<ROLE>` and `AISQUARE_EFFORT_<ROLE>` remain explicit role pins.
-Codex accepts `minimal`, `low`, `medium`, `high`, and `xhigh`. Shared effort
-names `max` and `ultracode` map to Codex's `xhigh`, with a note identifying the
-mapping. This selects a native reasoning level, without Claude workflow
-orchestration. AISquare-configured values are trimmed and effort
+Codex names `minimal`, `low`, `medium`, `high`, `xhigh`, `max` and `ultra`; these
+pass unchanged, and which of them a model takes is Codex's to settle (a level the
+model lacks is sent as its default). The shared name `ultracode` maps to Codex's
+`max`, with a note identifying the mapping: a native reasoning level, without
+Claude workflow orchestration. Another level name is passed on with a note for
+Codex to validate; a value that is not a level name is refused. AISquare-configured values are trimmed and effort
 names ignore case; blank environment/config pins fall through to native defaults.
 An explicitly empty `--effort` is a usage error. Native model availability is left to
 Codex, without paid discovery probes. `--probe`, `--no-probe` and `--refresh`
@@ -170,8 +184,8 @@ asq launch coder --agent codex -- -- '-migrate the schema'
 
 Explicit native model/effort options override AISquare defaults without injecting
 a second value. Codex validates its own `-c` values, including future reasoning
-levels; the shared aliases `max` and `ultracode` are rewritten to `xhigh` in the
-actual native arguments. AISquare validates its explicit `--effort` and the
+levels; the shared alias `ultracode` is rewritten to `max` in the actual native
+arguments. AISquare validates its explicit `--effort` and the
 effective Claude effort saved with `--arg`. One-off native passthrough is validated
 by the agent, including future levels; a later native effort supersedes a saved one. `team harness` and `team spawn` report these choices with source `native`;
 these are argv overrides, not availability claims. Codex parses `-migrate` as
@@ -181,17 +195,28 @@ When native effort overrides AISquare's `--effort`, spawn reports the precedence
 `team harness` also reports fleet-specific arguments and model choices separately
 from the defaults used by `team spawn`.
 Native sandbox and approval policies stay separate.
-Reviewers, including numbered seats such as `reviewer2`, default to read-only;
-other Codex fleet roles use workspace-write. Numbered seats inherit the base
-role's sandbox and approval policy per field unless configured separately.
+Codex fleet roles run with `--approve-for-me` (Codex's automatic reviewer, in the
+workspace-write sandbox), the counterpart of the `auto` permission mode Claude
+Code fleet roles get; reviewers, including numbered seats such as `reviewer2`,
+run `--sandbox read-only --ask-for-approval on-request` instead. Codex refuses
+`--approve-for-me` beside `--sandbox` or `--ask-for-approval`, so a role (or a
+spawn) that chooses a sandbox or an approval policy, in its settings or its
+native arguments, runs without it; `approve_for_me = false` turns it off, and
+`approve_for_me = true` beside a conflicting choice is refused at spawn. The
+approval policies are `on-request` and `never`: Codex no longer supports
+`untrusted`, `on-failure` is deprecated, and the granular table is native
+config. A sandbox or policy given in the native arguments is not given twice.
+Numbered seats inherit the base role's sandbox, approval policy and
+`approve_for_me` per field unless configured separately.
 Their worktree, Claude permission mode and extra arguments keep their own
 defaults. Saved Codex sandbox/approval
 settings apply only to Codex; Claude Code keeps its own permission mode.
 Legacy fleet `extra_args` belong to Claude Code; `agent_args` maps each agent
 name to its own extra arguments. A customized Claude role therefore cannot
 forward `--restricted` or `--verbose` into a Codex fleet launch.
-No automatic approval bypass is added. Native subagents are disabled in fleet
-sessions when `fleet.disable_native_agent_teams` is enabled.
+No approval bypass is added: `--approve-for-me` reviews each request.
+Native subagents are disabled in fleet sessions when
+`fleet.disable_native_agent_teams` is enabled.
 
 ## Identity, MCP and telemetry
 
@@ -215,7 +240,8 @@ Initial fleet tasks use Codex's positional prompt. Subsequent automated input
 requires a linked waiting session; otherwise `fleet tell` files a board note.
 Permission and user-input hooks mark attention, tools restore working state,
 and end hooks release claims. The existing fleet pause, resume, attach, stop,
-reap and worktree operations remain shared. Restart a stopped role with
+reap and worktree operations remain shared; `fleet stop` types `/exit` and its
+Enter apart, because Codex reads one burst of keys as a paste. Restart a stopped role with
 `fleet spawn`; resume a native thread with its explicit native ID.
 
 Set `agents.mcp = true` to add AISquare's stdio server to launched sessions.
@@ -288,7 +314,9 @@ The ambient CI jobs also export parent-agent identity and a populated
 `CODEX_HOME`, which the shared test fixtures must isolate.
 
 It covers native hook context, prompt capture, exec/resume identity, tool and
-MCP calls, usage export, interactive fleet startup, tell, resize and stop.
+MCP calls, usage export, interactive fleet startup with `--approve-for-me`, tell,
+resize, a graceful stop (Codex's own `SessionEnd` releases the claim) and the
+effort levels that reach the provider.
 Owned test hooks use Codex's automation trust flag only inside this fixture.
 No production credentials or paid model calls are used. Common tests also
 cover config preservation, mixed agents, a synthetic third adapter, migration,
@@ -304,7 +332,8 @@ memory and fleet services. Add adapter contract fixtures and an opt-in native
 test. Keep unsupported capabilities explicit instead of copying another
 agent's flags or claiming hookless detection is integration.
 
-Native contracts: [Codex hooks](https://learn.chatgpt.com/docs/hooks),
+Native contracts (checked against 0.162.1's `codex --help` and `codex features list`):
+[Codex hooks](https://learn.chatgpt.com/docs/hooks),
 [configuration](https://learn.chatgpt.com/docs/config-file/config-reference),
 [MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli), and
 [non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode).

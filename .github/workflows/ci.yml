@@ -361,7 +361,7 @@ jobs:
           assert_proxy after
 
   codex:
-    name: Codex native integration (0.153.4)
+    name: Codex native integration (0.162.1)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -373,7 +373,7 @@ jobs:
         run: |
           python -m pip install -e ".[dev,serve]"
           sudo apt-get install -y tmux
-          npm install --global --prefix "$RUNNER_TEMP/codex" @openai/codex@0.153.4
+          npm install --global --prefix "$RUNNER_TEMP/codex" @openai/codex@0.162.1
           echo "$RUNNER_TEMP/codex/bin" >> "$GITHUB_PATH"
       - name: Exercise hooks, MCP, resume, usage and the interactive fleet
         run: |

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from aisquare.core import harness
 from aisquare.core.agent_adapters.types import AgentCapabilities, BadEffortError, HookSpec
+from aisquare.core.claude_accounts import ClaudeCodeAccounts
 
 
 class ClaudeCodeAdapter:
@@ -15,6 +16,7 @@ class ClaudeCodeAdapter:
     home_name = ".claude"
     settings_name = "settings.json"
     install_hint = "https://claude.ai/install.sh"
+    accounts = ClaudeCodeAccounts()
     capabilities = AgentCapabilities(
         hooks=(
             HookSpec("SessionStart", "session-start", 120),

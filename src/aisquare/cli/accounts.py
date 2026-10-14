@@ -1,4 +1,4 @@
-"""``aisquare accounts`` — the Claude Code accounts this CLI manages.
+"""``aisquare accounts`` — the Claude Code and Codex accounts this CLI manages.
 
 Thin over :mod:`aisquare.services.claude_accounts`: parse, call, render. The
 commands that report (``list``, ``usage``, ``remove``) honour ``--json``; the
@@ -11,6 +11,12 @@ replaces this process with ``claude`` on slot 2, extra arguments forwarded.
 The fleet UI's sign-in window runs exactly this command, so the environment an
 account launches with is decided in one place (``services.claude_accounts.
 session_env``).
+
+Codex accounts are slots on the same ladder (``core.claude_accounts``): ``add
+--agent codex`` makes one and runs ``codex login`` in it, ``run <slot>`` starts
+``codex`` there, and every other command takes a Codex slot as it takes a
+Claude one. The defaults are per agent; ``--agent`` names whose a bare
+``default --clear`` clears.
 """
 
 from __future__ import annotations
@@ -18,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Annotated, Any, NoReturn
 
 import typer
@@ -41,7 +48,7 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services import settings as settings_service
 
 app = typer.Typer(
-    help="Claude Code accounts this CLI manages: list, add, remove, run, usage, "
+    help="Claude Code and Codex accounts this CLI manages: list, add, remove, run, usage, "
     "default, alias, order, move, disable, enable.",
     no_args_is_help=False,
     invoke_without_command=True,
@@ -60,6 +67,14 @@ ProjectOpt = Annotated[
         metavar="PROJECT",
     ),
 ]
+AgentOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--agent",
+        help="Whose account: claude-code (the default) or codex.",
+        metavar="AGENT",
+    ),
+]
 RoleOpt = Annotated[
     str | None,
     typer.Option(
@@ -76,11 +91,12 @@ _DEFAULT_MARK = "*"
 
 @app.callback(invoke_without_command=True)
 def _group(ctx: typer.Context) -> None:
-    """Claude Code accounts this CLI manages: list, add, remove, run, usage.
+    """Claude Code and Codex accounts this CLI manages: list, add, remove, run, usage.
 
     Bare ``aisquare accounts`` lists them, offline. Slot 1 is the plain
-    ``claude`` of this machine; every other slot is a directory the CLI created
-    with ``add`` and launches with ``run`` (or ``aisquare launch --account``).
+    ``claude`` of this machine and slot 0 the plain ``codex``; every other slot
+    is a directory the CLI created with ``add`` and launches with ``run`` (or
+    ``aisquare launch --account``), numbered on one ladder across both agents.
     """
     if ctx.invoked_subcommand is None:
         list_(usage=False)
@@ -93,8 +109,29 @@ def _resolve(ref: str) -> ClaudeAccount:
         fail(str(exc), error="unknown_account", ref=ref)
 
 
-def _fail_not_installed(exc: Exception) -> NoReturn:
+def _fail_not_installed(exc: Exception, agent: str = core.AGENT) -> NoReturn:
+    if agent != core.AGENT:
+        fail(str(exc), error="agent_not_installed", hint=core.kind(agent).install_command)
     fail(str(exc), error="claude_not_installed", hint=core.INSTALL_COMMAND)
+
+
+def _agent(raw: str | None) -> str:
+    """``--agent``'s value as an adapter id with account slots (``claude-code`` unless given)."""
+    if raw is None:
+        return core.AGENT
+    agents = core.account_agents()
+    if raw not in agents:
+        fail(
+            f"no accounts for agent {raw!r} — choose {', '.join(agents)}",
+            error="usage",
+            ref=raw,
+        )
+    return raw
+
+
+def _usage_age(usage: ClaudeUsage, *, now: datetime | None = None) -> str:
+    """`` · as of 3h ago`` for a reading a session recorded (Codex's), ``""`` when recent."""
+    return core.format_age(usage.fetched_at, now=now)
 
 
 def _percent(value: float | None) -> str:
@@ -144,11 +181,31 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
     else:
         version = f" {claude.version}" if claude.version else ""
         console.print(Text.assemble(("✓ ", "green"), f"Claude Code{version} · {claude.binary}"))
+    # Another agent's line once it is installed or has a slot: a machine without
+    # Codex reads exactly as it did.
+    agents = {status.account.agent for status in overview.accounts}
+    for agent, found in overview.installs.items():
+        if agent == core.AGENT or not (found.installed or agent in agents):
+            continue
+        name = core.agent_label(agent)
+        if found.installed:
+            version = f" {found.version}" if found.version else ""
+            console.print(Text.assemble(("✓ ", "green"), f"{name}{version} · {found.binary}"))
+        else:
+            console.print(
+                Text.assemble(
+                    (f"✗ {name} is not installed", "bold red"),
+                    f" — install it: {core.kind(agent).install_command}",
+                )
+            )
+    several = len(agents) > 1
     table = Table(box=None, pad_edge=False, show_edge=False, header_style="bold")
     # Rows arrive in PRIORITY order (services.claude_accounts.list_accounts), so
     # the table reads top-down as "the order the fleet would try them"; the
     # default is starred the way `project list` stars the active project.
-    for column in (" ", "slot", "label", "signed in as", "plan", "hooks"):
+    for column in (" ", "slot", *(["agent"] if several else []), "label", "signed in as"):
+        table.add_column(column)
+    for column in ("plan", "hooks"):
         table.add_column(column)
     if with_usage:
         table.add_column("session")
@@ -164,20 +221,27 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
         cells: list[Text | str] = [
             Text(_DEFAULT_MARK, style="bold green") if status.account.is_default else "",
             str(status.account.slot),
+            *([core.agent_label(status.account.agent)] if several else []),
             label,
             who,
             status.subscription or _DASH,
             Text("✓", style="green") if status.hooks_installed else Text("✗", style="red"),
         ]
         if with_usage:
-            cells.extend(_usage_cells(status.usage))
+            session, week = _usage_cells(status.usage)
+            if status.usage is not None and status.usage.available:
+                week += _usage_age(status.usage) if status.account.agent != core.AGENT else ""
+            cells.extend((session, week))
         cells.append(Text(_short(status.account.config_dir), style="dim"))
         table.add_row(*cells)
     console.print(table)
     for status in overview.accounts:
         if status.detail:
             console.print(f"{status.label}: {status.detail}", markup=False, style="yellow")
-    default = next((s for s in overview.accounts if s.account.is_default), None)
+    default = next(
+        (s for s in overview.accounts if s.account.is_default and s.account.agent == core.AGENT),
+        None,
+    )
     if default is None:
         console.print(
             Text(
@@ -188,8 +252,8 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
         )
     console.print(
         Text(
-            "add one: aisquare accounts add · open one: aisquare accounts run <slot> · "
-            "the Accounts page in asq does both",
+            "add one: aisquare accounts add [--agent codex] · open one: aisquare accounts run "
+            "<slot> · the Accounts page in asq does both",
             style="dim",
         )
     )
@@ -231,7 +295,11 @@ def usage_(
         ),
     ] = None,
 ) -> None:
-    """Session (5-hour) and weekly usage per signed-in account, as Claude Code's /usage shows it."""
+    """Session (5-hour) and weekly usage per signed-in account, as Claude Code's /usage shows it.
+
+    A Codex account's is what its newest session recorded, read from its home with
+    no request — "as of" says how old that reading is.
+    """
     # The arranged list, like every other account surface: priority order, the
     # alias as the label, disabled marked — and one concurrent read for all of
     # them (review of #205, third round).
@@ -261,6 +329,9 @@ def usage_(
     for status, label in zip(statuses, labels, strict=True):
         who = Text(status.identity.email) if status.identity else Text("not signed in", style="dim")
         session, week = _usage_cells(status.usage)
+        if status.account.agent != core.AGENT and status.usage and status.usage.available:
+            week += _usage_age(status.usage)
+            label = Text.assemble(label, (" · codex", "dim"))
         table.add_row(str(status.account.slot), label, who, session, week)
     console.print(table)
 
@@ -285,7 +356,8 @@ def _account_json(account: ClaudeAccount | None) -> dict[str, Any] | None:
 def _who(account: ClaudeAccount) -> str:
     identity = core.identity(account)
     email = f" ({identity.email})" if identity else ""
-    return f"slot {account.slot} · {core.label(account)}{email}"
+    agent = f" · {core.agent_label(account.agent)}" if account.agent != core.AGENT else ""
+    return f"slot {account.slot} · {core.label(account)}{email}{agent}"
 
 
 def _project_for(ref: str) -> ProjectInfo:
@@ -304,9 +376,21 @@ def _arrangement_failed(exc: Exception) -> NoReturn:
 
 
 def _show_defaults(project: ProjectInfo | None) -> None:
-    """The ladder as it stands: machine default, a project's default, every role binding."""
+    """The ladder as it stands: machine default, a project's default, every role binding.
+
+    Claude Code's as it always read; another agent's below it once that agent has
+    a default of either kind (``--json`` has them under ``agents``).
+    """
     machine = accounts_service.machine_default()
     per_project = accounts_service.project_default(project) if project is not None else None
+    others = {
+        agent: (
+            accounts_service.machine_default(agent),
+            accounts_service.project_default(project, agent=agent) if project is not None else None,
+        )
+        for agent in core.account_agents()
+        if agent != core.AGENT
+    }
     try:
         bindings = settings_service.role_account_bindings()
     except Exception as exc:  # a broken config.toml: say so, show the rest
@@ -320,6 +404,13 @@ def _show_defaults(project: ProjectInfo | None) -> None:
                     "project": project.id if project is not None else None,
                     "project_default": _account_json(per_project),
                     "role_bindings": bindings,
+                    "agents": {
+                        agent: {
+                            "machine_default": _account_json(theirs),
+                            "project_default": _account_json(their_project),
+                        }
+                        for agent, (theirs, their_project) in others.items()
+                    },
                 }
             )
         )
@@ -339,6 +430,17 @@ def _show_defaults(project: ProjectInfo | None) -> None:
             console.print(f"project {name}: no default of its own", markup=False)
         else:
             console.print(f"project {name}: {_who(per_project)}", markup=False)
+    for agent, (theirs, their_project) in others.items():
+        if theirs is not None:
+            console.print(
+                f"{core.agent_label(agent)} machine default: {_who(theirs)}", markup=False
+            )
+        if their_project is not None and project is not None:
+            console.print(
+                f"{core.agent_label(agent)} project {project.root.name or project.id}: "
+                f"{_who(their_project)}",
+                markup=False,
+            )
     if bindings:
         for role in sorted(bindings):
             console.print(f"role {role}: account {bindings[role]}", markup=False)
@@ -364,6 +466,7 @@ def default(
     clear: Annotated[
         bool, typer.Option("--clear", help="Remove the default at the chosen level.")
     ] = False,
+    agent: AgentOpt = None,
 ) -> None:
     """Choose the account a launch runs under — for the machine, a project, or a role.
 
@@ -373,7 +476,12 @@ def default(
     resolves them top-down: ``--account`` on the command line, then the role's
     binding, then the project's default, then the machine's; with none of those
     it runs on whatever ``claude`` the shell already has, exactly as before.
+
+    Each agent has its own defaults: an account sets its own agent's, and
+    ``--clear`` clears Claude Code's unless ``--agent codex`` says otherwise. A
+    role's binding is checked against the agent the role launches.
     """
+    whose = _agent(agent) if agent is not None else None
     if project is not None and role is not None:
         fail("--project and --role are mutually exclusive", error="usage")
     if ref is not None and clear:
@@ -388,14 +496,22 @@ def default(
         _set_role_default(role, ref, clear=clear)
         return
     try:
-        chosen = accounts_service.set_default(None if clear else ref, project=target)
+        chosen = (
+            accounts_service.set_default(None if clear else ref, project=target)
+            if whose is None
+            else accounts_service.set_default(None if clear else ref, project=target, agent=whose)
+        )
     except accounts_service.AccountsError as exc:
         _arrangement_failed(exc)
     level = f"project {target.root.name or target.id}" if target is not None else "machine"
     if get_state().json_output:
         typer.echo(json.dumps({"level": level, "default": _account_json(chosen)}))
         return
-    if chosen is None:
+    if chosen is None and whose not in (None, core.AGENT):
+        stdout_console().print(
+            f"✓ {level} default cleared for {core.agent_label(whose or core.AGENT)}", markup=False
+        )
+    elif chosen is None:
         stdout_console().print(f"✓ {level} default cleared", markup=False)
     else:
         stdout_console().print(f"✓ {level} default: {_who(chosen)}", markup=False)
@@ -410,12 +526,28 @@ def _has_project() -> bool:
     return True
 
 
+def _role_agent(role: str) -> str:
+    """The agent ``role`` launches (its binding's, else the default's); Claude Code if unknown."""
+    from aisquare.services import agent_launch
+
+    try:
+        return agent_launch.resolve(role).adapter.id
+    except Exception:
+        return core.AGENT
+
+
 def _set_role_default(role: str, ref: str | None, *, clear: bool) -> None:
     if not clear:
         if ref is None:
             fail("pass an account to bind, or --clear", error="usage")
         try:
-            accounts_service.resolve(ref)  # a bad name is a usage error, not a stored binding
+            # A bad name is a usage error, not a stored binding — and so is an account
+            # of another agent than the one the role launches.
+            role_agent = _role_agent(role)
+            if role_agent == core.AGENT:
+                accounts_service.resolve(ref)
+            else:
+                accounts_service.resolve(ref, agent=role_agent)
         except accounts_service.AccountsError as exc:
             _arrangement_failed(exc)
     with expected_config_write_errors():
@@ -533,8 +665,13 @@ def enable(ref: SlotRef) -> None:
 
 
 @app.command("add")
-def add() -> None:
-    """Add a Claude Code account: a fresh slot, signed in through Claude Code's own login."""
+def add(agent: AgentOpt = None) -> None:
+    """Add an account: a fresh slot, signed in through the agent's own login.
+
+    Claude Code's first session signs in; ``--agent codex`` runs ``codex login``
+    in the slot's own ``CODEX_HOME``. Either way the slot's hooks are connected after.
+    """
+    whose = _agent(agent)
     if get_state().json_output:
         fail(
             "accounts add hands the terminal to Claude Code and has no --json form — "
@@ -550,19 +687,34 @@ def add() -> None:
             detail=reason,
         )
     try:
-        account = accounts_service.begin_sign_in(None)
+        account = (
+            accounts_service.begin_sign_in(None)
+            if whose == core.AGENT
+            else accounts_service.begin_sign_in(None, agent=whose)
+        )
     except accounts_service.ClaudeNotInstalled as exc:
-        _fail_not_installed(exc)
+        _fail_not_installed(exc, whose)
     console = stderr_console()
-    console.print(
-        f"Slot {account.slot} is ready. Claude Code opens now with its own login — sign in "
-        "there, then leave it (/exit) and this command records the account."
-    )
+    if whose == core.AGENT:
+        console.print(
+            f"Slot {account.slot} is ready. Claude Code opens now with its own login — sign in "
+            "there, then leave it (/exit) and this command records the account."
+        )
+    else:
+        console.print(
+            f"Slot {account.slot} is ready. `{core.agent_label(whose).lower()} login` runs now "
+            "in it — finish the sign-in in the browser it opens, and this command records "
+            "the account."
+        )
     try:
-        status = accounts_service.run_session(account)
+        status = (
+            accounts_service.run_session(account)
+            if whose == core.AGENT
+            else accounts_service.run_session(account, core.kind(whose).sign_in_args())
+        )
     except accounts_service.ClaudeNotInstalled as exc:
         accounts_service.abandon_sign_in(account)
-        _fail_not_installed(exc)
+        _fail_not_installed(exc, whose)
     except KeyboardInterrupt:
         # The session guards itself against Ctrl-C; this is the belt to its
         # braces (Windows, a signal that arrived between the two calls): a slot
@@ -574,25 +726,27 @@ def add() -> None:
         accounts_service.abandon_sign_in(account)
         how = f"status {status}" if status >= 0 else f"signal {-status}"
         fail(
-            f"no sign-in landed in slot {account.slot} (Claude Code exited with {how}) "
-            "— nothing was added",
+            f"no sign-in landed in slot {account.slot} ({core.agent_label(whose)} exited with "
+            f"{how}) — nothing was added",
             error="not_signed_in",
         )
     described = accounts_service.complete_sign_in(account)
+    name = "Claude" if whose == core.AGENT else core.agent_label(whose)
     console.print(
-        Text.assemble(("✓ ", "green"), f"Added Claude account {account.slot}: {landed.email}")
+        Text.assemble(("✓ ", "green"), f"Added {name} account {account.slot}: {landed.email}")
     )
     if described.detail:
         console.print(described.detail, markup=False, style="yellow")
     if not described.hooks_installed:
         console.print(
             "  ⚠ aisquare's hooks did not install into it — run: "
-            + agents_service.config_dir_command("connect", "claude-code", account.config_dir),
+            + agents_service.config_dir_command("connect", whose, account.config_dir),
             style="yellow",
         )
+    as_role = "coder" if whose == core.AGENT else f"coder --agent {whose}"
     console.print(
         f"  open it: aisquare accounts run {account.slot} · "
-        f"as a role: aisquare launch coder --account {account.slot}",
+        f"as a role: aisquare launch {as_role} --account {account.slot}",
         style="dim",
     )
 
@@ -633,18 +787,37 @@ def remove(slot: SlotRef) -> None:
 
 
 def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:
-    """Replace this process with Claude Code (indirection so tests can intercept)."""
+    """Replace this process with the agent (indirection so tests can intercept)."""
     os.execve(binary, argv, env)
 
 
 def run(ctx: typer.Context, slot: SlotRef) -> None:
-    """Open Claude Code on one account — what a c1/c2 alias did. Extra arguments go to claude."""
+    """Open the agent on one account — what a c1/c2 alias did. Extra arguments go to it.
+
+    ``claude`` on a Claude slot, ``codex`` on a Codex one (``run <n> login`` is the
+    Codex sign-in the Accounts page opens).
+    """
     if get_state().json_output:
         fail(
             "accounts run hands the terminal to Claude Code and has no --json form",
             error="no_json_form",
         )
     account = _resolve(slot)
+    if account.agent != core.AGENT:
+        found = accounts_service.install(account.agent)
+        if not found.installed or found.binary is None:
+            _fail_not_installed(accounts_service.not_installed(account.agent), account.agent)
+        identity = core.identity(account)
+        who = identity.email if identity else "not signed in yet — run it with `login`"
+        stderr_console().print(
+            Text.assemble(
+                f"Opening {Path(found.binary).name} as ",
+                (core.label(account), "bold"),
+                f" ({who})…",
+            ),
+        )
+        _exec(found.binary, [found.binary, *ctx.args], accounts_service.session_env(account))
+        return
     found = accounts_service.install()
     if not found.installed or found.binary is None:
         _fail_not_installed(

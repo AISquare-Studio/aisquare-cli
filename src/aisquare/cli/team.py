@@ -706,6 +706,18 @@ def harness_status() -> None:
     )
 
 
+def _bound_agent(role: str, agent: str | None) -> str:
+    """The agent ``role`` launches: ``agent`` when this bind names one, else its resolution."""
+    if agent:
+        return agent
+    from aisquare.services import agent_launch
+
+    try:
+        return agent_launch.resolve(role).adapter.id
+    except Exception:  # an unresolvable role is the launch's to refuse, not the bind's
+        return "claude-code"
+
+
 @app.command("bind")
 def bind(
     role_name: Annotated[
@@ -803,7 +815,13 @@ def bind(
             # Resolved NOW, so a typo is a usage error rather than a binding
             # that refuses every later launch of the role.
             try:
-                claude_accounts_service.resolve(account)
+                # Against the agent the role launches (named here, or bound before):
+                # a Codex role bound to a Claude slot is refused now, naming both.
+                whose = _bound_agent(role_name, agent)
+                if whose == "claude-code":
+                    claude_accounts_service.resolve(account)
+                else:
+                    claude_accounts_service.resolve(account, agent=whose)
             except claude_accounts_service.AccountsError as exc:
                 fail(str(exc), error="unknown_account", ref=account)
         try:

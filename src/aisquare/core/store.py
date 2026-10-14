@@ -910,6 +910,33 @@ _SCHEMA_V27 = ""
 # dated 0. An UPDATE of those rows only, where the table is (:func:`_redate_team_meta`):
 # a store that meets it twice converges.
 _SCHEMA_V28 = ""
+# v29: the arrangement of OTHER agents' account slots (Codex's, t3). The slots are
+# directories like Claude Code's (``core.claude_accounts``: one ladder numbers every
+# agent's, so ``slot`` alone is the key), and this table is ``claude_account`` for
+# them, plus the agent: an alias, a rank among that agent's slots, a default PER
+# AGENT (the partial unique index is on ``agent``) and a disabled flag. A table of
+# its own rather than rows in ``claude_account``: that one's single-default index
+# would allow one default for the whole machine, and a build from before this step
+# reconciles ``claude_account`` against Claude Code's directories alone — it would
+# prune every Codex row it met, on any machine where two builds share the store.
+# Aliases are unique across the two tables by the service (``set_alias`` checks the
+# other agent's before writing); within this one, by the index.
+_SCHEMA_V29 = """
+CREATE TABLE IF NOT EXISTS agent_account (
+    slot        INTEGER PRIMARY KEY,
+    agent       TEXT NOT NULL,
+    config_dir  TEXT NOT NULL,
+    alias       TEXT,
+    position    INTEGER NOT NULL,
+    is_default  INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
+    disabled    INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1)),
+    created_at  TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS agent_account_alias ON agent_account (alias)
+    WHERE alias IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS agent_account_default ON agent_account (agent)
+    WHERE is_default = 1;
+"""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -940,6 +967,7 @@ _MIGRATIONS = (
     _SCHEMA_V26,
     _SCHEMA_V27,
     _SCHEMA_V28,
+    _SCHEMA_V29,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -998,6 +1026,7 @@ _PRODUCTS: dict[int, _Products] = {
         ("team_meta_insert_time", "team_meta_update_time"),
         (("team_meta", "updated_at", "INTEGER NOT NULL DEFAULT 0"),),
     ),
+    28: _Products(("agent_account", "agent_account_alias", "agent_account_default")),
 }
 
 _PROJECT_COLUMNS = "id, root, linked_repos, codename, onboarded_at, group_id, position, pinned_at"
@@ -1078,6 +1107,9 @@ _FLEET_AGENT_COLUMNS = (
     "socket_path, boot_id, agent"
 )
 _CLAUDE_ACCOUNT_COLUMNS = "slot, config_dir, alias, position, is_default, disabled, created_at"
+_AGENT_ACCOUNT_COLUMNS = (
+    "slot, agent, config_dir, alias, position, is_default, disabled, created_at"
+)
 
 
 class AmbiguousIdError(LookupError):
@@ -1278,6 +1310,16 @@ class ContextStore(Protocol):
     def set_claude_account_alias(self, slot: int, alias: str | None) -> None: ...
     def set_claude_account_disabled(self, slot: int, disabled: bool) -> None: ...
     def order_claude_accounts(self, slots: Sequence[int]) -> None: ...
+    # Other agents' account registry (v29): the same arrangement, per agent.
+    def agent_accounts(self, agent: str) -> list[ClaudeAccountRecord]: ...
+    def upsert_agent_account(
+        self, agent: str, slot: int, config_dir: Path
+    ) -> ClaudeAccountRecord: ...
+    def delete_agent_accounts(self, agent: str, slots: Sequence[int]) -> int: ...
+    def set_agent_account_default(self, agent: str, slot: int | None) -> None: ...
+    def set_agent_account_alias(self, agent: str, slot: int, alias: str | None) -> None: ...
+    def set_agent_account_disabled(self, agent: str, slot: int, disabled: bool) -> None: ...
+    def order_agent_accounts(self, agent: str, slots: Sequence[int]) -> None: ...
     # Usage readings (v16, #146): the history behind "how fast is this window filling".
     def add_usage_sample(self, sample: UsageSample) -> None: ...
     def usage_samples(self, slot: int, *, since: datetime) -> list[UsageSample]: ...
@@ -4025,6 +4067,98 @@ class SqliteStore:
         for position, slot in enumerate([*wanted, *rest], start=1):
             self._conn.execute(
                 "UPDATE claude_account SET position = ? WHERE slot = ?", (position, slot)
+            )
+        self._commit()
+
+    # --- other agents' account registry (v29) ---------------------------------------------------
+    #
+    # ``claude_account``'s methods above, for the rows of one other agent: the same
+    # one-statement writes, the default and the alias refused by the indexes.
+
+    def agent_accounts(self, agent: str) -> list[ClaudeAccountRecord]:
+        """``agent``'s registered slots in priority order (position, then slot)."""
+        rows = self._conn.execute(
+            f"SELECT {_AGENT_ACCOUNT_COLUMNS} FROM agent_account WHERE agent = ? "
+            "ORDER BY position, slot",
+            (agent,),
+        ).fetchall()
+        return [_row_to_claude_account(row) for row in rows]
+
+    def upsert_agent_account(self, agent: str, slot: int, config_dir: Path) -> ClaudeAccountRecord:
+        """Register ``slot`` at the END of ``agent``'s order, or refresh its directory."""
+        self._conn.execute(
+            f"INSERT INTO agent_account ({_AGENT_ACCOUNT_COLUMNS}) VALUES (?, ?, ?, NULL, "
+            "COALESCE((SELECT MAX(position) FROM agent_account WHERE agent = ?), 0) + 1, "
+            "0, 0, ?) "
+            "ON CONFLICT (slot) DO UPDATE SET config_dir = excluded.config_dir, "
+            "agent = excluded.agent",
+            (slot, agent, str(config_dir), agent, _now_iso()),
+        )
+        self._commit()
+        row = self._conn.execute(
+            f"SELECT {_AGENT_ACCOUNT_COLUMNS} FROM agent_account WHERE slot = ?", (slot,)
+        ).fetchone()
+        assert row is not None  # just written
+        return _row_to_claude_account(row)
+
+    def delete_agent_accounts(self, agent: str, slots: Sequence[int]) -> int:
+        """Forget several of ``agent``'s slots; the order is renumbered once, after."""
+        deleted = 0
+        for slot in slots:
+            cursor = self._conn.execute(
+                "DELETE FROM agent_account WHERE agent = ? AND slot = ?", (agent, slot)
+            )
+            deleted += cursor.rowcount
+        if deleted:
+            self.order_agent_accounts(agent, [])  # close the gaps; commits all of it
+        else:
+            self._commit()
+        return deleted
+
+    def set_agent_account_default(self, agent: str, slot: int | None) -> None:
+        """Make ``slot`` ``agent``'s one default (``None`` clears it). Unknown → ``KeyError``."""
+        self._conn.execute(
+            "UPDATE agent_account SET is_default = 0 WHERE agent = ? AND is_default = 1", (agent,)
+        )
+        if slot is not None:
+            cursor = self._conn.execute(
+                "UPDATE agent_account SET is_default = 1 WHERE agent = ? AND slot = ?",
+                (agent, slot),
+            )
+            if cursor.rowcount != 1:
+                self._rollback()
+                raise KeyError(slot)
+        self._commit()
+
+    def set_agent_account_alias(self, agent: str, slot: int, alias: str | None) -> None:
+        """Name a slot (``None`` unnames it). A taken alias raises ``sqlite3.IntegrityError``."""
+        cursor = self._conn.execute(
+            "UPDATE agent_account SET alias = ? WHERE agent = ? AND slot = ?", (alias, agent, slot)
+        )
+        if cursor.rowcount != 1:
+            self._rollback()
+            raise KeyError(slot)
+        self._commit()
+
+    def set_agent_account_disabled(self, agent: str, slot: int, disabled: bool) -> None:
+        cursor = self._conn.execute(
+            "UPDATE agent_account SET disabled = ? WHERE agent = ? AND slot = ?",
+            (int(disabled), agent, slot),
+        )
+        if cursor.rowcount != 1:
+            self._rollback()
+            raise KeyError(slot)
+        self._commit()
+
+    def order_agent_accounts(self, agent: str, slots: Sequence[int]) -> None:
+        """``slots`` first, in that order, then the rest of ``agent``'s as they were; 1..n."""
+        current = [record.slot for record in self.agent_accounts(agent)]
+        wanted = list(dict.fromkeys(slot for slot in slots if slot in current))
+        rest = [slot for slot in current if slot not in wanted]
+        for position, slot in enumerate([*wanted, *rest], start=1):
+            self._conn.execute(
+                "UPDATE agent_account SET position = ? WHERE agent = ? AND slot = ?",
+                (position, agent, slot),
             )
         self._commit()
 

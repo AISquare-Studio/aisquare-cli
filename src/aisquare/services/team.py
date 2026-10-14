@@ -494,7 +494,7 @@ def account_label(account: str | None, labels: Mapping[int, str] | None = None) 
         named = (labels or {}).get(slot)
         if named:
             return named
-        return "plain claude" if slot == claude_accounts_core.DEFAULT_SLOT else f"account {slot}"
+        return claude_accounts_core.slot_name(slot)
     return Path(account).name
 
 
@@ -1858,6 +1858,7 @@ def hook_stop_failure(
     error: str | None,
     message: str | None,
     details: str | None,
+    notice: claude_accounts_core.LimitNotice | None = None,
 ) -> TurnFailure | None:
     """The turn ended on an API error — Claude Code's ``StopFailure`` (#146).
 
@@ -1898,7 +1899,10 @@ def hook_stop_failure(
             )
             refreshed = store.get_session(session.id) or session
             return TurnFailure(refreshed, kind, None)
-        notice = claude_accounts_core.parse_limit_notice(message, now=_now())
+        if notice is None:
+            # Claude Code's own text; an agent that read its limit elsewhere (Codex,
+            # from the end of its rollout: `core.codex_accounts`) hands the notice in.
+            notice = claude_accounts_core.parse_limit_notice(message, now=_now())
         # A row `fleet switch` has marked HANDOVER_STATE is already handled: a
         # re-fire during the hand-over must neither start a second worker nor
         # write `limited` over the mark — its SessionEnd would then release the

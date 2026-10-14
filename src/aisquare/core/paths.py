@@ -7,6 +7,7 @@ Layout:
     ├── context.db      # SQLite store: context entries and projects (see core.store)
     ├── agents.json     # registry of detected and connected agents
     ├── claude-accounts/# one CLAUDE_CONFIG_DIR per managed account (core.claude_accounts)
+    ├── codex-accounts/ # one CODEX_HOME per managed Codex account (core.codex_accounts)
     ├── cache/          # disposable cached data (incl. each managed account's TMPDIR)
     ├── explainability/ # session→Run join records (see services.explainability)
     └── log/            # capture and diagnostic logs
@@ -484,6 +485,11 @@ def claude_accounts_dir() -> Path:
 def claude_accounts_tmp_dir() -> Path:
     """Where each managed account's ``CLAUDE_CODE_TMPDIR`` lives — disposable, under cache."""
     return cache_dir() / "claude-accounts"
+
+
+def agent_accounts_dir(name: str) -> Path:
+    """Where the CLI keeps another agent's homes, one per slot (``codex-accounts``)."""
+    return aisquare_home() / name
 
 
 def agents_registry_path() -> Path:

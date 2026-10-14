@@ -26,6 +26,7 @@ import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import insights, selfcli
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core import spawn as spawn_core
@@ -239,6 +240,8 @@ def turn_failed(
     error: str | None = None,
     message: str | None = None,
     details: str | None = None,
+    notice: claude_accounts_core.LimitNotice | None = None,
+    hand_over: bool = True,
 ) -> None:
     """The turn ended on an API error (Claude Code's ``StopFailure``), not a Stop (#146).
 
@@ -261,16 +264,27 @@ def turn_failed(
     :func:`hand_over`), and the hook returns at once. A hand-over that cannot
     find headroom leaves the agent limited, its own wait intact, and says so on
     the board — which is the ``wait`` behaviour, and correct.
+
+    Codex has no ``StopFailure``: its hooks read the limit off the end of the
+    session's rollout and come here with the ``notice`` already read
+    (``services.agent_events``). ``hand_over=False`` records the limit without
+    moving the agent — a session that is ending has nothing left to move.
     """
     if session_id is None:
         return
     try:
-        failure = team_service.hook_stop_failure(
-            session_id, error=error, message=message, details=details
+        failure = (
+            team_service.hook_stop_failure(
+                session_id, error=error, message=message, details=details
+            )
+            if notice is None
+            else team_service.hook_stop_failure(
+                session_id, error=error, message=message, details=details, notice=notice
+            )
         )
     finally:
         metrics_service.close_turn(session_id)
-    if failure is not None and failure.limited and not failure.already_limited:
+    if failure is not None and failure.limited and not failure.already_limited and hand_over:
         # A re-fire for the same window (Claude Code does that) is not a second
         # hand-over: the first worker is at work, or has already moved the agent.
         _hand_over_if_configured(failure)

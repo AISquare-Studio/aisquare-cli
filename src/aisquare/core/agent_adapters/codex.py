@@ -11,6 +11,7 @@ from aisquare.core.agent_adapters.types import (
     HookSpec,
     option_values,
 )
+from aisquare.core.codex_accounts import CodexAccounts
 
 #: ``model_reasoning_effort`` levels Codex names (0.162.1). Which of them a model
 #: takes is Codex's to say, so another level is passed through with a note.
@@ -36,6 +37,7 @@ class CodexAdapter:
     home_name = ".codex"
     settings_name = "hooks.json"
     install_hint = "npm install -g @openai/codex"
+    accounts = CodexAccounts()
     capabilities = AgentCapabilities(
         hooks=(
             HookSpec("SessionStart", "codex", 120),

@@ -23,7 +23,8 @@ The environment has one more decision in it since #145: WHICH CLAUDE ACCOUNT.
 project's default and the machine's default are consulted in that order
 (``aisquare accounts default``), and with none of those set the environment is
 exactly what it always was. One resolver, ``services.claude_accounts.choose``,
-answers for ``launch`` and ``fleet spawn`` alike.
+answers for ``launch`` and ``fleet spawn`` alike — for a Codex role too, where
+the account is a Codex slot and the launch sets ``CODEX_HOME`` to it.
 """
 
 from __future__ import annotations
@@ -233,10 +234,11 @@ def launch(
         typer.Option(
             "--account",
             "-a",
-            help="Claude Code account to run under: a slot number, an alias or the email it "
-            "is signed in as (see `aisquare accounts`). Sets CLAUDE_CONFIG_DIR and "
-            "CLAUDE_CODE_TMPDIR over the role's binding. Without it: the role's bound "
-            "account, then the project default, then the machine default.",
+            help="Account to run under, of the role's agent: a slot number, an alias or the "
+            "email it is signed in as (see `aisquare accounts`). Sets CLAUDE_CONFIG_DIR and "
+            "CLAUDE_CODE_TMPDIR (Claude Code) or CODEX_HOME (Codex) over the role's binding. "
+            "Without it: the role's bound account, then the project default, then the "
+            "machine default.",
             metavar="ACCOUNT",
         ),
     ] = None,
@@ -279,11 +281,6 @@ def launch(
         )
     except ValueError as exc:
         fail(str(exc), error="agent_configuration")
-    if account is not None and selected.adapter.id != "claude-code":
-        fail(
-            "--account selects a Claude Code account; for Codex use --env CODEX_HOME=PATH",
-            error="agent_configuration",
-        )
     resolution = selected.binary
     binary = agent_launch.executable(selected)
     if binary is None:
@@ -337,15 +334,26 @@ def launch(
     # own two variables (or their absence) over whatever the binding set — a
     # launch announced as `[plain claude]` must not run on the binding's other
     # login. When NOTHING chose (no flag, no binding, no default — every
-    # machine before #145), the environment is left exactly as it was. The
-    # accounts are Claude Code's: another agent keeps its own home, and is
-    # refused `--account` above.
+    # machine before #145), the environment is left exactly as it was. Every
+    # rung answers with an account of the role's agent: a Codex role runs on a
+    # Codex slot (`CODEX_HOME`), and another agent's account is refused, naming both.
     choice = claude_accounts_service.AccountChoice(account=None, source=None)
-    if selected.adapter.id == "claude-code":
+    if selected.adapter.accounts is not None:
         try:
-            choice = claude_accounts_service.choose(account, role=role, project=project)
+            choice = (
+                claude_accounts_service.choose(account, role=role, project=project)
+                if selected.adapter.id == claude_accounts_core.AGENT
+                else claude_accounts_service.choose(
+                    account, role=role, project=project, agent=selected.adapter.id
+                )
+            )
         except claude_accounts_service.NoSuchAccount as exc:
             fail(str(exc), error="unknown_account", ref=account)
+    elif account is not None:
+        fail(
+            f"--account selects an account, and {selected.adapter.label} has no account slots",
+            error="agent_configuration",
+        )
     for note in choice.notes:
         # A skipped rung is otherwise invisible: the launch lands on the next
         # one down and nobody learns why. Same channel and style as the

@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
-from aisquare.core import agents
+from aisquare.core import agents, codex_accounts
+from aisquare.core.claude_accounts import LimitNotice
 from aisquare.core.store import store_session
 from aisquare.services import hooks, metrics
 
@@ -129,6 +130,26 @@ def _dispatch_codex(
 ) -> str | None:
     common = {"agent": "codex", "native_session_id": native, "account": str(config_dir)}
     output: str | None = None
+    # Codex has no StopFailure: a usage limit is read off the end of the session's
+    # rollout when its turn stops, is interrupted or the session ends.
+    notice = (
+        _usage_limit(payload, session_id) if event in {"Stop", "Interrupt", "SessionEnd"} else None
+    )
+    if notice is not None:
+        # In place of the Stop (or the Interrupt's `waiting`), as StopFailure is
+        # Claude Code's: parked `limited`, the manager told, and — unless the
+        # session is ending, with nothing left to move — the hand-over if configured.
+        hooks.turn_failed(
+            session_id=session_id,
+            error="rate_limit",
+            message=f"Codex hit its {notice.window} limit",
+            notice=notice,
+            hand_over=event != "SessionEnd",
+        )
+        if event == "SessionEnd":
+            hooks.session_ended(cwd, session_id=session_id)
+            metrics.close_turn(session_id)
+        return None
     if event == "SessionStart":
         output = hooks.session_start_context(
             cwd,
@@ -186,6 +207,26 @@ def _dispatch_codex(
                 store.touch_session(session_id, state="working")
                 store.renew_leases(session_id, harness_lease())
     return output
+
+
+def _usage_limit(payload: dict[str, Any], session_id: str) -> LimitNotice | None:
+    """The usage limit the session's rollout records at its end, or ``None``.
+
+    The rollout is the event's ``transcript_path``, else the one the session's
+    start recorded. Fails open: a rollout that cannot be read is no limit, and
+    the event is handled as it always was.
+    """
+    try:
+        transcript = _text(payload, "transcript_path")
+        if transcript is None:
+            with store_session() as store:
+                session = store.get_session(session_id)
+            transcript = session.transcript_path if session is not None else None
+        if not transcript:
+            return None
+        return codex_accounts.limit_from_transcript(Path(transcript))
+    except Exception:
+        return None
 
 
 def harness_lease() -> datetime:

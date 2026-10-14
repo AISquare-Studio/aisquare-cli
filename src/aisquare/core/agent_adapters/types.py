@@ -6,10 +6,15 @@ import re
 import tomllib
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from aisquare.core import harness, paths
+
+if TYPE_CHECKING:
+    from aisquare.core.claude_accounts import LimitNotice
+    from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage
 
 
 @dataclass(frozen=True)
@@ -44,6 +49,11 @@ class AgentAdapter(Protocol):
     settings_name: str
     capabilities: AgentCapabilities
     install_hint: str
+
+    @property
+    def accounts(self) -> AgentAccounts | None:
+        """Numbered login slots (``aisquare accounts``); ``None`` for an agent without them."""
+        ...
 
     def mcp_args(
         self,
@@ -210,3 +220,58 @@ def fleet_extra_args(
 
 class BadEffortError(ValueError):
     """An explicit reasoning level is invalid for the selected agent."""
+
+
+# --- accounts: one login per home directory, in numbered slots --------------------------
+#
+# ``core.claude_accounts`` owns the slot directories for every agent that has this
+# slot; what differs per agent is here. One ladder numbers the slots of every agent
+# (a managed slot's number is unique across them), and each agent's PLAIN home —
+# whatever its binary uses in this shell — has a reserved number of its own.
+
+UsageFetch = Callable[[str, Mapping[str, str], float], tuple[int, bytes]]
+"""``(url, headers, timeout) -> (status, body)``: how an agent that reads usage over the
+network reaches it. Supplied by the service layer; core never opens a socket."""
+
+
+class AgentAccounts(Protocol):
+    agent: str
+    home_env: str
+    """The variable naming the home a login lives in (``CLAUDE_CONFIG_DIR``, ``CODEX_HOME``)."""
+    extra_env: tuple[str, ...]
+    """Further per-slot variables, each set to the slot's own directory under ``cache``."""
+    plain_vars: Mapping[str, str]
+    """Each launch variable → where a launch onto a managed slot keeps the shell's own."""
+    dir_name: str
+    """The slots' parent under the aisquare home (``claude-accounts``, ``codex-accounts``)."""
+    plain_slot: int
+    plain_label: str
+    install_command: str
+    network_usage: bool
+    """Whether :meth:`usage` leaves the machine (Claude's endpoint) or reads local files."""
+
+    def sign_in_args(self) -> tuple[str, ...]:
+        """Arguments to the agent's binary that start its own sign-in in a slot's env."""
+        ...
+
+    def plain_home(self, home: Path, plain: Mapping[str, str]) -> Path:
+        """The plain home, from the shell's own launch variables (``plain``)."""
+        ...
+
+    def identity(
+        self, account: ClaudeAccount, *, env: Mapping[str, str] | None = None
+    ) -> ClaudeIdentity | None: ...
+    def signed_in(self, account: ClaudeAccount) -> bool: ...
+    def subscription(self, account: ClaudeAccount) -> str | None: ...
+    def token_state(self, account: ClaudeAccount) -> str:
+        """``ok``, ``expired`` or ``missing`` — read, never refreshed."""
+        ...
+
+    def usage(
+        self, account: ClaudeAccount, *, now: datetime | None, fetch: UsageFetch
+    ) -> ClaudeUsage: ...
+    def limit_from_transcript(
+        self, path: Path, *, now: datetime | None = None
+    ) -> LimitNotice | None:
+        """A usage limit the session's own transcript records at its end, or ``None``."""
+        ...

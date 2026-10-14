@@ -1528,11 +1528,6 @@ def spawn(
         selected = agent_launch.resolve(role, agent=agent, binary=chosen, cwd=project.root)
     except ValueError as exc:
         raise FleetError(str(exc)) from exc
-    if account is not None and selected.adapter.id != "claude-code":
-        raise FleetError(
-            "--account selects a Claude Code account; for Codex bind CODEX_HOME "
-            "with aisquare team bind ROLE --agent codex --env CODEX_HOME=PATH"
-        )
     resolution = selected.binary
     if agent_launch.executable(selected) is None:
         way_out = (
@@ -1693,13 +1688,24 @@ def spawn(
     # word, which a restart (#144) or a hand-over (#146) reads. An account the
     # ladder names and the machine does not have refuses the spawn now, with
     # the rung named, rather than starting a window that dies on its first line.
-    # The accounts are Claude Code's: another agent keeps its own home.
+    # The account is the role's agent's: a Codex role on a Codex slot, and another
+    # agent's account refused here, naming both.
     choice = claude_accounts_service.AccountChoice(account=None, source=None)
-    if selected.adapter.id == "claude-code":
+    if selected.adapter.accounts is not None:
         try:
-            choice = claude_accounts_service.choose(account, role=role, project=project)
+            choice = (
+                claude_accounts_service.choose(account, role=role, project=project)
+                if selected.adapter.id == claude_accounts_core.AGENT
+                else claude_accounts_service.choose(
+                    account, role=role, project=project, agent=selected.adapter.id
+                )
+            )
         except claude_accounts_service.NoSuchAccount as exc:
             raise FleetError(str(exc)) from exc
+    elif account is not None:
+        raise FleetError(
+            f"--account selects an account, and {selected.adapter.label} has no account slots"
+        )
 
     # The spawn goes ahead: the codename names its tmux session and its branch. A
     # directory with no live row, never seen or forgotten, is captured for it
@@ -1806,7 +1812,11 @@ def spawn(
         # the CALLER's aisquare home and account variables travel with the
         # window (set as absolute paths, or unset through `env -u`), exactly as
         # the Accounts page's sign-in window carries them.
-        command, carried = claude_accounts_service.carry_environment(command)
+        command, carried = (
+            claude_accounts_service.carry_environment(command)
+            if choice.account.agent == claude_accounts_core.AGENT
+            else claude_accounts_service.carry_environment(command, agent=choice.account.agent)
+        )
         env.update(carried)
     # `auto` behind the explainability proxy is refused from the first tool call
     # once the session baseline is past what the proxy's non-streaming forward
@@ -4317,6 +4327,11 @@ def switch(
     and the window kill took the hook — and this function — down before
     ``spawn`` ran (finding 1; ``services.hooks._detach``).
 
+    A CODEX agent moves between Codex accounts, and always FRESH: its thread is a
+    rollout under the old ``CODEX_HOME``, which a session on another home cannot
+    resume, so the replacement starts with the hand-off prompt and takes the
+    claims over, as ``--fresh`` does for Claude Code.
+
     What is deliberately NOT promised: that Claude Code resumes a transcript
     written under one ``CLAUDE_CONFIG_DIR`` from another. The path form is
     documented and the id is preserved, but this machine has one login, so the
@@ -4356,16 +4371,35 @@ def switch(
     current = _account_slot_of(agent, session)
     notes: list[str] = []
     failures: list[str] = []  # the notes that say what did not happen (`SwitchReceipt`)
+    kind = agent.agent or claude_accounts_core.AGENT
+    if kind != claude_accounts_core.AGENT and not fresh:
+        # Its rollout lives under the old CODEX_HOME: no session on another home resumes it.
+        fresh = True
+        notes.append(
+            f"{claude_accounts_core.agent_label(kind)} cannot resume a thread under another "
+            "account's home — the replacement starts fresh with a hand-off prompt"
+        )
     # The accounts service decides, as for every launch
     # (tests/test_one_account_resolver.py): `--to` is the flag rung; without it
     # headroom decides first, with the account the agent is leaving excluded.
     try:
-        choice = claude_accounts_service.choose_for_handover(
-            to,
-            role=agent.role,
-            project=project,
-            exclude=() if current is None else (current,),
-            automatic=automatic,
+        choice = (
+            claude_accounts_service.choose_for_handover(
+                to,
+                role=agent.role,
+                project=project,
+                exclude=() if current is None else (current,),
+                automatic=automatic,
+            )
+            if kind == claude_accounts_core.AGENT
+            else claude_accounts_service.choose_for_handover(
+                to,
+                role=agent.role,
+                project=project,
+                exclude=() if current is None else (current,),
+                automatic=automatic,
+                agent=kind,
+            )
         )
     except claude_accounts_service.NoSuchAccount as exc:
         raise FleetError(str(exc)) from exc
@@ -4433,6 +4467,9 @@ def switch(
     # `spawn` refused the snapshot's closed task with the agent already stopped
     # (review of #203, final round, FLEET-3).
     stopped = handed_over.agent
+    whose = (
+        "Claude" if kind == claude_accounts_core.AGENT else claude_accounts_core.agent_label(kind)
+    )
     try:
         receipt, resumed, more = _respawn(
             project,
@@ -4444,7 +4481,7 @@ def switch(
             fresh=fresh,
             # What a FRESH replacement is told it takes over from: the account move is
             # the one thing it cannot read off the board.
-            reason=f"it stopped on {reason or 'a usage limit'} under another Claude account",
+            reason=(f"it stopped on {reason or 'a usage limit'} under another {whose} account"),
             resume_prompt=_resume_prompt(stopped, reason),
             takes_over=True,
             spawned_by=spawned_by,
@@ -4457,7 +4494,13 @@ def switch(
         raise
     notes.extend(more)
     failures.extend(receipt.failures)
-    from_name = f"slot {current}" if current is not None else "its shell's claude"
+    from_name = (
+        f"slot {current}"
+        if current is not None
+        else "its shell's claude"
+        if kind == claude_accounts_core.AGENT
+        else f"its shell's {claude_accounts_core.agent_label(kind).lower()}"
+    )
     how = _how_started(resumed, typed=bool(receipt.prompt_typed))
     why = f" ({reason})" if reason else ""
     # The suppression is entered FIRST: a store that cannot be opened is the courtesy

@@ -297,8 +297,9 @@ def test_migrations_reach_the_current_schema_version() -> None:
     # v22 the revocations owed for keys the CLI minted (#142), v23 the one-time repair of
     # old tombstones (#139, #140), v24 the destination a project's key was attached for (#142),
     # v25 where a fleet agent's server listened and in which boot (round 25 of #257),
-    # v26-v28 the coding-agent identity, team_meta dates and their repair (#113)
-    assert version == SCHEMA_VERSION == 28
+    # v26-v28 the coding-agent identity, team_meta dates and their repair (#113),
+    # v29 the arrangement of another agent's account slots (Codex accounts)
+    assert version == SCHEMA_VERSION == 29
 
 
 def test_v14_upgrades_native_identity_without_guessing_legacy_agents() -> None:

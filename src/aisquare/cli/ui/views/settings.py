@@ -123,6 +123,9 @@ def account_options(accounts: list[ClaudeAccount], current: str | None) -> list[
     for account in accounts:
         identity = accounts_core.identity(account)
         who = f" · {identity.email}" if identity else " · not signed in"
+        # Another agent's slot says whose it is: a launch refuses one for the wrong agent.
+        if account.agent != accounts_core.AGENT:
+            who += f" · {accounts_core.agent_label(account.agent)}"
         options.append((f"{account.slot} · {accounts_core.label(account)}{who}", str(account.slot)))
     if current and current not in {value for _, value in options}:
         options.append((f"{current} (as bound)", current))

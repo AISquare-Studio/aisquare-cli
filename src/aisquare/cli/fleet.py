@@ -121,7 +121,9 @@ def slot_label(slot: int, labels: Mapping[int, str] | None) -> str:
     named = (labels or {}).get(slot)
     if named:
         return named
-    return "plain claude" if slot == 1 else f"account {slot}"
+    from aisquare.core.claude_accounts import slot_name
+
+    return slot_name(slot)
 
 
 def _emit_agents(project: ProjectInfo, agents: list[FleetAgentStatus]) -> None:

@@ -107,10 +107,15 @@ def test_codex_cannot_silently_use_a_managed_claude_account(
     monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
     monkeypatch.setattr(fleet, "server", lambda config: server)
     monkeypatch.setattr(fleet, "_require_tmux", lambda server: None)
+    from aisquare.core import claude_accounts
+
+    # Codex has account slots of its own now; a Claude slot is refused, naming both agents.
+    assert claude_accounts.create_account().slot == 2
     launched = runner.invoke(app, ["launch", "coder", "--agent", "codex", "--account", "2"])
     assert launched.exit_code == 1 and "Claude Code account" in launched.output
+    assert "runs Codex" in launched.output
     execute.assert_not_called()
-    with pytest.raises(fleet.FleetError, match="Claude Code account"):
+    with pytest.raises(fleet.FleetError, match=r"Claude Code account.*runs Codex"):
         fleet.spawn(team_project(tmp_path), "coder", agent="codex", account="2", worktree=False)
     server.spawn_window.assert_not_called()
 

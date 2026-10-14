@@ -220,17 +220,24 @@ class PromptRecord(BaseModel):
 
 
 class ClaudeAccount(BaseModel):
-    """One Claude Code login the CLI can launch: a numbered slot over a config directory.
+    """One coding-agent login the CLI can launch: a numbered slot over a home directory.
 
     Slot 1 is the machine's default — whatever a plain ``claude`` in this shell
     uses (``CLAUDE_CONFIG_DIR`` when set, ``~/.claude`` otherwise) — and is never
     a directory of ours. Every other slot is a directory the CLI created and
     owns, launched by pointing ``CLAUDE_CONFIG_DIR`` and ``CLAUDE_CODE_TMPDIR``
     at it.
+
+    Codex logins are slots too (``agent="codex"``): slot 0 is the plain ``codex``
+    (``CODEX_HOME``, else ``~/.codex``), and a managed one is a directory under
+    ``codex-accounts`` launched with ``CODEX_HOME`` pointing at it. One ladder
+    numbers the managed slots of both agents, so a number names one account.
     """
 
     slot: int
     config_dir: Path
+    agent: str = "claude-code"
+    """The coding agent whose login this is (``core.agent_adapters`` id)."""
     tmp_dir: Path | None = None
     """The account's own ``CLAUDE_CODE_TMPDIR``; ``None`` for the default slot."""
     managed: bool = False
@@ -273,7 +280,11 @@ class ClaudeAccountRecord(BaseModel):
 
 
 class ClaudeIdentity(BaseModel):
-    """Who a Claude Code config directory is signed in as, read from its ``.claude.json``."""
+    """Who a Claude Code config directory is signed in as, read from its ``.claude.json``.
+
+    For a Codex home, the claims of the id token ``auth.json`` holds (never the token);
+    an API-key login has no email and reads ``API key``.
+    """
 
     email: str
     organization: str | None = None
@@ -281,7 +292,12 @@ class ClaudeIdentity(BaseModel):
 
 
 class ClaudeUsage(BaseModel):
-    """One account's rate-limit windows, as Claude Code's own ``/usage`` reads them."""
+    """One account's rate-limit windows, as Claude Code's own ``/usage`` reads them.
+
+    A Codex account's come from the newest ``token_count`` its sessions recorded
+    (``core.codex_accounts.usage``): the shorter window is ``session``, the longer
+    ``week``, and ``fetched_at`` is when that session recorded it.
+    """
 
     available: bool
     reason: str | None = None
@@ -343,7 +359,7 @@ class ClaudeAccountStatus(BaseModel):
 
 
 class ClaudeInstall(BaseModel):
-    """Whether Claude Code is on this machine, and which one."""
+    """Whether a coding agent (Claude Code unless named) is on this machine, and which one."""
 
     installed: bool
     binary: str | None = None
@@ -351,10 +367,12 @@ class ClaudeInstall(BaseModel):
 
 
 class AccountsOverview(BaseModel):
-    """The Claude side of the Accounts page in one read: the install and every slot."""
+    """The Accounts page in one read: the installs and every slot."""
 
     claude: ClaudeInstall
     accounts: list[ClaudeAccountStatus] = Field(default_factory=list)
+    installs: dict[str, ClaudeInstall] = Field(default_factory=dict)
+    """Every agent with account slots, by adapter id — Claude Code's is ``claude`` too."""
 
 
 # --- Collective Intelligence: the vocabularies both layers share --------------

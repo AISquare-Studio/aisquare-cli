@@ -4061,6 +4061,10 @@ class _Verdict:
     the one a row recorded lost is ended with (``ShutdownReport.recorded``)."""
     plan: str = ""
     """Why, as the plan shows it (``ShutdownPlan.held``, ``ShutdownPlan.lost_why``)."""
+    held: bool = False
+    """A row left ``live`` as one whose agent may run where no tmux client reaches it
+    (:attr:`ShutdownRow.held`): never one held as ``"answers"``, a server that came up on
+    its socket since the probe, where its pane may be."""
 
 
 def _shutdown_verdict(
@@ -4090,9 +4094,11 @@ def _shutdown_verdict(
     if unusable is None and answering.get(address) and unreached is None:
         return _Verdict("stop")
     if unreached is not None and (unreached[0] == "answers" or not forget):
-        _, why, way = unreached
+        said, why, way = unreached
         kept = ", which --forget does not end as a server answers there" if forget else ""
-        return _Verdict("live", f"{why} — left live{kept}: {way}", f"{why} — {way}")
+        return _Verdict(
+            "live", f"{why} — left live{kept}: {way}", f"{why} — {way}", said != "answers"
+        )
     if unusable is not None:
         reason = f"ended on your word (--forget), unchecked: {unusable}"
     elif unreached is None:
@@ -4138,11 +4144,7 @@ def _shutdown_row(
         agent, answering, held or {}, forget=forget, unusable=unusable, config=config
     )
     if verdict.end == "live":
-        # Held, except where a server came up on its socket since the probe ("answers"): its
-        # pane may be on that server, so its session there is spared (`_spared`).
-        unreached = (held or {}).get(agent.id)
-        out_of_reach = unreached is not None and unreached[0] != "answers"
-        report.failed.append(ShutdownRow(agent, verdict.reason, held=out_of_reach))
+        report.failed.append(ShutdownRow(agent, verdict.reason, held=verdict.held))
         _not_down(report, agent.project_id)
         return
     if verdict.end == "lost":
@@ -4302,15 +4304,24 @@ def _record_late_rows(
                 _not_down(report, agent.project_id)
                 continue
             if reachable is False:
-                # The rule every other row is held to (`_unreached`); never forgotten, as no
-                # plan the operator saw named it.
+                # The rule every other row is held to (`_unreached`), and the one verdict on
+                # it (`_shutdown_verdict`), held included; never forgotten, as no plan the
+                # operator saw named it (review of #259, round 7, 7/9).
                 unreached = _unreached(agent, config)
-                if unreached is not None:
+                verdict = _shutdown_verdict(
+                    agent,
+                    {address: False},
+                    {} if unreached is None else {agent.id: unreached},
+                    forget=False,
+                    unusable=None,
+                    config=config,
+                )
+                if verdict.end == "live":
                     report.failed.append(
                         ShutdownRow(
                             agent,
-                            f"it was spawned during the shutdown; {unreached[1]} — left live: "
-                            f"{unreached[2]}",
+                            f"it was spawned during the shutdown; {verdict.reason}",
+                            held=verdict.held,
                         )
                     )
                     _not_down(report, agent.project_id)

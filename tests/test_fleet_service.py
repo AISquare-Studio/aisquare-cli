@@ -5555,6 +5555,41 @@ def test_shutdown_keeps_a_row_live_when_its_pane_was_seen_alive_and_spares_its_s
     assert [s.agent.id for s in fleet_service.list_agents(project)] == [coder.id], "still live"
 
 
+def test_a_row_spawned_during_the_run_whose_agent_may_run_out_of_reach_is_left_live_held(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 7, 7/9: whether a row left live is held was worked out in
+    `_shutdown_row`, apart from `_shutdown_verdict`, and the late rows' path built its row
+    without it: a late row whose server lost its socket file was left live as a pane seen
+    alive, which spares its project's session on that socket (`_spared`), against
+    `ShutdownRow.held`'s own rule. Every row left live takes it from the one verdict."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    fleet_service.spawn(project, "manager")
+    late: list[FleetAgent] = []
+    real_stop, real_kill = fleet_service._stop_row, fleet_service._kill_fleet_sessions
+
+    def stop_and_spawn(*args: object, **kwargs: object) -> fleet_service.StopReceipt:
+        if not late:  # the spawn lands while the manager is being stopped
+            late.append(_coder(project))
+        return real_stop(*args, **kwargs)  # type: ignore[arg-type]
+
+    def kill_then_lose_the_file(*args: object, **kwargs: object) -> None:
+        real_kill(*args, **kwargs)  # type: ignore[arg-type]
+        tmux.running, tmux.socket_file = False, False  # its server lost its socket file
+
+    monkeypatch.setattr(fleet_service, "_stop_row", stop_and_spawn)
+    monkeypatch.setattr(fleet_service, "_kill_fleet_sessions", kill_then_lose_the_file)
+
+    report = fleet_service.shutdown(project, force=True)
+
+    (row,) = report.failed
+    assert row.agent.id == late[0].id
+    assert row.reason.startswith("it was spawned during the shutdown; ")
+    assert "is gone, so no tmux client can" in row.reason and "— left live: " in row.reason
+    assert row.held, "out of reach, as `_shutdown_row` holds such a row"
+    assert fleet_service._spared(report, fleet_service.settings()) == (set(), set())
+
+
 def test_shutdown_records_a_row_spawned_during_the_run(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -498,8 +498,8 @@ the reason (`not_a_tty`) rather than starting a full-screen app into a pipe.
 
 ## Accounts
 
-The **Accounts** section at the bottom of the sidebar opens one page for the two
-logins the fleet leans on.
+The **Accounts** section at the bottom of the sidebar opens one page for the
+logins the fleet leans on: AISquare's, and each coding agent's.
 
 **AISquare** is on top. The card reads the session `aisquare login` stores and
 shows who you are and when it expires. *Sign in* runs the same browser flow the
@@ -596,22 +596,52 @@ Nothing on this page writes into Claude Code's own files: the email and plan
 are read from what Claude Code recorded, and a token is never refreshed by the
 CLI. Claude Code refreshes it on the account's next session.
 
+**Codex** accounts are slots on the same ladder — one number names one login
+across both agents — and everything above works for them, with four
+differences ([Codex accounts](coding-agents.md#codex-accounts) has the
+details):
+
+- Slot **0** is the plain `codex` of your shell (`CODEX_HOME`, else
+  `~/.codex`); a managed one lives under `~/.aisquare/codex-accounts/` and
+  launches with `CODEX_HOME` pointing at it. The page shows them in a **Codex**
+  section of their own, below Claude Code's, once Codex is installed or has a
+  slot. **+ Add Codex account** (or `accounts add --agent codex`) runs `codex
+  login` in a fresh slot in the same watched pane, and **Sign in** on a row
+  runs it there; the account is recorded and its hooks connected the moment
+  `auth.json` lands.
+- **Usage is read offline**, from the `rate_limits` the account's own sessions
+  recorded in their rollouts — never over the network — so a Codex bar is as
+  fresh as that account's last turn and says how old it is.
+- **Defaults are per agent**, and every rung of the launch order answers with
+  an account of the role's agent: a Codex role gets a Codex slot, and naming a
+  Claude slot for it (or the reverse) is refused, naming both.
+- **A usage limit** is read off the end of the session's rollout when its turn
+  stops (Codex has no `StopFailure`), and the row turns **⏳ limited** the same
+  way. A Codex agent's `fleet switch`, by hand or by `on_limit = "switch"`, is
+  always **fresh**: its thread lives under the old `CODEX_HOME` and cannot be
+  resumed from another, so the replacement starts with the hand-off prompt and
+  takes the claims over.
+
 Everything the page does is a command, and every reporting one takes `--json`:
 
 ```sh
 aisquare accounts list                 # slots, who is signed in, plan, hooks
 aisquare accounts list --usage         # …plus the two windows (one request per account)
 aisquare accounts add                  # a fresh slot; Claude Code opens for the sign-in, then exits
+aisquare accounts add --agent codex    # a fresh Codex slot; `codex login` runs in it
 aisquare accounts run 2                # a plain Claude Code session on account 2
 aisquare accounts run 2 --model opus   # arguments after the slot go to claude
+aisquare accounts run 3 login          # on a Codex slot: codex (here its login) with CODEX_HOME=slot
 aisquare accounts usage                # the windows, per signed-in account
 aisquare accounts remove 2             # the directory is kept as 2.removed-<stamp>
 aisquare launch coder --account 2      # a board role on account 2
 aisquare fleet spawn coder --account 2 # a fleet agent on account 2
+aisquare fleet spawn coder --agent codex --account 3   # a Codex agent on Codex slot 3
 aisquare accounts default 2            # the machine default — what a launch runs on when nothing else says
 aisquare accounts default 3 --project . # this project's default (codename, name, id prefix, or . for here)
 aisquare accounts default 1 --role coder # coders run on the plain claude (= team bind coder --account 1)
 aisquare accounts default              # the three levels, as they stand
+aisquare accounts default --clear --agent codex   # defaults are per agent
 aisquare accounts alias 2 work         # a name: --account work, [work] on the board
 aisquare accounts order work 3         # the priority order; the rest follow as they were
 aisquare accounts move 3 top           # up · down · top · bottom
@@ -626,7 +656,7 @@ aisquare fleet restart coder-auth --permission-mode acceptEdits   # …another m
 aisquare fleet switch coder-auth --to personal --fresh   # a named account; a new session + hand-off
 ```
 
-`add` and `run` hand the terminal to Claude Code, so they have no `--json`
+`add` and `run` hand the terminal to the agent, so they have no `--json`
 form and `add` refuses outside an interactive terminal. `aisquare doctor` gains a
 `claude-accounts` line naming any slot that still needs a sign-in, a
 `claude-account-default` line when the default is not signed in or is disabled,

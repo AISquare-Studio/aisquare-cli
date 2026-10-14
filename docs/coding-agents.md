@@ -106,8 +106,9 @@ continues to catch role typos unless that option or a saved binding declares the
 
 Coding agents are optional for a CLI-only installation (`install.sh --no-agent`).
 Doctor warns about a missing executable when an agent or launch profile has
-been configured explicitly. Managed `--account` slots belong to Claude Code;
-choose a Codex account through the role's `CODEX_HOME` binding instead.
+been configured explicitly. Managed `--account` slots work for both agents
+(see [Codex accounts](#codex-accounts)); a role's `CODEX_HOME` binding still
+works for a home laid out some other way.
 A merely present, unused Codex home is advisory. `team harness` reports a bad
 role with its repair hint alongside the roles that resolve successfully.
 `--json agents use codex --project` returns `scope: "project"` and `project_id`.
@@ -141,6 +142,70 @@ Codex plugin with its `codex plugin remove`. `--purge` refuses while either
 would start aisquare again, as it does for Claude Code's. MCP servers added only
 for a launch (`agents.mcp = true`, `-c mcp_servers.aisquare…`) are never written
 to a file, so there is nothing to remove.
+
+## Codex accounts
+
+`aisquare accounts` and the Accounts page manage Codex logins as they manage
+Claude Code's ([Accounts](fleet.md#accounts)): numbered slots, an alias, a
+priority order, a default, *Disable*, usage, a headroom pick and the hand-over
+on a usage limit.
+
+- **Slots.** One ladder numbers both agents' slots, so a number names one
+  login: `aisquare accounts add --agent codex` takes the lowest number no
+  Claude or Codex slot uses and makes `~/.aisquare/codex-accounts/<n>/` (its
+  marker names `"agent": "codex"`). Existing Claude slot numbers never change.
+  Slot **0** is the plain `codex` of this shell (`CODEX_HOME`, else
+  `~/.codex`), listed once that home exists; slot **1** stays the plain
+  `claude`. A launch on a Codex slot sets `CODEX_HOME` to it and keeps the
+  shell's own as `AISQUARE_PLAIN_CODEX_HOME`, so a process under the slot still
+  knows which home the plain codex is. Codex has no scratch variable of its own.
+- **Sign-in.** `add --agent codex` runs `codex login` with the slot's
+  `CODEX_HOME` (in the foreground; the Accounts page runs it in a tmux window
+  as `aisquare accounts run <n> login`). It writes `auth.json`; once that holds
+  a login, the slot is recorded and `agents connect codex --config-dir <slot>`
+  installs AISquare's hooks there (Codex asks you to trust them on its first
+  session). A slot nothing signed into is discarded. `accounts run <n>` starts
+  `codex` on the slot.
+- **Identity.** Read from the claims of the id token in `auth.json` — `email`,
+  and `chatgpt_plan_type` / `chatgpt_account_id` under
+  `https://api.openai.com/auth` — decoded locally and never verified, sent or
+  printed. No token value is ever read beyond whether one is there. An API-key
+  login shows `API key`.
+- **Usage, offline.** There is no public usage endpoint and AISquare makes no
+  request for Codex: each session writes a rollout
+  (`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl`) whose `token_count`
+  events carry `rate_limits`, and the newest one under a home is that account's
+  usage. The shorter window is shown as the session window and the longer one
+  as the week; some plans have only a weekly window. A window whose reset has
+  passed since that reading reads 0 %, and the reading is labelled with its
+  age (`as of 3h ago`) because it is only as fresh as the account's last turn.
+  A Codex reading is not kept as a usage sample, so its bar shows no
+  *to the limit* trend.
+- **Choosing.** `--account`, a role's `account` binding, `accounts default
+  --project` and the machine default all answer with an account of the role's
+  agent: a Codex role takes a Codex slot. A Claude slot named for a Codex role
+  (or the reverse) is refused naming both agents. Defaults are per agent;
+  `accounts default <ref>` sets that account's agent's default and
+  `accounts default --clear --agent codex` clears Codex's. An email signed in
+  to both agents resolves to the launching agent's account; without one it is
+  refused as ambiguous.
+- **Usage limits.** Codex has no `StopFailure` hook. On its `Stop` and
+  `Interrupt` events AISquare reads the end of the session's rollout: a
+  `rate_limit_reached_type` on the newest `token_count`, or an `error` event of
+  this turn with `codex_error_info: usage_limit_reached` (or the text
+  `You've hit your usage limit`), parks the row **limited** with the reset time
+  of the window that is full, puts `limited` on the board and wakes the
+  manager — exactly what Claude Code's limit does. With `[accounts] on_limit =
+  "switch"` the hand-over moves the agent to the Codex account with the most
+  headroom. A limit found when the session ends is recorded without a move.
+  AISquare relies on no wait-and-continue from Codex at the reset (Claude
+  Code's): a parked Codex agent that is not switched waits for its next prompt.
+- **Switching is always fresh.** A Codex thread lives under the old
+  `CODEX_HOME` and cannot be resumed from another, so `fleet switch` of a Codex
+  agent (by hand or automatic) starts it fresh with the board-built hand-off
+  prompt and moves its claims onto the new session, as `--fresh` does.
+- **Doctor** lists Codex slots and their headroom beside Claude's; reading
+  Codex headroom needs no network, so it does not wait for `--live`.
 
 ## Native settings
 

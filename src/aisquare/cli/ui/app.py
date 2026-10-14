@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import shlex
+import sys
 import threading
 import time
 from collections import Counter
@@ -1666,7 +1667,8 @@ def run_ui(**options: Any) -> None:
     """Run the fleet UI until the user quits; then say what its last saves could not land,
     see out a phone's write that still runs, saying so (a Ctrl-C there quits at once), and
     hand the terminal to the command Update or Uninstall asked for, if one did, once the R
-    panel's own writes of ``remote.json`` have landed.
+    panel's own writes of ``remote.json`` have landed and the pushes sent to the phones have
+    gone out.
 
     A Remote that was on stops on a thread of its own at quit (``on_unmount``), so the
     screen did not freeze while uvicorn and ngrok wound down; the process waits for
@@ -1706,8 +1708,18 @@ def run_ui(**options: Any) -> None:
                 remote_server._remote_quit_now(undone)
         # A phone's write still running would hold the exit as long as it runs: said, not silent.
         remote_server.remote_wait_for_writes(undone)
-    # The terminal is ours again, and Remote, its ngrok, the panel's writes and the phones'
-    # are done: give it to the command, whose exec skips what an exit would run.
+        if hand_off is not None:
+            # The "Remote is off" a turn-off or the quit's auto-off sent the phones goes out on
+            # a daemon thread, which an exit waits for (`push_drain`, at exit) and the exec
+            # would kill mid-send (round 5 of #259).
+            pushes = sys.modules.get("aisquare.services.remote_push")  # loaded by all that push
+            try:
+                if pushes is not None:
+                    pushes.push_drain()
+            except KeyboardInterrupt:
+                remote_server._remote_quit_now(undone)
+    # The terminal is ours again, and Remote, its ngrok, the panel's writes, the phones' and
+    # the pushes are done: give it to the command, whose exec skips what an exit would run.
     if hand_off is not None:
         from aisquare.core import selfcli
 

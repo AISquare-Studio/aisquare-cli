@@ -1048,6 +1048,34 @@ def test_run_ui_hands_over_only_once_the_r_panels_writes_have_landed(
     assert server.allow_write_calls == [False] and server.revoked == ["dev_0000000a"]
 
 
+def test_run_ui_hands_over_only_once_the_phones_farewell_has_gone_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 5 of #259: a turn-off in the R panel, or the auto-off the quit enforces, sends the
+    phones "Remote is off" from a daemon thread, which an exit waits for (`push_drain`, an
+    `atexit` handler). `exec_self` runs no exit handler, so Update and Uninstall killed the
+    farewell mid-send, while a plain quit delivered it."""
+    from aisquare.services import remote_push
+
+    sent = threading.Event()
+
+    def sending() -> None:
+        time.sleep(0.3)  # a TLS handshake with the push service
+        sent.set()
+
+    farewell = threading.Thread(target=sending, daemon=True)
+    monkeypatch.setattr(remote_push, "_push_in_flight", {farewell})
+    farewell.start()
+    landed: list[bool] = []
+    monkeypatch.setattr(ui_app, "FleetApp", lambda **_options: _FakeApp(("upgrade",)))
+    monkeypatch.setattr(remote_server, "remote_wait_for_writes", lambda undone=None: None)
+    monkeypatch.setattr(selfcli, "exec_self", lambda args: landed.append(sent.is_set()))
+
+    ui_app.run_ui()
+
+    assert landed == [True], "the exec came before the farewell went out"
+
+
 # --------------------------------------------------------------------------- the exec
 
 

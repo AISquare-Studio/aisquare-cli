@@ -321,6 +321,7 @@ def test_a_ctrl_c_while_quit_waits_for_remote_to_stop_quits_at_once_and_stops_ng
         ("Remote stopping", ("upgrade", "--reopen"), "Update"),
         ("the panel's writes", ("uninstall", "--reopen"), "Uninstall"),
         ("a phone's write", ("upgrade", "--reopen"), "Update"),
+        ("the phones' pushes", ("uninstall", "--reopen"), "Uninstall"),
     ],
 )
 def test_a_ctrl_c_in_the_quits_waits_says_the_hand_over_did_not_run_and_what_runs_it(
@@ -335,8 +336,10 @@ def test_a_ctrl_c_in_the_quits_waits_says_the_hand_over_did_not_run_and_what_run
     R panel's writes and for a phone's write, each of which can take seconds. A Ctrl-C in any
     of them ends the process at once, and said nothing of the hand-over it dropped: a user
     who pressed it to hurry the upgrade along could not tell that it never ran. It says so,
-    and the command that runs it, with the global flags asq was started with."""
+    and the command that runs it, with the global flags asq was started with. Round 5 added
+    a wait for the pushes sent to the phones, which a Ctrl-C ends the same way."""
     from aisquare.core import selfcli
+    from aisquare.services import remote_push
 
     def ctrl_c(*_args: object, **_kwargs: object) -> bool:
         raise KeyboardInterrupt
@@ -365,6 +368,8 @@ def test_a_ctrl_c_in_the_quits_waits_says_the_hand_over_did_not_run_and_what_run
     monkeypatch.setattr(selfcli, "global_flags", lambda: ["--profile=work"])
     phones: list[str] = []
     running: contextlib.AbstractContextManager[None] = contextlib.nullcontext()
+    if where == "the phones' pushes":
+        monkeypatch.setattr(remote_push, "push_drain", ctrl_c)
     if where == "a phone's write":
         monkeypatch.setattr(remote_server, "_remote_writes_announced", ctrl_c)
         running = remote_server._remote_write_running("agent/restart for coder-1")

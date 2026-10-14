@@ -42,6 +42,7 @@ from aisquare.core.orchestrator import team_project
 from aisquare.core.store import SqliteStore, open_store, store_session
 from aisquare.models import TeamEvent, TeamSession
 from aisquare.services import agent_launch, diagnostics, fleet, native_telemetry
+from aisquare.services import agents as agents_service
 from tests.fsperms import can_symlink
 from tests.test_fleet_service import FakeTmux
 from tests.test_store import _dogfooded_113
@@ -577,7 +578,8 @@ def test_legacy_unverified_hooks_get_a_working_reconnect_instruction(tmp_path: P
         for check in diagnostics._check_other_agents(tmp_path)
         if check.name == "codex" and "unverified" in check.detail
     )
-    reconnect = f"agents connect codex --config-dir {shlex.quote(str(directory))}"
+    # Quoted for this platform's shell, as the doctor's button reads it back.
+    reconnect = agents_service.config_dir_command("connect", "codex", directory)
     assert check.fix and reconnect in check.fix
     assert "/hooks" in check.detail
     assert subprocess.run(["sh", "-n", "-c", check.fix], timeout=3).returncode == 0

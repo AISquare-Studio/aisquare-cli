@@ -2596,8 +2596,11 @@ def test_stop_and_restart_leave_live_a_row_whose_socket_was_taken_from_under_its
     with pytest.raises(FleetError, match=r"'coder-1' was not stopped: .* is gone") as stopped:
         fleet_service.stop(project, "coder-1")
     assert "SIGUSR1" in str(stopped.value) and "shutdown --forget" in str(stopped.value)
-    with pytest.raises(FleetError, match="is gone"):
+    # Refused before its stop is asked: its replacement could not start at that path either
+    # (`_refuse_a_freed_socket`, asked with the replay's refusals: review of #259, round 2).
+    with pytest.raises(FleetError, match=r"coder-1 .* runs on lost its socket file") as again:
         fleet_service.restart(project, "coder-1")
+    assert "SIGUSR1" in str(again.value) and "shutdown --forget" in str(again.value)
 
     assert len(tmux.spawned) == spawned, "no second agent in its worktree"
     with store_session() as store:
@@ -11579,6 +11582,47 @@ def test_a_switch_that_spawn_would_refuse_is_refused_before_the_stop(
     with store_session() as store:
         live = store.fleet_agent_by_label(project.id, agent.label, live_only=True)
     assert live is not None and live.id == agent.id
+    assert _session_state(agent.session_id or "") == "working", "the session is not marked"
+
+
+@pytest.mark.parametrize("verb", ["restart", "switch"])
+def test_a_restart_or_a_switch_is_refused_a_freed_socket_before_it_stops_the_agent(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    verb: str,
+) -> None:
+    """Review of #259, round 2: the freed-socket refusal ran only inside the spawn, after
+    `stop(..., handover=True)` had typed `/exit`. With this shell's socket file taken from
+    under the server coder-1 runs on, an agent whose own server listens at another path
+    (another `TMUX_TMPDIR`) stopped as asked, and its replacement was refused: the agent
+    was left down, and a switch announced that its replacement did not start. Refused
+    now before anything is stopped, as the replay's other refusals are."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    stranded = _coder(project)  # on this shell's socket path
+    apart = Path("/elsewhere/tmux-1000/asq-test")
+    elsewhere = tmux.per_path[apart] = FakeTmux()
+    window = elsewhere.spawn_window("asq-x", name="coder-2", cwd=project.root, command=["c"])
+    elsewhere.set_command(window.pane_id, "claude")
+    spawned = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    moved = {"socket_path": apart, "pane_id": window.pane_id}
+    with store_session() as store:
+        agent = store.upsert_fleet_agent(spawned.model_copy(update=moved))
+    _with_transcript(agent, None)
+    tmux.running = False  # no tmux client reaches coder-1's server…
+    tmux.socket_file = False  # …because its socket file is gone, not because it exited
+    started = len(tmux.spawned)
+
+    with pytest.raises(FleetError, match=r"not started: .* lost its socket file"):
+        getattr(fleet_service, verb)(project, agent.label)
+
+    assert elsewhere.typed == [] and elsewhere.killed == [], "no /exit typed, nothing killed"
+    assert len(tmux.spawned) == started
+    with store_session() as store:
+        live = {row.id for row in store.fleet_agents(project.id, live_only=True)}
+    assert live == {stranded.id, agent.id}, "both still live"
     assert _session_state(agent.session_id or "") == "working", "the session is not marked"
 
 

@@ -178,7 +178,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   into that path is now refused, for every project on the socket, naming the
   agents, `SIGUSR1` as the way back to their server, and `fleet shutdown
   --forget` for agents that are not running. A stale socket file (the server
-  exited) and rows from another boot still get a fresh server.
+  exited) and rows from another boot still get a fresh server. `fleet restart`
+  and `switch` give the same refusal before they stop the agent, rather than
+  after, which left it down.
 - A tmux server that took the socket path from a running one no longer
   answers for that one's agents. Every spawn now records when its server
   started (`fleet_agent.server_started_at`, schema v26), and a server at the

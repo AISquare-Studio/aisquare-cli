@@ -4825,6 +4825,12 @@ def _refuse_a_replay_that_cannot_start(agent: FleetAgent, session: TeamSession |
     restart of an agent whose recorded binary was still there because the
     role's binding had moved to one that is not. A refusal names no ``--bin``:
     ``fleet restart``, ``fleet switch`` and Restart take none.
+
+    And every other refusal :func:`spawn` gives before a window opens: a bound file it
+    cannot read, and a socket path a running server lost (:func:`_refuse_a_freed_socket`).
+    That one was asked only inside the spawn, after the stop had typed ``/exit``: an agent
+    whose own server listens at another path was stopped, and its replacement refused,
+    which left it down (review of #259, round 2).
     """
     _launch_binary(
         agent.role,
@@ -4835,6 +4841,8 @@ def _refuse_a_replay_that_cannot_start(agent: FleetAgent, session: TeamSession |
         bin_flag=False,
     )
     _refuse_an_env_file_it_cannot_read(agent.role)
+    config = settings()
+    _refuse_a_freed_socket(server(config), config)
 
 
 def _refuse_an_env_file_it_cannot_read(role: str) -> None:

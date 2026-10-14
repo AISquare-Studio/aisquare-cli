@@ -1931,21 +1931,23 @@ def spawn(
         task_id=resolved_task_id,
         spawned_by=spawned_by,
         account_slot=choice.account.slot if choice.account is not None else None,
-        launch_spec=launch_seal.sealed(
-            LaunchSpec(
-                binary=resolution.binary,
-                permission_mode=native_mode,
-                extra_args=recorded_args,
-                account_slot=choice.account.slot if choice.account is not None else None,
-                worktree=use_worktree,
-                command=list(command),
-                recorded_by=__version__,
-            )
+        launch_spec=LaunchSpec(
+            binary=resolution.binary,
+            permission_mode=native_mode,
+            extra_args=recorded_args,
+            account_slot=choice.account.slot if choice.account is not None else None,
+            worktree=use_worktree,
+            command=list(command),
+            recorded_by=__version__,
         ),
         socket_path=socket_path,
         boot_id=tmux_core.boot_id(),
         created_at=_now(),
     )
+    if fleet_agent.launch_spec is not None:
+        # What a replay may take back from the row (`core.launch_seal`); the store it is in
+        # is writable from an agent's sandbox, the digest is not.
+        launch_seal.record(fleet_agent.id, fleet_agent.launch_spec)
     stored = _record(
         fleet_agent,
         project,
@@ -5001,26 +5003,23 @@ def _refuse_a_replay_that_cannot_start(
 
 
 def _sealed_spec(agent: FleetAgent, notes: list[str] | None = None) -> LaunchSpec | None:
-    """The launch spec a replacement of ``agent`` replays: the row's, when its seal holds
-    (``core.launch_seal``). The store is writable from an agent's sandbox and the spec is
-    replayed outside it, so one ``fleet spawn`` did not seal (another aisquare's, or one
-    written since) is not replayed: the replacement starts as the role resolves today,
-    as a row spawned before specs were recorded does, and ``notes`` says so (review r2 of
-    #113, finding 3)."""
+    """The launch spec a replacement of ``agent`` replays: the row's, when it is the one
+    ``fleet spawn`` recorded (``core.launch_seal``). The store is writable from an agent's
+    sandbox and the spec is replayed outside it, so one changed since (or recorded by an
+    aisquare that kept no digest) is not replayed: the replacement starts as the role
+    resolves today, as a row spawned before specs were recorded does, and ``notes`` says
+    so (review r2 of #113, finding 3)."""
     spec = agent.launch_spec
-    if spec is None or launch_seal.holds(spec):
+    if spec is None:
+        return None
+    launch_seal.ensure_dir()  # its first making records the specs the store holds
+    if launch_seal.holds(agent.id, spec):
         return spec
-    if spec.seal is None and launch_seal.ensure_key() is not None:
-        # The key's first making sealed the specs the store held, this row's among them.
-        with store_session() as store:
-            fresh = store.get_fleet_agent(agent.id)
-        spec = fresh.launch_spec if fresh is not None else None
-        if spec is None or launch_seal.holds(spec):
-            return spec
     if notes is not None:
         notes.append(
-            "its recorded launch is not one aisquare sealed (recorded by another version, "
-            "or changed since) — the replacement starts as the role resolves today"
+            "its recorded launch is not the one aisquare recorded (changed since, or "
+            "recorded by another version) — the replacement starts as the role resolves "
+            "today"
         )
     return None
 

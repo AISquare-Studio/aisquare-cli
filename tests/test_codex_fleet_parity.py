@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tomllib
 from datetime import UTC, datetime, timedelta
@@ -901,6 +902,10 @@ def test_a_replay_its_agent_refuses_is_refused_before_anything_is_stopped(
 # --- what a sandbox may write in the aisquare home (review r2 of #113, finding 3) --------
 
 
+#: What a replacement's receipt says when the row's spec is not the one spawn recorded.
+NOT_RECORDED = "not the one aisquare recorded"
+
+
 def _tamper(agent: FleetAgent, path: str, value: object) -> None:
     """A write to the row's launch spec in the store, as a sandboxed agent can make one."""
     with store_session() as store:
@@ -915,8 +920,10 @@ def _tamper(agent: FleetAgent, path: str, value: object) -> None:
 def test_the_store_profile_keeps_what_runs_outside_the_sandbox_out_of_its_reach() -> None:
     """The store is writable from Codex's sandbox, the board's to write; what chooses or
     runs something outside it is read-only there (the tmux conf every fleet server loads,
-    the registry ``upgrade`` reconnects hooks by, keys and sign-in tokens), and the key
-    that seals launch specs cannot even be read."""
+    the registry ``upgrade`` reconnects hooks by, keys and sign-in tokens, the digests of
+    the launch specs a replay runs). No path is denied reading: with one, Codex reads its
+    own instructions through its sandbox helper, and on a host whose bwrap cannot bring up
+    loopback (a GitHub runner) the session did not start (CI on ca6d43ea)."""
     store = store_dir()
     args = CODEX.store_access("workspace", store)
     table = args[args.index("-c", 4) + 1].partition("=")[2]
@@ -932,7 +939,8 @@ def test_the_store_profile_keeps_what_runs_outside_the_sandbox_out_of_its_reach(
         "credentials",
     ):
         assert entries[str(store / kept)] == "read", kept
-    assert entries[str(store / launch_seal.KEY_NAME)] == "none"
+    assert entries[str(store / launch_seal.DIR_NAME)] == "read"
+    assert set(entries.values()) == {"write", "read"}
     assert str(store / "context.db") not in entries, "the board's"
 
 
@@ -950,7 +958,7 @@ def test_the_store_profile_names_a_windows_home_as_codex_reads_it() -> None:
     assert entries[r"C:\Users\me\.aisquare"] == "write"
     assert entries[r"C:\Users\me\.aisquare\cache\oidc"] == "read"
     assert entries[r"C:\Users\me\.aisquare\fleet-tmux.conf"] == "read"
-    assert entries[r"C:\Users\me\.aisquare\launch-key"] == "none"
+    assert entries[r"C:\Users\me\.aisquare\launch-specs"] == "read"
     assert all(key.startswith("C:\\Users\\me\\.aisquare") for key in entries), entries
 
 
@@ -968,18 +976,13 @@ def test_a_sandboxed_launch_makes_what_its_profile_names_before_the_sandbox_can(
         "connected": [],
         "connections": {},
     }
-    key = store / launch_seal.KEY_NAME
-    assert len(key.read_text(encoding="ascii").strip()) == 64
-    if os.name == "posix":
-        assert key.stat().st_mode & 0o777 == 0o600
+    assert (store / launch_seal.DIR_NAME).is_dir()
     # What is there already is left as it is.
     (store / "agents.json").write_text('{"connected": ["codex"]}', encoding="utf-8")
-    before = key.read_text(encoding="ascii")
     prepare_store(store)
     assert json.loads((store / "agents.json").read_text(encoding="utf-8")) == {
         "connected": ["codex"]
     }
-    assert key.read_text(encoding="ascii") == before
 
 
 @pytest.mark.parametrize(
@@ -999,48 +1002,46 @@ def test_a_launch_spec_written_from_a_sandbox_is_never_replayed(
 ) -> None:
     """The store is the board's to write from Codex's sandbox, and the row's launch spec
     is in it: restart, switch and the usage-limit hand-over replayed whatever binary and
-    arguments it held, outside any sandbox. A spec ``fleet spawn`` did not seal is not
-    replayed: the replacement starts as the role resolves today, and says so."""
+    arguments it held, outside any sandbox. A spec other than the one ``fleet spawn``
+    recorded is not replayed: the replacement starts as the role resolves today, and
+    says so."""
     agent = fleet_service.spawn(project, "coder", agent="codex", worktree=False).agent
-    assert agent.launch_spec is not None and launch_seal.holds(agent.launch_spec)
+    assert agent.launch_spec is not None and launch_seal.holds(agent.id, agent.launch_spec)
     _tamper(agent, field, value)
 
     receipt = fleet_service.restart(project, agent.label)
 
     assert planted not in _command(tmux), "the planted program is not run"
-    assert any("not one aisquare sealed" in note for note in receipt.notes), receipt.notes
-    assert receipt.started.launch_spec is not None
-    assert launch_seal.holds(receipt.started.launch_spec), "the replacement's is sealed"
+    assert any(NOT_RECORDED in note for note in receipt.notes), receipt.notes
+    started = receipt.started
+    assert started.launch_spec is not None and launch_seal.holds(started.id, started.launch_spec)
 
 
-def test_the_specs_recorded_before_the_key_keep_their_launch_across_the_upgrade(
+def test_the_specs_recorded_before_the_digests_keep_their_launch_across_the_upgrade(
     tmux: FakeTmux,  # noqa: F811
     codex_on_path: Path,  # noqa: F811
     project: ProjectInfo,  # noqa: F811
 ) -> None:
-    """An agent spawned before this version recorded no seal, and none could: the key did
-    not exist. The key's first making seals what the store holds, so the agents running
-    across an upgrade still restart as recorded; a spec unsealed AFTER that does not."""
+    """An agent spawned before this version left no digest: there was nowhere to. The
+    first run that makes the digests' directory records what the store holds, so the
+    agents running across an upgrade still restart as recorded; a spec changed AFTER that
+    does not."""
     agent = fleet_service.spawn(
         project, "coder", agent="codex", worktree=False, agent_args=["--search"]
     ).agent
-    assert agent.launch_spec is not None
-    before = agent.launch_spec.model_copy(update={"seal": None})
-    with store_session() as store:  # as the previous version recorded it, with no key yet
-        store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": before}))
-    launch_seal.key_path().unlink()
+    shutil.rmtree(launch_seal.specs_dir())  # as the previous version left the home
 
     receipt = fleet_service.restart(project, agent.label)
 
     assert "--search" in _command(tmux)
-    assert not any("not one aisquare sealed" in note for note in receipt.notes)
-    with store_session() as store:  # unsealed once a key exists: written since
-        store.upsert_fleet_agent(receipt.started.model_copy(update={"launch_spec": before}))
+    assert not any(NOT_RECORDED in note for note in receipt.notes), receipt.notes
+    _tamper(receipt.started, "$.extra_args", ["--search", "--yolo"])
     again = fleet_service.restart(project, agent.label)
-    assert any("not one aisquare sealed" in note for note in again.notes), again.notes
+    assert any(NOT_RECORDED in note for note in again.notes), again.notes
+    assert "--yolo" not in _command(tmux)
 
 
-def test_a_sealed_launch_spec_is_replayed_as_recorded(
+def test_an_untouched_launch_spec_is_replayed_as_recorded(
     tmux: FakeTmux,  # noqa: F811
     codex_on_path: Path,  # noqa: F811
     project: ProjectInfo,  # noqa: F811
@@ -1053,7 +1054,7 @@ def test_a_sealed_launch_spec_is_replayed_as_recorded(
     receipt = fleet_service.restart(project, agent.label)
 
     assert "--search" in _command(tmux)
-    assert not any("not one aisquare sealed" in note for note in receipt.notes)
+    assert not any(NOT_RECORDED in note for note in receipt.notes)
 
 
 # --- one permission per role, mapped per agent (acceptance 4) ----------------------------

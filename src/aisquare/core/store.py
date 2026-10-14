@@ -1242,7 +1242,7 @@ class ContextStore(Protocol):
     def set_codename(self, project_id: str, codename: str) -> ProjectInfo: ...
     def codenames_in_use(self) -> set[str]: ...
     def upsert_fleet_agent(self, agent: FleetAgent) -> FleetAgent: ...
-    def seal_launch_specs(self, seal: Callable[[LaunchSpec], LaunchSpec]) -> int: ...
+    def recorded_launch_specs(self) -> list[tuple[str, LaunchSpec]]: ...
     def get_fleet_agent(self, ref: str) -> FleetAgent | None: ...
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
     def fleet_agent_for_session(self, project_id: str, session_id: str) -> FleetAgent | None: ...
@@ -3797,27 +3797,15 @@ class SqliteStore:
             )
         self._commit()
 
-    def seal_launch_specs(self, seal: Callable[[LaunchSpec], LaunchSpec]) -> int:
-        """Seal every recorded launch spec that has no seal yet, with ``seal``; how many.
-
-        Run once, when the key that seals them is first made (``core.launch_seal``): the
-        rows spawned before it, in-flight agents across an upgrade among them, keep
-        their recorded launch. A spec that does not parse is left as it is."""
-        with self.transaction():
-            rows = self._conn.execute(
-                "SELECT id, launch_spec FROM fleet_agent WHERE launch_spec IS NOT NULL"
-            ).fetchall()
-            sealed = 0
-            for row in rows:
-                spec = _launch_spec(row["launch_spec"])
-                if spec is None or spec.seal is not None:
-                    continue
-                self._conn.execute(
-                    "UPDATE fleet_agent SET launch_spec = ? WHERE id = ?",
-                    (seal(spec).model_dump_json(), row["id"]),
-                )
-                sealed += 1
-        return sealed
+    def recorded_launch_specs(self) -> list[tuple[str, LaunchSpec]]:
+        """Every fleet row's id with the launch spec it recorded, of every project; a spec
+        that does not parse is left out. Read once, when the directory of the specs' digests
+        is first made (``core.launch_seal``)."""
+        rows = self._conn.execute(
+            "SELECT id, launch_spec FROM fleet_agent WHERE launch_spec IS NOT NULL"
+        ).fetchall()
+        recorded = [(str(row["id"]), _launch_spec(row["launch_spec"])) for row in rows]
+        return [(agent_id, spec) for agent_id, spec in recorded if spec is not None]
 
     def get_fleet_agent(self, ref: str) -> FleetAgent | None:
         """A fleet agent by id or unambiguous id prefix (git-style)."""

@@ -283,7 +283,9 @@ def store_dir() -> Path:
 
 def _store_dirs(store: Path) -> tuple[Path, ...]:
     """The directories :func:`store_read_only` names: every agent's account homes and
-    their temporary directories, and the sign-in tokens' cache."""
+    their temporary directories, the sign-in tokens' cache, and the digests of the launch
+    specs a replay runs (``core.launch_seal``)."""
+    from aisquare.core import launch_seal
     from aisquare.core.agent_adapters import adapters
 
     homes = sorted({adapter.accounts.dir_name for adapter in adapters() if adapter.accounts})
@@ -293,6 +295,7 @@ def _store_dirs(store: Path) -> tuple[Path, ...]:
         *(store / name for name in homes),
         *(store / cache / name for name in homes),
         store / paths.oidc_cache_dir().relative_to(home),
+        store / launch_seal.DIR_NAME,
     )
 
 
@@ -301,10 +304,10 @@ def store_read_only(store: Path) -> tuple[Path, ...]:
     what runs, or chooses what runs, outside any sandbox, so a write there is a way out of
     it. Every agent's account homes and their temporary directories (their hooks,
     settings and logins), the config (every later launch's flags), the tmux conf every
-    fleet server loads, the agent registry (the dirs ``upgrade`` reconnects hooks in), and
-    the keys and sign-in tokens. Everything else there, the store's database first, is
-    the board's to write; the launch specs in it a replay takes only sealed
-    (``core.launch_seal``, whose key is :func:`store_unreadable`)."""
+    fleet server loads, the agent registry (the dirs ``upgrade`` reconnects hooks in), the
+    keys and sign-in tokens, and the digests of the launch specs a replay runs. Everything
+    else there, the store's database first, is the board's to write; the launch specs in
+    it a replay takes only as their digest says (``core.launch_seal``)."""
     from aisquare.core.tmux import CONF_NAME
 
     return (
@@ -317,26 +320,19 @@ def store_read_only(store: Path) -> tuple[Path, ...]:
     )
 
 
-def store_unreadable(store: Path) -> tuple[Path, ...]:
-    """What under ``store`` a sandboxed agent may not even read: the key that seals the
-    launch specs a replay runs outside the sandbox (``core.launch_seal``)."""
-    from aisquare.core import launch_seal
-
-    return (store / launch_seal.KEY_NAME,)
-
-
 def prepare_store(store: Path) -> None:
-    """Make, before an agent's sandbox can, what :func:`store_read_only` and
-    :func:`store_unreadable` name under ``store``. Codex's sandbox leaves an empty file on
-    the host where a path its profile names does not exist (0.162.1, measured): in a
-    directory's place, which no ``mkdir`` then makes, and over a file a writer writes in
-    place, which then cannot (the tmux conf, the agent registry). A file whose empty
-    reading is its absent one (the config, the credentials, a key) is left to that. The
-    sealing key is made here too. Never raises: what is not made is the profile's to
-    hold as it can."""
+    """Make, before an agent's sandbox can, what :func:`store_read_only` names under
+    ``store``. Codex's sandbox leaves an empty file on the host where a path its profile
+    names does not exist (0.162.1, measured): in a directory's place, which no ``mkdir``
+    then makes, and over a file a writer writes in place, which then cannot (the tmux
+    conf, the agent registry). A file whose empty reading is its absent one (the config,
+    the credentials, a key) is left to that. The launch specs' directory is made the way
+    that records the specs already there (``launch_seal.ensure_dir``). Never raises: what
+    is not made is the profile's to hold as it can."""
     from aisquare.core import launch_seal
     from aisquare.core.tmux import BUNDLED_CONF, CONF_NAME
 
+    launch_seal.ensure_dir()
     for directory in _store_dirs(store):
         with suppress(OSError):
             directory.mkdir(parents=True, exist_ok=True)
@@ -350,7 +346,6 @@ def prepare_store(store: Path) -> None:
     for path, body in made.items():
         with suppress(OSError), path.open("x", encoding="utf-8") as handle:
             handle.write(body)
-    launch_seal.ensure_key()
 
 
 # --- version probe, hooks switch, plugin route ---------------------------------------------

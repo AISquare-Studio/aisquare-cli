@@ -279,7 +279,8 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
             assert len(requests) == 4
             # The receiver's token is Codex's exporter's alone: the shells its tools run in
             # never see it, where an app's OpenTelemetry SDK would send it on.
-            assert "local-tool-output[]" in json.dumps(requests[1])
+            if _sandbox_refused(binary, tmp_path) is None:  # a runner's sandbox runs none
+                assert "local-tool-output[]" in json.dumps(requests[1])
             assert token not in json.dumps(requests[1])
             assert "mcp:remote" not in json.dumps(requests[2])
             assert "unknown tool" not in json.dumps(requests[2]).lower()
@@ -822,18 +823,17 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             probe = (
                 f"RUN touch {store / 'credentials'}; touch {store / 'codex-accounts' / 'x'};"
                 f" touch {store / 'config.toml'}; touch {store / 'fleet-tmux.conf'};"
-                f" touch {store / 'agents.json'}; cat {store / launch_seal.KEY_NAME}; echo probed"
+                f" touch {store / 'agents.json'};"
+                f" touch {launch_seal.specs_dir() / f'{coder.id}.sha256'}; echo probed"
             )
             assert fleet.tell(project, label, probe).delivered
             until(lambda: answered(seen), 30, "the probe ran", pane)
             # Refused, each: "Read-only file system", or "Permission denied" where the
             # path did not exist and the sandbox left its read-only empty file there.
-            assert outputs()[-1].count("cannot touch") == 5, outputs()[-1]
-            # The key that seals launch specs: made before the sandbox, and unreadable in it.
-            assert "Permission denied" in outputs()[-1], outputs()[-1]
-            assert launch_seal.ensure_key() is not None
-            sealed = fleet.status_of(coder).agent.launch_spec
-            assert sealed is not None and launch_seal.holds(sealed)
+            assert outputs()[-1].count("cannot touch") == 6, outputs()[-1]
+            # The digest a replay checks the coder's launch spec against is still its own.
+            recorded = fleet.status_of(coder).agent.launch_spec
+            assert recorded is not None and launch_seal.holds(coder.id, recorded)
             # An escalation Codex's reviewer answers: reviewed, and no bell.
             until(lambda: state(coder) == "waiting", 20, "waiting", pane)
             seen, reviewed = len(outputs()), reviews()

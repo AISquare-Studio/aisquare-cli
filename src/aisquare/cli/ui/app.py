@@ -92,6 +92,7 @@ from aisquare.cli.ui.sidebar import (
 )
 from aisquare.cli.ui.terminal import EscapeToSidebar, SelectionHost, TerminalPane
 from aisquare.cli.ui.theme import ThemePicker, restore_theme, theme_autosave
+from aisquare.cli.ui.ticks import while_running
 from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, UsageRead, read_session
 from aisquare.cli.ui.views.agent import AgentRestarted, AgentView
 from aisquare.cli.ui.views.app_settings import AppSettingsView
@@ -902,6 +903,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
     # --- data ---------------------------------------------------------------------------
 
+    @while_running
     def refresh_data(self) -> None:
         """Re-read projects and agents; keep (and label) the last frame if the store is busy.
 
@@ -1015,6 +1017,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if self._accounts_owed:
             self.refresh_accounts()  # the ticks this read outlived: one read, after it
 
+    @while_running
     def refresh_headroom(self) -> None:
         """Re-read the status line's headroom OFF the UI thread; :meth:`_headroom_read` paints it.
 

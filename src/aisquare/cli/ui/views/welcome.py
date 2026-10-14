@@ -53,6 +53,7 @@ from textual.widgets import Button, Input, Static
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.sidebar import AccountsSelected, AgentSelected, short_path
+from aisquare.cli.ui.ticks import while_running
 from aisquare.cli.ui.views.onboard import render_verdict
 from aisquare.core.store import store_session
 from aisquare.models import FleetAgent, ProjectInfo
@@ -557,6 +558,7 @@ class WelcomeView(VerticalScroll):
             or not self.gh
         )
 
+    @while_running
     def _tick(self) -> None:
         """While shown: look again at what is not ready, list step 1 again when the shell's
         frame lists other projects, and repaint step 3 from the frame."""

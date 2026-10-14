@@ -68,6 +68,7 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.common import format_reset, local_time
 from aisquare.cli.ui.terminal import TerminalPane
+from aisquare.cli.ui.ticks import while_running
 from aisquare.core import browser, paths
 from aisquare.core import claude_accounts as core
 from aisquare.core.store import store_session
@@ -1066,6 +1067,7 @@ class AccountsView(Vertical):
 
     # --- usage (the one thing here that costs a request) ---------------------------------------
 
+    @while_running
     def refresh_readings(self) -> None:
         """The page's minute tick (and its ``on_show``): the Claude slots' usage, through the
         cache, and the workspaces' credits — and the "last refreshed" line, which ages.
@@ -1607,6 +1609,7 @@ class AccountsView(Vertical):
         self._notice(f"{self._name_of(account)}: waiting for the log-in below…")
         self._login_timer = self.set_interval(LOGIN_POLL_SECONDS, self._poll_login)
 
+    @while_running
     def _poll_login(self) -> None:
         login = self.login
         if login is None:

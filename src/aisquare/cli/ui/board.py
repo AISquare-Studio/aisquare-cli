@@ -56,6 +56,7 @@ from textual.worker import Worker, WorkerState
 from aisquare.cli import watch
 from aisquare.cli.common import local_time
 from aisquare.cli.ui.divider import Divider, floor_of
+from aisquare.cli.ui.ticks import while_running
 from aisquare.core.store import unmet_needs
 from aisquare.models import CLOSED_STATUSES, ProjectInfo, TeamEvent, TeamSession, TeamTask
 from aisquare.services import claude_accounts as accounts_service
@@ -393,6 +394,7 @@ class BoardPanel(Vertical):
         self.refresh_data()
         self.set_interval(self.interval, self._tick)
 
+    @while_running
     def _tick(self) -> None:
         """The polled read — skipped while the panel is off screen.
 

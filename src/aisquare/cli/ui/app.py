@@ -1234,8 +1234,12 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         )
         self.sidebar.select("accounts")
         self._remember_selection("accounts")
+        view = self.query_one("#accounts", AccountsView)
         if self.accounts_overview is not None:
-            self.query_one("#accounts", AccountsView).show(self.accounts_overview)
+            view.show(self.accounts_overview)
+        if event.sign_in is not None:
+            # Welcome's step 2 or a Doctor fix: that slot's sign-in, open in the page's pane.
+            view.begin_claude_sign_in(event.sign_in)
 
     def on_accounts_changed(self, event: AccountsChanged) -> None:
         """The page added, removed or signed in something: the section follows at once."""

@@ -1,4 +1,5 @@
-"""The Welcome view: the guided first run — a project, Claude Code, then a manager and two coders.
+"""The Welcome view: the guided first run — a project, the coding agent, then a manager and
+two coders.
 
 Roadmap 9.2 (docs/plans/fleet-tui.md §4.2 for where the page sits). Three step
 cards under the content id ``welcome``, which stays the shell's first view and
@@ -8,16 +9,24 @@ the one it goes back to:
    (``services.first_run.candidates``), plus a path input judged the way the
    Onboard view judges it. A folder that is not listed yet is onboarded first
    (``services.onboarding.onboard``: ``init``, then ``doctor``), as ``+`` does.
-2. **Claude Code** — the binary the fleet launches. When it is missing the card
-   names this platform's install command, and the page looks again on every
-   refresh tick while it is shown, and on *Check again*. *Sign in* opens the
-   Accounts page; *Connect* is the doctor's own one-click fix, and "connected"
-   is the one shared answer (``services.agents.claude_code_connected``), asked
-   where the manager starts and where the coders do.
+2. **The coding agent** — the one the fleet launches (``first_run.probe_fleet``):
+   Claude Code, or Codex where that is what is chosen or all that is installed.
+   When it is missing the card names this platform's install commands (both
+   agents', when neither is here), and the page looks again on every refresh tick
+   while it is shown, and on *Check again*. With more than one agent installed and
+   nothing more specific than the user default choosing, *Use …* saves the pick as
+   the user default (``agents use``). *Sign in* opens the Accounts page (for Codex,
+   with ``codex login`` already open on the account the manager will use);
+   *Connect* is the doctor's own one-click fix, and "connected" is the one shared
+   answer (``services.agents.claude_code_connected`` for Claude Code, aisquare's
+   hooks in ``CODEX_HOME`` for Codex), asked where the manager starts. Codex runs
+   its hooks only once the user trusts them in ``/hooks``, which no button can do:
+   the card says so, and step 3 says where.
 3. **Fleet** — *Start manager*, then *Start the coders* (coder-1 and coder-2),
-   through ``services.first_run.start_fleet``, which never types into an agent it
-   starts: Claude Code first asks whether to trust the folder, and the user
-   answers that in the manager's pane. The card waits for step 2's hooks, because
+   through ``services.first_run.start_on_agent`` (``start_fleet`` on step 2's
+   agent), which never types into an agent it starts: Claude Code and Codex first
+   ask whether to trust the folder, and the user answers that in the manager's
+   pane. The card waits for step 2's hooks, because
    they are how the manager receives its instructions. Each agent reads as the
    shell's frame sees it: one whose window is gone, or that tmux cannot answer for
    (as after a reboot), is never called running, and a coder whose window is gone
@@ -54,6 +63,8 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.sidebar import AccountsSelected, AgentSelected, short_path
 from aisquare.cli.ui.views.onboard import render_verdict
+from aisquare.core import claude_accounts as accounts_core
+from aisquare.core.agent_adapters import adapters
 from aisquare.core.store import store_session
 from aisquare.models import FleetAgent, ProjectInfo
 from aisquare.services import first_run, onboarding
@@ -74,6 +85,11 @@ WORKER_GROUP = "welcome"
 def worker_name(step: str) -> str:
     """The name of the page's worker for ``step`` (``onboard``, ``connect``, ``manager``…)."""
     return f"welcome-{step}"
+
+
+def agent_button(agent: str) -> str:
+    """The id of step 2's *Use …* button for ``agent``."""
+    return f"agent-use-{agent}"
 
 
 FRAME_WAITS = 50
@@ -107,7 +123,7 @@ def _probe_tmux() -> TmuxState:
 
 
 def _probe_claude(sign_in: bool, root: Path | None) -> ClaudeState:
-    return first_run.probe_claude(sign_in=sign_in, cwd=root)
+    return first_run.probe_fleet(sign_in=sign_in, cwd=root)
 
 
 def _probe_gh() -> bool:
@@ -146,12 +162,20 @@ def _stored_project(project_id: str) -> ProjectInfo | None:
         return store.get_project(project_id)
 
 
-def _connect() -> FixResult:
-    return first_run.connect()
+def _connect(state: ClaudeState | None) -> FixResult:
+    return first_run.connect(state=state)
+
+
+def _sign_in(state: ClaudeState) -> int:
+    return first_run.sign_in_slot(state)
+
+
+def _choose(agent: str) -> None:
+    first_run.choose_agent(agent)
 
 
 def _start(project: ProjectInfo, manager: bool, coders: int) -> FleetStart:
-    return first_run.start_fleet(project, manager=manager, coders=coders)
+    return first_run.start_on_agent(project, manager=manager, coders=coders)
 
 
 @dataclass(frozen=True)
@@ -160,16 +184,22 @@ class Seams:
 
     tmux: Callable[[], TmuxState] = _probe_tmux
     claude: Callable[[bool, Path | None], ClaudeState] = _probe_claude
-    """Called with ``sign_in`` (whether to read the login too; the periodic look does not)
-    and the folder step 3 starts in: the chosen project's root, ``None`` before one is
-    chosen, which asks about the folder asq started in."""
+    """Step 2's agent, whichever it is. Called with ``sign_in`` (whether to read the login
+    too; the periodic look does not) and the folder step 3 starts in: the chosen
+    project's root, ``None`` before one is chosen, which asks about the folder asq
+    started in."""
     gh: Callable[[], bool] = _probe_gh
     candidates: Callable[[list[ProjectInfo] | None], Candidates] = _find_candidates
     """Called with the shell frame's projects, or ``None`` when the page has no shell."""
     validate: Callable[[str], PathVerdict] = _validate
     onboard: Callable[[Path, Callable[[str], None]], OnboardOutcome] = _onboard
     project: Callable[[str], ProjectInfo | None] = _stored_project
-    connect: Callable[[], FixResult] = _connect
+    connect: Callable[[ClaudeState | None], FixResult] = _connect
+    """Connect for the agent step 2 shows (its last look's state)."""
+    sign_in: Callable[[ClaudeState], int] = _sign_in
+    """The slot whose sign-in the Accounts page opens, for an agent it opens one for."""
+    choose: Callable[[str], None] = _choose
+    """Save an agent as the user default (``agents use``)."""
     start: Callable[[ProjectInfo, bool, int], FleetStart] = _start
     platform: str = sys.platform
 
@@ -192,31 +222,152 @@ def candidate_detail(candidate: Candidate) -> Text:
     return text
 
 
+def none_installed(claude: ClaudeState | None) -> bool:
+    """No agent is installed and nothing chose one: step 2 offers every agent's install."""
+    return claude is not None and claude.choosable and not claude.installed and not claude.found
+
+
+def step_two_name(claude: ClaudeState | None) -> str:
+    """What step 2 is about: the agent's name, or "a coding agent" while none is installed."""
+    if claude is None or none_installed(claude):
+        return "a coding agent"
+    return claude.label
+
+
+def _routes(text: Text, agent: str, platform: str, indent: str) -> None:
+    for index, route in enumerate(first_run.install_routes(platform, agent=agent)):
+        text.append(f"\n{indent}")
+        if index:
+            text.append(f"or ({route.how}): ", style="dim")
+        text.append(route.command, style="bold")
+
+
+def _install_text(text: Text, claude: ClaudeState, platform: str) -> None:
+    """How to install the agent step 2 wants — every agent's way, when none is here."""
+    text.append("✗ ", style="red")
+    if not claude.native:
+        text.append(f"The fleet starts {claude.wanted} (set by: {claude.source}), ")
+        text.append("and it is not on your PATH.")
+        return
+    if none_installed(claude):
+        every = list(adapters())
+        names = " or ".join(adapter.label for adapter in every)
+        if platform == "win32":
+            text.append(
+                f"No coding agent is installed. The fleet runs inside WSL2; install {names}"
+            )
+            text.append(" there:")
+        else:
+            text.append(f"No coding agent is installed. Install {names} in a terminal:")
+        for adapter in every:
+            text.append(f"\n  {adapter.label}:")
+            _routes(text, adapter.id, platform, "    ")
+        text.append(
+            "\nThis page notices it within a few seconds; with more than one installed, it "
+            "asks which the fleet uses.",
+            style="dim",
+        )
+        return
+    if platform == "win32":
+        text.append(
+            f"{claude.label} is not installed. The fleet runs inside WSL2; install it there:"
+        )
+    else:
+        text.append(f"{claude.label} is not installed. Install it in a terminal:")
+    _routes(text, claude.agent, platform, "    ")
+    text.append("\nThis page notices it within a few seconds.", style="dim")
+
+
+def _other_agent_text(text: Text, claude: ClaudeState) -> Text:
+    """Step 2's body for an agent other than Claude Code (Codex): the same four facts —
+    installed, signed in, connected, trusted — read the way that agent keeps them."""
+    name = claude.label
+    text.append("✓ ", style="green")
+    shown = name if claude.native else claude.wanted
+    text.append(f"{shown} {claude.version}" if claude.version else shown)
+    text.append(f" · {claude.binary}", style="dim")
+    who = f" ({claude.account})" if claude.account else ""
+    if claude.signed_in is True:
+        text.append("\n✓ ", style="green")
+        text.append("signed in")
+        text.append(who, style="dim")
+    elif claude.signed_in is False:
+        text.append("\n· ", style="yellow")
+        text.append(f"not signed in{who} — ")
+        text.append(
+            f"Sign in opens `{name.lower()} login` on the Accounts page; {name} also asks "
+            "when it first starts",
+            style="dim",
+        )
+    where = f" in {short_path(claude.home)}" if claude.home is not None else ""
+    if claude.connected:
+        text.append("\n✓ ", style="green")
+        text.append("connected — the manager gets its instructions through aisquare's hooks")
+        text.append(where, style="dim")
+        if claude.trust_pending:
+            text.append("\n· ", style="yellow")
+            text.append(f"{name} runs aisquare's hooks once you trust them — ")
+            text.append(
+                "type /hooks in the manager's pane (step 3) and trust them; it asks once, and "
+                "again after an upgrade rewrites them",
+                style="dim",
+            )
+    elif claude.switch is not None:
+        text.append("\n✗ ", style="red")
+        text.append(f"hooks are switched off ({claude.switch}) — ")
+        text.append(
+            "Connect cannot change that. Remove it; this page notices within a few seconds."
+        )
+    elif claude.refused is not None:
+        text.append("\n✗ ", style="red")
+        text.append(f"aisquare's hooks cannot be written: {claude.refused} — ")
+        text.append("Connect cannot change that.")
+    else:
+        text.append("\n✗ ", style="red")
+        text.append(f"not connected — Connect installs aisquare's hooks{where}, which bring ")
+        text.append("the manager its instructions")
+    if claude.problem:
+        text.append(f"\n{claude.problem}", style="dim")
+    return text
+
+
+def choice_text(claude: ClaudeState | None) -> Text:
+    """The line above step 2's *Use …* buttons: which agents are here, and what a pick does."""
+    text = Text()
+    others = claude.others if claude is not None else ()
+    if claude is None or not others:
+        return text
+    labels = [first_run.agent_label(agent) for agent in claude.installed]
+    if claude.chosen_by == "default" and len(labels) > 1:
+        text.append(f"{' and '.join(labels)} are both installed. ")
+        text.append(
+            f"The fleet uses {claude.label} until you pick one; the pick becomes your default "
+            "(aisquare agents use).",
+            style="dim",
+        )
+    else:
+        names = " and ".join(first_run.agent_label(agent) for agent in others)
+        text.append(f"{names} {'is' if len(others) == 1 else 'are'} installed too. ")
+        text.append(
+            f"Your default is {claude.label}; a pick here changes it (aisquare agents use).",
+            style="dim",
+        )
+    return text
+
+
 def claude_text(claude: ClaudeState | None, *, platform: str) -> Text:
     """Step 2's body: the agent, its sign-in and its hooks — or how to install it."""
     text = Text()
     if claude is None:
-        text.append("Looking for Claude Code…", style="dim")
+        text.append("Looking for your coding agent…", style="dim")
         return text
     if not claude.found:
-        text.append("✗ ", style="red")
-        if not claude.is_claude:
-            text.append(f"The fleet starts {claude.wanted} (set by: {claude.source}), ")
-            text.append("and it is not on your PATH.")
-            return text
-        if platform == "win32":
-            text.append(
-                "Claude Code is not installed. The fleet runs inside WSL2; install it there:"
-            )
-        else:
-            text.append("Claude Code is not installed. Install it in a terminal:")
-        for index, route in enumerate(first_run.install_routes(platform)):
-            text.append("\n    ")
-            if index:
-                text.append(f"or ({route.how}): ", style="dim")
-            text.append(route.command, style="bold")
-        text.append("\nThis page notices it within a few seconds.", style="dim")
+        _install_text(text, claude, platform)
+        if claude.problem:
+            text.append(f"\n{claude.problem}", style="dim")
         return text
+    if claude.agent != accounts_core.AGENT:
+        return _other_agent_text(text, claude)
     text.append("✓ ", style="green")
     name = "Claude Code" if claude.is_claude else claude.wanted
     text.append(f"{name} {claude.version}" if claude.version else name)
@@ -404,6 +555,8 @@ class WelcomeView(VerticalScroll):
         self.project_note: Text | None = None
         """Step 1's progress or refusal line."""
         self.connect_error: str | None = None
+        self.agent_error: str | None = None
+        """Why a *Use …* pick or a *Sign in* could not be done."""
         self.steps: dict[str, FleetStep] = {}
         """Per label, what the last start said about the chosen project's agents."""
         self._standing: set[str] = set()
@@ -446,6 +599,15 @@ class WelcomeView(VerticalScroll):
         with Vertical(id="step-claude", classes="card"):
             yield Static(id="claude-title", classes="card-title")
             yield Static(id="claude-status")
+            yield Static(id="agent-choice-note")
+            with Horizontal(id="agent-choice", classes="row"):
+                for adapter in adapters():
+                    yield Button(
+                        f"Use {adapter.label}",
+                        id=agent_button(adapter.id),
+                        name=adapter.id,
+                        classes="use-agent",
+                    )
             with Horizontal(id="claude-actions", classes="row"):
                 yield Button("Connect", id="claude-connect", variant="primary")
                 yield Button("Sign in", id="claude-sign-in")
@@ -591,6 +753,10 @@ class WelcomeView(VerticalScroll):
             self._onboarded(result, error)
         elif name == "connect":
             self._connected(result, error)
+        elif name == "choose":
+            self._chose(error)
+        elif name == "sign-in":
+            self._sign_in_ready(result, error)
         elif name in ("manager", "coders"):
             self._started(result, error)
         self.paint()
@@ -602,9 +768,21 @@ class WelcomeView(VerticalScroll):
             if isinstance(tmux, TmuxState):
                 self.tmux = tmux
             if isinstance(claude, ClaudeState):
-                if claude.signed_in is None and self.claude is not None and claude.found:
-                    # The periodic look leaves the login out: keep the last answer.
-                    claude = dataclasses.replace(claude, signed_in=self.claude.signed_in)
+                last = self.claude
+                if (
+                    claude.signed_in is None
+                    and last is not None
+                    and claude.found
+                    and claude.agent == last.agent
+                ):
+                    # The periodic look leaves the login out: keep the last answer (for the
+                    # same agent: a pick since then is another agent's login).
+                    claude = dataclasses.replace(
+                        claude,
+                        signed_in=last.signed_in,
+                        account=last.account,
+                        account_slot=last.account_slot,
+                    )
                 self.claude = claude
                 self._claude_root = root
                 if claude.connected:
@@ -825,6 +1003,14 @@ class WelcomeView(VerticalScroll):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button = event.button
+        if button.has_class("use-agent"):
+            event.stop()
+            agent = button.name or ""
+            if agent:
+                choose = self.seams.choose
+                self.agent_error = None
+                self._start_work("choose", lambda: choose(agent))
+            return
         if button.has_class("use-candidate"):
             event.stop()
             items = self.candidates.items if self.candidates is not None else ()
@@ -849,9 +1035,19 @@ class WelcomeView(VerticalScroll):
         elif button.id == "claude-check":
             self.look(full=True)
         elif button.id == "claude-sign-in":
-            self.post_message(AccountsSelected())
+            claude = self.claude
+            if claude is None or claude.agent == accounts_core.AGENT:
+                # Claude Code signs in on its first start too; Accounts has its row.
+                self.post_message(AccountsSelected())
+            else:
+                # The account the manager will use, with its sign-in open: a plain home
+                # the agent never ran in has no row there until it exists.
+                sign_in = self.seams.sign_in
+                self.agent_error = None
+                self._start_work("sign-in", lambda: sign_in(claude))
         elif button.id == "claude-connect":
-            self._start_work("connect", self.seams.connect)
+            state, connect = self.claude, self.seams.connect
+            self._start_work("connect", lambda: connect(state))
         elif button.id == "fleet-manager":
             self._start_fleet("manager")
         elif button.id == "fleet-coders":
@@ -879,6 +1075,19 @@ class WelcomeView(VerticalScroll):
             return
         reason = result.reason if isinstance(result, FixResult) else _reason(error)
         self.connect_error = reason or "connect failed"
+
+    def _chose(self, error: BaseException | None) -> None:
+        """A *Use …* pick landed: step 2 is about the agent it saved."""
+        if error is not None:
+            self.agent_error = f"could not save the default agent: {_reason(error)}"
+            return
+        self.look(full=True)
+
+    def _sign_in_ready(self, result: Any, error: BaseException | None) -> None:
+        if not isinstance(result, int):
+            self.agent_error = f"could not open the sign-in: {_reason(error)}"
+            return
+        self.post_message(AccountsSelected(sign_in=result))
 
     def _start_fleet(self, which: str) -> None:
         project = self.project
@@ -1077,7 +1286,8 @@ class WelcomeView(VerticalScroll):
     def _paint_claude(self, *, waiting: bool) -> bool:
         claude = self.claude
         done = claude is not None and claude.ready
-        title = Text("2  Claude Code", style="bold")
+        name = "Coding agent" if claude is None or none_installed(claude) else claude.label
+        title = Text(f"2  {name[:1].upper()}{name[1:]}", style="bold")
         if done:
             title.append("  ✓", style="green")
         body = claude_text(claude, platform=self.seams.platform)
@@ -1085,15 +1295,28 @@ class WelcomeView(VerticalScroll):
             body.append("\nConnecting…", style="dim")
         elif self.connect_error and not (claude is not None and claude.connected):
             body.append(f"\n✗ {self.connect_error}", style="red")
+        if "sign-in" in self.busy:
+            body.append("\nOpening the sign-in…", style="dim")
+        elif self.agent_error:
+            body.append(f"\n✗ {self.agent_error}", style="red")
         self.query_one("#claude-title", Static).update(title)
         self.query_one("#claude-status", Static).update(body)
+        others = claude.others if claude is not None else ()
+        note = self.query_one("#agent-choice-note", Static)
+        note.display = bool(others)
+        note.update(choice_text(claude))
+        self.query_one("#agent-choice", Horizontal).display = bool(others)
+        for button in self.query(".use-agent").results(Button):
+            button.display = button.name in others
+            # Where the agent shown is not installed, the one that is comes first.
+            button.variant = "primary" if claude is not None and not claude.found else "default"
         found = claude is not None and claude.found
         connect = self.query_one("#claude-connect", Button)
         connect.display = (
             found
             and claude is not None
             and not claude.connected
-            and claude.hooks_off is None
+            and not claude.switched_off
             and claude.refused is None
         )
         self.query_one("#claude-sign-in", Button).display = (
@@ -1122,9 +1345,7 @@ class WelcomeView(VerticalScroll):
             name = self.project.root.name if self.project is not None else "the project"
             status.append(f"Starts the manager in {name}. ")
             status.append(
-                "Claude Code asks once whether you trust this folder: answer it in the "
-                "manager's pane.",
-                style="dim",
+                f"{self._trust_question()}: answer it in the manager's pane.", style="dim"
             )
         for line in self._fleet_lines(live):
             if status.plain:
@@ -1160,9 +1381,9 @@ class WelcomeView(VerticalScroll):
                 )
             else:
                 status.append(
-                    "\nOpen the manager and answer Claude Code's question about trusting this "
-                    f"folder; then {self.escape_key.upper()} and w bring you back here to start "
-                    "the coders.",
+                    f"\nOpen the manager and answer {self._agent_name()}'s question about "
+                    f"trusting this folder{self._hooks_review()}; then "
+                    f"{self.escape_key.upper()} and w bring you back here to start the coders.",
                     style="dim",
                 )
         if up:
@@ -1302,15 +1523,35 @@ class WelcomeView(VerticalScroll):
         listed = next((p for p in _frame_projects(self.app) or [] if p.id == project.id), project)
         return listed.codename or project.codename or project.id
 
+    def _agent_name(self) -> str:
+        """The agent step 3 starts, as its sentences name it."""
+        return "your coding agent" if self.claude is None else self.claude.label
+
+    def _trust_question(self) -> str:
+        """What the manager's pane asks first: the folder, and (Codex) its hooks."""
+        name = self._agent_name()
+        if self.claude is not None and self.claude.trust_pending:
+            return (
+                f"{name} asks once whether you trust this folder, then type /hooks there and "
+                "trust aisquare's hooks, which it runs only once trusted"
+            )
+        return f"{name} asks once whether you trust this folder"
+
+    def _hooks_review(self) -> str:
+        if self.claude is not None and self.claude.trust_pending:
+            return " and trust aisquare's hooks in /hooks"
+        return ""
+
     def _waiting_for(self) -> str:
         missing: list[str] = []
         if self.project is None:
             missing.append("a project (step 1)")
         claude = self.claude
+        name = step_two_name(claude)
         if claude is None or not claude.found:
-            missing.append("Claude Code installed (step 2)")
+            missing.append(f"{name} installed (step 2)")
         elif not claude.connected:
-            missing.append("Claude Code connected (step 2)")
+            missing.append(f"{name} connected (step 2)")
         line = (
             ("The manager starts once there is " + " and ".join(missing) + ".") if missing else ""
         )

@@ -43,6 +43,13 @@ def codex_home(isolated_agent_home: Path) -> Path:
     return isolated_agent_home / ".codex"
 
 
+def _connect(home: Path) -> None:
+    """``agents connect codex`` on a home Codex already made: connect makes a missing one
+    only where ``codex`` is on PATH, and these tests must not depend on that PATH."""
+    home.mkdir(parents=True, exist_ok=True)
+    agents_service.connect("codex", home)
+
+
 @pytest.fixture(autouse=True)
 def codex_version(monkeypatch: pytest.MonkeyPatch) -> None:
     """``codex --version`` as 0.162.1 prints it (the suite answers every probe as aisquare)."""
@@ -102,7 +109,7 @@ def test_codex_installed_and_unconnected_offers_connect(codex_home: Path) -> Non
 
 
 def test_connected_codex_is_ready_with_its_trust_step_pending(codex_home: Path) -> None:
-    agents_service.connect("codex", codex_home)
+    _connect(codex_home)
     pending = first_run.probe_fleet(which=on_path("codex"))
     assert pending.connected and pending.ready and pending.trust_pending
     # Once a hook ran this definition, the trust step is done.
@@ -112,7 +119,7 @@ def test_connected_codex_is_ready_with_its_trust_step_pending(codex_home: Path) 
 
 
 def test_hooks_switched_off_are_named_and_never_called_connected(codex_home: Path) -> None:
-    agents_service.connect("codex", codex_home)
+    _connect(codex_home)
     (codex_home / "config.toml").write_text("[features]\nhooks = false\n", encoding="utf-8")
     state = first_run.probe_fleet(which=on_path("codex"))
     assert not state.connected and state.switched_off
@@ -121,7 +128,7 @@ def test_hooks_switched_off_are_named_and_never_called_connected(codex_home: Pat
 
 
 def test_a_partial_install_is_not_connected(codex_home: Path) -> None:
-    agents_service.connect("codex", codex_home)
+    _connect(codex_home)
     hooks = codex_home / "hooks.json"
     text = hooks.read_text(encoding="utf-8")
     import json

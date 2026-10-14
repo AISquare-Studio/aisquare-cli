@@ -350,6 +350,43 @@ def test_live_lookup_without_the_sdk_is_red_and_still_shows_fleet_facts(
         remote_server.live_sources().explainability("nobody", None)
 
 
+def test_the_card_names_the_target_and_gateway_of_the_agents_project_destination(
+    fleet_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, remote focus, 8/12: the policy was resolved with no project, so the
+    project's destination (#142) never had its say: an agent its project launches against
+    staging read ``target: prod`` and prod's gateway on the phone, where the fleet UI's
+    card and spawn resolve with the project. The machine's own is the control."""
+    from aisquare.core.config import ExplainabilityTarget, load_config, save_config
+    from aisquare.services import destinations, iam
+    from aisquare.services import fleet as fleet_service
+
+    monkeypatch.setattr(ops, "sdk_presence", lambda: ops.SdkPresence(False, None, None, False))
+    monkeypatch.delenv(ops.TARGET_ENV_VAR, raising=False)
+    config = load_config()
+    config.explainability.target = "prod"
+    config.explainability.targets = {
+        "prod": ExplainabilityTarget(gateway_url="https://prod.example"),
+        "stg": ExplainabilityTarget(gateway_url="https://stg.example"),
+    }
+    save_config(config)
+    project = fleet_service.resolve_project(None)
+    session = iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env")
+    workspace = destinations.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN")
+    studio = destinations.Studio(id=301, uid="st-301", name="Frontend")
+    with store_session() as store:
+        destinations.choose(store, project, workspace, studio, session)
+
+    card = remote_server.live_sources().explainability("coder-1", None)
+
+    policy = card["policy"]
+    assert isinstance(policy, dict)
+    assert (policy["target"], policy["gateway"]) == ("stg", "https://stg.example")
+    machine = remote_server._explainability_policy()
+    assert machine is not None
+    assert (machine["target"], machine["gateway"]) == ("prod", "https://prod.example")
+
+
 def test_live_lookup_with_the_sdk_present_and_a_red_doctor(
     fleet_home: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

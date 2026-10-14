@@ -2965,15 +2965,26 @@ def _doctor_verdict() -> DoctorVerdict:
         return verdict
 
 
-def _explainability_policy() -> dict[str, object] | None:
-    """The policy applied to this machine's model traffic, from the config."""
+def _explainability_policy(project: ProjectInfo | None = None) -> dict[str, object] | None:
+    """The policy applied to the model traffic of ``project``'s agents, from the config; the
+    machine's for ``None``.
+
+    The target is resolved for the project their launches join (``orchestrator.team_project``
+    of its root: the hub under ``AISQUARE_TEAM_HUB``, else its principal checkout), as spawn
+    resolves it and the fleet UI's card does (``views.explainability.key_project``): that
+    project's destination may name another target than the machine's (#142). Resolved with
+    no project, an agent launched against staging read ``target: prod`` and prod's gateway
+    on the phone (review of #259, remote focus, 8/12).
+    """
+    from aisquare.core import orchestrator
     from aisquare.core.config import load_config
     from aisquare.services import explainability_ops as ops
 
     try:
         config = load_config()
         settings = config.explainability
-        target = ops.resolve_target(settings, None)
+        joined = None if project is None else orchestrator.team_project(project.root).id
+        target = ops.resolve_target(settings, None, project_id=joined)
     except Exception:
         return None
     return {
@@ -3010,7 +3021,7 @@ def _live_explainability(label: str, project: str | None = None) -> dict[str, ob
         session=session,
         turns=turns,
         verdict=_doctor_verdict(),
-        policy=_explainability_policy(),
+        policy=_explainability_policy(target),
     )
 
 

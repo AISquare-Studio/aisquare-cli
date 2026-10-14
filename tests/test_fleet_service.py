@@ -3214,6 +3214,36 @@ def test_a_row_left_live_as_held_spares_no_session_on_the_server_that_took_its_s
     assert again.sessions_left_up == [f"asq:{session}"]
 
 
+@pytest.mark.parametrize(("answer", "spared"), [("answers", True), ("another", False)])
+def test_a_row_held_as_its_socket_answering_now_spares_its_session_from_a_late_take_down(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, answer: SocketAnswer, spared: bool
+) -> None:
+    """Review of #259, round 6, 3/10: a row whose socket was silent at the probe and answers
+    now (``"answers"``) is left live, held, and `_spared` dropped every held row. Its pane
+    may be on the server that came up, so a late row's take-down on that socket killed the
+    session of an agent the report said it left live. Only a row out of every client's
+    reach (``"another"``, a silent socket) spares nothing."""
+    config = fleet_service.settings()
+    held = _coder(project)
+    late = _coder(project)  # spawned during the run, exited on its own since
+    tmux.die(late.pane_id, 0)
+    unreached: dict[str, tuple[SocketAnswer, str, str]] = {held.id: (answer, "why", "do")}
+    report = fleet_service.ShutdownReport()
+    with store_session() as store:
+        named = store.get_project(project.id)  # with the codename its spawn gave it
+    assert named is not None
+
+    fleet_service._shutdown_row(
+        named, held, {}, report, force=False, grace=0, held=unreached, config=config
+    )
+    fleet_service._retire_late_panes([(named, late)], report, config)
+
+    assert [row.agent.id for row in report.failed] == [held.id]
+    session = f"asq-{_codename(project)}"
+    assert (session in tmux.sessions) is spared
+    assert (report.sessions_left_up == [_session_of(project)]) is spared
+
+
 @pytest.mark.parametrize("board", ["waiting", "working", "attention"])
 def test_a_held_row_reads_unknown_saying_why_whatever_its_fresh_board_says(
     tmux: FakeTmux,

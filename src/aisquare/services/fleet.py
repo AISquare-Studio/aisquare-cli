@@ -325,7 +325,8 @@ class ShutdownRow:
     held: bool = False
     """Left live as one whose agent may run where no tmux client reaches it (``_held_rows``),
     not as a pane seen alive: no server this run asks holds its pane, so it spares no session
-    there (``_spared``)."""
+    there (``_spared``). Never a row held as ``"answers"``: a server came up on its socket
+    after the probe, and its pane may be on it."""
 
 
 @dataclass
@@ -3768,6 +3769,9 @@ def _spared(
     client reaches it, and its pane is on no server this run asks. A row another server
     answers for spared its project's session on that server, which the held agent does
     not run on, with every window there and the server itself (review of #259, round 3).
+    A row whose silent socket answers now (``"answers"``) is not held so, and is spared: its
+    pane may be on that server, and a late row's take-down there killed the session of an
+    agent the report said it left live (review of #259, round 6, 3/10).
     """
     seen = [row for row in report.failed if not row.held]
     return (
@@ -4133,7 +4137,11 @@ def _shutdown_row(
         agent, answering, held or {}, forget=forget, unusable=unusable, config=config
     )
     if verdict.end == "live":
-        report.failed.append(ShutdownRow(agent, verdict.reason, held=True))
+        # Held, except where a server came up on its socket since the probe ("answers"): its
+        # pane may be on that server, so its session there is spared (`_spared`).
+        unreached = (held or {}).get(agent.id)
+        out_of_reach = unreached is not None and unreached[0] != "answers"
+        report.failed.append(ShutdownRow(agent, verdict.reason, held=out_of_reach))
         _not_down(report, agent.project_id)
         return
     if verdict.end == "lost":

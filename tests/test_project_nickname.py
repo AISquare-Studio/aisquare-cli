@@ -13,12 +13,18 @@ from aisquare.core.store import store_session
 from aisquare.core.workspace import project_id_for
 from aisquare.models import ProjectInfo
 from aisquare.services import project as project_service
+from tests.ci_support import git
 
 
 @pytest.fixture(autouse=True)
 def work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The active project's directory: a repository of its own, so that is its root,
+    whatever lies above it. A plain one was resolved by the walk up the shared temp tree,
+    and ``project rename`` named another project once a marker or a repository appeared
+    above it (as ``tests/test_ui_project.py``'s ``work_dir`` says)."""
     workdir = tmp_path / "work"
     workdir.mkdir()
+    git(workdir, "init", "-q")
     monkeypatch.chdir(workdir)
     return workdir
 
@@ -162,7 +168,16 @@ def test_rename_names_the_active_project(runner: CliRunner, work_dir: Path) -> N
     ]
 
 
-def test_rename_clear_shows_the_folder_again(runner: CliRunner, work_dir: Path) -> None:
+@pytest.mark.parametrize("above", [None, ".aisquare", ".git"])
+def test_rename_clear_shows_the_folder_again(
+    runner: CliRunner, work_dir: Path, above: str | None
+) -> None:
+    """``above``: a project marker or a repository above the project's directory — what a
+    full run's shared temp tree may hold — and the active project is still this one."""
+    if above == ".git":
+        git(work_dir.parent, "init", "-q")
+    elif above is not None:
+        (work_dir.parent / above).mkdir()
     project = _added(work_dir)
     project_service.set_nickname(project, "Q3 launch")
     result = runner.invoke(app, ["project", "rename", "--clear"])

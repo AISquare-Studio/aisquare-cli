@@ -84,6 +84,7 @@ from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops as ops
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
+from tests.ci_support import git
 from tests.ui_workers import settle_page
 
 T = TypeVar("T")
@@ -242,8 +243,18 @@ class ScriptedServer(TmuxServer):
 
 @pytest.fixture(autouse=True)
 def work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The project's directory: a repository of its own, so that is its root, whatever
+    lies above it.
+
+    A plain directory is resolved by git and the marker walk climbing the shared temp
+    tree, and resolved twice — by the ``project`` fixture, then by *Save setup*'s worker
+    (``key_project``) — it was one project, then another, once a marker or a repository
+    appeared above it in between: the key went under the other's id, and the test found
+    no file where its notice said it went (a full run at 1ada4bd3).
+    """
     work = tmp_path / "repo"
     work.mkdir()
+    git(work, "init", "-q")
     monkeypatch.chdir(work)
     return work
 
@@ -1280,12 +1291,22 @@ def _attach_in_setup(host: Host, key: str, **fields: str) -> None:
     host.query_one("#explainability-save", Button).press()
 
 
+@pytest.mark.parametrize("above", [None, ".aisquare", ".git"])
 def test_the_explainability_tab_attaches_a_key_to_the_active_project_without_echoing_it(
-    project: ProjectInfo, quiet_explainability: dict[str, int]
+    project: ProjectInfo, quiet_explainability: dict[str, int], work_dir: Path, above: str | None
 ) -> None:
     """#141: the shell-only gap — a key per project, from the UI. The value goes to a
     mode-600 file and a binding row, not to the machine file; the toast names the
-    path, never the key."""
+    path, never the key.
+
+    ``above``: a project marker or a repository appears above the project's directory
+    after the fixture resolved it and before *Save setup* resolves it again — what a
+    full run's shared temp tree may do. The key still lands under the page's project
+    (``work_dir``)."""
+    if above == ".git":
+        git(work_dir.parent, "init", "-q")
+    elif above is not None:
+        (work_dir.parent / above).mkdir()
 
     async def scenario(
         pilot: Pilot[None], host: Host

@@ -155,6 +155,16 @@ def resolve(
         )
     elif (
         inferred is None
+        and source == "flag"
+        and chosen_binary.source != "flag"
+        and adapter.id != DEFAULT_AGENT
+        and not (bound and bound.agent == adapter.id)
+    ):
+        # --agent declares the family of a --bin on the same command only; a binding's
+        # unnamed executable is what it always was, the default agent's (claude2).
+        raise _undeclared_binding(chosen_binary, adapter, role)
+    elif (
+        inferred is None
         and source not in {"flag", "role", "default"}
         # A user default of the default agent names what an unnamed binary always was.
         and not (source == "user" and adapter.id == DEFAULT_AGENT)
@@ -169,6 +179,26 @@ def resolve(
         # The binding's or this shell's, as the agent itself reads it (Claude Code's as
         # written, as every reader names it: core.agents._claude_home).
         adapter.config_dir(agents._home(), effective_env),
+    )
+
+
+def _undeclared_binding(
+    chosen: harness.BinaryResolution, adapter: AgentAdapter, role: str
+) -> ValueError:
+    import shlex
+
+    where = {
+        "env": harness._bin_env_var(role),
+        "env:global": harness._BIN_ENV_GLOBAL,
+    }.get(chosen.source, f"team.profiles.{role}.bin")
+    declare = shlex.join(
+        ["aisquare", "team", "bind", role, "--agent", adapter.id, "--bin", chosen.binary]
+    )
+    return ValueError(
+        f"--agent {adapter.id} cannot vouch for {chosen.binary!r}: it comes from {where}, "
+        f"not from this command, and its agent family is unknown. To run {adapter.label} "
+        f"itself, pass its executable ({adapter.binary}) on this command; to run "
+        f"{chosen.binary!r} as {adapter.label}, declare it: {declare}."
     )
 
 

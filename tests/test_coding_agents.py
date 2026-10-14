@@ -140,6 +140,31 @@ def test_wrappers_declare_family_and_conflicts_fail(tmp_path: Path) -> None:
         agent_launch.resolve(agent="codex", binary="claude")
 
 
+@pytest.mark.parametrize("binding", ["role-env", "global-env", "config"])
+def test_an_agent_flag_does_not_vouch_for_a_bindings_wrapper(
+    binding: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # claude2, the documented Claude parallel install, is still Claude's under --agent codex.
+    if binding == "role-env":
+        monkeypatch.setenv("AISQUARE_BIN_CODER", "claude2")
+    elif binding == "global-env":
+        monkeypatch.setenv("AISQUARE_AGENT_BIN", "claude2")
+    else:
+        config = load_config()
+        config.team.profiles["coder"] = RoleLaunchProfile(bin="claude2")
+        save_config(config)
+    with pytest.raises(ValueError, match=r"--agent codex cannot vouch for 'claude2'"):
+        agent_launch.resolve(agent="codex")
+    assert agent_launch.resolve(agent="claude-code").binary.binary == "claude2"
+    # The same command's --bin, or a binding that declares the family, still does.
+    assert agent_launch.resolve(agent="codex", binary="claude2").binary.binary == "claude2"
+    assert agent_launch.resolve(agent="codex", binary="codex").binary.binary == "codex"
+    config = load_config()
+    config.team.profiles["coder"] = RoleLaunchProfile(agent="codex", bin="claude2")
+    save_config(config)
+    assert agent_launch.resolve(agent="codex").binary.binary == "claude2"
+
+
 def test_role_path_selects_the_executable_and_probe_account(tmp_path: Path) -> None:
     directory = tmp_path / "account-bin"
     binary = executable_fake(directory, "claude", posix="", windows="")  # claude.cmd on Windows

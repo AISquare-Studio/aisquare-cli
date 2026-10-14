@@ -3322,7 +3322,7 @@ _CODEX_CONFIG = """\
 model = "gpt-5-codex"
 
 [mcp_servers.aisquare]
-command = "{program}"
+command = {program}
 args = ["serve", "--stdio"]
 
 [mcp_servers.docs]
@@ -3349,7 +3349,9 @@ def _codex_hooked(home: Path, program: Path | str, *, config: str | None = None)
         hooks.setdefault(spec.event, []).append(group)
     hooks["Stop"].insert(0, _CODEX_FOREIGN)
     (home / "hooks.json").write_text(json.dumps({"hooks": hooks}, indent=2), encoding="utf-8")
-    text = _CODEX_CONFIG.format(program=program) if config is None else config
+    # A TOML string, escaped: a Windows path's `\U` in a bare "…" is an invalid escape,
+    # and Codex's config.toml (and the plan's read of it) would not parse.
+    text = _CODEX_CONFIG.format(program=json.dumps(str(program))) if config is None else config
     (home / "config.toml").write_text(text, encoding="utf-8")
     (home / "AGENTS.md").write_text("# House rules\nsmall commits\n", encoding="utf-8")
     return home

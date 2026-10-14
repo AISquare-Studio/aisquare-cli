@@ -531,8 +531,11 @@ opens when one can reach you, and *Cancel* stops the wait — and *Sign out*
 revokes the session exactly as `aisquare logout` does. A token supplied through
 `AISQUARE_TOKEN` is shown as such and cannot be signed out from here.
 
-**Claude Code** is below it: one row per account, with who is signed in, the
-plan, and the five-hour and seven-day usage as bars once they have been read.
+**Claude Code** is below it: a table, one aligned row per account — ★ for the
+default, the slot, its name, who is signed in, the plan, the five-hour and
+seven-day windows (a bar and the percent **used**, then when each resets) and a
+status. A value too long for its column ends in `…` (hover it for the whole
+text); on a narrow page the table scrolls sideways as one, header included.
 Slot **1** is the plain `claude` of your machine (whatever `CLAUDE_CONFIG_DIR`
 was in the shell you started `asq` from, `~/.claude` otherwise). Every other
 slot is a directory the CLI created under `~/.aisquare/claude-accounts/` and
@@ -545,16 +548,19 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   the account is recorded, aisquare's hooks go into its `settings.json`, and the
   pane closes by itself. Close the pane without signing in, or press *Cancel
   sign-in*, and the empty slot is discarded.
-- **Sign in** on a row does the same for a slot that has no login (slot 1
-  included).
+- **Log in** on a row does the same for a slot that has no login, or whose
+  token is missing, expired or rejected (slot 1 included) — the status beside
+  it says which. Type `/login` if Claude Code does not prompt you; the pane
+  waits for a *fresh* login, not the stale one on disk, then closes, and the
+  row reads its usage again.
 - **Remove** forgets a slot the CLI owns. Its directory is renamed beside
   itself as `<n>.removed-<stamp>` — the login, the settings and the transcripts
   kept, never listed again, deletable by hand — and the number is free for the
   next add. Slot 1 cannot be removed; sign out of it inside Claude Code.
 - Usage comes from the endpoint Claude Code's own `/usage` reads, called with
   the token in the account's credentials file, once a minute while the page is
-  open. It is not a documented API; when it does not answer, the row says why
-  (`usage unavailable`, `token expired — open a session to refresh it`) and
+  open. It is not a documented API; when it does not answer, the row's status
+  says why (`usage: HTTP 503 …`, `⚠ token expired`, `⚠ token rejected`) and
   nothing else on the page is affected. On macOS the token lives in the
   Keychain, which the CLI does not read, so the row says so. A reset reads as a
   distance and a clock time — `resets in 3h 10m (18:00)`, `resets in 2d 4h (Tue
@@ -565,10 +571,15 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   specific says. The arrows set the **priority order** — the order the rows are
   listed in, and the order a headroom-based pick will try them in. *Disable*
   keeps a slot out of every automatic choice (its row says `disabled`) while
-  `--account <slot>` still reaches it by hand; *Enable* puts it back. An
-  **alias** (`aisquare accounts alias 2 work`) replaces `account 2` wherever
-  the slot is named — the row, the board, the launch line — and is accepted
-  everywhere a slot number is.
+  `--account <slot>` still reaches it by hand; *Enable* puts it back.
+- **Rename in place**: double-click an account's name (or press Enter or F2
+  on its row) and type. Enter or clicking away saves, Esc cancels, an empty
+  name goes back to `account N` / `plain claude`. The name is any text up to 64
+  characters (`Work laptop`), never only digits and never with an `@`; it is
+  what `aisquare accounts alias 2 "Work laptop"` sets, replaces `account 2`
+  wherever the slot is named — the row, the board, `fleet ls`, the launch line
+  — and is accepted, in any case, everywhere a slot number is (quote it:
+  `--account "work laptop"`).
 - Which account an agent runs on is decided in one order, for `fleet spawn`,
   `aisquare launch` and a manager spawning a coder alike: `--account` on the
   command line, then the role's binding (the **account** select beside each

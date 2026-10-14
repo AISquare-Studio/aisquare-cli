@@ -117,6 +117,9 @@ DOCUMENTED = (
     # disconnect` that keeps one route are steps the reader types. The `/plugin`
     # lines are Claude Code input, fenced `text`, which this guard does not read.
     "docs/claude-code-plugin.md",
+    # The Codex plugin route, likewise: `remember`, `doctor` and the `agents disconnect`
+    # that keeps one route are steps the reader types, beside the `codex plugin` ones.
+    "docs/codex-plugin.md",
     # The README's long form, moved out when the README became a front page
     # (roadmap 9.5). Its fenced commands moved with it and are still steps a
     # reader types, so each page is listed in its own right; the command tree
@@ -915,6 +918,11 @@ CENSUS = {
     # and three classified mentions (`aisquare-cli` and `aisquare@aisquare-cli`
     # in the `claude plugin` and `uv tool install` lines).
     "docs/claude-code-plugin.md": (3, 3),
+    # Measured 2026-10-14 on the day the page was written: three fenced commands
+    # (`remember`, `doctor`, `agents disconnect codex`) and six classified mentions
+    # (`aisquare-cli` and `aisquare@aisquare-cli` in the `codex plugin` and `uv tool
+    # install` lines).
+    "docs/codex-plugin.md": (3, 6),
     # Measured 2026-10-07 on the day they were split out of the README; their
     # commands summed to the README's 82 before the split. Re-measured the same
     # day at (3, 3) for install.md, when it stopped repeating the first-run
@@ -1249,7 +1257,9 @@ def _staleness_sweep(root: Path) -> list[str]:
     """The documents the staleness detector would flag under `root`."""
     unlisted: list[str] = []
     for path in sorted(root.rglob("*.md")):
-        if any(part in _SWEEP_EXCLUDES for part in path.parts):
+        # Parts below `root` alone: the fleet's own worktrees live in a folder this
+        # set excludes, so read whole, a run from inside one swept nothing and passed.
+        if any(part in _SWEEP_EXCLUDES for part in path.relative_to(root).parts):
             continue
         relative = path.relative_to(root).as_posix()
         if relative in DOCUMENTED:

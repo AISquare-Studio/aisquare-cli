@@ -561,18 +561,22 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   kept, never listed again, deletable by hand — and the number is free for the
   next add. Slot 1 cannot be removed; sign out of it inside Claude Code.
 - Usage comes from the endpoint Claude Code's own `/usage` reads, called with
-  the token in the account's credentials file — at most once every five minutes
-  per account, and only while the page is open. The page shares one five-minute
-  cache with `aisquare accounts usage` and `accounts list --usage`, so opening
-  it again, or its minute tick, asks nothing while the readings are fresh.
+  the token in the account's credentials file. The page asks at most once every
+  five minutes per account. It shares one five-minute cache with the status
+  line under *⚙ Settings*, `aisquare accounts usage` and `accounts list
+  --usage`, so opening it again, or its minute tick, asks nothing while the
+  readings are fresh.
   **↻ Refresh usage** above the table asks every account now. Beside it a dim
   line says how old the readings are: `last refreshed 3m ago`, from the oldest
   reading actually read, and `· last try failed 2m ago` when the endpoint did
   not answer for an account (`never` before the first). An account that needs a
   login counts in neither half; its own row says so. The endpoint is not a
-  documented API; when it does not answer, the row's status
-  says why (`usage: HTTP 503 …`, `⚠ token expired`, `⚠ token rejected`) and
-  nothing else on the page is affected. On macOS the token lives in the
+  documented API. A try that fails with nothing to say about the login (the
+  endpoint unreachable, an HTTP 5xx) keeps the account's figure on its row while
+  that figure is under five minutes old, and the line says the try failed. With
+  no such figure, the row's status says why (`usage: HTTP 503 …`). A token the
+  endpoint refuses shows at once (`⚠ token rejected`), and an expired one says
+  so (`⚠ token expired`). Nothing else on the page is affected. On macOS the token lives in the
   Keychain, which the CLI does not read, so the row says so. A reset reads as a
   distance and a clock time — `resets in 3h 10m (18:00)`, `resets in 2d 4h (Tue
   02:00)` — the same string on the page and in `aisquare accounts usage`, so a
@@ -586,7 +590,8 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
 - **Rename in place**: double-click an account's name (or press Enter or F2
   on its row) and type. Enter or clicking away saves, Esc cancels, an empty
   name goes back to `account N` / `plain claude`. The name is any text up to 64
-  characters (`Work laptop`), never only digits and never with an `@`; it is
+  characters (`Work laptop`, emoji included), never only digits, never with an
+  `@` and never with an invisible formatting character; it is
   what `aisquare accounts alias 2 "Work laptop"` sets, replaces `account 2`
   wherever the slot is named — the row, the board, `fleet ls`, the launch line
   — and is accepted, in any case, everywhere a slot number is (quote it:
@@ -603,7 +608,10 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
 - **Headroom.** By default — `[accounts] pick = "headroom"`, *launches pick* in
   App settings — the machine default gives way to the account with room
   (`aisquare config set accounts.pick default` keeps it): every enabled, signed-in account's
-  usage is read once, and the first one in priority order under `switch_at`
+  usage is read through the usage cache, from a reading up to a minute old, so
+  a burst of spawns asks the endpoint once. When only one account could be
+  picked, nothing is read: it is the answer. A hand-over (below) and `doctor
+  --live` ask the endpoint now. The first account in priority order under `switch_at`
   (85 % by default) is taken — or, when all are over it, the one with the most
   left. An account counts as full as the fuller of its two windows, so one
   that has spent its week is not taken for an empty five hours. Usage is the
@@ -758,15 +766,23 @@ Three places to change one:
   `aisquare config set fleet.roles.coder.permission_mode acceptEdits`, or edit
   the file directly;
 - **in the UI** — *⚙ Settings ▸ App settings* writes the same config, and its
-  *Reset all settings to default* is `config reset`. A project's own *Settings*
-  tab holds only that project's nickname.
+  *Reset all settings to default* is `config reset`. Its *Save* writes only the
+  settings changed on the page, so one changed in a shell while it was open is
+  kept. A project's own *Settings* tab holds only that project's nickname.
 
 **Your file holds your changes and nothing else.** The defaults are built in, and
 `~/.aisquare/config.toml` is your layer over them: a save writes only the keys
 that differ from the defaults, so a key you never set follows the built-in default
-even when a release changes it. A config 0.8 saved holds every setting; it loads
+even when a release changes it. One exception: each `[fleet.roles.<role>]`
+table is written whole, so a release that reads the file without the defaults
+under it (0.8.1 and earlier, sharing `~/.aisquare`) starts each role as this
+one does. A config 0.8 saved holds every setting; it loads
 with the values that differ from 0.8's defaults kept as yours and the rest
-following today's, and the next save writes it down to yours.
+following today's, and the next save writes it down to yours. A file 0.8 saves
+whole again after a move back is read the same way. Moving back with
+`aisquare upgrade --version 0.8.1` names what that release reads differently:
+the settings the file leaves to today's defaults where 0.8.1's differ
+(`accounts.pick`, `accounts.on_limit`).
 
 ```sh
 aisquare config list --overrides   # what you changed, and nothing else
@@ -775,7 +791,8 @@ aisquare config reset              # every setting back to its default; asks fir
 
 `config reset` moves the file aside to `config.toml.bak-<stamp>` beside it, so
 moving it back undoes the reset; through a symlink, the file it points at is
-copied there and emptied, and the link stays.
+copied there and emptied, and the link stays. With no file, or one that holds
+no setting, it says `nothing to reset` and moves nothing.
 
 The whole `[fleet]` section at its defaults — what you get with no `[fleet]` in
 your file at all:
@@ -902,7 +919,10 @@ alike. Two projects sharing a basename also show their parent as a dim subtitle
 (`~/work/api`, `~/oss/api`).
 
 **Nickname.** Free text on one line, up to 255 characters — `API: auth rewrite
-🚀` — like naming a browser tab for what you are doing there. Double-click a
+🚀` — like naming a browser tab for what you are doing there. Emoji are fine,
+joined ones (👩‍💻, 🏳️‍🌈) included; an invisible formatting character (a bidi
+control, a zero-width space) is refused, as it would let one name pass for
+another, and so are bytes the terminal could not decode. Double-click a
 card's title (or press `F2` on it) and type: Enter or a click away saves, Esc
 cancels, and an empty name brings the folder's back. The project's *Settings*
 tab and `aisquare project rename "API: auth rewrite"` (`--clear` drops it) set
@@ -1082,6 +1102,11 @@ and each time its page opens (*⚙ Settings ▸ Doctor*), about the project sele
 last; then again on the page's *Re-run checks*, after one of its fixes, and when
 Welcome connects Claude Code. Selecting a project, opening a tab or pressing `r`
 (which refreshes the fleet) runs nothing, so moving around the UI stays quick.
+What the last run found shows beside the sidebar's settings row (`⚙︎ Settings  ✗ 1  ⚠ 2`,
+nothing when all is clear) and on the hub's Doctor link, so the run at start
+is seen without opening the page. The page's header names what it checked
+(`checks for <project>`, or `checks for this machine`), and while it runs the
+checks again it keeps the last report on screen (`… running the checks again`).
 
 **The UI holds no state that matters.** What must keep running lives in tmux
 (the processes) and `~/.aisquare/context.db` (the `fleet_agent` rows, the

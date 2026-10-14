@@ -27,7 +27,7 @@ concurrency-tested against racing parallel sessions):
 ```
 ~/.aisquare/
 ├── context.db    # context entries, projects, prompt history, tasks, events, sessions
-├── config.toml   # your settings: only what differs from the built-in defaults; config_version is the format
+├── config.toml   # your settings: only what differs from the built-in defaults, each fleet role whole; config_version is the format
 ├── fleet-tmux.conf  # the fleet's private tmux server config (regenerated, not yours)
 ├── state.json    # small runtime state (e.g. the pinned active project)
 ├── agents.json   # registry of connected agents

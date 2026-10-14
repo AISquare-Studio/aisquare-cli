@@ -26,20 +26,24 @@ that reads at a glance.**
 
 **Upgrading:**
 - From 0.8.1, run `aisquare upgrade`.
-- **`config.toml` is now only your changes** (`config_version = 2`). On first
-  load, a value equal to 0.8's default for that key is dropped and follows
-  today's default; every other value stays yours. The next save writes the file
-  down to those. 0.8 wrote every setting into the file, so a value you chose
-  that happens to be 0.8's default cannot be told apart from one it wrote for
-  you. **An explicit `pick = "default"` or `on_limit = "wait"` therefore moves to
+- **`config.toml` is now only your changes** (`config_version = 2`), apart from
+  each `[fleet.roles.<role>]` table, which is written whole. On first load, a
+  value equal to 0.8's default for that key is dropped and follows today's
+  default; every other value stays yours. The next save writes the file down to
+  those. 0.8 wrote every setting into the file, so a value you chose that
+  happens to be 0.8's default cannot be told apart from one it wrote for you.
+  **An explicit `pick = "default"` or `on_limit = "wait"` therefore moves to
   the new defaults, `headroom` and `switch`.** To keep the old behaviour, set
   them again after upgrading: `aisquare config set accounts.pick default` and
-  `aisquare config set accounts.on_limit wait`. **Moving back to 0.8.1 or
-  earlier** once the file has been saved this way: when the file names any fleet
-  role, that release fills in whatever it leaves out with `auto`, no worktree and
-  no extra arguments, so coders lose their worktrees and the reviewer its
-  `--disallowedTools`. If you may move back, copy `config.toml` aside before you
-  upgrade, or set those values again there with `config set`.
+  `aisquare config set accounts.on_limit wait`.
+- **Moving back to 0.8.1 or earlier**: that release reads `config.toml`
+  without today's defaults under it. Your own settings read the same there, and
+  so do the fleet roles, as their tables are written whole. A setting the file
+  leaves to today's default takes that release's instead: `pick` reads
+  `default` and `on_limit` reads `wait`. `aisquare upgrade --version 0.8.1`
+  names those settings before it moves; to keep one there, set it after the
+  move. When that release saves the file whole again, this release reads it as
+  it did the first time: values equal to 0.8's defaults follow today's.
 - The store migrates to schema v30 on first open, from 0.8.1's v26, in four
   steps:
   - v27: a project nickname column.
@@ -49,22 +53,26 @@ that reads at a glance.**
   - v29: `team_task.number`, backfilled per board in creation order.
   - v30: a unique index on (project, number).
 
-  0.8.1 opens a v30 store as it is. A task it adds has no number and shows its
-  id.
+  0.8.1 opens a v30 store as it is. A task it adds has no number there and
+  shows its id. The next open by this release numbers it after the last number
+  on its board, in the order such tasks were added.
 - **`"name"` in `project list --json` is now the project's nickname** when it
   has one, where it was always the folder's name; so is `name` in `fleet ls
   --json` and Remote's project list. A script that wants the folder reads `root`.
   Each project also carries `nickname` (`null` when unset). Task JSON carries
   `number`. Usage JSON adds `session_used_percent`,
-  `week_used_percent`, `session_left_percent`, `week_left_percent` and
-  `needs_login`. `session_percent` and `week_percent` stay, and mean percent
+  `week_used_percent`, `session_left_percent`, `week_left_percent`,
+  `needs_login` and `last_failed_at` (when a try after the reading failed,
+  else `null`). `session_percent` and `week_percent` stay, and mean percent
   used, as they always did.
 
 ### Added
 - **Project nicknames.** Free text on one line, up to 255 characters:
   `aisquare project rename "API: auth rewrite"` (`--clear` drops it), or
   double-click a card's title (or `F2`) and type, where Enter or a click away
-  saves and Esc cancels. The project's *Settings* tab sets it too. The sidebar,
+  saves and Esc cancels. Emoji are fine, joined ones (👩‍💻, 🏳️‍🌈) included. A
+  name with an invisible formatting character (a bidi control, a zero-width
+  space) is refused, as are bytes the terminal could not decode. The project's *Settings* tab sets it too. The sidebar,
   `project list`, `fleet ls` and `project info` show it, and `--project`
   accepts it when no id prefix, folder name or codename matches first. Cards no
   longer show the codename; the *Settings* tab names it, beside the tmux session
@@ -82,27 +90,36 @@ that reads at a glance.**
   - The claude dot is the room **left** across your usable accounts. Each
     account is `100 − max(session % used, week % used)`, and the dot shows the
     average: green over 50 %, yellow 25–50 %, orange 5–25 %, red under 5 %,
-    💀 none left, grey not read yet.
-  - `N×` counts the usable accounts, and ⚠ says one needs a login.
+    💀 none left. Grey means usage could not be read: offline, a login only in
+    the macOS Keychain, or no usable account.
+  - `N×` counts the usable accounts. ⚠ says an enabled account needs a login:
+    signed out, or its token expired or was refused. These are the Accounts
+    page's *Log in* rows. The dot is red when no account is usable for want of
+    one.
 
   It reads through the usage cache every minute, never on the UI's two-second
-  tick. A click on it opens Accounts, and `?` explains it.
+  tick, and follows the Accounts page as soon as the page reads. A click on it
+  opens Accounts, and `?` explains it.
 - **App settings**: the machine-wide settings that were on every project's
   *Settings* tab (each role's permission mode, worktree and account, the escape
   key, the agent cap, the worktree directory, native agent teams, and the
-  `[accounts]` settings). It also has **Reset all settings to default**, which
-  asks first.
+  `[accounts]` settings). *Save* writes only the settings changed on the page,
+  so one changed in a shell while it was open is kept. It also has **Reset all
+  settings to default**, which asks first.
 - **`aisquare config reset [--yes]`** moves `config.toml` aside to
   `config.toml.bak-<stamp>` beside it, so moving it back undoes the reset, and
   every setting is its default again. Through a symlink, the file it points at
   is copied aside and emptied. It asks at a terminal, does a dry run off one,
-  and never prunes earlier backups. **`config list --overrides`** shows what you
-  changed, and nothing else.
+  and never prunes earlier backups. With no file, or one that holds no setting,
+  it says `nothing to reset: <path> holds no setting…`, asks nothing and moves
+  nothing. **`config list --overrides`** shows what you changed, and nothing
+  else.
 - **Rename a Claude account in place** on the Accounts page: double-click its
   name, or press Enter or F2 on its row. An account's name is free text up to 64
   characters (`Work laptop`), with case kept and matched ignoring case. A name
-  is refused if it is only digits, has an `@`, has an invisible character, or
-  is another slot's own name (`account 3`, `plain claude`). `aisquare accounts
+  is refused if it is only digits, has an `@`, has an invisible formatting
+  character, or is another slot's own name (`account 3`, `plain claude`).
+  Emoji are fine, joined ones included, as in nicknames. `aisquare accounts
   alias 2 "Work laptop"` sets the same name, and `--account "work laptop"`
   takes it.
 - **Log in** on an account's row whose login is missing, expired or rejected.
@@ -113,16 +130,25 @@ that reads at a glance.**
   - `last refreshed 3m ago`, from the oldest reading actually read.
   - `· last try failed 2m ago` when the endpoint did not answer.
   - An account that needs a login counts in neither part.
+
+  A try that fails with nothing to say about the login (the endpoint
+  unreachable, an HTTP 5xx) keeps the account's figure on its row while that
+  figure is under five minutes old, and the line says the try failed. A
+  refused token shows at once.
 - **`--refresh`** on `aisquare accounts usage` and `accounts list --usage`
   fetches now. Otherwise both share a five-minute cache with the Accounts page
   and say how old their figures are (`usage as of 3m ago (percent USED;
-  refreshed at most every 5 min)`).
+  refreshed at most every 5 min)`). A failed try is said as on the page
+  (`usage as of 3m ago · last try failed 1m ago`), and `no usage read · last
+  try failed just now` when no account could be read.
 - **Task numbers.** Every task has a number on its board, `#1`, `#2`, … in the
   order tasks were added there. It shows on the board, in `task list` and
   `task show`, in every receipt (`✓ claimed: #12 tsk_… [doing] …`), and in the
   briefing and the wake-ups. Any task command, `--needs`, `--task` and the MCP
   task tools take `12` or `#12` for the caller's board, or the id as before.
-  `#12` is only ever a number: a board with no task #12 says so.
+  `12` and `#12` are only ever a number on the caller's board: a board with no
+  task #12 says `no task #12 on this board (<name>)`, and never takes another
+  board's task whose id ends in `12`.
 - **The board explains itself.** The tasks table is `#`, a status icon and the
   title, cut to the width there is, so it never scrolls sideways:
   - ○ to do
@@ -139,12 +165,22 @@ that reads at a glance.**
 - **Every line in the board drags to resize**: beside the tasks column, above
   the detail, and between the sessions and the tasks. A double-click puts a
   line back. The sizes are kept in `state.json`, one for every project's board.
-- The Doctor page has **Re-run checks**.
+- **The Doctor page** has **Re-run checks**, and a header that names what it
+  checked: `checks for <project>` or `checks for this machine`. What the last
+  run found shows beside the sidebar's settings row (`⚙︎ Settings  ✗ 1  ⚠ 2`,
+  nothing when all is clear) and on the hub's Doctor link, so the run at start
+  is seen without opening the page. Opening the page shows that report while
+  it runs the checks again (`… running the checks again`).
 
 ### Changed
 - **The defaults**: `[accounts] pick = "headroom"` (a launch takes the first
   account in priority order with room) and `on_limit = "switch"` (an agent
   that hits its limit is moved to one with room). See Upgrading.
+- **A launch's headroom pick reads the usage cache**, where it asked every
+  account on every launch. It uses a reading up to a minute old, so a burst of
+  spawns asks once, and reads nothing when only one account could be picked. A
+  hand-over (`fleet switch`, or an agent moved off its limit) and `doctor
+  --live` still ask the endpoint now.
 - **The sidebar** is your projects, then ⚙ Settings and its status line. The
   Accounts and Doctor sections and the doctor summary at the bottom are gone;
   both pages live under ⚙ Settings. A page you had open under them comes back

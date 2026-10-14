@@ -135,8 +135,9 @@ were added to that project — shown beside its id on the board, in `task list`,
 `task show` and every receipt (`✓ claimed: #12 tsk_01k… [doing] …`). Any task
 command, `--needs`, `--task` and the MCP task tools take `12` or `#12` for the
 caller's board (the `--as` session's, else the directory's), or the id as
-before. `#12` is only ever a number: if this board has no task #12 it says so
-rather than matching some other task's id.
+before. `12` and `#12` are only ever a number on that board: if it has no task
+#12 it says `no task #12 on this board (<name>)`, rather than matching some
+task's id, here or on another project's board.
 
 Claims are single-`UPDATE` atomic (race-tested), leased (default 120
 minutes), and renewed by the session's own lifecycle hooks — so a dead
@@ -403,8 +404,9 @@ default to using the room there is:
 
 ```sh
 aisquare config set accounts.pick headroom   # the default: spawns take, in priority order, the
-                                             # first account under switch_at % of its 5-hour
-                                             # window — or the one with the most room when all are over it
+                                             # first account under switch_at % of the fuller of
+                                             # its two windows — or the one with the most room
+                                             # when all are over it (usage up to a minute old)
 aisquare config set accounts.pick default    # …or every spawn on the machine default
 aisquare config set accounts.switch_at 85    # the line (default 85 %)
 aisquare config set accounts.on_limit wait   # when an agent hits its limit, leave it parked (default: switch)

@@ -212,8 +212,11 @@ def test_every_first_class_cycle_ends_with_its_own_lane_rule() -> None:
         assert f"Stay in your lane ({role}). When you are {trigger}" in text, role
         assert "Instead:" in text, role
         assert "if the human insists" in text, role
-        # the paragraph is three lines and reads only the reader's own trigger
-        assert len(lines) - len(harness._role_cycle_core(role, "abcd1234")) == 3, role
+        # the paragraph is three lines and reads only the reader's own trigger; a role
+        # that works in a checkout is told to clean up first (``_CLEANUP``)
+        cleanup = len(harness._CLEANUP) if role in harness._CLEANS_UP else 0
+        core = harness._role_cycle_core(role, "abcd1234")
+        assert len(lines) - len(core) == cleanup + 3, role
         for other, (other_trigger, _) in harness._LANE.items():
             if other_trigger != trigger:
                 assert other_trigger not in text, (role, other)
@@ -224,6 +227,30 @@ def test_every_first_class_cycle_ends_with_its_own_lane_rule() -> None:
     # and a role with a cycle but no lane entry gets no paragraph — never a KeyError,
     # which the session-start hook would swallow together with the whole team block
     assert harness._lane_rule("stenographer", "abcd1234", merge_said=False) == []
+
+
+def test_the_manager_stops_and_reaps_finished_agents_and_everyone_else_cleans_up() -> None:
+    """The human: the manager "can do it but I had to ask it first time … it did not clean up
+    the coder agents and its worktrees once they were done". Said from the first turn: the
+    manager stops an agent whose task is done and reaps, and reaps again before READY; every
+    role that works in a checkout removes the scratch trees and temp dirs it made, never the
+    worktree it was spawned in. Before the lane rule, which stays last."""
+    manager = " ".join(harness.role_cycle("manager", "abcd1234"))
+    assert (
+        "An agent whose task is done, with no queued task that fits it: "
+        "`aisquare fleet stop <label>`, then `aisquare fleet reap`"
+    ) in manager
+    assert "removes the agent's worktree once its work is pushed" in manager
+    assert manager.index("`aisquare fleet reap` again") < manager.index('"READY:')
+    for role in ("coder", "runner", "tester", "reviewer", "validator", "ui-tester"):
+        lines = harness.role_cycle(role, "abcd1234")
+        core = harness._role_cycle_core(role, "abcd1234")
+        assert lines[len(core) : len(core) + 3] == list(harness._CLEANUP), role
+        text = " ".join(lines)
+        assert "`git worktree remove <path>`, then `git worktree prune`" in text, role
+        assert "never the worktree you were spawned in" in text, role
+    for role in ("manager", "planner"):  # they work in no checkout of their own
+        assert harness._CLEANUP[0] not in harness.role_cycle(role, "abcd1234"), role
 
 
 def test_the_lane_rules_substitute_commands_run_as_written() -> None:

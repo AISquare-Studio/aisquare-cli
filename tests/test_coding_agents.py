@@ -107,6 +107,9 @@ def test_codex_cannot_silently_use_a_managed_claude_account(
     monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
     monkeypatch.setattr(fleet, "server", lambda config: server)
     monkeypatch.setattr(fleet, "_require_tmux", lambda server: None)
+    # The refusal is about the account, so it must not hinge on codex being on PATH
+    # (CI's check runners have none, and "not on your PATH" came first there).
+    monkeypatch.setattr(agent_launch, "executable", lambda selected: "/fixture/codex")
     from aisquare.core import claude_accounts
 
     # Codex has account slots of its own now; a Claude slot is refused, naming both agents.

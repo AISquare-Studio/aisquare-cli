@@ -20,6 +20,7 @@ import os
 import shutil
 import subprocess
 import tomllib
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from importlib import import_module
 from pathlib import Path, PureWindowsPath
@@ -694,6 +695,166 @@ def test_a_waiting_codex_manager_is_woken_with_the_enter_apart(
     tmux.screens[manager.pane_id] = IDLE_PROMPT
     assert fleet_service.nudge_manager(project.id, reason="task_review") is True
     assert len(typed) == 4
+
+
+def _waiting_manager_on(
+    agent: str, where: ProjectInfo, server: FakeTmux, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> FleetAgent:
+    """A manager of ``agent``'s at its prompt, its turn over, as its hooks leave it."""
+    manager = fleet_service.spawn(where, "manager", agent=agent, worktree=False).agent
+    if agent == "codex":
+        home.mkdir()
+        native = Codex(manager, where, home, server, monkeypatch, launch="launch-m")
+        native.start("thread-m")
+        native.hook("UserPromptSubmit", "thread-m", prompt="run the team", turn_id="turn-1")
+        native.hook("Stop", "thread-m", turn_id="turn-1", stop_hook_active=False)
+    else:
+        assert manager.session_id is not None
+        team_service.hook_session_start(manager.session_id, where.root, "startup")
+        team_service.hook_stop(manager.session_id, where.root)
+    server.set_command(manager.pane_id, "codex" if agent == "codex" else "claude")
+    row = _row(manager.id)
+    assert fleet_service.status_of(row).state == "waiting"
+    return row
+
+
+#: What Codex's sandbox does to the fleet's socket (measured on 0.162.1: the command runs
+#: in namespaces of its own, and `tmux -L <socket>` there is `Operation not permitted`).
+def _sandboxed(server: FakeTmux, inside: bool) -> None:
+    server.socket_denied = inside
+
+
+def _owed(where: ProjectInfo) -> str | None:
+    with store_session() as store:
+        return store.get_meta(fleet_service.NUDGE_OWED + where.id)
+
+
+@pytest.mark.parametrize("manager_agent", ["codex", "claude-code"])
+@pytest.mark.parametrize(
+    "write",
+    [
+        lambda me, task: team_service.add_note("calc ok", kind="result", session_ref=me),
+        lambda me, task: team_service.add_note("which db?", kind="question", session_ref=me),
+        lambda me, task: team_service.add_note("fyi", to_role="manager", session_ref=me),
+        lambda me, task: team_service.review_task(task, note="ready", session_ref=me),
+        lambda me, task: team_service.finish_task(task, session_ref=me),
+        lambda me, task: team_service.block_task(task, reason="needs spec", session_ref=me),
+        lambda me, task: team_service.reopen_task(task, reason="fails on 3.12", session_ref=me),
+    ],
+    ids=["result", "question", "note-to-manager", "review", "done", "blocked", "reopen"],
+)
+def test_a_sandboxed_codex_write_wakes_the_waiting_manager_from_the_writers_hook(
+    codex_agent: tuple[Codex, TeamTask],
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    manager_agent: str,
+    write: Callable[[str, str], object],
+) -> None:
+    """SMOKE2 on 0.162.1: a Codex coder's board write ran in its sandbox, where the
+    fleet's tmux socket is refused, so the nudge it owed a waiting manager — Codex's or
+    Claude Code's — was lost, and the fleet stalled. The sandbox gets no tmux: its write
+    leaves the nudge owed, and the coder's own PostToolUse, which Codex runs outside the
+    sandbox, sends it the moment the command ends."""
+    codex, task = codex_agent
+    manager = _waiting_manager_on(
+        manager_agent, codex.project, tmux, tmp_path / "manager-home", monkeypatch
+    )
+    codex.become()
+    codex.start("thread-c")
+    codex.hook("UserPromptSubmit", "thread-c", prompt="work the task", turn_id="turn-1")
+    me = codex.board_id("thread-c")
+    team_service.claim_task(task.id, session_ref=me)
+
+    _sandboxed(tmux, True)
+    write(me, task.id)
+    _sandboxed(tmux, False)
+
+    assert tmux.typed == [], "nothing reaches tmux from the sandbox"
+    assert _owed(codex.project) is not None
+    codex.hook("PostToolUse", "thread-c", turn_id="turn-1", tool_name="Bash")
+    assert tmux.typed == [
+        (manager.pane_id, "paste", fleet_service.NUDGE_TEXT),
+        (manager.pane_id, "key", "Enter"),
+    ]
+    assert _owed(codex.project) is None, "sent once"
+    codex.hook("Stop", "thread-c", turn_id="turn-1", stop_hook_active=False)
+    assert len(tmux.typed) == 2
+
+
+def test_an_owed_nudge_waits_for_a_hook_and_wakes_nobody_for_news_already_read(
+    codex_agent: tuple[Codex, TeamTask],
+    tmux: FakeTmux,  # noqa: F811
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mark says a write was made, not that it is unread: a manager woken since by
+    something else, which read the write in its delta, is not typed into for it."""
+    codex, _ = codex_agent
+    manager = _waiting_manager_on("codex", codex.project, tmux, tmp_path / "m", monkeypatch)
+    codex.become()
+    codex.start("thread-c")
+    me = codex.board_id("thread-c")
+    _sandboxed(tmux, True)
+    team_service.add_note("calc ok", kind="result", session_ref=me)
+    # Refused again from inside: owed once, never written over by a second refusal.
+    owed = _owed(codex.project)
+    assert owed is not None and fleet_service.deliver_owed_nudge(codex.project.id) is False
+    assert _owed(codex.project) is None, "taken, and not owed again by the sandbox's taker"
+    _sandboxed(tmux, False)
+
+    team_service.add_note("calc ok again", kind="result", session_ref=me)  # sent directly
+    assert len(tmux.typed) == 2 and _owed(codex.project) is None
+    with store_session() as store:  # the manager's next prompt read the delta
+        latest = store.latest_seq(codex.project.id)
+        assert manager.session_id is not None
+        store.touch_session(manager.session_id, cursor=latest, state="waiting")
+        store.set_meta(fleet_service.NUDGE_OWED + codex.project.id, "stale")
+        store.delete_meta(f"nudge:{manager.session_id}")
+    codex.hook("PostToolUse", "thread-c", turn_id="turn-1", tool_name="Bash")
+    assert len(tmux.typed) == 2, "nothing unread: no nudge"
+    assert _owed(codex.project) is None
+
+
+def test_a_manager_that_is_working_keeps_its_news_for_its_own_stop(
+    codex_agent: tuple[Codex, TeamTask],
+    tmux: FakeTmux,  # noqa: F811
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex, _ = codex_agent
+    manager = _waiting_manager_on("codex", codex.project, tmux, tmp_path / "m", monkeypatch)
+    with store_session() as store:
+        assert manager.session_id is not None
+        store.touch_session(manager.session_id, state="working")
+    codex.become()
+    codex.start("thread-c")
+    _sandboxed(tmux, True)
+    team_service.add_note("calc ok", kind="result", session_ref=codex.board_id("thread-c"))
+    _sandboxed(tmux, False)
+    codex.hook("PostToolUse", "thread-c", turn_id="turn-1", tool_name="Bash")
+    assert tmux.typed == [] and _owed(codex.project) is None
+
+
+def test_claude_codes_hooks_leave_an_owed_nudge_alone(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claude Code runs its tools unsandboxed and sends its own nudges; its hooks are as
+    they were."""
+    claude = get_adapter("claude-code")
+    coder = fleet_service.spawn(project, "coder", agent="claude-code", worktree=False).agent
+    assert coder.session_id is not None
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", coder.id)
+    team_service.hook_session_start(coder.session_id, project.root, "startup")
+    called: list[str] = []
+    monkeypatch.setattr(fleet_service, "deliver_owed_nudge", called.append)
+    payload = {"session_id": coder.session_id, "cwd": str(project.root)}
+    agent_events.handle(claude, {**payload, "hook_event_name": "Stop"}, Path("unused"))
+    assert called == []
 
 
 # --- who answers an approval decides the bell (t8 smoke, lane A) -------------------------

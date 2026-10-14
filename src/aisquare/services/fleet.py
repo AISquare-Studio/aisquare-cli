@@ -113,6 +113,11 @@ injection on ``UserPromptSubmit`` delivers the details — and never starts with
 NUDGE_DEBOUNCE = timedelta(seconds=5)
 """Two board writes inside this window wake the manager once."""
 
+NUDGE_OWED = "nudge-owed:"
+"""The ``team_meta`` key prefix, before a project id, of the nudge a board write owed
+that project's manager and could not send: tmux refused the writer (a command in Codex's
+sandbox, :func:`nudge_manager`). Its value is when; :func:`deliver_owed_nudge` takes it."""
+
 PROMPT_TIMEOUT = 20.0
 """How long ``spawn --prompt`` waits for the agent to come up before typing anyway."""
 
@@ -5759,7 +5764,43 @@ def nudge_manager(project_id: str, *, reason: str) -> bool:
     at its prompt as ``tell`` decides it (:func:`_at_its_prompt`), the line typed as
     ``tell`` types one (:func:`_type_line`): a Codex manager kept every nudge sent with
     its Enter in one burst unsent in its composer, and woke for none of them.
+
+    A tmux that refuses to be asked is a writer that may not reach it: a command in
+    Codex's sandbox, which runs in namespaces of its own where the fleet's socket is
+    ``Operation not permitted`` (measured on 0.162.1). Every board write a sandboxed
+    agent made lost its nudge there, and the fleet stalled on a waiting manager. The
+    sandbox is not widened to the socket — that would let it type into any pane — so
+    the nudge is left owed (:data:`NUDGE_OWED`) for a process outside it to send:
+    :func:`deliver_owed_nudge`, from the writer's own hooks, which Codex runs outside.
     """
+    return _nudge(project_id, owe=True)
+
+
+def deliver_owed_nudge(project_id: str) -> bool:
+    """Send the nudge a board write owed ``project_id``'s manager (:func:`nudge_manager`);
+    ``False`` when none was owed or it is not due. Never raises.
+
+    Run by the hooks of an agent that sandboxes its tools, which the agent runs outside
+    the sandbox (measured on Codex 0.162.1: children of the agent's process, in its
+    namespaces, where tmux answers): its ``PostToolUse`` fires as the write's command
+    ends, its ``Stop`` at the turn's. Taken once, by whoever deletes the mark first, and
+    not owed again when this one cannot reach tmux either. Due only while the manager
+    has not read news it wakes for (:func:`services.team.wake_pending`): the mark says
+    a write was made, not that it is unread, and a manager that has since read it is
+    not woken for nothing. The nudge is the fixed line, decided as any other.
+    """
+    try:
+        with store_session() as store:
+            if not store.delete_meta(NUDGE_OWED + project_id):
+                return False
+    except Exception:
+        return False
+    return _nudge(project_id, owe=False)
+
+
+def _nudge(project_id: str, *, owe: bool) -> bool:
+    """:func:`nudge_manager`, leaving the nudge owed where tmux refused it when ``owe``;
+    otherwise :func:`deliver_owed_nudge`'s, due only for unread news."""
     try:
         with store_session() as store:
             manager = store.fleet_agent_by_label(project_id, MANAGER_LABEL, live_only=True)
@@ -5768,13 +5809,20 @@ def nudge_manager(project_id: str, *, reason: str) -> bool:
             session = store.get_session(manager.session_id)
             if session is None or session.ended_at is not None:
                 return False
+            if not owe and not _team().wake_pending(store, session):
+                return False
             key = f"nudge:{session.id}"
             now = _now()
             last = store.get_meta(key)
             if last is not None and now - datetime.fromisoformat(last) < NUDGE_DEBOUNCE:
                 return False
             srv = server_of(manager)
-            facts = srv.pane_facts(manager.pane_id)
+            try:
+                facts = srv.pane_facts_or_raise(manager.pane_id)
+            except TmuxError:
+                if owe:
+                    store.set_meta(NUDGE_OWED + project_id, now.isoformat())
+                return False
             if facts is None or facts.dead or not _agent_running(facts.current_command):
                 return False
             if _outlived(manager, srv.started_at()):

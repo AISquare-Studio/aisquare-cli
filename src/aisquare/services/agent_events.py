@@ -193,6 +193,7 @@ def _dispatch(
         decision = hooks.turn_stopped(
             cwd, session_id=session_id, stop_hook_active=event.stop_hook_active
         )
+        _deliver_owed_nudge(adapter, session_id)
         if decision is None:
             return None
         if session_id and adapter.capabilities.stop_reason_as_prompt:
@@ -226,7 +227,27 @@ def _dispatch(
             if store.get_session(session_id):
                 store.touch_session(session_id, state="working")
                 store.renew_leases(session_id, harness_lease())
+        _deliver_owed_nudge(adapter, session_id)
     return None
+
+
+def _deliver_owed_nudge(adapter: AgentAdapter, session_id: str | None) -> None:
+    """Send the manager the nudge a write of this agent's tools owed it, where the agent
+    sandboxes them (``capabilities.sandboxes_tools``): tmux refuses its sandbox, and its
+    hooks run outside it (``services.fleet.deliver_owed_nudge``). After the hook's own
+    writes, as a write's nudge comes after the write; it never raises. An agent whose
+    tools run unsandboxed (Claude Code) sent its nudges itself."""
+    if not adapter.capabilities.sandboxes_tools or session_id is None:
+        return
+    try:
+        with store_session() as store:
+            session = store.get_session(session_id)
+        if session is not None:
+            from aisquare.services import fleet  # lazy: the fleet imports the team service
+
+            fleet.deliver_owed_nudge(session.project_id)
+    except Exception:  # the hook's own work is done; a lost nudge is the whole cost
+        return
 
 
 def _usage_limit(

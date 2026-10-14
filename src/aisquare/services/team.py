@@ -512,6 +512,8 @@ def _nudge_manager(project_id: str, *, reason: str) -> None:
     nudge. The fleet decides whether a nudge is due — state ``waiting``, pane
     alive, debounced — and what the one fixed line says; the details reach the
     manager through the delta its next prompt injects, never through the nudge.
+    That process may be a command in Codex's sandbox, which tmux refuses: the fleet
+    then leaves the nudge owed, for the agent's hooks to send from outside it.
     """
     try:
         from aisquare.services import fleet as fleet_service  # lazy: fleet imports the store
@@ -1668,6 +1670,13 @@ def _wake_candidates(store: ContextStore, me: TeamSession) -> list[TeamEvent]:
         me.project_id, me.cursor, exclude_session=me.id, limit=_DELTA_LIMIT * 3 + 1
     )
     return [event for event in raw if event.kind not in HUMAN_BOARD_KINDS]
+
+
+def wake_pending(store: ContextStore, me: TeamSession) -> bool:
+    """Whether news a manager wakes for is past its cursor, unread: what a nudge owed
+    since a write tmux refused (``services.fleet.deliver_owed_nudge``) is still due for.
+    Every write that nudges is one of these events (:func:`_wakes_manager`)."""
+    return any(_wakes_manager(event) for event in _wake_candidates(store, me))
 
 
 def _deferred_wake_reason(store: ContextStore, me: TeamSession) -> str | None:

@@ -817,6 +817,35 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             assert fleet.tell(project, label, claim).delivered
             until(lambda: answered(seen), 30, "the sandboxed claim ran", pane)
             assert "claimed" in outputs()[-1], outputs()[-1]
+            # A waiting manager is woken by a result the coder posts from its sandbox,
+            # which tmux refuses: by the coder's own hook, which Codex runs outside it.
+            manager = fleet.spawn(
+                project,
+                "manager",
+                agent="codex",
+                worktree=False,
+                prompt="manager fixture",
+                agent_args=["--dangerously-bypass-hook-trust", "--no-alt-screen"],
+            ).agent
+
+            def waiting(agent: Any) -> bool:
+                session = fleet.status_of(agent).session
+                return session is not None and session.state == "waiting"
+
+            def ran(text: str) -> bool:
+                return any(text in _user_texts(request) for request in list(requests))
+
+            until(lambda: waiting(manager), 40, "the manager waiting", manager.pane_id)
+            until(lambda: state(coder) == "waiting", 20, "waiting", pane)
+            seen, reviewed = len(outputs()), reviews()
+            socket = config.fleet.tmux_socket
+            tmux_probe = f"RUN tmux -L {socket} list-sessions; {cli} note 'lane-d' --kind result"
+            assert fleet.tell(project, label, tmux_probe).delivered
+            until(lambda: answered(seen), 30, "the sandboxed result ran", pane)
+            assert "Operation not permitted" in outputs()[-1], outputs()[-1]
+            assert "shared (result)" in outputs()[-1], outputs()[-1]
+            assert reviews() == reviewed, "on the first, sandboxed attempt"
+            until(lambda: ran(fleet.NUDGE_TEXT), 10, "the result woke the manager", manager.pane_id)
             # What runs outside the sandbox stays out of its reach.
             until(lambda: state(coder) == "waiting", 20, "waiting", pane)
             seen = len(outputs())

@@ -6437,6 +6437,31 @@ def test_nudge_without_a_manager_or_its_board_row_is_false(
     assert tmux.typed == []
 
 
+def test_a_nudge_tmux_refuses_is_left_owed_and_one_not_due_is_not(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """A writer tmux will not answer (a command in Codex's sandbox) cannot tell whether
+    the nudge is due, so it is owed to a process that can (``deliver_owed_nudge``); a
+    nudge tmux answered and refused for its own reasons is not."""
+    manager = fleet_service.spawn(project, "manager").agent
+    _board_session(manager, "working")
+    tmux.set_command(manager.pane_id, "claude")
+    key = fleet_service.NUDGE_OWED + project.id
+
+    assert fleet_service.nudge_manager(project.id, reason="result") is False
+    tmux.socket_denied = True
+    assert fleet_service.nudge_manager(project.id, reason="result") is False
+    with store_session() as store:
+        assert store.get_meta(key) is not None, "owed only where tmux refused"
+        store.delete_meta(key)
+    tmux.running = False
+    tmux.socket_denied = False
+    assert fleet_service.nudge_manager(project.id, reason="result") is False
+    with store_session() as store:
+        assert store.get_meta(key) is None, "no server is no fleet to nudge"
+    assert tmux.typed == []
+
+
 def test_nudge_never_raises(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

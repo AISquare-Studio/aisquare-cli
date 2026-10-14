@@ -85,7 +85,7 @@ def enqueue(record: dict[str, object]) -> Path | None:
     to ignore the return value entirely.
     """
     try:
-        return enqueue_retryable(record)
+        return _spool(record)
     except Exception:  # an observer may not break its subject
         return None
 
@@ -124,7 +124,23 @@ def enqueue_retryable(record: dict[str, object], *, filename: str | None = None)
 
     Primary-path observers use enqueue, which always fails open. A native
     exporter can retry disk pressure, but cannot repair permissions or input.
+    Only this variant leaves the doctor's ``last-error.json``: a native capture
+    clears it on success, and nothing would clear a primary-path observer's.
     """
+    try:
+        return _spool(record, filename=filename)
+    except OSError as exc:
+        report_failure(exc)
+        if temporary_write_error(exc):
+            raise
+        return None
+    except (TypeError, ValueError, OverflowError) as exc:
+        report_failure(exc)
+        return None
+
+
+def _spool(record: dict[str, object], *, filename: str | None = None) -> Path:
+    """Write one record into the queue, raising whatever the write raised."""
     staging: Path | None = None
     try:
         directory = queue_dir()
@@ -141,14 +157,6 @@ def enqueue_retryable(record: dict[str, object], *, filename: str | None = None)
         staging.replace(target)
         staging = None
         return target
-    except OSError as exc:
-        report_failure(exc)
-        if temporary_write_error(exc):
-            raise
-        return None
-    except (TypeError, ValueError, OverflowError) as exc:
-        report_failure(exc)
-        return None
     finally:
         if staging is not None:
             with contextlib.suppress(OSError):

@@ -461,6 +461,34 @@ def test_readonly_receipt_store_is_permanent_and_reported(
     assert diagnostics._check_outbox().status != "ok"
 
 
+@pytest.mark.parametrize("failure", ["disk-full", "unserialisable"])
+def test_a_primary_path_spool_failure_is_not_a_receiver_failure(
+    failure: str, shipping: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a native capture clears last-error.json, so only the receiver may leave it:
+    a Claude prompt capture's one ENOSPC warned about a Codex receiver forever."""
+    record: dict[str, object] = {"kind": "prompt"}
+    write = Path.write_text
+
+    def full(path: Path, *args: Any, **kwargs: Any) -> int:
+        if path.parent == outbox.queue_dir():
+            raise OSError(errno.ENOSPC, "fixture full disk")
+        return write(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        if failure == "unserialisable":
+            record["self"] = record  # json.dumps: ValueError, circular reference
+        else:
+            patch.setattr(Path, "write_text", full)
+        assert outbox.enqueue(record) is None
+    assert diagnostics._check_outbox().status == "ok"
+    # Control: the receiver's own write still reports its failure.
+    native: dict[str, object] = {"kind": "native"}
+    native["self"] = native
+    assert outbox.enqueue_retryable(native) is None
+    assert diagnostics._check_outbox().status != "ok"
+
+
 def test_recovery_clears_the_previous_receiver_diagnostic(
     receiver: Callable[[dict[str, Any]], int],
 ) -> None:

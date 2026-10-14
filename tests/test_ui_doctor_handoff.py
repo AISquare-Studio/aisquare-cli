@@ -679,6 +679,24 @@ Then = Callable[[ui_app.FleetApp, list[str]], Awaitable[list[str]]]
 """A step after the starts, given the app and every start so far; it says what to return."""
 
 
+async def _settle_reads(app: ui_app.FleetApp) -> None:
+    """Settle until every read that has begun has ended, but the one held on purpose, and so
+    has each start its answer made: the Accounts page's usage, once read, reads the status
+    line's headroom (``UsageRead``). A settle of the messages alone counted that start only
+    if the usage read had ended by then; on windows-latest the control's had and the
+    call-off's had not (CI run 38571988017). A read held for the hand-over has not begun: it
+    is PENDING until it is called off, and ``Worker._start`` makes a start RUNNING at once."""
+
+    def ended() -> bool:
+        return not any(
+            worker.state is WorkerState.RUNNING
+            for worker in app.workers
+            if worker.name != "held" and worker.group != "_loader"
+        )
+
+    await settle_until(app, ended, group="held")
+
+
 def _starts_with_a_hand_over(
     pending: bool, monkeypatch: pytest.MonkeyPatch, *, then: Then | None = None
 ) -> list[str]:
@@ -712,29 +730,35 @@ def _starts_with_a_hand_over(
         app.notify = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
         await app.on_accounts_selected(AccountsSelected())
         await settle_page(app)
-        if pending:
-            app.run_worker(lambda: release.wait(10), name="held", thread=True, exit_on_error=False)
-            app.query_one("#doctor-update", Button).press()
-            await settle_page(app, group="held")
-            assert app.hand_off == ("upgrade", "--reopen")
-        mark = len(names)
-        await app.on_project_selected(ProjectSelected("prj_a"))
-        app.run_doctor()  # what opening the Doctor page, or its Re-run, asks for
-        accounts = app.query_one(accounts_view.AccountsView)
-        accounts._on_screen = True
-        accounts.session = SimpleNamespace(source="file")  # type: ignore[assignment]
-        signed_in = SimpleNamespace(signed_in=True, account=SimpleNamespace(slot=2))
-        accounts.overview = SimpleNamespace(accounts=[signed_in])  # type: ignore[assignment]
-        accounts.refresh_readings()
-        welcome = app.query_one(welcome_view.WelcomeView)
-        welcome.look(full=True)
-        welcome.find_candidates()
-        await settle_page(app, group="held")  # the tabs' mounts, which start their reads
-        started = sorted(set(names[mark:]))
-        if then is not None:
-            started = await then(app, names)
-        release.set()
-        return started
+        try:
+            if pending:
+                # Held until the steps end (the ``finally``), however slow the runner.
+                app.run_worker(
+                    lambda: release.wait(60), name="held", thread=True, exit_on_error=False
+                )
+                app.query_one("#doctor-update", Button).press()
+                # The press bubbles to the Doctor view, its hand-over to the app: hop by hop.
+                await settle_until(app, lambda: app.hand_off is not None, group="held")
+                assert app.hand_off == ("upgrade", "--reopen")
+            mark = len(names)
+            await app.on_project_selected(ProjectSelected("prj_a"))
+            app.run_doctor()  # what opening the Doctor page, or its Re-run, asks for
+            accounts = app.query_one(accounts_view.AccountsView)
+            accounts._on_screen = True
+            accounts.session = SimpleNamespace(source="file")  # type: ignore[assignment]
+            signed_in = SimpleNamespace(signed_in=True, account=SimpleNamespace(slot=2))
+            accounts.overview = SimpleNamespace(accounts=[signed_in])  # type: ignore[assignment]
+            accounts.refresh_readings()
+            welcome = app.query_one(welcome_view.WelcomeView)
+            welcome.look(full=True)
+            welcome.find_candidates()
+            await _settle_reads(app)  # the tabs' mounts, which start their reads, and theirs
+            started = sorted(set(names[mark:]))
+            if then is not None:
+                started = await then(app, names)
+            return started
+        finally:
+            release.set()
 
     return drive(fn)
 
@@ -781,7 +805,7 @@ def test_a_called_off_hand_over_begins_each_start_that_stood_down_once(
         looks.clear()  # the looks before the hand-over
         mark = len(names)
         app._call_off_hand_off()
-        await settle_page(app, group="held")
+        await _settle_reads(app)
         return sorted(names[mark:])
 
     started = _starts_with_a_hand_over(False, monkeypatch)

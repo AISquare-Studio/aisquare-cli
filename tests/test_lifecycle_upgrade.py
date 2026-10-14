@@ -3879,3 +3879,18 @@ def test_the_refresh_the_upgrade_runs_for_codex_is_a_command_this_cli_has(
     assert json.loads(result.stdout) == {"name": "codex", "hooks_installed": True}
     assert agent_core.hooks_installed("codex", codex)
     assert not paths.db_path().exists(), "a refresh imports nothing, so it never opens the store"
+
+
+def test_a_retired_codex_account_home_is_not_refreshed_back_into_a_connection(
+    tool: Tool, isolated_agent_home: Path
+) -> None:
+    """A removed Codex account is renamed `<n>.removed-<stamp>`, as Claude Code's are. Its
+    hooks stay until uninstall takes them, but the upgrade does not rewrite them: the
+    refresh records the home it writes, and the account would come back connected."""
+    live = _codex_hooked(_codex_account("2"), tool.script)
+    _codex_hooked(_codex_account("3.removed-20261013T120000"), tool.script)
+
+    refresh, left = lifecycle.refresh_sites(tool.facts)
+
+    assert [(site.agent, site.config_dir) for site in refresh] == [("codex", live)]
+    assert left == ()

@@ -195,10 +195,15 @@ def _emit_plan(plan: lifecycle_service.UpgradePlan) -> None:
         label = lifecycle_service.agent_label(site.agent)
         if site.hooks_off is None:
             _say(f"  then:    re-connects the {label} hooks in {site.config_dir}")
-        else:
+        elif site.agent == lifecycle_service.HOOK_AGENT:
             _say(
                 f"  then:    rewrites the {label} hooks in {site.config_dir} (switched off "
                 'there: "disableAllHooks": true)'
+            )
+        else:
+            _say(
+                f"  then:    rewrites the {label} hooks in {site.config_dir} (switched off "
+                f"there by {site.hooks_off})"
             )
     for site in plan.left:
         _say(f"  leaves:  {site.config_dir} — {site.reason}")
@@ -256,10 +261,12 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
         where = _place(hook.config_dir, hook.agent)
         if hook.ok and hook.hooks_off is not None:
             # Not ✓ "re-connected": `agents connect` and init say the same of such a site.
-            _say(
-                f"· hooks rewritten in {where}, but switched off: remove "
-                f'"disableAllHooks" from {hook.hooks_off} to turn them on'
+            turn_on = (
+                f'remove "disableAllHooks" from {hook.hooks_off} to turn them on'
+                if hook.agent == lifecycle_service.HOOK_AGENT
+                else f"a setting in {hook.hooks_off} turns them off; change it to run them"
             )
+            _say(f"· hooks rewritten in {where}, but switched off: {turn_on}")
         elif hook.ok and hook.review:
             # Codex runs a changed definition only once it is trusted again: not a ✓ alone.
             label = lifecycle_service.agent_label(hook.agent)

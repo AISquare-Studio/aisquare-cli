@@ -698,9 +698,14 @@ def runs_this_install(binary: agent_core.HookBinary, found: install_route.Facts)
 def _refresh_candidates(agent: str) -> list[Path]:
     """The directories whose ``agent`` hooks an upgrade may rewrite: those THIS home
     connected (``agents.json``), and for Codex also every account home under this home
-    (:func:`_codex_account_dirs`), which only aisquare makes."""
+    (:func:`_codex_account_dirs`), which only aisquare makes. Not a retired one
+    (``<n>.removed-<stamp>``): `refresh-hooks` records the home it writes as connected,
+    and a removed account would come back as a connection."""
     recorded = agent_core.connected_dirs(agent)
-    return [*recorded, *_codex_account_dirs()] if agent == CODEX else recorded
+    if agent != CODEX:
+        return recorded
+    slots = [home for home in _codex_account_dirs() if ".removed-" not in home.name]
+    return [*recorded, *slots]
 
 
 def refresh_sites(found: install_route.Facts) -> tuple[tuple[HookSite, ...], tuple[HookSite, ...]]:

@@ -92,7 +92,8 @@ def test_native_windows_shims_launch_and_report_their_family(
 
 
 @pytest.mark.parametrize(
-    "effort, expected", [("max", "xhigh"), ("ultracode", "xhigh"), (" High ", "high")]
+    "effort, expected",
+    [("max", "max"), ("ultra", "ultra"), ("ultracode", "max"), (" High ", "high")],
 )
 def test_codex_effort_is_normalized_in_cli_and_environment(
     effort: str, expected: str, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
@@ -111,7 +112,7 @@ def test_codex_effort_is_normalized_in_cli_and_environment(
 def test_bad_native_effort_cannot_create_a_worktree_window_or_live_row(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("AISQUARE_EFFORT_CODER", "impossible")
+    monkeypatch.setenv("AISQUARE_EFFORT_CODER", "not a level")
     tmux = FakeTmux()
     monkeypatch.setattr(fleet, "server", lambda config: tmux)
     monkeypatch.setattr(agent_launch, "executable", lambda selected: "/fixture/agent")

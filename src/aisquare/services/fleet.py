@@ -120,6 +120,10 @@ _STATUS_WINDOW = 1.0
 _POLL_INTERVAL = 0.25
 _PROMPT_SETTLE = 2.0
 """After the agent process appears, its UI needs a moment before it reads input."""
+_KEY_GAP = 0.2
+"""Between a typed command and its Enter. Codex reads keys that arrive in one burst as
+a paste, Enter included: ``/exit`` sent with its Enter stayed in the composer and the
+stop's grace ran out into a kill, with no ``SessionEnd`` (0.162.1; 50 ms apart it exits)."""
 _SHELLS = frozenset({"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "ash"})
 _NOT_AN_AGENT = _SHELLS | {"tmux"}
 """Foreground commands that are never the agent: a shell (left behind after an
@@ -446,6 +450,11 @@ def role_settings(role: str, config: FleetSettings | None = None) -> FleetRoleSe
                 selected.approval_policy
                 if selected.approval_policy is not None
                 else base.approval_policy
+            ),
+            "approve_for_me": (
+                selected.approve_for_me
+                if selected.approve_for_me is not None
+                else base.approve_for_me
             ),
         }
     )
@@ -1654,6 +1663,9 @@ def spawn(
     native_approval = (
         role_config.approval_policy if selected.adapter.capabilities.sandbox_permissions else None
     )
+    approve_for_me = (
+        role_config.approve_for_me if selected.adapter.capabilities.sandbox_permissions else None
+    )
     try:
         native = selected.adapter.fleet_args(
             role,
@@ -1661,6 +1673,11 @@ def spawn(
             native_mode,
             sandbox=sandbox if sandbox is not None else native_sandbox,
             approval=approval_policy if approval_policy is not None else native_approval,
+            # A sandbox or a policy chosen for this spawn wins over the role's setting.
+            approve_for_me=(
+                approve_for_me if sandbox is None and approval_policy is None else None
+            ),
+            native=arguments.argv,
         )
     except ValueError as exc:
         raise FleetError(str(exc)) from exc
@@ -2912,6 +2929,7 @@ def _stop_row(
         window = _window()
         if not force and window is not None and not window.dead:
             srv.send_literal(agent.pane_id, "/exit")
+            _sleep(_KEY_GAP)
             srv.send_keys(agent.pane_id, "Enter")
             exited_here = True
             deadline = _monotonic() + grace

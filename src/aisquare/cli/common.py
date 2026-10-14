@@ -559,12 +559,18 @@ def emit_connected(connection: AgentConnection) -> None:
     noun = "entry" if connection.imported == 1 else "entries"
     imported = f"imported {connection.imported} {noun}"
     if connection.hooks_off is not None:
+        from aisquare.core import agents as agent_core
+
+        spec = agent_core.spec(connection.name)
         stdout_console().print(
             f"hooks installed for {connection.name}, but switched off — {imported}"
         )
         stderr_console().print(
-            f'note: {connection.hooks_off} sets "disableAllHooks": true, so Claude Code runs '
-            "none of its hooks, aisquare's included — remove that key to turn them on"
+            f"note: {connection.hooks_off} sets "
+            f"{agent_core.HOOKS_OFF_SETTINGS.get(connection.name, 'every hook off')}, so "
+            f"{spec.label if spec else connection.name} runs none of its hooks, aisquare's "
+            "included — remove that key to turn them on",
+            markup=False,
         )
     else:
         stdout_console().print(f"✓ connected {connection.name} — hooks installed; {imported}")

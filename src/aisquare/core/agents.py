@@ -19,6 +19,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tomllib
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
@@ -732,30 +733,110 @@ def hook_timeout_shortfall(name: str, config_dir: Path | None = None) -> list[st
     return _missing_events(name, config_dir, reconciled=True)
 
 
-def hooks_disabled(name: str, config_dir: Path | None = None) -> bool:
-    """Whether the agent's settings file switches every hook off (``"disableAllHooks": true``).
+@dataclass(frozen=True)
+class HooksSwitch:
+    """What switches every one of an agent's hooks off: the setting, as the operator writes
+    it, and the file that sets it (``None``: a launch argument)."""
 
-    Claude Code then runs no hook from that directory, its plugins' included, so
-    none of ours fire however complete they are, and ``agents connect`` leaves the
-    key alone: Connect cannot change it. Only a literal ``true`` counts, as Claude
-    Code reads it. Read-only (:func:`read_json`); never raises.
+    setting: str
+    path: Path | None = None
+
+    def __str__(self) -> str:
+        return f"{self.setting} in {self.path or 'the launch arguments'}"
+
+
+#: Each agent's switch for every hook, as messages that name it without a file write it.
+HOOKS_OFF_SETTINGS = {
+    "claude-code": '"disableAllHooks": true',
+    "codex": "`features.hooks = false`",
+}
+
+
+def hooks_switch(
+    name: str, config_dir: Path | None = None, args: Sequence[str] = ()
+) -> HooksSwitch | None:
+    """What switches every hook off for ``name`` in ``config_dir``, launched with ``args``.
+
+    Claude Code: ``"disableAllHooks": true`` in its ``settings.json``, a literal ``true``
+    as Claude Code reads it; ``args`` are not read. Codex (0.162.1): ``hooks = false``
+    under ``[features]``, or its deprecated alias ``codex_hooks``, in ``config.toml``, in
+    the profile ``-p`` layers on it, or in ``args`` (``-c features.hooks=false``,
+    ``--disable hooks``), a later layer winning and the canonical key winning over the
+    alias wherever either is set, as Codex merges them. Either agent then runs no hook
+    from that directory, so none of ours fire however complete they are, and ``agents
+    connect`` leaves the setting alone: Connect cannot change it. Read-only; never raises.
     """
     spec = _spec(name, config_dir)
     if spec is None or spec.settings_path is None:
-        return False
-    return read_json(spec.settings_path).get("disableAllHooks") is True
+        return None
+    if name == "codex":
+        return _codex_hooks_switch(spec.home, args)
+    if read_json(spec.settings_path).get("disableAllHooks") is True:
+        return HooksSwitch(HOOKS_OFF_SETTINGS["claude-code"], spec.settings_path)
+    return None
+
+
+def _codex_hooks_switch(home: Path, args: Sequence[str]) -> HooksSwitch | None:
+    from aisquare.core.agent_adapters.types import option_occurrences, option_values
+
+    user = home / "config.toml"
+    layers: list[tuple[dict[str, Any], Path | None, str]] = [(_toml_features(user), user, "")]
+    profile = next(reversed(option_values(args, "-p", "--profile")), None)
+    if profile and Path(profile).name == profile and profile not in {".", ".."}:
+        selected = home / f"{profile}.config.toml"
+        layers.append((_toml_features(selected), selected, ""))
+    for item in option_occurrences(args, "-c", "--config", "--enable", "--disable"):
+        option = item.prefix.rstrip("=") or args[item.index]
+        spelled = f"{option} {item.value}"
+        if option in {"--enable", "--disable"}:
+            layers.append(({item.value: option == "--enable"}, None, spelled))
+            continue
+        key, separator, raw = item.value.partition("=")
+        if separator and key.strip().startswith("features."):
+            try:
+                value = tomllib.loads("value=" + raw)["value"]
+            except (ValueError, RecursionError):
+                continue  # Codex reads it as a string, which no feature switch takes
+            layers.append(({key.strip().removeprefix("features."): value}, None, spelled))
+    decided: dict[str, tuple[bool, Path | None, str]] = {}
+    for features, path, spelled in layers:
+        for key in ("hooks", "codex_hooks"):
+            if isinstance(features.get(key), bool):
+                decided[key] = (features[key], path, spelled)
+    key = "hooks" if "hooks" in decided else "codex_hooks"
+    if key not in decided or decided[key][0]:
+        return None
+    _, path, spelled = decided[key]
+    if path is None:
+        return HooksSwitch(f"`{spelled}`")
+    return HooksSwitch(f"`{key} = false` under [features]", path)
+
+
+def _toml_features(path: Path) -> dict[str, Any]:
+    """``path``'s ``[features]`` table; ``{}`` when there is none or it cannot be read."""
+    try:
+        if not path.is_file():  # a FIFO would block the read
+            return {}
+        with path.open("rb") as handle:
+            features = tomllib.load(handle).get("features")
+    except (OSError, ValueError, RecursionError):
+        return {}
+    return features if isinstance(features, dict) else {}
+
+
+def hooks_disabled(name: str, config_dir: Path | None = None) -> bool:
+    """Whether the agent's own config switches every hook off (:func:`hooks_switch`)."""
+    return hooks_switch(name, config_dir) is not None
 
 
 def hooks_off(name: str, config_dir: Path | None = None) -> Path | None:
-    """The settings file that switches every hook off (:func:`hooks_disabled`), else ``None``.
+    """The file that switches every hook off (:func:`hooks_switch`), else ``None``.
 
     What `agents connect`, `agents list` and `agents status` name in place of a
-    connection or a "missing": the cause is that key, and Connect cannot change it.
+    connection or a "missing": the cause is that setting, and Connect cannot change it.
     """
-    spec = _spec(name, config_dir)
-    if spec is None or spec.settings_path is None or not hooks_disabled(name, config_dir):
-        return None
-    return spec.settings_path
+    switch = hooks_switch(name, config_dir)
+    return switch.path if switch is not None else None
 
 
 def claude_code_connected(config_dir: Path | None = None, *, cwd: Path | None = None) -> bool:

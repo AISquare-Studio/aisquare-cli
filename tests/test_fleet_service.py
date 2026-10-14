@@ -2289,6 +2289,34 @@ def test_stop_exits_gracefully_and_records_the_status(
     assert fleet_service.list_agents(project) == []
 
 
+def test_stop_types_the_exit_and_its_enter_apart(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex 0.162.1 reads `/exit` and an Enter sent in one burst as a paste, and the
+    stop's grace ran out into a kill with no SessionEnd: the Enter comes after a gap."""
+    _coder(project)
+    sent: list[tuple[str, float]] = []
+    send_literal, send_keys = tmux.send_literal, tmux.send_keys
+
+    def literal(pane_id: str, text: str) -> None:
+        sent.append((text, clock.now))
+        send_literal(pane_id, text)
+
+    def keys(pane_id: str, *names: str) -> None:
+        sent.append((names[0], clock.now))
+        send_keys(pane_id, *names)
+
+    monkeypatch.setattr(tmux, "send_literal", literal)
+    monkeypatch.setattr(tmux, "send_keys", keys)
+    fleet_service.stop(project, "coder-1")
+    [(_, typed_at), (enter, entered_at)] = sent[:2]
+    assert enter == "Enter" and entered_at - typed_at >= fleet_service._KEY_GAP > 0
+
+
 def test_stop_outwaits_the_dead_without_status_gap(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

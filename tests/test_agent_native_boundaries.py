@@ -593,18 +593,18 @@ def test_codex_compatibility_effort_mapping_is_reported(
 ) -> None:
     cfg = load_config()
     cfg.agents.default = "codex"
-    cfg.agents.models["codex"] = AgentModelSettings(effort="max")
+    cfg.agents.models["codex"] = AgentModelSettings(effort="ultracode")
     cfg.fleet.roles["coder"] = FleetRoleSettings(worktree=False)
     save_config(cfg)
     monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", Mock())
     for args in (["launch", "coder"], ["team", "spawn", "coder"], ["team", "harness"]):
         result = runner.invoke(app, args)
         assert result.exit_code == 0, result.output
-        assert "maps 'max' to native reasoning effort 'xhigh'" in result.output
+        assert "maps 'ultracode' to native reasoning effort 'max'" in result.output
     tmux = FakeTmux()
     monkeypatch.setattr(fleet, "server", lambda config: tmux)
     receipt = fleet.spawn(team_project(tmp_path), "coder")
-    assert any("maps 'max'" in note for note in receipt.notes)
+    assert any("maps 'ultracode'" in note for note in receipt.notes)
 
 
 @pytest.mark.parametrize(
@@ -667,7 +667,7 @@ def test_claude_effort_validation_is_independent_of_spelling(
     assert json.loads(result.stdout)["error"] == "bad_effort"
 
 
-@pytest.mark.parametrize("effort", ["", "bogus"])
+@pytest.mark.parametrize("effort", ["", "not a level"])
 def test_native_codex_override_does_not_hide_invalid_explicit_effort(
     effort: str,
     runner: CliRunner,
@@ -690,10 +690,13 @@ def test_native_codex_override_does_not_hide_invalid_explicit_effort(
     assert result.exit_code == 1 and json.loads(result.stdout)["error"] == "bad_effort"
 
 
-@pytest.mark.parametrize("alias", ["max", "ultracode"])
+@pytest.mark.parametrize(
+    "alias, native", [("ultracode", "max"), ("max", "max"), ("ultra", "ultra")]
+)
 @pytest.mark.parametrize("option", ["-c", "--config", "--config=", "-cattached"])
 def test_codex_native_effort_aliases_reach_the_executable(
     alias: str,
+    native: str,
     option: str,
     runner: CliRunner,
     monkeypatch: pytest.MonkeyPatch,
@@ -710,10 +713,11 @@ def test_codex_native_effort_aliases_reach_the_executable(
     )
     result = runner.invoke(app, ["launch", "coder", "--agent", "codex", "--", *args])
     assert result.exit_code == 0, result.output
-    assert f"maps '{alias}'" in result.output
+    # One alias, ultracode; Codex's own levels max and ultra pass unchanged (0.162.1).
+    assert (f"maps '{alias}'" in result.output) == (alias != native)
     from aisquare.core.agent_adapters.types import model_overrides
 
-    assert model_overrides("codex", execute.call_args.args[1][1:]) == (None, "xhigh")
+    assert model_overrides("codex", execute.call_args.args[1][1:]) == (None, native)
 
 
 def test_native_selection_has_no_probe_credit_or_blank_effort_banner(runner: CliRunner) -> None:

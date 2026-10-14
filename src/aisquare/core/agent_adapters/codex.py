@@ -1,9 +1,31 @@
-"""Codex CLI 0.153.4 integration; native hooks keep the real terminal UI."""
+"""Codex CLI 0.162.1 integration; native hooks keep the real terminal UI."""
 
+import re
+from collections.abc import Sequence
 from pathlib import Path
 
 from aisquare.core import harness
-from aisquare.core.agent_adapters.types import AgentCapabilities, BadEffortError, HookSpec
+from aisquare.core.agent_adapters.types import (
+    AgentCapabilities,
+    BadEffortError,
+    HookSpec,
+    option_values,
+)
+
+#: ``model_reasoning_effort`` levels Codex names (0.162.1). Which of them a model
+#: takes is Codex's to say, so another level is passed through with a note.
+REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+#: The one shared effort name Codex lacks: ``ultracode`` is Claude Code's ``max``
+#: plus workflow orchestration, of which Codex takes the level alone.
+EFFORT_ALIASES = {"ultracode": "max"}
+#: ``approval_policy`` values the CLI takes: ``untrusted`` is gone, ``on-failure``
+#: deprecated, and the granular table is config-only.
+APPROVAL_POLICIES = ("on-request", "never")
+#: Options that settle the sandbox or approvals, which ``--approve-for-me`` cannot
+#: be combined with (Codex refuses the launch).
+_APPROVAL_SWITCHES = frozenset(
+    {"--approve-for-me", "--dangerously-bypass-approvals-and-sandbox", "--yolo"}
+)
 
 
 class CodexAdapter:
@@ -44,6 +66,12 @@ class CodexAdapter:
                 "--sandbox",
                 "-s",
                 "--ask-for-approval",
+                "--enable",
+                "--disable",
+                "--local-provider",
+                "--remote",
+                "--remote-auth-token-env",
+                "--color",
                 "--output-schema",
                 "--output-last-message",
                 "-o",
@@ -52,14 +80,19 @@ class CodexAdapter:
         switch_options=frozenset(
             {
                 "--no-alt-screen",
-                "--full-auto",
                 "--yolo",
                 "--search",
                 "--oss",
                 "--json",
+                "--approve-for-me",
                 "--dangerously-bypass-approvals-and-sandbox",
+                "--dangerously-bypass-hook-trust",
+                "--no-daemon",
+                "--strict-config",
                 "--skip-git-repo-check",
                 "--ephemeral",
+                "--ignore-user-config",
+                "--ignore-rules",
             }
         ),
     )
@@ -80,17 +113,20 @@ class CodexAdapter:
         # validated by model_args after native overrides have been applied.
         result = resolve_model(self.id, role, env=env, effort=effort)
         level = self.effort_alias(result.effort)
-        notes = (
-            [f"Codex maps {result.effort!r} to native reasoning effort {level!r}."]
-            if level != result.effort.strip().lower()
-            else []
-        )
+        notes = []
+        if level != result.effort.strip().lower():
+            notes.append(f"Codex maps {result.effort!r} to native reasoning effort {level!r}.")
+        elif level and level not in REASONING_EFFORTS:
+            notes.append(
+                f"Codex reasoning effort {level!r} is not one AISquare knows "
+                f"({', '.join(REASONING_EFFORTS)}); it is passed on for Codex to validate."
+            )
         return result.model_copy(update={"effort": level, "notes": notes})
 
     @staticmethod
     def effort_alias(effort: str) -> str:
         normalized = effort.strip().lower()
-        return {"max": "xhigh", "ultracode": "xhigh"}.get(normalized, normalized)
+        return EFFORT_ALIASES.get(normalized, normalized)
 
     def native_args(self, args: list[str]) -> list[str]:
         from aisquare.core.agent_adapters.types import config_assignment, rewrite_option_values
@@ -143,11 +179,20 @@ class CodexAdapter:
 
     @staticmethod
     def reasoning_effort(effort: str | None) -> str | None:
+        """The level for ``model_reasoning_effort``: a known one, or any level-shaped name.
+
+        Levels depend on the model (Codex's config reference), so a name AISquare does
+        not know is Codex's to accept or refuse. One that is not a name at all cannot
+        be one and would not survive the TOML value it is written into.
+        """
         if effort is None or not effort.strip():
             return None
         normalized = CodexAdapter.effort_alias(effort)
-        if normalized not in {"minimal", "low", "medium", "high", "xhigh"}:
-            raise BadEffortError(f"Codex does not support reasoning effort {effort!r}")
+        if not re.fullmatch(r"[a-z][a-z0-9_-]*", normalized):
+            raise BadEffortError(
+                f"Codex reasoning effort must be a level name such as "
+                f"{', '.join(REASONING_EFFORTS)}, not {effort!r}"
+            )
         return normalized
 
     def fleet_args(
@@ -158,7 +203,20 @@ class CodexAdapter:
         *,
         sandbox: str | None = None,
         approval: str | None = None,
+        approve_for_me: bool | None = None,
+        native: Sequence[str] = (),
     ) -> list[str]:
+        """The fleet's sandbox and approval flags for ``role``.
+
+        ``--approve-for-me`` (Codex's automatic reviewer, in the workspace-write
+        sandbox) is the analogue of Claude Code's ``auto`` mode, which the fleet
+        gives every role but a reviewer's seats; Codex refuses it beside
+        ``--sandbox`` or ``--ask-for-approval``, so it replaces both. Unset
+        (``None``) it is on unless a sandbox or an approval policy is chosen, by the
+        role's settings, this spawn or its ``native`` arguments.
+        A reviewer is ``--sandbox read-only --ask-for-approval on-request``.
+        What the ``native`` arguments already choose is not given a second time.
+        """
         # Native modes are deliberately distinct from Claude's approval vocabulary.
         if sandbox is not None and permission_mode is not None:
             raise ValueError("Use --sandbox for Codex, without --permission-mode")
@@ -173,13 +231,60 @@ class CodexAdapter:
                 "Codex permission mode must be read-only, workspace-write, or "
                 "danger-full-access; Claude permission modes cannot be reused"
             )
+        if approval is not None and approval not in APPROVAL_POLICIES:
+            raise ValueError(
+                f"Codex approval policy must be {' or '.join(APPROVAL_POLICIES)}, not {approval!r}"
+            )
+        reviewer = harness.base_role(role) == "reviewer"
+        native_sandbox, native_approval = _native_approvals(native)
+        if approve_for_me is None:
+            approve_for_me = (
+                not reviewer
+                and sandbox is None
+                and approval is None
+                and native_sandbox is None
+                and native_approval is None
+            )
+        if approve_for_me:
+            clash = (
+                f"--sandbox {sandbox}"
+                if sandbox not in (None, "", "workspace-write")
+                else f"--ask-for-approval {approval}"
+                if approval is not None
+                else native_sandbox or native_approval
+            )
+            if clash is not None:
+                raise ValueError(
+                    f"Codex --approve-for-me reviews approvals in the workspace-write sandbox "
+                    f"and cannot run with {clash}; set fleet.roles.{role}.approve_for_me = "
+                    "false to use it"
+                )
+            return ["--approve-for-me"]
         if sandbox is None:
-            sandbox = "read-only" if harness.base_role(role) == "reviewer" else "workspace-write"
-        if approval is not None and approval not in {"on-request", "never", "untrusted"}:
-            raise ValueError("Codex approval policy must be on-request, untrusted, or never")
-        return (["--sandbox", sandbox] if sandbox else []) + (
-            ["--ask-for-approval", approval] if approval else []
+            sandbox = "read-only" if reviewer else "workspace-write"
+        if approval is None and reviewer:
+            approval = "on-request"
+        return (["--sandbox", sandbox] if sandbox and native_sandbox is None else []) + (
+            ["--ask-for-approval", approval] if approval and native_approval is None else []
         )
 
     def disable_native_teams(self) -> tuple[list[str], dict[str, str]]:
         return ["-c", "agents.enabled=false"], {}
+
+
+def _native_approvals(args: Sequence[str]) -> tuple[str | None, str | None]:
+    """The options in ``args`` (up to Codex's own ``--``) that choose the sandbox and
+    the approval policy, as written; a switch such as ``--approve-for-me`` chooses both."""
+    for arg in args:
+        if arg == "--":
+            break
+        if arg in _APPROVAL_SWITCHES:
+            return arg, arg
+    sandbox = approval = None
+    for option in ("--sandbox", "-s"):
+        for value in option_values(args, option):
+            sandbox = sandbox or f"{option} {value}"
+    for option in ("--ask-for-approval", "-a"):
+        for value in option_values(args, option):
+            approval = approval or f"{option} {value}"
+    return sandbox, approval

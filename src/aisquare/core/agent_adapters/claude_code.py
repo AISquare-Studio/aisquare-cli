@@ -1,5 +1,6 @@
 """Claude Code's native integration vocabulary."""
 
+from collections.abc import Sequence
 from pathlib import Path
 
 from aisquare.core import harness
@@ -120,8 +121,10 @@ class ClaudeCodeAdapter:
         *,
         sandbox: str | None = None,
         approval: str | None = None,
+        approve_for_me: bool | None = None,
+        native: Sequence[str] = (),
     ) -> list[str]:
-        if sandbox or approval:
+        if sandbox or approval or approve_for_me:
             raise ValueError(
                 "Claude Code uses --permission-mode; sandbox/approval are Codex settings"
             )

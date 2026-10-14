@@ -238,7 +238,10 @@ class FleetRoleSettings(BaseModel):
 
     ``permission_mode`` is any Claude Code ``--permission-mode`` value (``auto``,
     ``acceptEdits``, ``bypassPermissions``, ``manual``, ``dontAsk``, ``plan``); the
-    empty string means "pass no flag". ``worktree`` puts the agent in its own git
+    empty string means "pass no flag". ``sandbox``, ``approval_policy`` and
+    ``approve_for_me`` are Codex's; ``approve_for_me`` unset is Codex's
+    ``--approve-for-me`` for every role but a reviewer's seats, unless a sandbox or an
+    approval policy is chosen. ``worktree`` puts the agent in its own git
     worktree. Legacy ``extra_args`` belong to Claude Code; ``agent_args`` maps
     an agent ID to additional native arguments for that agent only.
     Precedence: per-spawn flag > this config > built-in. NOT the environment:
@@ -250,6 +253,7 @@ class FleetRoleSettings(BaseModel):
     permission_mode: str = "auto"
     sandbox: str | None = None
     approval_policy: str | None = None
+    approve_for_me: bool | None = None
     worktree: bool = False
     extra_args: list[str] = Field(default_factory=list)
     agent_args: dict[str, list[str]] = Field(default_factory=dict)

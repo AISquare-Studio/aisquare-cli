@@ -201,7 +201,7 @@ def test_third_adapter_reuses_selection_models_and_config(
     assert config_home(selected.adapter, tmp_path, {}) == tmp_path / ".fixture"
 
 
-@pytest.mark.parametrize("effort", ["minimal", "low", "medium", "high", "xhigh"])
+@pytest.mark.parametrize("effort", ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"])
 def test_codex_model_policy_uses_native_flags_without_probing(
     effort: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -219,8 +219,12 @@ def test_codex_model_policy_uses_native_flags_without_probing(
         "-c",
         f'model_reasoning_effort="{effort}"',
     ]
+    # A level AISquare does not know is Codex's to refuse; one that is no name cannot be.
+    future = agent_launch.model_for(selected, "coder", effort="future-level")
+    assert future and future.effort == "future-level"
+    assert any("passed on for Codex to validate" in note for note in future.notes)
     with pytest.raises(ValueError, match="reasoning effort"):
-        agent_launch.model_for(selected, "coder", effort="unknown-effort")
+        agent_launch.model_for(selected, "coder", effort='high" x="y')
 
 
 @pytest.mark.parametrize("agent", ["claude-code", "codex"])

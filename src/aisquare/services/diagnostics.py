@@ -24,6 +24,7 @@ from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import harness, orchestrator, outbox, paths
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core import tmux as tmux_core
+from aisquare.core.agent_adapters.types import AgentAdapter
 from aisquare.core.config import load_config
 from aisquare.core.injection import load_last
 from aisquare.core.keys import EXTENDED_MINIMUM
@@ -3165,6 +3166,44 @@ def _check_fleet(
         )
 
 
+def _launch_hooks_off(adapter: AgentAdapter, cwd: Path | None) -> list[DoctorCheck]:
+    """Roles whose own launch arguments switch the agent's hooks off (``--disable hooks``,
+    ``-c features.hooks=false``, a profile that does), where its config alone does not.
+
+    The arguments are the role's binding (``team bind --arg``) and its fleet
+    ``agent_args``; the directory's own switch is the row above.
+    """
+    from aisquare.services import agent_launch
+
+    roles: dict[str, list[str]] = {}
+    for role in harness.ROLE_PROFILES:
+        try:
+            selected = agent_launch.resolve(role, cwd=cwd)
+        except ValueError:
+            continue  # the configuration check explains this
+        if selected.adapter.id != adapter.id:
+            continue
+        args = [
+            *selected.profile.args,
+            *fleet_service.role_settings(role).agent_args.get(adapter.id, []),
+        ]
+        switch = agent_core.hooks_switch(adapter.id, selected.config_dir, args)
+        if switch is not None and switch != agent_core.hooks_switch(
+            adapter.id, selected.config_dir
+        ):
+            roles.setdefault(str(switch), []).append(role)
+    return [
+        _warn(
+            adapter.id,
+            f"{adapter.label}: hooks are switched off for {', '.join(named)} ({switch}) — "
+            f"{adapter.label} runs none of them in those sessions",
+            f"Remove it from the role's arguments (aisquare team bind ROLE, or "
+            f"fleet.roles.ROLE.agent_args.{adapter.id})",
+        )
+        for switch, named in roles.items()
+    ]
+
+
 @agent_core.inspection_snapshot()
 def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
     from aisquare.core.agent_adapters import adapters
@@ -3231,6 +3270,19 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
                     )
                 )
                 continue
+            # Switched off, the hooks run nowhere however complete, and Connect cannot
+            # change that: the setting is the row, as `disableAllHooks` is Claude Code's.
+            switch = agent_core.hooks_switch(adapter.id, directory)
+            if switch is not None:
+                checks.append(
+                    _warn(
+                        adapter.id,
+                        f"{adapter.label}: hooks are switched off ({switch}) — {adapter.label} "
+                        "runs none of them, so no context is injected and no prompt is captured",
+                        f"Turn hooks back on: remove {switch.setting} from {switch.path}",
+                    )
+                )
+                continue
             if site and site.binary_state not in (None, agent_core.HOOK_BINARY_CURRENT):
                 checks.append(_warn(adapter.id, "; ".join(_hook_binary_problems([site])), fix))
                 continue
@@ -3261,6 +3313,7 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
                         fix,
                     )
                 )
+        checks.extend(_launch_hooks_off(adapter, cwd))
     if selected is None:
         return checks
     # Coding agents are optional on a fresh CLI-only install (--no-agent).

@@ -63,7 +63,12 @@ def test_saved_codex_permissions_do_not_prevent_a_claude_spawn(
 @pytest.mark.parametrize("role", ["reviewer", "reviewer2", "reviewer12"])
 def test_numbered_reviewers_inherit_read_only_defaults(role: str) -> None:
     adapter = get_adapter("codex")
-    assert adapter.fleet_args(role, "seat", None) == ["--sandbox", "read-only"]
+    assert adapter.fleet_args(role, "seat", None) == [
+        "--sandbox",
+        "read-only",
+        "--ask-for-approval",
+        "on-request",
+    ]
     config = load_config()
     config.fleet.roles["reviewer"].sandbox = "read-only"
     config.fleet.roles["reviewer"].approval_policy = "on-request"

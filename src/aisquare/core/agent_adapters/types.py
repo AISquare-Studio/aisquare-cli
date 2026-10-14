@@ -74,6 +74,8 @@ class AgentAdapter(Protocol):
         *,
         sandbox: str | None = None,
         approval: str | None = None,
+        approve_for_me: bool | None = None,
+        native: Sequence[str] = (),
     ) -> list[str]: ...
     def disable_native_teams(self) -> tuple[list[str], dict[str, str]]: ...
 

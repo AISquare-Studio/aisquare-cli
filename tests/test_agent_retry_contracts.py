@@ -176,7 +176,7 @@ def test_complete_fleet_arguments_preserve_aliases_and_the_literal_boundary(
     tmp_path: Path,
 ) -> None:
     cfg = load_config()
-    profile = [*saved, "-c", "model_reasoning_effort=max"]
+    profile = [*saved, "-c", "model_reasoning_effort=ultracode"]
     cfg.team.profiles["coder"] = RoleLaunchProfile(agent="codex", args=profile)
     cfg.fleet.roles["coder"] = FleetRoleSettings(worktree=False)
     save_config(cfg)
@@ -201,7 +201,7 @@ def test_complete_fleet_arguments_preserve_aliases_and_the_literal_boundary(
     if saved:
         assert argv[argv.index("--") :] == profile
     else:
-        assert model_overrides("codex", argv[1:])[1] == "xhigh"
+        assert model_overrides("codex", argv[1:])[1] == "max"
 
 
 def test_fleet_does_not_validate_fragments_after_creating_a_worktree(
@@ -319,11 +319,11 @@ def test_native_assignment_whitespace_is_normalized_in_real_launch(
             "--agent",
             "codex",
             "-c",
-            "model_reasoning_effort = max",
+            "model_reasoning_effort = ultracode",
         ],
     )
     assert result.exit_code == 0, result.output
-    assert execute.call_args.args[1] == ["codex", '--config=model_reasoning_effort="xhigh"']
+    assert execute.call_args.args[1] == ["codex", '--config=model_reasoning_effort="max"']
 
 
 def test_alias_equivalence_and_mapping_notes_are_preserved(runner: CliRunner) -> None:
@@ -333,11 +333,15 @@ def test_alias_equivalence_and_mapping_notes_are_preserved(runner: CliRunner) ->
         args=["-c", "model_reasoning_effort=ultracode"],
     )
     save_config(cfg)
+    result = runner.invoke(app, ["--json", "team", "spawn", "coder", "--effort", "ultracode"])
+    assert result.exit_code == 0, result.output
+    notes = json.loads(result.stdout)["notes"]
+    assert any("maps 'ultracode'" in note for note in notes)
+    # Codex's own max is the same level, so neither takes precedence over the other.
     result = runner.invoke(app, ["--json", "team", "spawn", "coder", "--effort", "max"])
     assert result.exit_code == 0, result.output
     notes = json.loads(result.stdout)["notes"]
-    assert any("maps 'max'" in note for note in notes)
-    assert any("maps 'ultracode'" in note for note in notes)
+    assert not any("maps 'max'" in note for note in notes)
     assert not any("takes precedence" in note for note in notes)
 
 

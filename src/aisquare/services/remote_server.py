@@ -457,6 +457,13 @@ class RemoteOffIncomplete(RemoteError):
     signed in, or the deadline still in ``remote.json`` (:func:`run_foreground`)."""
 
 
+class LaterRemoteState(OSError):
+    """``remote.json`` became a version this aisquare does not know while this process ran
+    (a later release, upgraded in another shell): it is never written over
+    (:meth:`Runtime._publish_state`). An ``OSError``, so every write's caller says it as the
+    write that could not be made it is: the phone's 503, the flusher's one line."""
+
+
 class RemoteSignalled(Exception):
     """``serve`` was ended by a signal other than Ctrl-C (SIGTERM, SIGHUP), and its way out
     ran: :func:`run_foreground` raises it last, for the CLI to say what it says on every way
@@ -1045,6 +1052,16 @@ def _known_state_version(version: object) -> bool:
     return type(version) is int and version in (1, STATE_VERSION)
 
 
+def _unknown_state_version(path: Path, version: object) -> str:
+    """Why ``path`` is neither read nor written: its ``version`` is one this aisquare does
+    not know (:func:`_known_state_version`)."""
+    return (
+        f"{path} is version {version!r}, which this aisquare does not know (it reads "
+        f"{STATE_VERSION}) — nothing was changed; upgrade aisquare, or move the file aside "
+        "to start over with a new link and password"
+    )
+
+
 def _encoded_state(state: _State) -> bytes:
     """The exact bytes of ``remote.json`` for ``state``: what is written, and what a file
     already written this way compares equal to."""
@@ -1253,7 +1270,8 @@ class Runtime:
         hid a regenerated passphrase of equal length. An unreadable or
         half-written file keeps the state in hand and is retried on the next change,
         and so does a version-1 file an older build wrote: this process's next
-        write makes it version 2 again, with everything it holds.
+        write makes it version 2 again, with everything it holds. A version it does
+        not know is kept too, and never written over (:meth:`_refuse_a_later_file`).
 
         What applying the file means: switches, token and password replace (a new
         password also resets the failed-unlock budget); devices the file no longer
@@ -1359,11 +1377,7 @@ class Runtime:
         if "version" in raw and not _known_state_version(raw["version"]):
             # A later release's file, or a hand edit: migrated as version 1, it lost its
             # passphrase and every device to a mere read (review of #259, round 6, 2/10).
-            raise RemoteError(
-                f"{self._state_path} is version {raw['version']!r}, which this aisquare does "
-                f"not know (it reads {STATE_VERSION}) — nothing was changed; upgrade "
-                "aisquare, or move the file aside to start over with a new link and password"
-            )
+            raise RemoteError(_unknown_state_version(self._state_path, raw["version"]))
         return data, raw
 
     def _load_state(self) -> _State:
@@ -1432,6 +1446,7 @@ class Runtime:
         seen, because its bytes differ. ``unmade`` is why there is no temp, raised
         now that there is something to write.
         """
+        self._refuse_a_later_file()
         if pending is None:
             assert unmade is not None
             raise unmade
@@ -1442,6 +1457,27 @@ class Runtime:
         if not pending.restricted and not self._said_unrestricted:
             self._said_unrestricted = True  # once: the flush may rewrite the file every 30 s
             log.warning(_UNRESTRICTED, self._state_path, "the password and the link token")
+
+    def _refuse_a_later_file(self) -> None:
+        """Under the file lock, before a write: :class:`LaterRemoteState` when the file is now
+        a version this aisquare does not know.
+
+        Such a file is refused when a process starts (:meth:`_read_state_file`), but one
+        written while it ran was only left unadopted (:meth:`reload_if_changed`), and its
+        next write put this process's version-2 state over it: within 30 s, the flush,
+        everything the later release had added gone (review of #259, round 7, 1/9). A
+        version-1 file is still written over, as version 2; one that does not parse is too.
+        """
+        on_disk = self._signature()
+        if on_disk is None:
+            return
+        try:
+            raw = json.loads(on_disk.decode("utf-8-sig"))
+        except (ValueError, RecursionError):
+            return
+        version = raw.get("version", 1) if isinstance(raw, dict) else 1
+        if not _known_state_version(version):
+            raise LaterRemoteState(_unknown_state_version(self._state_path, version))
 
     def _save_state(self) -> None:
         """Write the state in hand as it is (tests set fields, then save)."""
@@ -1876,7 +1912,8 @@ class Runtime:
         Compared with the file, not with what this process last wrote or read
         (:attr:`_disk`): a version-1 file written under a running server is never
         adopted, so what this process last wrote still matched memory, and the
-        flush must write version 2 back over it.
+        flush must write version 2 back over it; never over a version it does not
+        know (:meth:`_refuse_a_later_file`).
         """
         if self._flush_needless(self._signature()):
             return

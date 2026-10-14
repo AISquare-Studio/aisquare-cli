@@ -278,7 +278,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   off and auto-off revoke every device (sockets close 4410); `asq remote revoke
   <id>` and `revoke --all` work from the machine, and a phone can sign itself
   out or, with writes on, revoke another. `remote.json` moves to version 2 and
-  drops the sessions it held.
+  drops the sessions it held; a version aisquare does not know (a later
+  release's) is refused, never migrated, and never written over by a Remote
+  that was already running.
 - **`project/add`** accepts only a git checkout (or a folder of them) under the
   home directory, never a hidden one.
 - **Where a notification leads** comes only from the panel's own ngrok, for the

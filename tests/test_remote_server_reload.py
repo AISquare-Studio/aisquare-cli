@@ -20,6 +20,7 @@ from aisquare.services.remote_server import (
     READ_ONLY_REASON,
     WS_CLOSE_UNAUTHORIZED,
     Device,
+    LaterRemoteState,
     Runtime,
     Sources,
     build_app,
@@ -157,6 +158,38 @@ def test_flush_does_not_overwrite_a_fresher_file(runtime: Runtime) -> None:
     runtime.flush_last_seen()
     assert json.loads(remote_state_path().read_text())["allow_write"] is True
     assert runtime.allow_write is True
+
+
+_WRITES: dict[str, Callable[[Runtime], object]] = {
+    "flush": lambda rt: rt.flush_last_seen(),
+    "allow-write": lambda rt: rt.set_allow_write(True),
+    "auto-off": lambda rt: rt.set_auto_off(datetime.now(UTC) + timedelta(hours=1)),
+    "unlock": lambda rt: rt.unlock_device(PASSWORD, "Pixel"),
+    "revoke": lambda rt: rt.revoke_every_device("remote off", WS_CLOSE_UNAUTHORIZED),
+    "regenerate": lambda rt: rt.regenerate_password(),
+}
+
+
+@pytest.mark.parametrize("write", list(_WRITES))
+def test_a_later_release_s_file_under_a_running_server_is_never_written_over(
+    runtime: Runtime, write: str
+) -> None:
+    """Review of #259, round 7, 1/9: a file of a version this build does not know was
+    refused when a process started, but one a later release wrote while this process ran
+    was only left unadopted, and the next write (the flush, within 30 s) put this
+    process's version-2 state over it, every field the later release added gone. Now
+    every write is refused while the file is such a version; a version-1 file is still
+    written over, as version 2."""
+    other_process_writes(lambda raw: raw.update({"version": 3, "later": {"kept": True}}))
+    later = remote_state_path().read_bytes()
+    assert runtime.reload_if_changed() is False
+    with pytest.raises(LaterRemoteState, match=r"is version 3, which this aisquare does not"):
+        _WRITES[write](runtime)
+    assert remote_state_path().read_bytes() == later, "nothing was changed"
+
+    other_process_writes(lambda raw: raw.update({"version": 1}))
+    runtime.flush_last_seen()
+    assert json.loads(remote_state_path().read_bytes())["version"] == 2
 
 
 def test_regenerated_password_from_another_process_applies(

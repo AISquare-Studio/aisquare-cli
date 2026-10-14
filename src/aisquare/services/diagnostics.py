@@ -3405,6 +3405,16 @@ def _check_fleet(
         )
 
 
+def _unmarked_hooks(agent: str, directory: Path) -> bool:
+    """Whether some of aisquare's hooks in ``directory`` carry no ``--definition`` marker
+    (written before it existed): a run of them is never evidence (``observe_hooks``), so
+    the row stays unverified until ``agents connect`` rewrites them with one."""
+    return any(
+        "--definition" not in command.split()
+        for command in agent_core.hook_commands(agent, directory)
+    )
+
+
 def _trust_fix(adapter: AgentAdapter, directory: Path) -> str:
     """How the user trusts aisquare's hooks in ``directory``: in the agent itself, started on
     that home (Codex's ``/hooks``). Not a command a button can run, and not Connect, which
@@ -3623,13 +3633,19 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
             elif state == "unverified":
                 # Installed, and the agent runs them only once the user trusts them: the
                 # one step no command takes (install.sh reads this row's opening words).
-                checks.append(
-                    _warn(
-                        adapter.id,
-                        f"{adapter.label}: unverified in {directory}"
-                        + (f". {detail.rstrip('. ')}" if detail else ""),
-                        _trust_fix(adapter, directory),
+                # Hooks from before the definition marker can never be seen running, so
+                # those are reconnected first: then the fix is the command, a button.
+                legacy = _unmarked_hooks(adapter.id, directory)
+                said = f"{adapter.label}: unverified in {directory}" + (
+                    f". {detail.rstrip('. ')}" if detail else ""
+                )
+                if legacy:
+                    said += (
+                        f". After reconnecting, review /hooks in {adapter.label} and start a "
+                        "session"
                     )
+                checks.append(
+                    _warn(adapter.id, said, fix if legacy else _trust_fix(adapter, directory))
                 )
             else:
                 missing = agent_core._missing_events(adapter.id, directory, reconciled=False)

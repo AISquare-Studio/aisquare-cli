@@ -192,10 +192,14 @@ def test_unused_codex_home_is_advisory_but_selected_or_connected_homes_are_check
     agents.install_hooks("codex", home)
     agents.set_connected("codex", True, home)
     checks = [check for check in diagnostics._check_other_agents(tmp_path) if check.name == "codex"]
+    # Current hooks wait for the user's trust in /hooks, which reconnecting does not give:
+    # the fix is that step, not a Connect (legacy hooks without a definition marker keep
+    # the reconnect, tests/test_agent_native_boundaries.py).
     assert any(
         check.status == CheckStatus.warn
         and "/hooks" in check.detail
-        and "agents connect codex" in (check.fix or "")
+        and "/hooks" in (check.fix or "")
+        and "agents connect codex" not in (check.fix or "")
         for check in checks
     )
 

@@ -1,0 +1,126 @@
+{
+  "events": {
+    "session.open": {
+      "payload": {
+        "thread": "fake-thread-1",
+        "workdir": "/repo",
+        "how": "resume",
+        "model_id": "fake-large",
+        "thinking": "high",
+        "log": "/home/dev/.fakeagent/threads/fake-thread-1.log"
+      },
+      "expect": {
+        "kind": "session_start",
+        "session_id": "fake-thread-1",
+        "cwd": "/repo",
+        "source": "resume",
+        "model": "fake-large",
+        "effort": "high"
+      }
+    },
+    "prompt.sent": {
+      "payload": {
+        "thread": "fake-thread-1",
+        "workdir": "/repo",
+        "text": "fix the flaky test",
+        "turn": "t1"
+      },
+      "expect": {
+        "kind": "prompt",
+        "session_id": "fake-thread-1",
+        "prompt": "fix the flaky test",
+        "turn_id": "t1"
+      }
+    },
+    "turn.done": {
+      "payload": {
+        "thread": "fake-thread-1",
+        "workdir": "/repo",
+        "continuing": true
+      },
+      "expect": {
+        "kind": "stop",
+        "session_id": "fake-thread-1",
+        "stop_hook_active": true
+      }
+    },
+    "session.close": {
+      "payload": {
+        "thread": "fake-thread-1",
+        "workdir": "/repo",
+        "why": "quit"
+      },
+      "expect": {
+        "kind": "session_end",
+        "session_id": "fake-thread-1",
+        "reason": "quit"
+      }
+    },
+    "turn.cancel": {
+      "payload": {
+        "thread": "fake-thread-1",
+        "workdir": "/repo"
+      },
+      "expect": {
+        "kind": "interrupt",
+        "session_id": "fake-thread-1"
+      }
+    },
+    "approval.wanted": {
+      "payload": {
+        "thread": "fake-thread-1",
+        "workdir": "/repo",
+        "message": "Fake Agent wants to run rm"
+      },
+      "expect": {
+        "kind": "attention",
+        "session_id": "fake-thread-1",
+        "message": "Fake Agent wants to run rm"
+      }
+    },
+    "tool.result": {
+      "payload": {
+        "thread": "fake-thread-1",
+        "workdir": "/repo"
+      },
+      "expect": {
+        "kind": "tool_done",
+        "session_id": "fake-thread-1"
+      }
+    },
+    "turn.error": {
+      "payload": {
+        "thread": "fake-thread-1",
+        "error_code": "overloaded",
+        "message": "try later",
+        "detail": "503"
+      },
+      "expect": {
+        "kind": "turn_failed",
+        "session_id": "fake-thread-1",
+        "error": "overloaded",
+        "message": "try later",
+        "details": "503"
+      }
+    },
+    "notice": {
+      "payload": {
+        "thread": "fake-thread-1",
+        "workdir": "/repo",
+        "message": "idle",
+        "notice_type": "idle_prompt"
+      },
+      "expect": {
+        "kind": "notification",
+        "session_id": "fake-thread-1",
+        "notification_type": "idle_prompt"
+      }
+    }
+  },
+  "version_output": "fakeagent 3.2.1-beta",
+  "version": "3.2.1-beta",
+  "hooks_off": {
+    "file": "hooks.json",
+    "text": "{\"hooks_off\": true}"
+  }
+}

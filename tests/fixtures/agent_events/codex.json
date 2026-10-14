@@ -1,0 +1,131 @@
+{
+  "events": {
+    "SessionStart": {
+      "payload": {
+        "session_id": "019a5c2e-7b1d-7f30-9c4e-codex",
+        "transcript_path": "/home/dev/.codex/sessions/2026/10/14/rollout-019a5c2e.jsonl",
+        "cwd": "/repo",
+        "hook_event_name": "SessionStart",
+        "model": "gpt-5.5-codex",
+        "source": "startup"
+      },
+      "expect": {
+        "kind": "session_start",
+        "session_id": "019a5c2e-7b1d-7f30-9c4e-codex",
+        "cwd": "/repo",
+        "source": "startup",
+        "model": "gpt-5.5-codex"
+      }
+    },
+    "UserPromptSubmit": {
+      "payload": {
+        "session_id": "019a5c2e-7b1d-7f30-9c4e-codex",
+        "turn_id": "turn-1",
+        "transcript_path": "/home/dev/.codex/sessions/2026/10/14/rollout-019a5c2e.jsonl",
+        "cwd": "/repo",
+        "hook_event_name": "UserPromptSubmit",
+        "model": "gpt-5.5-codex",
+        "prompt": "fix the flaky test"
+      },
+      "expect": {
+        "kind": "prompt",
+        "session_id": "019a5c2e-7b1d-7f30-9c4e-codex",
+        "prompt": "fix the flaky test",
+        "turn_id": "turn-1"
+      }
+    },
+    "Stop": {
+      "payload": {
+        "session_id": "019a5c2e-7b1d-7f30-9c4e-codex",
+        "turn_id": "turn-1",
+        "transcript_path": "/home/dev/.codex/sessions/2026/10/14/rollout-019a5c2e.jsonl",
+        "cwd": "/repo",
+        "hook_event_name": "Stop",
+        "stop_hook_active": false,
+        "last_assistant_message": "Done."
+      },
+      "expect": {
+        "kind": "stop",
+        "session_id": "019a5c2e-7b1d-7f30-9c4e-codex",
+        "stop_hook_active": false,
+        "turn_id": "turn-1"
+      }
+    },
+    "SessionEnd": {
+      "payload": {
+        "session_id": "019a5c2e-7b1d-7f30-9c4e-codex",
+        "transcript_path": "/home/dev/.codex/sessions/2026/10/14/rollout-019a5c2e.jsonl",
+        "cwd": "/repo",
+        "hook_event_name": "SessionEnd"
+      },
+      "expect": {
+        "kind": "session_end",
+        "session_id": "019a5c2e-7b1d-7f30-9c4e-codex"
+      }
+    },
+    "Interrupt": {
+      "payload": {
+        "session_id": "019a5c2e-7b1d-7f30-9c4e-codex",
+        "turn_id": "turn-2",
+        "cwd": "/repo",
+        "hook_event_name": "Interrupt"
+      },
+      "expect": {
+        "kind": "interrupt",
+        "session_id": "019a5c2e-7b1d-7f30-9c4e-codex"
+      }
+    },
+    "PermissionRequest": {
+      "payload": {
+        "session_id": "019a5c2e-7b1d-7f30-9c4e-codex",
+        "turn_id": "turn-2",
+        "cwd": "/repo",
+        "hook_event_name": "PermissionRequest",
+        "tool_name": "shell",
+        "tool_input": {
+          "command": [
+            "git",
+            "push"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "attention",
+        "session_id": "019a5c2e-7b1d-7f30-9c4e-codex",
+        "message": "Codex needs user input"
+      }
+    },
+    "PreToolUse": {
+      "payload": {
+        "session_id": "019a5c2e-7b1d-7f30-9c4e-codex",
+        "turn_id": "turn-2",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "request_user_input"
+      },
+      "expect": {
+        "kind": "attention",
+        "session_id": "019a5c2e-7b1d-7f30-9c4e-codex"
+      }
+    },
+    "PostToolUse": {
+      "payload": {
+        "session_id": "019a5c2e-7b1d-7f30-9c4e-codex",
+        "turn_id": "turn-2",
+        "cwd": "/repo",
+        "hook_event_name": "PostToolUse",
+        "tool_name": "shell"
+      },
+      "expect": {
+        "kind": "tool_done",
+        "session_id": "019a5c2e-7b1d-7f30-9c4e-codex"
+      }
+    }
+  },
+  "version_output": "codex-cli 0.162.1",
+  "version": "0.162.1",
+  "hooks_off": {
+    "file": "config.toml",
+    "text": "[features]\nhooks = false\n"
+  }
+}

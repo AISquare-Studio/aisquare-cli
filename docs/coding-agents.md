@@ -14,8 +14,15 @@ with this change.
 ## Setup and selection
 
 ```sh
-# Installer: --agent is also forwarded by the Windows -> WSL installer.
+# Installer: Codex alone, or both agents (--agent both, or --agent twice).
+# Windows: $env:AISQUARE_INSTALL_AGENT = 'codex' before `irm .../install.ps1 | iex`,
+# which becomes --agent inside WSL.
 sh install.sh --agent codex
+sh install.sh --agent both
+
+# Or init directly:
+aisquare init --local --yes --agent codex
+aisquare init --local --yes --agent claude-code --agent codex
 
 # Existing installation:
 asq agents connect codex
@@ -30,6 +37,16 @@ asq fleet spawn coder --agent codex --prompt 'Implement the task on the board'
 # Mixed teams:
 asq team bind reviewer --agent claude-code
 ```
+
+`install.sh --agent codex` installs a missing Codex with its own installer
+(`curl -fsSL https://chatgpt.com/codex/install.sh | sh`, as its
+[docs](https://learn.chatgpt.com/docs/codex/cli) give), run so that it asks
+nothing; an installed Codex is kept, and `--upgrade-all` runs `codex update`.
+It then runs `init --agent codex` and, with Codex alone, `agents use codex`, so
+launches use Codex rather than the Claude Code default. Claude Code is neither
+installed nor connected. The run ends on a doctor that is green but for one
+row: Codex's hooks are `unverified` until you trust them, which the summary
+names as the step left to you (run `codex`, sign in, open `/hooks`, trust them).
 
 Connect merges AISquare's handlers into `CODEX_HOME/hooks.json`, preserving
 other hooks and instruction files. Unreadable context files are skipped with a
@@ -100,6 +117,29 @@ Settings retains custom values written by another version, so they can be
 reviewed or corrected without losing them when saving unrelated changes.
 A damaged AISquare config renders defaults and an error; saving preserves the
 damaged file until it has been repaired and reloaded.
+
+### Upgrade and uninstall
+
+`aisquare upgrade` re-connects Codex's hooks as it does Claude Code's: the new
+install runs `agents refresh-hooks codex` for every Codex home this machine
+connected and for each Codex account home under `~/.aisquare/codex-accounts`,
+so the hooks name the new install. Only homes holding AISquare hooks are
+rewritten; other groups, `config.toml` and `AGENTS.md` are left as they are,
+and a home whose hooks run another aisquare install is left and named. An
+identical definition is not rewritten; a changed one is reported with the
+review Codex asks for in `/hooks`. `--version` back to a release without Codex
+hooks (0.8.0 or older) leaves them, naming `agents disconnect codex` to run first.
+
+`aisquare uninstall` takes AISquare's hook groups out of every Codex home it
+finds (`~/.codex`, `~/.codex*`, `$CODEX_HOME`, connected homes, account
+homes), keeping every other group. It reads each home's `config.toml` and
+never rewrites it: a `[mcp_servers.<name>]` that runs aisquare is listed with
+the `codex mcp remove <name>` that removes it there (with `CODEX_HOME=` set for
+a home other than the one your shell's `codex` reads), and an enabled aisquare
+Codex plugin with its `codex plugin remove`. `--purge` refuses while either
+would start aisquare again, as it does for Claude Code's. MCP servers added only
+for a launch (`agents.mcp = true`, `-c mcp_servers.aisquare…`) are never written
+to a file, so there is nothing to remove.
 
 ## Native settings
 

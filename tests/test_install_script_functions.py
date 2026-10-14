@@ -2574,23 +2574,194 @@ def test_the_gh_advice_matches_whether_gh_exists(tmp_path: Path) -> None:
     assert "apt install gh" in absent.stdout, absent.stdout
 
 
-def test_codex_selection_installs_into_user_prefix_and_connects() -> None:
-    result = sh("""
-parse_args --agent codex --yes --no-project
+def _codex_run(tmp_path: Path, args: str, *, codex: str = "") -> str:
+    """parse_args ``args``, decide, install the agents and init, with `run` printing what it
+    would run and the Codex installer replaced by a stub that records the environment it
+    was run in. Returns stdout, with the stub's record after a `STUB:` line."""
+    record = tmp_path / "codex-installer.env"
+    codex_bin = stub_dir(tmp_path, "codexbin", "codex", body='echo "codex-cli 0.162.1"')
+    tar = stub_dir(tmp_path, "tarbin", "tar")  # the one tool its installer needs beyond ours
+    snippet = f"""
+parse_args {args}
 DRY_RUN=0
 OFFLINE=0
-have() { return 0; }
-run() { printf 'RUN'; printf ' <%s>' "$@"; printf '\\n'; }
+CODEX_VERSION="{codex}"
+_resolve_system
+run() {{ printf 'RUN'; printf ' <%s>' "$@"; printf '\\n'; }}
+fetch_into_shell() {{
+    "$2" -c 'printf "url=%s noninteractive=%s\\n" "$1" "$CODEX_NON_INTERACTIVE"' sh "$1" >"{record}"
+    PATH="{codex_bin}:$PATH"
+}}
 install_agent
 init_home
-""")
+echo STUB:
+cat "{record}" 2>/dev/null || true
+"""
+    result = sh(snippet, path=f"{tar}:{base_path(tmp_path)}")
+    assert result.returncode == 0, result.stdout + result.stderr
+    return result.stdout
+
+
+def test_codex_is_installed_by_its_own_installer_and_connected(tmp_path: Path) -> None:
+    """`--agent codex` on a machine without Codex: its standalone installer (the route
+    its docs give), run so it asks nothing; then init connects Codex alone and makes it
+    the agent launches use. Claude Code is neither installed nor connected."""
+    out = _codex_run(tmp_path, "--agent codex --yes --no-project")
+
+    assert "url=https://chatgpt.com/codex/install.sh noninteractive=1" in out, out
+    assert "✓ Codex 0.162.1" in out, out
+    assert "RUN <aisquare> <init> <--local> <--yes> <--agent> <codex> <--no-onboard>" in out
+    assert "RUN <aisquare> <agents> <use> <codex>" in out, out
+    assert "claude" not in out.replace("claude-code", ""), out
+    assert "<claude-code>" not in out, out
+
+
+@pytest.mark.parametrize("args", ["--agent both", "--agent claude-code --agent codex"])
+def test_both_agents_are_installed_and_connected_together(tmp_path: Path, args: str) -> None:
+    """`--agent both`, or --agent twice: each agent installed, both connected by one init,
+    and Claude Code stays the agent launches use (no `agents use`)."""
+    out = _codex_run(tmp_path, f"{args} --yes --no-project")
+
+    assert "==> Installing Claude Code" in out, out
+    assert "url=https://chatgpt.com/codex/install.sh noninteractive=1" in out, out
+    assert (
+        "RUN <aisquare> <init> <--local> <--yes> <--agent> <claude-code> <--agent> <codex> "
+        "<--no-onboard>"
+    ) in out, out
+    assert "<agents> <use>" not in out, out
+
+
+def test_an_installed_codex_is_kept_and_only_upgrade_all_moves_it(tmp_path: Path) -> None:
+    kept = _codex_run(tmp_path, "--agent codex --yes --no-project", codex="0.150.0")
+    moved = _codex_run(
+        tmp_path / "all", "--agent codex --yes --no-project --upgrade-all", codex="0.150.0"
+    )
+
+    assert "✓ Codex 0.150.0" in kept and "url=" not in kept, kept
+    assert "RUN <codex> <update>" not in kept, kept
+    assert "RUN <codex> <update>" in moved and "url=" not in moved, moved
+
+
+def test_agent_and_no_agent_contradict() -> None:
+    result = sh("parse_args --agent codex --no-agent; printf SHOULD_NOT_RUN")
+    assert result.returncode != 0
+    assert "--agent and --no-agent ask for opposite things" in result.stdout + result.stderr
+    assert "SHOULD_NOT_RUN" not in result.stdout
+
+
+def test_the_dry_run_banner_names_codex_and_where_it_writes(tmp_path: Path) -> None:
+    result = sh(
+        "parse_args --agent codex --dry-run --no-project; CLI_ACTION=current; CLI_VERSION=0.9.0; "
+        "UV_VERSION=0.9; CODEX_VERSION=''; _resolve_system; banner; init_home",
+        env={"CODEX_HOME": str(tmp_path / "codex-home")},
+        path=base_path(tmp_path),
+    )
+
     assert result.returncode == 0, result.stderr
-    assert "<npm> <install> <--global> <--prefix>" in result.stdout
-    assert "<@openai/codex>" in result.stdout
-    assert "<aisquare> <init> <--local> <--yes> <--agent> <codex>" in result.stdout
-    assert "<aisquare> <agents> <use> <codex>" in result.stdout
-    assert "/hooks" in result.stdout
-    assert "<claude>" not in result.stdout
+    out = result.stdout
+    assert "  install  Codex (its own installer, https://chatgpt.com/codex/install.sh)" in out
+    assert "  connect  codex's hooks" in out, out
+    assert "Claude Code" not in out, out
+    assert f"{tmp_path / 'codex-home'}/hooks.json" in out, out
+    assert "MERGED — aisquare's hook groups only" in out, out
+    assert "would run: aisquare agents use codex" in out, out
+
+
+def test_claude_code_is_left_alone_when_only_codex_is_asked_for(tmp_path: Path) -> None:
+    """A machine with Claude Code installed but not connected, installing Codex alone:
+    its amber row is the requested state, named as information (as under --no-agent)."""
+    row = {
+        "name": "claude-code",
+        "status": "warn",
+        "detail": "Claude Code 2.1.296 hooks are missing or outdated",
+        "fix": "(Re)connect it: aisquare agents connect claude-code",
+    }
+
+    expected = sh(
+        "parse_args --agent codex; PROJECT_DIR=/p; expected_amber; echo", path=base_path(tmp_path)
+    )
+    result = _summary_then_handoff(
+        tmp_path,
+        "parse_args --agent codex; WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; "
+        "DOCTOR_AMBER='brain claude-code'",
+        node=False,
+        env={"PAYLOAD": json.dumps([row])},
+    )
+
+    assert expected.stdout.strip() == "brain claude-code", expected.stdout
+    assert "  claude-code — left alone by --agent codex; aisquare doctor here says:" in (
+        result.stdout
+    ), result.stdout
+    assert row["fix"] not in result.stdout and result.returncode == 0, result.stdout
+
+
+def _codex_row(state: str, home: str = "/h/.codex") -> dict[str, str]:
+    status = "ok" if state in ("configured", "observed") else "warn"
+    detail = f"Codex: {state} in {home}"
+    if state == "unverified":
+        detail += ". Hooks configured; open /hooks in Codex to review and trust them."
+    return {"name": "codex", "status": status, "detail": detail, "fix": "aisquare agents ..."}
+
+
+def test_codex_hooks_awaiting_trust_are_the_users_step_not_a_surprise(tmp_path: Path) -> None:
+    """Acceptance 3 of t4: after `--agent codex` the doctor is green but for Codex's own
+    review step, which no script may take. The summary names that one step and exits 0;
+    an amber Codex row of any other kind is unexpected (exit 2)."""
+    rows = [_codex_row("unverified"), _codex_row("unverified", "/h/.aisquare/codex-accounts/2")]
+    trust = _summary_then_handoff(
+        tmp_path,
+        "parse_args --agent codex; WANT_SYSTEM_DEPS=1; DOCTOR_RAW=$PAYLOAD; "
+        "DOCTOR_AMBER='brain codex codex'",
+        node=True,
+        env={"PAYLOAD": json.dumps(rows)},
+    )
+    (tmp_path / "broken").mkdir()
+    broken = _summary_then_handoff(
+        tmp_path / "broken",
+        "parse_args --agent codex; WANT_SYSTEM_DEPS=1; DOCTOR_RAW=$PAYLOAD; "
+        "DOCTOR_AMBER='brain codex codex'",
+        node=True,
+        env={"PAYLOAD": json.dumps([rows[0], _codex_row("not_configured")])},
+    )
+
+    step = "  codex — run codex (sign in if it asks), open /hooks and trust aisquare's hooks\n"
+    assert trust.stdout.count(step) == 1, trust.stdout
+    assert "UNEXPECTED=0" in trust.stdout and trust.returncode == 0, trust.stdout
+    assert step not in broken.stdout and "Not expected" in broken.stdout, broken.stdout
+    assert broken.returncode == 2, broken.stdout
+
+
+@pytest.mark.parametrize(
+    ("rows", "connected"),
+    [
+        ([{"name": "codex", "status": "ok", "detail": "Codex not detected on this machine"}], 0),
+        (
+            [
+                {
+                    "name": "codex",
+                    "status": "ok",
+                    "detail": "Codex detected; AISquare integration not selected",
+                }
+            ],
+            0,
+        ),
+        ([_codex_row("unverified")], 1),
+        ([_codex_row("observed")], 1),
+        ([], 0),
+    ],
+    ids=["not-detected", "not-selected", "unverified", "observed", "no-row"],
+)
+def test_a_codex_never_connected_is_work_to_do(
+    tmp_path: Path, rows: list[dict[str, str]], connected: int
+) -> None:
+    """The no-op path for `--agent codex` needs Codex connected: a Codex the doctor calls
+    not selected has no hooks of ours yet, and skipping the run would leave it so."""
+    result = sh(
+        "DOCTOR_RAW=$PAYLOAD; if codex_row_connected; then echo yes; else echo no; fi",
+        env={"PAYLOAD": json.dumps(rows)},
+        path=base_path(tmp_path),
+    )
+    assert result.stdout.strip() == ("yes" if connected else "no"), result.stdout
 
 
 def test_unknown_agent_is_refused_before_installation() -> None:

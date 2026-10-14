@@ -36,6 +36,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   mixed Claude Code/Codex teams; setup, status and the UI expose agent choice.
   See [coding-agent support](docs/coding-agents.md) for native trust and the
   tested compatibility boundary.
+- `aisquare upgrade` re-connects Codex's hooks in every connected Codex home and
+  Codex account home, and says when Codex asks for them to be reviewed again;
+  `aisquare uninstall` takes them out and names each Codex MCP server and plugin
+  that runs aisquare with the `codex mcp remove` / `codex plugin remove` for it.
+- `install.sh --agent codex` installs a missing Codex with its own installer and
+  connects it alone; `--agent both` (or `--agent` twice) installs both agents.
+  `install.ps1` takes the agent from `AISQUARE_INSTALL_AGENT`.
 
 ## [0.8.0] - 2026-10-12
 

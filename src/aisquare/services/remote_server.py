@@ -3568,25 +3568,38 @@ class _RateLimiter:
     so the table holds the keys of the last window and no more: keyed on a header, a
     fresh invented address per request grew it forever. Called on the event loop alone,
     with no ``await`` between a route's check and its count, so it takes no lock.
+
+    What ages out is found in :attr:`_order`, every call counted in the order counted, from
+    its head: each call costs the calls that aged out since, not a walk of every key. The
+    walk was on the event loop, and anyone holding the link may post an unlock from as
+    many addresses as an IPv6 /64 has: 2 ms a call with 20 000 keys live, some 40 s of the
+    loop's every minute at 20 000 calls a minute, every socket and read stalled behind it
+    (review of #259, remote focus, 7/12).
     """
 
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
         self._attempts: dict[str, deque[float]] = {}
+        self._order: deque[tuple[float, str]] = deque()
+        """Every call :attr:`_attempts` holds, as ``(when, key)``, oldest first."""
 
     def limiter_retry_after(self, key: str, limit: int, window: float) -> float | None:
         """Count a call by ``key``: ``None`` when it may go ahead, else the seconds until
         it may (and nothing is counted)."""
         now = self._clock()
-        for known, held in list(self._attempts.items()):
-            while held and now - held[0] >= window:
-                held.popleft()
-            if not held:
-                del self._attempts[known]
+        order = self._order
+        while order and now - order[0][0] >= window:
+            when, known = order.popleft()
+            aged = self._attempts.get(known)
+            if aged and aged[0] <= when:
+                aged.popleft()
+                if not aged:
+                    del self._attempts[known]
         held = self._attempts.setdefault(key, deque())
         if len(held) >= limit:
             return window - (now - held[0])
         held.append(now)
+        order.append((now, key))
         return None
 
     def limiter_wait_seconds(self, key: str, limit: int, window: float) -> int | None:

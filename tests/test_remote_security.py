@@ -479,6 +479,39 @@ def test_the_limiter_forgets_a_client_whose_minute_is_over() -> None:
     assert list(limiter._attempts) == ["203.0.113.5"]
 
 
+def test_a_call_to_the_limiter_costs_what_aged_out_not_every_client_it_holds() -> None:
+    """Review of #259, remote focus, 7/12: every call walked every key, on the event loop, so
+    its cost grew with the clients of the last minute: anyone holding the link may post an
+    unlock from every address of an IPv6 /64, 2 ms a call with 20 000 live, some 40 s of
+    the loop's every minute at that rate. What ages out is found from the oldest call on,
+    and a client still counts its own calls, and is forgotten once they have aged out."""
+    now = [0.0]
+    limiter = _RateLimiter(lambda: now[0])
+    rule = (UNLOCK_LIMIT, UNLOCK_WINDOW_SECONDS)
+    clients = 20_000
+
+    def at(n: int) -> float:
+        return n / 1000  # 20 000 clients over the first 20 s of a minute
+
+    began = time.perf_counter()
+    for n in range(clients):
+        now[0] = at(n)
+        assert limiter.limiter_retry_after(f"2001:db8::{n:x}", *rule) is None
+    took = time.perf_counter() - began
+    assert took < 5.0, f"{clients} calls took {took:.1f} s: each walked every client"
+    assert len(limiter._attempts) == clients
+    for _ in range(UNLOCK_LIMIT):
+        assert limiter.limiter_retry_after("2001:db8::ffff", *rule) is None
+    assert limiter.limiter_retry_after("2001:db8::ffff", *rule) is not None, "still counted"
+    now[0] = UNLOCK_WINDOW_SECONDS + 10.5  # those of the first 10.5 s have aged out
+    assert limiter.limiter_retry_after("203.0.113.5", *rule) is None
+    live = sum(1 for n in range(clients) if now[0] - at(n) < UNLOCK_WINDOW_SECONDS)
+    assert 0 < live < clients and len(limiter._attempts) == live + 2  # and the two since
+    now[0] = UNLOCK_WINDOW_SECONDS + 20.0
+    assert limiter.limiter_retry_after("2001:db8::ffff", *rule) is None, "its minute is over"
+    assert list(limiter._attempts) == ["203.0.113.5", "2001:db8::ffff"]
+
+
 def test_the_client_is_the_scope_peer_and_only_that() -> None:
     scope = {"client": ("203.0.113.5", 1), "headers": [(b"x-forwarded-for", b"10.0.0.1")]}
     assert remote_server._client_of(scope) == "203.0.113.5"

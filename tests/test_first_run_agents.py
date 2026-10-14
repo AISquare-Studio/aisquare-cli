@@ -11,6 +11,7 @@ Each behaviour has its control (Claude Code's answer unchanged, or the other sta
 from __future__ import annotations
 
 import re
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ from aisquare.models import ProjectInfo
 from aisquare.services import agent_launch, first_run, onboarding
 from aisquare.services import agents as agents_service
 from tests.test_codex_accounts import _sign_in
+from tests.test_codex_plugin_route import install as plugin_install
 from tests.test_first_run import Spawns
 
 REPO = Path(__file__).resolve().parents[1]
@@ -256,3 +258,17 @@ def test_claude_codes_fleet_saves_nothing(tmp_path: Path, monkeypatch: pytest.Mo
     spawns = _start(tmp_path, on_path("claude", "codex"), monkeypatch)
     assert {kwargs.get("agent") for _role, kwargs in spawns.calls} == {"claude-code"}
     assert load_config().agents.default is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the plugin route runs sh")
+def test_a_plugin_only_home_is_connected_through_it_and_never_offered_connect(
+    codex_home: Path,
+) -> None:
+    """The aisquare Codex plugin is a route of its own: Connect beside it would install
+    hooks.json's as a second one. Its hooks wait for the same /hooks trust."""
+    plugin_install(codex_home)
+    untrusted = first_run.probe_fleet(which=on_path("codex"))
+    assert untrusted.connected and untrusted.trust_pending and untrusted.ready
+    plugin_install(codex_home, trusted=None)
+    trusted = first_run.probe_fleet(which=on_path("codex"))
+    assert trusted.connected and not trusted.trust_pending

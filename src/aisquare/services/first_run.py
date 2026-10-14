@@ -579,7 +579,14 @@ def _probe_agent(
                     refused = detail or f"cannot read {home / adapter.settings_name}"
                 connected = state in {"configured", "observed", "unverified"}
                 trust = state == "unverified"
-                if connected and not agent_core.hooks_can_start(adapter.id, home):
+                plugin = agent_core.plugin_of(adapter.id)
+                install = plugin.installed(home) if plugin is not None else None
+                if install is not None and not agent_core.hook_commands(adapter.id, home):
+                    # The aisquare plugin is this home's route (none of its own hooks for
+                    # the plugin to stand down beside): connected through it, and its hooks
+                    # wait for the same trust. Connect would install a second route.
+                    connected, trust = True, not install.trusted
+                elif connected and not agent_core.hooks_can_start(adapter.id, home):
                     problems.append(
                         "aisquare's hooks name a program that does not exist or cannot start"
                     )

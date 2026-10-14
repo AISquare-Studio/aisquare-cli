@@ -2980,14 +2980,19 @@ def _needs_kept() -> dict[str, dict[str, str]]:
 
 def _needs_kept_raw() -> object:
     """``remote-needs.json`` as its JSON; ``None`` when there is none. Raises ``OSError`` for a
-    file that could not be read, ``ValueError`` for one that is not JSON."""
+    file that could not be read, ``ValueError`` for one that is not JSON, or nests deeper
+    than ``json`` reads: its ``RecursionError`` escaped every reader and the writer, so each
+    scan failed and the file was never moved aside (review of #259, round 6, 4/10)."""
     from aisquare.core.paths import remote_needs_path
 
     try:
         text = remote_needs_path().read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
-    return json.loads(text)
+    try:
+        return json.loads(text)
+    except RecursionError as exc:
+        raise ValueError("it nests deeper than JSON is read here") from exc
 
 
 def _needs_kept_whole(raw: object) -> dict[str, dict[str, str]]:

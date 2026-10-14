@@ -517,6 +517,13 @@ class SocketReads:
                 self._starts[key] = None
         return self._starts[key]
 
+    def heard_listener(
+        self, srv: TmuxServer, recorded: Path | None, answer: SocketAnswer | None
+    ) -> None:
+        """Keep what the socket at ``recorded`` said, as a caller read it already, so
+        :meth:`listener` does not ask it again."""
+        self._listeners.setdefault(self._key(srv, recorded), answer)
+
     def heard_started(self, srv: TmuxServer, recorded: Path | None, started: datetime) -> None:
         """Keep when the server answering at ``recorded`` started, as an answer that named one
         of its panes said it (``#{start_time}``), so :meth:`started` does not ask it again."""

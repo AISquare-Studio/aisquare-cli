@@ -2246,7 +2246,10 @@ def _take_over(agent: FleetAgent, previous: str, session_id: str, notes: list[st
 
 
 def _live_rows_here(
-    store: ContextStore, srv: TmuxServer, config: FleetSettings
+    store: ContextStore,
+    srv: TmuxServer,
+    config: FleetSettings,
+    reads: tmux_core.SocketReads | None = None,
 ) -> Iterator[tuple[FleetAgent, SocketAnswer | None]]:
     """Every live row recorded at this shell's socket path, in every project, with what the
     one rule says of its agent (:func:`~aisquare.core.tmux.server_may_run`): the rows a
@@ -2257,15 +2260,21 @@ def _live_rows_here(
     of #259); a row asked at another path (:func:`_address`) is another server's. The one
     walk :func:`_refuse_a_freed_socket` and :func:`_forget_an_exited_server` take, so the
     two cannot come to count different rows (review of #259, round 3).
+
+    Every such row is asked at this shell's path, where :func:`_address` found the one it
+    recorded, so ``reads``, the caller's, which read that path already
+    (:meth:`~aisquare.core.tmux.SocketReads.heard_listener`), answers for all of them. A
+    ``SocketReads`` of its own here, keyed by each row's spelling of the path, connected to
+    the socket the caller had just read (review of #259, round 7, 6/9).
     """
     here = _Address(config.tmux_socket)
-    reads = tmux_core.SocketReads()  # one socket: asked once, not per row
+    reads = reads or tmux_core.SocketReads()  # one socket: asked once, not per row
     for agent in store.live_fleet_agents():
         if _address(agent, config) != here:
             continue
         answer = tmux_core.server_may_run(
             srv,
-            agent.socket_path,
+            None,  # this shell's path: the row's, as `_address` says
             agent.boot_id,
             agent.created_at,
             agent.server_started_at,
@@ -2275,7 +2284,10 @@ def _live_rows_here(
 
 
 def _refuse_a_freed_socket(
-    srv: TmuxServer, config: FleetSettings, answer: SocketAnswer | None
+    srv: TmuxServer,
+    config: FleetSettings,
+    answer: SocketAnswer | None,
+    reads: tmux_core.SocketReads | None = None,
 ) -> None:
     """Refuse to start a server at a socket path a running server lost (follow-up of #257).
 
@@ -2292,7 +2304,7 @@ def _refuse_a_freed_socket(
     the spawn joins, and a stale file is a server that exited, which tmux replaces. That is
     ``answer``, what the path said (:meth:`~aisquare.core.tmux.TmuxServer.listener`), read
     by the caller: read here again, a path with no file cost two reads a check (review of
-    #259, round 6, 7/10).
+    #259, round 6, 7/10). It answers for the rows recorded there too (``reads``).
     """
     if answer != "gone":
         return
@@ -2300,8 +2312,11 @@ def _refuse_a_freed_socket(
         here = srv.socket_path()
     except TmuxUnavailable:
         return  # no POSIX uid: no tmux server can exist here
+    reads = reads or tmux_core.SocketReads()
+    reads.heard_listener(srv, None, answer)
     with store_session() as store:
-        gone = [agent for agent, answer in _live_rows_here(store, srv, config) if answer == "gone"]
+        rows = _live_rows_here(store, srv, config, reads)
+        gone = [agent for agent, answer in rows if answer == "gone"]
         if not gone:
             return
         names = {known.id: _name(known) for known in store.list_projects(include_forgotten=True)}
@@ -2319,7 +2334,9 @@ def _refuse_a_freed_socket(
     )
 
 
-def _forget_an_exited_server(srv: TmuxServer, config: FleetSettings) -> list[FleetAgent]:
+def _forget_an_exited_server(
+    srv: TmuxServer, config: FleetSettings, reads: tmux_core.SocketReads | None = None
+) -> list[FleetAgent]:
     """Forget the recorded start of a server that exited at this shell's socket path, before a
     spawn starts the next server there, so that its rows read lost under the new one rather
     than held as its; the rows it changed.
@@ -2344,11 +2361,12 @@ def _forget_an_exited_server(srv: TmuxServer, config: FleetSettings) -> list[Fle
     (``forget_fleet_agent_server_start``), so a server another process brought up meanwhile
     leaves its rows and any held one alone.
 
-    Asked by :func:`_before_a_server_starts` once it read a stale file at the path.
+    Asked by :func:`_before_a_server_starts` once it read a stale file at the path, with
+    ``reads`` holding that answer.
     """
     forgotten: list[FleetAgent] = []
     with store_session() as store:
-        for agent, answer in _live_rows_here(store, srv, config):
+        for agent, answer in _live_rows_here(store, srv, config, reads):
             started = agent.server_started_at
             if (
                 answer is None
@@ -2380,9 +2398,11 @@ def _before_a_server_starts(srv: TmuxServer, config: FleetSettings) -> list[Flee
         answer = srv.listener(srv.socket_path())
     except TmuxUnavailable:
         return []  # no POSIX uid: no tmux server can exist here
+    reads = tmux_core.SocketReads()  # that answer, for every row recorded at the path
+    reads.heard_listener(srv, None, answer)
     if answer is None:
-        return _forget_an_exited_server(srv, config)
-    _refuse_a_freed_socket(srv, config, answer)
+        return _forget_an_exited_server(srv, config, reads)
+    _refuse_a_freed_socket(srv, config, answer, reads)
     return []
 
 

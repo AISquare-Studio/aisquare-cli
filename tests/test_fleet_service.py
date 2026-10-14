@@ -2774,8 +2774,9 @@ def test_a_check_at_a_path_with_no_file_reads_the_fleets_socket_once(
 ) -> None:
     """Review of #259, round 6, 7/10: `_refuse_a_freed_socket` read the fleet's socket again
     right after `_before_a_server_starts` had read "gone" there, two reads a check where a
-    listening server costs one. The refusal stands on the one read; each row's own socket is
-    still asked, once (`_live_rows_here`)."""
+    listening server costs one. The refusal stands on the one read. Round 7, 6/9: so do the
+    rows recorded at that path, which `_live_rows_here` asked again, in a `SocketReads` of
+    its own, exactly where it matters: a path with no file, and rows recorded there."""
     monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
     coder = _coder(project)
     tmux.running, tmux.socket_file = False, False  # a server that lost its socket file
@@ -2790,7 +2791,8 @@ def test_a_check_at_a_path_with_no_file_reads_the_fleets_socket_once(
     with pytest.raises(FleetError, match="lost its socket file"):
         fleet_service._before_a_server_starts(tmux, fleet_service.settings())
 
-    assert asked == [tmux.socket_path(), coder.socket_path], asked
+    assert coder.socket_path is not None, "the row recorded where its server listened"
+    assert asked == [tmux.socket_path()], asked
 
 
 def test_a_check_before_a_server_starts_reads_the_socket_once_and_a_spawn_says_both_checks(

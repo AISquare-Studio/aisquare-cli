@@ -540,7 +540,6 @@ def server_may_run(
     srv: TmuxServer,
     recorded: Path | None,
     booted: str | None,
-    this_boot: str | None,
     created: datetime | None = None,
     started: datetime | None = None,
     *,
@@ -552,11 +551,11 @@ def server_may_run(
     another ends as gone (round 27 of #257).
 
     Asked of what its spawn recorded, never inferred from the shell asking (round 25). A row
-    from another boot (``booted``, against ``this_boot``) cannot be running: no process
-    outlives a reboot. Otherwise its server's socket is asked (:meth:`TmuxServer.listener`)
-    at ``recorded``, where the server said it listened, whatever ``TMUX_TMPDIR`` this shell
-    has and wherever this tmux build keeps sockets; a row from before v25 recorded neither
-    and is asked where this shell's tmux looks.
+    from another boot (``booted``, against this one's, :meth:`SocketReads.boot_id`) cannot
+    be running: no process outlives a reboot. Otherwise its server's socket is asked
+    (:meth:`TmuxServer.listener`) at ``recorded``, where the server said it listened,
+    whatever ``TMUX_TMPDIR`` this shell has and wherever this tmux build keeps sockets; a
+    row from before v25 recorded neither and is asked where this shell's tmux looks.
 
     A listener there is not thereby the row's server. One that lost its socket file runs
     on, and the next ``tmux -L`` there starts a second server at the freed path, which
@@ -580,11 +579,15 @@ def server_may_run(
     clock is ended only when its server's socket is gone as well.
 
     ``reads`` is the caller's :class:`SocketReads` for one read of the fleet, so rows on
-    one server ask it once; each call asks afresh without one.
+    one server ask it once; each call asks afresh without one. This boot is asked there too,
+    and only for a row that recorded one: callers asked it of :func:`boot_id` themselves, for
+    every read, beside the ``reads`` that asks it too, so one read could get two answers
+    where ``sysctl`` fails now and then (review of #259, round 7, 5/9).
     """
+    reads = reads or SocketReads()
+    this_boot = None if booted is None else reads.boot_id()
     if booted is not None and this_boot is not None and booted != this_boot:
         return None
-    reads = reads or SocketReads()
     answer = reads.listener(srv, recorded)
     if answer == "answers" and started is not None:
         now = reads.started(srv, recorded)

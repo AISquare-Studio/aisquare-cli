@@ -3330,7 +3330,6 @@ def test_every_path_that_decides_a_held_rows_fate_gives_the_one_verdict(
     from aisquare.services import diagnostics
 
     monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
-    monkeypatch.setattr(lifecycle, "boot_id", lambda: "b00t-1")
     # Uninstall asks whether `fleet shutdown` could reach the fleet: here it can, as it
     # does through the fake, whether or not this machine has a usable tmux (Windows: none).
     monkeypatch.setattr(TmuxServer, "require", lambda _self: None)

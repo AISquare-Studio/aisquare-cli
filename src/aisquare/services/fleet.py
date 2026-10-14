@@ -2258,7 +2258,6 @@ def _live_rows_here(
     walk :func:`_refuse_a_freed_socket` and :func:`_forget_an_exited_server` take, so the
     two cannot come to count different rows (review of #259, round 3).
     """
-    this_boot = tmux_core.boot_id()
     here = _Address(config.tmux_socket)
     reads = tmux_core.SocketReads()  # one socket: asked once, not per row
     for agent in store.live_fleet_agents():
@@ -2268,7 +2267,6 @@ def _live_rows_here(
             srv,
             agent.socket_path,
             agent.boot_id,
-            this_boot,
             agent.created_at,
             agent.server_started_at,
             reads=reads,
@@ -3368,12 +3366,7 @@ def _refuse_unless_gone(agent: FleetAgent, srv: TmuxServer) -> None:
     Anything else is refused, as :func:`_verify_gone` refuses a question it could not put.
     """
     answer = tmux_core.server_may_run(
-        srv,
-        agent.socket_path,
-        agent.boot_id,
-        tmux_core.boot_id(),
-        agent.created_at,
-        agent.server_started_at,
+        srv, agent.socket_path, agent.boot_id, agent.created_at, agent.server_started_at
     )
     if answer is None or answer == "answers":
         return
@@ -3609,7 +3602,6 @@ def _shutdown_probe(sockets: Sequence[_Address], config: FleetSettings) -> dict[
 def _unreached(
     agent: FleetAgent,
     config: FleetSettings,
-    this_boot: str | None,
     *,
     unusable: bool = False,
     answering: bool = False,
@@ -3644,7 +3636,6 @@ def _unreached(
         srv,
         agent.socket_path,
         agent.boot_id,
-        this_boot,
         agent.created_at,
         agent.server_started_at,
         reads=reads,
@@ -3682,15 +3673,14 @@ def _held_rows(
     it and runs on (follow-up of #257). Stopped as any other, the row ended under its
     agent: its pane read as gone, and the socket answered.
     """
-    this_boot = tmux_core.boot_id()
-    reads = tmux_core.SocketReads()  # one per server, not per row
+    reads = tmux_core.SocketReads()  # one per server, and the boot once, not per row
     held: dict[str, tuple[SocketAnswer, str, str]] = {}
     for _, agents in targets:
         for agent in agents:
             if unusable or not answering.get(_address(agent, config)):
-                unreached = _unreached(agent, config, this_boot, unusable=unusable, reads=reads)
+                unreached = _unreached(agent, config, unusable=unusable, reads=reads)
             elif agent.server_started_at is not None:
-                unreached = _unreached(agent, config, this_boot, answering=True, reads=reads)
+                unreached = _unreached(agent, config, answering=True, reads=reads)
             else:
                 continue
             if unreached is not None:
@@ -4294,7 +4284,7 @@ def _record_late_rows(
             if reachable is False:
                 # The rule every other row is held to (`_unreached`); never forgotten, as no
                 # plan the operator saw named it.
-                unreached = _unreached(agent, config, tmux_core.boot_id())
+                unreached = _unreached(agent, config)
                 if unreached is not None:
                     report.failed.append(
                         ShutdownRow(
@@ -5589,7 +5579,6 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
     report = ReapReport()
     absent: dict[_Address, bool] = {}
     reads = tmux_core.SocketReads()  # one per server for the sweep, not per row
-    this_boot = reads.boot_id() if server_down else None
     now = _now()
     with store_session() as store:
         if project is not None:
@@ -5626,7 +5615,6 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
                                 views[address] = _hold_on_absent_server(
                                     [a for a in live if _address(a, config) == address],
                                     config,
-                                    this_boot,
                                     report,
                                     reads,
                                 )
@@ -5678,7 +5666,6 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
 def _hold_on_absent_server(
     agents: Sequence[FleetAgent],
     config: FleetSettings,
-    this_boot: str | None,
     report: ReapReport,
     reads: tmux_core.SocketReads | None = None,
 ) -> _Observed:
@@ -5698,7 +5685,7 @@ def _hold_on_absent_server(
     view: _Observed = {}
     for agent in agents:
         unreached = _unreached(
-            agent, config, this_boot, forget="`aisquare fleet shutdown --forget`", reads=reads
+            agent, config, forget="`aisquare fleet shutdown --forget`", reads=reads
         )
         if unreached is not None:
             view[agent.id] = HELD

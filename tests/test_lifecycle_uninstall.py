@@ -1198,12 +1198,12 @@ def test_a_row_from_another_boot_cannot_be_running(
         boot_id="boot-2",
         created_at=long_ago,
     )
-    monkeypatch.setattr(lifecycle, "boot_id", lambda: "boot-2")
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "boot-2")
 
     assert lifecycle.running_fleet() == (("coder-2 (now)",), 1, None)
     assert asked == [tmp_path / "now.sock"]
 
-    monkeypatch.setattr(lifecycle, "boot_id", lambda: None)  # where it cannot be told
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: None)  # where it cannot be told
     asked.clear()
     assert sorted(lifecycle.running_fleet()[0]) == ["coder-1 (old)", "coder-2 (now)"]
     assert sorted(asked) == [tmp_path / "now.sock", tmp_path / "old.sock"]
@@ -1221,6 +1221,9 @@ def test_a_row_that_recorded_no_boot_and_predates_it_does_not_block_once_its_soc
     _initialised(runner, tmp_path)
     _live_agent(tmp_path / "old", "coder-1", created_at=datetime(2026, 10, 11, tzinfo=UTC))
     _live_agent(tmp_path / "now", "coder-2", created_at=datetime(2026, 10, 12, 7, tzinfo=UTC))
+    # No row recorded a boot, so none is asked: it was, for every read with rows, a 5 s
+    # `sysctl` each where it fails (review of #259, round 7, 5/9).
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: pytest.fail("no row recorded a boot"))
 
     assert lifecycle.running_fleet() == (("coder-2 (now)",), 1, None)
 

@@ -2984,8 +2984,7 @@ def _check_fleet(
         by_socket: dict[fleet_service._Address, list[FleetAgent]] = {}
         for agent in gone:
             by_socket.setdefault(fleet_service._address(agent, config), []).append(agent)
-        this_boot = tmux_core.boot_id()
-        reads = tmux_core.SocketReads()  # one per server, not per row
+        reads = tmux_core.SocketReads()  # one per server, and the boot once, not per row
         for sock, agents in by_socket.items():
             listed = _fleet_labels(agents, names)
             if servers[sock].list_sessions():
@@ -3002,7 +3001,6 @@ def _check_fleet(
                         servers[sock],
                         agent.socket_path,
                         agent.boot_id,
-                        this_boot,
                         agent.created_at,
                         agent.server_started_at,
                         reads=reads,
@@ -3039,7 +3037,6 @@ def _check_fleet(
                         servers[sock],
                         agent.socket_path,
                         agent.boot_id,
-                        this_boot,
                         agent.created_at,
                         agent.server_started_at,
                         reads=reads,

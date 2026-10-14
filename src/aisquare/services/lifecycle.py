@@ -43,7 +43,6 @@ from aisquare.core.tmux import (
     TmuxError,
     TmuxServer,
     asking_server,
-    boot_id,
     server_may_run,
 )
 from aisquare.core.version import DISTRIBUTION, __version__
@@ -2059,9 +2058,7 @@ def _tmux_unusable() -> str | None:
     return None
 
 
-def _may_run(
-    row: _LiveRow, this_boot: str | None, reads: SocketReads | None = None
-) -> SocketAnswer | None:
+def _may_run(row: _LiveRow, reads: SocketReads | None = None) -> SocketAnswer | None:
     """Whether the agent of live ``row`` may still be running, and why; ``None`` when it
     cannot be. :func:`~aisquare.core.tmux.server_may_run`, the rule ``fleet shutdown`` asks
     too, so a row counted here is never one it ends as gone (round 27 of #257): one whose
@@ -2072,18 +2069,15 @@ def _may_run(
     """
     _label, socket_name, created, recorded, booted, started = row
     return server_may_run(
-        asking_server(socket_name), recorded, booted, this_boot, created, started, reads=reads
+        asking_server(socket_name), recorded, booted, created, started, reads=reads
     )
 
 
 def _fleet_answers() -> tuple[tuple[tuple[str, SocketAnswer], ...], int, str | None]:
     """:func:`running_fleet`, with what each live row's socket said (:func:`_may_run`)."""
     rows, fleet_error = _live_fleet_agents()
-    this_boot = boot_id() if rows else None
-    reads = SocketReads()
-    live = tuple(
-        (row[0], answer) for row in rows if (answer := _may_run(row, this_boot, reads)) is not None
-    )
+    reads = SocketReads()  # one per server, and the boot once, for every row
+    live = tuple((row[0], answer) for row in rows if (answer := _may_run(row, reads)) is not None)
     return live, len(rows) - len(live), fleet_error
 
 

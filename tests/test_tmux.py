@@ -48,6 +48,7 @@ from aisquare.core.tmux import (
     Completed,
     PaneFacts,
     SocketAnswer,
+    SocketReads,
     TmuxError,
     TmuxServer,
     TmuxTimedOut,
@@ -960,6 +961,7 @@ def test_a_row_with_no_boot_to_compare_is_gone_when_its_socket_is_and_it_predate
     boot ids already decide."""
     booted = datetime(2026, 10, 12, 6, 0, tzinfo=UTC)
     monkeypatch.setattr(tmux_module, "boot_started", lambda: booted)
+    monkeypatch.setattr(tmux_module, "boot_id", lambda: "b00t")
     before, after = datetime(2026, 10, 11, tzinfo=UTC), datetime(2026, 10, 12, 7, tzinfo=UTC)
 
     def may_run(
@@ -967,7 +969,7 @@ def test_a_row_with_no_boot_to_compare_is_gone_when_its_socket_is_and_it_predate
     ) -> str | None:
         srv = TmuxServer("asq")
         monkeypatch.setattr(srv, "listener", lambda recorded=None: said)
-        return server_may_run(srv, None, recorded_boot, "b00t", created)
+        return server_may_run(srv, None, recorded_boot, created)
 
     assert may_run("gone", before) is None, "cleared by the reboot"
     assert may_run("gone", after) == "gone", "since the boot: taken from under its server"
@@ -989,6 +991,7 @@ def test_a_listener_that_started_at_another_time_is_another_server(
     recorded = Path("/run/user/1000/tmux-1000/asq")
     then = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
     asked: list[Path | None] = []
+    monkeypatch.setattr(tmux_module, "boot_id", lambda: "b00t")
 
     def may_run(
         now: datetime | TmuxError | None, started: datetime | None = then
@@ -1003,7 +1006,7 @@ def test_a_listener_that_started_at_another_time_is_another_server(
 
         monkeypatch.setattr(TmuxServer, "listener", lambda _self, _recorded=None: "answers")
         monkeypatch.setattr(TmuxServer, "started_at", started_at)
-        return server_may_run(srv, recorded, "b00t", "b00t", then, started)
+        return server_may_run(srv, recorded, "b00t", then, started)
 
     assert may_run(then) == "answers", "the server the row was started on"
     assert may_run(then + timedelta(minutes=5)) == "another"
@@ -1017,8 +1020,35 @@ def test_a_listener_that_started_at_another_time_is_another_server(
 
     srv = TmuxServer("asq")
     monkeypatch.setattr(TmuxServer, "listener", lambda _self, _recorded=None: "gone")
-    assert server_may_run(srv, recorded, "b00t", "b00t", then, then) == "gone", "no listener"
-    assert server_may_run(srv, recorded, "0ld", "b00t", then, then) is None, "another boot"
+    assert server_may_run(srv, recorded, "b00t", then, then) == "gone", "no listener"
+    assert server_may_run(srv, recorded, "0ld", then, then) is None, "another boot"
+
+
+def test_the_boot_is_asked_once_a_read_and_only_for_a_row_that_recorded_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 7, 5/9: callers asked :func:`boot_id` themselves, for every read
+    and before any row needed it, beside the ``SocketReads`` that asked it too: where
+    ``sysctl`` fails now and then (it keeps only an id it found, each failure another 5 s
+    run), one read could get two answers. The rule asks it of the read's ``reads`` alone."""
+    answers = iter(["b00t", None])
+    asked: list[str | None] = []
+
+    def boot_id() -> str | None:
+        asked.append(answer := next(answers))
+        return answer
+
+    monkeypatch.setattr(tmux_module, "boot_id", boot_id)
+    monkeypatch.setattr(tmux_module, "boot_started", lambda: None)
+    monkeypatch.setattr(TmuxServer, "listener", lambda _self, _recorded=None: "gone")
+    srv, recorded = TmuxServer("asq"), Path("/tmp/tmux-1000/asq")
+    then = datetime(2026, 10, 13, 9, 0, tzinfo=UTC)
+    reads = SocketReads()
+    assert server_may_run(srv, recorded, None, then, reads=reads) == "gone"
+    assert asked == [], "a row that recorded no boot asks none"
+    judged = [server_may_run(srv, recorded, "0ld", then, reads=reads) for _ in range(3)]
+    assert judged == [None, None, None], "one answer for every row of the read"
+    assert asked == ["b00t"]
 
 
 def test_a_row_with_no_boot_to_compare_is_not_held_by_the_server_after_a_reboot(
@@ -1040,7 +1070,9 @@ def test_a_row_with_no_boot_to_compare_is_not_held_by_the_server_after_a_reboot(
 
     def may_run(created: datetime, boots: tuple[str | None, str | None]) -> str | None:
         then = created - timedelta(seconds=1)  # its server started just before the row
-        return server_may_run(TmuxServer("asq"), recorded, *boots, created, then)
+        recorded_boot, this_boot = boots
+        monkeypatch.setattr(tmux_module, "boot_id", lambda: this_boot)
+        return server_may_run(TmuxServer("asq"), recorded, recorded_boot, created, then)
 
     assert may_run(before, (None, None)) is None, "the reboot ended it"
     assert may_run(before, ("b00t", None)) is None, "this boot's id could not be had"

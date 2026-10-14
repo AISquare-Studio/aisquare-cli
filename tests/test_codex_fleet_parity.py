@@ -1323,6 +1323,42 @@ def test_the_reviewers_read_only_seat_is_denied_its_editing_tools_once(
     assert codex[: len(seat)] == seat
 
 
+def test_a_codex_reviewer_on_the_built_in_config_spawns_without_the_legacy_note(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """SMOKE2: every Codex reviewer spawned on a fresh config was told 'Legacy fleet
+    extra_args apply only to Claude Code', about the reviewer default ``init`` writes and
+    no operator chose — a Codex manager read it in its tool output on every spawn."""
+    config = load_config()
+    reviewer = config.fleet.roles["reviewer"].model_copy(update={"worktree": False})
+    assert reviewer.extra_args == list(REVIEWER_ARGS), "what init writes"
+    config.fleet.roles["reviewer"] = reviewer
+    save_config(config)
+
+    on_codex = fleet_service.spawn(project, "reviewer", agent="codex")
+    codex = _spawn_native(tmux)
+    on_claude = fleet_service.spawn(project, "reviewer", agent="claude-code")
+    claude = _spawn_native(tmux)
+
+    assert not [note for note in [*on_codex.notes, *on_claude.notes] if "Legacy" in note]
+    assert REVIEWER_ARGS[0] not in codex, "Claude Code's flag, never Codex's"
+    assert claude.count(REVIEWER_ARGS[0]) == 1, "Claude Code's reviewer keeps it"
+    # The operator's own legacy arguments still say where Codex's go.
+    config.fleet.roles["reviewer"] = reviewer.model_copy(
+        update={"extra_args": [*REVIEWER_ARGS, "--model", "opus"]}
+    )
+    save_config(config)
+    told = fleet_service.spawn(project, "reviewer", agent="codex").notes
+    assert any(
+        "Legacy fleet extra_args apply only to Claude Code" in note
+        and "fleet.roles.reviewer.agent_args.codex" in note
+        for note in told
+    ), told
+
+
 def test_a_spawns_intent_wins_over_the_roles_and_a_restart_maps_it_again(
     tmux: FakeTmux,  # noqa: F811
     codex_on_path: Path,  # noqa: F811

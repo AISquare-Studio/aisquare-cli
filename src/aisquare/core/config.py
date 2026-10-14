@@ -297,6 +297,14 @@ def _default_fleet_roles() -> dict[str, FleetRoleSettings]:
     }
 
 
+def built_in_extra_args(role: str) -> list[str]:
+    """The ``extra_args`` ``role`` is born with (:func:`_default_fleet_roles`), which every
+    config ``init`` writes holds whether or not anyone chose them; ``[]`` for a role it
+    does not name."""
+    default = _default_fleet_roles().get(role)
+    return list(default.extra_args) if default is not None else []
+
+
 #: The reviewer's built-in ``extra_args``: Claude Code without the tools that edit files.
 #: One token, because the flag takes a variadic list and separate words would go on
 #: swallowing whatever plain word came after them on the command line; the names apart

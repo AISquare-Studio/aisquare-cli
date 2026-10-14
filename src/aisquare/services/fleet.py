@@ -57,6 +57,7 @@ from aisquare.core.config import (
     CLAUDE_PERMISSION_MODES,
     FleetRoleSettings,
     FleetSettings,
+    built_in_extra_args,
     load_config,
     replacing_the_former_reviewer_default_first,
 )
@@ -1654,9 +1655,13 @@ def spawn(
     except ValueError as exc:
         raise FleetError(str(exc)) from exc
     notes.extend(model_resolution.notes if model_resolution else [])
+    # Not for the role's built-in arguments (the reviewer's `--disallowedTools`), which
+    # `init` writes and nobody chose: every Codex reviewer spawn on a fresh config said it,
+    # in a Codex manager's tool output too, with nothing for anyone to change.
     if (
         spec is None
         and role_config.extra_args
+        and role_config.extra_args != built_in_extra_args(role)
         and not selected.adapter.capabilities.legacy_fleet_args
     ):
         notes.append(

@@ -656,6 +656,44 @@ def test_native_option_values_cannot_swallow_aisquare_options(native: list[str])
         assert ctx.args == native
 
 
+@pytest.mark.parametrize("native", [["-c", "model=o3"], ["-a", "never"], ["-cmodel=o3"]])
+def test_fleet_spawn_forwards_codexs_short_options(native: list[str]) -> None:
+    from typer.core import TyperGroup
+    from typer.main import get_command
+
+    root = get_command(app)
+    assert isinstance(root, TyperGroup)
+    fleet_group = root.commands["fleet"]
+    assert isinstance(fleet_group, TyperGroup)
+    with fleet_group.commands["spawn"].make_context(
+        "spawn", ["coder", "--agent", "codex", *native, "--label", "fix"]
+    ) as ctx:
+        assert ctx.params["label"] == "fix" and ctx.params["agent"] == "codex"
+        assert ctx.args == native
+
+
+def test_launch_a_is_the_account_and_names_codexs_spelling(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """launch's -a is --account (documented in its help), so Codex's -a is spelled out."""
+    from typer.core import TyperGroup
+    from typer.main import get_command
+
+    root = get_command(app)
+    assert isinstance(root, TyperGroup)
+    with root.commands["launch"].make_context(
+        "launch", ["coder", "--agent", "codex", "-a", "never", "-c", "model=o3"]
+    ) as ctx:
+        assert ctx.params["account"] == "never" and ctx.params["command"] is None
+        assert ctx.args == ["--config=model=o3"]
+    execute = Mock()
+    monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
+    monkeypatch.setattr(agent_launch, "executable", lambda selected: "/fixture/codex")
+    result = runner.invoke(app, ["launch", "coder", "--agent", "codex", "-a", "never", "fix"])
+    assert result.exit_code != 0 and "--ask-for-approval never" in result.output
+    execute.assert_not_called()
+
+
 @pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("bad", ["", "bogus", "   "])
 def test_claude_effort_validation_is_independent_of_spelling(

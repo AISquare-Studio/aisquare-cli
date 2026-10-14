@@ -44,6 +44,7 @@ from aisquare.cli.common import fail
 from aisquare.cli.native_args import NativeForwardingCommand as LaunchCommand
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import harness, orchestrator
+from aisquare.core.agent_adapters import codex
 from aisquare.core.agent_adapters.types import BadEffortError
 from aisquare.core.config import load_config
 from aisquare.core.console import stderr_console
@@ -77,6 +78,9 @@ ROLES = ("planner", "coder", "runner", "tester", "reviewer", "validator", "manag
 _SEAT = re.compile(rf"^({'|'.join(ROLES)})\d+$")
 
 DEFAULT_AGENT = "claude"
+
+#: What Codex's own -a takes, which a launch's -a (--account) is told apart from.
+_CODEX_APPROVALS = frozenset({"untrusted", "on-failure", *codex.APPROVAL_POLICIES})
 
 FLEET_ROW_TIMEOUT = 10.0
 """Seconds of LOOKS a fleet launch spends on its row before starting the agent anyway.
@@ -238,7 +242,8 @@ def launch(
             "email it is signed in as (see `aisquare accounts`). Sets CLAUDE_CONFIG_DIR and "
             "CLAUDE_CODE_TMPDIR (Claude Code) or CODEX_HOME (Codex) over the role's binding. "
             "Without it: the role's bound account, then the project default, then the "
-            "machine default.",
+            "machine default. -a is this option's, not Codex's --ask-for-approval: spell "
+            "that one out, or pass it after --.",
             metavar="ACCOUNT",
         ),
     ] = None,
@@ -344,7 +349,13 @@ def launch(
                 account, role=role, project=project, agent=selected.adapter.id
             )
         except claude_accounts_service.NoSuchAccount as exc:
-            fail(str(exc), error="unknown_account", ref=account)
+            message = str(exc)
+            if account in _CODEX_APPROVALS:
+                message += (
+                    f". launch's -a is --account: for Codex's approval policy pass "
+                    f"--ask-for-approval {account}, or -a {account} after --"
+                )
+            fail(message, error="unknown_account", ref=account)
     elif account is not None:
         fail(
             f"--account selects an account, and {selected.adapter.label} has no account slots",

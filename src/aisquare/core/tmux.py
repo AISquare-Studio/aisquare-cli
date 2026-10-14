@@ -278,6 +278,12 @@ class TmuxUnavailable(TmuxError):
     """No usable tmux: missing from PATH, or older than :data:`MIN_VERSION`."""
 
 
+class TmuxTimedOut(TmuxError):
+    """The server did not answer in time (:func:`_tmux`). Its client is killed, but what it
+    asked may be queued in a server that is wedged, which runs it once it recovers: unlike a
+    refusal, it may still happen."""
+
+
 #: How tmux says a LIVE server has no such session/window/pane — a benign
 #: "not there", distinct from the server being GONE (:data:`_ABSENT`) and from a
 #: socket that refused the probe. Measured on 3.7c: ``can't find session: NAME``
@@ -306,8 +312,8 @@ def _tmux(argv: Sequence[str], stdin: bytes | None, *, timeout: float | None = N
     own exceptions, so a caller that catches :class:`TmuxError` has caught
     everything: a binary that vanished between ``which`` and ``exec`` is
     :class:`TmuxUnavailable`; a server that stops answering (``timeout``,
-    :data:`_COMMAND_TIMEOUT` unless given) or any other OS refusal is
-    :class:`TmuxError`.
+    :data:`_COMMAND_TIMEOUT` unless given) is :class:`TmuxTimedOut`, and any other
+    OS refusal :class:`TmuxError`.
     """
     timeout = _COMMAND_TIMEOUT if timeout is None else timeout
     try:
@@ -322,7 +328,7 @@ def _tmux(argv: Sequence[str], stdin: bytes | None, *, timeout: float | None = N
     except FileNotFoundError as exc:
         raise TmuxUnavailable(f"tmux is not runnable: {exc}") from exc
     except subprocess.TimeoutExpired as exc:
-        raise TmuxError(
+        raise TmuxTimedOut(
             f"tmux did not answer within {timeout:.0f}s: {' '.join(argv[:6])} …"
         ) from exc
     except OSError as exc:

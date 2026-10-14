@@ -32,7 +32,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app as cli
 from aisquare.core.paths import remote_audit_path, remote_state_path
 from aisquare.core.store import store_session
-from aisquare.core.tmux import TmuxError
+from aisquare.core.tmux import TmuxError, TmuxTimedOut
 from aisquare.core.workspace import project_id_for
 from aisquare.models import ProjectInfo
 from aisquare.services import fleet as fleet_service
@@ -221,7 +221,8 @@ class FakePane:
 
     def __init__(self) -> None:
         self.sent: list[tuple[str, ...]] = []
-        self.fail_keys = False
+        self.fail_keys: bool | TmuxError = False
+        """``True`` refuses the keys as tmux refuses a pane it cannot find; an error, raises it."""
 
     def pane_facts(self, pane_id: str) -> SimpleNamespace:
         return SimpleNamespace(dead=False, current_command="claude", server_started=self.STARTED)
@@ -233,6 +234,8 @@ class FakePane:
         self.sent.append(("literal", text))
 
     def send_keys(self, pane_id: str, *keys: str) -> None:
+        if isinstance(self.fail_keys, TmuxError):
+            raise self.fail_keys
         if self.fail_keys:
             raise TmuxError("can't find pane: %1")
         self.sent.append(("keys", *keys))
@@ -311,6 +314,27 @@ def test_a_ctrl_c_whose_send_failed_is_no_first_press_for_the_double_press_guard
     with pytest.raises(RequestError) as again:  # the control: a delivered one still counts
         send({"agent": "coder-1", "keys": ["C-c"]})
     assert again.value.error == "double_press"
+
+
+def test_a_ctrl_c_whose_send_timed_out_counts_as_a_first_press(
+    pane: FakePane, clock: Clock
+) -> None:
+    """Review of #259, round 7, 4/9: a send tmux never answered (30 s, its client killed) may
+    still be queued in a wedged server, which delivers it once it recovers. Uncounted, the
+    next tap went through as a first press, and the two together exited Claude Code. A send
+    tmux refused still counts nothing (the test above)."""
+    send = live_writes(clock=clock.monotonic).handlers["send-keys"]
+    pane.fail_keys = TmuxTimedOut("tmux did not answer within 30s: tmux send-keys -t %1 …")
+    with pytest.raises(RequestError) as failed:
+        send({"agent": "coder-1", "keys": ["C-c"]})
+    assert (failed.value.status, failed.value.error) == (400, "write_failed")
+    pane.fail_keys = False
+    clock.advance(seconds=1)
+    with pytest.raises(RequestError) as again:
+        send({"agent": "coder-1", "keys": ["C-c"]})
+    assert again.value.error == "double_press" and pane.sent == []
+    send({"agent": "coder-1", "keys": ["C-c"], "confirm_exit": True})
+    assert pane.sent == [("keys", "C-c")]
 
 
 @pytest.mark.parametrize("hours", [-1, 1], ids=["back", "forward"])

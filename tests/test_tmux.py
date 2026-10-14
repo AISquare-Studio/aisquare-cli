@@ -50,6 +50,7 @@ from aisquare.core.tmux import (
     SocketAnswer,
     TmuxError,
     TmuxServer,
+    TmuxTimedOut,
     TmuxUnavailable,
     WindowInfo,
     _tmux,
@@ -1392,8 +1393,9 @@ def test_the_seam_maps_a_vanished_binary_to_unavailable() -> None:
 
 
 def test_the_seam_maps_a_hung_server_to_tmux_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A :class:`TmuxError` its callers catch, of its own kind: what it asked may still run."""
     monkeypatch.setattr(tmux_module, "_COMMAND_TIMEOUT", 0.2)
-    with pytest.raises(TmuxError, match="did not answer within 0s"):
+    with pytest.raises(TmuxTimedOut, match="did not answer within 0s"):
         _tmux([sys.executable, "-c", "import time; time.sleep(5)"], None)
 
 

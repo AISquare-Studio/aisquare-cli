@@ -3595,6 +3595,7 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
         input box, ahead of the line the fleet types into a resumed agent, or into its
         first dialog (review of #243, round 5).
         """
+        from aisquare.core.tmux import TmuxTimedOut
         from aisquare.services import fleet as fleet_service
 
         label = _required(body, "agent")
@@ -3652,7 +3653,14 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
                 if text:
                     server.send_literal(agent.pane_id, text)
                 if keys:
-                    server.send_keys(agent.pane_id, *keys)
+                    try:
+                        server.send_keys(agent.pane_id, *keys)
+                    except TmuxTimedOut:
+                        # Not refused, but unanswered: a wedged server may still deliver it,
+                        # and a press that may land counts (review of #259, round 7, 4/9).
+                        if exits:
+                            exit_keys.exit_keys_sent((target.id, label))
+                        raise
                     if exits:
                         exit_keys.exit_keys_sent((target.id, label))
                 if enter:

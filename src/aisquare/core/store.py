@@ -832,6 +832,13 @@ _SCHEMA_V25 = ""
 # script is empty: it is in :data:`_PRODUCTS`; a row from before it keeps NULL, which
 # every reader takes as nothing recorded.
 _SCHEMA_V26 = ""
+# v27: a project's nickname — free text a person gives it, as they name a browser tab,
+# beside the codename that names its tmux session and branches and so stays constrained.
+# The column is the whole step, so the script is empty: it is in :data:`_PRODUCTS`; a
+# row from before it keeps NULL, which every reader shows as the directory's name. The
+# ``name`` column is not it: written once as the basename and never read, it is not
+# repurposed.
+_SCHEMA_V27 = ""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -860,6 +867,7 @@ _MIGRATIONS = (
     _SCHEMA_V24,
     _SCHEMA_V25,
     _SCHEMA_V26,
+    _SCHEMA_V27,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -908,9 +916,12 @@ _PRODUCTS: dict[int, _Products] = {
         columns=(("fleet_agent", "socket_path", "TEXT"), ("fleet_agent", "boot_id", "TEXT"))
     ),
     25: _Products(columns=(("fleet_agent", "server_started_at", "TEXT"),)),
+    26: _Products(columns=(("project", "nickname", "TEXT"),)),
 }
 
-_PROJECT_COLUMNS = "id, root, linked_repos, codename, onboarded_at, group_id, position, pinned_at"
+_PROJECT_COLUMNS = (
+    "id, root, linked_repos, codename, onboarded_at, group_id, position, pinned_at, nickname"
+)
 _GROUP_COLUMNS = "id, name, position, pinned_at, collapsed, created_at"
 _DESTINATION_COLUMNS = (
     "project_id, api_url, environment, workspace_id, workspace_uid, workspace_name, "
@@ -1128,6 +1139,7 @@ class ContextStore(Protocol):
     def latest_seq(self, project_id: str) -> int: ...
     def terminal_events(self, project_id: str) -> dict[str, TeamEvent]: ...
     def set_codename(self, project_id: str, codename: str) -> ProjectInfo: ...
+    def set_project_nickname(self, project_id: str, nickname: str | None) -> ProjectInfo: ...
     def codenames_in_use(self) -> set[str]: ...
     def upsert_fleet_agent(self, agent: FleetAgent) -> FleetAgent: ...
     def get_fleet_agent(self, ref: str) -> FleetAgent | None: ...
@@ -1243,6 +1255,7 @@ def _row_to_project(row: sqlite3.Row) -> ProjectInfo:
         group_id=row["group_id"],
         position=row["position"],
         pinned_at=_maybe_dt(row["pinned_at"]),
+        nickname=row["nickname"],
     )
 
 
@@ -1746,12 +1759,25 @@ class SqliteStore:
         return _row_to_project(row) if row is not None else None
 
     def find_projects(self, term: str) -> list[ProjectInfo]:
+        """The live projects ``term`` names: an id prefix, a directory name or a codename,
+        and only when none of those match, a nickname (exactly, case and all).
+
+        The nickname comes last so that one a person types never takes a reference
+        that already worked: a nickname spelled like another project's codename or
+        folder leaves that one found, rather than both refused as ambiguous.
+        """
         rows = self._conn.execute(
             f"SELECT {_PROJECT_COLUMNS} FROM project "
             "WHERE forgotten_at IS NULL AND (id GLOB ? OR name = ? OR codename = ?) "
             "ORDER BY name",
             (_glob_prefix(term), term, term),
         ).fetchall()
+        if not rows:
+            rows = self._conn.execute(
+                f"SELECT {_PROJECT_COLUMNS} FROM project "
+                "WHERE forgotten_at IS NULL AND nickname = ? ORDER BY name",
+                (term,),
+            ).fetchall()
         return [_row_to_project(row) for row in rows]
 
     def forget_project(self, project_id: str) -> None:
@@ -2913,6 +2939,25 @@ class SqliteStore:
         project = self.get_project(project_id)
         if project is None:
             raise KeyError(project_id)
+        return project
+
+    def set_project_nickname(self, project_id: str, nickname: str | None) -> ProjectInfo:
+        """Name a project as a person sees it, or clear that name with ``None``.
+
+        Written as given: the service (``services.project.set_nickname``) trims and
+        bounds it. A forgotten project is a ``KeyError``, as an unknown one is, and
+        as :meth:`update_project_layout` refuses one: a rename from a stale frame
+        would otherwise land on the tombstone and come back with a revival.
+        """
+        cursor = self._conn.execute(
+            "UPDATE project SET nickname = ? WHERE id = ? AND forgotten_at IS NULL",
+            (nickname, project_id),
+        )
+        self._conn.commit()
+        if cursor.rowcount != 1:
+            raise KeyError(project_id)
+        project = self.get_project(project_id)
+        assert project is not None  # just written
         return project
 
     def codenames_in_use(self) -> set[str]:

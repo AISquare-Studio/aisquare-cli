@@ -231,6 +231,53 @@ def test_find_projects_by_name_and_id_prefix(store: ContextStore) -> None:
     assert store.find_projects("nope") == []
 
 
+def test_a_project_nickname_is_set_read_back_and_cleared(store: ContextStore) -> None:
+    named = store.set_project_nickname(PROJECT.id, "Auth rewrite — día 2 🚀")
+    assert named.nickname == "Auth rewrite — día 2 🚀"
+    assert named.codename is None, "the codename is not touched"
+    fetched = store.get_project(PROJECT.id)
+    assert fetched is not None and fetched.nickname == "Auth rewrite — día 2 🚀"
+    assert [p.nickname for p in store.list_projects(all=True)] == ["Auth rewrite — día 2 🚀"]
+    assert store.set_project_nickname(PROJECT.id, None).nickname is None
+
+
+def test_a_nickname_is_refused_for_a_forgotten_or_unknown_project(store: ContextStore) -> None:
+    """As ``update_project_layout`` refuses one: a rename from a stale frame would land
+    on the tombstone and come back with the revival."""
+    store.ensure_project(ProjectInfo(id="prj_gone", root=Path("/tmp/gone")))
+    store.forget_project("prj_gone")
+    with pytest.raises(KeyError):
+        store.set_project_nickname("prj_gone", "ghost")
+    with pytest.raises(KeyError):
+        store.set_project_nickname("prj_never", "ghost")
+    store.ensure_project(ProjectInfo(id="prj_gone", root=Path("/tmp/gone")))
+    revived = store.get_project("prj_gone")
+    assert revived is not None and revived.nickname is None
+
+
+def test_find_projects_matches_a_nickname_only_when_nothing_else_does(
+    store: ContextStore,
+) -> None:
+    """Exactly and case and all, after the id prefix, the folder name and the codename:
+    a nickname spelled like another project's codename leaves that project found."""
+    store.ensure_project(ProjectInfo(id="prj_other", root=Path("/tmp/other")))
+    store.set_codename(PROJECT.id, "amber-otter")
+    store.set_project_nickname("prj_other", "amber-otter")
+    assert [p.id for p in store.find_projects("amber-otter")] == [PROJECT.id]
+
+    store.set_project_nickname("prj_other", "billing: v2 [wip]")
+    assert [p.id for p in store.find_projects("billing: v2 [wip]")] == ["prj_other"]
+    assert store.find_projects("Billing: v2 [wip]") == []
+    assert store.find_projects("billing") == []
+
+    store.set_project_nickname(PROJECT.id, "billing: v2 [wip]")
+    both = store.find_projects("billing: v2 [wip]")
+    assert sorted(p.id for p in both) == sorted([PROJECT.id, "prj_other"]), "ambiguous"
+
+    store.forget_project("prj_other")
+    assert [p.id for p in store.find_projects("billing: v2 [wip]")] == [PROJECT.id]
+
+
 def test_a_key_pattern_holds_its_glob_characters_as_themselves(store: ContextStore) -> None:
     """``_glob_escape`` took ``*``, ``?`` and ``[`` out of what it was given, where its
     callers read it as standing for itself: ``x[1`` listed the keys under ``x1``, and a
@@ -383,8 +430,9 @@ def test_migrations_reach_the_current_schema_version() -> None:
     # v22 the revocations owed for keys the CLI minted (#142), v23 the one-time repair of
     # old tombstones (#139, #140), v24 the destination a project's key was attached for (#142),
     # v25 where a fleet agent's server listened and in which boot (round 25 of #257),
-    # v26 when that server started, the identity of the server its pane id names (follow-up)
-    assert version == SCHEMA_VERSION == 26
+    # v26 when that server started, the identity of the server its pane id names (follow-up),
+    # v27 a project's nickname
+    assert version == SCHEMA_VERSION == 27
 
 
 def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:
@@ -1890,6 +1938,27 @@ def test_v23_repairs_the_tombstones_older_cuts_left_holding_a_mark_or_a_place() 
         assert (kept.group_id, kept.position) == ("grp_1", 1) and kept.pinned_at is not None
     finally:
         store.close()
+
+
+def test_v27_gives_a_project_from_before_it_no_nickname_and_room_for_one() -> None:
+    _at_version(
+        26,
+        after="""
+        INSERT INTO project (id, root, name, linked_repos, created_at, codename)
+        VALUES ('prj_old', '/w/old', 'old', '[]', '2026-09-01T00:00:00+00:00', 'amber-otter');
+    """,
+    )
+
+    with store_session() as store:
+        before = store.get_project("prj_old")
+        assert before is not None
+        assert (before.nickname, before.codename) == (None, "amber-otter")
+        assert store.set_project_nickname("prj_old", "the old one").nickname == "the old one"
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    finally:
+        raw.close()
 
 
 def test_v24_marks_the_keys_bound_to_their_destinations_deployment() -> None:

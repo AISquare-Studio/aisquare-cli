@@ -122,6 +122,10 @@ class ProjectInfo(BaseModel):
     arranged, which sorts after every arranged project, by name."""
     pinned_at: datetime | None = None
     """Set when the project is pinned: it renders in the Pinned section, in pin order."""
+    nickname: str | None = None
+    """What a person calls the project, free text like a browser tab's name; ``None``
+    shows the directory's name. Unlike the codename it names nothing else, so it can
+    hold any text — see ``services.project.set_nickname``."""
 
 
 class InjectionRecord(BaseModel):

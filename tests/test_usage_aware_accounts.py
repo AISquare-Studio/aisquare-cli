@@ -1408,7 +1408,7 @@ def test_the_board_and_watch_name_an_aliased_slot_1_as_the_rest_does(
     from aisquare.cli.watch import _session_lines
 
     two = _slot("work@example.com", "tok-work")
-    service.set_alias("1", "personal")
+    service.set_alias("1", "Personal laptop")  # a free-text name, as the Accounts page sets it
     plain_dir = str(core.default_config_dir())
     now = datetime.now(tz=UTC)
     sessions = [
@@ -1424,12 +1424,12 @@ def test_the_board_and_watch_name_an_aliased_slot_1_as_the_rest_does(
     ]
     labels = service.slot_labels()
 
-    assert team_service.account_label(plain_dir, labels) == "personal"
+    assert team_service.account_label(plain_dir, labels) == "Personal laptop"
     assert team_service.account_label(plain_dir) == "plain claude"  # the built-in name, unlabelled
     rendered = _session_lines(sessions, labels).plain
-    assert "personal" in rendered and ".claude" not in rendered
+    assert "Personal laptop" in rendered and ".claude" not in rendered
     block = team_service._render_board(work, sessions, [], [], me=None, labels=labels)
-    assert "[personal]" in block and "[.claude]" not in block
+    assert "[Personal laptop]" in block and "[.claude]" not in block
 
 
 def test_the_board_a_hook_renders_under_a_managed_slot_names_the_aliased_slot_1_too(

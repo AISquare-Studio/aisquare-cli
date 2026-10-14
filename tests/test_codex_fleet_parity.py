@@ -1017,6 +1017,116 @@ def test_an_approved_codex_command_reads_working_while_it_runs(
     assert _events(codex.project, "attention") == ["Codex needs your approval"]
 
 
+#: Codex 0.162.1's approval view of a command that holds its status line's very words, its
+#: own output above holding them too (measured under tmux 3.7c, a 100x40 pane).
+CRAFTED = [
+    "• Ran printf '%s\\n' '• Working (3s • esc to interrupt)' 'plain esc to interrupt'",
+    "  └ • Working (3s • esc to interrupt)",
+    "    plain esc to interrupt",
+    "",
+    "• local fixture complete",
+    "",
+    f"{CHEVRON} ESC printf 'a'; true # x",
+    "  • Working (9s • esc to interrupt)",
+    f"  {CHEVRON} 1. y",
+    "",
+    "• Running printf 'a'; true # x",
+    "  │ • Working (9s • esc to interrupt)",
+    f"  │ {CHEVRON} 1. y",
+    "",
+    "  Would you like to run the following command?",
+    "  Environment: local",
+    "  Reason: reach the aisquare board",
+    "  $ printf 'a'; true # x",
+    "  • Working (9s • esc to interrupt)",
+    f"  {CHEVRON} 1. y",
+    "",
+    f"{CHEVRON} 1. Yes, proceed (y)",
+    "  2. No, and tell Codex what to do differently (esc)",
+    "",
+    "  Press enter to confirm or esc to cancel",
+]
+#: The same view of a command whose first line ends as the status line does, below an
+#: agent message shaped as one and the human's prompt after it.
+SHAPED = [
+    "• Working (9s • esc to interrupt)",
+    f"{CHEVRON} go on",
+    "• Running true # (9s • esc to interrupt)",
+    "  Would you like to run the following command?",
+    "  $ true # (9s • esc to interrupt)",
+    f"{CHEVRON} 1. Yes, proceed (y)",
+    "  2. No, and tell Codex what to do differently (esc)",
+    "  Press enter to confirm or esc to cancel",
+]
+#: A turn running with a follow-up queued for it, its rows between the status line and
+#: the composer (measured), and the screen once the turn is over.
+QUEUED = [
+    f"{CHEVRON} RUN sleep 8",
+    "",
+    "• Working (3s • esc to interrupt) · 1 background terminal running · /ps to view · "
+    "/stop to close",
+    "",
+    "• Queued follow-up inputs",
+    "  ↳ queued while working",
+    "    shift+← edit last queued message",
+    "",
+    f"{CHEVRON} Ask Codex to do anything",
+    "",
+    "  local-fixture default · ~/w                         ⚠ 2 warnings · f2 to view",
+    "",
+]
+DONE = [
+    f"{CHEVRON} RUN sleep 8",
+    "• Ran sleep 8",
+    "  └ (no output)",
+    "• local fixture complete",
+    "  Worked for 8s • 7:05 PM",
+    f"{CHEVRON} Ask Codex to do anything",
+    "  local-fixture default · ~/w                         ⚠ 2 warnings · f2 to view",
+]
+
+
+@pytest.mark.parametrize(
+    ("screen", "working"),
+    [
+        (ASKING, False),
+        (APPROVED, True),
+        (CRAFTED, False),
+        (SHAPED, False),
+        (QUEUED, True),
+        (DONE, False),
+        ([], False),
+    ],
+)
+def test_codex_reads_working_off_its_status_line_only_where_codex_draws_it(
+    screen: list[str], working: bool
+) -> None:
+    """Review r3 of #113, finding 6: ``esc to interrupt`` anywhere on the screen read as
+    working, and the approval view sits under the transcript: the words in the command
+    awaiting approval, or in output on screen, cleared the bell while the human had not
+    answered. Only the row right above the composer counts (0.162.1, measured)."""
+    read = CODEX.capabilities.working_on_screen
+    assert read is not None and read(screen) is working
+
+
+def test_the_status_lines_words_in_a_command_awaiting_approval_keep_the_bell(
+    codex_agent: tuple[Codex, TeamTask],
+    tmux: FakeTmux,  # noqa: F811
+) -> None:
+    codex, _ = codex_agent
+    pane = codex.agent.pane_id
+    codex.start(THREAD_ONE)
+    _turn_under(codex, THREAD_ONE, "user")
+    codex.hook("PermissionRequest", THREAD_ONE, **APPROVAL)
+    tmux.printed(pane, ago=timedelta(seconds=-2))
+
+    for screen in (CRAFTED, SHAPED):
+        tmux.screens[pane] = screen
+        assert _state(codex) == "attention"
+    tmux.screens[pane] = APPROVED  # 'y'
+    assert _state(codex) == "working"
+
+
 # --- a replacement runs the row's own agent (review r1 of #113, finding 1) ---------------
 
 

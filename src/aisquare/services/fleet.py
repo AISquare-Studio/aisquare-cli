@@ -1307,13 +1307,14 @@ def _working_on_screen(
     screen: Callable[[], Sequence[str] | None] | None,
 ) -> bool:
     """Whether ``screen`` shows the agent whose hook wrote ``session`` running a turn
-    unblocked (``AgentCapabilities.working_mark``); ``False`` when it cannot be read."""
+    unblocked (``AgentCapabilities.working_on_screen``); ``False`` when it cannot be
+    read."""
     adapter = recorded_adapter(_family(session) or agent.agent)
-    mark = adapter.capabilities.working_mark if adapter is not None else None
-    if not mark or screen is None:
+    working = adapter.capabilities.working_on_screen if adapter is not None else None
+    if working is None or screen is None:
         return False
     rows = screen()
-    return rows is not None and any(mark in row for row in rows)
+    return rows is not None and working(rows)
 
 
 def _screen_of(agent: FleetAgent, config: FleetSettings) -> list[str] | None:

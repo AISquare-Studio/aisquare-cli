@@ -168,6 +168,48 @@ _EVENTS = {
     "PostToolUse": "tool_done",
 }
 
+#: Codex's status line while a turn runs: a header (``Working``, or the one a reasoning
+#: summary gives it), the time it has run and ``esc to interrupt``, then whatever it adds
+#: (`` · 1 background terminal running · …``). Measured on 0.162.1.
+_STATUS_LINE = re.compile(r"• .+ \(\d+[hms](?: \d+[hms])* • esc to interrupt\)(?: · .*)?")
+#: What starts Codex's composer row, and every user prompt in its transcript above it:
+#: U+203A and a space.
+_CHEVRON = "\u203a "
+#: The header of the follow-ups queued during a turn, which Codex draws between its
+#: status line and its composer, each indented under it (0.162.1).
+_QUEUED = "• Queued follow-up input"
+
+
+def working_on_screen(rows: Sequence[str]) -> bool:
+    """Whether ``rows``, Codex's visible screen, show its status line where Codex draws it
+    while a turn runs unblocked (``AgentCapabilities.working_on_screen``).
+
+    Measured on 0.162.1 under tmux: the status line is the row right above the composer,
+    blank rows apart, or right above the queued follow-ups when a message waits for the
+    turn. The composer is the last row that starts with Codex's chevron (U+203A). In the
+    approval view that row is the option chosen (``1. Yes, proceed (y)``), the view's
+    rows above it every one indented: the command awaiting approval, which can hold the
+    status line's very words, among them. The transcript's rows, an agent's output and
+    its ``• Running <command>`` included, sit above both. So the words count only in that
+    place, never anywhere on the screen (review r3 of #113, finding 6).
+    """
+    lines = [row.rstrip() for row in rows if row.strip()]
+    composer = next(
+        (index for index in range(len(lines) - 1, -1, -1) if lines[index].startswith(_CHEVRON)),
+        None,
+    )
+    if composer is None:
+        return False
+    above = composer - 1
+    if above >= 0 and lines[above].startswith(" "):
+        # Only the queued follow-ups sit between the two, indented under their header.
+        while above >= 0 and lines[above].startswith(" "):
+            above -= 1
+        if above < 0 or not lines[above].startswith(_QUEUED):
+            return False
+        above -= 1
+    return above >= 0 and _STATUS_LINE.fullmatch(lines[above]) is not None
+
 
 class CodexAdapter:
     id = "codex"
@@ -210,7 +252,7 @@ class CodexAdapter:
         sandbox_permissions=True,
         sandboxes_tools=True,
         redraws_while_asking=True,
-        working_mark="esc to interrupt",
+        working_on_screen=working_on_screen,
         tool_shell_env="CODEX_THREAD_ID",
         # -c and -a as well: `fleet spawn` owns neither. `launch` owns both, and keeps
         # -c KEY=VALUE for Codex by its shape; its -a is --account (`launch --help`).

@@ -144,15 +144,16 @@ class AgentCapabilities:
     redraws_while_asking: bool = False
     """The agent's UI keeps redrawing while it waits on the human (Codex's approval view,
     every second, the screen unchanged: 0.162.1), so output in its pane answers nothing:
-    an ``attention`` row holds until one of its hooks moves the row, or its screen shows
-    :attr:`working_mark` (``services.fleet._derive``). Claude Code's prompt sits still
-    until it is answered."""
-    working_mark: str | None = None
-    """What the agent's screen shows only while a turn runs unblocked: Codex's status line
-    ``• Working (12s • esc to interrupt)``, measured on 0.162.1, which its approval view
-    replaces until the human answers and which is back the moment they do. The answer's
-    first hook is the approved command's PostToolUse, which fires only when the command
-    finishes, so without it an approved 12-minute command read ``attention`` throughout."""
+    an ``attention`` row holds until one of its hooks moves the row, or
+    :attr:`working_on_screen` says its screen shows a turn running
+    (``services.fleet._derive``). Claude Code's prompt sits still until it is answered."""
+    working_on_screen: Callable[[Sequence[str]], bool] | None = None
+    """Whether the agent's screen (its visible rows) shows a turn running unblocked:
+    Codex's status line ``• Working (12s • esc to interrupt)`` where Codex draws it,
+    measured on 0.162.1, which its approval view replaces until the human answers and
+    which is back the moment they do. The answer's first hook is the approved command's
+    PostToolUse, which fires only when the command finishes, so without it an approved
+    12-minute command read ``attention`` throughout."""
     legacy_fleet_args: bool = False
     """``fleet.roles.<role>.extra_args`` and ``permission_mode`` are in this agent's
     vocabulary (they predate adapters and are Claude Code's); another agent takes only

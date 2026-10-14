@@ -37,8 +37,9 @@ aisquare remember --user "prefer pytest over unittest"
 new session starts with what you told it to remember. `aisquare context list`
 shows what is in scope;
 [Memory](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/memory.md)
-has the rest. To install from inside Claude Code instead, see
-[the Claude Code plugin](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/claude-code-plugin.md).
+has the rest. To install from inside your agent instead, see
+[the Claude Code plugin](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/claude-code-plugin.md)
+or [the Codex plugin](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/codex-plugin.md).
 
 ## Quickstart 2: the full fleet
 

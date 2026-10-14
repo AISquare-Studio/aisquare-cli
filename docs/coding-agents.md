@@ -120,6 +120,15 @@ reviewed or corrected without losing them when saving unrelated changes.
 A damaged AISquare config renders defaults and an error; saving preserves the
 damaged file until it has been repaired and reloaded.
 
+### The Codex plugin
+
+Without the installer, Codex can take aisquare's hooks from a plugin:
+`codex plugin marketplace add AISquare-Studio/aisquare-cli`, then
+`codex plugin add aisquare@aisquare-cli`, then trust its hooks in `/hooks`.
+They run `aisquare hook codex` and stand down while `$CODEX_HOME/hooks.json`
+runs aisquare's; `aisquare agents status codex` names the route (`hooks`,
+`plugin` or `both`). See [The Codex plugin](codex-plugin.md).
+
 ### Upgrade and uninstall
 
 `aisquare upgrade` re-connects Codex's hooks as it does Claude Code's: the new

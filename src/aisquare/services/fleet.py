@@ -3184,8 +3184,10 @@ def _stop_row(
         Either read finds a pane by its id, and on a server that started after
         the row was written that pane is another agent's (:func:`_outlived`):
         the row's own is gone with the server it ran on, which is what ``None``
-        says. Asked of tmux only once a pane has answered, and strictly, as the
-        reads before it.
+        says. When the server started comes in the same answer as the pane
+        (``WindowInfo.server_started``, ``PaneFacts.server_started``): asked in a
+        second ``display-message`` of its own, every look of a stop's grace period
+        cost one more process (review of #259, round 3).
 
         Neither read names the pane when tmux found no server at the socket, and
         a socket file taken from under its server is one of those: that is not a
@@ -3196,7 +3198,7 @@ def _stop_row(
         """
         for window in srv.windows_or_raise(session):
             if window.pane_id == agent.pane_id:
-                if _outlived(agent, srv.started_at()):
+                if _outlived(agent, window.server_started):
                     _refuse_unless_gone(agent, srv)
                     return None
                 return window
@@ -3204,7 +3206,7 @@ def _stop_row(
         if facts is None:
             _refuse_unless_gone(agent, srv)
             return None
-        if _outlived(agent, srv.started_at()):
+        if _outlived(agent, facts.server_started):
             _refuse_unless_gone(agent, srv)
             return None
         return WindowInfo(
@@ -5321,12 +5323,13 @@ def _pane_alive(agent: FleetAgent) -> bool:
 
     A pane under the row's id on a server younger than the row is another
     agent's (:func:`_outlived`), so it is not the row's pane alive. When the
-    server started is a second question, put once the pane has answered alive,
-    and a refusal of that one judges nothing, as a start tmux does not report
-    does. Read as "cannot say", it sent the restart of a RUNNING agent down
-    the other branch: stopped as ``fleet stop`` stops it, its claims released
-    and its exit announced, then replaced with no hand-over (review of the
-    #203 final-round fixes, F5).
+    server started comes in the same answer (``PaneFacts.server_started``; a
+    second ``display-message`` before, review of #259, round 3), and a start tmux
+    does not report judges nothing. A refusal of that second question was read
+    as "cannot say" once, and sent the restart of a RUNNING agent down the other
+    branch: stopped as ``fleet stop`` stops it, its claims released and its exit
+    announced, then replaced with no hand-over (review of the #203 final-round
+    fixes, F5).
     """
     srv = server_of(agent)
     try:
@@ -5335,11 +5338,7 @@ def _pane_alive(agent: FleetAgent) -> bool:
         return False
     if facts is None or facts.dead:
         return False
-    try:
-        started = srv.started_at()
-    except TmuxError:
-        started = None
-    return not _outlived(agent, started)
+    return not _outlived(agent, facts.server_started)
 
 
 def project_of(agent: FleetAgent) -> ProjectInfo:

@@ -712,17 +712,24 @@ def test_spawn_window_refuses_a_cwd_tmux_would_replace_with_home(
 def test_list_windows_parses_each_pane_and_skips_a_malformed_line(
     fake_bin: Path, conf: Path
 ) -> None:
-    live = _SEP.join(["@0", "manager", "%0", "0", "", "claude", "1"])
-    dead = _SEP.join(["@1", "coder-1", "%1", "1", "3", "sh", "0"])
+    live = _SEP.join(["@0", "manager", "%0", "0", "", "claude", "1", "1760346007"])
+    dead = _SEP.join(["@1", "coder-1", "%1", "1", "3", "sh", "0", "1760346007"])
+    old = _SEP.join(["@3", "coder-2", "%3", "0", "", "sh", "0", ""])  # a tmux without it
     broken = _SEP.join(["@2", "only-two-fields"])
-    fake = FakeTmux(Completed(0, f"{live}\n{dead}\n{broken}\n", ""))
+    fake = FakeTmux(Completed(0, f"{live}\n{dead}\n{old}\n{broken}\n", ""))
     windows = _server(fake, fake_bin, conf).list_windows("asq-amber-fox")
     assert fake.commands() == [
         ["list-panes", "-s", "-t", "=asq-amber-fox", "-F", tmux_module._WINDOW_FORMAT]
     ]
+    # When the server started comes in the same answer, so a listing says which server's
+    # lifetime its pane ids belong to without a second process (review of #259, round 3).
+    started = datetime.fromtimestamp(1760346007, tz=UTC)
     assert windows == [
-        WindowInfo("asq-amber-fox", "@0", "manager", "%0", False, None, "claude", True),
-        WindowInfo("asq-amber-fox", "@1", "coder-1", "%1", True, 3, "sh", False),
+        WindowInfo(
+            "asq-amber-fox", "@0", "manager", "%0", False, None, "claude", True, None, started
+        ),
+        WindowInfo("asq-amber-fox", "@1", "coder-1", "%1", True, 3, "sh", False, None, started),
+        WindowInfo("asq-amber-fox", "@3", "coder-2", "%3", False, None, "sh", False),
     ]
 
     gone = FakeTmux(Completed(1, "", "can't find session: asq-amber-fox"))

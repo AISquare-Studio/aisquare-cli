@@ -227,6 +227,7 @@ _WINDOW_FIELDS = (
     "pane_dead_status",
     "pane_current_command",
     "window_activity_flag",
+    "start_time",
 )
 _WINDOW_FORMAT = _SEP.join(f"#{{{name}}}" for name in _WINDOW_FIELDS)
 _VERSION = re.compile(r"(\d+)\.(\d+)")
@@ -665,6 +666,11 @@ class WindowInfo:
     landed, when there was none to make, and on every window a listing reports.
     The spawn fails open on it; this is how the refusal still reaches the
     caller's receipt (review of #162, round 1)."""
+    server_started: datetime | None = None
+    """When the server that listed the window started (``#{start_time}``), as
+    :meth:`TmuxServer.started_at` says it, ``None`` when tmux does not say: asked in the same
+    ``list-panes``, as :attr:`PaneFacts.server_started` is, so a listing says which server's
+    lifetime its pane ids belong to without a second process (review of #259, round 3)."""
 
 
 def _int(value: str, default: int = 0) -> int:
@@ -1308,6 +1314,7 @@ class TmuxServer:
                     dead_status=_optional_int(values["pane_dead_status"]),
                     current_command=values["pane_current_command"],
                     activity=values["window_activity_flag"] == "1",
+                    server_started=_epoch(values["start_time"]),
                 )
             )
         return windows

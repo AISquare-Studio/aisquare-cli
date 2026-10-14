@@ -365,6 +365,7 @@ class FakeTmux(TmuxServer):
             # Faithful to tmux 3.7c: the flag is set from creation and never clears
             # on a detached session, so it must not be what the service reads.
             activity=True,
+            server_started=self.started,  # asked in the same `list-panes`, as the real one
         )
 
     def pane_facts(self, pane_id: str) -> PaneFacts | None:
@@ -2924,6 +2925,46 @@ def test_a_held_row_is_held_in_its_servers_view_not_absent_from_it(
     assert fleet_service._end_dead_rows([coder], dead) == []
     with store_session() as store:
         assert [a.id for a in store.fleet_agents(project.id, live_only=True)] == [coder.id]
+
+
+def test_a_stop_and_a_restart_read_the_servers_start_in_the_answer_that_names_the_pane(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 3: `_stop_row`'s look at the window asked `srv.started_at()` in
+    a `display-message` of its own each time the pane answered, on every poll of a stop's
+    grace period, and `_pane_alive` (whether a restart hands over) did the same after
+    `pane_facts`, though tmux says when its server started in the answer that names the
+    pane (`#{start_time}`: `PaneFacts.server_started`, and now `WindowInfo.server_started`).
+    Both read it there, and still judge a pane on another server the same way."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    coder = _coder(project)
+    tmux.set_command(coder.pane_id, "claude")
+    asked: list[datetime | None] = []
+    started_at = tmux.started_at
+
+    def counted() -> datetime | None:
+        asked.append(started_at())
+        return asked[-1]
+
+    monkeypatch.setattr(tmux, "started_at", counted)
+
+    assert fleet_service._pane_alive(coder) is True
+    tmux.honours_exit = False  # it lets its grace run out: every poll looks at the window
+    receipt = fleet_service._stop_row(project, coder, grace=2.0)
+
+    assert receipt.agent.ended_at is not None and tmux.killed == [coder.pane_id]
+    assert asked == [], "not one display-message for the start"
+    # The start read there still decides: on a server that took the socket, a pane under
+    # the row's id is another agent's, not the row's alive.
+    other = _coder(project)
+    newcomer = FakeTmux()
+    newcomer.started = tmux.started + timedelta(minutes=5)
+    newcomer.spawn_window("asq-elsewhere", name="x", cwd=project.root, command=["claude"])
+    newcomer.spawn_window("asq-elsewhere", name="y", cwd=project.root, command=["claude"])
+    assert other.pane_id in newcomer.facts
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: newcomer)
+    assert fleet_service._pane_alive(other) is False
 
 
 def _planned_ends(plan: fleet_service.ShutdownPlan) -> dict[str, str]:

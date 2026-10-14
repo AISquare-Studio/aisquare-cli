@@ -7262,14 +7262,13 @@ def start_remote_server(dist_dir: Path | None = None, port: int = DEFAULT_PORT) 
     if page_problem is not None:
         raise NoRemotePage(page_problem)
     state = runtime()
-    claimed = False
     try:
         with _lock:
             if _server is not None and _server.running:
                 return state.connection_info(_server.port)
             if any(stopped.winding_down for stopped in _winding_down):
                 raise RemoteWindingDown(_remote_winding_down())
-            claimed = _claim_remote_home(state, by="panel", port=port)
+            _claim_remote_home(state, by="panel", port=port)
             state.remote_coming_on()
             _remote_auto_off_missed(state)
             app = build_remote_app(state, dist_dir=dist_dir)
@@ -7277,8 +7276,11 @@ def start_remote_server(dist_dir: Path | None = None, port: int = DEFAULT_PORT) 
             server.start_serving()
             _server = server
     except BaseException:
-        if claimed:
-            _release_remote_home()
+        # Whoever took the claim: one this process held already (its last server ended
+        # without a stop) has just had its note rewritten for this port, which never came
+        # up, and kept it, with the home, until asq quit (review of #259, round 4). Kept
+        # while a server of this process still serves or winds down.
+        _release_remote_home()
         raise
     _schedule_flush()
     return state.connection_info(port)

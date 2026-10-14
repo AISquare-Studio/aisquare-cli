@@ -1433,6 +1433,48 @@ def test_the_note_says_this_processs_latest_claim_and_goes_with_its_lock(
         remote_server._release_remote_home()
 
 
+def test_a_start_that_fails_lets_the_home_go_once_no_server_of_this_process_serves(
+    isolated_home: Path, dist: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 4: the panel's last server ended without a stop, so this process
+    still held the home. A start on a busy port rewrote the note for that port, then failed,
+    and only a start that took the lock itself let the home go: the claim and a note naming
+    a port nobody served on stayed until asq quit, and `upgrade` and `uninstall` named it
+    (`uninstall` refusing). A failed start lets the home go unless a server still serves."""
+    monkeypatch.setattr(remote_server, "_runtime", None)
+    monkeypatch.setattr(remote_server, "_server", None)
+    state = remote_server.runtime()
+    note = remote_state_path().with_name(remote_server.SERVE_NOTE_NAME)
+    with remote_server._lock:
+        assert remote_server._claim_remote_home(state, by="panel", port=8750) is True
+    monkeypatch.setattr(remote_server, "_server", SimpleNamespace(running=False))
+    try:
+        with socket.socket() as taken:
+            taken.bind(("127.0.0.1", 0))
+            taken.listen(1)
+            port = int(taken.getsockname()[1])
+            with pytest.raises(remote_server.RemoteError, match="did not come up"):
+                remote_server.start_remote_server(dist, port=port)
+        assert remote_server._home_claim is None, "the home stayed claimed"
+        assert not note.exists(), "the note names a port nobody serves on"
+    finally:
+        remote_server._release_remote_home()
+
+    # Control: a server this process stopped, still finishing a phone's write, keeps the home
+    # through a start that fails for it (RemoteWindingDown), as through any other.
+    with remote_server._lock:
+        assert remote_server._claim_remote_home(state, by="panel", port=8750) is True
+    monkeypatch.setattr(remote_server, "_winding_down", [SimpleNamespace(winding_down=True)])
+    try:
+        with pytest.raises(remote_server.RemoteWindingDown):
+            remote_server.start_remote_server(dist, port=8751)
+        assert remote_server._home_claim is not None and note.exists()
+    finally:
+        monkeypatch.setattr(remote_server, "_winding_down", [])
+        remote_server._release_remote_home()
+    assert remote_server._home_claim is None
+
+
 def test_start_without_the_extra_says_what_to_install(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         remote_server, "_remote_dependency_error", lambda: "the remote extra is not installed"

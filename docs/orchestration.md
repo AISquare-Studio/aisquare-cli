@@ -429,9 +429,10 @@ printed command hold the path and never the value, and a file that cannot be
 read refuses the launch. A relative PATH is kept as the full path of the file
 `team bind` read, since each launch runs in its own directory (a worktree, the
 project), and one written into config.toml by hand refuses the launch. The
-printed command reads the file when it is pasted, as
-the launch does: in a subshell, its carriage returns dropped, and a file that is
-empty or gone by then stops the line before the role starts. The reviewer's
+printed command reads the file when it is pasted, as the launch does: in a
+subshell, its carriage returns and any byte-order mark (which Windows editors
+and PowerShell write) dropped, a token saved as UTF-16 read too, and a file that
+is empty or gone by then stops the line before the role starts. The reviewer's
 GitHub token is what it is for (see
 [A reviewer that cannot push](fleet.md#a-reviewer-that-cannot-push)).
 

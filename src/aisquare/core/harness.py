@@ -1205,9 +1205,17 @@ def read_env_file(path: str) -> str:
     dropped, as ``$(cat path)`` gives it. ``ValueError`` saying what is wrong with the file
     when it cannot be read or holds nothing: an empty value would launch the role without
     the secret it was bound to carry, as a blank ``CLAUDE_CONFIG_DIR`` would start another
-    login (:func:`expand_value`)."""
+    login (:func:`expand_value`).
+
+    Decoded by the byte-order mark it opens with (``config.decode_by_bom``): a token saved by
+    Windows PowerShell 5.1's ``Set-Content -Encoding UTF8`` or an older Notepad opens with
+    U+FEFF, which ``strip()`` keeps, and the role launched with ``GH_TOKEN='\\ufeffghp_…'``,
+    every ``gh`` and ``git`` call then failing to authenticate with nothing to say why
+    (review of #259, round 3). One saved as UTF-16 (PowerShell 5.1's ``>``) reads too."""
+    from aisquare.core.config import decode_by_bom  # lazy: config imports harness back
+
     try:
-        value = Path(path).read_text(encoding="utf-8").rstrip("\r\n")
+        value = decode_by_bom(Path(path).read_bytes()).rstrip("\r\n")
     except (OSError, UnicodeDecodeError) as exc:
         reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc)
         raise ValueError(f"cannot be read ({reason})") from exc

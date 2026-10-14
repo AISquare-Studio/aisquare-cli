@@ -618,15 +618,24 @@ def _reading_env_files(command: str, env_files: Mapping[str, str]) -> str:
     printed started the role with ``KEY`` empty, the other login the refusal exists to
     prevent, said by a ``cat:`` line alone; and one saved with CRLF gave ``KEY=token\\r``
     where ``--exec`` and ``fleet spawn`` give ``token`` (review of #259, round 2).
+
+    And without the byte-order mark ``launch`` drops (``config.decode_by_bom``): UTF-8's, and
+    UTF-16's once its NULs are dropped, which leaves an ASCII token as it was saved. Kept, a
+    file saved by PowerShell 5.1 gave ``KEY=\\ufefftoken`` (review of #259, round 3).
     """
     if not env_files:
         return command
     reads = [
-        f"{key}=\"$(tr -d '\\r' < {shlex.quote(path)})\" && "
-        f': "${{{key}:?its file is empty or cannot be read}}" && export {key}'
+        f"{key}=\"$(tr -d '\\r\\000' < {shlex.quote(path)})\" && "
+        + "".join(f'{key}="${{{key}#"$(printf \'{mark}\')"}}" && ' for mark in _BYTE_ORDER_MARKS)
+        + f': "${{{key}:?its file is empty or cannot be read}}" && export {key}'
         for key, path in env_files.items()
     ]
     return f"({' && '.join([*reads, command])})"
+
+
+_BYTE_ORDER_MARKS = ("\\357\\273\\277", "\\377\\376", "\\376\\377")
+"""UTF-8's, and UTF-16's little- and big-endian marks, as ``printf`` spells their bytes."""
 
 
 @app.command("harness")

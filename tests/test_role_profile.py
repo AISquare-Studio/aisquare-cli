@@ -715,7 +715,7 @@ class TestEnvFiles:
         machine = runner.invoke(app, ["--json", "team", "spawn", "reviewer", "--no-probe"])
 
         assert human.exit_code == 0 and machine.exit_code == 0, human.output + machine.output
-        assert f"GH_TOKEN=\"$(tr -d '\\r' < {shlex.quote(str(token))})\"" in human.output
+        assert f"GH_TOKEN=\"$(tr -d '\\r\\000' < {shlex.quote(str(token))})\"" in human.output
         assert "GH_TOKEN [file]" in human.output
         assert TOKEN not in human.output and TOKEN not in machine.output
         assert json.loads(machine.stdout)["env_files"] == {"GH_TOKEN": str(token)}
@@ -759,6 +759,18 @@ class TestEnvFiles:
             return done.returncode, done.stdout, done.stderr
 
         assert paste() == (0, f"[{TOKEN}]", ""), "the value as launch reads it, no CR"
+        # Review of #259, round 3: a token saved with a byte-order mark (PowerShell 5.1's
+        # `Set-Content -Encoding UTF8`, an older Notepad; its `>` writes UTF-16) launched as
+        # `﻿<token>`, which every `gh` call refused. Read without it, here and at launch.
+        for encoding in ("utf-8-sig", "utf-16", "utf-16-le", "utf-16-be"):
+            mark = "﻿" if encoding in ("utf-16-le", "utf-16-be") else ""
+            token.write_bytes(f"{mark}{TOKEN}\r\n".encode(encoding))
+            assert token.read_bytes()[:2] in (b"\xef\xbb", b"\xff\xfe", b"\xfe\xff"), encoding
+            assert harness.resolve_profile("reviewer").file_env == {"GH_TOKEN": TOKEN}, encoding
+            assert paste() == (0, f"[{TOKEN}]", ""), encoding
+        token.write_bytes(b"\xef\xbb\xbf\n")  # a mark and nothing else: empty, both ways
+        assert harness.resolve_profile("reviewer").refusal is not None
+        assert paste()[:2] == (1, "")
         token.write_text("\n", encoding="utf-8")
         status, out, err = paste()
         assert (status != 0, out) == (True, ""), "an emptied file starts nothing"

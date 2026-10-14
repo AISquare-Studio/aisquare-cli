@@ -2667,6 +2667,42 @@ def test_spawn_refuses_to_start_a_server_at_a_socket_a_running_server_lost(
     assert fleet_service.spawn(project, "coder").agent.label == "coder-2"
 
 
+def test_the_rows_a_new_server_would_answer_for_are_read_in_one_query(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    plain_project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 4: before a server starts at the fleet's socket, every live row
+    recorded there is asked about, in every project, forgotten ones' included. That walked
+    `list_projects` and ran one `fleet_agents` query per project ever registered, captured
+    directories included, twice per spawn. One query now, and the refusal still names a
+    forgotten project's row by its project."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    coder = _coder(project)
+    other = fleet_service.spawn(plain_project, "manager").agent
+    with store_session() as store:
+        store.forget_project(plain_project.id)
+    tmux.running = False  # no tmux client reaches the server…
+    tmux.socket_file = False  # …because its socket file is gone, not because it exited
+
+    with store_session() as store:
+        asked: list[str] = []
+        store._conn.set_trace_callback(asked.append)  # type: ignore[attr-defined]
+        try:
+            rows = list(fleet_service._live_rows_here(store, tmux, fleet_service.settings()))
+        finally:
+            store._conn.set_trace_callback(None)  # type: ignore[attr-defined]
+
+    assert {agent.id: answer for agent, answer in rows} == {coder.id: "gone", other.id: "gone"}
+    reads = [sql for sql in asked if sql.lstrip().upper().startswith("SELECT")]
+    assert len(reads) == 1 and "FROM fleet_agent WHERE ended_at IS NULL" in reads[0], reads
+    with pytest.raises(FleetError, match="lost its socket file") as refused:
+        fleet_service.spawn(project, "coder")
+    assert f"manager ({plain_project.root.name})" in str(refused.value), "forgotten, named"
+
+
 def test_a_spawn_over_a_server_that_exited_leaves_its_rows_lost_not_held(
     tmux: FakeTmux,
     claude_on_path: Path,

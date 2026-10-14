@@ -1132,6 +1132,7 @@ class ContextStore(Protocol):
     def upsert_fleet_agent(self, agent: FleetAgent) -> FleetAgent: ...
     def get_fleet_agent(self, ref: str) -> FleetAgent | None: ...
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
+    def live_fleet_agents(self) -> list[FleetAgent]: ...
     def fleet_agents_ended_since(self, project_id: str, since: datetime) -> list[FleetAgent]: ...
     def fleet_agent_for_session(self, project_id: str, session_id: str) -> FleetAgent | None: ...
     def ui_state(self, key: str) -> str | None: ...
@@ -3482,6 +3483,19 @@ class SqliteStore:
             f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent "
             f"WHERE project_id = ?{clause} ORDER BY created_at, id",
             (project_id,),
+        ).fetchall()
+        return [_row_to_fleet_agent(row) for row in rows]
+
+    def live_fleet_agents(self) -> list[FleetAgent]:
+        """Every live fleet row, in every project, forgotten ones' included, oldest first.
+
+        One query, for a question about the tmux server every project shares (whose rows a
+        server started at a socket path would answer for): asked project by project, it
+        ran one query per project ever registered, captured directories included, and a
+        spawn asks it twice (review of #259, round 4)."""
+        rows = self._conn.execute(
+            f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent "
+            "WHERE ended_at IS NULL ORDER BY created_at, id"
         ).fetchall()
         return [_row_to_fleet_agent(row) for row in rows]
 

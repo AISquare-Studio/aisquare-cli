@@ -2265,33 +2265,33 @@ def _take_over(agent: FleetAgent, previous: str, session_id: str, notes: list[st
 
 def _live_rows_here(
     store: ContextStore, srv: TmuxServer, config: FleetSettings
-) -> Iterator[tuple[ProjectInfo, FleetAgent, SocketAnswer | None]]:
+) -> Iterator[tuple[FleetAgent, SocketAnswer | None]]:
     """Every live row recorded at this shell's socket path, in every project, with what the
     one rule says of its agent (:func:`~aisquare.core.tmux.server_may_run`): the rows a
     server started at that path would answer for.
 
     The server is shared by every project, so every project's rows are asked, forgotten
-    ones' included; a row asked at another path (:func:`_address`) is another server's. The
-    one walk :func:`_refuse_a_freed_socket` and :func:`_forget_an_exited_server` take, so
-    the two cannot come to count different rows (review of #259, round 3).
+    ones' included, in one query (``live_fleet_agents``; a query per project before round 4
+    of #259); a row asked at another path (:func:`_address`) is another server's. The one
+    walk :func:`_refuse_a_freed_socket` and :func:`_forget_an_exited_server` take, so the
+    two cannot come to count different rows (review of #259, round 3).
     """
     this_boot = tmux_core.boot_id()
     here = _Address(config.tmux_socket)
     reads = tmux_core.SocketReads()  # one socket: asked once, not per row
-    for current in store.list_projects(include_forgotten=True):
-        for agent in store.fleet_agents(current.id, live_only=True):
-            if _address(agent, config) != here:
-                continue
-            answer = tmux_core.server_may_run(
-                srv,
-                agent.socket_path,
-                agent.boot_id,
-                this_boot,
-                agent.created_at,
-                agent.server_started_at,
-                reads=reads,
-            )
-            yield current, agent, answer
+    for agent in store.live_fleet_agents():
+        if _address(agent, config) != here:
+            continue
+        answer = tmux_core.server_may_run(
+            srv,
+            agent.socket_path,
+            agent.boot_id,
+            this_boot,
+            agent.created_at,
+            agent.server_started_at,
+            reads=reads,
+        )
+        yield agent, answer
 
 
 def _refuse_a_freed_socket(srv: TmuxServer, config: FleetSettings) -> None:
@@ -2316,13 +2316,11 @@ def _refuse_a_freed_socket(srv: TmuxServer, config: FleetSettings) -> None:
     except TmuxUnavailable:
         return  # no POSIX uid: no tmux server can exist here
     with store_session() as store:
-        stranded = [
-            f"{agent.label} ({_name(current)})"
-            for current, agent, answer in _live_rows_here(store, srv, config)
-            if answer == "gone"
-        ]
-    if not stranded:
-        return
+        gone = [agent for agent, answer in _live_rows_here(store, srv, config) if answer == "gone"]
+        if not gone:
+            return
+        names = {known.id: _name(known) for known in store.list_projects(include_forgotten=True)}
+    stranded = [f"{row.label} ({names.get(row.project_id, row.project_id)})" for row in gone]
     one = len(stranded) == 1
     raise FleetError(
         f"not started: the tmux server that {', '.join(stranded)} {'runs' if one else 'run'} "
@@ -2368,7 +2366,7 @@ def _forget_an_exited_server(srv: TmuxServer, config: FleetSettings) -> list[Fle
         return []  # no POSIX uid: no tmux server can exist here
     forgotten: list[FleetAgent] = []
     with store_session() as store:
-        for _, agent, answer in _live_rows_here(store, srv, config):
+        for agent, answer in _live_rows_here(store, srv, config):
             started = agent.server_started_at
             if (
                 answer is None

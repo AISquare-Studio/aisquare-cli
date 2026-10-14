@@ -2027,6 +2027,9 @@ def test_help_opens_from_the_sidebar_and_closes(tmp_path: Path, script: Script) 
     # the one place they are found (review of #171, round 1).
     for key in ("shift+↑ ↓", "g p space", "shift+click", "drag title"):
         assert key in keys, key
+    # What sits beside and under ⚙ Settings is explained here too (review of #261, m2/m9).
+    assert "✗ 1  ⚠ 2" in keys and "what the doctor's last run found" in keys
+    assert "usage could not be read" in keys and "accounts that need a login" in keys
 
 
 def test_help_opens_from_the_board_and_explains_every_task_icon(

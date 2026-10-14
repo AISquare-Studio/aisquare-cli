@@ -6,6 +6,9 @@ click or Enter on a task or a feed line shows its full content below; ``d``
 flips the table to the done archive; ``o`` opens the author session's
 transcript at the selected moment; ``v`` freezes the feed into selectable text;
 ``a`` toggles autoscroll; ``b`` hides the board column; ``r`` refreshes now.
+Every line between two parts is a ``Divider``: drag it to resize, double-click
+it to put the stylesheet's size back; each size is remembered in ``state.json``
+under one key for every project's board.
 
 Lifted out of ``cli.watch`` (docs/plans/fleet-tui.md §4.2, §9 Phase 6) so the
 fleet UI's Project view can show a project's board as one tab while
@@ -42,6 +45,7 @@ from textual import events, on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.coordinate import Coordinate
+from textual.geometry import Size
 from textual.message import Message
 from textual.widgets import DataTable, OptionList, Static
 from textual.widgets.option_list import Option, OptionDoesNotExist
@@ -49,6 +53,7 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli import watch
 from aisquare.cli.common import local_time
+from aisquare.cli.ui.divider import Divider, floor_of
 from aisquare.core.store import unmet_needs
 from aisquare.models import CLOSED_STATUSES, ProjectInfo, TeamEvent, TeamSession, TeamTask
 from aisquare.services import claude_accounts as accounts_service
@@ -64,6 +69,12 @@ the board column is 48 wide and a feed narrower than ~32 shows nothing readable.
 Measured against the PANEL, not the terminal — inside the fleet UI a 30-column
 sidebar sits beside it, and at 92 a 120-column terminal never showed the tasks."""
 TRANSCRIPT_HINT = "\npress o to open the transcript at this moment"
+COLUMN_WIDTH_KEY = "board_column_width"
+"""The ``state.json`` key of the board column's width (the line beside the live feed)."""
+TEAM_HEIGHT_KEY = "board_team_height"
+"""The ``state.json`` key of the team block's height (the line above the tasks)."""
+DETAIL_HEIGHT_KEY = "board_detail_height"
+"""The ``state.json`` key of the detail pane's height (the line above it)."""
 
 
 class PickableTable(DataTable[Text]):
@@ -109,29 +120,75 @@ class PickableTable(DataTable[Text]):
         self.post_message(self.RowPicked(key))
 
 
+class TeamBlock(Static):
+    """The team block: as tall as its lines, up to :attr:`AUTO_ROWS` — until a drag says otherwise.
+
+    The cap was the stylesheet's ``max-height: 10``; the column now writes the
+    block's ``max-height`` as the room the tasks leave it (:class:`BoardColumn`),
+    so a dragged height may go past ten rows. Capping the AUTO height here keeps
+    the undragged block what it was — Textual asks for the content height only
+    when the height is ``auto`` — and a height the divider set is the user's.
+    """
+
+    AUTO_ROWS: ClassVar[int] = 8
+    """Content rows an undragged block shows: ten rows less its border."""
+
+    def get_content_height(self, container: Size, viewport: Size, width: int) -> int:
+        return min(super().get_content_height(container, viewport, width), self.AUTO_ROWS)
+
+
+class BoardColumn(Vertical):
+    """The board column: the team block over the tasks, and the line between them.
+
+    The column keeps the team block's ceiling — its height less the line and
+    the rows the tasks must keep — as the block's ``max-height`` whenever its
+    own height changes: the panel resizing, or the detail pane's line moving.
+    Textual then clamps the block on every layout pass, as ``app.Panes`` does
+    for the navigator.
+    """
+
+    def on_resize(self, event: events.Resize) -> None:
+        if event.size.height <= 0:
+            return  # behind a hidden tab: nothing to fit, and the next show resizes
+        sessions = self.query_children("#sessions").first()
+        tasks = self.query_children("#tasks").first()
+        floor = floor_of(sessions, "height")
+        sessions.styles.max_height = max(floor, event.size.height - 1 - floor_of(tasks, "height"))
+
+
 class BoardPanel(Vertical):
     """Sessions, tasks, the live feed and a detail pane for one project's board.
 
     ``project`` may be ``None``: the board then resolves from the process cwd
     on every read, which is what ``board -w`` does when its own resolution
     failed at start. ``interval`` is the refresh period in seconds.
+
+    Three lines resize it, each a :class:`Divider` that finds its target among
+    its own siblings — the fleet UI mounts a board per project at once, and the
+    ids repeat: the column beside the feed, the detail pane below everything,
+    and the team block over the tasks (:class:`BoardColumn`). The panel keeps
+    the first two ceilings current from its own size, so the feed and the
+    board above the detail pane keep their stylesheet minimums whatever the
+    drag or the terminal does.
     """
 
     DEFAULT_CSS = """
     BoardPanel { height: 1fr; }
-    BoardPanel #board-main { height: 1fr; }
+    BoardPanel #board-main { height: 1fr; min-height: 8; }
     BoardPanel #board-side { width: 48; min-width: 32; }
     BoardPanel #board-side.collapsed { display: none; }
-    BoardPanel #sessions { height: auto; max-height: 10; border: round $primary;
+    BoardPanel #side-divider.collapsed { display: none; }
+    BoardPanel #sessions { height: auto; min-height: 3; border: round $primary;
                            padding: 0 1; }
-    BoardPanel #tasks { height: 1fr; border: round $primary; }
-    BoardPanel #feedpane { width: 1fr; }
+    BoardPanel #tasks { height: 1fr; min-height: 4; border: round $primary; }
+    BoardPanel #feedpane { width: 1fr; min-width: 32; }
     BoardPanel #feed { height: 1fr; border: round $secondary; }
     BoardPanel #feed.hidden { display: none; }
     BoardPanel #feedtext { height: 1fr; border: round $success; display: none;
                            padding: 0 1; }
     BoardPanel #feedtext.active { display: block; }
-    BoardPanel #detailwrap { height: 8; border: heavy $warning; padding: 0 1; }
+    BoardPanel #detailwrap { height: 8; min-height: 3; border: heavy $warning;
+                             padding: 0 1; }
     """
     BINDINGS: ClassVar = [
         ("b", "toggle_board", "board on/off"),
@@ -189,13 +246,34 @@ class BoardPanel(Vertical):
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="board-main"):
-            with Vertical(id="board-side"):
-                yield Static(id="sessions")
+            with BoardColumn(id="board-side"):
+                yield TeamBlock(id="sessions")
+                yield Divider(
+                    "#sessions",
+                    orientation="horizontal",
+                    state_key=TEAM_HEIGHT_KEY,
+                    what="the board's team height",
+                    id="team-divider",
+                )
                 yield PickableTable(id="tasks", cursor_type="row")
+            yield Divider(
+                "#board-side",
+                state_key=COLUMN_WIDTH_KEY,
+                what="the board column's width",
+                id="side-divider",
+            )
             with Vertical(id="feedpane"):
                 yield OptionList(id="feed")
                 with VerticalScroll(id="feedtext"):
                     yield Static(id="feedstatic")
+        yield Divider(
+            "#detailwrap",
+            orientation="horizontal",
+            side="after",
+            state_key=DETAIL_HEIGHT_KEY,
+            what="the board's detail height",
+            id="detail-divider",
+        )
         with VerticalScroll(id="detailwrap"):
             yield Static(id="detail")
 
@@ -553,14 +631,36 @@ class BoardPanel(Vertical):
         self.notify(f"copied {len(selected)} chars", timeout=3, markup=False)
 
     def action_toggle_board(self) -> None:
-        self.query_one("#board-side").toggle_class("collapsed")
+        self._collapse(not self.query_one("#board-side").has_class("collapsed"))
 
     def action_refresh_now(self) -> None:
         self.refresh_data()
 
+    def _collapse(self, collapsed: bool) -> None:
+        """Hide (or show) the board column and the line that resizes it, together."""
+        self.query_one("#board-side").set_class(collapsed, "collapsed")
+        self.query_one("#side-divider").set_class(collapsed, "collapsed")
+
     def on_resize(self, event: events.Resize) -> None:
+        self._collapse(event.size.width < COLLAPSE_BELOW)
+        if event.size.width > 0 and event.size.height > 0:
+            self._fit(event.size.width, event.size.height)
+
+    def _fit(self, width: int, height: int) -> None:
+        """Write the column's and the detail pane's ceilings from the panel's size.
+
+        Each is the panel less its line and what the other side must keep —
+        the feed's ``min-width``, the board's ``min-height`` above the detail
+        pane — so Textual clamps the dragged part on every layout pass and a
+        shrinking terminal re-clamps it with no handler. Too small for both
+        minimums, the dragged part's floor wins.
+        """
         side = self.query_one("#board-side")
-        if event.size.width < COLLAPSE_BELOW:
-            side.add_class("collapsed")
-        else:
-            side.remove_class("collapsed")
+        side.styles.max_width = max(
+            floor_of(side), width - 1 - floor_of(self.query_one("#feedpane"))
+        )
+        detail = self.query_one("#detailwrap")
+        detail.styles.max_height = max(
+            floor_of(detail, "height"),
+            height - 1 - floor_of(self.query_one("#board-main"), "height"),
+        )

@@ -26,6 +26,7 @@ here is about widgets.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sqlite3
 import sys
@@ -37,17 +38,28 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 import pytest
+from textual import events
 from textual.app import App, ComposeResult
 from textual.geometry import Region
 from textual.notifications import Notification, SeverityLevel
 from textual.pilot import Pilot
 from textual.widget import Widget
-from textual.widgets import Button, Checkbox, DataTable, Input, OptionList, Select, Static
+from textual.widgets import (
+    Button,
+    Checkbox,
+    ContentSwitcher,
+    DataTable,
+    Input,
+    OptionList,
+    Select,
+    Static,
+)
 from textual.widgets._toast import Toast
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.cli.ui.board import BoardPanel
+from aisquare.cli.ui.board import COLUMN_WIDTH_KEY, DETAIL_HEIGHT_KEY, BoardPanel
+from aisquare.cli.ui.divider import Divider
 from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.cli.ui.views import project as project_view_module
 from aisquare.cli.ui.views.agent import AgentView
@@ -746,6 +758,88 @@ def test_a_hidden_board_tab_stops_polling_and_catches_up_when_shown(
     assert at_mount == 1  # one read at mount primes the first frame
     assert hidden == at_mount  # …and not one more while nobody can see it
     assert after_show >= hidden + 2  # shown: on_show, then the ticks resume
+
+
+class TwoProjects(App[None]):
+    """Two Project views mounted at once, the second shown — the fleet UI keeps one per project
+    ever selected, so every id inside a board is on the screen once per project."""
+
+    def __init__(self, first: ProjectInfo, second: ProjectInfo) -> None:
+        super().__init__()
+        self._projects = (first, second)
+
+    def compose(self) -> ComposeResult:
+        with ContentSwitcher(initial="project-b"):
+            for project, view_id in zip(self._projects, ("project-a", "project-b"), strict=True):
+                yield ProjectView(
+                    project, id=view_id, refresh_seconds=60.0, doctor=lambda root: _stub_checks()
+                )
+
+
+def test_a_board_line_resizes_its_own_project_board_and_restores_in_the_tab(
+    project: ProjectInfo, tmp_path: Path, isolated_home: Path
+) -> None:
+    """Each line finds what it sizes beside itself. Looked up across the screen, the shown
+    board's line sized the FIRST project's hidden ``#board-side`` and left its own alone."""
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+    other = team_service.activate(other_dir)
+    isolated_home.mkdir(parents=True, exist_ok=True)
+    (isolated_home / "state.json").write_text(json.dumps({COLUMN_WIDTH_KEY: 60}))
+
+    async def run() -> dict[str, object]:
+        host = TwoProjects(project, other)
+        async with host.run_test(size=(120, 50)) as pilot:
+            first, second = host.query_one("#project-a"), host.query_one("#project-b")
+            for view in (first, second):
+                assert isinstance(view, ProjectView)
+                view.active = "tab-board"
+            await settle(pilot)
+            for divider in second.query("#side-divider, #detail-divider"):
+                await divider.wait_for_refresh()  # the restore queued at mount has run
+                await divider.wait_for_refresh()  # and the layout it asked for is done
+
+            def sizes(view: Widget) -> tuple[object, object]:
+                return (
+                    view.query_one("#board-side").styles.width,
+                    view.query_one("#detailwrap").styles.height,
+                )
+
+            seen: dict[str, object] = {
+                "restored": second.query_one("#board-side").outer_size.width,
+                "first_before": sizes(first),
+            }
+            for kind, x, y in (
+                (events.MouseDown, second.query_one("#side-divider").region.x, 10),
+                (events.MouseMove, 70, 10),
+                (events.MouseUp, 70, 10),
+                (events.MouseDown, 40, second.query_one("#detail-divider").region.y),
+                (events.MouseMove, 40, 30),
+                (events.MouseUp, 40, 30),
+            ):
+                host.post_message(kind(None, x, y, 0, 0, 1, False, False, False))
+                await host.wait_for_refresh()
+                await settle(pilot)
+            side = second.query_one("#board-side")
+            seen["second"] = (
+                side.outer_size.width + side.region.x,
+                second.query_one("#detailwrap").outer_size.height,
+            )
+            seen["first_after"] = sizes(first)
+            for divider in second.query(Divider):
+                # This bare app joins no saver at quit, as the fleet UI's does: wait here.
+                saver = divider._autosave
+                assert saver is not None and await asyncio.to_thread(saver.settled, 5.0)
+            return seen
+
+    seen = asyncio.run(run())
+    assert seen["restored"] == 60, "the width on file, shown in the fleet UI's Board tab"
+    # The board starts where the tab does; its column now ends at the pointer's column 70,
+    # and its detail pane runs from row 31 to the bottom of the 50-row terminal.
+    assert seen["second"] == (70, 50 - 31)
+    assert seen["first_after"] == seen["first_before"], "the hidden project's board is untouched"
+    state = json.loads((isolated_home / "state.json").read_text())
+    assert DETAIL_HEIGHT_KEY in state and state[COLUMN_WIDTH_KEY] != 60
 
 
 def test_the_board_names_its_accounts_from_a_worker_never_from_the_ui_thread(

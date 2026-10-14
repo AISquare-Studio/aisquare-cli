@@ -144,7 +144,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   than start the role on this shell's credentials. `fleet spawn`, `restart`
   and `switch` refuse before a window opens or a running agent is stopped.
   `team bind` reads the file when it binds. A key lives in `env` or
-  `env_files`, never both, and `--unset` removes it from either.
+  `env_files`, never both, and `--unset` removes it from either. `team
+  harness` names the key, and `team harness --json` carries `env_files`, each
+  key to its path, on every role.
 
 ### Changed
 - **`aisquare upgrade` warns, and `aisquare uninstall` refuses, while Remote is

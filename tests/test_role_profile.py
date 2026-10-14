@@ -718,6 +718,39 @@ class TestEnvFiles:
         assert TOKEN not in human.output and TOKEN not in machine.output
         assert json.loads(machine.stdout)["env_files"] == {"GH_TOKEN": str(token)}
 
+    def test_team_harness_names_the_file_bound_key_and_reads_its_file_once(
+        self,
+        runner: CliRunner,
+        work_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Review of #259, round 1: the text matrix named a key bound with `--env-file`,
+        and `--json` did not: `env` no longer holds it, and nothing else said it. Each
+        role was also resolved three times, each reading every bound file again."""
+        token = _token_file(tmp_path)
+        _bind("reviewer", env_files={"GH_TOKEN": str(token)})
+        monkeypatch.setenv("AISQUARE_TEAM", "1")
+        reads: list[str] = []
+        read = harness.read_env_file
+
+        def counted(path: str) -> str:
+            reads.append(path)
+            return read(path)
+
+        monkeypatch.setattr(harness, "read_env_file", counted)
+
+        human = runner.invoke(app, ["team", "harness"])
+        read_by_text, reads[:] = list(reads), []
+        machine = runner.invoke(app, ["--json", "team", "harness"])
+
+        assert human.exit_code == 0 and machine.exit_code == 0, human.output + machine.output
+        assert read_by_text == reads == [str(token)], "the file read once per listing"
+        row = {row["role"]: row for row in json.loads(machine.stdout)["roles"]}["reviewer"]
+        assert row["env_files"] == {"GH_TOKEN": str(token)} and "GH_TOKEN" not in row["env"]
+        assert "env=GH_TOKEN" in human.output
+        assert TOKEN not in human.output and TOKEN not in machine.output
+
 
 class TestBindEnvFile:
     def test_it_stores_the_path_as_typed_and_reads_it_now(

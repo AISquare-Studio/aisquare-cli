@@ -611,11 +611,17 @@ def harness_status() -> None:
     if not orchestrator.team_enabled():
         _fail_team(TeamDisabledError())
     rows = []
+    resolved = []
     base, base_source = harness.base_effort()
     for name, profile in harness.ROLE_PROFILES.items():
         resolution = harness.resolve_model(name, probe=False)
         assert resolution is not None  # every profiled role resolves
         pinned = harness.role_model_override(name)
+        binary = harness.resolve_binary(name)
+        # Once per role, for the JSON and the text alike: each resolve reads every
+        # secret file the role's binding names (`env_files`).
+        launch_profile = harness.resolve_profile(name)
+        resolved.append((name, profile, resolution, pinned, binary, launch_profile))
         rows.append(
             {
                 "role": name,
@@ -626,10 +632,14 @@ def harness_status() -> None:
                 "resolves_to": pinned or resolution.model,
                 "source": "pinned" if pinned else resolution.source,
                 "mission": profile.mission,
-                "binary": harness.resolve_binary(name).binary,
-                "binary_source": harness.resolve_binary(name).source,
-                "env": harness.resolve_profile(name).env,
-                "extra_args": harness.resolve_profile(name).args,
+                "binary": binary.binary,
+                "binary_source": binary.source,
+                "env": launch_profile.env,
+                # The keys read from a file, each to its path, never its value: without
+                # them a role bound with `--env-file GH_TOKEN=…` showed no GH_TOKEN
+                # here, while the text matrix named it (review of #259, round 1).
+                "env_files": launch_profile.env_files,
+                "extra_args": launch_profile.args,
                 # The role's OWN flags, the third axis of "what will this role
                 # launch with". Without it the matrix reported `extra_args: []`
                 # for a ui-tester that execs `claude --chrome`, and whoever
@@ -655,18 +665,13 @@ def harness_status() -> None:
         return
     console = stdout_console()
     console.print(f"base effort: {base} ({base_source})", markup=False)
-    for name, profile in harness.ROLE_PROFILES.items():
-        resolution = harness.resolve_model(name, probe=False)
-        assert resolution is not None  # every profiled role resolves
-        pinned = harness.role_model_override(name)
+    for name, profile, resolution, pinned, binary, launch_profile in resolved:
         ladder = "→".join(profile.ladder)
         offset = f"+{profile.effort_offset}" if profile.effort_offset else " 0"
         source = "pinned" if pinned else resolution.source
-        binary = harness.resolve_binary(name)
         # The matrix showed WHAT each role runs on and hid WHICH executable
         # runs it — half the launch decision, invisible.
         bin_note = "" if binary.source == "default" else f"  bin={binary.binary} [{binary.source}]"
-        launch_profile = harness.resolve_profile(name)
         # ...and hid the env the role carries, which is the axis a
         # parallel-install operator actually steers by. Keys only: the values
         # are paths and tokens and this is a terminal.

@@ -31,12 +31,14 @@ from collections.abc import Callable, Coroutine, Iterator
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, TypeVar
 
 import pytest
 from rich.cells import cell_len, split_graphemes
 from rich.style import Style
 from textual import Logger, events
+from textual import message as textual_message
 from textual.app import App, ComposeResult
 from textual.dom import NoScreen
 from textual.geometry import Offset, Region, Size
@@ -267,10 +269,11 @@ def scroll_event(pane: TerminalPane, *, up: bool) -> events.MouseScrollUp | even
 
 
 class Clock:
-    """The pane's clock, which only the test moves: ``terminal._monotonic``, read for the
-    duplicate-press window and for the click chain. A double click is then two clicks the
-    TEST says came within the threshold, and never two the runner happened to deliver
-    fast enough (follow-up of #259)."""
+    """A clock only the test moves. As :func:`clock`, the pane's and its events': the
+    duplicate-press window's (``terminal._monotonic``), and the stamp every event takes as
+    it is made, which both Textual's click chain and the pane's read. A double click is
+    then two clicks the TEST says came within the threshold, and never two the runner
+    happened to deliver fast enough (follow-up of #259, round 4)."""
 
     def __init__(self) -> None:
         self.now = 0.0
@@ -283,6 +286,8 @@ class Clock:
 def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
     ticking = Clock()
     monkeypatch.setattr(terminal_module, "_monotonic", ticking)
+    # The events' stamps alone (`Message.time`): Textual's timers keep their own clock.
+    monkeypatch.setattr(textual_message, "_time", SimpleNamespace(get_time=ticking))
     return ticking
 
 
@@ -2003,9 +2008,9 @@ def test_a_double_click_does_not_leak_into_the_next_gesture(
     """A double click selects its word AFTER the gesture that caused it ended,
     so the selection change it makes must not count as taking part in the next
     one — measured re-copying the word on the following release. The two clicks
-    are a double click by the pane's clock, which stands still between them
-    (``clock``): on a loaded runner the loop's turn between them outran the
-    threshold, and the word was never selected (CI of #259)."""
+    are a double click by the test's clock, which stamps them and stands still
+    between them (``clock``): on a loaded runner the loop's turn between them
+    outran the threshold, and the word was never selected (CI of #259)."""
 
     async def drive() -> tuple[str, int, str, int]:
         host = Host(fake.server(tmp_path), "%1", with_footer=True)
@@ -2031,11 +2036,11 @@ def test_a_double_click_does_not_leak_into_the_next_gesture(
 def test_a_double_click_is_judged_by_the_panes_clock_not_the_runners(
     fake: FakeTmux, tmp_path: Path, clock: Clock
 ) -> None:
-    """Follow-up of #259: the chain was timed by each Click's own stamp, Textual's wall
-    clock, so whether two clicks made a double click depended on how fast the loop turned
-    between them. By the pane's clock: two clicks 0.2 s apart select their word, and two
-    0.6 s apart — past the app's threshold — select nothing, however fast the test
-    delivers them (timed by the wall clock, the late pair copied "third" too)."""
+    """Follow-up of #259: the chain is timed by each event's stamp, which Textual takes from
+    the wall clock, so whether two clicks made a double click depended on how fast the loop
+    turned between them. Stamped by the test's clock: two clicks 0.2 s apart select their
+    word, and two 0.6 s apart — past the app's threshold — select nothing, however fast the
+    test delivers them (stamped by the wall clock, the late pair copied "third" too)."""
     threshold = Host.CLICK_CHAIN_TIME_THRESHOLD
 
     async def drive() -> tuple[str, int, str, int]:
@@ -2060,6 +2065,41 @@ def test_a_double_click_is_judged_by_the_panes_clock_not_the_runners(
     word, toasts, late, toasts_late = run(drive())
     assert word == "row" and toasts == 1, "within the threshold by the pane's clock"
     assert late == word and toasts_late == toasts, "past it: two single clicks, nothing copied"
+
+
+def test_the_panes_double_click_is_textuals_however_late_its_handler_runs(
+    fake: FakeTmux, tmp_path: Path, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 4: the pane timed its chain as its handler ran, Textual times
+    ``event.chain`` (which forwards a double click to the agent) by the events. With the
+    loop held between two clicks 0.2 s apart (the 2 s refresh, a doctor run), the second
+    was handled a second after the first: forwarded as a double click, and no word
+    selected. Both read the events' stamps, so the pane selects the word Textual chains."""
+    handled = Clock()  # when the handlers run: a second apart
+    monkeypatch.setattr(terminal_module, "_monotonic", handled)
+    chains: list[int] = []
+    counted = TerminalPane._own_click_chain
+
+    def spied(self: TerminalPane, event: events.Click) -> int:
+        chains.append(event.chain)
+        return counted(self, event)
+
+    monkeypatch.setattr(TerminalPane, "_own_click_chain", spied)
+
+    async def drive() -> str:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 10)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            await click(pilot, pane, (8, 1))
+            clock.now += 0.2
+            handled.now += 1.0
+            await click(pilot, pane, (8, 1))
+            await pilot.pause()
+            return host.clipboard
+
+    assert run(drive()) == "row", "Textual's double click selected no word in the pane"
+    assert chains == [1, 2]
 
 
 def test_a_right_button_drag_from_outside_the_pane_does_not_copy(

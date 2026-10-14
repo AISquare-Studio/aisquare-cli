@@ -1651,8 +1651,10 @@ def spawn(
     role_config = role_settings(role, config)
     # A server that exited at the socket path left its rows live, and the server this spawn
     # starts there would hold them for good: they read lost from now on, in every project,
-    # decided while the stale file still says so.
-    exited = _forget_an_exited_server(srv, config)
+    # decided while the stale file still says so. And a socket path a running server lost
+    # is not one to start a server at: the agents on it would be stranded for good, and the
+    # new server would answer for their rows. Asked again as the window opens (`open_window`).
+    exited = _before_a_server_starts(srv, config)
     if exited:
         one = len(exited) == 1
         with store_session() as store:
@@ -1710,9 +1712,6 @@ def spawn(
             notes.append(f"the manager is always labelled {MANAGER_LABEL!r} (asked: {label!r})")
         else:
             notes.append(f"label {label!r} is held by a live agent — using {picked!r}")
-    # A socket path a running server lost is not one to start a server at: the agents on
-    # it would be stranded for good, and the new server would answer for their rows.
-    _refuse_a_freed_socket(srv, config)
 
     use_worktree = role_config.worktree if worktree is None else worktree
 
@@ -1871,7 +1870,8 @@ def spawn(
         # the session environment, so a later spawn — or a window opened by hand
         # — starts from the server's environment and sets its own (review of
         # #203, rounds 3 and 4; §7.6 for the opt-out).
-        window = srv.spawn_window(
+        window = open_window(
+            srv,
             tmux_session,
             name=picked,
             cwd=cwd,
@@ -1879,6 +1879,7 @@ def spawn(
             env=env,
             width=width,
             height=height,
+            config=config,
         )
     except TmuxError as exc:
         raise FleetError(f"tmux could not start the window: {exc}") from exc
@@ -2332,6 +2333,48 @@ def _forget_an_exited_server(srv: TmuxServer, config: FleetSettings) -> list[Fle
             ):
                 forgotten.append(agent)
     return forgotten
+
+
+def _before_a_server_starts(srv: TmuxServer, config: FleetSettings) -> list[FleetAgent]:
+    """What must hold before anything starts a tmux server at the fleet's socket path, asked in
+    this one place; the rows whose exited server's start it forgot. ``srv`` is the fleet's
+    server for ``config`` (:func:`server`).
+
+    ``new-session`` starts a server where none listens. Over a stale file, a server that
+    exited, that is the next server, and the rows of the one that exited forget its start
+    first, or the new one holds them for good (:func:`_forget_an_exited_server`). At a path
+    with no file, a running server may have lost it, and a server started there strands its
+    agents (:func:`_refuse_a_freed_socket`, which raises). Only ``spawn`` asked, and the
+    Accounts sign-in window, on the same server, started one past both (review of #259,
+    round 3): so every window opened there goes through :func:`open_window`, which asks.
+    """
+    exited = _forget_an_exited_server(srv, config)
+    _refuse_a_freed_socket(srv, config)
+    return exited
+
+
+def open_window(
+    srv: TmuxServer,
+    session: str,
+    *,
+    name: str,
+    cwd: Path,
+    command: Sequence[str],
+    env: Mapping[str, str] | None = None,
+    width: int = DEFAULT_WINDOW_WIDTH,
+    height: int = DEFAULT_WINDOW_HEIGHT,
+    config: FleetSettings | None = None,
+) -> WindowInfo:
+    """A window on the fleet's tmux server ``srv`` (:func:`server`), opened once what must hold
+    before a server starts there does (:func:`_before_a_server_starts`): the one way anything
+    opens a window at the fleet's socket, a spawn's agent and the Accounts sign-in window
+    alike (tests/test_fleet_service.py names every caller). :class:`FleetError` when it may
+    not; :class:`~aisquare.core.tmux.TmuxError` when tmux would not
+    (:meth:`~aisquare.core.tmux.TmuxServer.spawn_window`)."""
+    _before_a_server_starts(srv, config or settings())
+    return srv.spawn_window(
+        session, name=name, cwd=cwd, command=command, env=env, width=width, height=height
+    )
 
 
 def _refuse_occupied_worktree(project: ProjectInfo, worktree_dir: str, label: str) -> None:

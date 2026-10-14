@@ -11,6 +11,7 @@ fake forgot to override fails loudly instead of quietly reaching a real tmux.
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import os
@@ -2717,6 +2718,95 @@ def test_a_spawn_over_a_server_that_exited_leaves_its_rows_lost_not_held(
         still = store.get_fleet_agent(kept.id)
     assert still is not None and still.ended_at is None and still.server_started_at is not None
     assert [typed for typed in tmux.typed if typed[0] == receipt.agent.pane_id] == []
+
+
+def _callers_of(name: str) -> set[tuple[str, str]]:
+    """``(module under src/aisquare, function)`` for each function whose body calls ``.name(…)``
+    or holds the string ``name`` as a whole constant (a tmux command word)."""
+    root = Path(fleet_service.__file__).resolve().parents[1]
+    found: set[tuple[str, str]] = set()
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for function in ast.walk(tree):
+            if not isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            for node in ast.walk(function):
+                called = (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == name
+                )
+                if called or (isinstance(node, ast.Constant) and node.value == name):
+                    found.add((path.relative_to(root).as_posix(), function.name))
+    return found
+
+
+@pytest.mark.parametrize("way_in", ["spawn", "restart", "switch", "sign-in"])
+def test_every_window_at_the_fleet_socket_asks_what_must_hold_before_a_server_starts(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    plain_project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    way_in: str,
+) -> None:
+    """Review of #259, round 3: rounds 1 to 3 each found another path that starts the fleet's
+    tmux server past the rules for doing so. Only `spawn` forgot the start of a server that
+    exited (a stale socket file, after which the next server holds its rows for good) and
+    refused a socket path a running server lost (no file, where a second server strands
+    its agents). The Accounts sign-in window, on the same server, started one past both.
+    Every window there now opens through `fleet.open_window`, which asks both: the source
+    has no other caller of `spawn_window`, and each way in is asked here."""
+    from aisquare.core import claude_accounts as claude_accounts_core
+    from aisquare.services import claude_accounts as claude_accounts_service
+
+    assert _callers_of("spawn_window") == {("services/fleet.py", "open_window")}
+    assert _callers_of("new-session") == {("core/tmux.py", "spawn_window")}, "no other start"
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    manager = fleet_service.spawn(project, "manager").agent  # on this shell's socket path
+    # The agent a restart or a switch replaces runs on a server at another path (another
+    # `TMUX_TMPDIR`), so its own stop goes through whatever this socket's state.
+    apart = Path("/elsewhere/tmux-1000/asq-test")
+    elsewhere = tmux.per_path[apart] = FakeTmux()
+    elsewhere.started = tmux.started
+    window = elsewhere.spawn_window("asq-x", name="coder-1", cwd=project.root, command=["c"])
+    elsewhere.set_command(window.pane_id, "claude")
+    moved = {"socket_path": apart, "pane_id": window.pane_id, "server_started_at": None}
+    spawned = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    with store_session() as store:
+        agent = store.upsert_fleet_agent(spawned.model_copy(update=moved))
+    _with_transcript(agent, None)
+
+    def enter() -> None:
+        if way_in == "spawn":
+            fleet_service.spawn(plain_project, "manager")  # any project: the server is shared
+        elif way_in == "sign-in":
+            account = claude_accounts_core.default_account()
+            claude_accounts_service.open_sign_in_window(account, fleet_service.server())
+        else:
+            getattr(fleet_service, way_in)(project, agent.label)
+
+    tmux.running = False  # no tmux client reaches the manager's server…
+    tmux.socket_file = False  # …because its socket file is gone: it may run on
+    started = len(tmux.spawned)
+
+    with pytest.raises(FleetError, match=r"not started: the tmux server that manager .* lost"):
+        enter()
+
+    assert len(tmux.spawned) == started and not tmux.running, "no second server at the path"
+    # A server that exited leaves its socket file, where nothing listens: the next server
+    # starts there, and the manager's row reads lost under it, as in 0.8.0, not held.
+    tmux.socket_file = True
+    enter()
+
+    assert tmux.running and len(tmux.spawned) == started + 1
+    [status] = [s for s in fleet_service.list_agents(project) if s.agent.id == manager.id]
+    assert (status.state, status.held) == ("lost", False), status
+    with store_session() as store:
+        forgotten = store.get_fleet_agent(manager.id)
+    assert forgotten is not None and forgotten.server_started_at is None
 
 
 def test_a_row_whose_socket_another_server_took_is_held_not_ended(

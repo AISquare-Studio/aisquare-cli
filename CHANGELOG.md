@@ -185,7 +185,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   --forget` for agents that are not running. A stale socket file (the server
   exited) and rows from another boot still get a fresh server. `fleet restart`
   and `switch` give the same refusal before they stop the agent, rather than
-  after, which left it down.
+  after, which left it down. asq's Accounts sign-in window, which opens on the
+  fleet's server too, is refused the same way, and over a stale socket file it
+  takes the same step a spawn takes (below): every window at the fleet's
+  socket now opens through one entry that asks both.
 - A tmux server that took the socket path from a running one no longer
   answers for that one's agents. Every spawn now records when its server
   started (`fleet_agent.server_started_at`, schema v26), and a server at the
@@ -200,8 +203,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   leaves it live until `--forget`, and
   `upgrade` and `uninstall` count it as running and name `--forget`. A
   server that exited (a `kill-server`, a crash) leaves its socket file with
-  nothing listening, and the next spawn, in any project, sees it before it
-  starts a server there: that server's rows read lost from then on, as in
+  nothing listening, and the next spawn, in any project, or asq's Accounts
+  sign-in window, sees it before it starts a server there: that server's rows
+  read lost from then on, as in
   0.8.0, not held under the new one, so `reap` records them and `restart`
   brings them back; the receipt names them. Before,
   the newcomer's missing pane read as the row's pane gone, and `stop`,

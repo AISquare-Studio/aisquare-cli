@@ -1283,6 +1283,32 @@ def test_a_window_that_closes_without_a_login_discards_the_fresh_slot(
     assert not box
 
 
+def test_a_sign_in_window_the_fleet_refuses_is_said_and_its_fresh_slot_discarded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review of #259, round 3: the sign-in window opens as every window at the fleet's
+    socket does (``fleet.open_window``), which refuses a socket path a running server lost
+    with a ``FleetError``. The page caught a ``TmuxError`` only, so that refusal would have
+    ended asq with a traceback. It is said, as tmux's own refusal is."""
+    seen = _script_claude_sign_in(monkeypatch, tmp_path, lands=False)
+    why = "not started: the tmux server that manager (repo) runs on lost its socket file"
+
+    def refused(acct: ClaudeAccount, server: TmuxServer, *, cwd: Path | None = None) -> None:
+        raise fleet_service.FleetError(why)
+
+    monkeypatch.setattr(accounts_service, "open_sign_in_window", refused)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, bool, object]:
+        view = await open_accounts(pilot)
+        await pilot.click("#claude-add")
+        await settle(fleet_app(pilot))
+        return notice(view), view.query_one("#login-box", Vertical).display, view.login
+
+    said, box, login = drive(go)
+    assert said == f"✗ could not open a sign-in window: {why}"
+    assert seen["abandoned"] == [2] and not box and login is None
+
+
 def test_cancel_stops_a_sign_in_and_a_sign_in_of_an_existing_slot_is_never_discarded(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

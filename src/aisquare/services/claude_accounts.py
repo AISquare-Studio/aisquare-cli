@@ -1257,9 +1257,19 @@ def open_sign_in_window(
     would give ``claude``; the environment is this process's view of what the
     slot means (:func:`carry_environment`), resolved against THIS process's
     working directory, not the window's.
+
+    Opened as every window at the fleet's socket is (``fleet.open_window``): it starts the
+    fleet's server when none runs, so the rows of a server that exited there forget its
+    start first, and a socket path a running server lost refuses it with
+    ``fleet.FleetError``. Started past both, after a ``kill-server`` every live row was held
+    for good, and over a freed path the agents of the server that lost it were stranded
+    (review of #259, round 3). Imported here, as ``fleet`` imports this module.
     """
+    from aisquare.services import fleet as fleet_service
+
     command, env = sign_in_window_command(account, environ)
-    return server.spawn_window(
+    return fleet_service.open_window(
+        server,
         SIGN_IN_SESSION,
         name=f"account-{account.slot}",
         cwd=cwd if cwd is not None else Path.home(),

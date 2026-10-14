@@ -1294,9 +1294,10 @@ ends their rows on your word.
 **The server was stopped outside the CLI.** Rows read `unknown (tmux
 unavailable)` and `reap` reaps nothing — correctly: it cannot ask. A stopped
 server leaves its socket file behind with nothing listening, which shows that it
-exited: the next spawn, in any project, sees it before it starts a new server at
-that path, and the rows on the old one read `✗ lost` from then on, as their
-panes are gone (its receipt names them). A plain `reap` records them, `restart`
+exited: the next spawn, in any project, or asq's Accounts sign-in window, sees it
+before it starts a new server at that path, and the rows on the old one read
+`✗ lost` from then on, as their panes are gone (a spawn's receipt names them). A
+plain `reap` records them, `restart`
 brings one back under its own label, and asq's Start the coders restarts the
 lost coders. A server started some other way (a hand-run `tmux -L asq`, a 0.8.0
 client) takes the path without that step, and hands the old pane ids out

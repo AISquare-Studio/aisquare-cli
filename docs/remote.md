@@ -330,8 +330,10 @@ and how long the whole is; past 20 fields it says how many it leaves out; a call
 whose input is over 16 KiB never reaches the phone, and its card says that
 instead. A permission a sub-agent asks for shows the task the sub-agent was
 given, and says that the call it answers is the sub-agent's own, which the card
-cannot show. Open the agent to read such a call before you answer it. Under a
-permission, a question or a plan, the bottom of the agent's live screen is shown
+cannot show. Open the agent to read such a call before you answer it. When one
+reply calls two tools that each ask, the second one's card comes a few seconds
+after its prompt, once its own notification lands: until then the card would be
+the first call's, already answered. Under a permission, a question or a plan, the bottom of the agent's live screen is shown
 too, so the real option labels are on screen next to the buttons.
 
 **Quick answers** are the card's buttons: `1`, `2` and No for a tool's

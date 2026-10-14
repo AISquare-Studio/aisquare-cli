@@ -208,11 +208,12 @@ _SUBAGENT_TOOLS = frozenset({"Task", "Agent"})
 """The tools a sub-agent runs inside: a prompt pending under one is the sub-agent's."""
 
 _NOTICE_WAIT = timedelta(seconds=20)
-"""How long after its pane printed a sub-agent's prompt may still be waiting for the
-notification that names it (:func:`_needs_subagent_prompt`). Claude Code sends it 6 s after
-the prompt is drawn; the hook's process starts in a second or so, and may wait out the
-store's busy timeout (5 s) for its write; tmux tells the time of output to the second,
-rounded down. That is about 13 s at worst. A notification later than this leaves the
+"""How long after its pane printed a sub-agent's prompt, or the prompt of a call beside
+another, may still be waiting for the notification that names it
+(:func:`_needs_drawn_since_notice`). Claude Code sends it 6 s after the prompt is drawn;
+the hook's process starts in a second or so, and may wait out the store's busy timeout (5 s)
+for its write; tmux tells the time of output to the second, rounded down. That is about 13 s
+at worst. A notification later than this leaves the
 prompt named after the one before until it lands, and a redraw (an attach, a resize, a
 key that moves the highlight) hides the card this long."""
 
@@ -830,7 +831,10 @@ def needs_from_agent(
        (:func:`_needs_later_notice`): the call's own prompt was answered, and what is up
        now is rule 8's too. Once the agent wrote after the turn's first notice, a later
        one's words are not on the board, and nothing tells a form asked then from its
-       tool's own prompt: it reads as the prompt, whose digits would go into the form;
+       tool's own prompt: it reads as the prompt, whose digits would go into the form.
+       Nor, with more than one call pending, while the pane printed after the newest
+       notice (:func:`_needs_drawn_since_notice`): the oldest call's prompt answered, the
+       next call's is up, and its own notice has not come;
     6. no pending tool, and the newest record an interruption later than the session's last
        hook, or one only Claude Code's own records follow (a local or ``!`` command run at
        the prompt since, which fires no hook either) → ``interrupted``, whatever the row
@@ -861,7 +865,8 @@ def needs_from_agent(
     3 to 6 and 9 cannot hold. ``exited`` and ``unknown`` agents need nothing here; ``crashed``,
     ``manager_down`` and ``fleet_down`` speak for them. ``manager_live`` and ``accounts``
     decide only when a push may go out. ``pane_output`` says when the agent's pane last
-    printed, asked only of a sub-agent's prompt.
+    printed, asked only of a sub-agent's prompt and of a prompt with more than one call
+    pending.
 
     A held row got rules 3 to 10 from its board while that was fresh: permission and
     question cards, pushed, whose every answer was a 409 ``not_agent`` (its pane id is
@@ -940,6 +945,8 @@ def needs_from_agent(
                 return _needs_subagent_prompt(
                     pending[0], session, pane_output, project=project, agent=agent, now=now
                 )
+            if len(pending) > 1 and _needs_drawn_since_notice(session, pane_output, now):
+                return []  # the oldest call's prompt answered, maybe, and the next one's up
             return [
                 _needs_permission_item(pending[0], project=project, agent=agent, name=name, now=now)
             ]
@@ -1377,8 +1384,7 @@ def _needs_subagent_prompt(
     notification lands, or :data:`_NOTICE_WAIT` passes without one.
     """
     seen = session.last_seen_at
-    output = None if pane_output is None else pane_output()
-    if output is not None and output > seen and now - output < _NOTICE_WAIT:
+    if _needs_drawn_since_notice(session, pane_output, now):
         return []
     return [
         _needs_permission_item(
@@ -1391,6 +1397,28 @@ def _needs_subagent_prompt(
             since=seen,
         )
     ]
+
+
+def _needs_drawn_since_notice(
+    session: TeamSession | None,
+    pane_output: Callable[[], datetime | None] | None,
+    now: datetime,
+) -> bool:
+    """The pane printed after the notice ``last_seen_at`` names, less than :data:`_NOTICE_WAIT`
+    ago: the prompt on screen may be one whose notification has not landed yet.
+
+    A prompt answered writes nothing until its tool ends, so with two calls of one message
+    pending, the oldest's answered, the next one's prompt is drawn under the same
+    ``last_seen_at`` and the same pending tools. Rule 5's card was the oldest call's again,
+    its id and its command, and a tap of "1" on it re-derived as current and approved the
+    other call (review of #259, remote focus, 1/12). A sub-agent's prompts are all under
+    its one ``Task`` (:func:`_needs_subagent_prompt`). Its cost is a redraw (an attach, a
+    resize, a key that moves the highlight) hiding the card this long.
+    """
+    if session is None:
+        return False
+    output = None if pane_output is None else pane_output()
+    return output is not None and output > session.last_seen_at and now - output < _NOTICE_WAIT
 
 
 def _needs_tool_detail(

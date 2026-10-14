@@ -509,6 +509,48 @@ def test_a_sub_agents_next_prompt_has_no_item_until_its_notice() -> None:
     assert _one(_classify(status, tail, pane_output=lambda: None)).since == seen
 
 
+def test_a_call_beside_one_answered_has_no_card_until_its_own_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, remote focus, 1/12: one message calls two tools that each need a
+    permission. The first's prompt is answered, which writes nothing until it ends, and the
+    second's is drawn: the same pending calls, the same ``last_seen_at``, the row reading
+    ``attention`` again once the pane has been quiet 5 s. Rule 5's card was the first call's
+    again, its id and its URL, and a tap of "1" on it re-derived as current and approved the
+    other call. Until the second prompt's notice lands, the pane printed after the newest
+    notice: no card, and nothing a tap could match."""
+    row = _row()
+    asked = NOW - timedelta(seconds=40)
+    called = asked - timedelta(seconds=6)
+    session = _session(row, state="attention", seen=asked)
+    said = "Claude needs your permission to use WebFetch"
+    events = [_event(4, "attention", said, session=session, at=asked)]
+    first = _tool("toolu_a", "WebFetch", at=called, url="https://a.example/")
+    second = _tool("toolu_b", "WebFetch", at=called, url="https://b.example/")
+    tail = _tail(first, second, at=called)
+    status = _status(row, "attention", session)
+    card = _one(_classify(status, tail, events, pane_output=lambda: called))
+    assert card.id == needs_item_id(PROJECT.id, "permission", "toolu_a")
+    assert card.detail["input"] == {"url": "https://a.example/"}
+    drawn = NOW - timedelta(seconds=6)
+    assert _classify(status, tail, events, pane_output=lambda: drawn) == []
+    slow = NOW - timedelta(seconds=13)
+    assert _classify(status, tail, events, pane_output=lambda: slow) == [], "a hook slowed"
+    fleet = Fleet(agents=[status], events=events, output_at=drawn)
+    fleet.tails[f"/transcripts/{row.label}.jsonl"] = tail
+    snap = _now_of(fleet, FakeTmux(reference=NOW), monkeypatch)
+    assert not needs_item_current(snap, card.id), "a tap on the first call's card is stale"
+    assert needs_dialog_open(snap), "the second prompt is up all the same"
+    noticed = _status(row, "attention", _session(row, state="attention", seen=NOW))
+    form = _one(_classify(noticed, tail, events, pane_output=lambda: drawn))
+    assert form.id != card.id and form.answers == (), "a dialog the board has no words for"
+    # Negative controls: one call pending, or a redraw long after the notice, hides nothing.
+    alone = _tail(first, at=called)
+    assert _one(_classify(status, alone, events, pane_output=lambda: drawn)).id == card.id
+    long_after = _classify(status, tail, events, pane_output=lambda: NOW - timedelta(seconds=25))
+    assert _one(long_after).id == card.id
+
+
 def test_rule_6_a_prompt_dismissed_with_esc_is_interrupted_not_a_prompt() -> None:
     """Esc fires no Stop: the row keeps reading ``attention`` for its whole stale window."""
     row = _row()

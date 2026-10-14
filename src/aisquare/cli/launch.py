@@ -507,6 +507,7 @@ def launch(
             else " with no board row (context.db unreadable)…",
         )
     )
+    agent_launch.prepare_sandbox(selected)
     _await_fleet_row()
     _exec(binary, argv, env)
 

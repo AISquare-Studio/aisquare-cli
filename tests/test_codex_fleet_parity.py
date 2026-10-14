@@ -18,9 +18,11 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tomllib
 from datetime import UTC, datetime, timedelta
 from importlib import import_module
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from typing import cast
 from unittest.mock import Mock
 
 import pytest
@@ -30,9 +32,9 @@ from aisquare.cli.app import app
 from aisquare.cli.ui.views.agent import key_spellings
 from aisquare.cli.ui.views.settings import launch_line
 from aisquare.core import claude_accounts as accounts_core
-from aisquare.core import harness
+from aisquare.core import harness, launch_seal
 from aisquare.core.agent_adapters import get_adapter
-from aisquare.core.agent_adapters.types import AgentAdapter, store_dir
+from aisquare.core.agent_adapters.types import AgentAdapter, prepare_store, store_dir
 from aisquare.core.config import (
     REVIEWER_ARGS,
     AgentModelDefault,
@@ -45,6 +47,7 @@ from aisquare.core.config import (
 )
 from aisquare.core.keys import Drop, Translation, translate
 from aisquare.core.store import SqliteStore, store_session
+from aisquare.core.tmux import BUNDLED_CONF
 from aisquare.models import (
     ClaudeAccount,
     FleetAgent,
@@ -893,6 +896,164 @@ def test_a_replay_its_agent_refuses_is_refused_before_anything_is_stopped(
 
     assert tmux.typed == [] and agent.pane_id not in tmux.killed
     assert len(tmux.spawned) == spawned
+
+
+# --- what a sandbox may write in the aisquare home (review r2 of #113, finding 3) --------
+
+
+def _tamper(agent: FleetAgent, path: str, value: object) -> None:
+    """A write to the row's launch spec in the store, as a sandboxed agent can make one."""
+    with store_session() as store:
+        assert isinstance(store, SqliteStore)
+        store._conn.execute(
+            "UPDATE fleet_agent SET launch_spec = json_set(launch_spec, ?, json(?)) WHERE id = ?",
+            (path, json.dumps(value), agent.id),
+        )
+        store._conn.commit()
+
+
+def test_the_store_profile_keeps_what_runs_outside_the_sandbox_out_of_its_reach() -> None:
+    """The store is writable from Codex's sandbox, the board's to write; what chooses or
+    runs something outside it is read-only there (the tmux conf every fleet server loads,
+    the registry ``upgrade`` reconnects hooks by, keys and sign-in tokens), and the key
+    that seals launch specs cannot even be read."""
+    store = store_dir()
+    args = CODEX.store_access("workspace", store)
+    table = args[args.index("-c", 4) + 1].partition("=")[2]
+    entries = tomllib.loads(f"t = {table}")["t"]
+
+    assert entries[str(store)] == "write"
+    for kept in (
+        "fleet-tmux.conf",
+        "agents.json",
+        "explainability-key",
+        "cache/oidc",
+        "config.toml",
+        "credentials",
+    ):
+        assert entries[str(store / kept)] == "read", kept
+    assert entries[str(store / launch_seal.KEY_NAME)] == "none"
+    assert str(store / "context.db") not in entries, "the board's"
+
+
+def test_the_store_profile_names_a_windows_home_as_codex_reads_it() -> None:
+    """A Windows home's paths go into Codex's ``-c`` as TOML strings, each backslash
+    escaped, and come out of TOML as Windows spells them. Asserted on any platform: the
+    contract test that looked for ``C:\\Users\\…`` in the command line as written failed on
+    the Windows runner only (CI on e8f95719), where the escaped spelling is the right one."""
+    store = PureWindowsPath(r"C:\Users\me\.aisquare")
+    args = CODEX.store_access("workspace", cast(Path, store))
+    table = args[args.index("-c", 4) + 1].partition("=")[2]
+
+    assert r'"C:\\Users\\me\\.aisquare" = "write"' in table, "TOML's escape, as Codex reads it"
+    entries = tomllib.loads(f"t = {table}")["t"]
+    assert entries[r"C:\Users\me\.aisquare"] == "write"
+    assert entries[r"C:\Users\me\.aisquare\cache\oidc"] == "read"
+    assert entries[r"C:\Users\me\.aisquare\fleet-tmux.conf"] == "read"
+    assert entries[r"C:\Users\me\.aisquare\launch-key"] == "none"
+    assert all(key.startswith("C:\\Users\\me\\.aisquare") for key in entries), entries
+
+
+def test_a_sandboxed_launch_makes_what_its_profile_names_before_the_sandbox_can() -> None:
+    """Codex's sandbox leaves an empty file on the host where a path its profile names did
+    not exist (0.162.1, measured): a directory's place taken by a file, a file a writer
+    that writes in place cannot write. The launcher makes them first."""
+    store = store_dir()
+    prepare_store(store)
+
+    for directory in ("codex-accounts", "claude-accounts", "cache/codex-accounts", "cache/oidc"):
+        assert (store / directory).is_dir(), directory
+    assert (store / "fleet-tmux.conf").read_text(encoding="utf-8") == BUNDLED_CONF
+    assert json.loads((store / "agents.json").read_text(encoding="utf-8")) == {
+        "connected": [],
+        "connections": {},
+    }
+    key = store / launch_seal.KEY_NAME
+    assert len(key.read_text(encoding="ascii").strip()) == 64
+    if os.name == "posix":
+        assert key.stat().st_mode & 0o777 == 0o600
+    # What is there already is left as it is.
+    (store / "agents.json").write_text('{"connected": ["codex"]}', encoding="utf-8")
+    before = key.read_text(encoding="ascii")
+    prepare_store(store)
+    assert json.loads((store / "agents.json").read_text(encoding="utf-8")) == {
+        "connected": ["codex"]
+    }
+    assert key.read_text(encoding="ascii") == before
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "planted"),
+    [
+        ("$.binary", "/tmp/x", "/tmp/x"),
+        ("$.extra_args", ["-c", 'notify=["sh","-c","/tmp/x"]'], 'notify=["sh","-c","/tmp/x"]'),
+    ],
+)
+def test_a_launch_spec_written_from_a_sandbox_is_never_replayed(
+    field: str,
+    value: object,
+    planted: str,
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """The store is the board's to write from Codex's sandbox, and the row's launch spec
+    is in it: restart, switch and the usage-limit hand-over replayed whatever binary and
+    arguments it held, outside any sandbox. A spec ``fleet spawn`` did not seal is not
+    replayed: the replacement starts as the role resolves today, and says so."""
+    agent = fleet_service.spawn(project, "coder", agent="codex", worktree=False).agent
+    assert agent.launch_spec is not None and launch_seal.holds(agent.launch_spec)
+    _tamper(agent, field, value)
+
+    receipt = fleet_service.restart(project, agent.label)
+
+    assert planted not in _command(tmux), "the planted program is not run"
+    assert any("not one aisquare sealed" in note for note in receipt.notes), receipt.notes
+    assert receipt.started.launch_spec is not None
+    assert launch_seal.holds(receipt.started.launch_spec), "the replacement's is sealed"
+
+
+def test_the_specs_recorded_before_the_key_keep_their_launch_across_the_upgrade(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """An agent spawned before this version recorded no seal, and none could: the key did
+    not exist. The key's first making seals what the store holds, so the agents running
+    across an upgrade still restart as recorded; a spec unsealed AFTER that does not."""
+    agent = fleet_service.spawn(
+        project, "coder", agent="codex", worktree=False, agent_args=["--search"]
+    ).agent
+    assert agent.launch_spec is not None
+    before = agent.launch_spec.model_copy(update={"seal": None})
+    with store_session() as store:  # as the previous version recorded it, with no key yet
+        store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": before}))
+    launch_seal.key_path().unlink()
+
+    receipt = fleet_service.restart(project, agent.label)
+
+    assert "--search" in _command(tmux)
+    assert not any("not one aisquare sealed" in note for note in receipt.notes)
+    with store_session() as store:  # unsealed once a key exists: written since
+        store.upsert_fleet_agent(receipt.started.model_copy(update={"launch_spec": before}))
+    again = fleet_service.restart(project, agent.label)
+    assert any("not one aisquare sealed" in note for note in again.notes), again.notes
+
+
+def test_a_sealed_launch_spec_is_replayed_as_recorded(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """Control: an untouched spec still replays, its arguments the recorded ones."""
+    agent = fleet_service.spawn(
+        project, "coder", agent="codex", worktree=False, agent_args=["--search"]
+    ).agent
+
+    receipt = fleet_service.restart(project, agent.label)
+
+    assert "--search" in _command(tmux)
+    assert not any("not one aisquare sealed" in note for note in receipt.notes)
 
 
 # --- one permission per role, mapped per agent (acceptance 4) ----------------------------

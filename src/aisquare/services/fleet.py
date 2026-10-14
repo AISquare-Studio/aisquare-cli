@@ -44,7 +44,7 @@ from typing import Any
 
 from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import codenames, harness, orchestrator, selfcli
+from aisquare.core import codenames, harness, launch_seal, orchestrator, selfcli
 from aisquare.core import tmux as tmux_core
 from aisquare.core.agent_adapters import (
     DEFAULT_AGENT,
@@ -1931,14 +1931,16 @@ def spawn(
         task_id=resolved_task_id,
         spawned_by=spawned_by,
         account_slot=choice.account.slot if choice.account is not None else None,
-        launch_spec=LaunchSpec(
-            binary=resolution.binary,
-            permission_mode=native_mode,
-            extra_args=recorded_args,
-            account_slot=choice.account.slot if choice.account is not None else None,
-            worktree=use_worktree,
-            command=list(command),
-            recorded_by=__version__,
+        launch_spec=launch_seal.sealed(
+            LaunchSpec(
+                binary=resolution.binary,
+                permission_mode=native_mode,
+                extra_args=recorded_args,
+                account_slot=choice.account.slot if choice.account is not None else None,
+                worktree=use_worktree,
+                command=list(command),
+                recorded_by=__version__,
+            )
         ),
         socket_path=socket_path,
         boot_id=tmux_core.boot_id(),
@@ -4869,6 +4871,7 @@ def _respawn(
         if why_not is not None:
             notes.append(f"{why_not} — the replacement starts fresh with a hand-off prompt")
     prompt = resume_prompt if resume is not None else _handoff_prompt(agent, task, recent, reason)
+    spec = _sealed_spec(agent, notes)
     receipt = spawn(
         project,
         agent.role,
@@ -4881,7 +4884,7 @@ def _respawn(
         resume=resume,
         size=size,
         permission_mode=permission_mode,
-        spec=agent.launch_spec,
+        spec=spec,
         # The agent the row ran, never today's resolution of the role: a `--agent codex
         # --bin <wrapper>` row came back with Claude Code's flags, and a role bound to
         # another agent since refused only after the original was stopped (r1 of #113).
@@ -4896,13 +4899,13 @@ def _respawn(
         bin_flag=False,
         own_worktree=agent.cwd if agent.worktree else None,
     )
-    if agent.launch_spec is not None:
+    if spec is not None:
         # Said once the replacement is up, for what it really took from the row: a
         # recorded binary that has left the PATH was replaced by today's resolution,
         # which the spawn's own note names, and "the binary comes from the row" beside
         # it said the opposite (review of #169, F7).
         kept = [
-            *(["binary"] if receipt.agent.binary == agent.launch_spec.binary else []),
+            *(["binary"] if receipt.agent.binary == spec.binary else []),
             *(["permission mode"] if permission_mode is None else []),
         ]
         said = f"{', '.join(kept)} and arguments" if kept else "arguments"
@@ -4959,8 +4962,9 @@ def _refuse_a_replay_that_cannot_start(
 
     The binary asked about is the one :func:`spawn` will start, chosen by the
     function spawn asks (:func:`_launch_binary`): the recorded one when the
-    row has a spec, the role's as it resolves today when it has none (a row
-    spawned before v18). Asking the role's for a row with a spec refused the
+    row has a sealed spec (:func:`_sealed_spec`), the agent's as the role resolves
+    it today when it has none (a row spawned before v18, or one whose spec was
+    changed since). Asking the role's for a row with a spec refused the
     restart of an agent whose recorded binary was still there because the
     role's binding had moved to one that is not. A refusal names no ``--bin``:
     ``fleet restart``, ``fleet switch`` and Restart take none. The agent that binary
@@ -4968,23 +4972,57 @@ def _refuse_a_replay_that_cannot_start(
     :func:`_replayed_agent`): a binary another agent's, and a wrapper with nothing to
     name its agent, are refused here rather than after the stop.
     """
-    replayed = _launch_binary(
-        agent.role,
-        binary=None,
-        spec=agent.launch_spec,
-        family=_family(session),
-        notes=[],
-        bin_flag=False,
-    )
-    chosen = (
-        replayed.binary if agent.launch_spec is not None and replayed.source != "default" else None
-    )
+    spec = _sealed_spec(agent)
+    chosen: str | None = None
+    if spec is not None:
+        replayed = _launch_binary(
+            agent.role,
+            binary=None,
+            spec=spec,
+            family=_family(session),
+            notes=[],
+            bin_flag=False,
+        )
+        chosen = replayed.binary if replayed.source != "default" else None
     try:
-        agent_launch.resolve(
+        selected = agent_launch.resolve(
             agent.role, agent=_replayed_agent(agent, session), binary=chosen, cwd=project.root
         )
     except ValueError as exc:
         raise FleetError(str(exc)) from exc
+    if spec is None and agent_launch.executable(selected) is None:
+        # As spawn asks it of a launch with no spec: the agent's binary as the role
+        # resolves it today, a Codex row's `codex` and never the role's default `claude`.
+        resolution = selected.binary
+        raise FleetError(
+            f"{resolution.binary!r} is not on your PATH (chosen by: {resolution.source}) — "
+            "install it, or change the role's binding"
+        )
+
+
+def _sealed_spec(agent: FleetAgent, notes: list[str] | None = None) -> LaunchSpec | None:
+    """The launch spec a replacement of ``agent`` replays: the row's, when its seal holds
+    (``core.launch_seal``). The store is writable from an agent's sandbox and the spec is
+    replayed outside it, so one ``fleet spawn`` did not seal (another aisquare's, or one
+    written since) is not replayed: the replacement starts as the role resolves today,
+    as a row spawned before specs were recorded does, and ``notes`` says so (review r2 of
+    #113, finding 3)."""
+    spec = agent.launch_spec
+    if spec is None or launch_seal.holds(spec):
+        return spec
+    if spec.seal is None and launch_seal.ensure_key() is not None:
+        # The key's first making sealed the specs the store held, this row's among them.
+        with store_session() as store:
+            fresh = store.get_fleet_agent(agent.id)
+        spec = fresh.launch_spec if fresh is not None else None
+        if spec is None or launch_seal.holds(spec):
+            return spec
+    if notes is not None:
+        notes.append(
+            "its recorded launch is not one aisquare sealed (recorded by another version, "
+            "or changed since) — the replacement starts as the role resolves today"
+        )
+    return None
 
 
 def _replayed_agent(agent: FleetAgent, session: TeamSession | None) -> str | None:

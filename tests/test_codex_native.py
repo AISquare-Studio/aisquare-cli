@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from aisquare.core import agents, outbox, selfcli
+from aisquare.core import agents, launch_seal, outbox, selfcli
 from aisquare.core.agent_adapters.types import store_dir, store_read_only
 from aisquare.core.config import load_config, save_config
 from aisquare.core.entries import new_entry
@@ -821,11 +821,19 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             seen = len(outputs())
             probe = (
                 f"RUN touch {store / 'credentials'}; touch {store / 'codex-accounts' / 'x'};"
-                f" touch {store / 'config.toml'}; echo probed"
+                f" touch {store / 'config.toml'}; touch {store / 'fleet-tmux.conf'};"
+                f" touch {store / 'agents.json'}; cat {store / launch_seal.KEY_NAME}; echo probed"
             )
             assert fleet.tell(project, label, probe).delivered
             until(lambda: answered(seen), 30, "the probe ran", pane)
-            assert outputs()[-1].count("Read-only file system") == 3, outputs()[-1]
+            # Refused, each: "Read-only file system", or "Permission denied" where the
+            # path did not exist and the sandbox left its read-only empty file there.
+            assert outputs()[-1].count("cannot touch") == 5, outputs()[-1]
+            # The key that seals launch specs: made before the sandbox, and unreadable in it.
+            assert "Permission denied" in outputs()[-1], outputs()[-1]
+            assert launch_seal.ensure_key() is not None
+            sealed = fleet.status_of(coder).agent.launch_spec
+            assert sealed is not None and launch_seal.holds(sealed)
             # An escalation Codex's reviewer answers: reviewed, and no bell.
             until(lambda: state(coder) == "waiting", 20, "waiting", pane)
             seen, reviewed = len(outputs()), reviews()

@@ -969,6 +969,9 @@ class LaunchSpec(BaseModel):
     """The aisquare version that recorded the spec; ``None`` on one recorded before 0.8.0,
     whose reviewer may hold that release's built-in ``--restricted``, which nobody chose
     and a replay replaces (``services.fleet``)."""
+    seal: str | None = None
+    """The spec's HMAC under the key a sandbox cannot read (``core.launch_seal``), made by
+    the ``fleet spawn`` that recorded it; a replay takes only a spec whose seal holds."""
 
 
 class FleetAgent(BaseModel):

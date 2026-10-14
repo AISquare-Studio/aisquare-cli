@@ -32,6 +32,7 @@ from aisquare.core.agent_adapters.types import (
     payload_text,
     store_dir,
     store_read_only,
+    store_unreadable,
 )
 from aisquare.core.codex_accounts import CodexAccounts, approvals_reviewer
 
@@ -601,8 +602,9 @@ class CodexAdapter:
     def store_access(self, write: WriteScope, store: Path) -> list[str]:
         """``-c`` settings that run the session under the profile :data:`PERMISSION_PROFILE`:
         Codex's built-in one for ``write`` (``:read-only``, ``:workspace``) with ``store``
-        writable and :func:`store_read_only` read-only within it, the more specific path
-        winning. ``full`` runs unsandboxed: nothing to add.
+        writable, :func:`store_read_only` read-only within it and :func:`store_unreadable`
+        unreadable (``none``: measured on 0.162.1, a read is refused), the more specific
+        path winning. ``full`` runs unsandboxed: nothing to add.
 
         Measured on 0.162.1, with the store outside ``/tmp`` (which every sandbox may
         write): ``aisquare note`` and ``aisquare board`` succeed on their first, sandboxed
@@ -614,7 +616,11 @@ class CodexAdapter:
         """
         if write == "full":
             return []
-        entries = {store: "write", **dict.fromkeys(store_read_only(store), "read")}
+        entries = {
+            store: "write",
+            **dict.fromkeys(store_read_only(store), "read"),
+            **dict.fromkeys(store_unreadable(store), "none"),
+        }
         table = ", ".join(
             f"{json.dumps(str(path))} = {json.dumps(at)}" for path, at in entries.items()
         )

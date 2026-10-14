@@ -1087,7 +1087,7 @@ def install_hint(*, editable: bool | None = None) -> str:
 
 def key_path() -> Path:
     """File holding the workspace ingest key (mode 600)."""
-    return paths.aisquare_home() / "explainability-key"
+    return paths.explainability_key_path()
 
 
 def stored_api_key() -> str | None:

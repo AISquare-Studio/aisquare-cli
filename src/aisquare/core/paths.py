@@ -497,6 +497,16 @@ def agents_registry_path() -> Path:
     return aisquare_home() / "agents.json"
 
 
+def explainability_key_path() -> Path:
+    """The workspace ingest key (mode 600)."""
+    return aisquare_home() / "explainability-key"
+
+
+def oidc_cache_dir() -> Path:
+    """The sign-in tokens ``services.iam`` caches, one file per server."""
+    return cache_dir() / "oidc"
+
+
 def explainability_dir() -> Path:
     """Directory for explainability artefacts written by the launcher."""
     return aisquare_home() / "explainability"

@@ -547,6 +547,7 @@ def spawn(
         if native_trace_note:
             typer.echo(native_trace_note, err=True)
         argv = [argv[0], *native_trace_args, *argv[1:]]
+        agent_launch.prepare_sandbox(selected)
         os.execvpe(argv[0], argv, env)
     if not get_state().json_output:
         stdout_console().print(f"  run it in the role's terminal:\n  {command}", markup=False)

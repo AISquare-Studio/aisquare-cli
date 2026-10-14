@@ -100,6 +100,16 @@ def launch_identity(env: dict[str, str], selected: ResolvedAgent, hub: Path | No
     return parent_run
 
 
+def prepare_sandbox(selected: ResolvedAgent) -> None:
+    """Before an agent that sandboxes its tools is exec'd: make what its store profile
+    names (``types.prepare_store``), which its sandbox would otherwise leave an empty
+    file in place of."""
+    from aisquare.core.agent_adapters.types import prepare_store, store_dir
+
+    if selected.adapter.capabilities.sandboxes_tools:
+        prepare_store(store_dir())
+
+
 def project_default(cwd: Path | None = None) -> str | None:
     snapshot = _PROJECT_CHOICE.get()
     if snapshot is not None and snapshot[0] == (cwd or Path.cwd()).absolute():

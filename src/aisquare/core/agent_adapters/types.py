@@ -9,9 +9,11 @@ holds every registered adapter to it).
 
 from __future__ import annotations
 
+import json
 import re
 import tomllib
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -279,22 +281,76 @@ def store_dir() -> Path:
         return home.absolute()
 
 
-def store_read_only(store: Path) -> tuple[Path, ...]:
-    """What under the aisquare home ``store`` a sandboxed agent may read and not write:
-    every agent's account homes and their temporary directories (their hooks, settings
-    and logins run outside any sandbox, so a write there is a way out of it), the
-    credentials, and the config (which chooses every later launch's flags). Everything
-    else there, the store's database first, is the board's to write."""
+def _store_dirs(store: Path) -> tuple[Path, ...]:
+    """The directories :func:`store_read_only` names: every agent's account homes and
+    their temporary directories, and the sign-in tokens' cache."""
     from aisquare.core.agent_adapters import adapters
 
     homes = sorted({adapter.accounts.dir_name for adapter in adapters() if adapter.accounts})
-    cache = paths.cache_dir().relative_to(paths.aisquare_home())
+    home = paths.aisquare_home()
+    cache = paths.cache_dir().relative_to(home)
     return (
         *(store / name for name in homes),
         *(store / cache / name for name in homes),
+        store / paths.oidc_cache_dir().relative_to(home),
+    )
+
+
+def store_read_only(store: Path) -> tuple[Path, ...]:
+    """What under the aisquare home ``store`` a sandboxed agent may read and not write:
+    what runs, or chooses what runs, outside any sandbox, so a write there is a way out of
+    it. Every agent's account homes and their temporary directories (their hooks,
+    settings and logins), the config (every later launch's flags), the tmux conf every
+    fleet server loads, the agent registry (the dirs ``upgrade`` reconnects hooks in), and
+    the keys and sign-in tokens. Everything else there, the store's database first, is
+    the board's to write; the launch specs in it a replay takes only sealed
+    (``core.launch_seal``, whose key is :func:`store_unreadable`)."""
+    from aisquare.core.tmux import CONF_NAME
+
+    return (
+        *_store_dirs(store),
         store / paths.credentials_path().name,
         store / paths.config_path().name,
+        store / CONF_NAME,
+        store / paths.agents_registry_path().name,
+        store / paths.explainability_key_path().name,
     )
+
+
+def store_unreadable(store: Path) -> tuple[Path, ...]:
+    """What under ``store`` a sandboxed agent may not even read: the key that seals the
+    launch specs a replay runs outside the sandbox (``core.launch_seal``)."""
+    from aisquare.core import launch_seal
+
+    return (store / launch_seal.KEY_NAME,)
+
+
+def prepare_store(store: Path) -> None:
+    """Make, before an agent's sandbox can, what :func:`store_read_only` and
+    :func:`store_unreadable` name under ``store``. Codex's sandbox leaves an empty file on
+    the host where a path its profile names does not exist (0.162.1, measured): in a
+    directory's place, which no ``mkdir`` then makes, and over a file a writer writes in
+    place, which then cannot (the tmux conf, the agent registry). A file whose empty
+    reading is its absent one (the config, the credentials, a key) is left to that. The
+    sealing key is made here too. Never raises: what is not made is the profile's to
+    hold as it can."""
+    from aisquare.core import launch_seal
+    from aisquare.core.tmux import BUNDLED_CONF, CONF_NAME
+
+    for directory in _store_dirs(store):
+        with suppress(OSError):
+            directory.mkdir(parents=True, exist_ok=True)
+    made = {
+        store / CONF_NAME: BUNDLED_CONF,
+        store / paths.agents_registry_path().name: json.dumps(
+            {"connected": [], "connections": {}}, indent=2
+        )
+        + "\n",
+    }
+    for path, body in made.items():
+        with suppress(OSError), path.open("x", encoding="utf-8") as handle:
+            handle.write(body)
+    launch_seal.ensure_key()
 
 
 # --- version probe, hooks switch, plugin route ---------------------------------------------

@@ -15,10 +15,11 @@ from __future__ import annotations
 
 import json
 import os
+import tomllib
 from collections.abc import Iterator
 from importlib import import_module
-from pathlib import Path
-from typing import Any, get_args
+from pathlib import Path, PureWindowsPath
+from typing import Any, cast, get_args
 from unittest.mock import Mock
 
 import pytest
@@ -377,23 +378,54 @@ def _runs_within(inner: list[str], outer: list[str]) -> bool:
     return any(outer[at : at + len(inner)] == inner for at in range(len(outer) - len(inner) + 1))
 
 
+def _named(args: list[str]) -> set[str]:
+    """Every path ``args`` names, as the agent reads it: each argument as written, and every
+    key and string of a ``KEY=VALUE`` read as TOML. Codex's ``-c`` takes TOML, where a
+    Windows home ``C:\\Users\\me`` is ``"C:\\\\Users\\\\me"`` on the command line: looked for
+    as written, the store a Windows runner's profile names was not found (CI on e8f95719).
+    """
+
+    def strings(value: object) -> set[str]:
+        if isinstance(value, str):
+            return {value}
+        if isinstance(value, dict):
+            return {*value, *(found for item in value.values() for found in strings(item))}
+        if isinstance(value, list):
+            return {found for item in value for found in strings(item)}
+        return set()
+
+    named = set(args)
+    for arg in args:
+        _, assigned, raw = arg.partition("=")
+        if not assigned:
+            continue
+        try:
+            named |= strings(tomllib.loads(f"v = {raw}")["v"])
+        except (tomllib.TOMLDecodeError, RecursionError):
+            continue
+    return named
+
+
 def test_a_sandboxed_agent_reaches_the_store(adapter: AgentAdapter, tmp_path: Path) -> None:
     """Every board call an agent makes (``aisquare note``, ``task claim``, a read too) opens
     the aisquare store for writing: an agent whose sandbox confines its tools' writes
     declares how its launch reaches the store (``store_access``), with the account homes,
     the credentials and the config read-only within it, and every permission the fleet
     maps for it carries that, the role's built-in ones included."""
-    store = tmp_path / "aisquare-home"
-    for write in get_args(WriteScope):
-        access = adapter.store_access(write, store)
-        assert all(isinstance(arg, str) for arg in access)
-        if not adapter.capabilities.sandboxes_tools:
-            assert access == [], "no sandbox stands between the agent and the store"
-        elif write != "full":
-            named = " ".join(access)
-            assert str(store) in named, f"{adapter.id}'s {write} sandbox leaves the store out"
-            for kept in store_read_only(store):
-                assert str(kept) in named, f"{kept} must stay read-only in the sandbox"
+    # A Windows home too, on every platform: its spelling in the launch is the agent's to
+    # choose (TOML escapes Codex's backslashes), and only a Windows runner had one.
+    windows = cast(Path, PureWindowsPath(r"C:\Users\me\.aisquare"))
+    for store in (tmp_path / "aisquare-home", windows):
+        for write in get_args(WriteScope):
+            access = adapter.store_access(write, store)
+            assert all(isinstance(arg, str) for arg in access)
+            if not adapter.capabilities.sandboxes_tools:
+                assert access == [], "no sandbox stands between the agent and the store"
+            elif write != "full":
+                named = _named(access)
+                assert str(store) in named, f"{adapter.id}'s {write} sandbox leaves out {store}"
+                for kept in store_read_only(store):
+                    assert str(kept) in named, f"{kept} must stay read-only in the sandbox"
     for write in get_args(WriteScope):
         for approvals in get_args(Approvals):
             intent = PermissionIntent(write, approvals)

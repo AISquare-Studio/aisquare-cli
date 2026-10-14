@@ -2462,6 +2462,67 @@ def test_an_unreadable_dismissals_file_dismisses_nothing(body: str) -> None:
     assert load_needs_dismissals() == {}
 
 
+_KEPT_AT = (datetime.now(UTC) - timedelta(hours=1)).isoformat(timespec="seconds")
+_KEPT_DISMISSED = {f"ny_{n:016x}": _KEPT_AT for n in range(3)}
+_KEPT_BEFORE = {
+    "version": 1,
+    "dismissed": _KEPT_DISMISSED,
+    "first_seen": {"fleet_down:prj_alpha": _KEPT_AT},
+}
+"""What three dismissals and a sighting leave on file, each an hour ago (within the week)."""
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        json.dumps(_KEPT_BEFORE).encode() + b"\x00",  # one stray byte
+        b"\xff\xfe not UTF-8",
+        b"[1, 2]",
+        b'{"dismissed": ["ny_1"]}',
+        b'{"dismissed": {"ny_1": {"at": "2026-10-07T11:00:00+00:00"}}}',  # a later shape
+    ],
+)
+def test_a_needs_file_a_write_cannot_read_whole_is_kept_aside_not_overwritten(
+    body: bytes, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review of #259, remote focus, 3/12: a file that could not be read was read as empty,
+    and the next dismissal, re-dating or first sighting replaced it with that one entry:
+    every earlier dismissal and first sighting gone for good. It is moved to
+    ``remote-needs.json.bad`` as it was, said in the log, and a new one started."""
+    path = remote_needs_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(body)
+    with caplog.at_level(logging.WARNING, logger=remote_needs.log.name):
+        record_needs_dismissal("ny_newest")
+    assert path.with_name("remote-needs.json.bad").read_bytes() == body
+    assert set(load_needs_dismissals()) == {"ny_newest"}
+    assert "remote-needs.json.bad" in caplog.text
+
+
+def test_a_needs_file_that_could_not_be_read_is_never_written(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read that failed (EIO, EACCES) says nothing of what is in the file: the write is the
+    ``OSError`` (a dismissal's 503, the watcher's streak), the file left as it was."""
+    path = remote_needs_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(_KEPT_BEFORE), encoding="utf-8")
+    real = Path.read_text
+
+    def failing(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self == path:
+            raise OSError(5, "Input/output error")
+        return real(self, *args, **kwargs)
+
+    with monkeypatch.context() as patched, pytest.raises(OSError, match="Input/output"):
+        patched.setattr(Path, "read_text", failing)
+        record_needs_dismissal("ny_newest")
+    assert json.loads(path.read_text(encoding="utf-8")) == _KEPT_BEFORE
+    assert not path.with_name("remote-needs.json.bad").exists()
+    record_needs_dismissal("ny_newest")  # the control: read whole, it is built on
+    assert set(load_needs_dismissals()) == {*_KEPT_DISMISSED, "ny_newest"}
+
+
 def test_a_dismissals_stamp_and_asq_remote_needs_age_are_read_as_the_server_reads_a_stamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

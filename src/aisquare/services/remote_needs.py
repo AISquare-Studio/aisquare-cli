@@ -2966,10 +2966,8 @@ watcher's memory key → when a scan first saw what it dates (:func:`_needs_date
 
 def _needs_kept() -> dict[str, dict[str, str]]:
     """Each part of ``remote-needs.json``, ``key → ISO stamp``; empty where unreadable."""
-    from aisquare.core.paths import remote_needs_path
-
     try:
-        raw = json.loads(remote_needs_path().read_text(encoding="utf-8"))
+        raw = _needs_kept_raw()
     except (OSError, ValueError):
         raw = None
     parts: dict[str, dict[str, str]] = {}
@@ -2980,18 +2978,68 @@ def _needs_kept() -> dict[str, dict[str, str]]:
     return parts
 
 
+def _needs_kept_raw() -> object:
+    """``remote-needs.json`` as its JSON; ``None`` when there is none. Raises ``OSError`` for a
+    file that could not be read, ``ValueError`` for one that is not JSON."""
+    from aisquare.core.paths import remote_needs_path
+
+    try:
+        text = remote_needs_path().read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    return json.loads(text)
+
+
+def _needs_kept_whole(raw: object) -> dict[str, dict[str, str]]:
+    """Each part of ``raw`` when all of it is as this version writes it, else ``ValueError``:
+    an object whose parts, where there, are objects of strings."""
+    if raw is not None and not isinstance(raw, dict):
+        raise ValueError("it is not a JSON object")
+    parts: dict[str, dict[str, str]] = {}
+    for part in _NEEDS_KEPT_PARTS:
+        kept = None if raw is None else raw.get(part)
+        if kept is None:
+            kept = {}
+        if not isinstance(kept, dict) or not all(isinstance(v, str) for v in kept.values()):
+            raise ValueError(f"its {part!r} is not an object of strings")
+        parts[part] = dict(kept)
+    return parts
+
+
 def _needs_keep(edit: Callable[[dict[str, dict[str, str]]], None]) -> None:
     """Write ``remote-needs.json`` again, ``edit`` applied to its parts; one writer at a time,
-    and owner-only, like every Remote file."""
+    and owner-only, like every Remote file.
+
+    What is written builds on the whole file, so only a file that is not there is empty. A
+    read that failed (``EIO``, ``EACCES``) is the ``OSError`` it was, and nothing is written:
+    a dismissal answers 503, and the watcher tells its streak. A file this version cannot
+    read in full (not JSON, a hand edit, a later version's shape) is moved aside to
+    ``remote-needs.json.bad``, kept for the human, and a new one started. It was read as
+    empty and replaced by the one entry being written, every dismissal and first sighting
+    in it lost for good: every dismissed card back on every phone, and pushed again, an
+    ongoing outage under a new id (review of #259, remote focus, 3/12).
+    """
     from aisquare.core.atomic import write_replacing
     from aisquare.core.paths import remote_needs_path
 
     with _dismissals_lock:
-        parts = _needs_kept()
-        edit(parts)
         path = remote_needs_path()
+        parts = _needs_kept_to_write(path)
+        edit(parts)
         path.parent.mkdir(parents=True, exist_ok=True)
         write_replacing(path, json.dumps({"version": 1, **parts}, indent=2), owner_only=True)
+
+
+def _needs_kept_to_write(path: Path) -> dict[str, dict[str, str]]:
+    """The parts of ``path`` for a write to build on, empty once a file it cannot build on
+    was moved to ``remote-needs.json.bad``; the caller holds ``_dismissals_lock``."""
+    try:
+        return _needs_kept_whole(_needs_kept_raw())
+    except ValueError as exc:  # json's, a text that is not UTF-8, or the shape's
+        aside = path.with_name(f"{path.name}.bad")
+        os.replace(path, aside)
+        log.warning("remote: %s could not be read (%s); it is kept as %s", path, exc, aside)
+        return _needs_kept_whole(None)
 
 
 def load_needs_dismissals() -> dict[str, str]:

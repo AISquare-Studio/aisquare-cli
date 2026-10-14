@@ -2769,6 +2769,30 @@ def test_a_spawn_over_a_server_that_exited_leaves_its_rows_lost_not_held(
     assert [typed for typed in tmux.typed if typed[0] == receipt.agent.pane_id] == []
 
 
+def test_a_check_at_a_path_with_no_file_reads_the_fleets_socket_once(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 6, 7/10: `_refuse_a_freed_socket` read the fleet's socket again
+    right after `_before_a_server_starts` had read "gone" there, two reads a check where a
+    listening server costs one. The refusal stands on the one read; each row's own socket is
+    still asked, once (`_live_rows_here`)."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    coder = _coder(project)
+    tmux.running, tmux.socket_file = False, False  # a server that lost its socket file
+    asked: list[Path | None] = []
+    listener = tmux.listener
+
+    def counted(recorded: Path | None = None) -> SocketAnswer | None:
+        asked.append(recorded)
+        return listener(recorded)
+
+    monkeypatch.setattr(tmux, "listener", counted)
+    with pytest.raises(FleetError, match="lost its socket file"):
+        fleet_service._before_a_server_starts(tmux, fleet_service.settings())
+
+    assert asked == [tmux.socket_path(), coder.socket_path], asked
+
+
 def test_a_check_before_a_server_starts_reads_the_socket_once_and_a_spawn_says_both_checks(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

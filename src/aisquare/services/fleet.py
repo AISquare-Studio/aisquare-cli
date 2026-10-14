@@ -2289,7 +2289,9 @@ def _live_rows_here(
         yield agent, answer
 
 
-def _refuse_a_freed_socket(srv: TmuxServer, config: FleetSettings) -> None:
+def _refuse_a_freed_socket(
+    srv: TmuxServer, config: FleetSettings, answer: SocketAnswer | None
+) -> None:
     """Refuse to start a server at a socket path a running server lost (follow-up of #257).
 
     ``tmux -L`` finds no file at the path and starts a server there. A live row whose
@@ -2302,11 +2304,14 @@ def _refuse_a_freed_socket(srv: TmuxServer, config: FleetSettings) -> None:
     project's live rows are asked, not only this one's (:func:`_live_rows_here`).
 
     Asked only when this shell's path holds no file: a server listening there is the one
-    the spawn joins, and a stale file is a server that exited, which tmux replaces.
+    the spawn joins, and a stale file is a server that exited, which tmux replaces. That is
+    ``answer``, what the path said (:meth:`~aisquare.core.tmux.TmuxServer.listener`), read
+    by the caller: read here again, a path with no file cost two reads a check (review of
+    #259, round 6, 7/10).
     """
+    if answer != "gone":
+        return
     try:
-        if srv.listener() != "gone":
-            return
         here = srv.socket_path()
     except TmuxUnavailable:
         return  # no POSIX uid: no tmux server can exist here
@@ -2392,8 +2397,7 @@ def _before_a_server_starts(srv: TmuxServer, config: FleetSettings) -> list[Flee
         return []  # no POSIX uid: no tmux server can exist here
     if answer is None:
         return _forget_an_exited_server(srv, config)
-    if answer == "gone":
-        _refuse_a_freed_socket(srv, config)
+    _refuse_a_freed_socket(srv, config, answer)
     return []
 
 
@@ -5097,7 +5101,8 @@ def _refuse_a_replay_that_cannot_start(agent: FleetAgent, session: TeamSession |
     )
     _refuse_an_env_file_it_cannot_read(agent.role)
     config = settings()
-    _refuse_a_freed_socket(server(config), config)
+    srv = server(config)
+    _refuse_a_freed_socket(srv, config, srv.listener())
 
 
 def _refuse_an_env_file_it_cannot_read(role: str) -> None:

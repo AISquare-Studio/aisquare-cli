@@ -159,6 +159,8 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "move",
             "disable",
             "enable",
+            "trust",
+            "settings",
         )
     ),
     *(("metrics", command) for command in ("show", "list")),

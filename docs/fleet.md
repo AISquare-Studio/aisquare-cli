@@ -599,7 +599,9 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   each account (plain and every managed slot), and from `.credentials.json` when
   there is no item. A locked Keychain, or one that refuses aisquare, is said on
   the row (`usage: the login Keychain is locked — unlock it …`) rather than
-  offered a Log in; **↻ Refresh usage** asks it again. A reset reads as a
+  offered a Log in. It is not asked again by itself (a locked Keychain's unlock
+  dialog would come back every tick): opening the page, **↻ Refresh usage** or
+  a Log in asks it again. A reset reads as a
   distance and a clock time — `resets in 3h 10m (18:00)`, `resets in 2d 4h (Tue
   02:00)` — the same string on the page and in `aisquare accounts usage`, so a
   weekly window six days out never looks like tonight.

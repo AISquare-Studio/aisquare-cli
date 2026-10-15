@@ -510,8 +510,17 @@ all of them, and the fleet cleans up the worktrees it made.**
   list --usage`, the Accounts page, the status line's dot and headroom picks
   all read it, through the five-minute cache. A missing login offers Log in,
   and an expired one says so, as on Linux. A locked Keychain, or one that
-  refuses aisquare, says so on the row with what to do, and **↻ Refresh usage**
-  asks it again. The token is never printed or logged.
+  refuses aisquare, says so on the row with what to do. It is not asked again by
+  itself, so its unlock dialog does not come back every tick: opening the
+  Accounts page, **↻ Refresh usage**, a Log in or an `aisquare` command asks it
+  again. Such an account's `token_state` in `accounts list --json` is the new
+  value `unreadable`. The token is never printed or logged.
+  - Known limit: a Log in on the plain claude (slot 1) from asq's Accounts page
+    may not close by itself when your shell's `CLAUDE_CONFIG_DIR` is written
+    with `~`, relative or with a trailing slash. The window's Claude Code then
+    stores its login under another Keychain item than the one aisquare reads.
+    An absolute path with no trailing slash, or no `CLAUDE_CONFIG_DIR`, is not
+    affected.
 
 ### Security
 - **One choke point.** Every request and every socket handshake passes the

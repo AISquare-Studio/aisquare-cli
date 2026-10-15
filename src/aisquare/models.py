@@ -408,7 +408,10 @@ class ClaudeAccountStatus(BaseModel):
     identity: ClaudeIdentity | None = None
     signed_in: bool = False
     token_state: str = "missing"
-    """``ok``, ``expired`` or ``missing`` — the state of the stored OAuth token."""
+    """``ok``, ``expired``, ``missing`` or ``unreadable`` — the state of the stored OAuth token.
+
+    ``unreadable``: on macOS, a Keychain that would not show it (locked, an unlock cancelled,
+    access refused, no answer); the account still counts as signed in."""
     subscription: str | None = None
     """The plan the credentials file names (``max``, ``team``, …), when it does."""
     hooks_installed: bool = False

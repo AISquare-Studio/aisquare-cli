@@ -374,22 +374,35 @@ account.
   item for the account (`keychain_service`: a managed slot hashes the
   `CLAUDE_CONFIG_DIR` its launch is given, `launch_env`; the plain claude hashes
   the shell's own, `plain_environment`), and falls back to `.credentials.json`
-  when there is no item (exit 44) or no login Keychain (37, 50).
+  when there is no item (exit 44) or no login Keychain (37, 50). The file is
+  where Claude Code's `wx()` puts it: `CLAUDE_SECURESTORAGE_CONFIG_DIR` when set
+  (empty: `~/.claude`), else the config dir (`plaintext_credentials_path`). Linux
+  reads the config dir's file whatever that variable says, as it always has.
 - `read_keychain` runs `/usr/bin/security find-generic-password -a … -w -s …`
   as an argument list, never a shell, with a five-second timeout. A locked
-  Keychain (36, or `locked` in what it says), one that refused (51, 128) and
-  anything else are `unreadable`, with the row's words. The token is never
+  Keychain (36, an unlock dialog cancelled: 128, or `locked` in what it says),
+  one that refused (51, the Deny button) and anything else are `unreadable`,
+  with the row's words. The token is never
   logged, printed, stored or put into a reason; the item's other secrets (the
   refresh token, the MCP servers' tokens) are never lifted out of it.
-- A read is kept in the process for ten seconds (a refusal: a minute), so the
-  Accounts page's two-second tick and a usage round, which reads each token
-  three times, ask the Keychain once. A sign-in's check reads afresh, and
-  **↻ Refresh usage** forgets them all.
+- A read is kept in the process for ten seconds, so the Accounts page's
+  two-second tick and a usage round, which reads each token three times, ask
+  the Keychain once. A refusal stands until someone asks again: a locked
+  Keychain in a desktop session may put its unlock dialog up on each read, and
+  asq's ticks would repeat it. Opening the Accounts page and **↻ Refresh usage**
+  forget them all (`forget_keychain_reads`, which also drops a read still in
+  flight: a generation counter), a sign-in's checks read afresh, and a command
+  is a process of its own.
 - `signed_in` is the identity plus a token, as on Linux. An `unreadable` login
   still counts as signed in, with `token_state = "unreadable"`: its row says why
   rather than offer a Log in that would not unlock anything.
 - The Accounts page's sign-in reads (the login a Log in is opened over, each
-  one-second poll, a fresh slot's discard) moved to thread workers.
+  one-second poll, a fresh slot's discard) moved to thread workers, and each
+  asks the Keychain afresh. A login that cannot be read is never a landing: the
+  window keeps waiting. A Log in over one opens no window
+  (`LoginUnreadable`), since the window could not tell the stored login from a
+  new one. Cancel settles a fresh slot as the quit does: kept and wired when its
+  login landed after the last poll, else discarded (`settle_sign_in`).
 
 **Unverified, and said so.** This was built and tested on Linux, with the
 platform switched on and a fake `security` (`tests/test_claude_keychain.py`); the
@@ -397,4 +410,11 @@ service names are checked against Claude Code's own code run in Node. It has not
 been run against a real Keychain. A sign-in window opened through tmux
 (`carry_environment`) carries a relative, `~`-written or slash-ended
 `CLAUDE_CONFIG_DIR` as an absolute path, which on macOS is another item than the
-plain claude's.
+plain claude's: a plain-slot Log in there does not close by itself (the
+CHANGELOG says so). Left as they are, each noted here:
+
+- A whitespace-only `CLAUDE_CONFIG_DIR` is unset to aisquare (`plain_environment`),
+  while Claude Code treats it as set and hashes it.
+- A removed slot's item stays in the Keychain, keyed on the slot's path, so a
+  later `accounts add` that reuses the number starts out signed in as the
+  removed account.

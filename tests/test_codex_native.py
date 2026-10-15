@@ -973,9 +973,11 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             flag = "--dangerously-bypass-approvals-and-sandbox"
             sandboxed(rewrite("team_session", "native_session_id", flag, seat.id), "thread")
             sandboxed(rewrite("team_session", "account", str(workspace), seat.id), "home")
-            sandboxed(rewrite("fleet_agent", "role", "coder", reviewer.id), "role")
             sandboxed(rewrite("fleet_agent", "binary", "/tmp/x", reviewer.id), "binary")
             sandboxed(rewrite("fleet_agent", "account_slot", "7", reviewer.id), "account")
+            # Last: a row whose role is rewritten is one nothing types into any more (review
+            # r8 of #113, rule C), and it is still replayed as recorded.
+            sandboxed(rewrite("fleet_agent", "role", "coder", reviewer.id), "role")
             until(lambda: state(reviewer) == "waiting", 20, "waiting", reviewer.pane_id)
             replaced = fleet.restart(project, reviewer.label)
             command = replaced.started.launch_spec.command if replaced.started.launch_spec else []
@@ -1170,7 +1172,7 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             sandboxed(rewrite("project", "codename", "spare-heron", other.id), "their codename")
             sandboxed(rewrite("project", "codename", other.codename or "", project.id), "ours")
             sandboxed(rewrite("project", "codename", ours, other.id), "the swap")
-            with pytest.raises(fleet.FleetError, match="no fleet session a launch record"):
+            with pytest.raises(fleet.FleetError, match="a live window is never killed"):
                 fleet.stop(project, "coder-9")
             report = fleet.shutdown(project, force=True)
             assert fake_id in [row.agent.id for row in report.failed], report
@@ -1394,3 +1396,179 @@ def test_real_codex_at_its_usage_limit_reaches_the_board_with_no_stop(
                 srv.run("kill-server")
             server.shutdown()
             thread.join(timeout=2)
+
+
+@pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
+def test_real_codex_fleet_from_before_launch_records_and_rows_its_sandbox_rewrote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r8 of #113, on the real Codex with only loopback and a real tmux server.
+
+    The upgrade (rule A): three agents run, and their launch records are gone, as the
+    aisquare before this one left them (it kept none). This aisquare's first fleet read
+    takes the census and places them: they list running, a new spawn joins their session,
+    `stop` ends one, `restart` starts one fresh, a dead one is reaped. Then a sandboxed
+    agent rewrites rows from its sandbox: two labels swapped (rule C) — `fleet stop` of a
+    label stops the agent its record gives that label — and its own `ended_at` (rule B) —
+    `restart` still finds it running and hands it over. `shutdown` takes it all down.
+    """
+    binary = shutil.which("codex")
+    assert binary, "AISQUARE_TEST_CODEX requires an installed Codex"
+    refused = _sandbox_refused(binary, tmp_path)
+    if refused is not None:
+        pytest.skip(f"Codex's sandbox cannot start a command on this host: {refused}")
+    outside = Path(tempfile.mkdtemp(prefix="asq-", dir="/var/tmp"))
+    store, native_home = outside / "h", outside / "c"
+    native_home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    cli = shlex.join(selfcli.argv_for([]))
+    socket = f"asq-codex-upgrade-{os.getpid()}"
+    with ThreadingHTTPServer(("127.0.0.1", 0), _Scripted) as server:
+        server.requests = []  # type: ignore[attr-defined]
+        requests: list[dict[str, Any]] = server.requests  # type: ignore[attr-defined]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        (native_home / "config.toml").write_text(
+            'model = "local-fixture"\nmodel_provider = "local"\n'
+            '[model_providers.local]\nname = "Local fixture"\nwire_api = "responses"\n'
+            f'base_url = "http://127.0.0.1:{server.server_port}/v1"\n'
+            "requires_openai_auth = false\n"
+            f'[projects.{json.dumps(str(workspace))}]\ntrust_level = "trusted"\n',
+            encoding="utf-8",
+        )
+        for key in tuple(os.environ):
+            if key.startswith(("OPENAI_", "ANTHROPIC_", "CODEX_")):
+                monkeypatch.delenv(key)
+        monkeypatch.delenv("TMPDIR", raising=False)
+        monkeypatch.setenv("AISQUARE_HOME", str(store))
+        monkeypatch.setenv("CODEX_HOME", str(native_home))
+        monkeypatch.setattr(agents, "_aisquare_command", lambda: shlex.join(selfcli.argv_for([])))
+        agents.install_hooks("codex", native_home)
+        config = load_config()
+        config.fleet.tmux_socket = socket
+        save_config(config)
+        project = team.activate(workspace)
+        for kept in store_read_only(store_dir()):
+            kept.parent.mkdir(parents=True, exist_ok=True)
+        (store / "codex-accounts").mkdir(exist_ok=True)
+        srv = fleet.server(config.fleet)
+        args = ["--dangerously-bypass-hook-trust", "--no-alt-screen"]
+
+        def outputs() -> list[str]:
+            found: dict[str, str] = {}
+            for request in list(requests):
+                for item in request.get("input", []):
+                    if item.get("type") == "function_call_output":
+                        found.setdefault(str(item.get("call_id")), str(item.get("output")))
+            return list(found.values())
+
+        def until(check: Any, seconds: float, what: str) -> None:
+            deadline = time.monotonic() + seconds
+            while not check():
+                if time.monotonic() >= deadline:
+                    raise AssertionError(f"{what}: {outputs()[-2:]}")
+                time.sleep(0.2)
+
+        def state(agent: Any) -> str:
+            return fleet.status_of(agent).state
+
+        def up(role: str, label: str) -> Any:
+            seen = len(outputs())
+            agent = fleet.spawn(
+                project, role, label=label, agent="codex", worktree=False,
+                prompt=f"RUN {cli} note '{label} up'", agent_args=args,
+            ).agent  # fmt: skip
+            until(lambda: len(outputs()) > seen, 40, f"{label}'s note ran")
+            until(lambda: state(agent) == "waiting", 30, f"{label} waiting")
+            return agent
+
+        def sandboxed(agent: Any, sql: str, *values: str) -> None:
+            code = (
+                "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); "
+                f"c.execute({sql!r}, sys.argv[2:]); c.commit(); print('rewrote', c.total_changes)"
+            )
+            argv = [sys.executable, "-c", code, str(store / "context.db"), *values]
+            until(lambda: state(agent) == "waiting", 30, "waiting to be told")
+            seen = len(outputs())
+            assert fleet.tell(project, agent.label, "RUN " + shlex.join(argv)).delivered
+            until(lambda: len(outputs()) > seen, 30, "the sandboxed rewrite ran")
+            assert "rewrote" in outputs()[-1], outputs()[-1]
+
+        try:
+            manager, first, second = (
+                up("manager", "manager"),
+                up("coder", "coder-a"),
+                up("coder", "coder-b"),
+            )
+            [session] = srv.list_sessions()
+            # As the aisquare before this one left them: no launch record, no census.
+            shutil.rmtree(launch_seal.seals_dir())
+            launch_seal._CENSUS_CACHE.clear()
+
+            listed = {s.agent.id: s.state for s in fleet.list_agents(project)}
+            assert listed == {a.id: "waiting" for a in (manager, first, second)}, listed
+            assert launch_seal.census_taken()
+            third = up("coder", "coder-c")
+            assert srv.list_sessions() == [session], "joined their session, by its id"
+            stopped = fleet.stop(project, first.label)
+            assert stopped.agent.ended_at is not None and srv.pane_facts(first.pane_id) is None
+            restarted = fleet.restart(project, second.label)
+            assert restarted.was_running and not restarted.resumed, restarted.notes
+            assert srv.pane_facts(second.pane_id) is None, "handed over at its own pane"
+            second = restarted.started
+            until(lambda: state(second) == "waiting", 40, "the fresh replacement")
+            manager_pid = srv.pane_pid(manager.pane_id)
+            assert manager_pid is not None
+            os.kill(manager_pid, 15)
+            until(lambda: bool((f := srv.pane_facts(manager.pane_id)) and f.dead), 20, "dead")
+            reaped = fleet.reap(project)
+            status = fleet.status_of(manager)
+            assert [row.id for row in reaped.ended] == [manager.id], (status.state, status.detail)
+
+            # Rule B: from its sandbox the replacement ends its own row; restart still
+            # finds it running at its record's pane and hands it over there.
+            sandboxed(
+                second,
+                "UPDATE fleet_agent SET ended_at = ? WHERE id = ?",
+                datetime.now(UTC).isoformat(),
+                second.id,
+            )
+            handed = fleet.restart(project, second.label)
+            assert handed.was_running and srv.pane_facts(second.pane_id) is None, handed.notes
+            fourth = handed.started
+            until(lambda: state(fourth) == "waiting", 40, "the second replacement")
+            # Rule C: from its sandbox coder-c swaps its row's label with that replacement's,
+            # in one command; `fleet stop coder-c` stops the agent its record calls coder-c.
+            swap = (
+                "UPDATE fleet_agent SET label = 'spare-label' WHERE id = :a;"
+                "UPDATE fleet_agent SET label = :b_label WHERE id = :b;"
+                "UPDATE fleet_agent SET label = :a_label WHERE id = :x"
+            )
+            code = (
+                "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); a, b, al, bl = "
+                "sys.argv[2:6]; [c.execute(q, {'a': a, 'b': b, 'x': a, 'a_label': bl, "
+                f"'b_label': al}}) for q in {swap!r}.split(';')]; c.commit(); "
+                "print('rewrote', c.total_changes)"
+            )
+            argv = [
+                sys.executable, "-c", code, str(store / "context.db"),
+                third.id, fourth.id, third.label, fourth.label,
+            ]  # fmt: skip
+            until(lambda: state(third) == "waiting", 30, "coder-c waiting")
+            seen = len(outputs())
+            assert fleet.tell(project, third.label, "RUN " + shlex.join(argv)).delivered
+            until(lambda: len(outputs()) > seen, 30, "the sandboxed swap ran")
+            assert "rewrote" in outputs()[-1], outputs()[-1]
+            gone = fleet.stop(project, third.label, force=True)
+            assert gone.agent.id == third.id and srv.pane_facts(third.pane_id) is None
+            assert srv.pane_facts(fourth.pane_id) is not None, "the swapped-in agent runs on"
+
+            report = fleet.shutdown(project, force=True)
+            assert report.failed == [] and report.incomplete_projects == [], report
+            assert srv.list_sessions() == []
+        finally:
+            subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True, check=False)
+            server.shutdown()
+            thread.join(timeout=2)
+            shutil.rmtree(outside, ignore_errors=True)

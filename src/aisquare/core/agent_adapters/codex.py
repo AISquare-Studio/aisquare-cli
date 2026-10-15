@@ -180,22 +180,34 @@ _STATUS_LINE = re.compile(r"[•◦] .+ \(\d+[hms](?: \d+[hms])* • esc to inte
 #: U+203A and a space.
 _CHEVRON = "\u203a "
 #: The header of the follow-ups queued during a turn, which Codex draws between its
-#: status line and its composer, each indented under it (0.162.1).
+#: status line and its composer, each one under it on a ``↳`` row (0.162.1).
 _QUEUED = "• Queued follow-up input"
+#: What starts a row Codex draws under its status line about it: a hint
+#: (``└ Tip: …``, measured on 0.162.1 signed in with ChatGPT).
+_DETAIL = "  \u2514 "
+#: What starts a queued follow-up's row under its header.
+_QUEUED_ROW = "  \u21b3 "
+#: What starts the rows a detail or a follow-up wraps onto, and the queue's own hint.
+_WRAPPED = "    "
 
 
 def working_on_screen(rows: Sequence[str]) -> bool:
     """Whether ``rows``, Codex's visible screen, show its status line where Codex draws it
     while a turn runs unblocked (``AgentCapabilities.working_on_screen``).
 
-    Measured on 0.162.1 under tmux: the status line is the row right above the composer,
-    blank rows apart, or right above the queued follow-ups when a message waits for the
-    turn. The composer is the last row that starts with Codex's chevron (U+203A). In the
-    approval view that row is the option chosen (``1. Yes, proceed (y)``), the view's
-    rows above it every one indented: the command awaiting approval, which can hold the
-    status line's very words, among them. The transcript's rows, an agent's output and
-    its ``• Running <command>`` included, sit above both. So the words count only in that
-    place, never anywhere on the screen (review r3 of #113, finding 6).
+    Measured on 0.162.1 under tmux, from the composer (the last row that starts with
+    Codex's chevron, U+203A) up, blank rows apart: the follow-ups queued for the turn,
+    when there are any (their header, then ``↳`` rows and the rows they wrap onto); then
+    any rows Codex draws under its status line about it (``└ Tip: …``, wrapped onto rows
+    indented four); then the status line, found by its shape: its header, the time it
+    has run and ``esc to interrupt`` (review r3 of #113, finding 6; its Tip row, the
+    tester's smoke 3). Nothing else may sit between them. In the approval view the last
+    chevron row is the option chosen (``1. Yes, proceed (y)``), with the view's own rows
+    above it, every one indented two and none of them a ``└`` or ``↳`` row's shape alone:
+    the command awaiting approval, which can hold the status line's very words, among
+    them, cut to ``[… N lines]`` in a short pane. The transcript, an agent's output and
+    its ``• Running <command>`` included, sits above both. So the words count only in
+    that place, never anywhere else on the screen.
     """
     lines = [row.rstrip() for row in rows if row.strip()]
     composer = next(
@@ -204,15 +216,30 @@ def working_on_screen(rows: Sequence[str]) -> bool:
     )
     if composer is None:
         return False
-    above = composer - 1
-    if above >= 0 and lines[above].startswith(" "):
-        # Only the queued follow-ups sit between the two, indented under their header.
-        while above >= 0 and lines[above].startswith(" "):
-            above -= 1
-        if above < 0 or not lines[above].startswith(_QUEUED):
-            return False
-        above -= 1
+    above = _past(lines, composer - 1, head=_QUEUED, rows=(_QUEUED_ROW, _WRAPPED))
+    above = _past(lines, above, head=_DETAIL, rows=(_WRAPPED,), head_indented=True)
     return above >= 0 and _STATUS_LINE.fullmatch(lines[above]) is not None
+
+
+def _past(
+    lines: list[str],
+    index: int,
+    *,
+    head: str,
+    rows: tuple[str, ...],
+    head_indented: bool = False,
+) -> int:
+    """The index above the block that ends at ``index`` (``rows`` under ``head``), or
+    ``index`` itself when no such block ends there. A ``head_indented`` block may be its
+    head alone; the other needs a row under it."""
+    top = index
+    while top >= 0 and lines[top].startswith(rows):
+        top -= 1
+    if top < 0 or not lines[top].startswith(head):
+        return index
+    if not head_indented and top == index:
+        return index
+    return top - 1
 
 
 class CodexAdapter:

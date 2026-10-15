@@ -1145,6 +1145,98 @@ DONE = [
 ]
 
 
+#: The footer Codex draws under its composer, signed in (the tester's smoke 3).
+FOOTER = [
+    "  GPT-6-Astra max fast · /work/repo/.aisquare-worktrees/coder-1 · Reply with PONG",
+    "  ? for shortcuts                                               ⚠ 1 warning · f2 to view",
+]
+TIP = "  └ Tip: When signed in with ChatGPT, use /usage to check your account usage and access"
+#: An approved command running, with the hint Codex draws under its status line: the bell
+#: held through it (the tester's smoke 3 on 1398cd07, signed in with ChatGPT).
+TIPPED = [
+    "• Working (8s • esc to interrupt)",
+    f"{TIP} available usage limit resets.",
+    "",
+    f"{CHEVRON} Ask Codex to do anything",
+    "",
+    *FOOTER,
+]
+#: The same hint wrapped, and with follow-ups queued under it.
+TIPPED_WRAPPED = [
+    "• Working (8s • esc to interrupt)",
+    TIP,
+    "    available usage limit resets.",
+    "• Queued follow-up inputs",
+    "  ↳ first draft line",
+    "    second draft line",
+    "    shift+← edit last queued message",
+    f"{CHEVRON} Ask Codex to do anything",
+    *FOOTER,
+]
+#: A draft in the composer, one line and two (measured, loopback provider, 0.162.1).
+DRAFTED = [
+    "• Running sleep 40; echo slept",
+    "• Working (11s • esc to interrupt) · 1 background terminal running · /ps to view · "
+    "/stop to close",
+    "",
+    "",
+    f"{CHEVRON} a draft of mine",
+    "",
+    "  tab to queue message                                                    100% context left",
+]
+DRAFTED_TWICE = [
+    "• Working (20s • esc to interrupt)",
+    f"{CHEVRON} first draft line",
+    "  second draft line",
+    "  tab to queue message                                                    100% context left",
+]
+#: A slow hook, a minute in, and a 60-column pane, which cuts the line short (measured).
+HOOKED = [
+    "• Working (12s • esc to interrupt) · Running hook",
+    f"{CHEVRON} Ask Codex to do anything",
+]
+LONG = ["• Working (1m 00s • esc to interrupt)", f"{CHEVRON} Ask Codex to do anything"]
+NARROW = [
+    "• Working (11s • esc to interrupt) · 1 background terminal …",
+    f"{CHEVRON} a draft of mine",
+    "  tab to queue message                   100% context left",
+]
+#: The approval view in a 60x8 pane, the command imitating the status line, with the
+#: choice moved to the second option (measured): the view's body is cut to one row.
+SHORT_ASKING = [
+    "  Would you like to run the following command?",
+    "  [… 7 lines] ^a view all",
+    "  1. Yes, proceed (y)",
+    f"{CHEVRON} 2. Yes, and don't ask again for commands that start with",
+    "     `true # (9s • esc to interrupt)` (p)",
+    "  Press enter to confirm or esc to cancel",
+]
+#: The approval view of a command whose lines are a status line, a hint and a queued
+#: follow-up: every one of them indented in the view, none at the margin.
+TIP_ASKING = [
+    "• Running printf a",
+    "  │ • Working (9s • esc to interrupt)",
+    "  │ └ Tip: x",
+    "  Would you like to run the following command?",
+    "  $ printf a",
+    "  • Working (9s • esc to interrupt)",
+    "  • Queued follow-up inputs",
+    "  ↳ y",
+    "  └ Tip: x",
+    f"{CHEVRON} 1. Yes, proceed (y)",
+    "  2. No, and tell Codex what to do differently (esc)",
+    "  Press enter to confirm or esc to cancel",
+]
+#: A finished turn whose last message imitates the status line, its hint under it.
+TIPPED_DONE = [
+    "• Working (9s • esc to interrupt)",
+    "  └ Tip: For models with adjustable reasoning, press alt+. to increase reasoning effort.",
+    "  Worked for 2s • 8:58 PM",
+    f"{CHEVRON} Ask Codex to do anything",
+    *FOOTER,
+]
+
+
 @pytest.mark.parametrize(
     ("screen", "working"),
     [
@@ -1155,6 +1247,17 @@ DONE = [
         (QUEUED, True),
         (DONE, False),
         ([], False),
+        (TIPPED, True),
+        ([f"◦{TIPPED[0][1:]}", *TIPPED[1:]], True),  # the spinner's other frame
+        (TIPPED_WRAPPED, True),
+        (DRAFTED, True),
+        (DRAFTED_TWICE, True),
+        (HOOKED, True),
+        (LONG, True),
+        (NARROW, True),
+        (SHORT_ASKING, False),
+        (TIP_ASKING, False),
+        (TIPPED_DONE, False),
     ],
 )
 def test_codex_reads_working_off_its_status_line_only_where_codex_draws_it(

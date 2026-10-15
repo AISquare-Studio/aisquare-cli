@@ -25,7 +25,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import NamedTuple
+from typing import NamedTuple, NoReturn
 
 from aisquare.core import (
     agent_sessions,
@@ -423,6 +423,17 @@ def _own_task(store: ContextStore, ref: str) -> TeamTask:
             "sandbox names only its own board's tasks"
         )
     return task
+
+
+def _out_of_board(message: str) -> NoReturn:
+    """Refuse a ref to another board's task: ``ValueError`` as ever, and for a command a
+    sandboxed agent's broker runs the scope refusal, which leaves its record (review r11
+    of #113, finding 13)."""
+    from aisquare.services.store_broker import OutOfScope
+
+    if brokered():
+        raise OutOfScope(message)
+    raise ValueError(message)
 
 
 def note_refusal(project_id: str, text: str, *, key: str) -> bool:
@@ -878,9 +889,12 @@ def set_signal(
     _DELIVERY.set(None)  # FIRST: a refused signal must not leave the last write's receipt readable
     _validate_signal(name, value)  # before any store is opened or board resolved
     if (brokered() or agent_tool) and name.startswith(_FLEET_SIGNAL_PREFIX):
-        raise ValueError(
+        from aisquare.services.store_broker import OutOfScope
+
+        raise OutOfScope(
             f"signal {name!r} is the fleet's own: an agent's tool, its sandbox's commands "
-            "included, may read it, not set it"
+            "included, may read it, not set it",
+            kind="fleet",
         )
     with store_session() as store:
         session = _resolve_session(store, session_ref)
@@ -1067,7 +1081,7 @@ def add_note(
                 # Same contamination --needs rejects: a foreign board's task
                 # attached to this board's event would render as a broken
                 # ref for every reader here.
-                raise ValueError(f"--task {task_ref}: that task belongs to another project's board")
+                _out_of_board(f"--task {task_ref}: that task belongs to another project's board")
             task_id = task.id
         event = _emit(
             store,
@@ -1121,7 +1135,7 @@ def add_task(
             if needed.project_id != board.id:
                 # A cross-project need would count as unmet forever (readiness
                 # only sees this project's statuses) — starve, silently.
-                raise ValueError(f"--needs {ref}: that task belongs to another project's board")
+                _out_of_board(f"--needs {ref}: that task belongs to another project's board")
             if needed.id not in resolved_needs:
                 resolved_needs.append(needed.id)
         now = _now()

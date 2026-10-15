@@ -13,7 +13,7 @@ from aisquare.core.editor import edit_text
 from aisquare.core.entries import new_entry
 from aisquare.core.injection import build_block, record_injection
 from aisquare.core.store import store_session
-from aisquare.core.workspace import active_project
+from aisquare.core.workspace import active_project, current_project
 from aisquare.models import ContextEntry, ExportFormat, Pool
 
 
@@ -56,13 +56,17 @@ def add_entry(text: str, pool: Pool | None, tags: list[str]) -> ContextEntry:
     with store_session() as store:
         project_id: str | None = None
         if resolved == "project":
-            project = active_project(store)
+            # Brokered: the launch's own project, by its directory, never a `project switch`
+            # pin, which `project forget` sets too (review r11 of #113, finding 7).
+            project = current_project() if scoped is not None else active_project(store)
             if scoped is not None and project.id != scoped:
                 raise OutOfScope(
                     f"{project.root} is not this agent's project: a command from its sandbox "
                     "writes only its own project's pool",
                     kind="pool",
                 )
+            if scoped is not None:
+                project = store.get_project(project.id) or project
             store.onboard_project(project)  # a fact added by hand is a deliberate add (#139)
             project_id = project.id
         return store.add(new_entry(text, resolved, project_id, tags, "cli"))

@@ -478,6 +478,25 @@ def no_store_broker(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def install_outside_the_tree(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer, for the suite, that this aisquare lives outside every project tree.
+
+    The install under test is this checkout (an editable ``src/``, a ``.venv`` beside it),
+    and a test that does not ``chdir`` runs in it, where a sandboxed launch is refused
+    (``services.store_broker.refuse_inside``) as it must be in a real project. Tests of
+    that refusal set the install's place themselves.
+    """
+    from aisquare.services import store_broker
+
+    monkeypatch.setattr(
+        store_broker,
+        "install_paths",
+        lambda: (Path("/nonexistent/aisquare-under-test"),),
+        raising=False,
+    )
+
+
+@pytest.fixture(autouse=True)
 def no_repomix(monkeypatch: pytest.MonkeyPatch) -> None:
     """Disable the repomix subprocess by default so tests never shell out.
 

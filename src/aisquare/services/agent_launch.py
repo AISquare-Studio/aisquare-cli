@@ -105,13 +105,16 @@ def start_broker(
 ) -> tuple[list[str], str]:
     """``argv`` with this launch's broker inbox in its sandbox's profile and the broker
     started outside it, for an agent that sandboxes its tools (``services.store_broker.
-    start``); a line to print when it could not be. Never raises: a broker that does not
-    start costs the agent its board calls from the sandbox, which then say so, never the
-    launch."""
+    start``); a line to print when it could not be. A broker that does not start costs
+    the agent its board calls from the sandbox, which then say so, never the launch; the
+    one refusal raised is ``store_broker.LaunchRefused``: the aisquare its hooks and broker
+    run lives where its sandbox may write (review r11 of #113, finding 2)."""
     from aisquare.services import store_broker
 
     try:
         return store_broker.start_for_launch(env, selected.adapter, argv)
+    except store_broker.LaunchRefused:
+        raise
     except Exception as exc:
         return argv, f"{selected.adapter.label}: its store broker did not start ({exc})"
 

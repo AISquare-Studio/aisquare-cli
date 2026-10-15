@@ -497,7 +497,12 @@ def launch(
     ]
     # Last, over the environment as it will be exec'd: the store is read-only in the
     # agent's sandbox, and its board calls go through this launch's broker.
-    argv, broker_note = agent_launch.start_broker(selected, env, argv)
+    from aisquare.services.store_broker import LaunchRefused
+
+    try:
+        argv, broker_note = agent_launch.start_broker(selected, env, argv)
+    except LaunchRefused as exc:
+        fail(str(exc), error="sandbox_writes_aisquare")
     if broker_note:
         stderr_console().print(broker_note, markup=False)
     # Text.assemble rather than "[bold]{role}[/bold]": this is the one line that

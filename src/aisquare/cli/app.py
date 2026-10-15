@@ -175,4 +175,9 @@ def main() -> None:
     code = store_broker.forward(sys.argv[1:])
     if code is not None:
         raise SystemExit(code)
+    why = store_broker.check_cwd()
+    if why is not None:
+        store_broker.record_refusal("board", why)
+        sys.stderr.write(f"aisquare: {why}\n")
+        raise SystemExit(2)
     app()

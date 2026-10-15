@@ -255,7 +255,7 @@ def test_a_brokered_command_acts_only_as_its_own_session(
         team_service.set_role("manager", THEIRS)
     assert team_service.add_note("unattributed").session_id is None
     assert team_service.log_events(by=THEIRS[:8]) == []
-    with pytest.raises(ValueError, match="the fleet's own"):
+    with pytest.raises(store_broker.OutOfScope, match="the fleet's own"):
         team_service.set_signal("fleet-paused", "off", session_ref=MINE)
     assert team_service.set_signal("fold-ready", "on", session_ref=MINE)[0].value == "on"
     with store_session() as store:
@@ -321,6 +321,7 @@ def running(work: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iter
     monkeypatch.chdir(work)
     monkeypatch.setenv(store_broker.DIR_ENV, str(directory))
     monkeypatch.setenv(store_broker.NONCE_ENV, env[store_broker.NONCE_ENV])
+    monkeypatch.setattr(store_broker, "_WRITABLE", {})
     monkeypatch.setattr(store_broker, "_writable", lambda home: False)
     try:
         yield directory
@@ -368,7 +369,9 @@ def test_the_cli_writes_the_store_itself_where_it_may(
     assert store_broker.brokered() is None
     monkeypatch.setenv(store_broker.DIR_ENV, str(tmp_path))
     store_dir().mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(store_broker, "_WRITABLE", {})
     assert store_broker.brokered() is None, "a writable home"
+    monkeypatch.setattr(store_broker, "_WRITABLE", {})
     monkeypatch.setattr(store_broker, "_writable", lambda home: False)
     assert store_broker.brokered() == tmp_path
     monkeypatch.setenv("AISQUARE_HOME", str(tmp_path / "missing"))
@@ -411,8 +414,10 @@ def test_a_launch_of_an_unsandboxed_agent_has_no_broker() -> None:
 
 
 def test_a_launch_whose_broker_cannot_start_holds_the_store_read_only_and_says_why(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.chdir(tmp_path)
+
     def fails(directory: Path, env: object) -> None:
         raise RuntimeError("it exited 1")
 
@@ -595,7 +600,7 @@ def test_no_agent_tool_sets_the_fleets_own_signals(
     from aisquare.core.spawn import LAUNCH_AGENT_ENV
     from aisquare.services import mcp_server
 
-    with pytest.raises(ValueError, match="the fleet's own"):
+    with pytest.raises(store_broker.OutOfScope, match="the fleet's own"):
         team_service.set_signal("fleet-paused", "off", agent_tool=True)
     told: dict[str, object] = {}
 
@@ -816,3 +821,228 @@ def test_codex_profile_carries_the_launch_paths(tmp_path: Path) -> None:
         str(inbox): "write",
         str(writable[0]): "write",
     }
+
+
+# --- review r11 of #113 -----------------------------------------------------------------
+
+
+def _fleet_record(agent: str, project_id: str, root: Path, cwd: Path) -> object:
+    from aisquare.core import launch_seal
+    from aisquare.models import LaunchSpec
+
+    return launch_seal.LaunchRecord.model_construct(
+        id=agent,
+        project_id=project_id,
+        project_root=str(root),
+        role="coder",
+        agent="codex",
+        binary="codex",
+        cwd=str(cwd),
+        spec=LaunchSpec.model_construct(binary="codex"),
+        label="coder-1",
+    )
+
+
+def test_under_a_hub_a_fleet_agents_brokered_calls_land_on_the_hubs_board(
+    work: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r11 of #113, finding 1: the broker took a fleet agent's board from its launch
+    record, spawn's project, which is not the hub's, while every board call resolves the
+    hub: under ``AISQUARE_TEAM_HUB`` every brokered note, task call, focus and signal was
+    refused, and the refusal went to a board nobody on the hub reads."""
+    from aisquare.core import launch_seal
+    from aisquare.core.orchestrator import team_project
+    from aisquare.core.workspace import current_project
+
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    spawn_project = current_project(work).id
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))
+    hub_board = team_project(work).id
+    team_service.activate(work)
+    assert hub_board != spawn_project, "the two resolutions disagree under a hub"
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", "agt_hub")
+    record = _fleet_record("agt_hub", spawn_project, work, work)
+    monkeypatch.setattr(launch_seal, "read", lambda agent: record)
+    hubbed = "cccc3333-0000-0000-0000-000000000000"
+    now = datetime.now(UTC)
+    with store_session() as store:
+        store.upsert_session(
+            TeamSession(id=hubbed, project_id=hub_board, started_at=now, last_seen_at=now)
+        )
+        store.set_meta(f"launch-session:{LAUNCH}", hubbed)
+    broker = store_broker.Broker(tmp_path / "broker-dir", NONCE, dict(os.environ))
+
+    assert broker.scope().board == hub_board
+    landed = _answer(broker, _request(["note", "under the hub", "--as", hubbed[:8]], work))
+
+    assert landed["code"] == 0, landed
+    with store_session() as store:
+        texts = [event.text for event in store.recent_events(hub_board, limit=20)]
+    assert "under the hub" in texts
+
+
+def test_a_project_pin_does_not_turn_a_brokered_memory_write_away(
+    work: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r11 of #113, finding 7: the pool was the pinned project's (``project switch``,
+    which ``project forget`` sets too), so while a pin pointed elsewhere every brokered
+    ``remember`` was refused. The launch's own project's pool takes it."""
+    from aisquare.core.workspace import current_project, pin_project
+    from aisquare.services import context as context_service
+
+    other = _other_repo(tmp_path)
+    pin_project(current_project(other).id)
+    _brokered(monkeypatch, work)
+
+    entry = context_service.add_entry("ours, whatever the pin", None, [])
+
+    assert entry.pool == "project" and entry.project_id == current_project(work).id
+
+
+def test_a_hand_launch_runs_calls_from_its_project_and_a_read_elsewhere_is_only_logged(
+    work: Path, tmp_path: Path
+) -> None:
+    """Review r11 of #113, finding 8: a hand launch's tree was its cwd alone, though its
+    project's directory is its own too; and a harmless read from elsewhere (``cd /tmp &&
+    aisquare board``) put "asked for what it may not do" on the board."""
+    sub = work / "backend"
+    sub.mkdir()
+    scope = store_broker.launch_scope(sub, dict(os.environ))
+    assert scope.holds(work) and scope.holds(sub)
+    broker = store_broker.Broker(tmp_path / "broker-dir", NONCE, dict(os.environ), scope=scope)
+    with store_session() as store:
+        before = len(store.recent_events(scope.board, limit=200))
+
+    read = _answer(broker, _request(["board"], Path("/")))
+    write = _answer(broker, _request(["note", "x"], Path("/"), rid="3" * 32))
+
+    assert read["code"] == 2 and write["code"] == 2
+    log = (paths.log_dir() / store_broker.LOG_NAME).read_text(encoding="utf-8")
+    assert " read: " in log and " board: " in log
+    with store_session() as store:
+        notes = [e.text for e in store.recent_events(scope.board, limit=200)][before:]
+    assert len([note for note in notes if "refused" in note]) == 1, "the write only"
+
+
+def test_a_sandboxed_launch_is_refused_where_its_sandbox_may_write_aisquare(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """Review r11 of #113, finding 2: the hooks and the broker run this aisquare outside the
+    sandbox, so an aisquare in the project's ``.venv`` or an editable ``src/`` a sandboxed
+    tester may write ran what it wrote, at its next hook. Such a launch is refused, naming
+    the remedy, and the doctor says so."""
+    from aisquare.services import diagnostics
+
+    project = tmp_path / "proj"
+    venv = project / ".venv"
+    venv.mkdir(parents=True)
+    monkeypatch.setattr(store_broker, "install_paths", lambda: (venv.resolve(),))
+    with pytest.raises(store_broker.LaunchRefused, match="uv tool install aisquare"):
+        store_broker.refuse_inside(project, get_adapter("codex"))
+    monkeypatch.chdir(project)
+    execute = Mock()
+    monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
+    monkeypatch.setattr(agent_launch, "executable", lambda selected: selected.binary.binary)
+    refused = runner.invoke(app, ["launch", "tester", "--agent", "codex", "--", *_profile()])
+    assert refused.exit_code == 1 and "uv tool install aisquare" in refused.output
+    assert not execute.called
+    row = diagnostics._sandboxed_install_check(project)
+    assert row is not None and row.status.value == "warn" and ".venv" in row.detail
+    monkeypatch.setattr(store_broker, "install_paths", lambda: (Path("/opt/elsewhere"),))
+    assert diagnostics._sandboxed_install_check(project) is None
+    store_broker.refuse_inside(project, get_adapter("codex"))  # no refusal
+
+
+def test_the_socket_dirs_never_name_a_shared_temporary_directory(tmp_path: Path) -> None:
+    """Review r11 of #113, finding 6: under ``tmux -S /tmp/x`` the parent of ``$TMUX``'s
+    socket is ``/tmp`` itself, and held read-only every write of the session there failed."""
+    if sys.platform == "win32":
+        pytest.skip("POSIX's")
+    dirs = store_broker._socket_dirs({"TMUX": "/tmp/x,1,0", "TMPDIR": str(tmp_path)}, "asq")
+    assert Path("/tmp").resolve() not in dirs and Path("/").resolve() not in dirs
+    assert Path(f"/tmp/tmux-{os.getuid()}").resolve() in dirs
+
+
+def test_a_command_is_not_started_once_the_agent_has_exited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r11 of #113, finding 9: the exit was looked at once, before the vetting, and a
+    command past that look started after ``close`` took its list: nothing ended it."""
+    broker = _broker(tmp_path)
+    started: list[object] = []
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: started.append(a))
+    broker._closing.set()
+    answer = broker._run(["task", "claim", "t"], str(tmp_path), os.environ)
+    assert answer["code"] == 75 and started == []
+
+
+def test_a_brokered_command_refuses_to_run_outside_the_launchs_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r11 of #113, finding 11: the broker checked the request's directory, resolved,
+    and started the command in it as spelt: a directory the sandbox swapped for a link in
+    between ran it elsewhere. The command asks where it really is."""
+    tree, elsewhere = tmp_path / "tree", tmp_path / "elsewhere"
+    tree.mkdir()
+    elsewhere.mkdir()
+    environ = {store_broker.CALLER_ENV: "1", store_broker.ROOTS_ENV: str(tree.resolve())}
+    monkeypatch.chdir(tree)
+    assert store_broker.check_cwd(environ) is None
+    monkeypatch.chdir(elsewhere)
+    assert "outside this agent's tree" in str(store_broker.check_cwd(environ))
+    assert store_broker.check_cwd({store_broker.ROOTS_ENV: str(tree)}) is None, "brokered only"
+
+
+def test_every_refusal_of_a_brokered_call_leaves_its_record(
+    work: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """Review r11 of #113, finding 13: the pool refusal, the fleet-signal refusal and a ref
+    to another board's task in ``note --task`` or ``task add --needs`` left no log line and
+    no note, though the docs said every refusal does."""
+    other = _other_repo(tmp_path)
+    theirs, _ = team_service.add_task("their task", cwd=other)
+    _brokered(monkeypatch, work)
+    for argv in (
+        ["remember", "everyone", "--user"],
+        ["team", "signal", "fleet-paused", "off", "--as", MINE[:8]],
+        ["note", "x", "--task", theirs.id, "--as", MINE[:8]],
+        ["task", "add", "y", "--needs", theirs.id, "--as", MINE[:8]],
+    ):
+        result = runner.invoke(app, argv)
+        assert result.exit_code == 1, (argv, result.output)
+    log = (paths.log_dir() / store_broker.LOG_NAME).read_text(encoding="utf-8")
+    assert log.count(" pool: ") == 1 and log.count(" fleet: ") == 1
+    assert log.count(" board: ") == 2
+
+
+def test_the_sandbox_probe_runs_once_per_process_and_a_full_disk_is_no_sandbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review r11 of #113, finding 14: the probe made a file in the home at every start that
+    names a broker, every Codex hook's, and read a full disk as a sandbox, so a hook outside
+    one did nothing."""
+    import errno as errno_module
+    import tempfile
+
+    store_dir().mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv(store_broker.DIR_ENV, str(tmp_path))
+    monkeypatch.setattr(store_broker, "_WRITABLE", {})
+    asked: list[Path] = []
+    real = store_broker._writable
+
+    def counted(home: Path) -> bool:
+        asked.append(home)
+        return real(home)
+
+    monkeypatch.setattr(store_broker, "_writable", counted)
+    assert store_broker.brokered() is None and store_broker.brokered() is None
+    assert len(asked) == 1
+
+    def full(**kwargs: object) -> tuple[int, str]:
+        raise OSError(errno_module.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(tempfile, "mkstemp", full)
+    with caplog.at_level("WARNING", logger="aisquare.services.store_broker"):
+        assert real(store_dir()) is True
+    assert any("full" in record.message for record in caplog.records)

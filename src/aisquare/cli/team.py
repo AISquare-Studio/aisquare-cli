@@ -564,7 +564,10 @@ def spawn(
         argv = [argv[0], *native_trace_args, *argv[1:]]
         # As `aisquare launch`: the store is read-only in the agent's sandbox, and its
         # board calls go through this launch's broker.
-        argv, broker_note = agent_launch.start_broker(selected, env, argv)
+        try:
+            argv, broker_note = agent_launch.start_broker(selected, env, argv)
+        except store_broker.LaunchRefused as exc:
+            fail(str(exc), error="sandbox_writes_aisquare")
         if broker_note:
             typer.echo(broker_note, err=True)
         agent_launch.prepare_sandbox(selected)

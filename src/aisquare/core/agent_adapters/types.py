@@ -331,14 +331,15 @@ def store_read_only(store: Path) -> tuple[Path, ...]:
 
 
 def prepare_store(store: Path) -> None:
-    """Make, before an agent's sandbox can, the store its profile names. Codex's sandbox
-    leaves an empty file on the host where a path its profile names does not exist
-    (0.162.1, measured), which no ``mkdir`` then makes; the broker's inbox, the profile's
-    other path, is made by ``services.store_broker.start_for_launch`` before the agent starts. The
-    launch records' directory too (``launch_seal.ensure_dir``): a fleet agent's own record
-    was written before its window started, and an agent that sandboxes its tools is not
-    started without one. Never raises: what is not made is the profile's to hold as it
-    can."""
+    """Make the store its profile names before the agent starts, and the launch records'
+    directory (``launch_seal.ensure_dir``): a fleet agent's own record was written before
+    its window started, and an agent that sandboxes its tools is not started without one.
+    The broker's inbox, the profile's one writable path there, is made by
+    ``services.store_broker.start_for_launch``. A path the profile names that does not exist
+    is no harm: measured on 0.162.1 in a real turn (the worktree layout, a path inside the
+    workspace and outside every writable root, an absent parent too), the sandbox shows it
+    as an empty read-only mount point and leaves nothing on the host (review r11 of #113,
+    finding 3). Never raises."""
     from aisquare.core import launch_seal
 
     with suppress(OSError):

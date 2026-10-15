@@ -1,12 +1,15 @@
 """The broker a sandboxed agent's board calls go through.
 
-An agent that sandboxes its tools (Codex, ``capabilities.sandboxes_tools``) has the
-aisquare store read-only in its sandbox (``AgentAdapter.store_access``), and with it what
-the project's trees hold that a launch outside any sandbox reads, the other agents'
-worktrees and the tmux sockets' directories (:func:`launch_paths`): nothing a process
-there writes reaches any of them, so nothing it writes can reach a replay, a kill, a
-typed line, a launch, a model or account choice, a worktree removal or a paste outside
-it. The board calls its role protocol makes still work there, unchanged (``aisquare note …``,
+An agent that sandboxes its tools (Codex, ``capabilities.sandboxes_tools``) is trusted to
+the extent of the tree it may write, as a Claude Code agent and a human contributor are;
+what aisquare itself runs or reads outside its sandbox on its behalf never comes from that
+tree (``core.launch_seal``'s boundary). So the aisquare store is read-only in its sandbox
+(``AgentAdapter.store_access``), and with it the tree tops' launch inputs, the other
+agents' worktrees and the tmux sockets' directories (:func:`launch_paths`); a launch is
+refused where its sandbox may write the aisquare its hooks and this broker run
+(:func:`refuse_inside`). Nothing a process there writes chooses a replay, a kill, a typed
+line, a launch, a model or account choice, a worktree removal or a paste the fleet makes.
+The board calls its role protocol makes still work there, unchanged (``aisquare note …``,
 ``aisquare task claim … --as <id>``): the CLI, finding the store read-only and its launch's
 broker in its environment (:data:`DIR_ENV`), hands its argv and cwd to the broker and
 prints what the command printed, with its exit status (:func:`forward`).
@@ -45,6 +48,7 @@ import argparse
 import errno
 import hmac
 import json
+import logging
 import os
 import re
 import select
@@ -63,6 +67,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from aisquare.core import paths, selfcli
+
+_log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from aisquare.core.agent_adapters.types import AgentAdapter
@@ -84,10 +90,35 @@ the one board it writes and the one whose tasks it may name (``services.team``).
 POOL_ENV = "AISQUARE_BROKERED_POOL"
 """The launch's project (an id), in the environment of the command a broker runs: the one
 memory pool a brokered ``remember`` or ``context add`` writes (``services.context``)."""
+ROOTS_ENV = "AISQUARE_BROKERED_ROOTS"
+"""The launch's tree (its directories, ``os.pathsep``-joined), in the environment of the
+command a broker runs: the command refuses to run anywhere else (:func:`check_cwd`)."""
 LOG_NAME = "store-broker.log"
 """The brokers' refusals, one line each, in the aisquare home's log directory."""
-#: The refusals put on the launch's board as well as logged, once per launch and kind.
-NOTED = frozenset({"identity", "board", "fleet", "signature"})
+#: The refusals put on the launch's board as well as logged, once per launch and kind: a
+#: session not its own, another board's task, another project's pool, a fleet operation
+#: (its signals included), a request not signed by its launch.
+NOTED = frozenset({"identity", "board", "pool", "fleet", "signature"})
+#: The commands that only read: one asked from outside the launch's tree is refused and
+#: logged, never put on the board (``cd /tmp && aisquare board`` is no misbehaviour).
+READS: frozenset[tuple[str, ...]] = frozenset(
+    {
+        ("board",),
+        ("recall",),
+        ("log",),
+        ("inject",),
+        ("task", "list"),
+        ("task", "show"),
+        ("team", "status"),
+        ("team", "log"),
+        ("team", "verify"),
+        ("team", "signals"),
+        ("context", "list"),
+        ("context", "show"),
+        ("context", "search"),
+        ("context", "preview"),
+    }
+)
 INBOX, OUTBOX, BELL, READY = "in", "out", "bell", "ready.json"
 MAX_REQUEST = 1_000_000
 MAX_OUTPUT = 4_000_000
@@ -169,6 +200,11 @@ class BrokerGone(BrokerUnavailable):
     """No broker listens on the launch's bell (``ENXIO``: a FIFO with no reader)."""
 
 
+class LaunchRefused(RuntimeError):
+    """A sandboxed launch that must not start: the aisquare its hooks and broker run,
+    outside the sandbox, lives where the sandbox may write (:func:`install_inside`)."""
+
+
 class OutOfScope(PermissionError):
     """A command a sandboxed agent's broker runs reached past its launch's own board or
     project pool (:data:`BOARD_ENV`, :data:`POOL_ENV`)."""
@@ -211,6 +247,25 @@ def own_pool(environ: Mapping[str, str] | None = None) -> str | None:
     other."""
     source = os.environ if environ is None else environ
     return (source.get(POOL_ENV) or None) if brokered_call(source) else None
+
+
+def check_cwd(environ: Mapping[str, str] | None = None) -> str | None:
+    """Why a command a broker runs may not run where it is, or ``None``: its cwd, as the
+    kernel has it now (``os.getcwd``), must be in the launch's tree (:data:`ROOTS_ENV`).
+    The broker checks the request's directory, then starts the command there; a
+    directory the sandbox swapped for a link in between is caught here (review r11 of
+    #113, finding 11)."""
+    source = os.environ if environ is None else environ
+    if not brokered_call(source) or not source.get(ROOTS_ENV):
+        return None
+    roots = [Path(root) for root in source[ROOTS_ENV].split(os.pathsep) if root]
+    try:
+        here = Path(os.getcwd())
+    except OSError as exc:
+        return f"its directory is gone ({exc.strerror})"
+    if any(here == root or here.is_relative_to(root) for root in roots):
+        return None
+    return f"{here} is outside this agent's tree: its broker runs commands only there"
 
 
 def record_refusal(kind: str, detail: str, *, board: str | None = None) -> None:
@@ -338,6 +393,11 @@ def _runs() -> str:
 # --- the CLI's side ---------------------------------------------------------------------
 
 
+_WRITABLE: dict[tuple[int, str], bool] = {}
+""":func:`_writable`'s answer, once per process and home: every hook a Codex agent fires
+names its broker (review r11 of #113, finding 14)."""
+
+
 def brokered(environ: Mapping[str, str] | None = None) -> Path | None:
     """The launch's broker directory when this process must go through it: one is named
     (:data:`DIR_ENV`) and the aisquare home is there but may not be written, as in the
@@ -348,9 +408,12 @@ def brokered(environ: Mapping[str, str] | None = None) -> Path | None:
     if not where:
         return None
     home = paths.aisquare_home()
-    if not home.is_dir() or _writable(home):
+    if not home.is_dir():
         return None
-    return Path(where)
+    key = (os.getpid(), str(home))
+    if key not in _WRITABLE:
+        _WRITABLE[key] = _writable(home)
+    return None if _WRITABLE[key] else Path(where)
 
 
 def _writable(home: Path) -> bool:
@@ -366,7 +429,12 @@ def _writable(home: Path) -> bool:
 
     try:
         fd, name = tempfile.mkstemp(prefix=".write-probe-", dir=home)
-    except OSError:
+    except OSError as exc:
+        if exc.errno in (errno.ENOSPC, errno.EDQUOT):
+            # A full disk is no sandbox: cannot tell, so this process is not sandboxed, and
+            # a hook outside one runs as it always did (review r11 of #113, finding 14).
+            _log.warning("aisquare home %s is full (%s): taken as unsandboxed", home, exc)
+            return True
         return False
     os.close(fd)
     with suppress(OSError):
@@ -639,25 +707,32 @@ def _resolved(path: Path) -> Path:
 
 
 def launch_scope(cwd: Path, environ: Mapping[str, str]) -> Scope:
-    """The launch's own board, pool and tree: its launch record's project and directories
-    for a fleet agent (``core.launch_seal``, written by its spawner, read-only to the
-    sandbox), its own directory's otherwise. Never the cwd of a request: with
-    ``AISQUARE_TEAM_HUB`` every directory resolves to the hub's board (review r10 of #113,
-    finding 3)."""
+    """The launch's own board, pool and tree, from the launch's own directory, never a
+    request's: its board as every board call resolves one (``orchestrator.team_project``,
+    under the launch's ``AISQUARE_TEAM_HUB``: a fleet record's project is spawn's, which is
+    not the hub's, and every call under a hub was refused: review r11 of #113, finding 1);
+    its project's pool (``workspace.current_project``, never a ``project switch`` pin); and
+    its tree: its checkout and its project's principal one, a fleet agent's launch record's
+    directories too (``core.launch_seal``, read-only to the sandbox), so a hand launch in a
+    subdirectory may still run a call from its project's directory (finding 8)."""
     from aisquare.core import launch_seal
     from aisquare.core.orchestrator import team_project
-    from aisquare.core.workspace import current_project
+    from aisquare.core.workspace import current_project, git_common_root
 
     roots: list[Path] = [cwd]
-    board: str | None = None
+    top = _tree_top(cwd)
+    if top is not None:
+        roots.append(top)
+    with suppress(Exception):
+        principal = git_common_root(cwd)
+        if principal is not None:
+            roots.append(principal)
     agent = environ.get("AISQUARE_FLEET_AGENT", "").strip()
     if agent:
         record = launch_seal.read(agent)
         if isinstance(record, launch_seal.LaunchRecord):
-            board = record.project_id
             roots += [Path(record.project_root), Path(record.cwd)]
-    if board is None:
-        board = team_project(cwd).id
+    board = team_project(cwd).id
     pool = current_project(cwd).id
     return Scope(board, pool, tuple(dict.fromkeys(_resolved(root) for root in roots)))
 
@@ -739,34 +814,43 @@ class Broker:
         except Exception as exc:
             return _refused(f"this agent's board could not be resolved ({exc})")
         if not scope.holds(Path(cwd)):
+            named = command_path(argv)
+            reads = not isinstance(named, str) and named[0] in READS
             return self._refuse(
-                "board",
+                "read" if reads else "board",
                 f"{cwd} is outside this agent's tree: its broker runs commands only in its "
-                "own worktree or its project's directory",
+                "own checkout or its project's directory",
             )
         env = dict(self.environ)
         env[BOARD_ENV], env[POOL_ENV] = scope.board, scope.pool
+        env[ROOTS_ENV] = os.pathsep.join(str(root) for root in scope.roots)
         columns = request.get("columns")
         if isinstance(columns, int) and 20 <= columns <= 1000:
             env["COLUMNS"] = str(columns)
-        return self._run(argv, cwd, env)
+        # The directory checked, never the request's spelling of it, and checked again by
+        # the command itself where it runs (:func:`check_cwd`; review r11, finding 11).
+        return self._run(argv, str(_resolved(Path(cwd))), env)
 
     def _run(self, argv: list[str], cwd: str, env: Mapping[str, str]) -> dict[str, object]:
         """``aisquare <argv>`` in ``cwd``, its output capped (:data:`MAX_OUTPUT`) and a cut
         said: an exit status of 74 when it had none, and a line on stderr (review r10,
-        finding 10). Tracked, so the broker ends it when the agent exits (:meth:`close`)."""
-        try:
-            child = subprocess.Popen(
-                selfcli.argv_for(argv),
-                cwd=cwd,
-                env=dict(env),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-        except OSError as exc:
-            return _refused(f"the command could not start ({exc})", 126)
+        finding 10). Tracked, so the broker ends it when the agent exits (:meth:`close`):
+        started and registered under the lock :meth:`close` takes its list under, after a
+        last look at whether the agent has exited (review r11, finding 9)."""
         with self._lock:
+            if self._closing.is_set():
+                return _refused("this agent has exited: its broker runs nothing more", 75)
+            try:
+                child = subprocess.Popen(
+                    selfcli.argv_for(argv),
+                    cwd=cwd,
+                    env=dict(env),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+            except OSError as exc:
+                return _refused(f"the command could not start ({exc})", 126)
             self._children.add(child)
         out: list[bytes] = []
         err: list[bytes] = []
@@ -860,8 +944,8 @@ class Broker:
         (``SIGTERM``, then ``SIGKILL`` after ``grace``), so none lands after its session
         ended and its claims were released (review r10, finding 7), and let their answers
         be written."""
-        self._closing.set()
         with self._lock:
+            self._closing.set()
             children = list(self._children)
         for child in children:
             with suppress(OSError):
@@ -1014,9 +1098,10 @@ def launch_paths(env: Mapping[str, str], cwd: Path) -> tuple[tuple[Path, ...], t
         fleet = load_config().fleet
     except Exception:
         fleet = FleetSettings()
-    trees: list[Path] = []
+    trees: list[Path] = [cwd]
     own = _tree_top(cwd)
-    trees.append(own or cwd)
+    if own is not None:
+        trees.append(own)
     with suppress(Exception):
         principal = git_common_root(cwd)
         if principal is not None:
@@ -1044,15 +1129,72 @@ def _socket_dirs(env: Mapping[str, str], configured: str) -> list[Path]:
     listens in (``$TMUX``), tmux's own (``$TMUX_TMPDIR`` or ``/tmp``, then
     ``tmux-<uid>``), and a configured socket path's."""
     dirs: list[Path] = []
-    pane_server = env.get("TMUX", "").split(",", 1)[0].strip()
-    if pane_server:
-        dirs.append(Path(pane_server).parent)
     getuid = getattr(os, "getuid", None)
     if getuid is not None:
         dirs.append(Path(env.get("TMUX_TMPDIR") or "/tmp") / f"tmux-{getuid()}")
+    pane_server = env.get("TMUX", "").split(",", 1)[0].strip()
+    if pane_server:
+        dirs.append(Path(pane_server).parent)
     if "/" in configured:
         dirs.append(Path(configured).expanduser().parent)
-    return [_resolved(directory) for directory in dirs]
+    # A socket made straight in a shared directory (`tmux -S /tmp/x`) names that directory:
+    # held read-only, every write of the session there would fail (review r11, finding 6).
+    shared = {
+        _resolved(Path(place))
+        for place in ("/", "/tmp", "/var/tmp", env.get("TMPDIR") or "/tmp", Path.home())
+    }
+    return [d for d in dict.fromkeys(_resolved(directory) for directory in dirs) if d not in shared]
+
+
+def install_paths() -> tuple[Path, ...]:
+    """Where the aisquare that runs outside an agent's sandbox on its behalf lives: the
+    interpreter's environment (its ``.pth`` files run at every start), the interpreter, and
+    the package's own directory (an editable install's source tree). Hooks run the install
+    that connected them, the broker ``sys.executable -m aisquare``: this one."""
+    import aisquare
+    from aisquare.core import agents
+
+    found = [Path(sys.prefix), Path(sys.executable), Path(aisquare.__file__).parent]
+    with suppress(Exception):
+        hooks_run = agents.current_install()
+        if hooks_run is not None:
+            found.append(Path(hooks_run))
+    return tuple(dict.fromkeys(_resolved(path) for path in found))
+
+
+def install_inside(writable: Sequence[Path]) -> Path | None:
+    """The first of :func:`install_paths` under one of ``writable``, or ``None``."""
+    roots = [_resolved(root) for root in writable]
+    for path in install_paths():
+        if any(path == root or path.is_relative_to(root) for root in roots):
+            return path
+    return None
+
+
+def sandbox_writable(cwd: Path) -> tuple[Path, ...]:
+    """What a sandboxed agent launched in ``cwd`` may write outside the store: its workspace
+    (``cwd``, Codex's ``:workspace``) and the temporary directories every sandbox may."""
+    places = [cwd, Path("/tmp"), Path("/var/tmp")]
+    if os.environ.get("TMPDIR"):
+        places.append(Path(os.environ["TMPDIR"]))
+    return tuple(places)
+
+
+def refuse_inside(cwd: Path, adapter: AgentAdapter) -> None:
+    """Refuse the launch of ``adapter``'s sandboxed agent in ``cwd`` when the aisquare its
+    hooks and broker run lives where its sandbox may write: a project ``.venv``, an
+    editable ``src/`` in the tree. The next hook or brokered call would run what it wrote,
+    outside any sandbox (review r11 of #113, finding 2). :class:`LaunchRefused`."""
+    inside = install_inside(sandbox_writable(cwd))
+    if inside is None:
+        return
+    raise LaunchRefused(
+        f"{adapter.label} runs its tools in a sandbox that may write {inside}, where the "
+        "aisquare its hooks and its store broker run outside the sandbox lives: what it "
+        "wrote there would run unsandboxed. Install aisquare outside the project (`uv tool "
+        "install aisquare`, or pipx) and connect its hooks from there (`aisquare agents "
+        "connect codex`), then launch again"
+    )
 
 
 def start_for_launch(
@@ -1076,6 +1218,7 @@ def start_for_launch(
     )
     if access is None:
         return argv, ""
+    refuse_inside(Path.cwd(), adapter)
     if sys.platform == "win32":
         return access, (
             f"{adapter.label}: the aisquare store is read-only in its sandbox, and its "

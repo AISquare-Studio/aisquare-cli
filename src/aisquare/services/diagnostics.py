@@ -171,6 +171,8 @@ def doctor(
             # prefix, so it waits here with them rather than beside tmux.
             _check_browser_tools(cwd),
             _check_fleet_terminal(),
+            # Only when this aisquare lives where a sandboxed agent may write (r11 of #113).
+            *_optional(_sandboxed_install_check(cwd)),
             *_experiment_checks(),
             *explainability_ops.checks(live=live, target_name=target, project_id=project_id),
             # Only while a key the CLI minted is owed a revocation (#142); --live
@@ -187,6 +189,32 @@ def doctor(
             *_live_only(live, _workspace_credits_check),
             _check_outbox(),
         ]
+
+
+def _sandboxed_install_check(cwd: Path | None = None) -> DoctorCheck | None:
+    """A warning when this aisquare (its environment, interpreter or package) lives inside
+    the project's tree or a temporary directory, where a sandboxed agent (a Codex tester,
+    validator or ui-tester in the project's directory) may write: its hooks and its store
+    broker run this aisquare outside the sandbox, so what the agent wrote there would run
+    unsandboxed, and such a launch is refused (``store_broker.refuse_inside``; review r11 of
+    #113, finding 2). ``None`` when it lives elsewhere."""
+    from aisquare.core.workspace import find_project_root
+    from aisquare.services import store_broker
+
+    try:
+        root = find_project_root(cwd or Path.cwd())
+    except Exception:
+        return None
+    inside = store_broker.install_inside(store_broker.sandbox_writable(root))
+    if inside is None:
+        return None
+    return _warn(
+        "sandboxed agents' aisquare",
+        f"aisquare runs from {inside}, where a sandboxed agent of {root.name or root} may "
+        "write: a Codex agent launched in the project's directory is refused",
+        "install aisquare outside the project (`uv tool install aisquare`, or pipx), then "
+        "`aisquare agents connect codex` from it",
+    )
 
 
 def _check_outbox() -> DoctorCheck:

@@ -39,7 +39,6 @@ here.
 from __future__ import annotations
 
 import contextlib
-import errno
 import json
 import os
 import time
@@ -48,16 +47,11 @@ from pathlib import Path
 
 from aisquare.core import paths
 from aisquare.core.atomic import write_replacing
-from aisquare.core.locking import lock_exclusive, unlock
+from aisquare.core.locking import held, open_lock_file
 
 LOCK_WAIT_S = 2.0
 """How long a writer waits for another's turn before giving up: a few writes' worth, not a hang."""
 
-_LOCK_POLL_S = 0.01
-_HELD = frozenset({errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES})
-"""The errnos that mean "another holder": POSIX ``flock``'s and Windows ``locking``'s. Any other
-``OSError`` from the primitive (``EBADF``, ``ENOLCK``, ``EOPNOTSUPP``, ``EIO``) will not clear on a
-retry and is refused at once."""
 _BLANK = " \t\r\n\x00"
 """What an empty file may hold: whitespace, or the NULs a crash leaves when the size reached the
 disk and the data did not."""
@@ -196,49 +190,27 @@ def _locked(path: Path) -> Iterator[None]:
 
     Beside the path every process opens (``~/.aisquare/state.json.lock``), not
     beside a symlink's target: a dotfiles repo should not gain a lock file.
-    Opened for WRITING first — on NFS an exclusive ``flock`` is emulated with a
-    byte-range lock and needs a descriptor open for writing — and read-only
-    when that is refused, which is enough everywhere else: a lock file left
-    behind by another user (``sudo aisquare …``, created ``0o644`` here for
-    that reason) still serves on a local disk instead of refusing every update
-    while blaming ``state.json``. Taken without blocking and polled, so a
-    holder stalled inside its critical section costs a bounded wait, not a
-    hang; only "held" is retried, and every other error from the primitive is
-    refused at once with its own message. The OS drops the lock if the process
-    dies.
+    Opened and polled by ``core.locking`` (:func:`~aisquare.core.locking.open_lock_file`,
+    :func:`~aisquare.core.locking.held`), the one copy of both: for writing first,
+    read-only when that is refused, so a lock file left behind by another user
+    (``sudo aisquare …``) still serves on a local disk instead of refusing every update
+    while blaming ``state.json``; and only "held" waited for, so a holder stalled inside
+    its critical section costs a bounded wait, not a hang. Each refusal says which step
+    refused, as a :class:`StateUnwritableError`.
     """
     lock_path = path.with_name(f"{path.name}.lock")
     try:
-        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
-    except PermissionError as denied:
-        try:
-            fd = os.open(lock_path, os.O_RDONLY)
-        except FileNotFoundError:
-            # A home we cannot write to and no lock yet: the refusal is the
-            # permission problem, not a missing file the fallback could not create.
-            raise StateUnwritableError(f"{lock_path} could not be opened: {denied}") from denied
-        except OSError as exc:
-            raise StateUnwritableError(f"{lock_path} could not be opened: {exc}") from exc
+        fd = open_lock_file(lock_path)
     except OSError as exc:
         raise StateUnwritableError(f"{lock_path} could not be opened: {exc}") from exc
-    try:
-        deadline = time.monotonic() + LOCK_WAIT_S
-        while True:
-            try:
-                lock_exclusive(fd)
-                break
-            except OSError as exc:
-                if exc.errno not in _HELD:
-                    raise StateUnwritableError(f"{lock_path} could not be locked: {exc}") from exc
-                if time.monotonic() >= deadline:
-                    raise StateUnwritableError(
-                        f"{lock_path} is held by another process (waited {LOCK_WAIT_S:g}s)"
-                    ) from exc
-                time.sleep(_LOCK_POLL_S)
+    with contextlib.ExitStack() as stack:
+        stack.callback(os.close, fd)
         try:
-            yield
-        finally:
-            with contextlib.suppress(OSError):
-                unlock(fd)
-    finally:
-        os.close(fd)
+            stack.enter_context(held(fd, wait_s=LOCK_WAIT_S))
+        except TimeoutError as exc:
+            raise StateUnwritableError(
+                f"{lock_path} is held by another process (waited {LOCK_WAIT_S:g}s)"
+            ) from exc
+        except OSError as exc:
+            raise StateUnwritableError(f"{lock_path} could not be locked: {exc}") from exc
+        yield

@@ -26,13 +26,12 @@ import json
 import os
 import shutil
 import subprocess
-import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 from aisquare.core import paths, spawn
-from aisquare.core.locking import lock_exclusive, unlock
+from aisquare.core.locking import holding
 
 _OFF_VALUES = {"0", "false", "no", "off"}
 _ON_VALUES = {"1", "true", "yes", "on"}
@@ -139,27 +138,20 @@ def _lock(home: Path, *, wait_s: float) -> Iterator[bool]:
     """aisquare's own exclusive lock around a brain; yields whether it was won.
 
     ``wait_s == 0`` is a try-lock (drains skip when another drain runs);
-    otherwise the lock is polled for up to ``wait_s`` seconds.
+    otherwise the lock is polled for up to ``wait_s`` seconds, by
+    :func:`~aisquare.core.locking.holding`, the one copy of the loop. Any refusal —
+    held past ``wait_s``, or a lock file or a lock the platform refuses — is a lock not
+    won, as it always was: a brain is a cache, and its callers skip.
     """
     home.mkdir(parents=True, exist_ok=True)
-    handle = (home / ".aisquare.lock").open("w")
-    deadline = time.monotonic() + wait_s
-    try:
-        while True:
-            try:
-                lock_exclusive(handle.fileno())  # the per-platform primitive: core.locking
-                break
-            except OSError:
-                if time.monotonic() >= deadline:
-                    yield False
-                    return
-                time.sleep(0.1)
+    with ExitStack() as stack:
         try:
-            yield True
-        finally:
-            unlock(handle.fileno())
-    finally:
-        handle.close()
+            stack.enter_context(holding(home / ".aisquare.lock", wait_s=wait_s))
+        except OSError:
+            won = False
+        else:
+            won = True
+        yield won
 
 
 def _run(home: Path, argv: list[str], *, stdin: str | None = None, timeout: int) -> str | None:

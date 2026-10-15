@@ -426,9 +426,10 @@ def _replace_the_former_reviewer_default(data: dict[str, Any]) -> None:
         reviewer["extra_args"] = replacing_the_former_reviewer_default(reviewer["extra_args"])
 
 
-#: Every setting at its system default in version 1 (0.8.0 and 0.8.1), as those builds
-#: wrote it. Frozen here, never derived from today's models: a later change of a default
-#: must not change which of a version-1 file's values the step below takes for unchosen.
+#: Every setting at its system default in version 1 (0.8.0, and the 0.8.1 builds before
+#: the layers), as those builds wrote it. Frozen here, never derived from today's models:
+#: a later change of a default must not change which of a version-1 file's values the step
+#: below takes for unchosen.
 _V1_DEFAULTS: dict[str, Any] = {
     "profile": "default",
     "api_url": "https://api.aisquare.studio",
@@ -492,7 +493,7 @@ def _keep_only_what_v1_did_not_write_by_default(data: dict[str, Any]) -> None:
     Version 1 wrote every setting out, so its file cannot tell a value the user chose
     from one it wrote because it was the default. Taken as written, every such value
     would stay pinned when a default moves on — ``[accounts] pick = "default"`` from
-    every 0.8 save would keep ``headroom`` from ever becoming the default. So a value
+    every 0.8.0 save would keep ``headroom`` from ever becoming the default. So a value
     equal to version 1's default (:data:`_V1_DEFAULTS`) is taken as unchosen and
     follows the system default from now on; one that differs is the user's and stays.
     A user who had chosen exactly the old default gets the new one: the file cannot say
@@ -512,7 +513,7 @@ _MIGRATIONS: tuple[Callable[[dict[str, Any]], None], ...] = (
 )
 
 
-#: The top-level keys every release up to 0.8.1 wrote into the file whatever their value,
+#: The top-level keys every release up to 0.8.0 wrote into the file whatever their value,
 #: and that this build writes only when changed: a file holding all three was written whole.
 _WRITTEN_WHOLE_BY = ("profile", "api_url", "default_pool")
 
@@ -637,7 +638,7 @@ class AccountsSettings(BaseModel):
     minutes away is cheaper than a cold start elsewhere). ``switch_at`` doubles as
     the line the Accounts page colours red and ``doctor --live`` warns at.
 
-    Both defaults were ``default`` and ``wait`` through 0.8.1; a file those builds
+    Both defaults were ``default`` and ``wait`` through 0.8.0; a file those builds
     saved keeps either only where it differs from them (``_V1_DEFAULTS``).
 
     ``share_trust``, on by default, copies a folder's trust into the account a launch
@@ -732,7 +733,7 @@ def _overrides(
 def _with_whole_role_tables(sparse: dict[str, Any], full: dict[str, Any]) -> dict[str, Any]:
     """``sparse``, with every ``[fleet.roles.<role>]`` table of ``full`` written whole.
 
-    A release before the layers (0.8.1 and earlier) reads the file as it stands, not over
+    A release before the layers (0.8.0 and earlier) reads the file as it stands, not over
     the defaults. Given one key of one role, it took ``fleet.roles`` to be that role
     alone: the reviewer launched there without ``--disallowedTools`` and every coder in
     the main checkout (review of #261, M2). Whole, every role reads the same in either
@@ -764,7 +765,7 @@ def defaults_a_whole_file_reader_lacks(config: AppConfig) -> list[tuple[str, Any
     """The settings ``config`` takes from a system default that version 1 had otherwise:
     ``(key, today's default, version 1's)`` for each, in the file's order.
 
-    What a release that reads the file without the defaults under it (0.8.1 and earlier)
+    What a release that reads the file without the defaults under it (0.8.0 and earlier)
     reads differently from a file this build saved: the file says nothing of them, so
     that release applies its own default (``accounts.pick``: ``default``, not
     ``headroom``). A value the user set is in the file and reads the same in both.

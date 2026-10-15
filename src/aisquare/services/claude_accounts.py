@@ -504,7 +504,7 @@ def choose(
             max_age=PICK_MAX_AGE_SECONDS if spread is None else None,
         )
         if spread is None:
-            # The default rung since 0.8.2, so every machine walks it: one with no account
+            # The default rung since 0.8.1, so every machine walks it: one with no account
             # to pick from (an API key, no login yet) is not told so on every launch. A
             # hand-over that finds none still says it.
             more = [note for note in more if note != _NOTHING_TO_PICK]
@@ -1457,7 +1457,7 @@ _NOTHING_TO_PICK = "headroom: no enabled, signed-in account to pick from"
 PICK_MAX_AGE_SECONDS = 60.0
 """How old a reading a LAUNCH's headroom pick may use (:func:`choose`): one minute.
 
-``pick = "headroom"`` is the default since 0.8.2, so every ``fleet spawn`` and
+``pick = "headroom"`` is the default since 0.8.1, so every ``fleet spawn`` and
 ``aisquare claude`` walks that rung, and read live it sent one request per account each
 time, a second after the sidebar had read them too (review of #261, m1). A minute is the
 sidebar's own tick, so a burst of spawns, or a spawn beside the sidebar's or the page's

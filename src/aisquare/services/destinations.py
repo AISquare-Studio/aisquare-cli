@@ -231,7 +231,7 @@ def deployment_target(
     exception: it is the entry ``use`` tells them to write for a host outside
     the table (its gateway and proxy), and the machine's prod key went to the
     self-hosted gateway and proxy with it (review of #203). Nor is one that
-    names the default variable: releases up to 0.8.1 wrote every field of every
+    names the default variable: releases up to 0.8.0 wrote every field of every
     entry, and ``save_config`` now writes only what differs, so whether an entry
     names it says nothing of whether anyone chose it. The one exception
     is the deployment the machine key already serves

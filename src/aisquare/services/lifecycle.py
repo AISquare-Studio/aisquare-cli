@@ -1081,7 +1081,7 @@ REFRESH_HOOKS = ("agents", "refresh-hooks", HOOK_AGENT)
 #: The first release with ``agents refresh-hooks``: 0.7.0, on PyPI, has none.
 FIRST_REFRESH_HOOKS = "0.8.0"
 #: The last release that reads config.toml as it stands: those after lay it over defaults.
-LAST_WHOLE_CONFIG = "0.8.1"
+LAST_WHOLE_CONFIG = "0.8.0"
 #: The first release that reads ``env_files`` (``team bind --env-file``): 0.8.0 ignores it.
 FIRST_ENV_FILES = "0.8.1"
 

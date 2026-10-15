@@ -513,7 +513,7 @@ def test_the_hook_starts_a_detached_hand_over_only_when_configured_and_the_reset
     _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
     assert started == []
 
-    # Switch, the default since 0.8.2: a limit whose reset is far away starts the worker…
+    # Switch, the default since 0.8.1: a limit whose reset is far away starts the worker…
     _settings(wait_if_reset_within_minutes=15)
     unpark()
     _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
@@ -985,7 +985,7 @@ def test_choose_uses_headroom_only_when_configured_and_falls_back_to_the_default
     assert plain.source == "machine default" and plain.account is not None
     assert plain.account.slot == 2 and fetch.calls == []  # pick=default: no request at all
 
-    _settings(switch_at=85)  # pick=headroom, the default since 0.8.2
+    _settings(switch_at=85)  # pick=headroom, the default since 0.8.1
     spread = service.choose(role="coder", project=work, fetch=fetch)
     assert spread.source == "headroom" and spread.account is not None
     assert spread.account.slot == 3

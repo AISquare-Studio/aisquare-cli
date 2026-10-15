@@ -834,13 +834,13 @@ Three places to change one:
 that differ from the defaults, so a key you never set follows the built-in default
 even when a release changes it. One exception: each `[fleet.roles.<role>]`
 table is written whole, so a release that reads the file without the defaults
-under it (0.8.1 and earlier, sharing `~/.aisquare`) starts each role as this
-one does. A config 0.8 saved holds every setting; it loads
-with the values that differ from 0.8's defaults kept as yours and the rest
-following today's, and the next save writes it down to yours. A file 0.8 saves
+under it (0.8.0 and earlier, sharing `~/.aisquare`) starts each role as this
+one does. A config 0.8.0 saved holds every setting; it loads
+with the values that differ from 0.8.0's defaults kept as yours and the rest
+following today's, and the next save writes it down to yours. A file 0.8.0 saves
 whole again after a move back is read the same way. Moving back with
-`aisquare upgrade --version 0.8.1` names what that release reads differently:
-the settings the file leaves to today's defaults where 0.8.1's differ
+`aisquare upgrade --version 0.8.0` names what that release reads differently:
+the settings the file leaves to today's defaults where 0.8.0's differ
 (`accounts.pick`, `accounts.on_limit`).
 
 ```sh

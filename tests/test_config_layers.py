@@ -229,7 +229,7 @@ def test_config_list_overrides_with_none_still_prints_toml(runner: CliRunner) ->
 
 def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> None:
     """The snapshot is version 1's defaults, frozen. When a default changes later, or a
-    setting is added, it changes here — never in ``_V1_DEFAULTS``, which is what 0.8 wrote."""
+    setting is added, it changes here — never in ``_V1_DEFAULTS``, which is what 0.8.0 wrote."""
     changed = {
         "accounts": {
             "pick": "headroom",
@@ -242,7 +242,7 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
 
 
 def test_a_v1_file_keeps_only_what_differs_from_v1s_defaults(tmp_path: Path) -> None:
-    """Every value 0.8 wrote because it was the default follows today's: ``pick`` and
+    """Every value 0.8.0 wrote because it was the default follows today's: ``pick`` and
     ``on_limit`` move to the new defaults. Every value the user changed stays."""
     target = tmp_path / "config.toml"
     _v1_file(
@@ -403,7 +403,7 @@ def test_config_reset_at_a_terminal_asks(
 
 
 def _as_a_whole_file_reader_reads(target: Path) -> AppConfig:
-    """``target`` as 0.8.1 and earlier read it: the file validated as it stands, with no
+    """``target`` as 0.8.0 and earlier read it: the file validated as it stands, with no
     defaults laid under it (their ``load_config`` had no overlay), its version set aside."""
     data = _file(target)
     data.pop("config_version", None)
@@ -413,7 +413,7 @@ def _as_a_whole_file_reader_reads(target: Path) -> AppConfig:
 def test_a_file_this_build_writes_reads_the_same_without_the_defaults_under_it(
     tmp_path: Path,
 ) -> None:
-    """One key of one role, written sparse, read by 0.8.1 as the whole roles map: the
+    """One key of one role, written sparse, read by 0.8.0 as the whole roles map: the
     reviewer launched there without --disallowedTools and every coder in the main checkout.
     Every role's table is written whole, so both builds read the same fleet."""
     target = tmp_path / "config.toml"

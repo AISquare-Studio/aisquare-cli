@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-13
+
+**The fleet on your phone: `aisquare remote`, through your own ngrok tunnel.**
+- One server on `127.0.0.1:8750` serves a page that ships with aisquare-cli,
+  behind a secret link and a four-word passphrase. It is read-only until
+  `aisquare remote allow-write on`.
+- In `asq`, `R` opens the Remote panel: Remote on and off, the link, a QR code,
+  the passphrase, the devices, the write switch and an auto-off timer.
+- What needs you across every project is one feed, with notifications. You also
+  get each agent's live screen and conversation and the board. With writes on,
+  you can answer a prompt, tell an agent something, or stop, restart or switch it.
+- `aisquare remote serve` runs it without the UI. `status`, `allow-write`,
+  `regenerate-password`, `revoke`, `needs` and `install-page` manage it from the
+  machine.
+
 **A quieter `asq`: projects you can name, one ⚙ Settings, and an Accounts page
 that reads at a glance. A folder trusted on one Claude account is trusted on
 all of them, and the fleet cleans up the worktrees it made.**
@@ -32,27 +47,40 @@ all of them, and the fleet cleans up the worktrees it made.**
   done.
 
 **Upgrading:**
-- From 0.8.1, run `aisquare upgrade`.
+- From 0.8.0, run `aisquare upgrade`. It keeps your install's extras. The
+  `remote` extra is new, so to use Remote, install it as
+  [docs/remote.md](docs/remote.md) says. `aisquare remote serve` and the R panel
+  print the line for your install.
+- `segno`, a small pure-Python QR library, is a new core dependency. Every
+  upgrade installs it.
 - **`config.toml` is now only your changes** (`config_version = 2`), apart from
   each `[fleet.roles.<role>]` table, which is written whole. On first load, a
-  value equal to 0.8's default for that key is dropped and follows today's
+  value equal to 0.8.0's default for that key is dropped and follows today's
   default; every other value stays yours. The next save writes the file down to
-  those. 0.8 wrote every setting into the file, so a value you chose that
-  happens to be 0.8's default cannot be told apart from one it wrote for you.
+  those. 0.8.0 wrote every setting into the file, so a value you chose that
+  happens to be 0.8.0's default cannot be told apart from one it wrote for you.
   **An explicit `pick = "default"` or `on_limit = "wait"` therefore moves to
   the new defaults, `headroom` and `switch`.** To keep the old behaviour, set
   them again after upgrading: `aisquare config set accounts.pick default` and
   `aisquare config set accounts.on_limit wait`.
-- **Moving back to 0.8.1 or earlier**: that release reads `config.toml`
+- **Moving back to 0.8.0 or earlier**: that release reads `config.toml`
   without today's defaults under it. Your own settings read the same there, and
   so do the fleet roles, as their tables are written whole. A setting the file
   leaves to today's default takes that release's instead: `pick` reads
-  `default` and `on_limit` reads `wait`. `aisquare upgrade --version 0.8.1`
+  `default` and `on_limit` reads `wait`. `aisquare upgrade --version 0.8.0`
   names those settings before it moves; to keep one there, set it after the
   move. When that release saves the file whole again, this release reads it as
-  it did the first time: values equal to 0.8's defaults follow today's.
-- The store migrates to schema v30 on first open, from 0.8.1's v26, in four
+  it did the first time: values equal to 0.8.0's defaults follow today's.
+- The store migrates to schema v30 on first open, from 0.8.0's v25, in five
   steps:
+  - v26: `fleet_agent.server_started_at`, when each agent's tmux server
+    started, as the server said at spawn. It is the identity of the server the
+    agent's pane id names, which `stop`, `shutdown`, `reap` and `uninstall`
+    compare before ending a row (see Fixed). An agent started before 0.8.1
+    recorded none, and is judged as before. `fleet ls --json` carries the
+    field. Also an index, `team_event_project_created`, on when each board
+    event was written, which the Remote needs feed reads its last day by (a
+    store an earlier 0.8.1 candidate made v26 or v30 gets it at its next open).
   - v27: a project nickname column.
   - v28: `claude_usage.token_fingerprint`, a digest of the login a reading was
     taken with, never the token. A reading recorded before it is served to no
@@ -60,9 +88,15 @@ all of them, and the fleet cleans up the worktrees it made.**
   - v29: `team_task.number`, backfilled per board in creation order.
   - v30: a unique index on (project, number).
 
-  0.8.1 opens a v30 store as it is. A task it adds has no number there and
-  shows its id. The next open by this release numbers it after the last number
-  on its board, in the order such tasks were added.
+  0.8.0 opens a v30 store as it is. A task it adds gets no number there; the
+  next open by 0.8.1 numbers it after the last number on its board, in the
+  order such tasks were added.
+- Remote keeps its state in `~/.aisquare`: `remote.json` (owner-only),
+  `remote-audit.log`, `remote-needs.json` and `remote-push.json`. Each is
+  written only once Remote is used. `aisquare uninstall --purge` removes them
+  with the rest.
+- Text typed into an agent's pane, in `asq` as from the phone, now reaches tmux
+  as hex (`send-keys -H`). A trailing space or a lone `;` arrives as typed.
 - **`"name"` in `project list --json` is now the project's nickname** when it
   has one, where it was always the folder's name; so is `name` in `fleet ls
   --json` and Remote's project list. A script that wants the folder reads `root`.
@@ -74,6 +108,125 @@ all of them, and the fleet cleans up the worktrees it made.**
   used, as they always did.
 
 ### Added
+- **Phone control: `aisquare remote`.** The fleet on a phone, through the
+  user's own ngrok tunnel: one server on `127.0.0.1:8750` (never anything else;
+  8747 to 8749 belong to `serve`, cliXR and the captain's voice). Every path
+  sits under `/r/<32-char token>/`, and a wrong token is a 404 everywhere. The
+  guide is [docs/remote.md](docs/remote.md).
+- **A page that ships with aisquare-cli.** `aisquare.web.remote` is a
+  hand-written page (HTML, one script, one stylesheet, a service worker and a
+  manifest; no build step, nothing from another origin) served whenever no
+  other is installed, so a fresh machine just works. `asq remote install-page
+  <dist>` and `serve --dist` still override it. It is served with a strict
+  Content-Security-Policy (this origin only, no inline script or style), no
+  referrer and no framing, and every string the server sends reaches it as
+  text: escape sequences are dropped (an OSC link with its target), colours are
+  clamped integers, and no server string ever becomes a URL or an attribute.
+  Screens: the needs-you feed, projects (fleet, board with a note composer,
+  tasks, memory), an agent (its live pane, its transcript wrapped to the phone,
+  its explainability card, an input bar and a key pad), devices and settings.
+  It greys out and holds every action after 25 s without an update, and
+  reconnects and re-reads everything when the phone wakes.
+- **In the fleet UI, on `R`.** A panel that turns Remote on and off (the server
+  plus ngrok), shows the link, a QR (`segno`, a new core dependency imported only
+  by the QR renderer) and the passphrase, lists the devices with revoke, and
+  holds the write switch (off by default) and an auto-off timer (30/60/120
+  minutes or Never). Whether Remote is on and the timer live in `state.json`
+  beside the theme; the write switch is the server's, in `remote.json`, the one
+  `asq remote allow-write` sets. No ngrok outlives the UI, however it ends. A
+  Remote that was on comes back on at the next start, with writes off and a
+  notice that it is back and when auto-off comes, unless its auto-off time
+  passed while the UI was gone (a closed terminal, a kill): then it stays off
+  and the notice says so; a dead ngrok is restarted
+  within 30 s. With `AISQUARE_REMOTE_NGROK_URL`
+  set, ngrok runs on that static domain (`--url=`), so the link survives.
+- **`asq remote serve [--port] [--auto-off MINUTES] [--public-url URL] [--dist DIR]`**,
+  for a machine without the UI open. Auto-off defaults to 60 minutes (`0` is
+  never, and the banner says so); the phone can extend it an hour at a time,
+  up to 8 hours ahead. `status` and `regenerate-password --new-link` take the
+  same `--port` (and `AISQUARE_REMOTE_PORT`) for the link they print.
+- **Needs you.** Every 3 s, while a phone has the page open or notifications on,
+  the server works out what waits on the human across every project: a
+  permission prompt (each prompt of a turn on its own), a
+  question, a plan to approve, a board question or result, a crashed agent, a
+  stopped manager, a usage limit, a turn that died on an API error (an expired
+  login, credit run out), a lost pane, tmux not answering, a turn that ended
+  with a question, an interruption. Each card carries what must be read
+  first (the command, every question and its options, the plan, and what of
+  them it had to cut) and the quick answers it offers, checked against the
+  agent as it is now before a key is typed (`409 stale` otherwise).
+  `GET api/needs`, a `needs_you` frame, `POST api/needs/answer`,
+  `POST api/needs/dismiss`, and `asq remote needs`.
+- **Notifications (Web Push).** When an item has stood for two scans, the phone
+  gets a notification that opens its card: encrypted to the browser
+  (RFC 8291 and VAPID, through `cryptography`, now in the `remote` extra), built
+  from fixed sentences with every name cut to 40 characters, and never holding
+  an excerpt or anything else from an agent. Plus warnings before auto-off and
+  before a phone's sign-in ends, a goodbye at Remote off, and an alert on a
+  password-guessing lockout. iOS needs the page on the Home Screen.
+- **Agent actions.** `agent/tell` (modes `auto`, `prompt` and `interrupt`: one
+  Esc, then the text once the agent is back at its prompt), `agent/stop`,
+  `agent/restart` and `agent/switch`. Each is pinned to the agent the phone
+  looked at (`agent_id`, and a card's `needs_id`), refused while the agent shows
+  a dialog that an Enter would answer, has a tool pending that may be a prompt
+  just opened, or cannot be read at all (`no hooks`, or a transcript the machine
+  cannot open) (`dialog_open`, with `dismiss_dialog` to press Esc first),
+  and run at most once per `request_id`: a retry after the phone slept is
+  answered from the server's ledger (`GET api/actions/recent`, and an `action`
+  frame). A restart or a switch answers how its replacement began and what did
+  not happen (`how`, `failures`, in `fleet restart|switch --json` too), and the
+  page says when the replacement's first line was not typed, so it needs a Tell.
+- **Reads by project.** `api/board`, `api/tasks`, `api/memory` and
+  `api/explainability/<agent>` take `?project=` as `api/fleet` does, each cached
+  per project; `api/transcript/<agent>` takes `?width=`; pane subscriptions name
+  their project. Reads are built by the builders `asq --json` prints with
+  (`projects_json`, `agents_json` and `board_json`), with two differences: the
+  board carries its newest 200 events where `asq board --json` has five, and
+  `api/projects` adds each project's agents counted by state.
+- **`GET api/explainability/<agent>`**: `{available, reason?, model?, tokens_in?,
+  tokens_out?, policy?, updated_at?}`, `available` only when the explainability
+  SDK is present and no doctor check is RED. It never raises; an unknown agent
+  is a 404 like `panes/<agent>`.
+- **Writes, off until `asq remote allow-write on`.** `send-keys`, `note`,
+  `task/claim`, `task/done`, `project/switch|add|remove`, the agent actions,
+  quick answers and extend answer 403 `read_only` until then. Each write that
+  goes through is one line in `~/.aisquare/remote-audit.log` (owner-only), with
+  control characters scrubbed; a tell keeps its first 120 characters, a note or
+  a task change the author it claimed. When the log will not write (a full
+  disk, a home that is not writable) the write still answers, so that the phone
+  does not send it again, and the server's log warns with the line that is
+  missing. A running server re-reads
+  `~/.aisquare/remote.json` when its content changes, so `allow-write`,
+  `regenerate-password` and `revoke` from another shell reach it within a second.
+- **`aisquare team bind <role> --env-file KEY=PATH`: a variable whose value is
+  read from a file at every launch**, for a secret. config.toml, the launch
+  banner and `team spawn`'s printed command hold the path, never the value
+  (the printed command reads the file itself, in a subshell, with the launch's
+  reader, `aisquare team read-env-file`: its trailing newlines and any
+  byte-order mark dropped, a token saved as UTF-16 read too, and an empty,
+  blank or unreadable file stops the line before the role starts). It is for the
+  reviewer, which keeps its shell: bound to a GitHub token that cannot write
+  the repository's contents, it can review and comment but not push or merge
+  through `gh`. [docs/fleet.md](docs/fleet.md#a-reviewer-that-cannot-push)
+  gives the token's permissions and the branch protection to pair it with, for
+  the pushes that token does not govern. It is opt-in; the reviewer's default
+  stays Bash with Edit, Write and NotebookEdit denied. A file that cannot be
+  read, or holds nothing, refuses the launch (`env_file_unreadable`) rather
+  than start the role on this shell's credentials. `fleet spawn`, `restart`
+  and `switch` refuse before a window opens or a running agent is stopped.
+  `team bind` refuses a KEY no shell can set (`--env` too: letters, digits and
+  `_`, not starting with a digit), as `team spawn` prints each as a shell
+  word, and `team spawn` refuses one written into config.toml by hand.
+  `team bind` reads the file when it binds, and keeps a relative PATH as the
+  full path of the file it read; a relative path written into config.toml by
+  hand refuses every launch, wherever it is launched from. A key lives in `env` or
+  `env_files`, never both, and `--unset` removes it from either. `team
+  harness` names the key, and `team harness --json` carries `env_files`, each
+  key to its path, on every role, one whose file cannot be read included: the
+  role's refusal is a ⚠ line under it, and `refusal` in `--json`. `aisquare upgrade --version` to a release
+  before 0.8.1, which ignores `env_files`, names each role bound to a file and
+  its variables before it moves back (`env_files_dropped` in `--json`): there
+  those roles launch with whatever value the launching shell has.
 - **Project nicknames.** Free text on one line, up to 255 characters:
   `aisquare project rename "API: auth rewrite"` (`--clear` drops it), or
   double-click a card's title (or `F2`) and type, where Enter or a click away
@@ -200,6 +353,25 @@ all of them, and the fleet cleans up the worktrees it made.**
   key, a token, a cloud provider or a forced login is left as it is.
 
 ### Changed
+- **`aisquare upgrade` warns, and `aisquare uninstall` refuses, while Remote is
+  on in another process**, as they already do for running fleet agents. Both
+  name it: `aisquare remote serve` in another shell, or another asq's R panel,
+  with its port and process id, and say how to turn it off. An upgrade replaces
+  the install under that server, which goes on running the old release. An
+  uninstall would leave it serving with nothing left to turn it off, sign its
+  phones out or switch its writes off. asq's Update and Uninstall run the same
+  checks, and asq turns its own Remote off before either starts. `--json` gains
+  `remote` in both plans, and the refusal's error is `remote_on`. To be named,
+  a Remote writes `remote-serve.json` beside its lock in `~/.aisquare`.
+- **`fleet ls --json` and `fleet status --json` carry `socket_at` on every
+  agent.** 0.8.0 added it and its notes left it out. It is the path the agent's
+  tmux server is asked at (`tmux -S`). It is `null` where the server is asked by
+  its socket's name (`tmux -L`): a row spawned before 0.8.0, which recorded no
+  path, or one whose recorded path is where `-L` finds that name from this
+  shell anyway. The field is additive, and Remote's `api/fleet` carries it too,
+  as it carries those agents. They carry `held` too, `true` for a row held as
+  another tmux server's (see Fixed): its state is `unknown` whatever its board
+  says, and its pane id is no pane of its own, so asq shows none under it.
 - **The defaults**: `[accounts] pick = "headroom"` (a launch takes the first
   account in priority order with room) and `on_limit = "switch"` (an agent
   that hits its limit is moved to one with room). See Upgrading.
@@ -262,191 +434,6 @@ all of them, and the fleet cleans up the worktrees it made.**
   runner, reviewer, validator and ui-tester are told to remove the scratch
   worktrees and temp dirs they made before they finish or go idle, never the
   worktree they were spawned in, which is reap's.
-
-### Fixed
-- `b` on the board brings the tasks column back however often it is pressed.
-  Hiding the column took the keyboard with it, so the next `b` went nowhere.
-
-## [0.8.1] - 2026-10-13
-
-**The fleet on your phone: `aisquare remote`, through your own ngrok tunnel.**
-- One server on `127.0.0.1:8750` serves a page that ships with aisquare-cli,
-  behind a secret link and a four-word passphrase. It is read-only until
-  `aisquare remote allow-write on`.
-- In `asq`, `R` opens the Remote panel: Remote on and off, the link, a QR code,
-  the passphrase, the devices, the write switch and an auto-off timer.
-- What needs you across every project is one feed, with notifications. You also
-  get each agent's live screen and conversation and the board. With writes on,
-  you can answer a prompt, tell an agent something, or stop, restart or switch it.
-- `aisquare remote serve` runs it without the UI. `status`, `allow-write`,
-  `regenerate-password`, `revoke`, `needs` and `install-page` manage it from the
-  machine.
-
-**Upgrading:**
-- From 0.8.0, run `aisquare upgrade`. It keeps your install's extras. The
-  `remote` extra is new, so to use Remote, install it as
-  [docs/remote.md](docs/remote.md) says. `aisquare remote serve` and the R panel
-  print the line for your install.
-- `segno`, a small pure-Python QR library, is a new core dependency. Every
-  upgrade installs it.
-- The store migrates to schema v26 on first open, from 0.8.0's v25. The step
-  adds one column to `fleet_agent`: `server_started_at`, when each agent's
-  tmux server started, as the server said at spawn. It is the identity of the
-  server the agent's pane id names, which `stop`, `shutdown`, `reap` and
-  `uninstall` compare before ending a row (see Fixed). An agent started before
-  0.8.1 recorded none, and is judged as before. `fleet ls --json` carries the
-  field. It also adds one index, `team_event_project_created`, on when each
-  board event was written, which the Remote needs feed reads its last day by
-  (a store an earlier 0.8.1 candidate made v26 gets it at its next open).
-  0.8.0 opens a v26 store as it is.
-- Remote keeps its state in `~/.aisquare`: `remote.json` (owner-only),
-  `remote-audit.log`, `remote-needs.json` and `remote-push.json`. Each is
-  written only once Remote is used. `aisquare uninstall --purge` removes them
-  with the rest.
-- Text typed into an agent's pane, in `asq` as from the phone, now reaches tmux
-  as hex (`send-keys -H`). A trailing space or a lone `;` arrives as typed.
-
-### Added
-- **Phone control: `aisquare remote`.** The fleet on a phone, through the
-  user's own ngrok tunnel: one server on `127.0.0.1:8750` (never anything else;
-  8747 to 8749 belong to `serve`, cliXR and the captain's voice). Every path
-  sits under `/r/<32-char token>/`, and a wrong token is a 404 everywhere. The
-  guide is [docs/remote.md](docs/remote.md).
-- **A page that ships with aisquare-cli.** `aisquare.web.remote` is a
-  hand-written page (HTML, one script, one stylesheet, a service worker and a
-  manifest; no build step, nothing from another origin) served whenever no
-  other is installed, so a fresh machine just works. `asq remote install-page
-  <dist>` and `serve --dist` still override it. It is served with a strict
-  Content-Security-Policy (this origin only, no inline script or style), no
-  referrer and no framing, and every string the server sends reaches it as
-  text: escape sequences are dropped (an OSC link with its target), colours are
-  clamped integers, and no server string ever becomes a URL or an attribute.
-  Screens: the needs-you feed, projects (fleet, board with a note composer,
-  tasks, memory), an agent (its live pane, its transcript wrapped to the phone,
-  its explainability card, an input bar and a key pad), devices and settings.
-  It greys out and holds every action after 25 s without an update, and
-  reconnects and re-reads everything when the phone wakes.
-- **In the fleet UI, on `R`.** A panel that turns Remote on and off (the server
-  plus ngrok), shows the link, a QR (`segno`, a new core dependency imported only
-  by the QR renderer) and the passphrase, lists the devices with revoke, and
-  holds the write switch (off by default) and an auto-off timer (30/60/120
-  minutes or Never). Whether Remote is on and the timer live in `state.json`
-  beside the theme; the write switch is the server's, in `remote.json`, the one
-  `asq remote allow-write` sets. No ngrok outlives the UI, however it ends. A
-  Remote that was on comes back on at the next start, with writes off and a
-  notice that it is back and when auto-off comes, unless its auto-off time
-  passed while the UI was gone (a closed terminal, a kill): then it stays off
-  and the notice says so; a dead ngrok is restarted
-  within 30 s. With `AISQUARE_REMOTE_NGROK_URL`
-  set, ngrok runs on that static domain (`--url=`), so the link survives.
-- **`asq remote serve [--port] [--auto-off MINUTES] [--public-url URL] [--dist DIR]`**,
-  for a machine without the UI open. Auto-off defaults to 60 minutes (`0` is
-  never, and the banner says so); the phone can extend it an hour at a time,
-  up to 8 hours ahead. `status` and `regenerate-password --new-link` take the
-  same `--port` (and `AISQUARE_REMOTE_PORT`) for the link they print.
-- **Needs you.** Every 3 s, while a phone has the page open or notifications on,
-  the server works out what waits on the human across every project: a
-  permission prompt (each prompt of a turn on its own), a
-  question, a plan to approve, a board question or result, a crashed agent, a
-  stopped manager, a usage limit, a turn that died on an API error (an expired
-  login, credit run out), a lost pane, tmux not answering, a turn that ended
-  with a question, an interruption. Each card carries what must be read
-  first (the command, every question and its options, the plan, and what of
-  them it had to cut) and the quick answers it offers, checked against the
-  agent as it is now before a key is typed (`409 stale` otherwise).
-  `GET api/needs`, a `needs_you` frame, `POST api/needs/answer`,
-  `POST api/needs/dismiss`, and `asq remote needs`.
-- **Notifications (Web Push).** When an item has stood for two scans, the phone
-  gets a notification that opens its card: encrypted to the browser
-  (RFC 8291 and VAPID, through `cryptography`, now in the `remote` extra), built
-  from fixed sentences with every name cut to 40 characters, and never holding
-  an excerpt or anything else from an agent. Plus warnings before auto-off and
-  before a phone's sign-in ends, a goodbye at Remote off, and an alert on a
-  password-guessing lockout. iOS needs the page on the Home Screen.
-- **Agent actions.** `agent/tell` (modes `auto`, `prompt` and `interrupt`: one
-  Esc, then the text once the agent is back at its prompt), `agent/stop`,
-  `agent/restart` and `agent/switch`. Each is pinned to the agent the phone
-  looked at (`agent_id`, and a card's `needs_id`), refused while the agent shows
-  a dialog that an Enter would answer, has a tool pending that may be a prompt
-  just opened, or cannot be read at all (`no hooks`, or a transcript the machine
-  cannot open) (`dialog_open`, with `dismiss_dialog` to press Esc first),
-  and run at most once per `request_id`: a retry after the phone slept is
-  answered from the server's ledger (`GET api/actions/recent`, and an `action`
-  frame). A restart or a switch answers how its replacement began and what did
-  not happen (`how`, `failures`, in `fleet restart|switch --json` too), and the
-  page says when the replacement's first line was not typed, so it needs a Tell.
-- **Reads by project.** `api/board`, `api/tasks`, `api/memory` and
-  `api/explainability/<agent>` take `?project=` as `api/fleet` does, each cached
-  per project; `api/transcript/<agent>` takes `?width=`; pane subscriptions name
-  their project. Reads are built by the builders `asq --json` prints with
-  (`projects_json`, `agents_json` and `board_json`), with two differences: the
-  board carries its newest 200 events where `asq board --json` has five, and
-  `api/projects` adds each project's agents counted by state.
-- **`GET api/explainability/<agent>`**: `{available, reason?, model?, tokens_in?,
-  tokens_out?, policy?, updated_at?}`, `available` only when the explainability
-  SDK is present and no doctor check is RED. It never raises; an unknown agent
-  is a 404 like `panes/<agent>`.
-- **Writes, off until `asq remote allow-write on`.** `send-keys`, `note`,
-  `task/claim`, `task/done`, `project/switch|add|remove`, the agent actions,
-  quick answers and extend answer 403 `read_only` until then. Each write that
-  goes through is one line in `~/.aisquare/remote-audit.log` (owner-only), with
-  control characters scrubbed; a tell keeps its first 120 characters, a note or
-  a task change the author it claimed. When the log will not write (a full
-  disk, a home that is not writable) the write still answers, so that the phone
-  does not send it again, and the server's log warns with the line that is
-  missing. A running server re-reads
-  `~/.aisquare/remote.json` when its content changes, so `allow-write`,
-  `regenerate-password` and `revoke` from another shell reach it within a second.
-- **`aisquare team bind <role> --env-file KEY=PATH`: a variable whose value is
-  read from a file at every launch**, for a secret. config.toml, the launch
-  banner and `team spawn`'s printed command hold the path, never the value
-  (the printed command reads the file itself, in a subshell, with the launch's
-  reader, `aisquare team read-env-file`: its trailing newlines and any
-  byte-order mark dropped, a token saved as UTF-16 read too, and an empty,
-  blank or unreadable file stops the line before the role starts). It is for the
-  reviewer, which keeps its shell: bound to a GitHub token that cannot write
-  the repository's contents, it can review and comment but not push or merge
-  through `gh`. [docs/fleet.md](docs/fleet.md#a-reviewer-that-cannot-push)
-  gives the token's permissions and the branch protection to pair it with, for
-  the pushes that token does not govern. It is opt-in; the reviewer's default
-  stays Bash with Edit, Write and NotebookEdit denied. A file that cannot be
-  read, or holds nothing, refuses the launch (`env_file_unreadable`) rather
-  than start the role on this shell's credentials. `fleet spawn`, `restart`
-  and `switch` refuse before a window opens or a running agent is stopped.
-  `team bind` refuses a KEY no shell can set (`--env` too: letters, digits and
-  `_`, not starting with a digit), as `team spawn` prints each as a shell
-  word, and `team spawn` refuses one written into config.toml by hand.
-  `team bind` reads the file when it binds, and keeps a relative PATH as the
-  full path of the file it read; a relative path written into config.toml by
-  hand refuses every launch, wherever it is launched from. A key lives in `env` or
-  `env_files`, never both, and `--unset` removes it from either. `team
-  harness` names the key, and `team harness --json` carries `env_files`, each
-  key to its path, on every role, one whose file cannot be read included: the
-  role's refusal is a ⚠ line under it, and `refusal` in `--json`. `aisquare upgrade --version` to a release
-  before 0.8.1, which ignores `env_files`, names each role bound to a file and
-  its variables before it moves back (`env_files_dropped` in `--json`): there
-  those roles launch with whatever value the launching shell has.
-
-### Changed
-- **`aisquare upgrade` warns, and `aisquare uninstall` refuses, while Remote is
-  on in another process**, as they already do for running fleet agents. Both
-  name it: `aisquare remote serve` in another shell, or another asq's R panel,
-  with its port and process id, and say how to turn it off. An upgrade replaces
-  the install under that server, which goes on running the old release. An
-  uninstall would leave it serving with nothing left to turn it off, sign its
-  phones out or switch its writes off. asq's Update and Uninstall run the same
-  checks, and asq turns its own Remote off before either starts. `--json` gains
-  `remote` in both plans, and the refusal's error is `remote_on`. To be named,
-  a Remote writes `remote-serve.json` beside its lock in `~/.aisquare`.
-- **`fleet ls --json` and `fleet status --json` carry `socket_at` on every
-  agent.** 0.8.0 added it and its notes left it out. It is the path the agent's
-  tmux server is asked at (`tmux -S`). It is `null` where the server is asked by
-  its socket's name (`tmux -L`): a row spawned before 0.8.0, which recorded no
-  path, or one whose recorded path is where `-L` finds that name from this
-  shell anyway. The field is additive, and Remote's `api/fleet` carries it too,
-  as it carries those agents. They carry `held` too, `true` for a row held as
-  another tmux server's (see Fixed): its state is `unknown` whatever its board
-  says, and its pane id is no pane of its own, so asq shows none under it.
 
 ### Fixed
 - `fleet spawn` no longer starts a tmux server at a socket path a running
@@ -512,6 +499,8 @@ all of them, and the fleet cleans up the worktrees it made.**
   folders of one name (`~/work/api`, `~/oss/api`) each with a manager printed
   `manager (api)` twice. Every other row keeps the folder. The `live_agents`
   strings in `uninstall --json` and `upgrade --json` change the same way.
+- `b` on the board brings the tasks column back however often it is pressed.
+  Hiding the column took the keyboard with it, so the next `b` went nowhere.
 
 ### Security
 - **One choke point.** Every request and every socket handshake passes the

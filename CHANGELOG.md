@@ -294,9 +294,9 @@ all of them, and the fleet cleans up the worktrees it made.**
   characters (`Work laptop`), with case kept and matched ignoring case. A name
   is refused if it is only digits, has an `@`, has an invisible formatting
   character, or is another slot's own name (`account 3`, `plain claude`).
-  Emoji are fine, joined ones included, as in nicknames. `aisquare accounts
-  alias 2 "Work laptop"` sets the same name, and `--account "work laptop"`
-  takes it.
+  Emoji are fine, joined ones included, as in nicknames. Left blank, it clears
+  the name. `aisquare accounts alias 2 "Work laptop"` sets the same name, and
+  `--account "work laptop"` takes it (#258).
 - **Log in** on an account's row whose login is missing, expired or rejected.
   The status beside it says which. The sign-in pane waits for a fresh login,
   not the stale one on disk, then the row reads its usage again.

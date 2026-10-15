@@ -1054,7 +1054,7 @@ def _reuse_worktree(
         )
     if refuse_if_taken is not None:
         refuse_if_taken()
-    if _git(root, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0:
+    if _branch_exists(root, branch):
         _git_ok(path, "checkout", branch)
     else:
         _git_ok(path, "checkout", "-b", branch)
@@ -1118,17 +1118,33 @@ def _ensure_worktree(
             else "remove it or pick another label"
         )
         raise FleetError(f"{path} exists and is not a git worktree — {detail}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # A worktree whose directory was deleted by hand stays registered and blocks
-    # `add` at the same path; prune is idempotent and cheap.
-    _git(root, "worktree", "prune")
-    if _git(root, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0:
-        _git_ok(root, "worktree", "add", str(path), branch)
+    if _branch_exists(root, branch):
+        _add_worktree(root, path, branch)
         notes.append(f"branch {branch} already existed — checked it out")
     else:
-        _git_ok(root, "worktree", "add", str(path), "-b", branch)
+        _add_worktree(root, path, branch, new=True)
     _exclude_worktrees(root, worktree_dir, notes)
     return path
+
+
+def _branch_exists(root: Path, branch: str) -> bool:
+    """Whether the local branch ``branch`` is there."""
+    return _git(root, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0
+
+
+def _add_worktree(root: Path, path: Path, branch: str, *, new: bool = False) -> None:
+    """``git worktree add`` at ``path`` on ``branch`` — a new one from HEAD when ``new``.
+
+    A worktree whose directory was deleted by hand stays registered and blocks ``add`` at
+    the same path, and holds its branch from any other tree; ``git worktree prune`` is
+    idempotent and cheap. It forgets every such tree's branch, which nothing here reads:
+    an agent's branch is on its row (:attr:`FleetAgent.branch`)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _git(root, "worktree", "prune")
+    if new:
+        _git_ok(root, "worktree", "add", str(path), "-b", branch)
+    else:
+        _git_ok(root, "worktree", "add", str(path), branch)
 
 
 def _worktree_branches(root: Path) -> dict[Path, str]:
@@ -1222,7 +1238,7 @@ def _branch_of_a_gone_tree(root: Path, own: Path, branch: str | None) -> str:
             f"its worktree {own} is gone, and its row records no branch it was on (a "
             "detached HEAD, or an agent spawned before 0.8.1): " + instead
         )
-    if _git(root, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode != 0:
+    if not _branch_exists(root, branch):
         raise FleetError(f"its worktree {own} is gone, and so is its branch {branch}: " + instead)
     gone = own.resolve()
     holder = next(
@@ -1252,9 +1268,7 @@ def _remake_worktree(root: Path, own: Path, branch: str | None, notes: list[str]
     had nothing the default branch lacks.
     """
     branch = _branch_of_a_gone_tree(root, own, branch)
-    own.parent.mkdir(parents=True, exist_ok=True)
-    _git(root, "worktree", "prune")  # a tree deleted by hand still holds its branch
-    _git_ok(root, "worktree", "add", str(own), branch)
+    _add_worktree(root, own, branch)
     notes.append(f"its worktree {own} was gone — made it again on its branch {branch}")
     return own
 

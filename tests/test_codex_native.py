@@ -1001,9 +1001,91 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
                     if event.kind == "note" and moved in event.text
                 ]
             assert said and said[0].startswith(f"{reviewer.label}: cannot restart it"), said
+
+            # Review r5 of #113, finding 2: the transcript a failed turn is read from is
+            # the record's. The reviewer points its session at a rollout that ends in a
+            # usage limit; with the row working (a write its Stop would undo, made here),
+            # the fleet's read leaves it working: no limited, no hand-over.
+            until(lambda: state(reviewer) == "waiting", 30, "waiting", reviewer.pane_id)
+            seat = fleet.status_of(reviewer).session
+            assert seat is not None
+            planted = store / "planted-rollout.jsonl"
+            failed = {
+                "timestamp": (datetime.now(UTC) + timedelta(minutes=1)).isoformat(),
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "turn_id": "planted",
+                    "error": {"message": "limit", "codex_error_info": "usage_limit_exceeded"},
+                },
+            }
+            planted.write_text(json.dumps(failed) + "\n", encoding="utf-8")
+            sandboxed(
+                rewrite("team_session", "transcript_path", str(planted), seat.id), "transcript"
+            )
+            until(lambda: state(reviewer) == "waiting", 20, "waiting", reviewer.pane_id)
+            with store_session() as handle:
+                handle.touch_session(seat.id, state="working")
+            listed = {status.agent.id: status.state for status in fleet.list_agents(project)}
+            assert listed[reviewer.id] == "working", listed
+            with store_session() as handle:
+                kinds = [event.kind for event in handle.recent_events(project.id, limit=80)]
+                handle.touch_session(seat.id, state="waiting")
+            assert "limited" not in kinds and "turn_failed" not in kinds
+
+            # Finding 1: what is typed into or killed is the pane the record places. The
+            # reviewer points its row at a pane of another tmux server, the user's own:
+            # `tell` files the note, `stop` is refused, and that pane gets nothing.
+            users = f"asq-users-{os.getpid()}"
+            subprocess.run(
+                ["tmux", "-L", users, "new-session", "-d", "-s", "main", "cat"], check=True
+            )
+            display = ["tmux", "-L", users, "display-message", "-p", "-t", "main"]
+            users_pane = subprocess.run(
+                [*display, "#{pane_id}"], capture_output=True, text=True, check=True
+            ).stdout.strip()
+            users_socket = subprocess.run(
+                [*display, "#{socket_path}"], capture_output=True, text=True, check=True
+            ).stdout.strip()
+            code = (
+                "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); c.execute('UPDATE "
+                "fleet_agent SET socket_path = ?, pane_id = ? WHERE id = ?', sys.argv[2:5])"
+                "; c.commit(); print('rewrote', c.total_changes)"
+            )
+            db = str(store / "context.db")
+            pointed = [sys.executable, "-c", code, db, users_socket, users_pane, reviewer.id]
+            sandboxed("RUN " + shlex.join(pointed), "the pane")
+            # Its turn ends on its own; the row no longer names its pane to watch it by.
+            time.sleep(3)
+            seen = len(outputs())
+            not_its = "not the one its launch record places"
+            told = fleet.tell(project, reviewer.label, "LEAKED LINE")
+            assert not told.delivered and not_its in told.how, told.how
+            with pytest.raises(fleet.LaunchRefused, match=not_its):
+                fleet.stop(project, reviewer.label)
+            screen = subprocess.run(
+                ["tmux", "-L", users, "capture-pane", "-p", "-t", users_pane],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+            assert "LEAKED" not in screen and "/exit" not in screen, screen
+            assert len(outputs()) == seen, "nothing reached the reviewer either"
+            with store_session() as handle:
+                said = [
+                    event.text
+                    for event in handle.recent_events(project.id, limit=80)
+                    if event.kind == "note" and not_its in event.text
+                ]
+            assert said, "the reason is on the board"
         finally:
             if srv.has_session(fleet.session_name(fleet.ensure_codename(project).codename or "")):
                 srv.run("kill-server")
+            subprocess.run(
+                ["tmux", "-L", f"asq-users-{os.getpid()}", "kill-server"],
+                capture_output=True,
+                check=False,
+            )
             server.shutdown()
             thread.join(timeout=2)
             shutil.rmtree(outside, ignore_errors=True)

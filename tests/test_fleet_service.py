@@ -1947,6 +1947,102 @@ def test_with_capture_off_a_spawn_where_nothing_was_added_adds_it(
     assert receipt.tmux_session == f"asq-{listed.codename}"
 
 
+@pytest.mark.parametrize("refusal", ["worktree", "window"])
+@pytest.mark.parametrize("state", ["unseen", "forgotten"])
+def test_with_capture_off_a_spawn_refused_after_its_codename_adds_nothing(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    refusal: str,
+    state: str,
+) -> None:
+    """Review of #259, round 17: with ``[projects] capture`` off, ``ensure_codename`` added
+    the project for a spawn before its worktree and window existed, and a spawn refused
+    after that — a directory at the tree's path that is no worktree, a window tmux would
+    not start — left a directory nobody added listed with no agent, or brought a forgotten
+    one back, as review of #168, round 2 had stopped. The codename is worked out without a
+    write and stored with the add, once the agent's row is written; a spawn that starts
+    names its session by it, and a forgotten project comes back under the one it kept."""
+    asked = team_project(repo)
+    kept: str | None = None
+    if state == "forgotten":
+        with store_session() as store:
+            store.onboard_project(asked)
+        first = fleet_service.spawn(asked, "coder", worktree=False).agent
+        fleet_service.stop(asked, first.label, force=True)
+        kept = _codename(asked)
+        with store_session() as store:
+            store.forget_project(asked.id)
+    blocked = repo / fleet_service.settings().worktree_dir / "coder-1"
+    real_spawn_window = tmux.spawn_window
+    if refusal == "worktree":
+        blocked.mkdir(parents=True)
+        (blocked / "notes.txt").write_text("somebody's\n", encoding="utf-8")
+    else:
+
+        def refused(*args: Any, **kwargs: Any) -> WindowInfo:
+            raise TmuxError("no server running")
+
+        monkeypatch.setattr(tmux, "spawn_window", refused)
+    spawned_before = len(tmux.spawned)
+
+    with pytest.raises(FleetError):
+        fleet_service.spawn(asked, "coder", worktree=refusal == "worktree")
+
+    assert len(tmux.spawned) == spawned_before, "nothing was started"
+    with store_session() as store:
+        rows = {p.id: p for p in store.list_projects(all=True, include_forgotten=True)}
+        assert store.list_projects(all=True) == [], "nothing listed, nothing captured"
+    if state == "unseen":
+        assert asked.id not in rows, "no row at all"
+    else:
+        assert rows[asked.id].codename == kept, "still forgotten, the codename kept"
+    if refusal == "worktree":
+        shutil.rmtree(blocked)
+    else:
+        monkeypatch.setattr(tmux, "spawn_window", real_spawn_window)
+    started = fleet_service.spawn(asked, "coder", worktree=refusal == "worktree")
+    with store_session() as store:
+        [listed] = store.list_projects()
+    assert listed.id == asked.id and listed.codename
+    assert started.tmux_session == f"asq-{listed.codename}"
+    if kept is not None:
+        assert listed.codename == kept
+
+
+def test_a_spawn_whose_codename_another_project_took_meanwhile_is_refused_and_adds_nothing(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The codename is stored with the add, after the window: another project that took it
+    in between makes the add fail, and the spawn is refused, its window killed, rather than
+    left in a session that is another project's."""
+    asked = team_project(repo)
+    other = team_project(tmp_path / "other")
+    real = fleet_service.open_window
+
+    def another_takes_it(*args: Any, **kwargs: Any) -> WindowInfo:
+        window = real(*args, **kwargs)
+        with store_session() as store:
+            store.onboard_project(other)
+            store.set_codename(other.id, codenames.codename_for(asked.id))
+        return window
+
+    monkeypatch.setattr(fleet_service, "open_window", another_takes_it)
+
+    with pytest.raises(FleetError, match="another project took the codename"):
+        fleet_service.spawn(asked, "coder", worktree=False)
+
+    assert tmux.sessions.get(f"asq-{codenames.codename_for(asked.id)}", []) == []
+    with store_session() as store:
+        assert [p.id for p in store.list_projects(all=True)] == [other.id]
+        assert store.fleet_agents(asked.id) == []
+
+
 def test_the_automatic_hand_over_lists_nothing_a_forget_left_captured(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

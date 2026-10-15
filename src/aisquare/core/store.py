@@ -1168,7 +1168,9 @@ class ContextStore(Protocol):
     def delete(self, entry_id: str) -> None: ...
     def promote(self, entry_id: str) -> ContextEntry: ...
     def ensure_project(self, project: ProjectInfo) -> None: ...
-    def onboard_project(self, project: ProjectInfo) -> ProjectInfo: ...
+    def onboard_project(
+        self, project: ProjectInfo, *, codename: str | None = None
+    ) -> ProjectInfo: ...
     def list_projects(
         self, *, all: bool = False, include_forgotten: bool = False
     ) -> list[ProjectInfo]: ...
@@ -1828,7 +1830,7 @@ class SqliteStore:
         )
         self._conn.commit()
 
-    def onboard_project(self, project: ProjectInfo) -> ProjectInfo:
+    def onboard_project(self, project: ProjectInfo, *, codename: str | None = None) -> ProjectInfo:
         """Register the project ON PURPOSE: shown from now on, and revived if forgotten.
 
         ``init``, ``project onboard`` / ``link`` / ``switch``, the sidebar's
@@ -1839,13 +1841,20 @@ class SqliteStore:
         A revived row comes back loose and unpinned, as :meth:`ensure_project`
         says, and marked now: a tombstone holds no mark to keep (v23). A live
         one keeps its place.
+
+        ``codename`` is given to a row that has none, in the same statement: a fleet spawn's,
+        whose session and branch were named by it before anything was written. A row's own
+        codename is kept; one another project holds raises ``sqlite3.IntegrityError`` and
+        writes nothing.
         """
         now = _now_iso()
         self._conn.execute(
-            "INSERT INTO project (id, root, name, linked_repos, created_at, onboarded_at) "
-            "VALUES (?, ?, ?, ?, ?, ?) "
+            "INSERT INTO project "
+            "(id, root, name, linked_repos, created_at, onboarded_at, codename) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET forgotten_at = NULL, "
-            "onboarded_at = COALESCE(project.onboarded_at, excluded.onboarded_at)",
+            "onboarded_at = COALESCE(project.onboarded_at, excluded.onboarded_at), "
+            "codename = COALESCE(project.codename, excluded.codename)",
             (
                 project.id,
                 str(project.root),
@@ -1853,6 +1862,7 @@ class SqliteStore:
                 json.dumps(project.linked_repos),
                 now,
                 now,
+                codename,
             ),
         )
         self._conn.commit()

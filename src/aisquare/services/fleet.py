@@ -843,9 +843,7 @@ def only_project(ref: str, matches: list[ProjectInfo]) -> ProjectInfo:
     return matches[0]
 
 
-def ensure_codename(
-    project: ProjectInfo, store: ContextStore | None = None, *, onboard: bool = False
-) -> ProjectInfo:
+def ensure_codename(project: ProjectInfo, store: ContextStore | None = None) -> ProjectInfo:
     """Give the project its codename if it has none (lazily, on first fleet contact).
 
     ``codename_for`` walks past the names a SNAPSHOT of the store called taken,
@@ -866,22 +864,20 @@ def ensure_codename(
 
     With capture off there is nothing to capture into: a directory with no live
     row gets none, and comes back without a codename (:func:`attach_argv` then
-    takes the one a forgotten row kept, or refuses: no agent ran there), unless
-    ``onboard`` — a spawn's, which then adds it here, before its
-    window: a deliberate start in a directory is an add, and its codename names
-    the session and the branches it is about to make.
+    takes the one a forgotten row kept, or refuses: no agent ran there). A spawn
+    works its codename out without writing it (:func:`_codename_to_add`), and adds
+    the project with it once the window exists, with the agent's row: added here,
+    before the window, a spawn refused afterwards left the directory listed with
+    no agent, or brought a forgotten one back (review of #259, round 17).
     """
     if project.codename:
         return project
 
     def assign(store: ContextStore) -> ProjectInfo:
         if store.get_project(project.id) is None:
-            if project_service.capture_on():
-                store.ensure_project(project)
-            elif onboard:
-                store.onboard_project(project)
-            else:
+            if not project_service.capture_on():
                 return project
+            store.ensure_project(project)
         for _ in range(_CODENAME_RETRIES):
             current = store.get_project(project.id)
             if current is not None and current.codename:
@@ -915,6 +911,17 @@ def _kept_codename(store: ContextStore, project: ProjectInfo) -> str | None:
         ),
         None,
     )
+
+
+def _codename_to_add(store: ContextStore, project: ProjectInfo) -> str:
+    """The codename a spawn names its session and branch by, for a project
+    :func:`ensure_codename` gave none (``[projects] capture`` off, no live row), read
+    without a write: the one a forgotten row kept, else the walk past every name in use.
+    :func:`_write_row` stores it with the project's add and the agent's row."""
+    kept = _kept_codename(store, project)
+    if kept is not None:
+        return kept
+    return codenames.codename_for(project.id, taken=store.codenames_in_use())
 
 
 def next_label(
@@ -2429,11 +2436,13 @@ def spawn(
     # The spawn goes ahead: the codename names its tmux session and its branch. A
     # directory with no live row, never seen or forgotten, is captured for it
     # (`ensure_codename`), not listed, and a worktree or a window that then cannot
-    # be made leaves it captured. With `[projects] capture` off there is no captured
-    # row to leave: a spawn someone asked for adds the directory here instead.
+    # be made leaves it captured. With `[projects] capture` off nothing is written
+    # here: the codename is worked out, and stored with the add and the agent's row
+    # (`_write_row`), so a refusal from here on leaves no row behind (review of #259,
+    # round 17).
     with store_session() as store:
-        project = ensure_codename(project, store, onboard=onboard)
-    codename = project.codename or codenames.codename_for(project.id)
+        project = ensure_codename(project, store)
+        codename = project.codename or _codename_to_add(store, project)
     if codename != observed:
         # A forgotten project's ended rows keep their windows under the codename its
         # tombstone kept, which the caller's registration did not carry.
@@ -2648,6 +2657,7 @@ def spawn(
         notes=notes,
         cap=config.max_agents_per_project,
         onboard=onboard,
+        codename=codename,
     )
     # The auto-mode note (#150), from the evidence read before the window: on the
     # receipt when this machine's transcripts say so, a warning, never a reason
@@ -3167,6 +3177,7 @@ def _record(
     notes: list[str],
     cap: int,
     onboard: bool,
+    codename: str,
 ) -> FleetAgent:
     """Write the row; on a live-label collision re-pick the label and retry.
 
@@ -3186,10 +3197,14 @@ def _record(
     The spawn's deliberate add (#139) is made in the same store session, before
     the insert, so a store that refuses it refuses the row too and the window
     goes with it: onboarded after the insert, the refusal would leave a live
-    row on a killed window. ``onboard`` is :func:`spawn`'s.
+    row on a killed window. ``onboard`` is :func:`spawn`'s, and so is ``codename``, the
+    one its session and branch were named by, which the add stores on a row that has
+    none (``[projects] capture`` off: nothing was written before the window).
     """
     try:
-        return _write_row(agent, project, wanted=wanted, notes=notes, cap=cap, onboard=onboard)
+        return _write_row(
+            agent, project, wanted=wanted, notes=notes, cap=cap, onboard=onboard, codename=codename
+        )
     except FleetError:
         _kill_unrecorded(srv, agent.pane_id)
         raise
@@ -3215,11 +3230,12 @@ def _write_row(
     notes: list[str],
     cap: int,
     onboard: bool,
+    codename: str,
 ) -> FleetAgent:
     """The store half of :func:`_record`: onboard, insert, relabelling past a live collision."""
     with store_session() as store:
         if onboard:
-            store.onboard_project(project)
+            _add_named(store, project, codename)
         for _ in range(_LABEL_RETRIES):
             try:
                 stored = store.upsert_fleet_agent(agent)
@@ -3229,6 +3245,28 @@ def _write_row(
             _verify_cap(store, stored, cap)
             return stored
     raise FleetError(f"could not record {agent.label!r}: every label tried was taken")
+
+
+def _add_named(store: ContextStore, project: ProjectInfo, codename: str) -> None:
+    """A spawn's deliberate add, with ``codename`` — the one its window's session and its
+    branch were named by — stored on a row that has none, in the same statement.
+
+    Refused (:class:`FleetError`, and :func:`_record` kills the window) when another
+    project took that codename while the agent was starting, or another aisquare gave this
+    project another one meanwhile: either way the window sits in a session that is not this
+    project's, where ``fleet attach`` would never find it."""
+    try:
+        added = store.onboard_project(project, codename=codename)
+    except sqlite3.IntegrityError as exc:
+        raise FleetError(
+            f"another project took the codename {codename} while this agent was starting — "
+            "spawn again"
+        ) from exc
+    if added.codename != codename:
+        raise FleetError(
+            f"{_name(project)} was named {added.codename} by another aisquare while this agent "
+            f"was starting in session {session_name(codename)} — spawn again"
+        )
 
 
 def _relabel(

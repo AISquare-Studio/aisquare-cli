@@ -78,6 +78,7 @@ from aisquare.models import (
     AccountsOverview,
     ClaudeAccount,
     ClaudeAccountStatus,
+    ClaudeIdentity,
     ClaudeUsage,
     UsageTrend,
 )
@@ -104,6 +105,13 @@ CREDITS_WORKER = "workspace-credits"
 SIGN_IN_WORKER = "aisquare-sign-in"
 SIGN_OUT_WORKER = "aisquare-sign-out"
 COMPLETE_WORKER = "claude-complete-sign-in"
+LOGIN_OPEN_WORKER = "claude-sign-in-open"
+"""Reads the login a *Log in* is opened over (``login_fingerprint``) before its window opens:
+on macOS a Keychain read, a subprocess, and never one on the UI thread."""
+LOGIN_POLL_WORKER = "claude-sign-in-poll"
+"""A sign-in window's poll: whether the login landed (``sign_in_landed``), off the UI thread."""
+ABANDON_WORKER = "claude-abandon-sign-in"
+"""Discards a fresh slot whose sign-in never landed, once it has asked whether it did."""
 REMOVE_WORKER = "claude-remove"
 ARRANGE_WORKER = "claude-arrange"
 RENAME_WORKER = "claude-rename"
@@ -827,6 +835,10 @@ class AccountsView(Vertical):
         self._asked: set[int] = set()
         """The signed-in slots a usage reading has been started for (``show``)."""
         self.login: _ClaudeLogin | None = None
+        self._login_opening: ClaudeAccount | None = None
+        """The slot a *Log in* is reading the stored login of, before its window opens."""
+        self._login_poll: Worker[Any] | None = None
+        """The sign-in window's poll in flight, or the last one."""
         self._login_timer: Timer | None = None
         self._usage_timer: Timer | None = None
         self._usage_worker: Worker[Any] | None = None
@@ -899,7 +911,9 @@ class AccountsView(Vertical):
         second and stores nothing. A Claude sign-in window is closed and its
         slot settled the way a poll would have: recorded if the login landed in
         the meantime, discarded if it was fresh and did not. No widget is
-        touched here; they are being torn down under us.
+        touched here; they are being torn down under us. The one read made here
+        rather than in a worker (on macOS a Keychain read): nothing is left on
+        screen to keep answering, and a worker would not outlive the quit.
         """
         for timer in (self._login_timer, self._usage_timer):
             if timer is not None:
@@ -1094,7 +1108,7 @@ class AccountsView(Vertical):
         asked for while one runs is owed, and made once that one ends.
 
         Every signed-in slot, not only those with a readable token: the service
-        answers a Keychain-backed (macOS) or expired token with its reason and
+        answers an unreadable (a locked Keychain) or expired token with its reason and
         no request, and that reason is what the row must show instead of a
         ``usage: …`` that never resolves.
         """
@@ -1140,7 +1154,7 @@ class AccountsView(Vertical):
         cache's, and the line stays as it is through it.
 
         A row that needs a login (signed out, its token expired or refused) or whose token
-        this CLI cannot read (missing, the macOS Keychain) counts in neither half
+        this CLI cannot read (missing, a locked Keychain) counts in neither half
         (``usage_is_readable``, the CLI's rule too): its own status says so, and an account
         left expired would otherwise say "failed" every tick.
         """
@@ -1569,20 +1583,44 @@ class AccountsView(Vertical):
         *Add* and *Log in* both come here. A slot still holding a login — an
         expired or rejected token — is watched for a DIFFERENT login
         (``login_fingerprint``): the stale one is a signed-in directory, and the
-        window closed at the first poll, before Claude Code had refreshed it.
+        window closed at the first poll, before Claude Code had refreshed it. That
+        login is read before the window opens (a Claude Code starting there may
+        refresh the token at once, which is the new login), off the UI thread
+        (:data:`LOGIN_OPEN_WORKER`): on macOS it is a Keychain read.
         """
-        if self.login is not None:
-            self._notice(
-                f"a sign-in for {self._name_of(self.login.account)} is already open below", "warn"
-            )
+        opening = self.login.account if self.login is not None else self._login_opening
+        if opening is not None:
+            self._notice(f"a sign-in for {self._name_of(opening)} is already open below", "warn")
             return
         try:
             account = accounts_service.begin_sign_in(slot)
         except accounts_service.AccountsError as exc:
             self._notice(f"✗ {exc}", "error")
             return
-        fresh = slot is None
-        since = None if fresh else accounts_service.login_fingerprint(account)
+        if slot is None:
+            self._open_login_window(account, fresh=True, since=None)
+            return
+        self._login_opening = account
+        self.run_worker(
+            lambda: (account, accounts_service.login_fingerprint(account)),
+            name=LOGIN_OPEN_WORKER,
+            group=LOGIN_OPEN_WORKER,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _login_read(self, worker: Worker[Any], state: WorkerState) -> None:
+        """The login a *Log in* opens over was read: open its window now. A read that failed
+        opens it over none, as a fresh slot's: the first login stored then closes it."""
+        account, self._login_opening = self._login_opening, None
+        if account is None:
+            return
+        since: str | None = None
+        if state is WorkerState.SUCCESS and isinstance(worker.result, tuple):
+            since = worker.result[1]
+        self._open_login_window(account, fresh=False, since=since)
+
+    def _open_login_window(self, account: ClaudeAccount, *, fresh: bool, since: str | None) -> None:
         try:
             # One read of [fleet] for the server and for the check before a server starts
             # there. A server kept from the page's first sign-in kept the socket of that day,
@@ -1618,11 +1656,28 @@ class AccountsView(Vertical):
 
     @while_running
     def _poll_login(self) -> None:
+        """The timer's tick: ask whether the login landed, off the UI thread (on macOS the
+        token is a Keychain read). One poll at a time; a tick while one runs is skipped."""
         login = self.login
-        if login is None:
+        if login is None or (self._login_poll is not None and not self._login_poll.is_finished):
             return
-        landed = accounts_service.sign_in_landed(login.account, since=login.since)
-        if landed is not None:
+        self._login_poll = self.run_worker(
+            lambda: (login, accounts_service.sign_in_landed(login.account, since=login.since)),
+            name=LOGIN_POLL_WORKER,
+            group=LOGIN_POLL_WORKER,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _login_polled(self, worker: Worker[Any], state: WorkerState) -> None:
+        """A poll answered: close the window on a landed login, or once Claude Code has gone.
+        An answer for a window closed meanwhile is nobody's."""
+        result = worker.result if state is WorkerState.SUCCESS else None
+        polled, landed = result if isinstance(result, tuple) else (None, None)
+        login = self.login
+        if login is None or (polled is not None and polled is not login):
+            return
+        if isinstance(landed, ClaudeIdentity):
             self._finish_login(landed.email)
             return
         facts = login.server.pane_facts(login.pane_id)
@@ -1688,10 +1743,27 @@ class AccountsView(Vertical):
         self.post_message(AccountsChanged())
 
     def _abandon_login(self, reason: str) -> None:
+        """Close the window; a fresh slot is discarded off the UI thread
+        (:data:`ABANDON_WORKER`), since it first asks whether a login landed after all."""
         login = self._close_login_window()
         if login is None:
             return
-        discarded = accounts_service.abandon_sign_in(login.account) if login.fresh else False
+        if not login.fresh:
+            self._notice(f"sign-in cancelled — {reason}; nothing changed", "warn")
+            self.post_message(AccountsChanged())
+            return
+        account = login.account
+        self.run_worker(
+            lambda: (reason, accounts_service.abandon_sign_in(account)),
+            name=ABANDON_WORKER,
+            group=ABANDON_WORKER,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _abandon_finished(self, worker: Worker[Any], state: WorkerState) -> None:
+        result = worker.result if state is WorkerState.SUCCESS else None
+        reason, discarded = result if isinstance(result, tuple) else ("cancelled", False)
         what = "the new slot was discarded" if discarded else "nothing changed"
         self._notice(f"sign-in cancelled — {reason}; {what}", "warn")
         self.post_message(AccountsChanged())
@@ -1758,6 +1830,12 @@ class AccountsView(Vertical):
             self._sign_out_finished(worker, state)
         elif worker.name == COMPLETE_WORKER:
             self._complete_finished(worker, state)
+        elif worker.name == LOGIN_OPEN_WORKER:
+            self._login_read(worker, state)
+        elif worker.name == LOGIN_POLL_WORKER:
+            self._login_polled(worker, state)
+        elif worker.name == ABANDON_WORKER:
+            self._abandon_finished(worker, state)
         elif worker.name == REMOVE_WORKER:
             self._remove_finished(worker, state)
         elif worker.name == ARRANGE_WORKER:

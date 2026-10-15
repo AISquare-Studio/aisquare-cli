@@ -435,11 +435,8 @@ NEEDS_LOGIN: dict[str, tuple[str, ClaudeUsage]] = {
         ),
     ),
     "keychain": (
-        "missing",
-        ClaudeUsage(
-            available=False,
-            reason="credentials are in the macOS Keychain, which the CLI does not read",
-        ),
+        "unreadable",
+        ClaudeUsage(available=False, reason=core.KEYCHAIN_LOCKED),
     ),
 }
 
@@ -482,7 +479,7 @@ def test_an_expired_account_beside_a_good_one_adds_nothing_to_the_line_for_ten_m
 def test_an_account_that_needs_a_login_counts_in_neither_half_of_the_line(
     kind: str, no_network: dict[str, Any], clock: Clock, tmp_path: Path
 ) -> None:
-    """Slot 4 was read, then needs a login (or its token is in the Keychain): its old
+    """Slot 4 was read, then needs a login (or its Keychain is locked): its old
     reading no longer sets the age, and its answer is not a failed try. Slot 2's endpoint
     going down still is."""
     token_state, answer = NEEDS_LOGIN[kind]

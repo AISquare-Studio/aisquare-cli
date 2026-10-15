@@ -387,7 +387,7 @@ def test_the_doctor_page_names_the_project_its_checks_are_about(
         (HeadroomSummary(level="low", percent_left=10.0, usable=2), "●", ORANGE_RED),
         (HeadroomSummary(level="critical", percent_left=2.0, usable=1), "●", RED),
         (HeadroomSummary(level="empty", percent_left=0.0, usable=2), "💀", ""),
-        # Offline, a Keychain login, no usable account: nothing READ — grey, not a skull.
+        # Offline, a locked Keychain, no usable account: nothing READ — grey, not a skull.
         (HeadroomSummary(level="empty"), "●", "grey50"),
         (HeadroomSummary(level="unknown"), "●", "grey50"),
         (None, "●", "grey50"),

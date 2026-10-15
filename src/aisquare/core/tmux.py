@@ -1304,6 +1304,20 @@ class TmuxServer:
             return None
         return _optional_int(pid)
 
+    def pane_session(self, pane_id: str) -> tuple[str, str] | None:
+        """``(session id, session name)`` of the session that holds ``pane_id`` (``$3``,
+        ``asq-amber-otter``), or ``None`` when the pane is gone or tmux will not say. The
+        same two shapes of "gone" as :meth:`pane_facts`, and the same guard against an
+        attached client's current pane answering for the one asked about."""
+        fmt = f"#{{pane_id}}{_SEP}#{{session_id}}{_SEP}#{{session_name}}"
+        completed = self._runner(self.argv("display-message", "-p", "-t", pane_id, fmt), None)
+        if completed.returncode != 0:
+            return None
+        answered, session_id, name = [*completed.stdout.rstrip("\n").split(_SEP, 2), "", ""][:3]
+        if answered != pane_id or not _SESSION_ID.fullmatch(session_id):
+            return None
+        return session_id, name
+
     def pane_facts_or_raise(self, pane_id: str) -> PaneFacts | None:
         """:meth:`pane_facts`, except a server that could not be ASKED raises.
 

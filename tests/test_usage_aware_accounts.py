@@ -462,10 +462,12 @@ def test_claude_codes_routine_notices_leave_a_parked_or_handed_over_row_as_it_is
 def test_a_hand_over_its_launch_record_refuses_is_said_on_the_board_once(
     fake_home: Path, work: ProjectInfo, runner: CliRunner
 ) -> None:
-    """The usage-limit hand-over of a row with no launch record (``core.launch_seal``) is
-    refused before anything is stopped; the reason is on the board once, said by the
-    switch, not again by the hand-over's own line, and not again at the next limit."""
+    """The usage-limit hand-over of a row with no launch record (``core.launch_seal``) that
+    the census of the fleet before records did not find (``fleet.take_census``) is refused
+    before anything is stopped; the reason is on the board once, said by the switch, not
+    again by the hand-over's own line, and not again at the next limit."""
     _session(work, "sess-fleet")
+    fleet_service.take_census()  # taken before the row was written
     _fleet_row(work, "agt_unrecorded", "coder-db", "sess-fleet")
     for _ in range(2):
         with store_session() as store:

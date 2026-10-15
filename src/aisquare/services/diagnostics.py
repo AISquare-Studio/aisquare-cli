@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 from aisquare.core import agents as agent_core
 from aisquare.core import brain as brain_core
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import harness, orchestrator, outbox, paths
+from aisquare.core import harness, launch_seal, orchestrator, outbox, paths
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.agent_adapters.types import AgentAdapter, PluginInstall
@@ -3314,9 +3314,12 @@ def _check_fleet(
         started: dict[fleet_service._Address, datetime | None] = {}
         # Where their launch records place them, as `reap` asks (`fleet.resolve_place`): a
         # row no record places is judged by nothing, there or here.
+        # Read as written, the census never taken here: the doctor writes nothing.
         placed = [
             placement
-            for placement in (fleet_service.resolve_place(row, config=config) for row in live)
+            for placement in (
+                fleet_service.resolve_place(row, launch_seal.read(row.id), config) for row in live
+            )
             if isinstance(placement, fleet_service.Placed)
         ]
         addresses = {placement.row.id: placement.pane.address for placement in placed}

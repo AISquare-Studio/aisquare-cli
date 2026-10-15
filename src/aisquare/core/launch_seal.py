@@ -42,17 +42,23 @@ open. So a fleet row's launch is ONE record (:class:`LaunchRecord`), written in
   an Enter out of Codex's dialogs (r6, finding 1), or had another project's session
   taken down (r6, finding 7; r7, finding 2). ``tests/test_fleet_placement.py``
   enumerates every tmux call and holds it to that. A rewritten row is told nothing and
-  stopped where its record places it (r6, finding 4). A row with no record is told
-  nothing, and stopped by killing its window only where tmux lists it in a session a
-  record of its project names (r7, finding 1).
+  stopped where its record places it (r6, finding 4), its label and its ``ended_at``
+  deciding nothing (r8, findings 2, 5 and 6). The sessions a project's spawns made are
+  kept here too (:func:`project_sessions`): what later spawns join and ``shutdown``
+  takes down, whatever rows are left (r8, findings 2 and 4).
+- A row spawned before records were kept is placed by the census (:func:`take_census`),
+  taken once, while no record was written here, so before anything sandboxed could have
+  written the store; it is then a row like any other, but that its replay starts fresh.
+  A row with no record that the census did not find is told nothing, and only a dead
+  window of its is removed (r8, findings 1, 3 and 9).
 - What the fleet reads of a session to act on outside the sandbox — a failed turn's
   limit, the hand-over it starts — is read from the transcript the record holds, never
   the board session's (r5, finding 2).
 
-Nothing scans the store to mint a record: a row spawned before this version has none,
-and its replay is refused, naming the way out (stop it, spawn it again). What a record
-holds is read back as it was written, never compared with a digest of today's model,
-so a release that adds a field reads an older record with that field's default.
+Nothing scans the store to mint a record but the census, once, before any record was
+kept (above): a row whose record is lost later is refused, naming the way out. What a
+record holds is read back as it was written, never compared with a digest of today's
+model, so a release that adds a field reads an older record with that field's default.
 
 Validated, besides: a native session id goes on a command line only in the shape the
 agent makes it (:func:`native_id`; ``codex resume`` and ``codex queue`` read one that
@@ -69,10 +75,11 @@ from __future__ import annotations
 import hashlib
 import re
 import tempfile
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from aisquare.core import orchestrator, paths
 from aisquare.core.atomic import write_replacing
@@ -153,6 +160,53 @@ class LaunchRecord(BaseModel):
     window: WindowPlace | None = None
     """Where its window is (:func:`placed`); ``None`` until tmux made it, and for a record
     written by an aisquare that kept no such thing."""
+    label: str | None = None
+    """The row's label as its spawn recorded it (a label re-picked on a collision
+    included): who ``fleet stop <label>`` and ``fleet tell <label>`` mean, never the row's
+    ``label`` column, which a sandbox can swap with another row's (review r8 of #113,
+    finding 5). ``None`` in a record written before it was kept."""
+    legacy: bool = False
+    """Made by the census (:func:`take_census`) for a row spawned before launch records
+    were kept, from the row as it stood then, before any sandboxed agent could write the
+    store: its window is that row's own, its agent starts fresh on a replay (no session
+    is held for it), and its session is the one tmux says holds its pane."""
+
+
+class SessionPlace(BaseModel):
+    """A tmux session one of a project's spawns made, as tmux answered it (its id, its
+    name) and where (the socket's name and path): what later spawns join and ``shutdown``
+    takes down, whatever rows are left (:func:`project_sessions`)."""
+
+    tmux_socket: str
+    socket_path: str | None = None
+    session_id: str
+    name: str
+    created_at: datetime
+    """When it was recorded: a server that started later holds none of it."""
+
+
+class ProjectSessions(BaseModel):
+    """The sessions a project's spawns made, kept beside the launch records, read-only to
+    an agent's sandbox: which sessions are the project's, never worked out from its rows'
+    ``ended_at`` or age, store columns (review r8 of #113, findings 2 and 4)."""
+
+    version: int = VERSION
+    project_id: str
+    sessions: list[SessionPlace] = Field(default_factory=list)
+
+
+class LegacyCensus(BaseModel):
+    """The rows that had no launch record when this aisquare first read the fleet, each
+    as a launch record made from the row as it stood then (:attr:`LaunchRecord.legacy`).
+
+    Taken once (:func:`take_census`), by the first fleet read or spawn outside any
+    sandbox and before any agent that sandboxes its tools is launched, so before anything
+    in a sandbox could have written the store; never rewritten. A row inserted later with
+    no record is not in it, and is refused (review r8 of #113, finding 1)."""
+
+    version: int = VERSION
+    taken_at: datetime
+    records: dict[str, LaunchRecord] = Field(default_factory=dict)
 
 
 #: The session facts this process's hooks were handed, by the board's session id: what
@@ -254,15 +308,26 @@ def _window(agent_id: str) -> WindowPlace | None:
         return None
 
 
+def recorded(agent_id: str) -> bool:
+    """Whether a spawn wrote a record for the row ``agent_id`` (readable or not)."""
+    return _path(agent_id).exists()
+
+
 def read(agent_id: str) -> LaunchRecord | str:
-    """The record of the row ``agent_id``, or why there is none to replay. Never raises."""
+    """The record of the row ``agent_id``, or why there is none to replay. Never raises.
+    A row spawned before records were kept has the one the census made for it
+    (:func:`take_census`), when it was in the fleet then."""
     path = _path(agent_id)
     try:
         body = path.read_text(encoding="utf-8")
     except FileNotFoundError:
+        legacy = _census().records.get(agent_id) if census_taken() else None
+        if legacy is not None and legacy.id == agent_id:
+            return legacy
         return (
             "no launch record was written for it (it was spawned by an aisquare that "
-            "keeps none, or its record could not be written)"
+            "keeps none, or its record could not be written), and it was not in the "
+            "fleet when this aisquare first read it"
         )
     except (OSError, UnicodeDecodeError) as exc:
         return f"its launch record could not be read ({exc})"
@@ -278,6 +343,146 @@ def read(agent_id: str) -> LaunchRecord | str:
     if record.id != agent_id:
         return "its launch record names another row"
     return record.model_copy(update={"window": _window(agent_id)})
+
+
+def _census_path() -> Path:
+    return seals_dir() / "legacy-census.json"
+
+
+_CENSUS_CACHE: dict[str, tuple[tuple[int, int], LegacyCensus]] = {}
+
+
+def census_taken() -> bool:
+    """Whether the census of rows spawned before records were kept was taken here."""
+    return _census_path().exists()
+
+
+def _census() -> LegacyCensus:
+    """The census (:func:`take_census`), read once per change of its file; an empty one
+    when it cannot be read, so nothing is placed on a guess."""
+    path = _census_path()
+    try:
+        stat = path.stat()
+        key = (stat.st_mtime_ns, stat.st_size)
+        cached = _CENSUS_CACHE.get(str(path))
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        census = LegacyCensus.model_validate_json(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValidationError):
+        return LegacyCensus(taken_at=datetime.now(tz=UTC))
+    _CENSUS_CACHE[str(path)] = (key, census)
+    return census
+
+
+_RECORD_FILE = re.compile(r"[0-9a-f]{64}\.json")
+
+
+def records_kept() -> bool:
+    """Whether any launch record was ever written here: once one was, an agent that
+    sandboxes its tools may have run, and the store is no longer the fleet as it stood
+    before records were kept, so no census is taken from it (:func:`take_census`)."""
+    try:
+        return any(_RECORD_FILE.fullmatch(entry.name) for entry in seals_dir().iterdir())
+    except OSError:
+        return False
+
+
+def take_census(records: list[LaunchRecord]) -> str | None:
+    """Write the census of the rows spawned before records were kept: ``None`` when it was
+    written now, or was already (it is never rewritten), otherwise why it could not be.
+    Created exclusively, so two processes taking it at once keep the first; only a
+    process outside the sandbox can (the directory is read-only in it)."""
+    why = ensure_dir()
+    if why is not None:
+        return why
+    census = LegacyCensus(
+        taken_at=datetime.now(tz=UTC),
+        records={record.id: record.model_copy(update={"legacy": True}) for record in records},
+    )
+    try:
+        with _census_path().open("x", encoding="utf-8") as handle:
+            handle.write(census.model_dump_json(indent=1) + "\n")
+    except FileExistsError:
+        return None
+    except OSError as exc:
+        return f"{_census_path()} could not be written ({exc.strerror or exc})"
+    return None
+
+
+def legacy_records(project_id: str) -> list[LaunchRecord]:
+    """The census's records of ``project_id``'s rows (:func:`take_census`)."""
+    if not census_taken():
+        return []
+    return [record for record in _census().records.values() if record.project_id == project_id]
+
+
+def _project_path(project_id: str) -> Path:
+    """The sessions of ``project_id``, by the id's digest (the id is the store's)."""
+    name = hashlib.sha256(project_id.encode("utf-8", "surrogatepass")).hexdigest()
+    return seals_dir() / f"project-{name}.json"
+
+
+def project_sessions(project_id: str) -> list[SessionPlace]:
+    """The sessions the project's spawns made (:class:`ProjectSessions`); none when none
+    were recorded or what was cannot be read. Never raises."""
+    try:
+        kept = ProjectSessions.model_validate_json(
+            _project_path(project_id).read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeDecodeError, ValidationError):
+        return []
+    return kept.sessions if kept.project_id == project_id else []
+
+
+def add_project_session(project_id: str, place: SessionPlace) -> str | None:
+    """Record that a spawn of ``project_id`` made (or joined) the session ``place``:
+    ``None`` when recorded, otherwise why not. An entry for the same id on the same
+    socket is replaced (a newer server numbers its sessions from ``$0`` again)."""
+    why = ensure_dir()
+    if why is not None:
+        return why
+    key = (place.tmux_socket, place.socket_path, place.session_id)
+    kept = [
+        session
+        for session in project_sessions(project_id)
+        if (session.tmux_socket, session.socket_path, session.session_id) != key
+    ]
+    body = ProjectSessions(project_id=project_id, sessions=[*kept, place])
+    path = _project_path(project_id)
+    try:
+        write_replacing(path, body.model_dump_json(indent=1) + "\n", keep_mode=False)
+    except OSError as exc:
+        return f"{path} could not be written ({exc.strerror or exc})"
+    return None
+
+
+def keep_project_sessions(project_id: str, sessions: list[SessionPlace]) -> None:
+    """Keep only ``sessions`` of the project's (the ones tmux still holds). Never raises."""
+    if sessions == project_sessions(project_id):
+        return
+    body = ProjectSessions(project_id=project_id, sessions=sessions)
+    with suppress(OSError):
+        write_replacing(
+            _project_path(project_id), body.model_dump_json(indent=1) + "\n", keep_mode=False
+        )
+
+
+def rename_project_session(project_id: str, session_id: str, socket: str, name: str) -> None:
+    """The project's session ``session_id`` on ``socket`` is called ``name`` now. Never
+    raises; a write that fails keeps the old name, which reports alone use."""
+    sessions = project_sessions(project_id)
+    renamed = [
+        session.model_copy(update={"name": name})
+        if (session.session_id, session.tmux_socket) == (session_id, socket)
+        else session
+        for session in sessions
+    ]
+    if renamed != sessions:
+        body = ProjectSessions(project_id=project_id, sessions=renamed)
+        with suppress(OSError):
+            write_replacing(
+                _project_path(project_id), body.model_dump_json(indent=1) + "\n", keep_mode=False
+            )
 
 
 def observe(

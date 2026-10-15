@@ -1744,16 +1744,20 @@ def test_a_replay_with_no_record_is_refused_and_none_is_minted(
 ) -> None:
     """r4 finding 5: until the directory was marked ready every run sealed the store as
     it stood, and a sandboxed agent that kept it unready could have its rewritten row
-    sealed. Nothing reads the store to write a record now: a row with none is refused,
-    with the way out, and stays refused."""
+    sealed. The store is read for records once, by the census of the fleet as it stood
+    before any record was kept (review r8 of #113, rule A), taken before this spawn
+    started its agent; a row whose record is lost since is refused, with the way out, and
+    stays refused: the census is never taken again."""
     agent = fleet_service.spawn(project, "coder", agent="codex", worktree=False).agent
-    shutil.rmtree(launch_seal.seals_dir())  # as an aisquare that kept no records left it
+    assert launch_seal.census_taken() and launch_seal.legacy_records(project.id) == []
+    launch_seal._path(agent.id).unlink()  # its record lost, since
 
     for _ in range(2):
         with pytest.raises(fleet_service.FleetError, match=UNRECORDED) as refused:
             fleet_service.restart(project, agent.label)
-        assert "then spawn a new agent" in str(refused.value)
+        assert "and spawn a new agent" in str(refused.value)
     assert not launch_seal._path(agent.id).exists()
+    assert launch_seal.legacy_records(project.id) == [], "nothing minted from the store"
 
 
 def test_a_refusal_is_said_on_the_board_once_per_row_and_reason(
@@ -1782,8 +1786,10 @@ def test_a_refusal_is_said_on_the_board_once_per_row_and_reason(
     said = [text for text in _events(codex.project, "note") if UNRECORDED in text]
     assert said == [
         f"{codex.agent.label}: cannot restart it — no launch record was written for it (it was "
-        "spawned by an aisquare that keeps none, or its record could not be written); "
-        f"`aisquare fleet stop {codex.agent.label}`, then spawn a new agent"
+        "spawned by an aisquare that keeps none, or its record could not be written), and it "
+        "was not in the fleet when this aisquare first read it; end its agent in its own "
+        f"window, then `aisquare fleet stop {codex.agent.label}` removes the window and ends "
+        "its row, and spawn a new agent"
     ]
     assert told.delivered is False and UNRECORDED in told.how
     # Another reason for the same row is said again.

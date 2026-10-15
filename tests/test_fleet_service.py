@@ -59,7 +59,7 @@ from aisquare.core.tmux import (
 )
 from aisquare.core.version import __version__
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession, TeamTask
-from aisquare.services import auto_mode, lifecycle
+from aisquare.services import auto_mode, diagnostics, lifecycle
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from aisquare.services.explainability import PIPELINE_ID_ENV_VAR
@@ -455,6 +455,17 @@ class FakeTmux(TmuxServer):
         if pane_id not in self.facts:
             return None
         return self.pids.get(pane_id)
+
+    def pane_session(self, pane_id: str) -> tuple[str, str] | None:
+        """The session holding ``pane_id``, by tmux's id and name, as ``display-message``
+        answers it; ``None`` for a pane that is gone or a server that does not answer."""
+        if not self._read() or pane_id not in self.facts:
+            return None
+        for name, windows in self.sessions.items():
+            if any(window.pane_id == pane_id for window in windows):
+                session_id = self.session_ids.get(name)
+                return (session_id, name) if session_id is not None else None
+        return None
 
     def kill_window(self, pane_id: str) -> None:
         self.binary()
@@ -1318,9 +1329,10 @@ def test_spawn_kills_the_window_when_no_label_can_be_recorded(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A manager race has no suffix to fall back on: the second window must not linger."""
-    fleet_service.spawn(project, "manager")
+    first = fleet_service.spawn(project, "manager").agent
     with store_session() as store:
-        store.end_fleet_agent(store.fleet_agents(project.id)[0].id)  # looks free to the pre-check
+        store.end_fleet_agent(first.id)  # gone, and free to the pre-check
+    tmux.vanish(first.pane_id)
     original = tmux.spawn_window
 
     def spawn_then_revive(*args: object, **kwargs: object) -> WindowInfo:
@@ -4614,11 +4626,21 @@ def _socket_file(name: str, *, listening: bool) -> Iterator[Path]:
 
 def _recorded_at(agent: FleetAgent, path: Path) -> FleetAgent:
     """``agent`` as if its server had said, at spawn, that it listens at ``path``: in its
-    row and in the place its launch record gives its window, as its spawn writes both."""
+    row, in the place its launch record gives its window and in its project's sessions,
+    as its spawn writes all three."""
     record = launch_seal.read(agent.id)
     assert isinstance(record, launch_seal.LaunchRecord) and record.window is not None
     window = record.window.model_copy(update={"socket_path": str(path)})
     assert launch_seal.placed(agent.id, window) is None
+    launch_seal.keep_project_sessions(
+        agent.project_id,
+        [
+            place.model_copy(update={"socket_path": str(path)})
+            if place.session_id == window.session_id
+            else place
+            for place in launch_seal.project_sessions(agent.project_id)
+        ],
+    )
     with store_session() as store:
         return store.upsert_fleet_agent(agent.model_copy(update={"socket_path": path}))
 
@@ -5965,10 +5987,9 @@ def test_a_scoped_shutdown_takes_down_a_leftover_session_on_todays_socket(
     its LIVE rows were on, plus today's when it had none at all — so with live
     rows on the old socket and a leftover session (dead remain-on-exit panes of
     rows long ended) standing on today's, a scoped shutdown stopped the rows,
-    printed ✓ and left that session up. The dead windows of the rows that ended lately
-    are removed where their launch records place them, which takes the session they held
-    with them (review r6 of #113, finding 7: never by the codename alone; r7, finding 2:
-    only the live rows' sessions are taken down whole)."""
+    printed ✓ and left that session up. Every session the project's spawns made is
+    taken down, by tmux's id, whatever rows are left (review r6 of #113, finding 7: never
+    by the codename alone; r8, rule D)."""
     old = FakeTmux()
     tmux.per_socket["asq-old"] = old
     gone = _coder(project, label="coder-gone")  # on today's socket, long ended
@@ -5984,8 +6005,8 @@ def test_a_scoped_shutdown_takes_down_a_leftover_session_on_todays_socket(
     report = fleet_service.shutdown(project, force=True)
 
     assert [a.id for a in report.stopped] == [on_old.id]
-    assert gone.pane_id in tmux.killed, "the dead window its record places is removed"
-    assert leftover not in tmux.sessions, "and the leftover on today's socket went with it"
+    assert leftover not in tmux.sessions, "the leftover on today's socket went too"
+    assert f"asq:{leftover}" in report.sessions_killed
     assert report.incomplete_projects == []
 
 
@@ -7346,15 +7367,22 @@ def test_a_listing_shows_a_row_where_its_launch_record_places_its_window(
         assert listed.state == "exited" and row.ended_at is not None
 
 
-def test_a_row_with_no_record_is_told_nothing_and_stopped_by_its_window_alone(
+def _before_records() -> None:
+    """The launch records gone, the census and the project's sessions with them: what the
+    aisquare before this one left, which kept none (review r8 of #113, rule A)."""
+    shutil.rmtree(launch_seal.seals_dir())
+    getattr(launch_seal, "_CENSUS_CACHE", {}).clear()
+
+
+def test_a_row_whose_record_is_lost_after_the_census_is_told_nothing_and_never_killed_live(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:
-    """Review r6 of #113, finding 6: every agent spawned before this version has no launch
-    record, and ``stop`` and ``shutdown`` refused it while a refused replay named `fleet
-    stop` as the way out. Nothing is typed into a pane the fleet has no record of, but its
-    window, where tmux lists it in a session a launch record of its project names (r7,
-    finding 1), is killed, and the receipt says so."""
-    recorded = _coder(project)  # a record of the project names the session they share
+    """Review r8 of #113, finding 9 (and r6 6): a row with no launch record that the census
+    did not find — a fake row, or one whose record was lost since — is told nothing, and
+    its word reaches only a DEAD window of its project's sessions: a live window is never
+    killed on a row's word. Once its agent has exited, ``fleet stop`` removes the window
+    and ends the row, the way out a refused replay names."""
+    recorded = _coder(project)  # its project's session, which they share
     agent = _coder(project)
     _board_session(agent, "waiting")
     tmux.set_command(agent.pane_id, "claude")
@@ -7363,12 +7391,14 @@ def test_a_row_with_no_record_is_told_nothing_and_stopped_by_its_window_alone(
     told = fleet_service.tell(project, agent.label, "please rebase")
     with pytest.raises(fleet_service.LaunchRefused, match="fleet stop") as refused:
         fleet_service.restart(project, agent.label)
-    receipt = fleet_service.stop(project, agent.label)
+    with pytest.raises(FleetError, match="a live window is never killed on a row's word"):
+        fleet_service.stop(project, agent.label)
 
     assert not told.delivered and "no launch record" in told.how
-    assert f"`aisquare fleet stop {agent.label}`, then spawn a new agent" in str(refused.value)
-    assert tmux.typed == [], "no /exit into a pane it has no record of"
-    assert receipt.killed is not None and "no launch record" in receipt.killed
+    assert "end its agent in its own window, then `aisquare fleet stop" in str(refused.value)
+    assert tmux.typed == [] and tmux.killed == [], "nothing typed or killed on its word"
+    tmux.die(agent.pane_id, 0)  # its agent ended in its own window
+    receipt = fleet_service.stop(project, agent.label)
     assert tmux.killed == [agent.pane_id] and receipt.agent.ended_at is not None
     assert recorded.pane_id in tmux.facts, "the recorded agent beside it runs on"
 
@@ -7377,13 +7407,13 @@ def test_a_row_with_no_record_is_not_stopped_outside_its_fleet_session(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:
     """With no record to place it, the row's own columns name the pane: never one of the
-    user's own servers' is asked about or killed, and with no session a record of its
-    project names, nothing is."""
+    user's own servers' is asked about or killed, and a live window of its own is not
+    killed on its word either; ``--forget`` ends its row."""
     agent = _coder(project)
     users = _pointed_at_the_users_pane(tmux, agent)
     _unrecorded(agent)
 
-    with pytest.raises(FleetError, match="no fleet session a launch record of this project"):
+    with pytest.raises(FleetError, match="no dead window of its is listed"):
         fleet_service.stop(project, agent.label)
     report = fleet_service.shutdown(project)
 
@@ -7393,19 +7423,19 @@ def test_a_row_with_no_record_is_not_stopped_outside_its_fleet_session(
     assert failed.agent.id == agent.id and "shutdown --forget" in failed.reason
     forgotten = fleet_service.shutdown(project, forget=True)
     assert [row.agent.id for row in forgotten.recorded] == [agent.id]
-    assert tmux.killed == [] and users.killed == []
+    assert users.killed == []
 
 
 @pytest.mark.parametrize("by", ["stop", "a respawn"])
 def test_the_lingering_window_of_a_row_with_no_record_is_removed(
     by: str, tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:
-    """Review r6 of #113, finding 9: the 💤 row of an agent spawned before this version could
-    not be stopped — a refusal reported as "no live agent" — and a respawn under its label
-    never removed its dead window. A dead pane only, where tmux lists it in a session a
-    launch record of its project names (r7, finding 1). With no record it is no 💤 row of
-    the listing's either: its pane is not one the fleet may name."""
-    _coder(project)  # a record of the project names the session
+    """Review r6 of #113, finding 9: the 💤 row of an agent with no record could not be
+    stopped — a refusal reported as "no live agent" — and a respawn under its label never
+    removed its dead window. A dead pane only, where tmux lists it in a session of its
+    project's (r7, finding 1; r8, finding 9). With no record it is no 💤 row of the
+    listing's: its pane is not one the fleet may name."""
+    _coder(project)
     agent = _coder(project)
     _unrecorded(agent)
     tmux.die(agent.pane_id, 0)
@@ -7422,19 +7452,20 @@ def test_the_lingering_window_of_a_row_with_no_record_is_removed(
     assert agent.pane_id in tmux.killed
 
 
-def test_the_window_of_an_ended_row_with_no_record_is_named_by_no_session_of_its_own(
-    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+def test_the_dead_window_a_row_with_no_record_names_elsewhere_is_left_alone(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
 ) -> None:
-    """With no session a record of its project names, an ended row's dead window is not the
-    fleet's to close, and ``stop`` says why rather than "no live agent"."""
-    agent = _coder(project)
-    _unrecorded(agent)
-    tmux.die(agent.pane_id, 0)
-    with store_session() as store:
-        store.end_fleet_agent_if_live(agent.id, exit_status=0)
+    """An ended row with no record that names a dead window of another project's session:
+    not its project's, so the fleet closes nothing, and ``stop`` says why rather than "no
+    live agent"."""
+    other = _other_project(tmp_path)
+    theirs = fleet_service.spawn(other, "coder", worktree=False).agent
+    tmux.die(theirs.pane_id, 0)
+    mine = _coder(project)
+    fake = _fake_row(project, mine, theirs.pane_id, ended_at=datetime.now(tz=UTC))
 
     with pytest.raises(NoSuchAgent, match="no launch record was written for it"):
-        fleet_service.stop(project, agent.label, agent_id=agent.id)
+        fleet_service.stop(project, fake.label, agent_id=fake.id)
     assert tmux.killed == []
 
 
@@ -7497,7 +7528,7 @@ def test_a_fake_row_with_no_record_cannot_have_another_projects_window_killed(
     fake = _fake_row(project, mine, victim.pane_id, session_id=victim.session_id)
     _swap_codenames(project, other)
 
-    with pytest.raises(FleetError, match="no fleet session a launch record of this project"):
+    with pytest.raises(FleetError, match="no dead window of its is listed"):
         fleet_service.stop(project, fake.label)
     report = fleet_service.shutdown(project, force=True)
 
@@ -7710,6 +7741,278 @@ def test_shutdown_and_spawn_read_no_record_of_a_row_long_ended(
 
     assert gone.id not in reads, "a row ended two days ago is history, not a place"
     assert live.id in reads
+
+
+# --- review r8 of #113: legacy rows, ended_at and labels decide nothing -------------------
+
+
+def _ended_in_the_store(agent: FleetAgent) -> None:
+    """``agent``'s row ended by one UPDATE, as a sandboxed agent can end its own, while its
+    window runs on."""
+    with store_session() as store:
+        assert isinstance(store, SqliteStore)
+        store._conn.execute(
+            "UPDATE fleet_agent SET ended_at = ? WHERE id = ?",
+            (datetime.now(tz=UTC).isoformat(), agent.id),
+        )
+        store._conn.commit()
+
+
+def test_an_upgrade_finds_the_agents_spawned_before_records_and_operates_them(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Review r8 of #113, findings 1, 3 and 4 (rule A): agents running when this aisquare
+    is installed have no launch record. The census, taken by its first fleet read before
+    anything sandboxed could write the store, places each by its row as it stood: they
+    list as running, a spawn joins their session (never a new `asq-<codename>-2`), `stop`
+    types the exit command and kills the window as before, `restart` starts one fresh,
+    a dead one is ended by the reconcile (so a new manager can be spawned), and `shutdown`
+    takes their session down."""
+    manager = fleet_service.spawn(project, "manager").agent
+    coder, other = _coder(project), _coder(project)
+    session = _session_of(project).split(":", 1)[1]
+    for agent in (manager, coder, other):
+        _board_session(agent, "waiting")
+        tmux.set_command(agent.pane_id, "claude")
+    _before_records()  # as the aisquare before this one left them
+
+    listed = {status.agent.id: status.state for status in fleet_service.list_agents(project)}
+    assert listed == {manager.id: "waiting", coder.id: "waiting", other.id: "waiting"}
+    assert {r.id for r in launch_seal.legacy_records(project.id)} == {
+        manager.id,
+        coder.id,
+        other.id,
+    }
+    joined = fleet_service.spawn(project, "coder", worktree=False)
+    assert joined.tmux_session == session and list(tmux.sessions) == [session]
+    stopped = fleet_service.stop(project, coder.label)
+    assert (coder.pane_id, "literal", "/exit") in tmux.typed and stopped.agent.ended_at
+    restarted = fleet_service.restart(project, other.label)
+    assert restarted.was_running and not restarted.resumed
+    assert (other.pane_id, "literal", "/exit") in tmux.typed
+    tmux.die(manager.pane_id, 0)
+    fleet_service.spawn(project, "manager")  # the dead one is ended first, as before
+    with store_session() as store:
+        assert (row := store.get_fleet_agent(manager.id)) is not None and row.ended_at
+    report = fleet_service.shutdown(project, force=True)
+    assert report.failed == [] and report.incomplete_projects == []
+    assert session not in tmux.sessions
+
+
+def test_the_census_is_taken_once_and_never_from_a_store_records_were_kept_beside(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Rule A's guard: which rows are legacy is not a store column (a sandbox could date
+    an INSERT back): it is the census, written once in launch-seals/ (read-only to a
+    sandbox) before any record was kept here. A row inserted after it with no record is
+    not legacy; nor is one whose record was lost; and the doctor, which writes nothing,
+    never takes it."""
+    agent = _coder(project)
+    _before_records()
+    diagnostics._check_fleet(lambda socket: tmux)
+    assert not launch_seal.census_taken(), "the doctor writes nothing"
+    fleet_service.list_agents(project)
+    assert launch_seal.census_taken()
+    assert [r.id for r in launch_seal.legacy_records(project.id)] == [agent.id]
+    fake = _fake_row(project, agent, agent.pane_id, label="coder-9")
+    placement = fleet_service.resolve_place(fake)
+    assert isinstance(placement, fleet_service.Unplaced)
+    assert "not in the fleet when this aisquare first read it" in placement.why
+
+
+def test_shutdown_takes_down_an_agent_that_ended_its_own_row(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Review r8 of #113, finding 2a (rule B): a sandboxed agent that set its own row's
+    ``ended_at`` kept running under "✓ fleet shut down". It is stopped where its record
+    places it, saying so; ``ended_at`` decides nothing."""
+    agent = _coder(project)
+    tmux.set_command(agent.pane_id, "claude")
+    _ended_in_the_store(agent)
+
+    report = fleet_service.shutdown(project)
+
+    assert agent.pane_id not in tmux.facts or tmux.facts[agent.pane_id].dead
+    assert (agent.pane_id, "literal", "/exit") in tmux.typed
+    assert [row.id for row in report.stopped] == [agent.id]
+    assert any("ended there while the pane" in note for note in _events(project, "note"))
+
+
+def test_a_scoped_shutdown_takes_down_a_session_whose_rows_ended_days_ago(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Review r8 of #113, finding 2b (rule D): a session held up only by the dead windows of
+    rows that ended more than a day ago stood under "✓ fleet shut down". Every session the
+    project's spawns made is taken down, whatever its rows."""
+    gone = _coder(project)
+    tmux.die(gone.pane_id, 0)
+    with store_session() as store:
+        assert isinstance(store, SqliteStore)
+        store.end_fleet_agent_if_live(gone.id, exit_status=0)
+        store._conn.execute(
+            "UPDATE fleet_agent SET ended_at = ? WHERE id = ?",
+            ((datetime.now(tz=UTC) - timedelta(days=3)).isoformat(), gone.id),
+        )
+        store._conn.commit()
+    session = _session_of(project).split(":", 1)[1]
+    assert session in tmux.sessions
+
+    report = fleet_service.shutdown(project)
+
+    assert session not in tmux.sessions and report.incomplete_projects == []
+
+
+def test_spawn_joins_its_projects_session_after_an_idle_day_and_rename_names_each_once(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Review r8 of #113, finding 4: a spawn joined only sessions of rows live or ended
+    within a day, so after an idle weekend it made `asq-<codename>-2`, -3…, and the sixth
+    was refused; rename then gave two sessions one name. It joins the session its project's
+    spawns made, by tmux's id, however old; rename gives every session a name of its own."""
+    first = _coder(project)
+    tmux.die(first.pane_id, 0)
+    with store_session() as store:
+        assert isinstance(store, SqliteStore)
+        store.end_fleet_agent_if_live(first.id, exit_status=0)
+        store._conn.execute(
+            "UPDATE fleet_agent SET ended_at = ? WHERE id = ?",
+            ((datetime.now(tz=UTC) - timedelta(days=3)).isoformat(), first.id),
+        )
+        store._conn.commit()
+    session = _session_of(project).split(":", 1)[1]
+
+    again = fleet_service.spawn(project, "coder", worktree=False)
+
+    assert again.tmux_session == session and list(tmux.sessions) == [session]
+    tmux.spawn_window("asq-elsewhere", name="x", cwd=Path.home(), command=["zsh"])
+    launch_seal.add_project_session(
+        project.id,
+        launch_seal.SessionPlace(
+            tmux_socket="asq",
+            session_id=tmux.session_ids["asq-elsewhere"],
+            name="asq-elsewhere",
+            created_at=datetime.now(tz=UTC) - timedelta(seconds=1),
+        ),
+    )
+    notes: list[str] = []
+    fleet_service.rename(project, "amber-otter", notes=notes)
+    assert notes == [] and sorted(tmux.sessions) == ["asq-amber-otter", "asq-amber-otter-2"]
+
+
+def test_swapped_labels_stop_and_tell_the_row_its_record_names(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Review r8 of #113, finding 5 (rule C): the label a command names was read from the
+    row, a store column: two rows' labels swapped, `fleet stop coder-1` killed the
+    manager's window. The record holds the label its spawn gave; a label resolves to the
+    row whose record holds it, a row whose record holds another is rewritten."""
+    manager = fleet_service.spawn(project, "manager").agent
+    coder = _coder(project)
+    for agent in (manager, coder):
+        _board_session(agent, "waiting")
+        tmux.set_command(agent.pane_id, "claude")
+    with store_session() as store:
+        assert isinstance(store, SqliteStore)
+        for row_id, label in ((manager.id, "spare-label"), (coder.id, "manager")):
+            store._conn.execute("UPDATE fleet_agent SET label = ? WHERE id = ?", (label, row_id))
+        store._conn.execute(
+            "UPDATE fleet_agent SET label = ? WHERE id = ?", (coder.label, manager.id)
+        )
+        store._conn.commit()
+
+    told = fleet_service.tell(project, coder.label, "please rebase")
+    receipt = fleet_service.stop(project, coder.label, force=True)
+
+    assert not told.delivered and "label" in told.how
+    assert receipt.agent.id == coder.id and coder.pane_id in tmux.killed
+    assert manager.pane_id not in tmux.killed and manager.pane_id in tmux.facts
+
+
+def test_restart_hands_over_a_row_ended_in_the_store_while_it_runs(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Review r8 of #113, finding 6 (rule B): `restart` read ``ended_at`` as "not running"
+    and started a replacement beside the agent still running. Whether it runs is asked of
+    the pane its record places; running, it is handed over first."""
+    agent = _coder(project)
+    _board_session(agent, "waiting")
+    tmux.set_command(agent.pane_id, "claude")
+    _ended_in_the_store(agent)
+
+    receipt = fleet_service.restart(project, agent.label)
+
+    assert receipt.was_running and (agent.pane_id, "literal", "/exit") in tmux.typed
+    assert agent.pane_id not in tmux.facts or tmux.facts[agent.pane_id].dead
+    assert receipt.started.id != agent.id
+
+
+def test_the_rename_remedy_names_the_fleets_own_server(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r8 of #113, finding 7: the remedy printed when tmux refused a rename lost its
+    ``-L``, and pasted it renamed session ``$N`` of the user's default server."""
+    _coder(project)
+
+    def refusing(old: str, new: str) -> None:
+        raise TmuxError("server busy")
+
+    monkeypatch.setattr(tmux, "rename_session", refusing)
+    notes: list[str] = []
+    fleet_service.rename(project, "amber-otter", notes=notes)
+
+    [note] = notes
+    assert "`tmux -L asq rename-session -t '$0' asq-amber-otter`" in note, note
+
+
+def test_an_ended_row_with_no_record_lists_exited_not_lost(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Review r8 of #113, finding 8: every ended row with no record listed as "lost — not
+    placed", so `fleet ls --all` showed a fleet's whole history lost. Ended, it reads
+    exited; nothing is asked of where its row points."""
+    agent = _coder(project)
+    fleet_service.stop(project, agent.label)
+    _unrecorded(agent)
+
+    [listed] = [s for s in fleet_service.list_agents(project, live_only=False)]
+
+    assert listed.state == "exited", listed
+
+
+def test_a_fake_row_naming_a_live_window_of_its_project_kills_nothing(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Review r8 of #113, finding 9: a fake row INSERTed at a window the human opened in the
+    project's session (an editor), or at an agent whose own row was ended, had that window
+    killed by `fleet stop <fake>`. A row no record places reaches only a dead window."""
+    agent = _coder(project)
+    session = _session_of(project).split(":", 1)[1]
+    editor = tmux.spawn_window(session, name="vim", cwd=Path.home(), command=["vim"]).pane_id
+    at_the_editor = _fake_row(project, agent, editor, label="coder-9")
+    with pytest.raises(FleetError, match="a live window is never killed"):
+        fleet_service.stop(project, at_the_editor.label)
+    _ended_in_the_store(agent)  # and an agent whose own row was ended
+    at_the_agent = _fake_row(project, agent, agent.pane_id, label="coder-8")
+    with pytest.raises(FleetError, match="a live window is never killed"):
+        fleet_service.stop(project, at_the_agent.label)
+    assert tmux.killed == [] and tmux.typed == []
+
+
+def test_shutdown_all_spares_the_session_of_a_row_it_leaves_live(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Review r8 of #113, finding 10: `--all`'s sweep killed the session of a row with no
+    record that the same report listed as left live ("end it in its own window"), leaving a
+    live row on a dead pane. A session hosting the pane such a row names is spared."""
+    agent = _coder(project)
+    _unrecorded(agent)
+    session = _session_of(project).split(":", 1)[1]
+
+    report = fleet_service.shutdown(None, force=True)
+
+    assert [row.agent.id for row in report.failed] == [agent.id]
+    assert session in tmux.sessions and agent.pane_id in tmux.facts
+    assert f"asq:{session}" in report.sessions_left_up
 
 
 def test_tell_reads_its_launch_record_once(
@@ -9465,7 +9768,8 @@ def test_a_reused_pane_id_never_makes_an_ended_row_present_nor_kills_a_live_wind
     listed as the row's, never killed for it."""
     old = _coder(project, label="coder-old")
     fleet_service.stop(project, "coder-old")  # its window is gone with it
-    tmux._counter = 0  # the server restarted: numbering begins again
+    tmux._counter = 0  # the server restarted: numbering begins again…
+    tmux.started = datetime.now(tz=UTC)  # …and says when, as tmux does
     new = _coder(project, label="coder-new")
     assert new.pane_id == old.pane_id  # the shape under test
 
@@ -9480,6 +9784,7 @@ def test_a_reused_pane_id_never_makes_an_ended_row_present_nor_kills_a_live_wind
     # A spawn under the old label after a listing: the same rule, from the supersede path.
     fleet_service.stop(project, "coder-old", force=True)
     tmux._counter = 0
+    tmux.started = datetime.now(tz=UTC)
     third = _coder(project, label="coder-third")
     assert third.pane_id == old.pane_id
     fleet_service.spawn(project, "coder", label="coder-old", worktree=False)

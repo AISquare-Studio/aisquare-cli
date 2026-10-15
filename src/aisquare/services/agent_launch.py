@@ -103,11 +103,16 @@ def launch_identity(env: dict[str, str], selected: ResolvedAgent, hub: Path | No
 def prepare_sandbox(selected: ResolvedAgent) -> None:
     """Before an agent that sandboxes its tools is exec'd: make what its store profile
     names (``types.prepare_store``), which its sandbox would otherwise leave an empty
-    file in place of."""
+    file in place of, and take the fleet's census of the rows spawned before launch
+    records were kept (``services.fleet.take_census``) if it was not, while nothing in a
+    sandbox can have written the store yet."""
     from aisquare.core.agent_adapters.types import prepare_store, store_dir
 
     if selected.adapter.capabilities.sandboxes_tools:
         prepare_store(store_dir())
+        from aisquare.services import fleet
+
+        fleet.take_census()
 
 
 def project_default(cwd: Path | None = None) -> str | None:

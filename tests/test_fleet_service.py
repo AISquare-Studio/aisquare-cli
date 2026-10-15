@@ -2393,7 +2393,8 @@ def test_tell_says_a_paste_that_timed_out_may_be_typed_as_well_as_noted(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Review of #259, round 9, 1/8: a wedged server may still run the queued paste once it
-    recovers, so the note it falls back to may reach the agent beside the typed text."""
+    recovers, so the note it falls back to may reach the agent beside the typed text. Round
+    10, 6/9: and it is ``maybe``, which the remote's trail says (``delivered=maybe``)."""
     agent = _coder(project)
     _board_session(agent, "waiting")
     tmux.set_command(agent.pane_id, "claude")
@@ -2403,8 +2404,9 @@ def test_tell_says_a_paste_that_timed_out_may_be_typed_as_well_as_noted(
 
     monkeypatch.setattr(tmux, "paste", wedged)
     result = fleet_service.tell(project, "coder-1", "please rebase")
-    assert not result.delivered and "it may be typed as well" in result.how
-    assert "board note" in result.how
+    assert not result.delivered and result.maybe and result.typed == "maybe"
+    assert result.how.startswith("filed as board note #1 to coder-1, and tmux did not answer")
+    assert "it may still arrive at its prompt as well, unsent" in result.how
     assert _events(project, "note") == ["please rebase"]
 
 

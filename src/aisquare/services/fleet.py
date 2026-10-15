@@ -3124,12 +3124,11 @@ def tell(
             return TellResult(False, f"{why} — {how}")
         pasted = pane_write("the text", lambda: srv.paste(agent.pane_id, text))
         if pasted.typed == "maybe":
-            # A wedged server may still run what it was asked (review of #259, round 9, 1/8).
+            # A wedged server may still run what it was asked (review of #259, round 9, 1/8),
+            # which the remote's trail says as `delivered=maybe` (round 10, 6/9).
             how = _file_note(project, label, text, sender)
-            return TellResult(
-                False,
-                f"tmux did not answer in time ({pasted.error}), so it may be typed as well — {how}",
-            )
+            late = pasted.late(label, then=" at its prompt as well, unsent", again="type into it")
+            return TellResult(False, f"{how}, and {late}", maybe=True)
         if pasted.typed == "no":
             how = _file_note(project, label, text, sender)
             return TellResult(False, f"tmux could not type it ({pasted.error}) — {how}")

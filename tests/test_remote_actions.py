@@ -2423,6 +2423,7 @@ _LATE_WRITES = [
         LateWrite("agent/tell", {"mode": "interrupt"}, "Enter", "working"),
         id="interrupt's Enter",
     ),
+    pytest.param(LateWrite("agent/tell", {"mode": "auto"}, "paste"), id="auto's paste"),
     pytest.param(LateWrite("agent/tell", {"mode": "auto"}, "Enter"), id="auto's Enter"),
     *(
         pytest.param(

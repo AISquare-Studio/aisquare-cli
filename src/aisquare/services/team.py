@@ -1438,6 +1438,20 @@ def hook_session_start(
         # other session's injected context.
         model = harness.clean_model_id(model)
         effort = harness.clean_effort(effort)
+        adapter = recorded_adapter(agent)
+        # At its prompt, and nothing fires before its first one: the row's
+        # `working` was the column's default, so `fleet ls` read a fresh Claude Code
+        # agent as working for as long as it sat there, `fleet tell` filed a note
+        # instead of typing, and the nudge passed over a fresh manager (SMOKE2 on
+        # 2.1.300). A compaction comes mid-turn as often as not, and keeps it. In
+        # the statement that opens the session, which the fleet types a spawn's
+        # prompt at once on: written at this hook's end, it overwrote the `working`
+        # of a first prompt submitted meanwhile (review r4 of #113, finding 9).
+        at_its_prompt = (
+            source != "compact"
+            and adapter is not None
+            and adapter.capabilities.starts_at_its_prompt
+        )
         session = store.upsert_session(
             TeamSession(
                 id=session_id,
@@ -1448,6 +1462,7 @@ def hook_session_start(
                 started_at=now,
                 last_seen_at=now,
                 cursor=store.latest_seq(project.id),
+                state="waiting" if at_its_prompt else "working",
                 transcript_path=transcript_path,
                 account=account or session_account(transcript_path),
                 model=model,
@@ -1464,19 +1479,6 @@ def hook_session_start(
         store.renew_leases(session.id, now + timedelta(minutes=orchestrator.lease_minutes()))
         if known is None and source in (None, "startup"):
             session = _behind_notes_to_its_row(store, session)
-        adapter = recorded_adapter(agent)
-        if (
-            source != "compact"
-            and adapter is not None
-            and adapter.capabilities.starts_at_its_prompt
-        ):
-            # At its prompt, and nothing fires before its first one: the row's
-            # `working` was the column's default, so `fleet ls` read a fresh Claude Code
-            # agent as working for as long as it sat there, `fleet tell` filed a note
-            # instead of typing, and the nudge passed over a fresh manager (SMOKE2 on
-            # 2.1.300). A compaction comes mid-turn as often as not, and keeps it.
-            store.touch_session(session.id, state="waiting")
-            session = store.get_session(session.id) or session
         # Presence is board state, not feed traffic: /clear cycles, resumes and
         # ephemeral `claude -p` children would otherwise spam join/left pairs.
         return collision + _render_board(

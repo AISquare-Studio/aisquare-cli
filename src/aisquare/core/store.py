@@ -2275,7 +2275,10 @@ class SqliteStore:
 
     @_session_write
     def upsert_session(self, session: TeamSession) -> TeamSession:
-        """Insert the session, or revive/refresh it if the id is already known."""
+        """Insert the session, or revive/refresh it if the id is already known.
+
+        A revived row's state is replaced, a hand-over's mark included: ``waiting`` for a
+        session given as at its prompt (a Claude Code start), otherwise ``working``."""
         canonical = self._canonical_session_id(session.id)
         if canonical != session.id:
             stored = self.get_session(canonical)
@@ -2286,7 +2289,7 @@ class SqliteStore:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "last_seen_at = excluded.last_seen_at, ended_at = NULL, "
-            "state = 'working', "
+            "state = CASE excluded.state WHEN 'waiting' THEN 'waiting' ELSE 'working' END, "
             "transcript_path = COALESCE(excluded.transcript_path, transcript_path), "
             "account = COALESCE(excluded.account, account), "
             "model = COALESCE(excluded.model, model), "

@@ -2526,6 +2526,40 @@ def test_a_fresh_claude_agent_waits_at_its_prompt_from_its_session_start(
         assert fleet_service.status_of(agent).state == "waiting", source
 
 
+def test_a_first_prompt_submitted_while_its_session_start_runs_keeps_it_working(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r4 of #113, finding 9: ``hook_session_start`` opened the session, which is
+    when a spawn's prompt is typed, and wrote ``waiting`` only at its end, after the
+    assignment, the leases and the notes' cursor. A first prompt whose
+    ``UserPromptSubmit`` committed ``working`` in between was overwritten, and the row
+    read waiting through that turn: ``tell`` typed into a busy agent, the nudge into a
+    busy manager. ``waiting`` is in the statement that opens the session now."""
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    agent = _coder(project)
+    tmux.set_command(agent.pane_id, "claude")
+    session_id = agent.session_id
+    assert session_id is not None
+    real = team_service._assignment
+    opened_as: list[str] = []
+
+    def prompted_meanwhile(store: ContextStore, session: str, project_id: str) -> Any:
+        with store_session() as other:  # the prompt hook's process, its own connection
+            opened = other.get_session(session)
+            opened_as.append(opened.state if opened is not None else "missing")
+        team_service.hook_prompt_heartbeat(session, project.root)
+        return real(store, session, project_id)
+
+    monkeypatch.setattr(team_service, "_assignment", prompted_meanwhile)
+    team_service.hook_session_start(session_id, project.root, "startup")
+
+    with store_session() as store:
+        session = store.get_session(session_id)
+    assert session is not None and session.state == "working"
+    assert fleet_service.status_of(agent).state == "working"
+    assert opened_as == ["waiting"], "opened at its prompt, in the one statement"
+
+
 @pytest.mark.parametrize("unseen", ["board off", "--continue"])
 def test_tell_types_into_a_waiting_claude_agent_whose_start_the_board_cannot_see(
     tmux: FakeTmux,

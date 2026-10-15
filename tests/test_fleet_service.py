@@ -5693,7 +5693,9 @@ def test_an_interrupt_before_any_rows_turn_still_carries_the_report(
             return super().__iter__()
 
     monkeypatch.setattr(
-        fleet_service, "_shutdown_targets", lambda project_: InterruptsOnItsSecondWalk(real_targets)
+        fleet_service,
+        "_shutdown_targets",
+        lambda project_, **_: InterruptsOnItsSecondWalk(real_targets),
     )
     with pytest.raises(fleet_service.FleetInterrupted) as caught:
         fleet_service.shutdown(project, force=True)

@@ -483,7 +483,8 @@ push it, and the next `reap` removes it. `fleet stop` says so for an agent that
 had a worktree. The removed tree's branch stays. Every `reap` then looks at
 each `fleet/…` branch an ended agent's row recorded (`branch` in `fleet ls
 --json`) that no worktree has out, the ones kept before included, and deletes it
-once the default branch has its work (`branches_deleted`): the default branch
+once the default branch has its work (`branches_deleted`, each `{repo, branch}`
+under `--json`): the default branch
 holds its tip, or the branch is pushed and merging it would change nothing, as
 after a squash or rebase merge (git 2.38 or later). Only those are ever deleted:
 a branch no row names — made by hand, or one an agent left for another — and a
@@ -493,8 +494,9 @@ spawn makes its tree, and a reap deletes, under one lock in the repo's `.git`,
 so a reap never deletes a branch a spawn is checking out: one that meets a spawn
 deletes nothing, and the next reap does. A recorded branch with commits the
 default branch lacks — pushed to an integration branch, say — is kept and named
-on every reap (`branches_kept`), with `git branch -D <branch>` to drop it once
-its work is abandoned: a coder spawned again for its task asks for the same branch, checks
+on every reap (`branches_kept`), with `git -C <repo> branch -D <branch>` to drop
+it once its work is abandoned: a coder spawned again for its task asks for the
+same branch, checks
 it out and carries on with its commits, where it used to start a new one from
 the main checkout's HEAD without them. A restart of an agent whose tree was
 removed makes the tree again on the branch its row recorded: *One rule for a

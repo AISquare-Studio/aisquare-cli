@@ -455,12 +455,12 @@ all of them, and the fleet cleans up the worktrees it made.**
   once the default branch has its work (its tip, or, pushed, every change it
   makes, after a squash or rebase merge), and keeps one with commits the default
   branch lacks, so a coder spawned again for its task checks it out and carries
-  on with them. A kept branch is named on every reap, with `git branch -D` to
-  drop it. Reap never deleted a branch before, and deletes no other: not one
+  on with them. A kept branch is named on every reap, with its repo and `git -C
+  <repo> branch -D` to drop it. Reap never deleted a branch before, and deletes no other: not one
   made by hand, nor one an agent left for another. A tree with uncommitted changes, an untracked file that is not
   ignored, or unpushed commits is kept and named with why; push it, and the
-  next `reap` removes it. `--json` adds `worktrees_kept`, `branches_deleted`
-  and `branches_kept` beside `worktrees_removed`. A live agent's tree is never
+  next `reap` removes it. `--json` adds `worktrees_kept`, and `branches_deleted`
+  and `branches_kept` (each `{repo, branch}`), beside `worktrees_removed`. A live agent's tree is never
   touched, as before. A restart or switch of an agent whose tree is gone —
   reaped, or deleted by hand — makes it again on the branch it was on, which
   its row records (whatever its name, and through any `git worktree prune`),

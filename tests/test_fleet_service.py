@@ -7788,7 +7788,7 @@ def test_reap_removes_a_merged_worktree_and_keeps_an_unmerged_one(
 
     assert report.worktrees_removed == [merged.cwd]
     assert not merged.cwd.exists() and unmerged.cwd.exists()
-    assert report.branches_deleted == [branch], "main holds its tip: nothing is lost"
+    assert report.branches_deleted == [(project.root, branch)], "main holds its tip"
     assert _git("branch", "--list", branch, cwd=project.root) == ""
     assert fleet_service.reap(project).worktrees_removed == []
 
@@ -7829,7 +7829,7 @@ def test_reap_removes_a_worktree_pushed_to_any_remote_branch_and_keeps_its_fleet
     report = fleet_service.reap(project)
 
     assert report.worktrees_removed == [pushed.cwd] and not pushed.cwd.exists()
-    assert report.branches_deleted == [] and report.branches_kept == [branch]
+    assert report.branches_deleted == [] and report.branches_kept == [(project.root, branch)]
     assert _git("branch", "--list", branch, cwd=project.root), f"{branch} kept"
     assert report.worktrees_kept == []
     assert _git("rev-parse", "origin/feat/integration", cwd=project.root), "the work is safe"
@@ -7900,10 +7900,10 @@ def test_a_worktree_and_its_branch_over_their_lifecycle(
     fleet_service.stop(project, coder.label, force=True)
     if case == "pushed, reaped: branch kept":
         _git("push", "-q", "origin", f"{branch}:feat/integration", cwd=project.root)
-        assert fleet_service.reap(project).branches_kept == [branch]
+        assert fleet_service.reap(project).branches_kept == [(project.root, branch)]
     elif case == "merged, reaped: branch deleted":
         _git("merge", "-q", "--ff-only", branch, cwd=project.root)
-        assert fleet_service.reap(project).branches_deleted == [branch]
+        assert fleet_service.reap(project).branches_deleted == [(project.root, branch)]
     elif case != "tree and branch there":
         shutil.rmtree(coder.cwd)
         if case == "tree and branch deleted by hand":
@@ -8005,7 +8005,7 @@ def test_a_restart_makes_a_gone_tree_again_on_the_branch_its_row_recorded(
     else:
         _git("push", "-q", "origin", f"{branch}:feat/integration", cwd=coder.cwd)
         fleet_service.stop(project, coder.label, force=True)
-        assert fleet_service.reap(project).branches_kept == [branch]
+        assert fleet_service.reap(project).branches_kept == [(project.root, branch)]
         coder = fleet_service.spawn(project, "coder", task_id=task.id).agent
         assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=coder.cwd) == branch
         branch, tip = "fix/auth", _move_to_a_branch_of_its_own(coder.cwd, "fix/auth")
@@ -8073,7 +8073,7 @@ def test_reap_deletes_a_kept_fleet_branch_once_the_default_branch_has_its_work(
         _git("push", "-q", "origin", f"HEAD:feat/{label}", cwd=agent.cwd)
         fleet_service.stop(project, label, force=True)
     first = fleet_service.reap(project)
-    assert sorted(first.branches_kept) == sorted(branches.values())
+    assert sorted(first.branches_kept) == sorted((project.root, b) for b in branches.values())
     assert first.branches_deleted == []
     done, still = branches["coder-merged"], branches["coder-open"]
     if merge == "fast-forward":
@@ -8085,9 +8085,9 @@ def test_reap_deletes_a_kept_fleet_branch_once_the_default_branch_has_its_work(
 
     again = fleet_service.reap(project)
 
-    assert again.worktrees_removed == [] and again.branches_deleted == [done]
+    assert again.worktrees_removed == [] and again.branches_deleted == [(project.root, done)]
     assert _git("branch", "--list", done, cwd=project.root) == ""
-    assert again.branches_kept == [still], "still kept, and named again"
+    assert again.branches_kept == [(project.root, still)], "still kept, and named again"
     assert _git("branch", "--list", still, cwd=project.root)
 
 
@@ -8162,7 +8162,8 @@ def test_reap_keeps_a_worktree_with_unpushed_commits_or_uncommitted_changes_and_
     _git("push", "-q", "origin", "HEAD:feat/later", cwd=unpushed.cwd)
     again = fleet_service.reap(project)
     assert again.worktrees_removed == [unpushed.cwd]
-    assert again.branches_deleted == [] and again.branches_kept == [branches["coder-unpushed"]]
+    assert again.branches_deleted == []
+    assert again.branches_kept == [(project.root, branches["coder-unpushed"])]
     assert dict(again.worktrees_kept) == {dirty.cwd: "uncommitted changes"}
 
 
@@ -8261,8 +8262,8 @@ def test_reap_deletes_only_a_fleet_branch_an_ended_agent_recorded(
     report = fleet_service.reap(project)
 
     verdict = _SWEEP[case]
-    assert (branch in report.branches_deleted) == (verdict == "deleted"), report
-    assert (branch in report.branches_kept) == (verdict == "kept"), report
+    assert ((project.root, branch) in report.branches_deleted) == (verdict == "deleted"), report
+    assert ((project.root, branch) in report.branches_kept) == (verdict == "kept"), report
     assert bool(_git("branch", "--list", branch, cwd=project.root)) == (verdict != "deleted")
 
 
@@ -8279,7 +8280,9 @@ def test_a_reap_inside_a_spawn_never_deletes_the_branch_the_spawn_is_making_its_
     first = fleet_service.spawn(project, "coder", task_id=task.id).agent
     branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=first.cwd)
     fleet_service.stop(project, first.label, force=True)
-    assert fleet_service.reap(project).branches_deleted == [branch], "main holds its tip"
+    assert fleet_service.reap(project).branches_deleted == [(project.root, branch)], (
+        "main holds its tip"
+    )
     real = fleet_service._add_worktree
     meanwhile: list[fleet_service.ReapReport] = []
 
@@ -8296,7 +8299,9 @@ def test_a_reap_inside_a_spawn_never_deletes_the_branch_the_spawn_is_making_its_
     assert [report.branches_deleted for report in meanwhile] == [[]]
     assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=again.cwd) == branch
     fleet_service.stop(project, again.label, force=True)
-    assert fleet_service.reap(project).branches_deleted == [branch], "the next reap does"
+    assert fleet_service.reap(project).branches_deleted == [(project.root, branch)], (
+        "the next reap does"
+    )
 
 
 def test_reap_never_removes_a_live_agents_worktree(

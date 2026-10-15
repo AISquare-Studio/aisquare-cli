@@ -441,13 +441,16 @@ class ReapReport:
     worktrees_kept: list[tuple[Path, str]] = field(default_factory=list)
     """An ended agent's worktree left in place, with why: uncommitted changes, or commits
     found nowhere but there (:func:`_remove_finished_worktrees`)."""
-    branches_deleted: list[str] = field(default_factory=list)
-    """The ``fleet/…`` branches ended agents' rows recorded and no worktree had out, deleted
-    once the default branch had their work (:func:`_sweep_fleet_branches`)."""
-    branches_kept: list[str] = field(default_factory=list)
-    """The ``fleet/…`` branches ended agents' rows recorded and no worktree has out that hold
-    commits the default branch lacks, named on every reap: kept, so a spawn for their task
-    or a restart of their agent carries on from them (:func:`_remake_worktree`)."""
+    branches_deleted: list[tuple[Path, str]] = field(default_factory=list)
+    """``(repo, branch)`` for each ``fleet/…`` branch ended agents' rows recorded and no
+    worktree had out, deleted once the default branch had its work
+    (:func:`_sweep_fleet_branches`). With its repo, as a reap of every project walks
+    several."""
+    branches_kept: list[tuple[Path, str]] = field(default_factory=list)
+    """``(repo, branch)`` for each ``fleet/…`` branch ended agents' rows recorded and no
+    worktree has out that holds commits the default branch lacks, named on every reap: kept,
+    so a spawn for its task or a restart of its agent carries on from it
+    (:func:`_remake_worktree`). With its repo, which a ``git branch -D`` needs."""
     claims_released: list[str] = field(default_factory=list)
     """Task ids the ended and lost rows' board sessions still held, returned to
     the pool — the same count ``shutdown`` reports, where ``reap`` used to
@@ -1516,7 +1519,7 @@ def _sweep_fleet_branches(
         if branch in merged or branch in squashed:
             done.append(branch)
         else:
-            report.branches_kept.append(branch)
+            report.branches_kept.append((root, branch))
     if not done:
         return
     try:
@@ -1526,7 +1529,7 @@ def _sweep_fleet_branches(
             out = set(_worktree_branches(root).values())  # asked again, under the lock
             for branch in done:
                 if branch not in out and _git(root, "branch", "-D", branch).returncode == 0:
-                    report.branches_deleted.append(branch)
+                    report.branches_deleted.append((root, branch))
     except FleetError:
         return
 

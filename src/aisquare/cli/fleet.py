@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
 from collections.abc import Mapping
 from typing import Annotated, NoReturn
@@ -888,8 +889,14 @@ def reap(
                         {"path": str(path), "reason": reason}
                         for path, reason in report.worktrees_kept
                     ],
-                    "branches_deleted": list(report.branches_deleted),
-                    "branches_kept": list(report.branches_kept),
+                    "branches_deleted": [
+                        {"repo": str(root), "branch": branch}
+                        for root, branch in report.branches_deleted
+                    ],
+                    "branches_kept": [
+                        {"repo": str(root), "branch": branch}
+                        for root, branch in report.branches_kept
+                    ],
                     "claims_released": list(report.claims_released),
                     "release_failures": list(report.release_failures),
                     "held": [_row_json(row) for row in report.held],
@@ -919,14 +926,16 @@ def reap(
         console.print(f"  ⚠ {row.agent.label}  LEFT LIVE — {row.reason}")
     for path in report.worktrees_removed:
         console.print(f"  🗑 {path}")
-    for branch in report.branches_deleted:
-        console.print(f"  🗑 branch {branch}")
-    for branch in report.branches_kept:
+    for root, branch in report.branches_deleted:
+        console.print(f"  🗑 branch {branch} in {root}")
+    for root, branch in report.branches_kept:
         # Named on every reap until it goes: reap deletes it once the default branch has
-        # its work, and only the operator knows when work it lacks is abandoned.
+        # its work, and only the operator knows when work it lacks is abandoned. With its
+        # repo, as `--all` walks several (review of #259, round 16).
+        drop = f"git -C {shlex.quote(str(root))} branch -D {shlex.quote(branch)}"
         console.print(
-            f"  · kept branch {branch} — commits the default branch lacks; "
-            f"a spawn for its task carries on there, and `git branch -D {branch}` drops it"
+            f"  · kept branch {branch} in {root} — commits the default branch lacks; "
+            f"a spawn for its task carries on there, and `{drop}` drops it"
         )
     for path, reason in report.worktrees_kept:
         console.print(f"  ⚠ kept {path} — {reason}")

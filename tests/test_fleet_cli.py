@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import io
 import json
+import shlex
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -1363,14 +1364,17 @@ def test_reap_server_down_reaches_the_service_as_a_keyword(
 
 
 def test_reap_json(runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each branch with its repo (review of #259, round 16): ``--all`` walks several, and a
+    bare ``git branch -D <branch>`` did not say where to run it."""
     kept = WORKTREE.parent / "coder-open"
+    other = Path("/home/me/oss/my api")
     report = ReapReport(
         ended=[_agent("coder-auth", ended=True, exit_status=0)],
         lost=[],
         worktrees_removed=[WORKTREE],
         worktrees_kept=[(kept, "uncommitted changes")],
-        branches_deleted=["fleet/amber-otter/auth"],
-        branches_kept=["fleet/amber-otter/billing"],
+        branches_deleted=[(PROJECT.root, "fleet/amber-otter/auth")],
+        branches_kept=[(other, "fleet/ruby-fox/billing")],
     )
     _install(monkeypatch, "reap", report)
 
@@ -1394,17 +1398,19 @@ def test_reap_json(runner: CliRunner, resolved: Seen, monkeypatch: pytest.Monkey
     assert payload["lost"] == [] and payload["held"] == []
     assert payload["worktrees_removed"] == [str(WORKTREE)]
     assert payload["worktrees_kept"] == [{"path": str(kept), "reason": "uncommitted changes"}]
-    assert payload["branches_deleted"] == ["fleet/amber-otter/auth"]
-    assert payload["branches_kept"] == ["fleet/amber-otter/billing"]
+    assert payload["branches_deleted"] == [
+        {"repo": str(PROJECT.root), "branch": "fleet/amber-otter/auth"}
+    ]
+    assert payload["branches_kept"] == [{"repo": str(other), "branch": "fleet/ruby-fox/billing"}]
 
     human = runner.invoke(app, ["fleet", "reap", "--all"])
-    assert f"🗑 {WORKTREE}" in human.stdout and "🗑 branch fleet/amber-otter/auth" in human.stdout
-    assert f"⚠ kept {kept} — uncommitted changes" in human.stdout
-    assert "· kept branch fleet/amber-otter/billing — commits the default branch lacks" in (
-        human.stdout
-    )
     said = " ".join(human.stdout.split())
-    assert "`git branch -D fleet/amber-otter/billing` drops it" in said, "and how to drop it"
+    assert f"🗑 {WORKTREE}" in human.stdout
+    assert f"🗑 branch fleet/amber-otter/auth in {PROJECT.root}" in said
+    assert f"⚠ kept {kept} — uncommitted changes" in human.stdout
+    assert f"· kept branch fleet/ruby-fox/billing in {other} — commits the default branch" in said
+    drop = f"git -C {shlex.quote(str(other))} branch -D fleet/ruby-fox/billing"
+    assert f"`{drop}` drops it" in said, "and how to drop it, in its repo"
 
 
 def test_reap_names_a_refused_release_and_exits_1(

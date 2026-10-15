@@ -514,7 +514,7 @@ _MIGRATIONS: tuple[Callable[[dict[str, Any]], None], ...] = (
 
 
 #: The top-level keys every release up to 0.8.0 wrote into the file whatever their value,
-#: and that this build writes only when changed: a file holding all three was written whole.
+#: and that this build writes only when changed: a file written whole holds all three.
 _WRITTEN_WHOLE_BY = ("profile", "api_url", "default_pool")
 
 
@@ -524,11 +524,28 @@ def _written_whole(data: dict[str, Any]) -> bool:
     Such a release keeps a higher ``config_version`` it finds (it does not know the
     version's steps, and must not undo them), so a version-2 file one of them saved again
     — an older install sharing ``~/.aisquare``, or a move back and forth — says 2 while
-    holding every value that release's defaults gave it. A version cannot record that; the
-    file's shape can. This build never writes ``profile``, ``api_url`` and
-    ``default_pool`` at their defaults, and those releases always wrote all three.
+    holding every value that release's defaults gave it. A version cannot record that, nor
+    can a marker this build writes: those releases keep a key they do not know. The
+    file's values can. Those releases always wrote ``profile``, ``api_url`` and
+    ``default_pool``, and every setting the user left alone at version 1's default. This
+    build never writes a value at its own default, outside the role tables it writes whole
+    (:func:`_with_whole_role_tables`).
+
+    Both, then: the three keys, and a value at a default version 1 had and this build
+    keeps. The three keys alone were not enough: a user who set all three away from their
+    defaults had every save of theirs read as whole, and an ``accounts.pick = "default"``
+    or ``on_limit = "wait"`` they chose dropped on every load (review of #259, round 13).
+    Compared with version 1's defaults as well as this build's, a later build that moves a
+    default does not read this build's choice of the new one as a sign of a whole file.
     """
-    return all(key in data for key in _WRITTEN_WHOLE_BY)
+    if not all(key in data for key in _WRITTEN_WHOLE_BY):
+        return False
+    then, today = _flat(_V1_DEFAULTS), _flat(system_defaults())
+    return any(
+        key in then and key in today and value == then[key] == today[key]
+        for key, value in _flat(data).items()
+        if not key.startswith("fleet.roles.")
+    )
 
 
 def _migrate(data: dict[str, Any]) -> None:

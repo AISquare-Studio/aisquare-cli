@@ -462,6 +462,36 @@ def test_a_file_an_older_build_saved_whole_again_keeps_only_what_the_user_change
     assert load_config(chosen).accounts.pick == "default"
 
 
+def test_a_sparse_file_naming_profile_api_url_and_pool_keeps_the_old_defaults_chosen(
+    tmp_path: Path,
+) -> None:
+    """A self-hosted user sets ``profile``, ``api_url`` and ``default_pool``, the three keys
+    every whole save holds, then follows the CHANGELOG's advice and chooses ``on_limit =
+    "wait"``: the file was taken for a whole one on every load, and both choices dropped.
+    What tells a whole file is a value at a default, which this build never writes."""
+    target = tmp_path / "config.toml"
+    chosen = AccountsSettings(pick="default", on_limit="wait")
+    config = AppConfig(
+        profile="work",
+        api_url="https://aisquare.example.com",
+        default_pool="user",
+        accounts=chosen,
+    )
+    save_config(config, target)
+    assert {"profile", "api_url", "default_pool", "accounts"} <= set(_file(target))
+
+    loaded = load_config(target)
+    assert loaded.accounts == chosen
+    assert (loaded.profile, loaded.api_url) == ("work", "https://aisquare.example.com")
+
+    # The same settings saved whole by an older build: the defaults beside them say so.
+    whole = _overlay(_V1_DEFAULTS, _file(target))
+    target.write_text(tomli_w.dumps(whole), encoding="utf-8")
+    again = load_config(target)
+    assert again.accounts == AccountsSettings()  # version 1's defaults, taken as unchosen
+    assert (again.profile, again.api_url) == ("work", "https://aisquare.example.com")
+
+
 def test_reset_with_nothing_changed_moves_nothing(tmp_path: Path) -> None:
     """Every save leaves a file, at least its version and the role tables: a reset of it
     backed up nothing and said the user's settings were kept there."""

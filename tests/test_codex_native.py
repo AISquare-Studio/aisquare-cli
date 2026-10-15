@@ -1058,7 +1058,7 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             # Its turn ends on its own; the row no longer names its pane to watch it by.
             time.sleep(3)
             seen = len(outputs())
-            not_its = "not the one its launch record places"
+            not_its = "is not the pane its launch record places"
             told = fleet.tell(project, reviewer.label, "LEAKED LINE")
             assert not told.delivered and not_its in told.how, told.how
             with pytest.raises(fleet.LaunchRefused, match=not_its):

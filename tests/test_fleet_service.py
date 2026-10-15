@@ -6944,7 +6944,7 @@ def test_nudge_never_raises(
 #: Where a sandboxed agent points a row: the user's own tmux server.
 USERS_SOCKET = Path("/tmp/tmux-1000/default")
 #: Why a row that names another pane than its record is not touched.
-NOT_ITS_PANE = "not the one its launch record places"
+NOT_ITS_PANE = "is not the pane its launch record places"
 
 
 def _pointed_at_the_users_pane(tmux: FakeTmux, agent: FleetAgent) -> FakeTmux:
@@ -7062,6 +7062,42 @@ def test_nothing_is_typed_into_or_killed_but_the_pane_its_launch_record_places(
         row = store.get_fleet_agent(agent.id)
     assert row is not None and row.ended_at is None, "left live"
     assert any(NOT_ITS_PANE in text for text in _events(project, "note")), "said on the board"
+
+
+@pytest.mark.parametrize(
+    ("column", "field", "value"),
+    [
+        ("tmux_socket", "tmux socket", "decoy"),
+        ("socket_path", "socket path", "/tmp/tmux-1000/decoy"),
+        ("pane_id", "pane", "%9"),
+    ],
+)
+def test_a_refusal_names_the_field_its_row_and_record_differ_in(
+    column: str,
+    field: str,
+    value: str,
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+) -> None:
+    """SMOKE4: a row whose socket name alone was rewritten was refused with its path
+    printed on both sides, and the board said nothing a human could act on. Each field
+    that differs is named, with the row's value and the record's."""
+    agent = _coder(project)
+    record = launch_seal.read(agent.id)
+    assert isinstance(record, launch_seal.LaunchRecord) and record.window is not None
+    recorded = getattr(record.window, column)
+    with store_session() as store:
+        assert isinstance(store, SqliteStore)
+        store._conn.execute(f"UPDATE fleet_agent SET {column} = ? WHERE id = ?", (value, agent.id))
+        store._conn.commit()
+
+    told = fleet_service.tell(project, agent.label, "please rebase")
+
+    assert not told.delivered and NOT_ITS_PANE in told.how
+    assert f"{field} {value!r} where its launch record has {recorded!r}" in told.how, told.how
+    assert told.how.count("where its launch record has") == 1, "that field alone"
+    assert tmux.typed == []
 
 
 def test_the_nudge_types_only_into_the_pane_the_managers_launch_record_places(

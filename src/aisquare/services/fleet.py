@@ -5559,16 +5559,19 @@ def _where_spawned(
     if record.project_id != agent.project_id:
         return "its launch record is another project's"
     row_path = str(agent.socket_path) if agent.socket_path is not None else None
-    if (agent.tmux_socket, agent.pane_id, row_path) != (
-        place.tmux_socket,
-        place.pane_id,
-        place.socket_path,
-    ):
-        return (
-            f"its row names pane {agent.pane_id} on {row_path or agent.tmux_socket}, not the "
-            f"one its launch record places, {place.pane_id} on "
-            f"{place.socket_path or place.tmux_socket}"
+    differ = [
+        f"{field} {row!r} where its launch record has {recorded!r}"
+        for field, row, recorded in (
+            ("tmux socket", agent.tmux_socket, place.tmux_socket),
+            ("socket path", row_path, place.socket_path),
+            ("pane", agent.pane_id, place.pane_id),
         )
+        if row != recorded
+    ]
+    if differ:
+        # Every field that differs, both sides: a socket name alone rewritten printed the
+        # same path twice (SMOKE4).
+        return f"its row is not the pane its launch record places: {'; '.join(differ)}"
     return _at_place(agent, place)
 
 

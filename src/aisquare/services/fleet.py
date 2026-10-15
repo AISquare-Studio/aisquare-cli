@@ -1704,10 +1704,30 @@ def _with_trust_prompts(
     Asked only of a live row that tmux reports and whose session has fired no hook since
     the row began (:func:`_maybe_at_trust_prompt`): one capture each, which an agent
     whose hooks run never costs. A screen that cannot be read is no question.
+
+    A row's session is looked up by its id where the listing has none for it, in one read
+    of the store: :func:`list_agents` joins the sessions of the project's own board, and
+    under ``AISQUARE_TEAM_HUB`` every session is the hub's. Every row there read as silent,
+    so every listing captured every pane, and a pane that merely showed the question's
+    words (a reviewer reading ``claude_sharing``) read as at it (review of #259, round 13).
     """
+    elsewhere = {
+        status.agent.session_id
+        for status in statuses
+        if status.session is None and status.agent.session_id and _maybe_at_trust_prompt(status)
+    }
+    found: dict[str, TeamSession] = {}
+    if elsewhere:
+        with store_session() as store:
+            found = {
+                session_id: session
+                for session_id in elsewhere
+                if (session := store.get_session(session_id)) is not None
+            }
     shown: list[FleetAgentStatus] = []
     for status in statuses:
-        if _maybe_at_trust_prompt(status):
+        session = status.session or found.get(status.agent.session_id or "")
+        if _maybe_at_trust_prompt(status, session):
             agent = status.agent
             try:
                 server = _server_at(_where(agent, config, addresses), config)
@@ -1721,9 +1741,10 @@ def _with_trust_prompts(
     return shown
 
 
-def _maybe_at_trust_prompt(status: FleetAgentStatus) -> bool:
-    """A live row tmux reports, whose session has said nothing since the row began."""
-    agent, session = status.agent, status.session
+def _maybe_at_trust_prompt(status: FleetAgentStatus, session: TeamSession | None = None) -> bool:
+    """A live row tmux reports, whose session has said nothing since the row began:
+    ``session``, the row's found by its id, else the listing's."""
+    agent, session = status.agent, session or status.session
     if agent.ended_at is not None or status.held or status.state not in ("waiting", "working"):
         return False
     return session is None or session.last_seen_at < agent.created_at

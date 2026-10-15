@@ -13081,6 +13081,35 @@ def test_an_agent_whose_hooks_have_run_is_never_asked_for_its_screen(
     assert tmux.captured == [fresh.pane_id]
 
 
+def test_an_agent_whose_hooks_run_on_a_hubs_board_is_never_asked_for_its_screen(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Under ``AISQUARE_TEAM_HUB`` every session is on the hub's board, and the listing
+    joins its project's own: no row had one, so every listing captured every pane, and
+    an agent whose screen showed the question's words read as at it (review of #259,
+    round 13). Its session is found by its id."""
+    hub = ProjectInfo(id="prj_hub000000", root=tmp_path / "hub", linked_repos=[])
+    agent = _coder(project)
+    tmux.set_command(agent.pane_id, "claude")
+    tmux.screens[agent.pane_id] = TRUST_SCREEN  # a reviewer reading claude_sharing's fixture
+    now = datetime.now(tz=UTC)
+    assert agent.session_id is not None
+    with store_session() as store:
+        store.ensure_project(hub)
+        store.upsert_session(
+            TeamSession(
+                id=agent.session_id, project_id=hub.id, role=agent.role,
+                started_at=now, last_seen_at=now,
+            )
+        )  # fmt: skip
+    tmux.captured.clear()
+
+    (status,) = fleet_service.list_agents(project)
+
+    assert status.session is None, "the premise: the listing joins its own board's sessions"
+    assert status.state != "attention" and tmux.captured == []
+
+
 def test_spawn_never_types_its_prompt_into_the_trust_question(
     tmux: FakeTmux,
     clock: FakeClock,

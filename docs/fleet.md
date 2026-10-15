@@ -233,13 +233,32 @@ follows as a `⚠` line.
 | `--agent A` | the coding agent (`claude-code`, `codex`) | the role's binding, the project's, the user's default |
 | `--sandbox S` / `--approval P` | Codex's own sandbox and approval policy for this spawn; not beside a `WRITE:APPROVALS` `--permission-mode` | the role's setting |
 | `--bin B` | the agent executable | the role's binding, else the agent's (`claude`, `codex`) |
-| `--prompt TEXT` | first message typed once the agent is up | none |
+| `--prompt TEXT` | its first message: typed once Claude Code's session has started, on Codex's command line ([below](#the-first-prompt-and-the-folder-trust-dialog)) | none |
 | `--as SESSION` | the acting session — a manager passes its own, so the row records who spawned it | `user` |
 | `-- <agent args>` | everything after the options goes to the agent, as with `aisquare launch` | — |
 
 Refused, with the reason in the message: a second `manager`, more agents than
 `max_agents_per_project`, `--worktree` in a project that is not a git
 repository, an unknown role, a `--task` that is already done or dropped.
+
+#### The first prompt and the folder-trust dialog
+
+A folder an account has not trusted (each account slot keeps its own trust, so a
+spawn onto a new `--account` meets it) opens Claude Code at its folder-trust
+dialog. The agent is already in the pane's foreground there, the dialog fires no
+hook, and an Enter answers it with its default, *No, exit* (measured on Claude Code
+2.1.300). So `--prompt` waits for the agent's `SessionStart`, which Claude Code
+fires once it sits at its prompt, past the dialog, and types the prompt then (a
+folder inside one the account trusts asks nothing, and it starts in a few
+seconds). If the session has not started within 20 s, the prompt is not typed: it
+is filed as a board note to the agent's label, and the receipt says so. Answer the
+dialog in the agent's pane (`aisquare fleet attach`), then `aisquare fleet tell
+<label> …` types its first prompt, whose delta carries the note. `fleet restart`,
+`fleet switch` and the automatic hand-over type their one line the same way. With
+the board off (`AISQUARE_TEAM=0`) no hook says anything, and the prompt is typed
+once the agent is in the foreground, as before. Codex takes its first prompt on its
+command line and submits it after its own folder-trust and hook-review dialogs are
+answered, so nothing is typed into a Codex pane at spawn.
 
 **What the agent is told.** `fleet spawn` exports `AISQUARE_FLEET_AGENT` — the
 agent's row — onto its window, and the session-start hook joins the session to

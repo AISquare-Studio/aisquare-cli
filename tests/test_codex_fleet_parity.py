@@ -862,6 +862,21 @@ def test_a_codex_start_comes_with_its_first_prompt_and_leaves_the_row_working(
     assert session is not None and session.state == "working"
 
 
+def test_a_codex_spawn_prompt_is_its_argument_and_nothing_is_typed_into_its_dialogs(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """Codex takes its first prompt on its command line and submits it once its
+    folder-trust and hook-review dialogs are answered (measured on 0.162.1), so a spawn
+    types nothing into a pane those dialogs may hold."""
+    receipt = fleet_service.spawn(
+        project, "coder", agent="codex", worktree=False, prompt="start on tsk_1"
+    )
+    assert receipt.prompt_typed is True and tmux.typed == []
+    assert _command(tmux)[-2:] == ["--", "start on tsk_1"]
+
+
 def test_claude_codes_hooks_leave_an_owed_nudge_alone(
     tmux: FakeTmux,  # noqa: F811
     claude_on_path: Path,  # noqa: F811

@@ -1462,6 +1462,8 @@ def hook_session_start(
         # ``source`` plays no part — see rule 1 of the fleet-row section.
         assigned = _assignment(store, session.id, project.id)
         store.renew_leases(session.id, now + timedelta(minutes=orchestrator.lease_minutes()))
+        if known is None and source in (None, "startup"):
+            session = _behind_notes_to_its_row(store, session)
         adapter = recorded_adapter(agent)
         if (
             source != "compact"
@@ -2630,6 +2632,34 @@ def _assignment(store: ContextStore, session_id: str, project_id: str) -> Assign
         return _resolve_assignment(store, session_id, project_id)
     except Exception:
         return None
+
+
+def _behind_notes_to_its_row(store: ContextStore, session: TeamSession) -> TeamSession:
+    """``session``, a new one, with its cursor before the notes to its fleet row's label
+    filed since the row was spawned, so its first prompt's delta carries them.
+
+    A new session's cursor starts at the board's newest event, and a note to its label
+    filed before its start was behind it: a ``fleet tell`` into a pane whose session had
+    not started, a ``fleet spawn`` prompt its folder-trust dialog kept from being typed.
+    No delta carried it, and the start's board showed it only while it was one of the
+    last few events. Only this row's: a label is reused once its agent ends, and a
+    ``/clear``'s session (not a new start) read what came before. Fail-open: the cursor
+    stays where it was.
+    """
+    try:
+        row = store.fleet_agent_for_session(session.project_id, session.id)
+        if row is None:
+            return session
+        notes = store.filtered_events(
+            session.project_id, since_iso=row.created_at.isoformat(), kind="note", limit=200
+        )
+        first = min((event.seq for event in notes if event.to_role == row.label), default=None)
+        if first is None or first > session.cursor:
+            return session
+        store.touch_session(session.id, cursor=first - 1)
+        return store.get_session(session.id) or session
+    except Exception:
+        return session
 
 
 def _late_assignment(store: ContextStore, session: TeamSession) -> Assignment | None:

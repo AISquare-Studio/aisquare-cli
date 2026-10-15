@@ -556,7 +556,20 @@ def tmux(monkeypatch: pytest.MonkeyPatch) -> FakeTmux:
     # The desktop variables a spawn carries per window (#147) are this PROCESS's,
     # which a test must not depend on; one test below hands in its own.
     monkeypatch.setattr(tmux_core, "desktop_environment", lambda environ=None: {})
+    # A Claude Code agent comes to its prompt at once, as in a folder its account
+    # trusts: its SessionStart is taken as come, and a prompt is typed for it at once
+    # (`fleet._type_at_its_start`). `session_start_for_real` waits for the hook's own.
+    monkeypatch.setattr(fleet_service, "_started_since", lambda session_id, launched: True)
     return fake
+
+
+_STARTED_SINCE = fleet_service._started_since
+
+
+@pytest.fixture
+def session_start_for_real(tmux: FakeTmux, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Claude Code agent's prompt waits for its own SessionStart hook's board row."""
+    monkeypatch.setattr(fleet_service, "_started_since", _STARTED_SINCE)
 
 
 @pytest.fixture(autouse=True)
@@ -1407,34 +1420,116 @@ def test_the_agent_is_not_running_behind_a_shell_the_launcher_or_a_pane_before_i
     assert not fleet_service._agent_running(command)
 
 
-def test_spawn_types_the_prompt_once_the_agent_is_up(
+def test_spawn_types_a_claude_prompt_once_its_session_has_started(
     tmux: FakeTmux,
+    session_start_for_real: None,
     clock: FakeClock,
     claude_on_path: Path,
     project: ProjectInfo,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Claude Code is in the foreground long before it is at its prompt: at its
+    folder-trust dialog, which fires no hook and takes an Enter as ``No, exit``
+    (measured on 2.1.300). Its SessionStart fires once it is at its prompt, and a
+    two-line paste sent that instant was one first prompt. So that is when it is typed."""
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
     polls = 0
     original = tmux.pane_facts
+    typed_before_start: list[object] = []
 
     def coming_up(pane_id: str) -> PaneFacts | None:
         nonlocal polls
         polls += 1
-        if polls == 3:
-            tmux.set_command(pane_id, "claude")  # the launcher exec'd the agent
+        if polls == 2:
+            tmux.set_command(pane_id, "claude")  # up, and at its folder-trust dialog
+        if polls == 5:
+            typed_before_start.extend(tmux.typed)
+            with store_session() as store:
+                [row] = store.fleet_agents(project.id, live_only=True)
+            assert row.session_id is not None
+            team_service.hook_session_start(row.session_id, project.root, "startup")
         return original(pane_id)
 
     monkeypatch.setattr(tmux, "pane_facts", coming_up)
-    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="start on tsk_1")
+    prompt = "start on tsk_1\nand say when it is done"
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt=prompt)
+
     pane = receipt.agent.pane_id
-    assert tmux.typed == [(pane, "paste", "start on tsk_1"), (pane, "key", "Enter")]
-    assert receipt.notes == []
-    assert 0 < clock.now < PROMPT_TIMEOUT, "waited for the agent, not for the timeout"
-    assert polls == 3, "typed as soon as the agent was up"
-    # Negative control: no prompt, nothing typed.
-    tmux.typed.clear()
-    _coder(project)
-    assert tmux.typed == []
+    assert typed_before_start == [], "nothing while it was only in the foreground"
+    assert tmux.typed == [(pane, "paste", prompt), (pane, "key", "Enter")], "once, whole"
+    assert polls == 5 and receipt.prompt_typed is True and receipt.notes == []
+    assert 0 < clock.now < PROMPT_TIMEOUT, "typed at its start, not at the timeout"
+    assert _events(project, "note") == []
+
+
+def test_a_claude_spawn_whose_session_never_starts_types_nothing_and_files_the_note(
+    tmux: FakeTmux,
+    session_start_for_real: None,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A folder its account had not trusted (each account slot keeps its own): the
+    agent waits at the dialog for the human, and the spawn does not wait for ever. The
+    prompt is the board note to its label, and its first prompt's delta carries it,
+    however busy the board was meanwhile."""
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    original = tmux.pane_facts
+
+    def at_the_dialog(pane_id: str) -> PaneFacts | None:
+        tmux.set_command(pane_id, "claude")
+        return original(pane_id)
+
+    monkeypatch.setattr(tmux, "pane_facts", at_the_dialog)
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="start on tsk_1")
+
+    assert tmux.typed == [], "no Enter for the dialog to take as No, exit"
+    assert receipt.prompt_typed is False
+    [said] = [note for note in receipt.failures if "did not start" in note]
+    assert "NOT typed" in said and "filed as board note" in said and "fleet tell coder-1" in said
+    assert PROMPT_TIMEOUT <= clock.now < PROMPT_TIMEOUT + 5
+    with store_session() as store:
+        [note] = [e for e in store.recent_events(project.id) if e.kind == "note"]
+    assert (note.text, note.to_role) == ("start on tsk_1", "coder-1")
+    # The human trusts the folder; the board moves on meanwhile; the first prompt reads it.
+    for i in range(8):
+        team_service.add_note(f"unrelated {i}", cwd=project.root)
+    session = receipt.agent.session_id
+    assert session is not None
+    team_service.hook_session_start(session, project.root, "startup")
+    assert "start on tsk_1" in team_service.hook_prompt_heartbeat(session, project.root)
+
+
+def test_a_resumed_session_has_started_only_once_its_new_start_comes() -> None:
+    """A restart or switch resumes the session id it had: its old row is there, ended by
+    its last process's SessionEnd, or last seen before this launch."""
+    launched = datetime.now(tz=UTC)
+    with store_session() as store:
+        project_id = "prj_resumed"
+        store.upsert_session(
+            TeamSession(
+                id="sess-r",
+                project_id=project_id,
+                role="coder",
+                started_at=launched - timedelta(hours=1),
+                last_seen_at=launched - timedelta(minutes=1),
+            )
+        )
+    assert not _STARTED_SINCE("sess-r", launched), "seen before this launch"
+    assert not _STARTED_SINCE("sess-missing", launched) and not _STARTED_SINCE(None, launched)
+    with store_session() as store:
+        store.touch_session("sess-r")
+        store.end_session("sess-r")
+    assert not _STARTED_SINCE("sess-r", launched), "its last process ended it"
+    now = datetime.now(tz=UTC)
+    with store_session() as store:  # its new SessionStart's upsert
+        store.upsert_session(
+            TeamSession(
+                id="sess-r", project_id=project_id, role="coder", started_at=now, last_seen_at=now
+            )
+        )
+    assert _STARTED_SINCE("sess-r", launched)
 
 
 def test_spawn_prompt_waits_out_the_pane_before_its_exec(
@@ -1444,7 +1539,9 @@ def test_spawn_prompt_waits_out_the_pane_before_its_exec(
     project: ProjectInfo,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Right after creation a pane reads ``tmux``; that is not the agent listening."""
+    """With the board off nothing says a session started, and the foreground decides:
+    right after creation a pane reads ``tmux``, which is not the agent listening."""
+    monkeypatch.setenv("AISQUARE_TEAM", "0")
     polls = 0
     original = tmux.pane_facts
 
@@ -1455,13 +1552,21 @@ def test_spawn_prompt_waits_out_the_pane_before_its_exec(
         return original(pane_id)
 
     monkeypatch.setattr(tmux, "pane_facts", forking)
-    fleet_service.spawn(project, "coder", worktree=False, prompt="hello")
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="hello")
     assert polls == 3, "the two 'tmux' polls were not mistaken for a running agent"
+    pane = receipt.agent.pane_id
+    assert tmux.typed == [(pane, "paste", "hello"), (pane, "key", "Enter")]
 
 
 def test_spawn_prompt_stops_waiting_at_the_timeout_and_types_anyway(
-    tmux: FakeTmux, clock: FakeClock, claude_on_path: Path, project: ProjectInfo
+    tmux: FakeTmux,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The board off: one line past the wait sits in the pty's buffer until it reads."""
+    monkeypatch.setenv("AISQUARE_TEAM", "0")
     receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="hello")
     assert PROMPT_TIMEOUT <= clock.now < PROMPT_TIMEOUT + 5
     assert any("did not come up within 20 s" in note for note in receipt.notes)
@@ -1478,7 +1583,9 @@ def test_a_multi_line_prompt_is_not_typed_before_the_agent_is_up(
     """``paste-buffer -p`` brackets a paste only for an application that asked for
     bracketed paste mode; past the timeout the foreground is still the launcher, which
     has not, so tmux would replace every LF with a CR and the agent would read N
-    submitted messages. Not typed — and the note says what to do instead."""
+    submitted messages. Not typed — and the note says what to do instead. (The board
+    off: with it on, a Claude Code prompt waits for its SessionStart.)"""
+    monkeypatch.setenv("AISQUARE_TEAM", "0")
     prompt = "first line\nsecond line"
     receipt = fleet_service.spawn(project, "coder", worktree=False, prompt=prompt)
 
@@ -2282,8 +2389,10 @@ def test_a_fresh_claude_agent_waits_at_its_prompt_from_its_session_start(
         (agent.pane_id, "paste", "please rebase"),
         (agent.pane_id, "key", "Enter"),
     ]
-    # Its first prompt makes it work; a compaction, mid-turn as often as not, keeps it so.
-    team_service.hook_prompt_heartbeat(agent.session_id, project.root)
+    # Its first prompt makes it work, and brings the note left at the dialog; a
+    # compaction, mid-turn as often as not, keeps it working.
+    first = team_service.hook_prompt_heartbeat(agent.session_id, project.root)
+    assert "please rebase" in first, "the note filed before its start"
     team_service.hook_session_start(agent.session_id, project.root, "compact")
     assert fleet_service.status_of(agent).state == "working"
     # A /clear or a resume comes to rest at its prompt again.
@@ -7799,6 +7908,7 @@ def test_fleet_switch_command_reports_the_move_and_its_json(
 def test_restart_and_switch_say_in_their_headline_that_the_first_line_was_not_typed(
     command: str,
     tmux: FakeTmux,
+    session_start_for_real: None,
     claude_on_path: Path,
     project: ProjectInfo,
     monkeypatch: pytest.MonkeyPatch,
@@ -8928,7 +9038,11 @@ def _recorded_nudges(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 
 def test_restarting_a_running_agent_hands_its_claims_to_the_replacement_and_announces_no_exit(
-    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+    tmux: FakeTmux,
+    session_start_for_real: None,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``restart`` stopped a RUNNING agent as ``fleet stop`` stops it: its task went back
     to the pool, ``agent_exited`` went out and the manager was nudged, all before
@@ -11173,6 +11287,7 @@ def test_a_replacement_whose_prompt_poll_tmux_will_not_answer_keeps_the_claims(
 
 def test_the_automatic_hand_over_puts_what_its_switch_did_not_do_on_the_board(
     tmux: FakeTmux,
+    session_start_for_real: None,
     claude_on_path: Path,
     project: ProjectInfo,
     monkeypatch: pytest.MonkeyPatch,
@@ -11200,7 +11315,7 @@ def test_the_automatic_hand_over_puts_what_its_switch_did_not_do_on_the_board(
     )
     [said] = [note for note in _events(project, "note") if note.startswith(f"{agent.label}: ")]
     assert said.startswith(f"{agent.label}: switched — ")
-    assert "the prompt has several lines — NOT typed" in said
+    assert "session did not start within 20 s, so the prompt was NOT typed" in said
     # What every switch says is not on the board: only what this one could not do.
     assert "launched as recorded" not in said and "headroom" not in said
 

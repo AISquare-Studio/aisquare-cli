@@ -25,10 +25,12 @@ Two rules shape :func:`start_fleet`:
 - **It never types into an agent it starts.** No ``prompt=`` reaches
   ``fleet.spawn`` (:class:`Spawner` has no such parameter, so mypy holds this as
   well as the tests). A folder Claude Code has not seen makes it ask, once,
-  whether to trust the folder, and the fleet's prompt typing decides when the
-  agent is ready from the pane's foreground process, not from its screen. #240's
-  captain work measured that typing into that question picks "No, exit". The user
-  answers it in the manager's pane, and the coders start after that, from their
+  whether to trust the folder. #240's captain work measured that typing into that
+  question picks "No, exit"; ``fleet.spawn`` now types a prompt into Claude Code
+  only once its ``SessionStart`` has come, past the question, and files it as a
+  board note when that does not come in time, which would leave the manager's
+  first job a note behind a dialog. So the user answers it in the manager's pane,
+  and the coders start after that, from their
   own button. A coder whose window is gone is not started but restarted
   (:class:`Restarter`), as the agent view's Restart does it, and restart types its
   own line: that coder has run in its folder before. Codex asks the same question

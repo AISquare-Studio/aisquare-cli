@@ -222,6 +222,15 @@ adapter.**
   and the manager's nudge passed over a fresh manager. Before that start,
   `fleet tell` files a note: the trust dialog fires no hook, and an Enter there
   picks its default, *No, exit*.
+- `fleet spawn --prompt` on Claude Code waits for the agent's `SessionStart`
+  before it types, and `fleet restart`, `fleet switch` and the automatic
+  hand-over type their line the same way. It typed as soon as the agent was in
+  the pane's foreground, which in a folder the account had not trusted is the
+  folder-trust dialog, so the Enter chose *No, exit* and the agent exited with
+  status 1. If the session has not started within 20 s, the prompt is filed as
+  a board note to the agent instead, and the receipt says how to go on; a new
+  session's first prompt now carries the notes left for its agent before it
+  started, which it missed once the board had moved on.
 
 ## [0.8.0] - 2026-10-12
 

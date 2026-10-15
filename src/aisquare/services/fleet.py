@@ -1892,6 +1892,8 @@ def spawn(
     )
     tmux_session = session_name(codename)
     width, height = size if size is not None else (DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
+    # Before the window: a session start since this moment is this launch's (`_type_prompt`).
+    launched = _now()
     try:
         # Every pair is this window's alone: `spawn_window` keeps them out of
         # the session environment, so a later spawn — or a window opened by hand
@@ -1996,7 +1998,15 @@ def spawn(
         if not prompt
         else True
         if selected.adapter.capabilities.positional_prompt
-        else _type_prompt(srv, stored.pane_id, prompt, typing)
+        else _type_prompt(
+            srv,
+            stored,
+            prompt,
+            typing,
+            project=project,
+            session_id=identity.session_id or stored.session_id,
+            launched=launched,
+        )
     )
     return SpawnReceipt(
         agent=stored,
@@ -2511,12 +2521,27 @@ def _verify_cap(store: ContextStore, stored: FleetAgent, cap: int) -> None:
     )
 
 
-def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -> bool:
+def _type_prompt(
+    srv: TmuxServer,
+    agent: FleetAgent,
+    prompt: str,
+    notes: list[str],
+    *,
+    project: ProjectInfo,
+    session_id: str | None,
+    launched: datetime,
+) -> bool:
     """Wait (bounded) for the agent to come up, then paste the prompt and press Enter.
 
     Returns whether it was typed; when it was not, a note says why.
 
-    Ready means the pane's foreground process is no longer our launcher (or it
+    An agent whose ``SessionStart`` fires at rest at its prompt
+    (``capabilities.starts_at_its_prompt``: Claude Code) is up when that start has
+    come, since ``launched``, for ``session_id``: :func:`_type_at_its_start`. Its
+    foreground process is up long before, at its folder-trust dialog, which an Enter
+    answers ``No, exit``.
+
+    Otherwise ready means the pane's foreground process is no longer our launcher (or it
     has produced scrollback). Past :data:`PROMPT_TIMEOUT` a SINGLE-LINE prompt
     is typed anyway and the receipt says so — a slow start must not turn into a
     hang, and one line sits harmlessly in the pty's input buffer until the
@@ -2536,6 +2561,14 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
     #203, final round, FLEET-4). So a poll tmux will not answer (a wedged
     server's timeout, an OS refusal) is a note, as a refused paste already was.
     """
+    adapter = recorded_adapter(agent.agent)
+    if (
+        adapter is not None
+        and adapter.capabilities.starts_at_its_prompt
+        and orchestrator.team_enabled()
+    ):
+        return _type_at_its_start(srv, agent, adapter, prompt, notes, project, session_id, launched)
+    pane_id = agent.pane_id
     deadline = _monotonic() + PROMPT_TIMEOUT
     ready = False
     while True:
@@ -2578,6 +2611,82 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
         notes.append(f"could not type the prompt: {exc}")
         return False
     return True
+
+
+def _type_at_its_start(
+    srv: TmuxServer,
+    agent: FleetAgent,
+    adapter: AgentAdapter,
+    prompt: str,
+    notes: list[str],
+    project: ProjectInfo,
+    session_id: str | None,
+    launched: datetime,
+) -> bool:
+    """:func:`_type_prompt` for an agent whose ``SessionStart`` fires at rest at its prompt.
+
+    Typed once that start has come (:func:`_started_since`), at once: Claude Code took a
+    two-line paste sent the instant its ``SessionStart`` fired as one first prompt
+    (2.1.300). Its pane is no sign before then: the agent is in the foreground at its
+    folder-trust dialog, which fires no hook, is as quiet as a prompt, and takes an
+    Enter as its default, ``No, exit`` — every spawn with a prompt in a folder its
+    account had not trusted (each account slot keeps its own) exited the agent.
+
+    Past :data:`PROMPT_TIMEOUT` with no start the prompt is never typed: it is filed as
+    the board note to the agent's label, which its first prompt's delta carries
+    (``services.team`` keeps a new session's cursor before the notes to its row), and
+    the receipt says how to go on. Never raises, as :func:`_type_prompt`.
+    """
+    deadline = _monotonic() + PROMPT_TIMEOUT
+    while True:
+        try:
+            facts = srv.pane_facts(agent.pane_id)
+        except TmuxError as exc:
+            notes.append(
+                f"tmux could not be asked whether the agent is up ({exc}) — the prompt was "
+                "NOT typed. Send it once the agent is up: `aisquare fleet tell <label> …`, "
+                "or `aisquare fleet attach`"
+            )
+            return False
+        if facts is None or facts.dead:
+            notes.append("the agent exited before the prompt could be typed")
+            return False
+        if _started_since(session_id, launched):
+            break
+        if _monotonic() >= deadline:
+            try:
+                how = _file_note(project, agent.label, prompt, None)
+            except Exception as exc:  # never raises: the receipt says it
+                how = f"not filed as a board note either ({exc})"
+            notes.append(
+                f"its {adapter.label} session did not start within {PROMPT_TIMEOUT:.0f} s, "
+                f"so the prompt was NOT typed — {how}. It fires no hook at its folder-trust "
+                "dialog, where an Enter would exit it: answer the dialog in its pane "
+                f"(`aisquare fleet attach`), then `aisquare fleet tell {agent.label} …` "
+                "types its first prompt, which brings the note"
+            )
+            return False
+        _sleep(_POLL_INTERVAL)
+    try:
+        _type_line(srv, agent.pane_id, prompt)
+    except TmuxError as exc:
+        notes.append(f"could not type the prompt: {exc}")
+        return False
+    return True
+
+
+def _started_since(session_id: str | None, launched: datetime) -> bool:
+    """Whether ``session_id``'s ``SessionStart`` has come since ``launched``: its board row
+    open and seen since. A resumed session's row is its old one, ended by its last
+    process's ``SessionEnd`` or last seen before this launch; a read that fails is no."""
+    if session_id is None:
+        return False
+    try:
+        with store_session() as store:
+            session = store.get_session(session_id)
+    except Exception:
+        return False
+    return session is not None and session.ended_at is None and session.last_seen_at >= launched
 
 
 #: How long after its end an agent whose window is still on the tmux server stays in

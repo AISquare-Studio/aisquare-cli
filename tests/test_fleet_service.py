@@ -1890,6 +1890,48 @@ def test_with_capture_off_a_codename_or_an_attach_writes_no_row(
         assert store.list_projects(all=True) == []
 
 
+def test_with_capture_off_an_attach_where_nothing_was_added_never_finds_anothers_session(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Review of #259, round 17: with no row, ``attach_argv`` named the session by the walk
+    with nothing taken, ``asq-<its first candidate>``, past no name in use. Another project
+    that holds that codename has a session of that name on the default socket, and ``fleet
+    attach`` in the directory nobody added attached to that project's manager. With no
+    row, live or forgotten, no session is the directory's: it is refused."""
+    unseen = team_project(tmp_path / "unseen")
+    taken = codenames.codename_for(unseen.id)
+    with store_session() as store:
+        store.set_codename(project.id, taken)
+    fleet_service.spawn(project, "manager")
+    assert tmux.has_session(f"asq-{taken}"), "the premise: another project's session"
+
+    with pytest.raises(FleetError, match="nothing to attach to"):
+        fleet_service.attach_argv(unseen)
+
+    with store_session() as store:
+        assert unseen.id not in {p.id for p in store.list_projects(all=True)}
+
+
+def test_an_attach_in_a_forgotten_directory_finds_the_session_its_codename_kept(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """A forget keeps the codename (its tombstone), and the agents' session stays under it:
+    a forget that raced a spawn, or the window an ended manager left (``remain-on-exit``).
+    With capture off, ``attach_argv`` takes the codename from the tombstone, which nothing
+    revives, rather than the walk's first name, which is not this project's."""
+    with store_session() as store:
+        store.set_codename(project.id, "quiet-lynx")
+    fleet_service.spawn(project, "manager")
+    with store_session() as store:
+        store.forget_project(project.id)
+
+    argv = fleet_service.attach_argv(team_project(project.root))
+
+    assert argv[-1] == "=asq-quiet-lynx"
+    with store_session() as store:
+        assert store.get_project(project.id) is None, "still forgotten"
+
+
 def test_with_capture_off_a_spawn_where_nothing_was_added_adds_it(
     tmux: FakeTmux, claude_on_path: Path, repo: Path
 ) -> None:

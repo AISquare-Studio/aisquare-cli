@@ -865,9 +865,9 @@ def ensure_codename(
     :func:`rename` before it writes (review of #168, round 2).
 
     With capture off there is nothing to capture into: a directory with no live
-    row gets none, and comes back without a codename (the callers name its
-    session by :func:`codenames.codename_for`, as a walk with nothing taken
-    would), unless ``onboard`` — a spawn's, which then adds it here, before its
+    row gets none, and comes back without a codename (:func:`attach_argv` then
+    takes the one a forgotten row kept, or refuses: no agent ran there), unless
+    ``onboard`` — a spawn's, which then adds it here, before its
     window: a deliberate start in a directory is an add, and its codename names
     the session and the branches it is about to make.
     """
@@ -900,6 +900,21 @@ def ensure_codename(
         return assign(store)
     with store_session() as opened:
         return assign(opened)
+
+
+def _kept_codename(store: ContextStore, project: ProjectInfo) -> str | None:
+    """The codename ``project``'s row holds, a forgotten one's included, or ``None`` when it
+    has no row. A forget keeps the codename (its tombstone), and the windows its agents left
+    linger under it; :meth:`~aisquare.core.store.SqliteStore.get_project` reads no tombstone.
+    """
+    return next(
+        (
+            each.codename
+            for each in store.list_projects(include_forgotten=True)
+            if each.id == project.id
+        ),
+        None,
+    )
 
 
 def next_label(
@@ -6736,9 +6751,19 @@ def attach_argv(project: ProjectInfo) -> list[str]:
     srv = server(config)
     _require_tmux(srv)
     project = ensure_codename(project)
-    name = session_name(project.codename or codenames.codename_for(project.id))
     with store_session() as store:
+        codename = project.codename or _kept_codename(store, project)
         rows = store.fleet_agents(project.id, live_only=False)
+    if codename is None:
+        # `[projects] capture` off and no row, live or forgotten: no agent ever ran here, so
+        # no session is this project's. Named by the walk with nothing taken, the session was
+        # whichever project's held that name, and its manager was attached to (review of
+        # #259, round 17).
+        raise FleetError(
+            f"no fleet session for {_name(project)} — nothing to attach to; "
+            "`aisquare fleet spawn manager` starts one"
+        )
+    name = session_name(codename)
     live = _manager_first([agent for agent in rows if agent.ended_at is None])
     ended = sorted(
         (agent for agent in rows if agent.ended_at is not None),

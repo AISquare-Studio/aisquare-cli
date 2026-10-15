@@ -1,93 +1,162 @@
-"""Every tmux act of the fleet is put to a place a launch record holds — by construction.
+"""Every tmux server the fleet makes, and every pane, session, socket or path it names to
+one, comes from a launch record, tmux's own answer or today's config — by construction.
 
 The store (``context.db``) is writable from an agent's sandbox, so no value read from it
-may say where the fleet types, reads or kills: not a row's ``pane_id``, ``tmux_socket``,
-``socket_path`` or ``agent``, not a project's codename (``core.launch_seal``). Rounds r5,
-r6 and r7 of #113 each found one more path that handed one of them to tmux — typing,
-``/exit`` and the kill, a restart's running check, the late panes, ``shutdown``'s sessions
-— and each fix closed that path alone. So the rule is structural, and this test enumerates
-it over ``services/fleet.py`` and ``services/team.py``:
+may say where the fleet types, reads, probes or kills: not a row's ``pane_id``,
+``tmux_socket``, ``socket_path``, ``agent`` or ``label``, not a project's codename
+(``core.launch_seal``). Rounds r5 to r8 of #113 each found one more path that handed one
+of them to tmux. So the rule is structural, and this test enumerates it over the fleet's
+service and the board's (``services/fleet.py``, ``services/team.py``), the doctor
+(``services/diagnostics.py``) and asq's views (``cli/ui``), keyed on the ``TmuxServer``
+handle itself (review r8 of #113, finding 11):
 
-1. A ``TmuxServer`` method that names a pane or a session (read off ``core/tmux.py``: its
-   first parameter is a pane id or a session) is called only inside a method of
-   ``PlacedPane`` or ``PlacedSession``, the resolver's handles, or in a function
-   :data:`ALLOWED` names with the reason.
-2. ``PlacedPane``, ``PlacedSession`` and ``_Address`` are made only by the functions
-   :data:`MINTS` names, each from the expression it names: a launch record's
-   ``WindowPlace``, or what tmux itself listed.
-3. What turns a row's columns or a socket's name into a server (``_address``,
-   ``server_for``) and the sweep's listed sessions (``_listed_session``) are called only
-   where :data:`CALLERS` says.
+1. Every place a ``TmuxServer`` is MADE — ``TmuxServer(…)``, ``.at(path)``, ``server_for``,
+   the fleet's ``server()`` factory — is listed in :data:`MADE` with where its socket and
+   path come from. ``_server_at`` takes an ``_Address``, which only the mints below make.
+2. Every call of a ``TmuxServer`` method that names a pane, a session, a socket or a path
+   (read off ``core/tmux.py``: its first parameter is one), of ``run`` (any arguments), of
+   ``kill_server``, and of the module's socket probes (``server_may_run``,
+   ``socket_answer``), is inside a method of the resolver's handles (``PlacedPane``,
+   ``PlacedSession``) or in a site :data:`ACTS` lists with the reason.
+3. ``PlacedPane``, ``PlacedSession`` and ``_Address`` are made only by :data:`MINTS`, each
+   from the expression named there (a record's place, tmux's own answer, today's config),
+   and what turns recorded values into an address (``_address``) or lists sessions by name
+   (``_listed_session``) is called only where :data:`CALLERS` says.
 
-A next path that puts a pane or a session to tmux from anywhere else, or mints a place from
-a row, fails here, naming the line. Widening a list is a decision to review, not a fix.
+A next path that makes a server or names a target to one anywhere else fails here, naming
+the file and line. Widening a list is a decision to review, not a fix.
 """
 
 from __future__ import annotations
 
 import ast
+import re
 from collections.abc import Iterator
 from pathlib import Path
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "aisquare"
 TMUX = SRC / "core" / "tmux.py"
-MODULES = (SRC / "services" / "fleet.py", SRC / "services" / "team.py")
+FLEET = "services/fleet.py"
+SERVICES = (FLEET, "services/team.py")
+MODULES = (*SERVICES, "services/diagnostics.py")
+UI = "cli/ui"
 
-#: The resolver's handles: the only classes whose methods put a pane or a session to tmux.
+#: The resolver's handles: the only classes whose methods put a target to tmux unlisted.
 HANDLES = frozenset({"PlacedPane", "PlacedSession"})
 
-#: ``function`` → why it may name a pane or a session to tmux without a handle. Each is one
-#: the store has no say in.
-ALLOWED: dict[str, str] = {
-    "_new_session_window": (
-        "makes a NEW session (`spawn_window(create=True)` never joins one); a name is "
-        "only probed for being free, so no name read from the store chooses a session a "
-        "window lands in (review r7 of #113, finding 2)"
-    ),
-    "_kill_unrecorded": (
-        "kills the window this spawn's own `spawn_window` just made, by the pane tmux "
-        "answered, when its place or its row could not be recorded"
-    ),
-    "_activity_times": "`list-panes -a`: every pane of a server, no pane or session named",
+#: ``module`` → ``site`` → where the servers it makes are pointed.
+MADE: dict[str, dict[str, str]] = {
+    FLEET: {
+        "server": "the factory: the socket today's config names, or one a caller passes",
+        "server_for": "a socket's name (`server`): an address's name, or today's to compare",
+        "_server_at": "an `_Address`, which only the mints in MINTS make",
+        "_address": "the recorded socket's name, to compare its path with this shell's",
+        "_require_usable_tmux": "today's socket (the version is asked, nothing named)",
+        "spawn": "today's socket, where this spawn starts its window",
+        "attach_argv": "today's socket, for `require` before a record's session is asked",
+        "_cannot_run": "today's socket, for a socket probe only (ACTS)",
+    },
+    "services/diagnostics.py": {
+        "_check_tmux": "the default socket: is tmux installed, which version",
+        "_check_fleet_terminal": "the fleet's socket from config: its terminal settings",
+        "_fleet_server": "the doctor's factory: a socket's name from config or a record",
+        "_check_fleet": "today's socket, and each address a launch record places",
+    },
+    f"{UI}/terminal.py": {"TerminalPane.attach": "today's socket, when a view gave none"},
+    f"{UI}/views/accounts.py": {"AccountsView.server": "today's socket: its own sign-in windows"},
+    f"{UI}/views/agent.py": {
+        "AgentView.__init__": "a listed status's socket and path: placed by the resolver"
+    },
+    f"{UI}/views/project.py": {
+        "ManagerTab.show": "a listed status's socket and path: placed by the resolver"
+    },
 }
 
-#: ``(function, class made)`` → the source of the pane id or the session target each mint
-#: takes, as written there. ``_Address`` is made from a row's columns only in ``_address``,
-#: which only the resolver calls (:data:`CALLERS`), else from today's config.
+#: ``module`` → ``site`` → why it may name a pane, session, socket or path to tmux without a
+#: handle. Each is one the store has no say in.
+ACTS: dict[str, dict[str, str]] = {
+    FLEET: {
+        "_new_session_window": (
+            "makes a NEW session (`spawn_window(create=True)` never joins one); a name is "
+            "only probed for being free, so no name read from the store chooses a session a "
+            "window lands in (review r7 of #113, finding 2)"
+        ),
+        "_kill_unrecorded": (
+            "kills the window this spawn's own `spawn_window` just made, by the pane tmux "
+            "answered, when its place or its row could not be recorded"
+        ),
+        "_activity_times": "`list-panes -a`: every pane of a server, no pane or session named",
+        "_server_at": "`.at(path)`: an `_Address`'s path, minted from a record (MINTS)",
+        "_unreached": "a socket probe at the path a placed row's launch record holds",
+        "_refuse_unless_gone": "a socket probe at the path a placed row's launch record holds",
+        "_cannot_run": (
+            "a socket probe at a row's own `socket_path` for a row no record places, only "
+            "ever to END that row: a sandbox that wrote it could end its row itself"
+        ),
+    },
+    "services/diagnostics.py": {
+        "_check_fleet": (
+            "each placed row's pane and socket, as `fleet.resolve_place` placed them, read "
+            "as written (the doctor takes no census)"
+        ),
+        "_check_fleet_terminal": "`show-options -gv prefix`: the server's own option",
+        "_stale_server_environment": "`show-environment -g`: the server's own environment",
+    },
+    f"{UI}/terminal.py": {
+        "TerminalPane": (
+            "the pane a view attached (`shown_pane`): a listed status's, placed by the "
+            "resolver, or a sign-in window the Accounts view made itself"
+        )
+    },
+    f"{UI}/views/accounts.py": {
+        "AccountsView._settle_login_quietly": "the sign-in window this view made",
+        "AccountsView._poll_login": "the sign-in window this view made",
+        "AccountsView._close_login_window": "the sign-in window this view made",
+    },
+}
+
+#: ``(site, class made)`` → the source of the pane id or the session target each mint
+#: takes, as written there (``None``: ``_address``, whose callers CALLERS restricts).
 MINTS: dict[tuple[str, str], str | None] = {
     ("resolve_place", "PlacedPane"): "place.pane_id",
     ("resolve_place", "PlacedSession"): "place.session_id",
+    ("_indexed_sessions", "PlacedSession"): "place.session_id",
+    ("_legacy_panes", "PlacedPane"): "place.pane_id",
     ("_recordless_pane", "PlacedPane"): "window.pane_id",
+    ("PlacedPane.holding_session", "PlacedSession"): "session_id",
     ("_listed_session", "PlacedSession"): "name",
     ("_address", "_Address"): None,
     ("_session_to_join", "_Address"): "config.tmux_socket",
     ("_shutdown_sockets", "_Address"): "config.tmux_socket",
 }
 
-#: ``callee`` → the functions that may call it.
+#: ``callee`` → the sites that may call it in ``services/fleet.py``.
 CALLERS: dict[str, frozenset[str]] = {
-    # A row's columns (placed by the resolver) to the server it is asked at.
-    "_address": frozenset({"resolve_place"}),
-    # A socket's name to a server: today's socket compared, or an address asked.
-    "server_for": frozenset({"_address", "_server_at"}),
+    # Recorded values (a record's place, a session the index holds) to an address.
+    "_address": frozenset({"resolve_place", "_indexed_sessions", "_legacy_panes"}),
     # Session names tmux itself listed, for `shutdown --all`'s sweep.
     "_listed_session": frozenset({"_swept_sessions"}),
 }
 
-_TARGETS = frozenset({"pane_id", "session", "name", "old"})
+_TARGETS = frozenset({"pane_id", "session", "name", "old", "recorded", "path"})
+_PROBES = frozenset({"server_may_run", "socket_answer"})
+#: A receiver that is a server, outside the fleet's service (where names are unambiguous).
+_SERVER = re.compile(r"(?:\b|_)(?:server|srv|probe|servers\[[^]]*\])\b")
+#: Calls that are no tmux server's, whatever their name (`subprocess.run`, `app.run`).
+_NOT_TMUX = frozenset({"subprocess", "os", "shutil", "app", "asyncio"})
 
 
 def tmux_target_methods() -> frozenset[str]:
-    """The ``TmuxServer`` methods that name a pane or a session, read off ``core/tmux.py``:
-    whose first parameter after ``self`` is a pane id or a session — and ``run``, which
-    takes any arguments at all."""
+    """The ``TmuxServer`` methods that name a pane, a session, a socket or a path, read off
+    ``core/tmux.py`` (their first parameter is one), with ``run`` (any arguments) and
+    ``kill_server`` (every session at once)."""
     tree = ast.parse(TMUX.read_text(encoding="utf-8"))
     server = next(
         node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "TmuxServer"
     )
-    methods = {"run"}
+    methods = {"run", "kill_server"}
     for node in server.body:
-        if not isinstance(node, ast.FunctionDef):
+        if not isinstance(node, ast.FunctionDef) or node.name.startswith("__"):
             continue
         args = node.args.args
         if len(args) > 1 and args[1].arg in _TARGETS:
@@ -95,83 +164,100 @@ def tmux_target_methods() -> frozenset[str]:
     return frozenset(methods)
 
 
-def _scopes(tree: ast.AST) -> Iterator[tuple[str, str | None, ast.AST]]:
-    """``(function, class, node)`` for every node, with the top-level function or the
-    method it is in (a function nested in one counts as that one: an exemption is never
-    had by naming an inner function after it) and its class."""
+def _sites(tree: ast.AST) -> Iterator[tuple[str, str | None, ast.Call]]:
+    """``(site, class, call)`` for every call: the site is ``Class.method`` for a method and
+    the function's name otherwise, a function nested in one counting as that one (an
+    exemption is never had by naming an inner function after it)."""
 
     def walk(
-        node: ast.AST, function: str, klass: str | None
-    ) -> Iterator[tuple[str, str | None, ast.AST]]:
+        node: ast.AST, site: str, klass: str | None
+    ) -> Iterator[tuple[str, str | None, ast.Call]]:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, ast.ClassDef):
-                yield from walk(child, function, child.name)
+                yield from walk(child, site, child.name)
             elif isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
-                outer = child.name if function == "<module>" else function
-                yield outer, klass, child
+                outer = (
+                    (f"{klass}.{child.name}" if klass else child.name)
+                    if site == "<module>"
+                    else site
+                )
                 yield from walk(child, outer, klass)
             else:
-                yield function, klass, child
-                yield from walk(child, function, klass)
+                if isinstance(child, ast.Call):
+                    yield site, klass, child
+                yield from walk(child, site, klass)
 
     yield from walk(tree, "<module>", None)
 
 
-def _called(node: ast.AST) -> str | None:
-    """The name a call calls: ``f`` for ``f(…)`` and ``x.f(…)`` alike."""
-    if not isinstance(node, ast.Call):
-        return None
-    if isinstance(node.func, ast.Attribute):
-        return node.func.attr
-    if isinstance(node.func, ast.Name):
-        return node.func.id
-    return None
+def _called(call: ast.Call) -> tuple[str | None, str | None]:
+    """``(name, receiver source)``: ``f`` for ``f(…)``, ``f`` and ``x`` for ``x.f(…)``."""
+    if isinstance(call.func, ast.Attribute):
+        return call.func.attr, ast.unparse(call.func.value)
+    if isinstance(call.func, ast.Name):
+        return call.func.id, None
+    return None, None
 
 
-def _of_subprocess(func: ast.expr) -> bool:
-    """``subprocess.run(…)``: git and a native queue, no tmux."""
-    return (
-        isinstance(func, ast.Attribute)
-        and isinstance(func.value, ast.Name)
-        and func.value.id == "subprocess"
-    )
+def _allowed(table: dict[str, dict[str, str]], module: str, site: str, klass: str | None) -> bool:
+    listed = table.get(module, {})
+    return site in listed or (klass is not None and klass in listed)
 
 
-def _target_source(call: ast.Call) -> str | None:
-    """The source of a mint's pane id or session target: its second argument."""
-    if len(call.args) >= 2:
-        return ast.unparse(call.args[1])
-    if call.args and isinstance(call.func, ast.Name) and call.func.id == "_Address":
-        return ast.unparse(call.args[0])
-    return None
-
-
-def violations(source: str, methods: frozenset[str]) -> list[str]:
-    """Every breach of the three rules in ``source``, as ``line: what``."""
+def violations(source: str, module: str, methods: frozenset[str]) -> list[str]:
+    """Every breach of the three rules in ``source`` (the module at ``module``)."""
     found: list[str] = []
-    tree = ast.parse(source)
-    for function, klass, node in _scopes(tree):
-        name = _called(node)
+    service = module in SERVICES
+    for site, klass, call in _sites(ast.parse(source)):
+        name, receiver = _called(call)
         if name is None:
             continue
-        assert isinstance(node, ast.Call)
-        is_attribute = isinstance(node.func, ast.Attribute)
-        if _of_subprocess(node.func):
+        root = receiver.split(".", 1)[0] if receiver else None
+        if root in _NOT_TMUX:
             continue
-        if is_attribute and name in methods and klass not in HANDLES and function not in ALLOWED:
-            found.append(f"{node.lineno}: tmux `{name}` in {function} names a pane or session")
-        if not is_attribute and name in {*HANDLES, "_Address"}:
-            mint = (function, name)
+        in_handle = service and klass in HANDLES
+        # 1. A server made.
+        made = (
+            name in {"TmuxServer", "server_for"}
+            or (name == "at" and receiver is not None)
+            or (name == "server" and (receiver is None or receiver.endswith("fleet_service")))
+        )
+        if made and not in_handle and not _allowed(MADE, module, site, klass):
+            found.append(f"{call.lineno}: a tmux server made in {site}")
+        # 2. A target named to one.
+        acts_on_server = receiver is not None and (service or bool(_SERVER.search(receiver)))
+        names_target = (name in methods and acts_on_server) or name in _PROBES
+        if name == "listener" and call.args:
+            names_target = True
+        if names_target and not in_handle and not _allowed(ACTS, module, site, klass):
+            found.append(f"{call.lineno}: tmux `{name}` in {site} names a target")
+        # 3. Mints and callers (the fleet's service).
+        if module == FLEET and receiver is None and name in {*HANDLES, "_Address"}:
+            mint = (site, name)
             if mint not in MINTS:
-                found.append(f"{node.lineno}: {name} made in {function}, not by the resolver")
-            elif MINTS[mint] is not None and _target_source(node) != MINTS[mint]:
+                found.append(f"{call.lineno}: {name} made in {site}, not by the resolver")
+            elif MINTS[mint] is not None and _source(call) != MINTS[mint]:
                 found.append(
-                    f"{node.lineno}: {name} made in {function} from "
-                    f"{_target_source(node)!r}, not {MINTS[mint]!r}"
+                    f"{call.lineno}: {name} made in {site} from {_source(call)!r}, "
+                    f"not {MINTS[mint]!r}"
                 )
-        if name in CALLERS and function not in CALLERS[name]:
-            found.append(f"{node.lineno}: {name} called in {function}")
+        if module == FLEET and name in CALLERS and site not in CALLERS[name]:
+            found.append(f"{call.lineno}: {name} called in {site}")
     return found
+
+
+def _source(call: ast.Call) -> str | None:
+    """The source of a mint's pane id or session target: its second argument (an
+    ``_Address``'s first)."""
+    if isinstance(call.func, ast.Name) and call.func.id == "_Address":
+        return ast.unparse(call.args[0]) if call.args else None
+    return ast.unparse(call.args[1]) if len(call.args) >= 2 else None
+
+
+def _scanned() -> list[tuple[str, Path]]:
+    files = [(module, SRC / module) for module in MODULES]
+    files += [(path.relative_to(SRC).as_posix(), path) for path in sorted((SRC / UI).rglob("*.py"))]
+    return files
 
 
 def test_the_tmux_methods_that_name_a_target_are_the_ones_the_fleet_acts_with() -> None:
@@ -180,67 +266,99 @@ def test_the_tmux_methods_that_name_a_target_are_the_ones_the_fleet_acts_with() 
     methods = tmux_target_methods()
     acted = {
         "send_keys", "send_literal", "paste", "kill_window", "kill_session", "pane_facts",
-        "pane_facts_or_raise", "pane_pid", "screen_text", "list_windows", "windows_or_raise",
-        "has_session", "has_session_or_raise", "rename_session", "attach_argv",
-        "spawn_window", "run",
+        "pane_facts_or_raise", "pane_pid", "pane_session", "screen_text", "list_windows",
+        "windows_or_raise", "has_session", "has_session_or_raise", "rename_session",
+        "attach_argv", "spawn_window", "run", "kill_server", "at", "listener", "capture",
     }  # fmt: skip
     assert acted <= methods, sorted(acted - methods)
 
 
-def test_every_tmux_act_of_the_fleet_goes_through_a_place_a_launch_record_holds() -> None:
+def test_every_tmux_server_and_target_comes_from_a_record_tmux_or_the_config() -> None:
     methods = tmux_target_methods()
     found = {
-        path.relative_to(SRC.parent): violations(path.read_text(encoding="utf-8"), methods)
-        for path in MODULES
+        module: hits
+        for module, path in _scanned()
+        if (hits := violations(path.read_text(encoding="utf-8"), module, methods))
     }
-    assert not any(found.values()), (
-        "a tmux call names a pane or a session the resolver (`fleet.resolve_place`) did not "
-        "place, or a place is made from something other than a launch record or tmux's own "
-        f"listing: {found}"
+    assert not found, (
+        "a tmux server is made, or a pane, session, socket or path named to one, where no "
+        "launch record, tmux answer or config says so (`fleet.resolve_place`), or a place "
+        f"is made from anything else: {found}"
     )
 
 
-def test_every_allowed_site_and_mint_still_exists() -> None:
-    """An entry whose function is gone is a stale exemption: removed, not kept."""
-    defined: set[str] = set()
-    for path in MODULES:
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if isinstance(node, ast.FunctionDef | ast.ClassDef):
-                defined.add(node.name)
-    named = {*ALLOWED, *(function for function, _ in MINTS), *CALLERS, *HANDLES}
-    for callers in CALLERS.values():
-        named |= callers
-    assert named <= defined, sorted(named - defined)
+def test_every_listed_site_still_exists() -> None:
+    """An entry whose site is gone is a stale exemption: removed, not kept."""
+    for table in (MADE, ACTS):
+        for module, sites in table.items():
+            defined = {site for site, _, _ in _sites(ast.parse((SRC / module).read_text()))}
+            classes = {
+                node.name
+                for node in ast.walk(ast.parse((SRC / module).read_text()))
+                if isinstance(node, ast.ClassDef)
+            }
+            stale = {site for site in sites if site not in defined and site not in classes}
+            assert not stale, (module, sorted(stale))
+    fleet = {site for site, _, _ in _sites(ast.parse((SRC / FLEET).read_text()))}
+    named = {site for site, _ in MINTS} | {s for callers in CALLERS.values() for s in callers}
+    assert named <= fleet, sorted(named - fleet)
 
 
 def test_the_check_sees_every_shape_of_the_breach() -> None:
     methods = tmux_target_methods()
     breaches = [
-        # The r5-r7 shapes: a row's pane typed into, killed, asked about; a session named
-        # from the codename taken down; a place made from a row.
-        "def tell(srv, agent):\n    srv.paste(agent.pane_id, 'x')",
-        "def _stop_row(agent):\n    server_of(agent).kill_window(agent.pane_id)",
-        "def _pane_alive(srv, agent):\n    return srv.pane_facts(agent.pane_id)",
-        "def shutdown(srv, project):\n    srv.kill_session(session_name(project.codename))",
-        "def restart(srv, name):\n    srv.has_session_or_raise(name)",
-        "def resolve_place(row, config):\n    PlacedPane(a, row.pane_id, row.created_at, config)",
-        "def _stop_row(row, config):\n    PlacedPane(a, row.pane_id, row.created_at, config)",
-        "def tell(row):\n    _Address(row.tmux_socket, row.socket_path)",
-        "def tell(row):\n    _address(row)",
-        "def tell(row):\n    server_for(row.tmux_socket)",
-        "def tell(name):\n    _listed_session(a, name, c)",
-        "class Other:\n    def m(self, row):\n        self.srv.send_keys(row.pane_id, 'Enter')",
-        "def tell(srv, row):\n    def _kill_unrecorded():\n        srv.kill_window(row.pane_id)",
+        # The r5-r8 shapes: a row's pane typed into, killed, asked about; a session named
+        # from the codename taken down; a place made from a row; a row's socket probed or
+        # made a server of; a server made from a row in a view.
+        (FLEET, "def tell(srv, agent):\n    srv.paste(agent.pane_id, 'x')"),
+        (FLEET, "def _stop_row(agent):\n    server_for(agent.tmux_socket).kill_window('%1')"),
+        (FLEET, "def _pane_alive(srv, agent):\n    return srv.pane_facts(agent.pane_id)"),
+        (FLEET, "def shutdown(srv, p):\n    srv.kill_session(session_name(p.codename))"),
+        (FLEET, "def resolve_place(row, config):\n    PlacedPane(a, row.pane_id, t, config)"),
+        (FLEET, "def _stop_row(row, config):\n    PlacedPane(a, row.pane_id, t, config)"),
+        (FLEET, "def tell(row):\n    _Address(row.tmux_socket, row.socket_path)"),
+        (FLEET, "def tell(row):\n    _address(row.tmux_socket, row.socket_path)"),
+        (FLEET, "def reap(row):\n    server().at(row.socket_path).kill_server()"),
+        (FLEET, "def reap(row, srv):\n    tmux_core.server_may_run(srv, row.socket_path, b, c)"),
+        (FLEET, "def reap(row, srv):\n    srv.listener(row.socket_path)"),
+        (FLEET, "def tell(name):\n    _listed_session(a, name, c)"),
+        (
+            FLEET,
+            "def tell(srv, row):\n    def _kill_unrecorded():\n"
+            "        srv.kill_window(row.pane_id)",
+        ),
+        (
+            "services/team.py",
+            "def _pane_holds(agent):\n    server_of(agent).pane_pid(agent.pane_id)",
+        ),
+        ("services/diagnostics.py", "def _check_x(row):\n    TmuxServer(row.tmux_socket)"),
+        (f"{UI}/views/x.py", "def show(row):\n    TmuxServer(row.tmux_socket).at(row.socket_path)"),
+        (
+            f"{UI}/views/x.py",
+            "class V:\n    def go(self, row):\n        self.server.send_keys(row.pane_id, 'y')",
+        ),
     ]
-    for source in breaches:
-        assert violations(source, methods), source
+    for module, source in breaches:
+        assert violations(source, module, methods), source
     allowed = [
-        "class PlacedPane:\n    def kill(self):\n        self.server().kill_window(self.pane_id)",
-        "def resolve_place(row, place, config):\n    PlacedPane(a, place.pane_id, t, config)",
-        "def _recordless_pane(window, s):\n    PlacedPane(s.address, window.pane_id, t, c)",
-        "def _new_session_window(srv, name):\n    srv.spawn_window(name, create=True)",
-        "def tell(placed):\n    placed.pane.type_line('x')",
-        "def anything(config):\n    server(config).reachable()",
+        (
+            FLEET,
+            "class PlacedPane:\n    def kill(self):\n"
+            "        self.server().kill_window(self.pane_id)",
+        ),
+        (
+            FLEET,
+            "def resolve_place(row, place, config):\n    PlacedPane(a, place.pane_id, t, config)",
+        ),
+        (
+            FLEET,
+            "def _recordless_pane(window, s):\n    PlacedPane(s.address, window.pane_id, t, c)",
+        ),
+        (FLEET, "def _new_session_window(srv, name):\n    srv.spawn_window(name, create=True)"),
+        (FLEET, "def tell(placed):\n    placed.pane.type_line('x')"),
+        (FLEET, "def reap(address, config):\n    _server_at(address, config).reachable()"),
+        (FLEET, "def _git(cwd):\n    subprocess.run(['git'])"),
+        (f"{UI}/app.py", "def run_ui(app):\n    app.run()"),
     ]
-    for source in allowed:
-        assert not violations(source, methods), source
+    for module, source in allowed:
+        assert not violations(source, module, methods), source

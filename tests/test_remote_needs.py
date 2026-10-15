@@ -2560,6 +2560,24 @@ def test_a_limit_pushes_never_near_its_reset_and_later_when_someone_is_on_it(
     assert item.reason == "coder-1 hit its usage limit" + lifts
 
 
+def test_a_card_and_an_actions_refusal_name_a_project_as_the_project_list_does() -> None:
+    """Remote's project list sends a nicknamed project's nickname, and its cards, their
+    pushes and the errors said the directory's name: "Billing" in the list, "api-v2" on the
+    card and the lock screen (review of #259, round 13)."""
+    from aisquare.services import remote_server
+
+    billing = PROJECT.model_copy(update={"nickname": "Billing", "root": Path("/work/api-v2")})
+    item = _one(needs_from_agent(_limited(None), None, project=billing, events=[], now=NOW))
+    assert item.project_name == "Billing" and item.needs_item_json()["project"] == {
+        "id": "prj_alpha",
+        "name": "Billing",
+    }
+    assert "'coder-9' in Billing" in str(remote_server._no_live_agent(billing, "coder-9"))
+    stale = remote_server.remote_stale(billing, "coder-9", None, done="nothing was sent")
+    assert "in Billing now" in stale.message
+    assert remote_server.remote_project_name(PROJECT) == "alpha"  # no nickname: its directory
+
+
 def test_a_limit_with_no_account_to_switch_to_is_pushed_at_once(isolated_home: Path) -> None:
     """``on_limit = "switch"`` is the default on a machine with one account too, where no
     hand-over can start: the limit's push waited 90 s for one (review of #259, round 13).

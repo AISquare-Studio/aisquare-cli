@@ -797,6 +797,14 @@ def _needs_now() -> datetime:
     return datetime.now(UTC)
 
 
+def _needs_project_name(project: ProjectInfo) -> str:
+    """How a card, its push and an action's refusal name ``project``: as Remote's project
+    list does (``remote_server.remote_project_name``), its nickname first."""
+    from aisquare.services.remote_server import remote_project_name
+
+    return remote_project_name(project)
+
+
 def _needs_item(
     kind: str,
     subject: str,
@@ -815,7 +823,7 @@ def _needs_item(
         id=needs_item_id(project.id, kind, subject),
         kind=kind,
         project_id=project.id,
-        project_name=project.root.name or project.id,
+        project_name=_needs_project_name(project),
         agent=None if agent is None else agent.label,
         agent_id=None if agent is None else agent.id,
         reason=reason,
@@ -2643,7 +2651,7 @@ def _needs_fleet_down(
             f"{project.id}:{_iso_seconds(first)}",  # in UTC: as the kept sighting reads back
             project=project,
             agent=None,
-            reason=f"tmux is not answering for {needs_push_safe(project.root.name or project.id)}",
+            reason=f"tmux is not answering for {needs_push_safe(_needs_project_name(project))}",
             excerpt=None,
             detail={},
             since=first,
@@ -2893,7 +2901,7 @@ def needs_agent_now(project: ProjectInfo, label: str, *, now: datetime | None = 
     scanned = _needs_scan_project(
         sources, project, board_id=board_id, now=when, first_seen=first_seen, seen=set()
     )
-    where = project.root.name or project.id
+    where = _needs_project_name(project)
     if scanned.failed is not None:
         raise RequestError(503, "unavailable", f"{where} could not be read: {scanned.failed}")
     rows = [row for row in scanned.rows if row.label == label]
@@ -2949,7 +2957,7 @@ def needs_single_agent_now(
     with store_session() as store:
         row = store.fleet_agent_by_label(project.id, label, live_only=False)
     if row is None:
-        raise fleet_service.NoSuchAgent(f"no agent {label!r} in {project.root.name or project.id}")
+        raise fleet_service.NoSuchAgent(f"no agent {label!r} in {_needs_project_name(project)}")
     status = fleet_service.status_of(row)
     reads = _NeedsReads(project)
     tail = _needs_tail_of(live_needs_sources(), status, reads)

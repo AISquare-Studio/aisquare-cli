@@ -2496,10 +2496,20 @@ PANE_OUTLIVED = (
 """409 ``not_agent`` for a row that outlived its tmux server (:func:`_remote_facts_refusal`)."""
 
 
+def remote_project_name(project: ProjectInfo) -> str:
+    """How Remote names ``project`` to a person: ``project.display_name``, its nickname
+    first, as ``api/projects`` lists it. The cards, their pushes and the errors said the
+    directory's name where the list said the nickname: "Billing" there, "api-v2" on the
+    card and the lock screen (review of #259, round 13)."""
+    from aisquare.services import project as project_service
+
+    return project_service.display_name(project)
+
+
 def _no_live_agent(target: ProjectInfo, label: str) -> NoSuchAgent:
     """The one :class:`NoSuchAgent` for a label no live row of ``target`` holds: every read and
     write that wants a live row says it in these words, which the page maps on."""
-    return NoSuchAgent(f"no live agent {label!r} in {target.root.name or target.id}")
+    return NoSuchAgent(f"no live agent {label!r} in {remote_project_name(target)}")
 
 
 def _remote_live_row(target: ProjectInfo, label: str) -> FleetAgent:
@@ -2576,7 +2586,7 @@ def remote_stale(
     """409 ``stale``: the label is not the agent the phone pinned, ``current`` says who holds it
     now, or none, and ``done`` what was done all the same."""
     if current is None:
-        said = f"there is no agent {label!r} in {target.root.name or target.id} now"
+        said = f"there is no agent {label!r} in {remote_project_name(target)} now"
     else:
         said = f"{label!r} is another agent now ({current.id})"
     return RequestError(
@@ -2604,7 +2614,7 @@ def _remote_turn_pinned(
         return _remote_live_row(target, label)
     row = remote_turn_row(target, label, live_only=live_only)
     if row is None and pin is None:
-        where = target.root.name or target.id
+        where = remote_project_name(target)
         said = f"no agent {label!r} in {where} — `aisquare fleet ls --all` shows every row"
         raise RequestError(404, "no_such_agent", said)
     if row is None or (pin is not None and row.id != pin):

@@ -234,6 +234,7 @@ def _project_stub(ref: str | None) -> Any:
     class _P:
         id = "prj_h"
         root = Path("/tmp/prj_h")
+        nickname = None
 
     return _P()
 

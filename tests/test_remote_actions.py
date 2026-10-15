@@ -710,8 +710,8 @@ class FakePane:
         self.failing: set[str] = set()
         """``"paste"`` or a key name: that call raises ``TmuxError``."""
         self.timing_out: set[str] = set()
-        """``"paste"`` or a key name: that call raises ``TmuxTimedOut``, a server that did not
-        answer, and ``log`` says ``late <it>``."""
+        """``"paste"``, ``"literal"`` or a key name: that call raises ``TmuxTimedOut``, a server
+        that did not answer, and ``log`` says ``late <it>``."""
         self.prompt = False
         """A permission prompt is drawn, for the tests that open one: text does nothing in
         its list, Escape answers it "No" and Enter its highlighted "1. Yes"."""
@@ -742,6 +742,9 @@ class FakePane:
 
     def send_literal(self, pane_id: str, text: str) -> None:
         """``send-keys``' text: keystrokes, not a paste."""
+        if "literal" in self.timing_out:
+            self.log.append("late literal")
+            raise TmuxTimedOut("tmux did not answer within 30s: send-keys -H")
         self.sent.append((pane_id, "literal", text))
         self.log.append("literal")
 
@@ -2403,7 +2406,8 @@ class LateWrite:
     route: str
     body: dict[str, object]
     late: str
-    """The call that times out (:attr:`FakePane.timing_out`): ``"paste"`` or a key name."""
+    """The call that times out (:attr:`FakePane.timing_out`): ``"paste"``, ``"literal"`` or a
+    key name."""
     shows: str = "prompt"
     """What the agent shows: ``prompt``, its input prompt; ``working``, a turn; ``dialog``."""
 
@@ -2425,6 +2429,9 @@ _LATE_WRITES = [
     ),
     pytest.param(LateWrite("agent/tell", {"mode": "auto"}, "paste"), id="auto's paste"),
     pytest.param(LateWrite("agent/tell", {"mode": "auto"}, "Enter"), id="auto's Enter"),
+    pytest.param(LateWrite("send-keys", {"enter": True}, "literal"), id="send-keys' text"),
+    pytest.param(LateWrite("send-keys", {"text": "", "keys": ["Escape"]}, "Escape"), id="its keys"),
+    pytest.param(LateWrite("send-keys", {"enter": True}, "Enter"), id="send-keys' Enter"),
     *(
         pytest.param(
             LateWrite(name, {**PINNED, "dismiss_dialog": True}, "Escape", "dialog"),

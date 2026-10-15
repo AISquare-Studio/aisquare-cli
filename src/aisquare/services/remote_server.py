@@ -3585,7 +3585,11 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
         (409 ``not_agent``, as the actions and quick answers refuse it). The pane is
         judged and typed into under the agent's action lock (:func:`remote_agent_turn`).
         Once a byte may have reached the pane, a failure is still audited: the trail
-        exists for what a device did to a live agent, finished or not.
+        exists for what a device did to a live agent, finished or not. A write tmux did not
+        answer in time may still land (``fleet.PaneWrite``): it says so, and is audited
+        ``delivered=maybe``. It was a plain ``write_failed`` "tmux did not answer within
+        30s", and a Send again typed the text a second time beside the first, which a
+        queued Enter may already have submitted (review of #259, round 10, 5/9).
 
         ``dialog_guard`` is for a sender that does not see the pane, the page's
         Transcript tab: nothing is typed unless the agent is at rest at its prompt
@@ -3605,7 +3609,6 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
         input box, ahead of the line the fleet types into a resumed agent, or into its
         first dialog (review of #243, round 5).
         """
-        from aisquare.core.tmux import TmuxTimedOut
         from aisquare.services import fleet as fleet_service
 
         label = _required(body, "agent")
@@ -3659,27 +3662,25 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
                 (target.id, label), exits, confirmed=confirmed
             ):
                 raise RequestError(409, "double_press", DOUBLE_PRESS)
-            try:
-                if text:
-                    server.send_literal(agent.pane_id, text)
-                if keys:
-                    try:
-                        server.send_keys(agent.pane_id, *keys)
-                    except TmuxTimedOut:
-                        # Not refused, but unanswered: a wedged server may still deliver it,
-                        # and a press that may land counts (review of #259, round 7, 4/9).
-                        if exits:
-                            exit_keys.exit_keys_sent((target.id, label))
-                        raise
-                    if exits:
-                        exit_keys.exit_keys_sent((target.id, label))
-                if enter:
-                    server.send_keys(agent.pane_id, "Enter")
-            except Exception as exc:
-                log.warning("remote: send-keys to %s failed: %s", label, exc)
-                raise RequestError(
-                    400, "write_failed", f"{label}: {exc}", audit=f"{summary} failed"
-                ) from exc
+            pane, wrote = agent.pane_id, fleet_service.PaneWrite("yes", "nothing")
+            if text:
+                wrote = fleet_service.pane_write(
+                    "the text", lambda: server.send_literal(pane, text)
+                )
+            if keys and wrote.typed == "yes":
+                wrote = fleet_service.pane_write("the keys", lambda: server.send_keys(pane, *keys))
+                if exits and wrote.typed != "no":
+                    # A press that may land counts (review of #259, round 7, 4/9).
+                    exit_keys.exit_keys_sent((target.id, label))
+            if enter and wrote.typed == "yes":
+                wrote = fleet_service.pane_write("Enter", lambda: server.send_keys(pane, "Enter"))
+            if wrote.typed == "maybe":
+                audit = f"{summary} delivered=maybe"
+                raise RequestError(400, "write_failed", wrote.late(label), audit=audit)
+            if wrote.typed == "no":
+                log.warning("remote: send-keys to %s failed: %s", label, wrote.error)
+                said = f"{label}: {wrote.error}"
+                raise RequestError(400, "write_failed", said, audit=f"{summary} failed")
         return {"agent": label, "project": target.id, "sent": True}, summary
 
     return Writes(

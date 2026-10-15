@@ -8061,6 +8061,48 @@ def test_reap_deletes_a_kept_fleet_branch_once_the_default_branch_has_its_work(
     assert _git("branch", "--list", still, cwd=project.root)
 
 
+def test_a_kept_branch_costs_a_reap_one_git_call_pushed_and_none_unpushed(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 16: a kept branch stays until main has its work, perhaps for
+    good, and every reap asked each one five git commands (``rev-parse``, ``merge-base``,
+    ``for-each-ref --contains``, ``merge-tree``, ``rev-parse ^{tree}``). Whether each is
+    pushed is one ``rev-list`` for them all now: a pushed one costs its ``merge-tree``,
+    an unpushed one (its tree deleted by hand) nothing."""
+    _remote(project, tmp_path)
+    for label in ("coder-a", "coder-b", "coder-c"):
+        agent = fleet_service.spawn(project, "coder", label=label).agent
+        _commit(agent.cwd, f"{label}.txt")
+        if label == "coder-c":
+            fleet_service.stop(project, label, force=True)
+            shutil.rmtree(agent.cwd)  # unpushed, so reap would have kept its tree
+            _git("worktree", "prune", cwd=project.root)
+        else:
+            _git("push", "-q", "origin", f"HEAD:feat/{label}", cwd=agent.cwd)
+            fleet_service.stop(project, label, force=True)
+    assert len(fleet_service.reap(project).branches_kept) == 3
+    real = fleet_service._git
+    asked: list[tuple[str, ...]] = []
+
+    def counted(cwd: Path, *args: str) -> object:
+        asked.append(args)
+        return real(cwd, *args)
+
+    monkeypatch.setattr(fleet_service, "_git", counted)
+
+    again = fleet_service.reap(project)
+
+    assert len(again.branches_kept) == 3 and again.branches_deleted == []
+    commands = [args[0] for args in asked]
+    assert commands.count("merge-tree") == 2, "the two pushed ones"
+    assert commands.count("rev-list") == 1, "one question for all three"
+    assert "merge-base" not in commands and ("--contains" not in sum(asked, ())), asked
+
+
 def test_reap_keeps_a_worktree_with_unpushed_commits_or_uncommitted_changes_and_says_why(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
 ) -> None:

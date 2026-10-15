@@ -1447,14 +1447,21 @@ def _remove_finished_worktrees(
     _sweep_fleet_branches(root, default, store.fleet_agents(project.id), report)
 
 
-def _fleet_branches(root: Path, *flags: str) -> list[str] | None:
-    """The local ``fleet/…`` branches, as ``git for-each-ref <flags>`` lists them; ``None``
-    when git would not."""
-    listed = _git(root, "for-each-ref", "--format=%(refname)", *flags, "refs/heads/fleet")
+def _fleet_branches(root: Path, *flags: str) -> dict[str, str] | None:
+    """The local ``fleet/…`` branches and their tips, as ``git for-each-ref <flags>`` lists
+    them; ``None`` when git would not."""
+    listed = _git(
+        root, "for-each-ref", "--format=%(objectname) %(refname)", *flags, "refs/heads/fleet"
+    )
     if listed.returncode != 0:
         return None
-    names = (line.removeprefix("refs/heads/") for line in listed.stdout.splitlines())
-    return [name for name in names if name.startswith(_FLEET_BRANCH_PREFIX)]
+    tips: dict[str, str] = {}
+    for line in listed.stdout.splitlines():
+        tip, _, ref = line.partition(" ")
+        name = ref.removeprefix("refs/heads/")
+        if name.startswith(_FLEET_BRANCH_PREFIX):
+            tips[name] = tip
+    return tips
 
 
 def _sweep_fleet_branches(
@@ -1496,14 +1503,14 @@ def _sweep_fleet_branches(
     if not every or merged is None:
         return
     out = set(_worktree_branches(root).values())
+    asked = {b: tip for b, tip in every.items() if b in recorded and b not in out}
+    squashed = _squashed(root, {b: tip for b, tip in asked.items() if b not in merged}, default)
     done: list[str] = []
-    for branch in every:
-        if branch not in recorded or branch in out:
-            continue
-        if branch not in merged and not _squashed(root, branch, default):
-            report.branches_kept.append(branch)
-        else:
+    for branch in asked:
+        if branch in merged or branch in squashed:
             done.append(branch)
+        else:
+            report.branches_kept.append(branch)
     if not done:
         return
     try:
@@ -1518,22 +1525,33 @@ def _sweep_fleet_branches(
         return
 
 
-def _squashed(root: Path, branch: str, default: str) -> bool:
-    """Whether ``branch`` is pushed and merging it into ``default`` would change nothing:
-    every change it makes is there already, though ``default`` lacks its tip.
+def _squashed(root: Path, tips: Mapping[str, str], default: str) -> set[str]:
+    """The branches of ``tips`` (name → tip, none merged into ``default``) that are pushed
+    and that merging into ``default`` would change nothing: every change each makes is there
+    already, though ``default`` lacks its tip.
 
-    Pushed, so its commits are safe on the remote once the branch goes. Asked of git's own
-    merge (``merge-tree --write-tree``, git 2.38): its tree is ``default``'s. An older git,
-    or a merge with conflicts, says no, and the branch is kept."""
-    ref = f"refs/heads/{branch}"
-    tip = _git(root, "rev-parse", "--verify", "--quiet", ref)
-    if tip.returncode != 0 or not _pushed(root, tip.stdout.strip(), default):
-        return False
-    merge = _git(root, "merge-tree", "--write-tree", default, ref)
+    Pushed, so its commits are safe on the remote once the branch goes: asked of them all
+    in one ``rev-list``, which prints each tip neither ``default`` nor a remote-tracking
+    branch reaches (with the commits under it only it has). Then, of each pushed one, git's
+    own merge (``merge-tree --write-tree``, git 2.38): its tree is ``default``'s. An older
+    git, or a merge with conflicts, says no, and the branch is kept. One git call a pushed
+    branch and none an unpushed one, on every reap: five each were asked, the kept ones'
+    every time (review of #259, round 16)."""
+    if not tips:
+        return set()
+    alone = _git(root, "rev-list", *tips.values(), "--not", default, "--remotes")
     tree = _git(root, "rev-parse", "--verify", "--quiet", f"{default}^{{tree}}")
-    if merge.returncode != 0 or tree.returncode != 0:
-        return False
-    return merge.stdout.split()[:1] == tree.stdout.split()
+    if alone.returncode != 0 or tree.returncode != 0:
+        return set()
+    unpushed = set(alone.stdout.split())
+    same: set[str] = set()
+    for branch, tip in tips.items():
+        if tip in unpushed:
+            continue
+        merge = _git(root, "merge-tree", "--write-tree", default, tip)
+        if merge.returncode == 0 and merge.stdout.split()[:1] == tree.stdout.split():
+            same.add(branch)
+    return same
 
 
 # --- what tmux knows about a pane -----------------------------------------------------

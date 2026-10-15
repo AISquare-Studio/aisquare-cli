@@ -191,6 +191,17 @@ class ResumeSpec:
     transcript_path: Path
 
 
+PromptTyped = bool | Literal["unsent", "maybe"]
+"""How a spawn's prompt, or a replacement's first line, reached its pane (:func:`_type_prompt`):
+``True``, typed and sent; ``False``, nothing of it is there, and it is to be sent again;
+``unsent``, pasted at its prompt but its Enter refused, so an Enter sends it; ``maybe``,
+tmux did not answer in time with its text or its Enter, which may still arrive. The last
+two were ``False``, "NOT typed … Tell it what to do", and the Tell went in beside the first
+copy, both submitted as one message (review of #259, round 11, 2/13). ``True`` and
+``False`` keep their meaning in the JSON the CLI and the remote answer, which says the
+other two as words."""
+
+
 @dataclass(frozen=True)
 class SwitchReceipt:
     """What ``fleet switch`` did: the agent it stopped, the one it started, and how."""
@@ -210,10 +221,11 @@ class SwitchReceipt:
     not taken back. Each is in ``notes`` too, beside the ones every switch has (the
     headroom read, the launch replayed, the worktree kept). The automatic hand-over has
     no terminal to print ``notes`` to and posts these alone (``services.hooks.hand_over``)."""
-    prompt_typed: bool = True
+    prompt_typed: PromptTyped = True
     """Whether the replacement's first line reached its pane: the line telling a resumed
     session to continue, or a fresh one's hand-off prompt. ``False`` leaves it idle at an
-    empty prompt, and ``notes`` say why."""
+    empty prompt, ``unsent`` and ``maybe`` with the line at its prompt or on its way
+    (:data:`PromptTyped`), and ``notes`` say why."""
 
     @property
     def how(self) -> str:
@@ -233,9 +245,9 @@ class SpawnReceipt:
     branch it was put on), a prompt that could not be typed, an agent that will not
     join the board. NOT a permission-mode fallback — there is none: the mode is the
     flag, then the role's config, then ``auto``, and nothing here rewrites it."""
-    prompt_typed: bool | None = None
-    """Whether the ``prompt`` asked for reached the pane: ``None`` when none was
-    asked for, ``False`` when it was not typed — the notes say why."""
+    prompt_typed: PromptTyped | None = None
+    """Whether the ``prompt`` asked for reached the pane (:data:`PromptTyped`): ``None`` when
+    none was asked for; otherwise the notes say why it is not ``True``."""
     failures: list[str] = field(default_factory=list)
     """The notes about what did NOT happen once the agent was up: the prompt not typed,
     the claims of a hand-over not moved, the previous session not marked ended. Each
@@ -2118,7 +2130,7 @@ def spawn(
         tmux_session=tmux_session,
         notes=[*notes, *moved, *typing],
         prompt_typed=typed,
-        failures=[*moved, *(typing if typed is False else [])],
+        failures=[*moved, *(typing if typed is not None and typed is not True else [])],
     )
 
 
@@ -2732,10 +2744,10 @@ def _verify_cap(store: ContextStore, stored: FleetAgent, cap: int) -> None:
     )
 
 
-def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -> bool:
+def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -> PromptTyped:
     """Wait (bounded) for the agent to come up, then paste the prompt and press Enter.
 
-    Returns whether it was typed; when it was not, a note says why.
+    Returns whether it was typed (:data:`PromptTyped`); when it was not, a note says why.
 
     Ready means the pane's foreground process is no longer our launcher (or it
     has produced scrollback). Past :data:`PROMPT_TIMEOUT` a SINGLE-LINE prompt
@@ -2761,7 +2773,9 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
     tmux did not answer in time may still arrive, and an Enter that did not go through
     leaves the prompt at the agent's, unsent (:func:`pasted_unsent`). Both were "could not
     type the prompt", and the prompt sent again with ``fleet tell`` went in beside the first
-    (review of #259, round 10, 8/9).
+    (review of #259, round 10, 8/9). And the receipt says so too, ``unsent`` or ``maybe``: it
+    said ``False``, "NOT typed", and the board's line and the page told the human to send
+    it (round 11, 2/13).
     """
     deadline = _monotonic() + PROMPT_TIMEOUT
     ready = False
@@ -2805,13 +2819,13 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
     if isinstance(told, PaneWrite):
         if told.typed == "maybe":
             notes.append(told.late("the agent", then=" at its prompt, unsent"))
-        else:
-            notes.append(f"could not type the prompt: {told.error}")
+            return "maybe"
+        notes.append(f"could not type the prompt: {told.error}")
         return False
-    if not told.delivered:
-        notes.append(f"the prompt: {told.how}")
-        return False
-    return True
+    if told.typed == "yes":
+        return True
+    notes.append(f"the prompt: {told.how}")
+    return "maybe" if told.typed == "maybe" else "unsent"
 
 
 #: How long after its end an agent whose window is still on the tmux server stays in
@@ -5106,7 +5120,8 @@ def switch(
     notes.extend(more)
     failures.extend(receipt.failures)
     from_name = f"slot {current}" if current is not None else "its shell's claude"
-    how = _how_started(resumed, typed=bool(receipt.prompt_typed))
+    typed = False if receipt.prompt_typed is None else receipt.prompt_typed
+    how = _how_started(resumed, typed=typed)
     why = f" ({reason})" if reason else ""
     # The suppression is entered FIRST: a store that cannot be opened is the courtesy
     # lost too, never a moved agent reported as not moved (review of #205, fourth round).
@@ -5128,7 +5143,7 @@ def switch(
         tmux_session=receipt.tmux_session,
         notes=notes,
         failures=failures,
-        prompt_typed=bool(receipt.prompt_typed),
+        prompt_typed=typed,
     )
 
 
@@ -5291,7 +5306,7 @@ class RestartReceipt:
     """True when the agent was still alive and had to be stopped first."""
     tmux_session: str
     notes: list[str] = field(default_factory=list)
-    prompt_typed: bool = True
+    prompt_typed: PromptTyped = True
     """Whether the replacement's first line reached its pane, as on :class:`SwitchReceipt`."""
     failures: list[str] = field(default_factory=list)
     """The notes that say what did NOT happen, as on :class:`SwitchReceipt`: the stop's
@@ -5507,7 +5522,8 @@ def restart(
             nudge_manager(project.id, reason=f"{label} exited")
         raise
     notes.extend(more)
-    how = _how_started(resumed, typed=bool(receipt.prompt_typed))
+    typed = False if receipt.prompt_typed is None else receipt.prompt_typed
+    how = _how_started(resumed, typed=typed)
     # The suppression is entered FIRST, as in `switch`: a store that cannot be opened
     # costs the courtesy, never a restarted agent reported as not restarted.
     with contextlib.suppress(Exception), store_session() as store:  # the courtesy, not the record
@@ -5525,7 +5541,7 @@ def restart(
         was_running=was_running,
         tmux_session=receipt.tmux_session,
         notes=notes,
-        prompt_typed=bool(receipt.prompt_typed),
+        prompt_typed=typed,
         failures=[*failures, *receipt.failures],
     )
 
@@ -5634,7 +5650,7 @@ def _abandon_handover(stopped: FleetAgent) -> None:
     nudge_manager(stopped.project_id, reason=f"{stopped.label} exited")
 
 
-def _how_started(resumed: bool, *, typed: bool) -> str:
+def _how_started(resumed: bool, *, typed: PromptTyped) -> str:
     """How a replacement began, for the board's ``switched`` and ``restarted`` lines.
 
     And for every surface that reports the receipt (``RestartReceipt.how``,
@@ -5649,14 +5665,23 @@ def _how_started(resumed: bool, *, typed: bool) -> str:
     the line said "started fresh with a hand-off prompt" over it. On the
     automatic hand-over that line was the only account anyone got (review of
     #203, final round, FLEET-5); the receipt's notes say why it was not typed.
+
+    A line pasted at its prompt whose Enter was refused, or one tmux did not answer in time
+    with, is not "NOT typed": the human, or the manager reading the board, sent it again,
+    beside the first copy (review of #259, round 11, 2/13).
     """
-    if resumed:
-        if typed:
-            return "resumed its session"
-        return "resumed its session, but the line telling it to continue was NOT typed"
-    if typed:
-        return "started fresh with a hand-off prompt"
-    return "started fresh, but its hand-off prompt was NOT typed"
+    line = "the line telling it to continue" if resumed else "its hand-off prompt"
+    began = "resumed its session" if resumed else "started fresh"
+    if typed is True:
+        return began if resumed else "started fresh with a hand-off prompt"
+    if typed == "unsent":
+        return f"{began}, but {line} waits unsent at its prompt: press Enter in its pane"
+    if typed == "maybe":
+        return (
+            f"{began}, but tmux did not answer in time with {line}: it may still arrive — "
+            "read its screen before you send it again"
+        )
+    return f"{began}, but {line} was NOT typed"
 
 
 def _restart_prompt(agent: FleetAgent) -> str:

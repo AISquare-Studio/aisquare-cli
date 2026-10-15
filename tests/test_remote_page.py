@@ -1680,6 +1680,13 @@ def test_a_replacement_whose_first_line_was_not_typed_is_said_and_told_to_be_tol
         "toast": "Restarted coder-1, but not all of it: claims: 1 claim could not be "
         "released (database is locked)",
     }, "what else did not happen, said as the CLI and the TUI say it"
+    # Review of #259, round 11, 2/13: a first line pasted with its Enter refused is not
+    # "NOT typed": the note says to press Enter, and nothing says to tell it what to do.
+    assert report["unsent"] == {
+        "sheet": None,
+        "toast": "Restarted coder-1, but not all of it: the prompt: pasted it at its prompt, "
+        "but tmux could not press Enter (refused) — press Enter in its pane to send it",
+    }
     assert report["ledger"] == f"Switch account coder-1: done — {said}"
 
 

@@ -1569,11 +1569,78 @@ def test_spawn_prompt_that_tmux_did_not_take_says_how_far_it_got(
     monkeypatch.setattr(tmux, "pane_facts", up)
     monkeypatch.setattr(tmux, "paste" if late == "paste" else "send_keys", wedged)
     receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="start on tsk_1")
-    assert receipt.prompt_typed is False
+    # Round 11, 2/13: and the receipt does not say "not typed" of it either.
+    assert receipt.prompt_typed == ("unsent" if late == "refused Enter" else "maybe")
     (note,) = [note for note in receipt.notes if "prompt" in note]
     assert note.startswith(says), note
     assert ("it may still arrive" in note) is (late != "refused Enter"), note
     assert "could not type the prompt" not in note
+    assert receipt.failures == [note]
+
+
+@pytest.mark.parametrize(
+    ("late", "typed", "how"),
+    [
+        (
+            "refused Enter",
+            "unsent",
+            "started fresh, but its hand-off prompt waits unsent at its prompt: press Enter in "
+            "its pane",
+        ),
+        (
+            "paste",
+            "maybe",
+            "started fresh, but tmux did not answer in time with its hand-off prompt: it may "
+            "still arrive — read its screen before you send it again",
+        ),
+    ],
+)
+def test_a_replacement_whose_first_line_is_at_its_prompt_is_not_said_to_be_untyped(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    late: str,
+    typed: str,
+    how: str,
+) -> None:
+    """Review of #259, round 11, 2/13: a hand-off prompt pasted with its Enter refused, or
+    one tmux did not answer in time with, was ``prompt_typed`` false: "started fresh, but
+    its hand-off prompt was NOT typed" on the receipt and the board's ``restarted`` line,
+    and the page added "Tell it what to do". The Tell went in beside the first copy, both
+    submitted as one message."""
+    agent = _coder(project)
+    _with_transcript(agent, tmp_path / "missing.jsonl")  # named, not on disk: a fresh start
+    original_spawn, original_paste, original_keys = tmux.spawn_window, tmux.paste, tmux.send_keys
+    pasted: list[str] = []
+
+    def ready_spawn(*args: Any, **kwargs: Any) -> WindowInfo:
+        window = original_spawn(*args, **kwargs)
+        tmux.set_command(window.pane_id, "claude")
+        return window
+
+    def paste(pane_id: str, text: str) -> None:
+        if late == "paste":
+            raise TmuxTimedOut("tmux did not answer within 30s: paste-buffer")
+        original_paste(pane_id, text)
+        pasted.append(pane_id)
+
+    def send_keys(pane_id: str, *keys: str) -> None:
+        if pasted and keys == ("Enter",):
+            raise TmuxError("send-keys failed (fake)")
+        original_keys(pane_id, *keys)
+
+    monkeypatch.setattr(tmux, "spawn_window", ready_spawn)
+    monkeypatch.setattr(tmux, "paste", paste)
+    monkeypatch.setattr(tmux, "send_keys", send_keys)
+    receipt = fleet_service.restart(project, agent.label)
+
+    assert receipt.resumed is False and receipt.prompt_typed == typed
+    assert receipt.how == how and "NOT typed" not in receipt.how
+    assert _events(project, "restarted") == [f"{agent.label} restarted — {how}"]
+    (note,) = [note for note in receipt.failures if "prompt" in note]
+    assert ("press Enter in its pane" in note) is (typed == "unsent"), note
 
 
 def test_spawn_prompt_is_not_typed_into_a_dead_pane(

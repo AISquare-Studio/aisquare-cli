@@ -1018,6 +1018,9 @@ async function notTyped() {
   const restarted = await act("Restart…", "Restart");
   answers.restart = { resumed: false, prompt_typed: true, how: "started fresh with a hand-off prompt", failures: ["claims: 1 claim could not be released (database is locked)"] };
   const unreleased = await act("Restart…", "Restart");
+  const unsentLine = "the prompt: pasted it at its prompt, but tmux could not press Enter (refused) — press Enter in its pane to send it";
+  answers.restart = { resumed: false, prompt_typed: "unsent", how: "started fresh, but its hand-off prompt waits unsent at its prompt: press Enter in its pane", failures: [unsentLine] };
+  const unsent = await act("Restart…", "Restart");
   const lost = await agentView({ "POST api/agent/switch": () => "network" });
   lost.live().frame("fleet", FLEET);
   await settle();
@@ -1031,7 +1034,7 @@ async function notTyped() {
   const id = lost.sent("api/agent/switch")[0].request_id;
   lost.live().frame("action", { actions: [{ request_id: id, endpoint: "agent/switch", status: 200, body: SWITCHED, at: "2026-10-07T10:13:00+00:00" }] });
   await settle();
-  return { switched, restarted, unreleased, ledger: lost.toast() };
+  return { switched, restarted, unreleased, unsent, ledger: lost.toast() };
 }
 
 /* A stop that could not release its agent's claims, and a Tell the machine left as a board

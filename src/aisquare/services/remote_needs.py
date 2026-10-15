@@ -2907,22 +2907,31 @@ def needs_item_current(snap: AgentNow, item_id: str) -> bool:
     return any(item.id == item_id for item in snap.items)
 
 
-def needs_prompt_still_up(snap: AgentNow, item: NeedsItem) -> bool:
+def needs_prompt_still_up(snap: AgentNow, item: NeedsItem) -> bool | None:
     """Whether the prompt on the agent's screen right now is still the call ``item`` names,
-    asked of tmux again: what a quick answer checks last, right before its keys.
+    asked of tmux again: what a quick answer checks last, right before its keys. ``None``
+    when tmux could not show the screen: not known either way.
 
     With more than one call pending, the card was the call its screen named when it was
     derived (:func:`_needs_on_screen`), and the screen is read again here: a prompt answered
     at the terminal meanwhile, and the next call's drawn, is not the card's. With one call
     pending the prompt can only be its own, as rule 5 says, and a card naming no call (the
     plain dialog's) is answered from the live pane, which shows what is up.
+
+    A capture that failed or timed out read as another prompt up: the tap was refused as
+    ``stale`` with a sentence that said so, and the card left every phone until a scan
+    brought it back and pushed it again, while its prompt may have been the one up (review
+    of #259, round 9, 3/8).
     """
     status = snap.status
     pending = () if status is None else _needs_pending(snap.tail, status.agent)
     named = {needs_item_id(snap.project.id, item.kind, tool.tool_use_id): tool for tool in pending}
     if len(pending) <= 1 or item.id not in named or status is None:
         return True
-    return _needs_on_screen(pending, _needs_screen_now(status.agent)) is named[item.id]
+    rows = _needs_screen_now(status.agent)
+    if rows is None:
+        return None
+    return _needs_on_screen(pending, rows) is named[item.id]
 
 
 def _needs_screen_now(agent: FleetAgent) -> list[str] | None:
@@ -3764,7 +3773,8 @@ def _needs_answer_now(
     typing (:meth:`RemoteKit.kit_write_still_allowed`): the re-derivation came between
     them and the keys. So is the screen, last (:func:`needs_prompt_still_up`): a card about
     one of several calls pending is answered only while the prompt up is still its call's,
-    and otherwise is a 409 ``stale``, out of the feed until the next scan. A tmux that fails
+    and otherwise is a 409 ``stale``, out of the feed until the next scan; a screen tmux
+    could not show is a 503 ``fleet_unavailable``, and the card stays. A tmux that fails
     mid-answer is a 503 whose ``audit`` says it was tried, as part of it may have reached
     the pane; one that timed out may still type all of it, so its card leaves the feed as
     an answered one does.
@@ -3803,7 +3813,15 @@ def _needs_answer_now(
             f"text={len(text)}ch enter={enter}"
         )
         kit.kit_write_still_allowed(device)
-        if not needs_prompt_still_up(snap, item):
+        up = needs_prompt_still_up(snap, item)
+        if up is None:
+            # Unknown, not another prompt: the card stays in the feed, and nothing is typed.
+            said = (
+                f"tmux could not show {label}'s screen, to check that its prompt is still "
+                f"that {item.kind}'s — nothing was sent; try again"
+            )
+            raise RequestError(503, "fleet_unavailable", said)
+        if not up:
             # Out of the feed as an answered card is, until the scan after it says what is up.
             watcher.needs_answered(item.id)
             gone = f"{label} shows another prompt than that {item.kind} now — nothing was sent"

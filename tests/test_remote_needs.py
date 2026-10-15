@@ -5918,6 +5918,30 @@ def test_an_answer_to_one_of_two_calls_is_typed_only_while_the_screen_still_show
     assert not any(" needs/answer " in line for line in live.audit())
 
 
+def test_an_answer_whose_screen_cannot_be_read_is_unknown_not_another_prompt(
+    live: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 9, 3/8: a capture that failed read as another prompt up. The tap
+    was refused as ``stale``, which said so, and the card left every phone, its prompt maybe
+    the one up. Unknown is a 503 to try again: nothing typed, the card kept."""
+    monkeypatch.setattr(remote_needs, "NEEDS_RESCAN_AFTER_ANSWER", 30.0)
+    live.runtime.set_allow_write(True)
+    called = datetime.now(UTC) - timedelta(minutes=1)
+    push, rm = replace(_PUSH, at=called), replace(_RM, at=called)
+    live.fleet.tails["/transcripts/coder-1.jsonl"] = _tail(push, rm, at=called)
+    live.fleet.screen = _screen_of(push, (push, rm))
+    card = live.card("permission")
+    assert card["id"] == needs_item_id(PROJECT.id, "permission", push.tool_use_id)
+    live.tmux.screen = None  # capture-pane fails
+    response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
+    assert (response.status_code, response.json()["error"]) == (503, "fleet_unavailable")
+    assert "could not show coder-1's screen" in response.json()["message"]
+    assert "another prompt" not in response.json()["message"]
+    assert live.tmux.typed == []
+    assert live.app.kit.lane_state["needs"].needs_lookup(card["id"]) is not None
+    assert not any(" needs/answer " in line for line in live.audit())
+
+
 def test_an_answered_card_leaves_the_feed_at_once_as_a_dismissed_one_does(
     live: Live, monkeypatch: pytest.MonkeyPatch
 ) -> None:

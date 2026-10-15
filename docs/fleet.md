@@ -1159,9 +1159,11 @@ branch and checks it out:
 
 The branch a restart makes the tree again on is the one the agent's row records
 (`branch` in `fleet ls --json`): the tree's branch as git said it at spawn, at
-`fleet stop`, and at `fleet reap` just before the tree went. So it is the branch
-the agent was last on, whatever its name: one that ran `git checkout -b fix/auth`
-is restarted on `fix/auth`, not on the `fleet/…` branch it was spawned on. A
+`fleet stop`, and at `fleet reap` just before the tree went, on the newest row at
+the tree's path; a detached HEAD (mid-rebase, say) leaves the branch recorded before.
+So it is the branch the agent was last on, whatever its name: one that ran `git
+checkout -b fix/auth` is restarted on `fix/auth`, not on the `fleet/…` branch it was
+spawned on. A
 `git worktree prune`, which every spawn runs and every role's cleanup asks for,
 loses nothing, and neither does a later agent under the same label and path.
 A row from before 0.8.1 records no branch, so its gone tree is refused. A refusal

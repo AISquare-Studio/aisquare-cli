@@ -7956,6 +7956,8 @@ def _move_to_a_branch_of_its_own(tree: Path, name: str) -> str:
         "deleted by hand, then git's worktree list pruned",
         "its label's earlier tree was on another branch",
         "its label's earlier tree was on another branch, and it exited, reaped",
+        "on a detached HEAD, stopped, its tree deleted by hand",
+        "on a detached HEAD, exited, reaped",
     ],
 )
 def test_a_restart_makes_a_gone_tree_again_on_the_branch_its_row_recorded(
@@ -7970,7 +7972,9 @@ def test_a_restart_makes_a_gone_tree_again_on_the_branch_its_row_recorded(
     without its own commits. The row records the branch at spawn, at stop and at reap,
     and a restart makes the tree again there, at its tip. Round 16: reap wrote the tree's
     branch to the OLDEST row at its path, and a restart acts on the newest, so the later
-    agent, exited rather than stopped, was rebuilt on the earlier one's branch."""
+    agent, exited rather than stopped, was rebuilt on the earlier one's branch; and a
+    detached HEAD at stop or reap wrote ``None`` over the branch recorded, so the restart
+    was refused while that branch still held the agent's commits."""
     _remote(project, tmp_path)
     task = _add_task(project, "Wire the auth flow")
     coder = fleet_service.spawn(project, "coder", task_id=task.id).agent
@@ -7989,6 +7993,15 @@ def test_a_restart_makes_a_gone_tree_again_on_the_branch_its_row_recorded(
         fleet_service.stop(project, coder.label, force=True)
         shutil.rmtree(coder.cwd)
         _git("worktree", "prune", cwd=project.root)  # as any spawn, or a role's cleanup
+    elif case == "on a detached HEAD, stopped, its tree deleted by hand":
+        _git("checkout", "-q", "--detach", cwd=coder.cwd)  # mid-rebase, say
+        fleet_service.stop(project, coder.label, force=True)
+        shutil.rmtree(coder.cwd)
+    elif case == "on a detached HEAD, exited, reaped":
+        _git("push", "-q", "origin", f"{branch}:feat/integration", cwd=coder.cwd)
+        _git("checkout", "-q", "--detach", cwd=coder.cwd)
+        tmux.die(coder.pane_id, 0)
+        assert fleet_service.reap(project).worktrees_removed == [coder.cwd]
     else:
         _git("push", "-q", "origin", f"{branch}:feat/integration", cwd=coder.cwd)
         fleet_service.stop(project, coder.label, force=True)

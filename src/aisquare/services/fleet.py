@@ -1221,14 +1221,17 @@ def _record_the_branch(store: ContextStore, agent: FleetAgent) -> None:
     """Record on ``agent``'s row the branch its worktree is on now (:attr:`FleetAgent.branch`),
     while the tree is there to ask: at stop, and at reap before the tree can go. An agent
     that ran ``git checkout -b fix/auth`` is restarted there, not on the branch it was
-    spawned on. A tree that is gone, or that git cannot read, leaves what was recorded."""
+    spawned on. A tree that is gone, or that git cannot read, leaves what was recorded, and
+    so does a detached HEAD (mid-rebase, mid-bisect, a ``git checkout <sha>``): written over
+    with no branch, the restart of its gone tree was refused while its branch still held the
+    agent's commits (review of #259, round 16)."""
     if not agent.worktree:
         return
     try:
         branch = _tree_branch(agent.cwd)
     except FleetError:
         return
-    if branch != agent.branch:
+    if branch is not None and branch != agent.branch:
         store.record_fleet_agent_branch(agent.id, branch)
 
 

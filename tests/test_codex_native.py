@@ -24,11 +24,15 @@ from typing import Any
 import pytest
 
 from aisquare.core import agents, launch_seal, outbox, selfcli
+from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.agent_adapters.types import store_dir, store_read_only
 from aisquare.core.config import load_config, save_config
 from aisquare.core.entries import new_entry
 from aisquare.core.store import SqliteStore, store_session
 from aisquare.services import agent_launch, fleet, native_telemetry, store_broker, team
+
+#: The real install check, before the suite's stand-in (``tests/conftest.py``).
+REAL_INSTALL_PATHS = store_broker.install_paths
 
 
 def _user_texts(request: dict[str, Any]) -> list[str]:
@@ -1726,14 +1730,19 @@ def test_real_codex_fleet_from_before_launch_records_and_rows_its_sandbox_rewrot
 def test_real_codex_under_a_hub_in_a_worktree_reaches_its_board_and_leaves_no_placeholder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Review r11 of #113, findings 1, 2 and 3, on the real Codex with only loopback.
+    """Review r11 of #113, findings 1, 2 and 3, and r12, findings 1, 9, 15 and R1, on the
+    real Codex with only loopback.
 
-    Under ``AISQUARE_TEAM_HUB`` a sandboxed coder in its worktree posts a note through its
-    broker, and it lands on the hub's board (the broker took its board from spawn's
-    project, which is not the hub's, and refused every call). The profile names the
-    principal checkout's absent launch inputs, outside every writable root: after a real
-    session nothing is left on the host there. A sandboxed launch from inside the aisquare
-    install it would run outside its sandbox is refused, naming the remedy.
+    A sandboxed coder in its worktree posts a note through its broker, and the principal
+    checkout's absent launch inputs, which the profile names outside every writable root,
+    leave nothing on the host after a real session. Under ``AISQUARE_TEAM_HUB`` another
+    coder in ITS worktree (roots from its launch record, board the hub's) posts one, and
+    it lands on the hub's board (the broker took its board from spawn's project, which is
+    not the hub's, and refused every call). With the agent's hooks connected from an
+    aisquare in the project's tree, a workspace seat is refused, by the fleet before any
+    window and by a hand launch, naming the remedy; a ``:read-only`` seat, whose sandbox
+    may write none of the tree, runs and posts its note. A sandboxed launch from inside
+    the aisquare it would run outside its sandbox is refused.
     """
     import aisquare
 
@@ -1762,7 +1771,12 @@ def test_real_codex_under_a_hub_in_a_worktree_reaches_its_board_and_leaves_no_pl
         thread.start()
         trusted = "".join(
             f'[projects.{json.dumps(str(place))}]\ntrust_level = "trusted"\n'
-            for place in (workspace, worktree)
+            for place in (
+                workspace,
+                worktree,
+                workspace / ".aisquare-worktrees" / "coder-hub2",
+                workspace / ".aisquare-worktrees" / "tester-ro",
+            )
         )
         (native_home / "config.toml").write_text(
             'model = "local-fixture"\nmodel_provider = "local"\n'
@@ -1830,20 +1844,63 @@ def test_real_codex_under_a_hub_in_a_worktree_reaches_its_board_and_leaves_no_pl
             hub_board = team.activate(hub).id
             assert hub_board == team_project(workspace).id != project.id
             seen = len(outputs())
-            fleet.spawn(
-                project, "coder", label="coder-hub2", agent="codex", worktree=False,
+            hubbed = fleet.spawn(
+                project, "coder", label="coder-hub2", agent="codex", worktree=True,
                 prompt=f"RUN {cli} note 'note under the hub'",
                 agent_args=["--dangerously-bypass-hook-trust", "--no-alt-screen"],
-            )  # fmt: skip
+            ).agent  # fmt: skip
+            assert hubbed.cwd is not None
+            assert Path(hubbed.cwd).resolve() == (worktree.parent / "coder-hub2").resolve()
             until(lambda: len(outputs()) > seen, 60, "the hub's note ran")
             assert "shared (note): note under the hub" in outputs()[-1], outputs()[-1]
             assert noted(hub_board, "note under the hub")
             monkeypatch.delenv("AISQUARE_TEAM_HUB")
+            # The agent's hooks connected from an aisquare in the project's tree, the
+            # launcher's own install elsewhere (r12, finding 1): the hooks run that one.
+            in_tree = workspace / ".venv" / "bin" / "aisquare"
+            in_tree.parent.mkdir(parents=True)
+            in_tree.write_text(f'#!/bin/sh\nexec {cli} "$@"\n', encoding="utf-8")
+            in_tree.chmod(0o755)
+            monkeypatch.setattr(agents, "_aisquare_command", lambda: shlex.quote(str(in_tree)))
+            agents.install_hooks("codex", native_home)
+            # The suite answers that aisquare lives outside every tree (conftest); this is
+            # the real answer.
+            monkeypatch.setattr(store_broker, "install_paths", REAL_INSTALL_PATHS)
+            with pytest.raises(fleet.FleetError, match="aisquare-cli") as refusal:
+                fleet.spawn(project, "tester", label="tester-ws", agent="codex", worktree=False)
+            assert str(in_tree.resolve()) in str(refusal.value)
+            assert not [a for a in fleet.list_agents(project) if a.agent.label == "tester-ws"]
+            profile = get_adapter("codex").store_access("workspace", store_dir())
+            by_hand = subprocess.run(
+                [*selfcli.argv_for(["launch", "tester", "--agent", "codex", "--", *profile])],
+                cwd=workspace,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                stdin=subprocess.DEVNULL,
+                check=False,
+            )
+            assert by_hand.returncode != 0, by_hand.stdout + by_hand.stderr
+            assert "uv tool install aisquare-cli" in by_hand.stdout + by_hand.stderr
+            # A `:read-only` seat in its own worktree, as a fleet reviewer's, writes none of
+            # the tree, its worktree included (R1): it runs, and its hooks and broker with it.
+            seen = len(outputs())
+            seat = fleet.spawn(
+                project, "tester", label="tester-ro", agent="codex", worktree=True,
+                sandbox="read-only", approval_policy="never",
+                prompt=f"RUN touch ro-probe {workspace}/ro-probe; {cli} note 'from read-only'",
+                agent_args=["--dangerously-bypass-hook-trust", "--no-alt-screen"],
+            ).agent  # fmt: skip
+            assert seat.cwd is not None
+            own = Path(seat.cwd)
+            assert own.resolve() == (worktree.parent / "tester-ro").resolve()
+            until(lambda: len(outputs()) > seen, 60, "the read-only seat's note ran")
+            assert "shared (note): from read-only" in outputs()[-1], outputs()[-1]
+            assert "cannot touch 'ro-probe'" in outputs()[-1], outputs()[-1]
+            assert noted(project.id, "from read-only")
+            assert not (own / "ro-probe").exists() and not (workspace / "ro-probe").exists()
             # A sandboxed launch from inside the aisquare it would run unsandboxed (finding 2).
             inside = Path(aisquare.__file__).parent
-            from aisquare.core.agent_adapters import get_adapter
-
-            profile = get_adapter("codex").store_access("workspace", store_dir())
             launched = subprocess.run(
                 [*selfcli.argv_for(["launch", "tester", "--agent", "codex", "--", *profile])],
                 cwd=inside,
@@ -1854,7 +1911,7 @@ def test_real_codex_under_a_hub_in_a_worktree_reaches_its_board_and_leaves_no_pl
                 check=False,
             )
             assert launched.returncode != 0, launched.stdout + launched.stderr
-            assert "uv tool install aisquare" in launched.stdout + launched.stderr
+            assert "uv tool install aisquare-cli" in launched.stdout + launched.stderr
         finally:
             subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True, check=False)
             server.shutdown()

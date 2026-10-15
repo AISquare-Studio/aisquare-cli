@@ -13,14 +13,16 @@ thing), so signing an account in means starting ``claude`` with that account's
 browser. The UI does that in a tmux window it renders and watches; the
 terminal command does it as a foreground child and looks afterwards. Either
 way the login "landed" when the directory holds what a signed-in Claude Code
-writes there — :func:`sign_in_landed` — and nothing here ever writes those
-files. What the accounts SHARE is the exception, and touches no login: a
-folder's trust entry in ``.claude.json``, and (opt-in) ``settings.json`` as a
-link to the plain claude's (:func:`share_for_launch`, ``core.claude_sharing``).
+writes there (on macOS, with the token in its Keychain item) —
+:func:`sign_in_landed` — and nothing here ever writes those files. What the
+accounts SHARE is the exception, and touches no login: a folder's trust entry
+in ``.claude.json``, and (opt-in) ``settings.json`` as a link to the plain
+claude's (:func:`share_for_launch`, ``core.claude_sharing``).
 
 **Usage is best effort, on purpose.** The percentages come from the endpoint
 Claude Code's own ``/usage`` reads (:data:`USAGE_URL`), called with the access
-token the account's credentials file holds. It is not a documented API: it
+token the account's stored login holds (``core.stored_login``: the credentials
+file, or on macOS the login Keychain). It is not a documented API: it
 answered on 2026-09-09 with Claude Code 2.1.266 and its shape is recorded in
 ``tests/test_claude_accounts.py``, and the day it changes an account's row says
 ``usage unavailable`` with the reason while everything else on the page keeps
@@ -119,14 +121,19 @@ def install() -> ClaudeInstall:
 
 
 def describe(account: ClaudeAccount) -> ClaudeAccountStatus:
-    """Everything about one slot that can be read without leaving the machine."""
-    creds = core.credentials(account)
+    """Everything about one slot that can be read without leaving the machine.
+
+    A token the Keychain would not show (locked, refused) is ``unreadable``: neither a
+    missing one, which would offer a log-in that cannot help, nor one to use.
+    """
+    login = core.stored_login(account)
+    creds = login.credentials
     return ClaudeAccountStatus(
         account=account,
         label=core.label(account),
         identity=core.identity(account),
         signed_in=core.signed_in(account),
-        token_state=core.token_state(creds),
+        token_state="unreadable" if login.unreadable is not None else core.token_state(creds),
         subscription=core.subscription_label(creds),
         hooks_installed=_hooks_installed(account),
     )
@@ -744,15 +751,20 @@ def usage(
 ) -> ClaudeUsage:
     """The account's five-hour and seven-day windows, or why they cannot be read.
 
-    Reads the token from the credentials file and sends it to :data:`USAGE_URL`
-    only; a token that has already expired is not sent at all, because Claude
-    Code refreshes it on the account's next session and this module never does.
-    No reason ever carries the token.
+    Reads the token where Claude Code keeps it (``core.stored_login``: the
+    credentials file, or on macOS the login Keychain) and sends it to
+    :data:`USAGE_URL` only; a token that has already expired is not sent at all,
+    because Claude Code refreshes it on the account's next session and this
+    module never does. A Keychain that would not show the token says why
+    (locked, refused), and asks for no log-in. No reason ever carries the token.
     """
-    creds = core.credentials(account)
+    login = core.stored_login(account)
+    creds = login.credentials
     if creds is None:
-        if core.keychain_platform():
-            reason = "credentials are in the macOS Keychain, which the CLI does not read"
+        if login.unreadable is not None:
+            reason = login.unreadable
+        elif core.keychain_platform():
+            reason = "no login in the Keychain or a credentials file — not signed in"
         else:
             reason = "no credentials file — not signed in"
         return ClaudeUsage(available=False, reason=reason)
@@ -1202,12 +1214,16 @@ def cached_usage(
     token to send — signed out, or expired — which :func:`usage` answers
     without a request. A slot another call in this process is fetching is
     waited for, and served what that call read (:func:`_fetching`).
-    ``force=True`` fetches every account regardless — the page's refresh key.
+    ``force=True`` fetches every account regardless — the page's refresh key —
+    and asks the Keychain again too (``core.forget_keychain_reads``), so a row
+    that said to unlock it reads again once someone has.
     Each reading's ``fetched_at`` says how old it is ("refreshed 3m ago"); a
     reading that could not be taken carries the moment that was found out.
     """
     if not accounts:
         return {}
+    if force:
+        core.forget_keychain_reads()
     moment = now or _now()
     since = moment - timedelta(seconds=max_age)
     tokens = {
@@ -1286,8 +1302,8 @@ def usage_is_readable(status: ClaudeAccountStatus, reading: ClaudeUsage | None) 
 
     The rows a "refreshed …" line ages from and says a try failed on (the Accounts page's
     rule, ``views.accounts`` ``_paint_usage_age``): a row that needs a login, or whose token
-    is missing or in the macOS Keychain, says so itself, and would otherwise put "last try
-    failed" on the line every time.
+    is missing or unreadable (a locked Keychain), says so itself, and would otherwise put
+    "last try failed" on the line every time.
     """
     return (
         status.signed_in
@@ -1764,9 +1780,10 @@ def login_fingerprint(account: ClaudeAccount) -> str | None:
     So a sign-in window opened to RE-authenticate an account can tell the login
     it was opened over from a fresh one: an expired or rejected token is still
     a signed-in directory, and :func:`sign_in_landed` alone would answer at the
-    first poll, before the user had done anything. A digest, never the token.
+    first poll, before the user had done anything. A digest, never the token. Read
+    afresh (a login is what changes here), so never on the UI thread.
     """
-    creds = core.credentials(account)
+    creds = core.credentials(account, fresh=True)
     return _login_digest(creds) if creds is not None else None
 
 
@@ -1782,11 +1799,15 @@ def sign_in_landed(account: ClaudeAccount, *, since: str | None = None) -> Claud
     ``since`` is :func:`login_fingerprint` as the window opened, for a re-auth:
     the login lands only once the stored one is a different login (a refreshed
     or new token), not the expired or rejected one the window was opened over.
+    Read afresh, as :func:`login_fingerprint` is, and once: the fingerprint is the
+    read the sign-in check just took.
     """
-    if not core.signed_in(account):
+    if not core.signed_in(account, fresh=True):
         return None
-    if since is not None and login_fingerprint(account) == since:
-        return None
+    if since is not None:
+        creds = core.credentials(account)
+        if (_login_digest(creds) if creds is not None else None) == since:
+            return None
     return core.identity(account)
 
 

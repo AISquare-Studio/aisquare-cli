@@ -32,10 +32,13 @@ open. So a fleet row's launch is ONE record (:class:`LaunchRecord`), written in
   project whose directory in the store is not the record's.
 - What is typed into a row's pane or kills its window — ``fleet tell``, ``fleet stop``
   and with it restart, switch, the hand-over and ``shutdown``, the manager's nudge —
-  goes to the pane its record places, never to the row's ``pane_id`` at its
-  ``socket_path``: a sandbox that rewrote those pointed them at any pane of the user's
-  (review r5 of #113, finding 1). A row that names another pane than its record, or
-  whose record places none, is not typed into or killed, and says why.
+  goes to the pane its record places, by its record's agent's rules, never to the row's
+  ``pane_id`` at its ``socket_path`` or by its ``agent``: a sandbox that rewrote those
+  pointed them at any pane of the user's (review r5 of #113, finding 1), or skipped the
+  check that keeps an Enter out of Codex's dialogs (r6, finding 1). A rewritten row is
+  told nothing and stopped where its record places it; ``shutdown`` takes down the
+  sessions the records name (r6, findings 4 and 7). A row with no record is told
+  nothing, and stopped by killing its window in its project's fleet session (r6, 6).
 - What the fleet reads of a session to act on outside the sandbox — a failed turn's
   limit, the hand-over it starts — is read from the transcript the record holds, never
   the board session's (r5, finding 2).
@@ -104,6 +107,10 @@ class WindowPlace(BaseModel):
     created_at: datetime
     """The row's own: after the window existed, so a server started later holds none of
     its panes (``services.fleet._outlived``)."""
+    session: str | None = None
+    """The tmux session the window was made in (``asq-<codename>``), which ``shutdown``
+    takes down, never by the project's codename in the store; renamed with it by ``fleet
+    rename``."""
 
 
 class LaunchRecord(BaseModel):

@@ -313,11 +313,15 @@ def _recorded_transcript(session_id: str) -> str | None:
     return facts.transcript if facts is not None and facts.id == session_id else None
 
 
-def failed_turn(agent_id: str, session: TeamSession) -> bool:
+def failed_turn(
+    agent_id: str,
+    session: TeamSession,
+    record: launch_seal.LaunchRecord | str | None = None,
+) -> bool:
     """Record the turn ``session``'s transcript says ended on an error that fired no hook
     (``AgentAccounts.failed_turn``: Codex 0.162.1 fires no ``Stop`` for a failed turn);
     ``True`` when this call recorded it. ``session`` is the board's session of the fleet
-    row ``agent_id``.
+    row ``agent_id``; ``record`` its launch record, when the caller has read it.
 
     The transcript read, and the agent whose reader reads it, are the row's launch
     record's (``core.launch_seal``): the session the agent's own hook reported, never
@@ -338,7 +342,7 @@ def failed_turn(agent_id: str, session: TeamSession) -> bool:
     that records it. Never raises: a transcript that cannot be read is no failure, and a
     record that could not be written gives the turn back to the next read.
     """
-    record = launch_seal.read(agent_id)
+    record = launch_seal.read(agent_id) if record is None else record
     facts = record.session if isinstance(record, launch_seal.LaunchRecord) else None
     if facts is None or facts.id != session.id or not facts.transcript:
         return False

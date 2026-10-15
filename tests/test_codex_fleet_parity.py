@@ -742,6 +742,34 @@ def test_a_codex_dialog_after_its_stop_gets_no_keystroke_though_its_hooks_say_wa
     assert manager.pane_id in tmux.killed and receipt.agent.ended_at is not None
 
 
+@pytest.mark.parametrize("rewritten", [None, "claude-code", "not-an-agent"])
+def test_a_codex_row_whose_agent_column_was_rewritten_gets_no_keystroke_at_its_dialog(
+    rewritten: str | None,
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review r6 of #113, finding 1: the placed row kept the store's ``agent``, and every
+    check that keeps an Enter out of Codex's dialogs took its adapter from it. Set to NULL
+    (read as Claude Code's) or an unknown name, ``tell`` pasted and pressed Enter into the
+    rate-limit dialog and ``stop`` typed ``/exit`` and Enter there. The record's agent
+    decides: ``tell`` and the nudge refuse a rewritten row, ``stop`` kills it unanswered."""
+    manager = _waiting_manager_on("codex", project, tmux, tmp_path / "codex-home", monkeypatch)
+    tmux.screens[manager.pane_id] = RATE_LIMIT_DIALOG
+    _rewrite("fleet_agent", "agent", rewritten, manager.id)
+
+    told = fleet_service.tell(project, manager.label, "carry on")
+    assert not told.delivered and "its row was rewritten" in told.how, told
+    assert fleet_service.nudge_manager(project.id, reason="task_review") is False
+    receipt = fleet_service.stop(project, manager.label, grace=0)
+
+    assert tmux.typed == [], "no line, no /exit: an Enter there picks the cheaper model"
+    assert receipt.killed is not None and "dialog" in receipt.killed, receipt
+    assert manager.pane_id in tmux.killed
+
+
 def test_every_fleet_codex_launch_hides_its_rate_limit_dialog_unless_the_operator_sets_it(
     codex_agent: tuple[Codex, TeamTask],
     tmux: FakeTmux,  # noqa: F811

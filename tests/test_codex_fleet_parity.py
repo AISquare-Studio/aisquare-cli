@@ -21,11 +21,12 @@ import shutil
 import sqlite3
 import subprocess
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from importlib import import_module
 from pathlib import Path, PureWindowsPath
-from typing import cast
+from typing import Any, cast
 from unittest.mock import Mock
 
 import pytest
@@ -794,6 +795,49 @@ def test_a_sandboxed_codex_write_wakes_the_waiting_manager_from_the_writers_hook
     assert _owed(codex.project) is None, "sent once"
     codex.hook("Stop", "thread-c", turn_id="turn-1", stop_hook_active=False)
     assert len(tmux.typed) == 2
+
+
+def test_a_codex_hook_with_no_nudge_owed_opens_the_store_no_further_time(
+    codex_agent: tuple[Codex, TeamTask],
+    tmux: FakeTmux,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review r4 of #113, finding 13: every Codex PostToolUse and Stop opened the store
+    twice more to look for a nudge owed, even with none: the session again, right after
+    the tool's own write read it, and the mark's take. The mark is read in the store
+    session the hook has open; with one owed, it is sent as before."""
+    codex, _ = codex_agent
+    codex.become()
+    codex.start("thread-c")
+    codex.hook("UserPromptSubmit", "thread-c", prompt="work the task", turn_id="turn-1")
+    opened: list[str] = []
+
+    def counted(module: Any, name: str) -> None:
+        real = module.store_session
+
+        @contextmanager
+        def counting() -> Iterator[Any]:
+            opened.append(name)
+            with real() as store:
+                yield store
+
+        monkeypatch.setattr(module, "store_session", counting)
+
+    counted(agent_events, "hook")
+    counted(fleet_service, "fleet")
+
+    codex.hook("PostToolUse", "thread-c", turn_id="turn-1", tool_name="Bash")
+    assert opened == ["hook", "hook"], "the launch's binding and the tool's write, no more"
+    opened.clear()
+    codex.hook("Stop", "thread-c", turn_id="turn-1", stop_hook_active=False)
+    assert "fleet" not in opened, "no mark to take"
+    sent: list[str] = []
+    monkeypatch.setattr(fleet_service, "deliver_owed_nudge", sent.append)
+    with store_session() as store:
+        store.set_meta(fleet_service.NUDGE_OWED + codex.project.id, "now")
+    codex.hook("PostToolUse", "thread-c", turn_id="turn-1", tool_name="Bash")
+    codex.hook("Stop", "thread-c", turn_id="turn-2", stop_hook_active=False)  # not a redelivery
+    assert sent == [codex.project.id, codex.project.id], "owed, it goes to be sent"
 
 
 def test_an_owed_nudge_waits_for_a_hook_and_wakes_nobody_for_news_already_read(

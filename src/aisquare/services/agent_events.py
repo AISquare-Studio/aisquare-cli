@@ -13,7 +13,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 from aisquare.core import agents
 from aisquare.core.agent_adapters.types import AgentAdapter, AgentEvent
 from aisquare.core.claude_accounts import LimitNotice
-from aisquare.core.store import store_session
+from aisquare.core.store import ContextStore, store_session
 from aisquare.services import hooks, metrics
 
 
@@ -193,7 +193,7 @@ def _dispatch(
         decision = hooks.turn_stopped(
             cwd, session_id=session_id, stop_hook_active=event.stop_hook_active
         )
-        _deliver_owed_nudge(adapter, session_id)
+        _deliver_owed_nudge(_nudge_owed_after(adapter, session_id))
         if decision is None:
             return None
         if session_id and adapter.capabilities.stop_reason_as_prompt:
@@ -223,29 +223,57 @@ def _dispatch(
                 store.touch_session(session_id, state="waiting")
         metrics.close_turn(session_id)
     elif event.kind == "tool_done" and session_id:
+        owed = None
         with store_session() as store:
-            if store.get_session(session_id):
+            session = store.get_session(session_id)
+            if session:
                 store.touch_session(session_id, state="working")
                 store.renew_leases(session_id, harness_lease())
-        _deliver_owed_nudge(adapter, session_id)
+                owed = _nudge_owed(adapter, store, session.project_id)
+        _deliver_owed_nudge(owed)
     return None
 
 
-def _deliver_owed_nudge(adapter: AgentAdapter, session_id: str | None) -> None:
-    """Send the manager the nudge a write of this agent's tools owed it, where the agent
-    sandboxes them (``capabilities.sandboxes_tools``): tmux refuses its sandbox, and its
-    hooks run outside it (``services.fleet.deliver_owed_nudge``). After the hook's own
-    writes, as a write's nudge comes after the write; it never raises. An agent whose
-    tools run unsandboxed (Claude Code) sent its nudges itself."""
+def _nudge_owed(adapter: AgentAdapter, store: ContextStore, project_id: str) -> str | None:
+    """``project_id`` when a write of this agent's tools owed its manager a nudge
+    (``services.fleet.NUDGE_OWED``), where the agent sandboxes them
+    (``capabilities.sandboxes_tools``): tmux refuses its sandbox, and its hooks run
+    outside it. Read in the store session the hook has open, so a hook with nothing owed
+    opens the store no further time (review r4 of #113, finding 13). An agent whose
+    tools run unsandboxed (Claude Code) sent its nudges itself. Never raises."""
+    if not adapter.capabilities.sandboxes_tools:
+        return None
+    try:
+        from aisquare.services import fleet  # lazy: the fleet imports the team service
+
+        return project_id if store.get_meta(fleet.NUDGE_OWED + project_id) is not None else None
+    except Exception:  # the hook's own work is done; a lost nudge is the whole cost
+        return None
+
+
+def _nudge_owed_after(adapter: AgentAdapter, session_id: str | None) -> str | None:
+    """:func:`_nudge_owed` for ``session_id``'s project, in one store session of its own
+    (a ``Stop``, whose own writes are ``hooks.turn_stopped``'s). Never raises."""
     if not adapter.capabilities.sandboxes_tools or session_id is None:
-        return
+        return None
     try:
         with store_session() as store:
             session = store.get_session(session_id)
-        if session is not None:
-            from aisquare.services import fleet  # lazy: the fleet imports the team service
+            return None if session is None else _nudge_owed(adapter, store, session.project_id)
+    except Exception:
+        return None
 
-            fleet.deliver_owed_nudge(session.project_id)
+
+def _deliver_owed_nudge(project_id: str | None) -> None:
+    """Send ``project_id``'s manager the nudge :func:`_nudge_owed` found owed
+    (``services.fleet.deliver_owed_nudge``). After the hook's own writes, as a write's
+    nudge comes after the write; it never raises."""
+    if project_id is None:
+        return
+    try:
+        from aisquare.services import fleet  # lazy: the fleet imports the team service
+
+        fleet.deliver_owed_nudge(project_id)
     except Exception:  # the hook's own work is done; a lost nudge is the whole cost
         return
 

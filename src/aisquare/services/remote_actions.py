@@ -686,15 +686,33 @@ def action_pane_agent(snap: AgentNow, label: str) -> FleetAgent:
     return snap.status.agent
 
 
-def action_press_escape(snap: AgentNow, label: str) -> None:
+def action_press_escape(snap: AgentNow, label: str, *, audit: Callable[[str], str]) -> None:
     """ONE Escape into the agent's pane. Never two: a second one on an idle prompt opens
-    Claude Code's Rewind selector."""
-    from aisquare.core.tmux import TmuxError
+    Claude Code's Rewind selector.
+
+    tmux refusing it is a 409 ``fleet_error`` that did nothing, and stays off the trail. One
+    that timed out (``TmuxTimedOut``) may still land: a wedged server may have the keys
+    queued and run them once it recovers, as the Ctrl-C guard counts one for (round 7, 4/9).
+    It was "nothing was done", unaudited, and the Escape that arrived later stopped the
+    turn; the human's try again sent a second one to the idle prompt, which opened the
+    Rewind selector, and the paste went there (review of #259, round 8, 2/9). So it says
+    the Escape may still arrive, and is audited as ``audit(<its error code>)``.
+    """
+    from aisquare.core.tmux import TmuxError, TmuxTimedOut
     from aisquare.services import fleet as fleet_service
 
     agent = action_pane_agent(snap, label)
     try:
         fleet_service.server_of(agent).send_keys(agent.pane_id, "Escape")
+    except TmuxTimedOut as exc:
+        raise RequestError(
+            409,
+            "fleet_error",
+            f"tmux did not answer in time with Escape for {label}'s pane ({exc}): it may "
+            "still arrive, and stop its turn or answer its prompt No — nothing else was "
+            "done; read its live screen before you try again",
+            audit=audit("fleet_error"),
+        ) from exc
     except TmuxError as exc:
         raise RequestError(
             409,
@@ -784,7 +802,8 @@ def action_dialog_guard(
     ``fleet.ACTIVITY_WINDOW`` after the Escape (:func:`action_after_escape`).
 
     The Escape answers a permission prompt "No", so a refusal after it is audited,
-    as ``audit_start`` and then ``dismissed=yes refused=<error>``.
+    as ``audit_start`` and then ``dismissed=yes refused=<error>``; ``dismissed=maybe`` for
+    an Escape whose send timed out (:func:`action_press_escape`).
     """
     snap = snap if snap is not None else action_snapshot(target, label, pin)
     if snap.status is None or not snap.pane_is_agent or action_at_rest(snap):
@@ -814,7 +833,9 @@ def action_dialog_guard(
             f"showing a prompt; {doing} could answer one — send dismiss_dialog: true to "
             "press Esc (No) first",
         )
-    action_press_escape(snap, label)
+    action_press_escape(
+        snap, label, audit=lambda error: f"{audit_start} dismissed=maybe refused={error}"
+    )
     rest = action_after_escape(action_at_rest)
     with action_audited(lambda error: f"{audit_start} dismissed=yes refused={error}"):
         rested = action_settle(target, label, pin, rest, action_interrupt_wait())
@@ -1135,7 +1156,9 @@ def action_type_now(
         if not remote_needs.needs_at_input_prompt(snap):
             raise RequestError(409, "agent_busy", action_busy_sentence(snap, label))
         return action_paste(snap, label, text, interrupted=False)
-    action_press_escape(snap, label)
+    action_press_escape(
+        snap, label, audit=lambda error: trail(f"delivered=no escape=maybe refused={error}")
+    )
     prompt = action_after_escape(remote_needs.needs_at_input_prompt)
     with action_audited(lambda error: trail(f"delivered=no escape=sent refused={error}")):
         reached = action_settle(target, label, pin, prompt, action_interrupt_wait())

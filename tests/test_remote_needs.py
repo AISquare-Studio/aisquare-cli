@@ -2765,6 +2765,8 @@ class FakeTmux:
         self.started = started
         """When the server started; ``None`` is a start tmux does not report."""
         self.fail = False
+        self.timing_out = False
+        """``send_keys`` times out: a server that did not answer, which may still type them."""
         self.asked: list[str] = []
         """Every pane asked about, once per question."""
         self.typed: list[tuple[str, ...]] = []
@@ -2815,6 +2817,10 @@ class FakeTmux:
             from aisquare.core.tmux import TmuxError
 
             raise TmuxError("no server running on /tmp/tmux-1000/asq")
+        if self.timing_out:
+            from aisquare.core.tmux import TmuxTimedOut
+
+            raise TmuxTimedOut("tmux did not answer within 30s: send-keys")
         self.typed.append(("keys", pane_id, *keys))
 
     def send_literal(self, pane_id: str, text: str) -> None:
@@ -6192,6 +6198,33 @@ def test_tmux_failing_mid_answer_is_said_and_still_on_the_trail(live: Live) -> N
     response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
     assert response.status_code == 503 and response.json()["error"] == "fleet_unavailable"
     assert live.audit()[-1].endswith("enter=False failed"), "part of it may have reached the pane"
+
+
+@pytest.mark.parametrize("timed_out", [True, False])
+def test_an_answer_whose_keys_timed_out_leaves_the_feed_as_an_answered_one(
+    live: Live, monkeypatch: pytest.MonkeyPatch, timed_out: bool
+) -> None:
+    """Review of #259, round 8, 2/9: a send that timed out was a 503, audited, but its card
+    stayed live on every phone, and a second tap typed its digit again after a wedged
+    server ran the first. It leaves the feed as an answered card does; one tmux refused
+    typed nothing, and its card stays to be answered again."""
+    monkeypatch.setattr(remote_needs, "NEEDS_RESCAN_AFTER_ANSWER", 30.0)
+    live.runtime.set_allow_write(True)
+    card = live.card("permission")
+    if timed_out:
+        live.tmux.timing_out = True
+    else:
+        live.tmux.fail = True
+    response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
+    assert (response.status_code, response.json()["error"]) == (503, "fleet_unavailable")
+    assert live.audit()[-1].endswith("enter=False failed")
+    watcher = live.app.kit.lane_state["needs"]
+    if timed_out:
+        assert "may still arrive" in response.json()["message"]
+        assert watcher.needs_lookup(card["id"]) is None
+        assert card["id"] not in [item["id"] for item in live.feed()]
+    else:
+        assert watcher.needs_lookup(card["id"]) is not None
 
 
 def test_the_needs_routes_write_their_audit_lines_off_the_event_loop(

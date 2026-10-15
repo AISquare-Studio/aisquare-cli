@@ -3721,7 +3721,8 @@ def _needs_answer_now(
     one of several calls pending is answered only while the prompt up is still its call's,
     and otherwise is a 409 ``stale``, out of the feed until the next scan. A tmux that fails
     mid-answer is a 503 whose ``audit`` says it was tried, as part of it may have reached
-    the pane.
+    the pane; one that timed out may still type all of it, so its card leaves the feed as
+    an answered one does.
 
     The card leaves ``watcher``'s feed as soon as the keys are typed, here on the write
     thread (:meth:`RemoteNeedsWatcher.needs_answered`). It left once the audit line was written,
@@ -3730,6 +3731,7 @@ def _needs_answer_now(
     second tap typed again, those cards being current with no ``attention`` until the
     agent writes its result (review of #259, remote focus, 2/12).
     """
+    from aisquare.core.tmux import TmuxTimedOut
     from aisquare.services import fleet as fleet_service
     from aisquare.services.remote_server import RequestError, _audit_keys, remote_agent_held
 
@@ -3763,6 +3765,15 @@ def _needs_answer_now(
             raise RequestError(409, "stale", gone, current=[])
         try:
             _needs_send(snap.status.agent, keys, text, enter)
+        except TmuxTimedOut as exc:
+            # Unanswered, not refused: a wedged server may still type it once it recovers, and
+            # a card left live meanwhile typed its digit again (review of #259, round 8, 2/9).
+            watcher.needs_answered(item.id)
+            said = (
+                f"tmux did not answer in time ({exc}): the answer may still arrive — read "
+                f"{label}'s live screen before you answer again"
+            )
+            raise RequestError(503, "fleet_unavailable", said, audit=f"{summary} failed") from None
         except Exception as exc:
             said = f"tmux could not type it: {exc}"
             raise RequestError(503, "fleet_unavailable", said, audit=f"{summary} failed") from None

@@ -29,7 +29,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app as cli
 from aisquare.core.paths import remote_audit_path
 from aisquare.core.store import store_session
-from aisquare.core.tmux import TmuxError
+from aisquare.core.tmux import TmuxError, TmuxTimedOut
 from aisquare.core.workspace import find_project_root, project_id_for
 from aisquare.models import (
     ClaudeAccount,
@@ -709,6 +709,8 @@ class FakePane:
         self.sockets: list[str] = []
         self.failing: set[str] = set()
         """``"paste"`` or a key name: that call raises ``TmuxError``."""
+        self.timing_out: set[str] = set()
+        """A key name: that call raises ``TmuxTimedOut``, a server that did not answer."""
         self.prompt = False
         """A permission prompt is drawn, for the tests that open one: text does nothing in
         its list, Escape answers it "No" and Enter its highlighted "1. Yes"."""
@@ -719,6 +721,8 @@ class FakePane:
         for key in keys:
             if key in self.failing:
                 raise TmuxError(f"send-keys {key}: lost server")
+            if key in self.timing_out:
+                raise TmuxTimedOut("tmux did not answer within 30s: send-keys")
             self.sent.append((pane_id, "key", key))
             self.log.append(f"key {key}")
             if self.prompt and key in ("Escape", "Enter"):
@@ -1401,6 +1405,36 @@ def test_dismiss_dialog_sends_one_escape_then_acts_once_the_dialog_closed(
         "closed: never the project's scan again while the Escape lands"
     )
     assert "dismissed=yes" in phone.audit()[0][1]
+
+
+@pytest.mark.parametrize("timed_out", [True, False])
+@pytest.mark.parametrize("name", PINNED_ACTIONS)
+def test_a_guards_escape_that_timed_out_may_still_land_and_is_on_the_trail(
+    phone: Phone,
+    fleet: FleetCalls,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    name: str,
+    timed_out: bool,
+) -> None:
+    """Review of #259, round 8, 2/9: every ``TmuxError`` was "nothing was done", off the
+    trail, a timeout too, whose keys a wedged server may run once it recovers. One refused
+    did nothing, and says so; one unanswered says it may still arrive, and is audited."""
+    _row(project)
+    needs.dialog = True
+    (pane.timing_out if timed_out else pane.failing).add("Escape")
+    response = phone.post(name, **PINNED, dismiss_dialog=True)
+    assert (response.status_code, response.json()["error"]) == (409, "fleet_error")
+    assert fleet.calls == [] and pane.sent == []
+    said = response.json()["message"]
+    if not timed_out:
+        assert said.endswith("— nothing was done") and phone.audit() == []
+        return
+    assert "it may still arrive" in said and "nothing was done" not in said
+    assert phone.audit() == [
+        (name, f"{_acted_on(name, project)} dismissed=maybe refused=fleet_error")
+    ]
 
 
 @pytest.mark.parametrize("name", PINNED_ACTIONS)
@@ -2140,6 +2174,28 @@ def test_an_interrupt_that_does_not_stop_the_agent_types_nothing(
             "agent/tell",
             f"tell coder-1@{project.id} mode=interrupt delivered=no escape=sent "
             'refused=still_busy text=2ch "hi"',
+        )
+    ]
+
+
+def test_an_interrupts_escape_that_timed_out_types_nothing_and_says_it_may_still_land(
+    phone: Phone, needs: FakeNeeds, pane: FakePane, project: ProjectInfo
+) -> None:
+    """Review of #259, round 8, 2/9: told "nothing was done", the human tried again once tmux
+    recovered and delivered the first Escape, which had stopped the turn: the second one
+    reached the idle prompt and opened the Rewind selector, and the paste went there."""
+    _row(project)
+    needs.state = "working"
+    pane.timing_out.add("Escape")
+    response = phone.post("agent/tell", agent=LABEL, text="hi", mode="interrupt")
+    assert (response.status_code, response.json()["error"]) == (409, "fleet_error")
+    assert "it may still arrive" in response.json()["message"]
+    assert pane.sent == [], "nothing typed"
+    assert phone.audit() == [
+        (
+            "agent/tell",
+            f"tell coder-1@{project.id} mode=interrupt delivered=no escape=maybe "
+            'refused=fleet_error text=2ch "hi"',
         )
     ]
 

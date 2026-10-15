@@ -337,6 +337,36 @@ def test_a_number_the_board_lacks_is_refused_never_looked_for_as_an_id_tail(
                 team_service.find_task(store, ref, here.id)
 
 
+def test_a_task_named_by_its_id_needs_no_board_worked_out(
+    work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claim, close, reopen, release and show worked out the caller's board up front, which
+    runs ``git`` in the current directory, for an id that never needs it: Remote's claim and
+    close, which pass the id they resolved, paid it on every write, and a server whose
+    directory ``fleet reap`` had removed failed them (review of #259, round 13). The board
+    is worked out for a number only."""
+    from aisquare.core import orchestrator
+
+    here = _board(work_dir)
+    task = _add(here, "ship it")
+    looked: list[Path | None] = []
+
+    def gone(cwd: Path | None = None) -> ProjectInfo:
+        looked.append(cwd)
+        raise FileNotFoundError("the current directory was removed")
+
+    monkeypatch.setattr(orchestrator, "team_project", gone)
+    assert team_service.show_task(task.id).id == task.id
+    assert team_service.claim_task(task.id).status == "doing"
+    assert team_service.release_task(task.id).status == "todo"
+    assert team_service.finish_task(task.id).status == "done"
+    assert team_service.reopen_task(task.id, reason="again").status == "todo"
+    assert looked == []
+    with pytest.raises(FileNotFoundError):
+        team_service.show_task("1")  # a number: the board is the directory's
+    assert looked == [None]
+
+
 def test_a_number_never_moves_a_task_on_another_projects_board(
     work_dir: Path,
     other_dir: Path,

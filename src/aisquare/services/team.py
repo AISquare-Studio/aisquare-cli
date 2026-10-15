@@ -409,11 +409,15 @@ def task_label(task: TeamTask) -> str:
     return f"#{task.number} {task.id}" if task.number is not None else task.id
 
 
-def find_task(store: ContextStore, ref: str, board_id: str) -> TeamTask | None:
+def find_task(store: ContextStore, ref: str, board_id: str | Callable[[], str]) -> TeamTask | None:
     """The task ``ref`` names, a board number first: ``12`` or ``#12`` on ``board_id``.
 
     ``board_id`` is the CALLER's board (:func:`_caller_board_id`): numbers are per
-    project, so ``7`` means this board's seventh task, never another's. A number the
+    project, so ``7`` means this board's seventh task, never another's. Given as a
+    callable, it is asked only for a number: working the board out runs ``git`` in the
+    current directory, which an id never needs, and Remote's claim and close, which pass
+    the id they resolved, paid it on every write, and failed in a directory since removed
+    (review of #259, round 13). A number the
     board does not have, ``12`` or ``#12``, raises :class:`NoSuchTaskNumber` and is never
     looked for as an id: the tail lookup (``get_task``) spans every board, so ``12``
     would close whichever task's id happens to end in ``12``, here or on another
@@ -424,9 +428,10 @@ def find_task(store: ContextStore, ref: str, board_id: str) -> TeamTask | None:
     number = task_number_of(ref)
     if number is None:
         return store.get_task(ref)
-    task = store.task_by_number(board_id, number)
+    board = board_id() if callable(board_id) else board_id
+    task = store.task_by_number(board, number)
     if task is None:
-        raise NoSuchTaskNumber(number, _board_of(store, board_id).name)
+        raise NoSuchTaskNumber(number, _board_of(store, board).name)
     return task
 
 
@@ -1129,7 +1134,7 @@ def show_task(ref: str, *, session_ref: str | None = None, cwd: Path | None = No
     _require_enabled()
     with store_session() as store:
         session = _resolve_session(store, session_ref)
-        task = find_task(store, ref, _caller_board_id(store, session, cwd))
+        task = find_task(store, ref, lambda: _caller_board_id(store, session, cwd))
         if task is None:
             raise KeyError(ref)
         return task
@@ -1193,7 +1198,7 @@ def claim_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
     _DELIVERY.set(None)
     with store_session() as store:
         session = _resolve_session(store, session_ref)
-        task = find_task(store, ref, _caller_board_id(store, session, None))
+        task = find_task(store, ref, lambda: _caller_board_id(store, session, None))
         if task is None:
             raise KeyError(ref)
         claimant = session.id if session else "cli"
@@ -1228,7 +1233,7 @@ def _finish_task(
     _DELIVERY.set(None)
     with store_session() as store:
         session = _resolve_session(store, session_ref)
-        task = find_task(store, ref, _caller_board_id(store, session, None))
+        task = find_task(store, ref, lambda: _caller_board_id(store, session, None))
         if task is None:
             raise KeyError(ref)
         updated = store.set_task_status(task.id, status)
@@ -1278,7 +1283,7 @@ def reopen_task(ref: str, *, reason: str, session_ref: str | None = None) -> Tea
     _DELIVERY.set(None)
     with store_session() as store:
         session = _resolve_session(store, session_ref)
-        task = find_task(store, ref, _caller_board_id(store, session, None))
+        task = find_task(store, ref, lambda: _caller_board_id(store, session, None))
         if task is None:
             raise KeyError(ref)
         reopened = store.reopen_task(task.id)
@@ -1375,7 +1380,7 @@ def release_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
     _DELIVERY.set(None)
     with store_session() as store:
         session = _resolve_session(store, session_ref)
-        task = find_task(store, ref, _caller_board_id(store, session, None))
+        task = find_task(store, ref, lambda: _caller_board_id(store, session, None))
         if task is None:
             raise KeyError(ref)
         released = store.release_task(task.id)

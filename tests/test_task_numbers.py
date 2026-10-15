@@ -26,6 +26,7 @@ from aisquare.core.store import SCHEMA_VERSION, open_store, store_session
 from aisquare.models import ProjectInfo, TeamTask
 from aisquare.services import mcp_server
 from aisquare.services import team as team_service
+from tests.projects import add_project
 
 CODER = "bbbb2222-0000-0000-0000-000000000000"
 
@@ -35,6 +36,7 @@ def work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     work = tmp_path / "repo"
     work.mkdir()
     monkeypatch.chdir(work)
+    add_project(work)
     return work
 
 

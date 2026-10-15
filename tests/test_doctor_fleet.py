@@ -45,6 +45,7 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from aisquare.services.onboarding import fix_commands
 from tests.fsperms import can_symlink
+from tests.projects import add_project
 
 # --- fakes and seeds -------------------------------------------------------------------
 
@@ -1037,6 +1038,7 @@ def test_doctor_cwd_selects_the_project_for_the_project_scoped_checks(
     monkeypatch.setattr(snapshot_core, "can_pack", lambda: True)
     # Activate the orchestrator in `there` only, with an off-ladder live session.
     monkeypatch.setenv("AISQUARE_ROLE", "runner")
+    add_project(there)  # a role session joins a board only where the project was added
     team_service.hook_session_start("sess-there-1", there, "startup", model="claude-haiku-4-5")
     _ready_snapshot(_seed(there).id)
 
@@ -1063,6 +1065,7 @@ def test_doctor_without_cwd_means_the_process_cwd(
     work.mkdir()
     monkeypatch.chdir(work)
     monkeypatch.setenv("AISQUARE_ROLE", "runner")
+    add_project(work)
     team_service.hook_session_start("sess-work-1", work, "startup", model="claude-haiku-4-5")
 
     implicit = _by_name(diagnostics.doctor())["agent harness"]

@@ -14,6 +14,7 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.core import harness
+from tests.projects import add_project
 
 # --- profiles & resolution ------------------------------------------------------
 
@@ -361,6 +362,7 @@ def test_session_start_captures_model_and_effort(
     monkeypatch.setenv("AISQUARE_ROLE", "coder")
     work = tmp_path / "repo"
     work.mkdir()
+    add_project(work)  # a role session joins a board only where it was added
     from aisquare.services import team as team_service
 
     board = team_service.hook_session_start(
@@ -376,6 +378,7 @@ def test_board_flags_an_off_ladder_session(
     monkeypatch.setenv("AISQUARE_ROLE", "coder")
     work = tmp_path / "repo"
     work.mkdir()
+    add_project(work)  # a role session joins a board only where it was added
     from aisquare.services import team as team_service
 
     board = team_service.hook_session_start(
@@ -665,6 +668,7 @@ def test_doctor_harness_check_warns_on_live_mismatch(
 
     work = tmp_path / "repo-doctor"
     work.mkdir()
+    add_project(work)  # a role session joins a board only where it was added
     monkeypatch.setenv("AISQUARE_ROLE", "runner")
     monkeypatch.chdir(work)
     team_service.hook_session_start("sess-doc-1", work, "startup", model="claude-haiku-4-5")
@@ -679,6 +683,7 @@ def test_hook_cli_captures_model_and_effort(
     """The real `hook session-start` entrypoint parses model + effort.level."""
     work = tmp_path / "repo-hookcli"
     work.mkdir()
+    add_project(work)  # a role session joins a board only where it was added
     monkeypatch.setenv("AISQUARE_ROLE", "coder")
     runner, app = _cli()
     payload = json.dumps(
@@ -708,6 +713,7 @@ def test_reconnect_without_model_keeps_the_stored_one(
     """COALESCE upsert: a payload lacking model must not erase a known one."""
     work = tmp_path / "repo-coalesce"
     work.mkdir()
+    add_project(work)  # a role session joins a board only where it was added
     monkeypatch.setenv("AISQUARE_ROLE", "coder")
     from aisquare.services import team as team_service
 
@@ -727,6 +733,7 @@ def test_prompt_join_path_captures_model(
     """A session that joins on prompt-submit still gets a model chip."""
     work = tmp_path / "repo-join"
     work.mkdir()
+    add_project(work)  # a role session joins a board only where it was added
     monkeypatch.setenv("AISQUARE_ROLE", "coder")
     from aisquare.services import team as team_service
 

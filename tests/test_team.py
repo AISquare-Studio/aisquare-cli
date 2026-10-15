@@ -24,6 +24,12 @@ PLANNER = "aaaa1111-0000-0000-0000-000000000000"
 CODER = "bbbb2222-0000-0000-0000-000000000000"
 
 
+# The board in a directory nobody added, with ``[projects] capture`` on as these were
+# written; several build their store by hand, so none may be opened first to add one.
+# A board where nothing was added with capture off: tests/test_project_capture_off.py.
+pytestmark = pytest.mark.usefixtures("project_capture")
+
+
 @pytest.fixture(autouse=True)
 def work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     work = tmp_path / "repo"

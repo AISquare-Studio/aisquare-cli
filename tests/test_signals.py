@@ -17,6 +17,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core.store import store_session
 from aisquare.services import team as team_service
+from tests.projects import add_project
 
 CODER = "bbbb2222-0000-0000-0000-000000000000"
 
@@ -26,6 +27,7 @@ def work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     work = tmp_path / "repo"
     work.mkdir()
     monkeypatch.chdir(work)
+    add_project(work)
     return work
 
 

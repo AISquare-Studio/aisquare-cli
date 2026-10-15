@@ -236,8 +236,9 @@ def test_an_unknown_project_raises_a_lookup_error(two_projects: tuple[str, str])
 
 
 @pytest.fixture
-def captured(two_projects: tuple[str, str], tmp_path: Path) -> ProjectInfo:
-    """A directory the hooks captured (#139): registered, never added, never listed."""
+def captured(two_projects: tuple[str, str], tmp_path: Path, project_capture: None) -> ProjectInfo:
+    """A directory the hooks captured (#139): registered, never added, never listed. Made
+    with ``[projects] capture`` on, as 0.8.0 made them; off, they are what it left behind."""
     root = tmp_path / "secret-captured"
     root.mkdir()
     project = ProjectInfo(id=project_id_for(find_project_root(root)), root=root, linked_repos=[])

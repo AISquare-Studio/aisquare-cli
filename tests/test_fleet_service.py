@@ -650,9 +650,11 @@ def repo(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def project(repo: Path) -> ProjectInfo:
+    """Added on purpose, as a fleet's project is: with ``[projects] capture`` off, the
+    default, a hook or a board write in a directory nobody added records nothing."""
     info = team_project(repo)
     with store_session() as store:
-        store.ensure_project(info)
+        store.onboard_project(info)
     return info
 
 
@@ -663,7 +665,7 @@ def plain_project(tmp_path: Path) -> ProjectInfo:
     path.mkdir()
     info = team_project(path)
     with store_session() as store:
-        store.ensure_project(info)
+        store.onboard_project(info)
     return info
 
 
@@ -1847,11 +1849,15 @@ def test_a_refused_spawn_leaves_the_registration_as_it_found_it(
 
 
 def test_a_codename_is_not_an_onboarding(
-    tmux: FakeTmux, project: ProjectInfo, tmp_path: Path
+    tmux: FakeTmux, repo: Path, tmp_path: Path, project_capture: None
 ) -> None:
     """Review of #168, round 2: ``ensure_codename`` onboarded, so ``fleet attach`` in a
     captured directory listed it and was then refused — it had no session to attach
-    to. A codename needs a live row, so a directory never seen is captured for it."""
+    to. A codename needs a live row, so a directory never seen is captured for it,
+    while ``[projects] capture`` is on."""
+    project = team_project(repo)
+    with store_session() as store:
+        store.ensure_project(project)  # a prompt there: captured
     with pytest.raises(FleetError, match="nothing to attach to"):
         fleet_service.attach_argv(project)
     unseen = team_project(tmp_path / "unseen")
@@ -7538,7 +7544,7 @@ def test_shutdown_clears_the_pause_by_the_target_id_not_a_redirected_board(
     hub_root.mkdir()
     hub = team_project(hub_root)
     with store_session() as store:
-        store.ensure_project(hub)
+        store.onboard_project(hub)
     fleet_service.pause(hub)
     monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub_root))  # cwd resolution now points at A
 
@@ -13360,7 +13366,7 @@ def test_an_agent_whose_hooks_run_on_a_hubs_board_is_never_asked_for_its_screen(
     now = datetime.now(tz=UTC)
     assert agent.session_id is not None
     with store_session() as store:
-        store.ensure_project(hub)
+        store.onboard_project(hub)
         store.upsert_session(
             TeamSession(
                 id=agent.session_id, project_id=hub.id, role=agent.role,

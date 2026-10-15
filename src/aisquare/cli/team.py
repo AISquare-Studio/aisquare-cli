@@ -38,6 +38,7 @@ from aisquare.models import ProjectInfo, TeamEvent, TeamSession, TeamTask
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops
+from aisquare.services import project as project_service
 from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
 from aisquare.services.team import DeliveryUnconfirmedError, TeamDisabledError
@@ -109,6 +110,7 @@ SessionRef = Annotated[
 # family — none of them may reach the user as a traceback.
 STORE_ERRORS = (
     TeamDisabledError,
+    project_service.NotAdded,
     KeyError,
     AmbiguousIdError,
     DeliveryUnconfirmedError,
@@ -120,6 +122,8 @@ def _fail_team(exc: Exception, ref: str | None = None) -> NoReturn:
     """Translate service errors into the shared CLI error contract."""
     if isinstance(exc, TeamDisabledError):
         fail(str(exc), error="team_disabled")
+    if isinstance(exc, project_service.NotAdded):
+        fail(str(exc), error="not_added", ref=str(exc.project.root), detail=str(exc))
     if isinstance(exc, AmbiguousIdError):
         fail(f"'{exc.ref}' is ambiguous — use more characters", error="ambiguous_id", ref=exc.ref)
     if isinstance(exc, DeliveryUnconfirmedError):
@@ -562,6 +566,18 @@ def spawn(
                 f"Set a different one with --bin, {_bin_env_hint(role_name)}, or "
                 f"aisquare team bind {role_name} --bin <command>.",
                 error="agent_binary_missing",
+            )
+        # The session joins this project's board, as `aisquare launch`'s does, and with
+        # `[projects] capture` off a board needs its project added: started here, the
+        # spawn adds it (`team on`), fail-open as launch's is. A printed line is run
+        # later, or never, so printing adds nothing.
+        try:
+            team_service.activate()
+        except TeamDisabledError:
+            pass
+        except Exception as exc:
+            typer.echo(
+                f"board: context.db unreadable ({exc}) — launching without a board row", err=True
             )
         env = dict(os.environ)
         env["AISQUARE_ROLE"] = role_name

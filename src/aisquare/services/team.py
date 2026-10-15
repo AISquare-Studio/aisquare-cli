@@ -322,9 +322,17 @@ def _require_enabled() -> None:
         raise TeamDisabledError()
 
 
-def _project(store: ContextStore, cwd: Path | None) -> ProjectInfo:
+def _project(store: ContextStore, cwd: Path | None, *, write: bool = False) -> ProjectInfo:
+    """The board ``cwd`` resolves to, captured as #139 did while ``[projects] capture`` is on.
+
+    Off, nothing is written: a read gets the project as resolved, whose board is empty
+    when nobody added it, and a ``write`` there is refused
+    (:class:`~aisquare.services.project.NotAdded`) — the board of a directory no list
+    shows is not where anyone meant to post.
+    """
     project = orchestrator.team_project(cwd)
-    store.ensure_project(project)
+    if not project_service.tracked(store, project) and write:
+        raise project_service.NotAdded(project)
     return project
 
 
@@ -463,8 +471,10 @@ def _board_named(store: ContextStore, project: ProjectInfo) -> _Board:
     return _Board(id=project.id, name=project_service.display_name(named), root=project.root)
 
 
-def _board(store: ContextStore, session: TeamSession | None, cwd: Path | None) -> _Board:
-    """The board an attributed command delivers to.
+def _board(
+    store: ContextStore, session: TeamSession | None, cwd: Path | None, *, write: bool = False
+) -> _Board:
+    """The board an attributed command delivers to (``write``: :func:`_project`'s).
 
     With ``--as`` the SESSION's registered board wins — a session legitimately
     works across many worktrees and subdirectories, so cwd is a hint, not an
@@ -474,7 +484,7 @@ def _board(store: ContextStore, session: TeamSession | None, cwd: Path | None) -
     session's board produces a warning, never a reroute.
     """
     if session is None:
-        return _board_named(store, _project(store, cwd))
+        return _board_named(store, _project(store, cwd, write=write))
     board = _board_of(store, session.project_id)
     cwd_board = orchestrator.team_project(cwd)
     if cwd_board.id == board.id:
@@ -858,7 +868,9 @@ def set_signal(
         # reported B (review of #121, round 8). `_board_of` also skips
         # `ensure_project`, so a forgotten project's tombstone is not revived.
         board = (
-            _board_of(store, project_id) if project_id is not None else _board(store, session, cwd)
+            _board_of(store, project_id)
+            if project_id is not None
+            else _board(store, session, cwd, write=True)
         )
         state, prev, event = _write_signal(store, board, session, name, value)
     _record_delivery(event, board)  # the receipt for this write; `state.seq` is already the row's
@@ -1025,7 +1037,7 @@ def add_note(
     _DELIVERY.set(None)
     with store_session() as store:
         session = _resolve_session(store, session_ref)
-        board = _board(store, session, cwd)
+        board = _board(store, session, cwd, write=True)
         task_id: str | None = None
         if task_ref is not None:
             task = find_task(store, task_ref, board.id)
@@ -1080,7 +1092,7 @@ def add_task(
     _DELIVERY.set(None)
     with store_session() as store:
         session = _resolve_session(store, session_ref)
-        board = _board(store, session, cwd)
+        board = _board(store, session, cwd, write=True)
         resolved_needs: list[str] = []
         for ref in needs or []:
             needed = find_task(store, ref, board.id)
@@ -1332,7 +1344,7 @@ def next_task(
         raise ValueError("--claim only applies to todo tasks")
     with store_session() as store:
         session = _resolve_session(store, session_ref)
-        board = _board(store, session, cwd)
+        board = _board(store, session, cwd, write=claim)
         claimant = session.id if session else "cli"
         lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
         event = None
@@ -1500,12 +1512,15 @@ def hook_session_start(
 
     Silent (returns ``""``) unless the orchestrator is enabled and this project has
     been activated — or the session was launched with ``AISQUARE_ROLE``,
-    which activates it.
+    which activates it. With ``[projects] capture`` off, silent too in a project
+    nobody added, role or not: ``launch`` adds its own (``team on``), a fleet spawn its.
     """
     if not orchestrator.team_enabled():
         return ""
     with store_session() as store:
-        project = _project(store, cwd)
+        project = orchestrator.team_project(cwd)
+        if not project_service.tracked(store, project):
+            return ""  # capture is off and nobody added it: no session row, no board (#139)
         role = orchestrator.env_role()
         if not store.team_active(project.id) and role is None:
             return ""
@@ -1569,7 +1584,9 @@ def hook_prompt_heartbeat(
     with store_session() as store:
         session = store.get_session(session_id)
         if session is None:
-            project = _project(store, cwd)
+            project = orchestrator.team_project(cwd)
+            if not project_service.tracked(store, project):
+                return ""  # as at session start: nothing on a board nobody added
             role = orchestrator.env_role()
             if not store.team_active(project.id) and role is None:
                 return ""

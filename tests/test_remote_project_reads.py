@@ -377,6 +377,7 @@ def test_under_a_hub_each_projects_board_frame_is_the_hubs_board_named_for_that_
     two_projects: tuple[ProjectInfo, ProjectInfo],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    project_capture: None,  # a hub nobody added takes writes only with capture on
 ) -> None:
     """r4 2/9, on a real store: with ``AISQUARE_TEAM_HUB`` set, every project's board is the
     hub's, as ``asq board`` reads it there, and the board names the hub's project. The page
@@ -645,9 +646,12 @@ def test_a_task_number_is_read_on_one_board_never_as_an_id_tail(
 
 
 @pytest.fixture
-def captured(two_projects: tuple[ProjectInfo, ProjectInfo], tmp_path: Path) -> ProjectInfo:
+def captured(
+    two_projects: tuple[ProjectInfo, ProjectInfo], tmp_path: Path, project_capture: None
+) -> ProjectInfo:
     """A directory the hooks captured (#139), with a board of its own: never added, never
-    listed, and so no phone's to reach."""
+    listed, and so no phone's to reach. Made with ``[projects] capture`` on, as 0.8.0
+    made them; off, they are what it left behind."""
     root = tmp_path / "secret-captured"
     root.mkdir()
     project = ProjectInfo(id=project_id_for(find_project_root(root)), root=root, linked_repos=[])
@@ -734,6 +738,7 @@ def test_a_hubs_board_is_reached_through_every_project_on_it(
     two_projects: tuple[ProjectInfo, ProjectInfo],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    project_capture: None,  # a hub nobody added takes writes only with capture on
 ) -> None:
     """Under ``AISQUARE_TEAM_HUB`` every project's board is the hub's, a directory nobody
     added: its tasks and sessions are a phone's to reach, as its Board tab reads them."""

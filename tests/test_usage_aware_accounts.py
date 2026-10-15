@@ -125,7 +125,7 @@ def work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ProjectInfo:
     monkeypatch.chdir(root)
     project = team_project(root)
     with store_session() as store:
-        store.ensure_project(project)
+        store.onboard_project(project)  # added: the hooks record nowhere else (#139)
     return project
 
 

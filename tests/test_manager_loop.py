@@ -44,6 +44,7 @@ from aisquare.models import TeamEvent, TeamSession, TeamTask
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from aisquare.services.fleet import FLEET_ROLES
+from tests.projects import add_project
 
 MANAGER = "aaaa1111-0000-0000-0000-000000000000"
 CODER = "bbbb2222-0000-0000-0000-000000000000"
@@ -63,6 +64,7 @@ def work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     work = tmp_path / "repo"
     work.mkdir()
     monkeypatch.chdir(work)
+    add_project(work)
     return work
 
 
@@ -1174,6 +1176,7 @@ def test_a_numbered_seat_gets_its_roles_standing_cycle_and_ladder(
     monkeypatch.setenv("AISQUARE_ROLE", "coder1")
     work = tmp_path / "seat-repo"
     work.mkdir()
+    add_project(work)
 
     board = team_service.hook_session_start(
         "5eaa0000-0000-0000-0000-000000000001",
@@ -1198,6 +1201,7 @@ def test_a_role_that_is_not_a_seat_of_a_real_role_gets_no_cycle(
     monkeypatch.setenv("AISQUARE_ROLE", "codr1")
     work = tmp_path / "typo-repo"
     work.mkdir()
+    add_project(work)
 
     board = team_service.hook_session_start(
         "5eaa0000-0000-0000-0000-000000000002",

@@ -44,6 +44,7 @@ from aisquare.core import credentials as credentials_store
 from aisquare.core import paths
 from aisquare.core.store import is_locked_error
 from aisquare.models import TaskStatus, TeamSession
+from aisquare.services import project as project_service
 from aisquare.services import team as team_service
 from aisquare.services.team import ClaimLostError, DeliveryUnconfirmedError, TeamDisabledError
 
@@ -103,7 +104,9 @@ def _ensure_virtual_session() -> str:
     Gated like every other orchestrator entry point: the master switch must be on and
     the project must already be activated (``aisquare serve`` activates its
     project explicitly at startup). Without the gate, one read-only MCP call
-    against a never-opted-in directory would permanently activate it.
+    against a never-opted-in directory would permanently activate it. With
+    ``[projects] capture`` off it must be added too, which both of those do: a board
+    left from before on a captured row is refused, not written to.
     """
     from datetime import UTC, datetime
 
@@ -119,8 +122,9 @@ def _ensure_virtual_session() -> str:
                 f"the agent orchestrator is not active for {project.root} — start `aisquare serve` "
                 "from the project (it activates it), or run `aisquare team on` there"
             )
+        if not project_service.tracked(store, project):
+            raise project_service.NotAdded(project)  # capture off, and nobody added it
         session_id = client_session_id(project.id)
-        store.ensure_project(project)
         now = datetime.now(tz=UTC)
         store.upsert_session(
             TeamSession(
@@ -155,7 +159,7 @@ def _guard(fn: Any, *args: Any, **kwargs: Any) -> str:
         raise _tool_error(
             "error: the agent orchestrator is disabled on the host (AISQUARE_TEAM=0)"
         ) from exc
-    except ClaimLostError as exc:
+    except (ClaimLostError, project_service.NotAdded) as exc:
         raise _tool_error(f"error: {exc}") from exc
     except DeliveryUnconfirmedError as exc:
         # The #20 contract crosses the remote surface too: an unconfirmed

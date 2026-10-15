@@ -489,6 +489,16 @@ class _ClaudeLogin:
     same way (:meth:`AccountsView._login_polled`)."""
 
 
+def _poll_sign_in(login: _ClaudeLogin) -> tuple[_ClaudeLogin, ClaudeIdentity | Exception | None]:
+    """Whether ``login``'s sign-in landed, off the UI thread: the window it was asked for,
+    with the identity, ``None`` for not yet, or what the read raised. Caught here, so that a
+    failure names its window as an answer does (:meth:`AccountsView._login_polled`)."""
+    try:
+        return login, accounts_service.sign_in_landed(login.account, since=login.since)
+    except Exception as exc:
+        return login, exc
+
+
 def _hooks_did_not_install(error: object) -> str:
     """What the page says of a slot signed in whose hooks did not install: after its sign-in
     (``complete_sign_in``), or after a cancel that found its login landed (``settle_sign_in``)."""
@@ -1688,7 +1698,7 @@ class AccountsView(Vertical):
         if login is None or (self._login_poll is not None and not self._login_poll.is_finished):
             return
         self._login_poll = self.run_worker(
-            lambda: (login, accounts_service.sign_in_landed(login.account, since=login.since)),
+            lambda: _poll_sign_in(login),
             name=LOGIN_POLL_WORKER,
             group=LOGIN_POLL_WORKER,
             thread=True,
@@ -1701,20 +1711,23 @@ class AccountsView(Vertical):
 
         A poll that raised (a ``.claude.json`` it may not read, or one half written) is said,
         once a window: read as "not landed" without a word, a user who had signed in watched
-        "waiting for the log-in below…" until they cancelled (review of #259, round 16)."""
+        "waiting for the log-in below…" until they cancelled (review of #259, round 16). Said
+        of the window it was asked for, which the failure names as an answer does
+        (:func:`_poll_sign_in`): a failed worker named none, and a poll asked for a window
+        cancelled since was blamed on the one open when it failed (round 17)."""
         result = worker.result if state is WorkerState.SUCCESS else None
-        polled, landed = result if isinstance(result, tuple) else (None, None)
+        polled, answer = result if isinstance(result, tuple) else (None, None)
         login = self.login
         if login is None or (polled is not None and polled is not login):
             return
-        if isinstance(landed, ClaudeIdentity):
-            self._finish_login(landed.email)
+        if isinstance(answer, ClaudeIdentity):
+            self._finish_login(answer.email)
             return
-        if state is WorkerState.ERROR and not login.poll_failed:
+        if isinstance(answer, Exception) and not login.poll_failed:
             login.poll_failed = True
             self._notice(
                 f"⚠ {self._name_of(login.account)}: could not tell whether the log-in landed "
-                f"({worker.error}) — still waiting; finish it below, or Cancel",
+                f"({answer}) — still waiting; finish it below, or Cancel",
                 "warn",
             )
         facts = login.server.pane_facts(login.pane_id)

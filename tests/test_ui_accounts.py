@@ -1605,6 +1605,72 @@ def test_a_poll_that_raises_is_said_once_and_the_window_waits_on(
     assert waiting
 
 
+def test_a_poll_that_raises_is_said_of_the_window_it_was_asked_for(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review of #259, round 17: a poll that raised returned nothing that named its window,
+    so the stale-answer guard, which held for an answer, did not hold for a failure. A poll
+    asked for window A that raised after A was cancelled and window B opened set B's
+    ``poll_failed`` and said "could not tell whether the log-in landed" of B's account, and
+    B's own failure later was never said. A failure names its window as an answer does."""
+    _script_claude_sign_in(monkeypatch, tmp_path, lands=False)
+    asked = threading.Event()
+    gate = threading.Event()
+
+    def unreadable_once_let_go(
+        acct: ClaudeAccount, *, since: str | None = None
+    ) -> ClaudeIdentity | None:
+        asked.set()
+        gate.wait(5)
+        raise PermissionError(13, "Permission denied", ".claude.json")
+
+    alive = tmux_core.PaneFacts(
+        pane_id="%7",
+        width=80,
+        height=24,
+        cursor_x=0,
+        cursor_y=0,
+        cursor_visible=True,
+        alternate_on=False,
+        history_size=0,
+        dead=False,
+        dead_status=None,
+        in_mode=False,
+        current_command="claude",
+        title="",
+    )
+    monkeypatch.setattr(accounts_service, "sign_in_landed", unreadable_once_let_go)
+    monkeypatch.setattr(TmuxServer, "pane_facts", lambda self, pane_id: alive)
+    monkeypatch.setattr(accounts_view, "LOGIN_POLL_SECONDS", 3600.0)  # ticks taken by hand
+
+    async def go(pilot: Pilot[None]) -> tuple[str, bool, str, bool]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await pilot.click("#claude-add")
+        await settle(app)
+        view._notice("before")
+        view._poll_login()  # asked for this window, A
+        assert await asyncio.to_thread(asked.wait, 5)
+        first = view.login
+        assert first is not None
+        view.login = dataclasses.replace(first)  # A gone, B open, while A's poll runs
+        gate.set()
+        await settle(app)
+        during = notice(view)
+        b = view.login
+        assert b is not None
+        b_marked = b.poll_failed
+        view._poll_login()  # B's own poll fails: said, of B
+        await settle(app)
+        return during, b_marked, notice(view), b.poll_failed
+
+    during, b_marked, after, b_failed = drive(go)
+    assert during == "before" and not b_marked, "A's failure said nothing of B"
+    said = " ".join(after.split())
+    assert said.startswith("⚠ account 2: could not tell whether the log-in landed"), said
+    assert b_failed
+
+
 def test_a_log_in_over_a_login_the_keychain_will_not_show_opens_no_window(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

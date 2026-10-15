@@ -13189,6 +13189,11 @@ def test_the_fleets_git_runs_no_hook_of_the_repository(tmp_path: Path) -> None:
     """Review r11 of #113, finding 4: a hook that lives in the tree (``core.hooksPath`` into
     ``.husky/``) is the sandboxed agent's to write, and the fleet's own ``git worktree add``,
     outside any sandbox, ran its ``post-checkout``."""
+    if os.name == "nt":
+        # A POSIX hook script: Git for Windows' sh reads the marker's backslashed path as
+        # escapes (CI on e9ee3576). That no git aisquare runs has a hook of the
+        # repository's holds structurally there too (test_ci_snapshot's argv guard).
+        pytest.skip("a POSIX hook script")
     repo = tmp_path / "repo"
     repo.mkdir()
     git = ["git", "-C", str(repo), "-c", "user.email=a@b", "-c", "user.name=t"]

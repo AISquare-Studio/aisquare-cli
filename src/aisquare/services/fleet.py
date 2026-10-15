@@ -76,7 +76,7 @@ from aisquare.core.tmux import (
     WindowInfo,
 )
 from aisquare.core.version import __version__
-from aisquare.core.workspace import active_project
+from aisquare.core.workspace import active_project, git_argv
 from aisquare.models import (
     CLOSED_STATUSES,
     ClaudeAccount,
@@ -1337,7 +1337,7 @@ def _git(cwd: Path, *args: str) -> _GitResult:
     """
     try:
         completed = subprocess.run(
-            ["git", "-c", f"core.hooksPath={os.devnull}", "-C", str(cwd), *args],
+            git_argv("-C", str(cwd), *args),
             capture_output=True,
             text=True,
             encoding="utf-8",

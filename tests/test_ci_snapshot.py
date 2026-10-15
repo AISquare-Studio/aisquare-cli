@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import os
+import re
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -317,3 +318,46 @@ def test_a_trace_id_that_cannot_be_a_ref_still_yields_the_object(tmp_path: Path)
     assert snapshot is not None
     assert snapshot.ref is None
     assert len(snapshot.object_id) == 40
+
+
+def test_the_snapshots_git_runs_no_hook_of_the_repository(tmp_path: Path) -> None:
+    """Review r12 of #113, finding 2: the snapshot's ``stash create`` runs from the agent's
+    hooks outside any sandbox, and with ``core.hooksPath`` in the tree (husky's layout) it
+    ran the tree's ``post-index-change``, which a sandboxed agent may write."""
+    if os.name == "nt":
+        pytest.skip("a POSIX hook script")
+    root = repo(tmp_path / "r")
+    hooks = root / ".husky"
+    hooks.mkdir()
+    marker = tmp_path / "ran"
+    hook = hooks / "post-index-change"
+    hook.write_text(f"#!/bin/sh\necho x >> {marker}\n", encoding="utf-8")
+    hook.chmod(0o755)
+    git(root, "config", "core.hooksPath", ".husky")
+    (root / "tracked.txt").write_text("edited\n", encoding="utf-8")
+
+    snapshot = ci_snapshot.capture(root, TRACE)
+
+    assert snapshot is not None and snapshot.dirty
+    assert not marker.exists(), "the snapshot ran the tree's hook"
+    git(root, "-c", "user.name=t", "-c", "user.email=t@t", "stash", "create")
+    assert marker.exists(), "the repository's own git still runs it"
+
+
+def test_every_git_aisquare_runs_is_its_own_hookless_one() -> None:
+    """Review r12 of #113, finding 2: aisquare runs git through ``workspace.git_argv`` alone
+    (no hook, no fsmonitor of the repository's), never a ``"git"`` argv of its own; the
+    one other ``"git"`` argv is a command line printed for the user to run."""
+    source = Path(__file__).resolve().parents[1] / "src" / "aisquare"
+    argv = re.compile(r"""[\[(]\s*["']git["']\s*,""")
+    found = [
+        f"{path.relative_to(source).as_posix()}: {line.strip()}"
+        for path in sorted(source.rglob("*.py"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if argv.search(line) and not line.lstrip().startswith("#")
+    ]
+    assert found == [
+        'core/workspace.py: return ["git", *GIT_OWN, *args]',
+        "services/install_route.py: "
+        'pull = command_line(["git", "-C", route.source or ".", "pull"])',
+    ], found

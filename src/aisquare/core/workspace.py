@@ -9,6 +9,7 @@ A project's id is a stable hash of its resolved root path.
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 from pathlib import Path
 
@@ -71,6 +72,21 @@ def marks_project_root(directory: Path) -> bool:
     return False
 
 
+#: What every git aisquare itself runs is given first: no hook of the repository's runs
+#: (``core.hooksPath`` pointed at nothing) and no file-system monitor command
+#: (``core.fsmonitor``). A hook in the tree (``.husky/``, ``.githooks/``) or a monitor
+#: command is the sandboxed agent's to write, and aisquare runs git outside its sandbox: the
+#: agent's own hooks (``services.ci_snapshot``'s ``git stash create``), the fleet's worktrees
+#: (review r11 of #113, finding 4; r12, finding 2). Git config the repository includes
+#: from a file in its own tree is the tree's, as it is for every git run there.
+GIT_OWN = ("-c", f"core.hooksPath={os.devnull}", "-c", "core.fsmonitor=false")
+
+
+def git_argv(*args: str) -> list[str]:
+    """``git`` with :data:`GIT_OWN` and then ``args``: the one way aisquare runs git."""
+    return ["git", *GIT_OWN, *args]
+
+
 def git_common_root(start: Path) -> Path | None:
     """The principal repository root for ``start``, resolving git worktrees.
 
@@ -85,7 +101,7 @@ def git_common_root(start: Path) -> Path | None:
     """
     try:
         result = subprocess.run(
-            ["git", "-C", str(start), "rev-parse", "--git-common-dir"],
+            git_argv("-C", str(start), "rev-parse", "--git-common-dir"),
             capture_output=True,
             text=True,
             encoding="utf-8",

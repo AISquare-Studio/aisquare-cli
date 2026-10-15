@@ -2646,6 +2646,32 @@ def test_ngrok_back_on_a_new_link_is_news_and_a_restart_failing_alike_is_said_on
     ]
 
 
+def test_a_wall_clock_stepped_back_holds_no_revive() -> None:
+    """Review of #259, round 8, 4/9: the once-a-minute throttle compared wall-clock times. A
+    clock stepped back two hours after a revive held every check under the minute for two
+    hours: the server up, ngrok dead, no phone able to reach it. It counts monotonic time."""
+    clock = [datetime(2026, 9, 11, 18, 0, tzinfo=UTC)]
+    ticks = [100.0]
+    made = [FakeTunnel(8750, url=f"https://{n}.ngrok-free.app", failure=None) for n in range(3)]
+    controller = RemoteController(
+        server=fake_server(),
+        tunnel_factory=lambda port: made.pop(0),
+        now=lambda: clock[0],
+        ticks=lambda: ticks[0],
+    )
+    controller.turn_on()
+    assert controller._waiter is not None
+    controller._waiter.join(5)
+    assert controller.revive_tunnel_if_dead() is True  # a FakeTunnel never runs: it died
+    controller._waiter.join(5)
+    clock[0] -= timedelta(hours=2)
+    ticks[0] += 30
+    assert controller.revive_tunnel_if_dead() is False, "inside the minute"
+    ticks[0] += 30
+    assert controller.revive_tunnel_if_dead() is True, "a minute on, whatever the wall says"
+    controller._waiter.join(5)
+
+
 class SlowServer(FakeServer):
     """A server whose stop takes until the test says: uvicorn waiting for a needs scan in
     flight and the push sender, ngrok given its seconds to exit."""

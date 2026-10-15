@@ -214,7 +214,8 @@ class RemoteController:
     """Turn Remote on and off, and answer what the modal paints.
 
     ``server`` is :mod:`aisquare.services.remote_server`, ``tunnel_factory``
-    builds the ngrok subprocess wrapper, ``now`` is the clock — all three are
+    builds the ngrok subprocess wrapper, ``now`` is the clock and ``ticks`` the
+    monotonic one (``time.monotonic``; a test's ``now`` alone drives both) — all
     seams for the tests. Every time here carries its offset; a naive one from
     ``now`` is read as local time. ``port`` is :data:`PORT_ENV`'s when not given.
     """
@@ -226,7 +227,8 @@ class RemoteController:
         tunnel_factory: TunnelFactory = ngrok_without_its_api,
         dist_dir: Path | None = None,
         port: int | None = None,
-        now: Callable[[], datetime] = _utc_now,
+        now: Callable[[], datetime] | None = None,
+        ticks: Callable[[], float] | None = None,
         state: RemoteState | None = None,
         url_timeout: float = 15.0,
     ) -> None:
@@ -234,7 +236,8 @@ class RemoteController:
         self._tunnel_factory = tunnel_factory
         self._dist_dir = dist_dir
         self._port, self._port_problem = (port, None) if port is not None else _panel_port()
-        self._now = now
+        self._now = now or _utc_now
+        self._ticks = ticks or (time.monotonic if now is None else lambda: now().timestamp())
         self._url_timeout = url_timeout
         self.state = state if state is not None else load_remote_state()
         self.info: remote_server.RemoteInfo | None = None
@@ -1325,8 +1328,10 @@ class RemoteController:
 
     REVIVE_SECONDS = 60.0
     """A dead tunnel is started again at most this often."""
-    _revived_at: datetime | None = None
-    """When :meth:`revive_tunnel_if_dead` last started ngrok."""
+    _revived_at: float | None = None
+    """When :meth:`revive_tunnel_if_dead` last started ngrok, in ``ticks``: on the wall clock,
+    one stepped back two hours held every revive for those two hours, the server up and no
+    phone able to reach it (review of #259, round 8, 4/9)."""
     _revived_tunnel: NgrokTunnel | None = None
     """The tunnel the last revive started: its URL says ngrok was restarted, and whether the
     link changed (:meth:`_adopt_tunnel_url`)."""
@@ -1372,10 +1377,8 @@ class RemoteController:
             and dead.error in LASTING_TUNNEL_ERRORS
         ):
             return False
-        now = self._now()
-        if self._revived_at is not None and now - self._revived_at < timedelta(
-            seconds=self.REVIVE_SECONDS
-        ):
+        now = self._ticks()
+        if self._revived_at is not None and now - self._revived_at < self.REVIVE_SECONDS:
             return False
         self._revived_at = now
         tunnel = self._watched_tunnel()

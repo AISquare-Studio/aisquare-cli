@@ -446,7 +446,8 @@ class NeedsSources:
     time bounds what the store walks back through to find none."""
     pane_output: Callable[[FleetAgent], datetime | None] = _needs_no_output
     """When the row's pane last printed (``#{window_activity}``); ``None``: tmux would not
-    say. Asked only of an agent whose sub-agent waits on a prompt (:func:`needs_from_agent`)."""
+    say. Asked only of an agent whose sub-agent waits on a prompt, or whose question or plan
+    waits beside a call the screen cannot name (:func:`needs_from_agent`)."""
     pane_screen: Callable[[FleetAgent], list[str] | None] = _needs_no_screen
     """The rows the row's pane shows now (``capture-pane``); ``None``: tmux would not say.
     Asked only of an agent with more than one call pending, whose prompt on screen may be
@@ -878,7 +879,9 @@ def needs_from_agent(
        twice (review of #259, round 9, 4/8). Once the agent wrote after the turn's first
        notice, a later one's words are not on the board, and nothing tells a form asked
        then from its tool's own prompt: it reads as the prompt, whose digits would go into
-       the form. Nor with no call up: more than one pending, and the screen names none;
+       the form. Nor with no call up: more than one pending, and the screen names none,
+       which is rule 8's, and with a question or a plan among them is rule 8's before any
+       notice too, once a dialog is drawn (:func:`_needs_unnamed_dialog`);
     6. no pending tool, and the newest record an interruption later than the session's last
        hook, or one only Claude Code's own records follow (a local or ``!`` command run at
        the prompt since, which fires no hook either) → ``interrupted``, whatever the row
@@ -909,8 +912,8 @@ def needs_from_agent(
     3 to 6 and 9 cannot hold. ``exited`` and ``unknown`` agents need nothing here; ``crashed``,
     ``manager_down`` and ``fleet_down`` speak for them. ``manager_live`` and ``accounts``
     decide only when a push may go out. ``pane_output`` says when the agent's pane last
-    printed, asked only of a sub-agent's prompt; ``pane_screen`` is what it shows, asked
-    only with more than one call pending.
+    printed, asked only of a sub-agent's prompt or a dialog no call is named for;
+    ``pane_screen`` is what it shows, asked only with more than one call pending.
 
     A held row got rules 3 to 10 from its board while that was fresh: permission and
     question cards, pushed, whose every answer was a 409 ``not_agent`` (its pane id is
@@ -968,15 +971,18 @@ def needs_from_agent(
         ]
     pending = _needs_pending(tail, agent)
     attention = _needs_attention(status)
+    asking = any(tool.name in _NEEDS_ASKING_TOOLS for tool in pending)
+    screen = _needs_screen_once(pane_screen)
     # The screen is read only where a card could come of it: not for calls at work, unasked.
-    asked = attention or any(tool.name in _NEEDS_ASKING_TOOLS for tool in pending)
-    call = _needs_prompt_call(pending, pane_screen) if asked else None
+    call = _needs_prompt_call(pending, screen) if attention or asking else None
     if call is not None and call.name == "AskUserQuestion":
         return [_needs_question_item(call, project=project, agent=agent, name=name, now=now)]
     if call is not None and call.name == "ExitPlanMode":
         return [_needs_plan_item(call, project=project, agent=agent, name=name, now=now)]
     if pending:
         if not attention:
+            if asking and call is None and _needs_unnamed_dialog(screen, session, pane_output, now):
+                return [_needs_dialog_item(status, attention_event, None, project=project, now=now)]
             return []  # a tool running, or the 6 s before Claude Code's notification
         notice = _needs_notice(attention_event, tail, session)
         if notice is not None:
@@ -1478,6 +1484,47 @@ def _needs_drawn_since_notice(
         return False
     output = None if pane_output is None else pane_output()
     return output is not None and output > session.last_seen_at and now - output < _NOTICE_WAIT
+
+
+def _needs_screen_once(
+    pane_screen: Callable[[], Sequence[str] | None] | None,
+) -> Callable[[], Sequence[str] | None] | None:
+    """``pane_screen``, asked of tmux the first time it is called and remembered: one
+    derivation reads the screen once, however many of its rules look at it."""
+    if pane_screen is None:
+        return None
+    read: list[Sequence[str] | None] = []
+
+    def once() -> Sequence[str] | None:
+        if not read:
+            read.append(pane_screen())
+        return read[0]
+
+    return once
+
+
+def _needs_unnamed_dialog(
+    screen: Callable[[], Sequence[str] | None] | None,
+    session: TeamSession | None,
+    pane_output: Callable[[], datetime | None] | None,
+    now: datetime,
+) -> bool:
+    """A question or a plan is pending beside a call the screen cannot name, no notice came, and
+    a dialog is up, which waits for the human: rule 8's card, before any notice.
+
+    Its own dialog is all an ``AskUserQuestion`` or an ``ExitPlanMode`` needs (rules 3 and
+    4), but beside a call with no mark (a ``Task``, a ``Read``, an MCP tool) the screen
+    names none of them (:func:`_needs_on_screen`), and rule 8 waited for a notice that
+    Claude Code may never send: no card at all (review of #259, round 9, 5/8). Only while a
+    dialog is drawn (:func:`_needs_prompt_region`), or the screen cannot be read: a question
+    waiting behind a command at work is not up yet. And not in the seconds a notice may
+    still be on its way (:func:`_needs_drawn_since_notice`), which would make it rule 8's
+    card under another id, pushed twice.
+    """
+    rows = None if screen is None else screen()
+    if rows is not None and _needs_prompt_region(rows) is None:
+        return False
+    return not _needs_drawn_since_notice(session, pane_output, now)
 
 
 def _needs_prompt_call(

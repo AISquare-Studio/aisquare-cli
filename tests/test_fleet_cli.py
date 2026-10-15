@@ -48,6 +48,7 @@ from aisquare.services.fleet import (
     SpawnReceipt,
     StopReceipt,
     TellResult,
+    Typed,
 )
 from tests.rendered import plain as _plain
 
@@ -621,15 +622,22 @@ def test_tell_to_a_busy_agent_is_marked_as_a_note_not_a_delivery(
     assert tell.kwargs == {"sender": None}  # no --as: the user spoke
 
 
-def test_tell_json(runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch) -> None:
-    _install(monkeypatch, "tell", TellResult(typed="no", how="filed a board note"))
+@pytest.mark.parametrize("typed", ["yes", "no", "maybe"])
+def test_tell_json(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch, typed: Typed
+) -> None:
+    """``typed`` is in it: a tell tmux did not answer in time read ``delivered: false`` as a
+    refusal does, and a script that retried on it typed the text twice (review of #259,
+    round 11, 9/13)."""
+    _install(monkeypatch, "tell", TellResult(typed=typed, how="filed a board note"))
 
     result = runner.invoke(app, ["--json", "fleet", "tell", "coder-auth", "ship it"])
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout) == {
         "label": "coder-auth",
-        "delivered": False,
+        "delivered": typed == "yes",
+        "typed": typed,
         "how": "filed a board note",
     }
 

@@ -437,7 +437,11 @@ def tell(
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
     if get_state().json_output:
-        typer.echo(json.dumps({"label": label, "delivered": result.delivered, "how": result.how}))
+        # `typed` tells "may still arrive" (`maybe`) from "not typed" (`no`), which `delivered`
+        # alone reads the same: a caller retrying on `false` typed it twice (review of #259,
+        # round 11, 9/13).
+        told = {"label": label, "delivered": result.delivered, "typed": result.typed}
+        typer.echo(json.dumps({**told, "how": result.how}))
         return
     mark = "✓" if result.delivered else "→"
     stdout_console().print(f"{mark} {label}: {result.how}")

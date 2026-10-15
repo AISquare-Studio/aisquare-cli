@@ -133,9 +133,10 @@ MINTS: dict[tuple[str, str], str | None] = {
 #: ``callee`` → the sites that may call it in ``services/fleet.py``.
 CALLERS: dict[str, frozenset[str]] = {
     # Recorded values (a record's place, a session the index holds) to an address.
-    "_address": frozenset({"resolve_place", "_indexed_sessions", "_legacy_panes"}),
-    # Session names tmux itself listed, for `shutdown --all`'s sweep.
-    "_listed_session": frozenset({"_swept_sessions"}),
+    "_address": frozenset({"resolve_place", "_indexed_sessions", "_legacy_panes", "_running_ids"}),
+    # Session names tmux itself listed, for `shutdown --all`'s sweep; or the census holds,
+    # whose panes alone are matched in it (`_running_ids`).
+    "_listed_session": frozenset({"_swept_sessions", "_running_ids"}),
 }
 
 _TARGETS = frozenset({"pane_id", "session", "name", "old", "recorded", "path"})

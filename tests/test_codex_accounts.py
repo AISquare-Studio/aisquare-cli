@@ -1180,7 +1180,7 @@ def _running_on_screen(monkeypatch: pytest.MonkeyPatch) -> None:
     outside any sandbox (a sandboxed one is refused tmux)."""
     from aisquare.services import fleet
 
-    def observe(placements: Any) -> dict[str, Any]:
+    def observe(placements: Any, also: Any = ()) -> dict[str, Any]:
         return {
             placement.row.id: fleet._PaneView(False, None, "codex", None)
             for placement in placements

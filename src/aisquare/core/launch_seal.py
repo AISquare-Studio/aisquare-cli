@@ -73,9 +73,12 @@ of its instructions through its sandbox helper, and where bwrap cannot bring up 
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import tempfile
-from contextlib import suppress
+import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -83,6 +86,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from aisquare.core import orchestrator, paths
 from aisquare.core.atomic import write_replacing
+from aisquare.core.locking import lock_exclusive, unlock
 from aisquare.models import LaunchSpec
 
 DIR_NAME = "launch-seals"
@@ -185,14 +189,29 @@ class SessionPlace(BaseModel):
     """When it was recorded: a server that started later holds none of it."""
 
 
+class WindowEntry(BaseModel):
+    """A window a spawn of the project made, for which row, as tmux answered the spawner:
+    how the fleet tells which of the project's rows run from the panes alone, whatever
+    their ``ended_at`` says (review r9 of #113, findings 5 and 6)."""
+
+    row_id: str
+    tmux_socket: str
+    socket_path: str | None = None
+    session_id: str
+    pane_id: str
+    created_at: datetime
+
+
 class ProjectSessions(BaseModel):
-    """The sessions a project's spawns made, kept beside the launch records, read-only to
-    an agent's sandbox: which sessions are the project's, never worked out from its rows'
-    ``ended_at`` or age, store columns (review r8 of #113, findings 2 and 4)."""
+    """The sessions a project's spawns made, and the windows they made in them, kept beside
+    the launch records, read-only to an agent's sandbox: which sessions are the project's
+    and which of its rows run, never worked out from its rows' ``ended_at`` or age, store
+    columns (review r8 of #113, findings 2 and 4; r9, findings 5 and 6)."""
 
     version: int = VERSION
     project_id: str
     sessions: list[SessionPlace] = Field(default_factory=list)
+    windows: list[WindowEntry] = Field(default_factory=list)
 
 
 class LegacyCensus(BaseModel):
@@ -426,67 +445,173 @@ def _project_path(project_id: str) -> Path:
     return seals_dir() / f"project-{name}.json"
 
 
-def project_sessions(project_id: str) -> list[SessionPlace]:
-    """The sessions the project's spawns made (:class:`ProjectSessions`); none when none
-    were recorded or what was cannot be read. Never raises."""
+def _index(project_id: str) -> ProjectSessions:
+    """The project's sessions and windows as written; empty when none were or what was
+    cannot be read. Never raises."""
     try:
         kept = ProjectSessions.model_validate_json(
             _project_path(project_id).read_text(encoding="utf-8")
         )
     except (OSError, UnicodeDecodeError, ValidationError):
-        return []
-    return kept.sessions if kept.project_id == project_id else []
+        return ProjectSessions(project_id=project_id)
+    return kept if kept.project_id == project_id else ProjectSessions(project_id=project_id)
 
 
-def add_project_session(project_id: str, place: SessionPlace) -> str | None:
-    """Record that a spawn of ``project_id`` made (or joined) the session ``place``:
-    ``None`` when recorded, otherwise why not. An entry for the same id on the same
-    socket is replaced (a newer server numbers its sessions from ``$0`` again)."""
+def project_sessions(project_id: str) -> list[SessionPlace]:
+    """The sessions the project's spawns made (:class:`ProjectSessions`)."""
+    return _index(project_id).sessions
+
+
+def project_windows(project_id: str) -> list[WindowEntry]:
+    """The windows the project's spawns made (:class:`WindowEntry`)."""
+    return _index(project_id).windows
+
+
+def _update_index(
+    project_id: str, change: Callable[[ProjectSessions], ProjectSessions]
+) -> str | None:
+    """``change`` the project's index as it stands, under its lock (:func:`_locked`), and
+    write it back: ``None`` when done, otherwise why not. Read and replaced unlocked, two
+    spawns at once (or a spawn during ``shutdown``'s pruning) lost one's session (review
+    r9 of #113, finding 12)."""
     why = ensure_dir()
     if why is not None:
         return why
-    key = (place.tmux_socket, place.socket_path, place.session_id)
-    kept = [
-        session
-        for session in project_sessions(project_id)
-        if (session.tmux_socket, session.socket_path, session.session_id) != key
-    ]
-    body = ProjectSessions(project_id=project_id, sessions=[*kept, place])
     path = _project_path(project_id)
     try:
-        write_replacing(path, body.model_dump_json(indent=1) + "\n", keep_mode=False)
+        with _locked(path):
+            kept = _index(project_id)
+            changed = change(kept)
+            if changed != kept:
+                write_replacing(path, changed.model_dump_json(indent=1) + "\n", keep_mode=False)
     except OSError as exc:
         return f"{path} could not be written ({exc.strerror or exc})"
     return None
 
 
-def keep_project_sessions(project_id: str, sessions: list[SessionPlace]) -> None:
-    """Keep only ``sessions`` of the project's (the ones tmux still holds). Never raises."""
-    if sessions == project_sessions(project_id):
-        return
-    body = ProjectSessions(project_id=project_id, sessions=sessions)
-    with suppress(OSError):
-        write_replacing(
-            _project_path(project_id), body.model_dump_json(indent=1) + "\n", keep_mode=False
+def add_project_session(
+    project_id: str, place: SessionPlace, window: WindowEntry | None = None
+) -> str | None:
+    """Record that a spawn of ``project_id`` made (or joined) the session ``place``, and the
+    ``window`` it made there: ``None`` when recorded, otherwise why not. An entry for the
+    same id on the same socket is replaced (a newer server numbers its sessions from
+    ``$0`` again)."""
+    key = (place.tmux_socket, place.socket_path, place.session_id)
+
+    def add(kept: ProjectSessions) -> ProjectSessions:
+        sessions = [
+            session
+            for session in kept.sessions
+            if (session.tmux_socket, session.socket_path, session.session_id) != key
+        ]
+        windows = [
+            entry for entry in kept.windows if window is None or entry.row_id != window.row_id
+        ]
+        return kept.model_copy(
+            update={
+                "sessions": [*sessions, place],
+                "windows": [*windows, *([window] if window is not None else [])],
+            }
         )
+
+    return _update_index(project_id, add)
+
+
+def forget_project_sessions(
+    project_id: str, sessions: set[tuple[str, str]], windows: set[tuple[str, str]]
+) -> None:
+    """Drop the project's ``sessions`` and ``windows`` (each by its socket's name and tmux's
+    id for it) that tmux no longer holds, from the index as it stands now, so neither list
+    grows with every spawn. Never raises."""
+
+    def forget(kept: ProjectSessions) -> ProjectSessions:
+        return kept.model_copy(
+            update={
+                "sessions": [
+                    session
+                    for session in kept.sessions
+                    if (session.tmux_socket, session.session_id) not in sessions
+                ],
+                "windows": [
+                    entry
+                    for entry in kept.windows
+                    if (entry.tmux_socket, entry.session_id) not in sessions
+                    and (entry.tmux_socket, entry.pane_id) not in windows
+                ],
+            }
+        )
+
+    _update_index(project_id, forget)
 
 
 def rename_project_session(project_id: str, session_id: str, socket: str, name: str) -> None:
     """The project's session ``session_id`` on ``socket`` is called ``name`` now. Never
     raises; a write that fails keeps the old name, which reports alone use."""
-    sessions = project_sessions(project_id)
-    renamed = [
-        session.model_copy(update={"name": name})
-        if (session.session_id, session.tmux_socket) == (session_id, socket)
-        else session
-        for session in sessions
-    ]
-    if renamed != sessions:
-        body = ProjectSessions(project_id=project_id, sessions=renamed)
-        with suppress(OSError):
-            write_replacing(
-                _project_path(project_id), body.model_dump_json(indent=1) + "\n", keep_mode=False
-            )
+
+    def rename(kept: ProjectSessions) -> ProjectSessions:
+        return kept.model_copy(
+            update={
+                "sessions": [
+                    session.model_copy(update={"name": name})
+                    if (session.session_id, session.tmux_socket) == (session_id, socket)
+                    else session
+                    for session in kept.sessions
+                ]
+            }
+        )
+
+    _update_index(project_id, rename)
+
+
+_LOCK_WAIT_S = 5.0
+
+
+@contextmanager
+def _locked(path: Path) -> Iterator[None]:
+    """Hold ``<path>.lock`` exclusively for the block, waiting at most :data:`_LOCK_WAIT_S`
+    (``core.locking``: non-blocking, polled, dropped by the OS if the holder dies); raises
+    ``OSError`` when it cannot be had. Only processes outside the sandbox take it (the
+    directory is read-only in it)."""
+    lock = path.with_name(f"{path.name}.lock")
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        deadline = time.monotonic() + _LOCK_WAIT_S
+        while True:
+            try:
+                lock_exclusive(fd)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.02)
+        try:
+            yield
+        finally:
+            with suppress(OSError):
+                unlock(fd)
+    finally:
+        os.close(fd)
+
+
+def _rewrite(agent_id: str, change: Callable[[LaunchRecord], LaunchRecord | None]) -> None:
+    """``change`` the row ``agent_id``'s record as it stands, under its lock, and write it
+    back when it changed. The spawner (a re-picked label) and the agent's own hook (its
+    session) both rewrite the whole record from two processes, and each lost the other's
+    field (review r9 of #113, finding 13). A legacy record is the census's and is left
+    alone. Never raises."""
+    with suppress(OSError), _locked(_path(agent_id)):
+        record = read(agent_id)
+        if not isinstance(record, LaunchRecord) or record.legacy:
+            return
+        changed = change(record)
+        if changed is not None and changed != record:
+            write(changed)
+
+
+def relabel(agent_id: str, label: str) -> None:
+    """The row ``agent_id`` was stored under ``label`` (re-picked on a collision): its
+    record says so, with whatever its hook has added since. Never raises."""
+    _rewrite(agent_id, lambda record: record.model_copy(update={"label": label}))
 
 
 def observe(
@@ -518,13 +643,17 @@ def observe(
     agent_id = orchestrator.env_fleet_agent()
     if agent_id is None:
         return
-    record = read(agent_id)
-    if not isinstance(record, LaunchRecord) or record.legacy or record.agent != agent:
-        # A legacy row's record is the census's, never written out: its replay is fresh.
-        return
-    kept = record.session
-    if (kept is None and own is True) or (kept is not None and kept.id == session_id):
-        _with_session(record, facts)
+
+    def add(record: LaunchRecord) -> LaunchRecord | None:
+        if record.agent != agent:
+            return None
+        kept = record.session
+        if (kept is None and own is True) or (kept is not None and kept.id == session_id):
+            return _with_session(record, facts)
+        return None
+
+    # A legacy row's record is the census's, never written out: its replay is fresh.
+    _rewrite(agent_id, add)
 
 
 def adopted(agent_id: str, session_id: str) -> None:
@@ -534,12 +663,11 @@ def adopted(agent_id: str, session_id: str) -> None:
     facts = _SEEN.get(session_id)
     if facts is None:
         return
-    record = read(agent_id)
-    if isinstance(record, LaunchRecord) and not record.legacy:
-        _with_session(record, facts)
+    _rewrite(agent_id, lambda record: _with_session(record, facts))
 
 
-def _with_session(record: LaunchRecord, facts: SessionFacts) -> None:
+def _with_session(record: LaunchRecord, facts: SessionFacts) -> LaunchRecord:
+    """``record`` holding ``facts``, merged with what it held of the same session."""
     kept = record.session
     if kept is not None and kept.id == facts.id:
         # A later hook of the same session may know less (a prompt names no home).
@@ -553,9 +681,7 @@ def _with_session(record: LaunchRecord, facts: SessionFacts) -> None:
             # does not move it.
             started_at=kept.started_at or facts.started_at,
         )
-    if facts == kept:
-        return
-    write(record.model_copy(update={"session": facts}))
+    return record.model_copy(update={"session": facts})
 
 
 def native_id(value: str | None) -> str | None:

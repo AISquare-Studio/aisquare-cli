@@ -2475,7 +2475,8 @@ def test_tell_whose_enter_did_not_go_through_leaves_the_text_at_its_prompt_and_f
     said "tmux could not type it" and filed the text as a note too. The agent read the note
     at its next prompt, and the text left unsent in its input box went out with whatever was
     typed there next. It says the text is at its prompt, and files nothing. One whose Enter
-    timed out may still send it, and is ``maybe``."""
+    timed out may still send it, and is ``maybe``. Round 12, 2/9: one whose Enter was refused
+    is ``unsent``, not ``no``, the word a caller that retries on "not typed" retries on."""
     agent = _coder(project)
     _board_session(agent, "waiting")
     tmux.set_command(agent.pane_id, "claude")
@@ -2487,7 +2488,7 @@ def test_tell_whose_enter_did_not_go_through_leaves_the_text_at_its_prompt_and_f
 
     monkeypatch.setattr(tmux, "send_keys", enter_fails)
     result = fleet_service.tell(project, "coder-1", "please rebase")
-    assert result.typed == ("maybe" if timed_out else "no")
+    assert result.typed == ("maybe" if timed_out else "unsent")
     assert result.how.startswith("pasted it at its prompt, but "), result.how
     assert "tmux could not type it" not in result.how and "board note" not in result.how
     if timed_out:

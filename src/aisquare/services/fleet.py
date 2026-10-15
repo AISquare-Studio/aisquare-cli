@@ -255,15 +255,21 @@ class SpawnReceipt:
     is in ``notes`` too; a prompt typed past the wait is typed, and is not here."""
 
 
-Typed = Literal["yes", "no", "maybe"]
-"""How a write into an agent's pane ended (:class:`PaneWrite`): the word an audit line says."""
+Typed = Literal["yes", "no", "unsent", "maybe"]
+"""How a write into an agent's pane ended (:class:`PaneWrite`, :class:`TellResult`): the word
+an audit line says. ``yes``, all of it went through; ``no``, tmux refused it and typed
+nothing; ``unsent``, it is at the agent's prompt but its Enter did not go through, so an
+Enter sends it; ``maybe``, tmux did not answer in time, and it may still arrive. ``unsent``
+was ``no``, and a caller retrying on ``no`` pasted a second copy beside the first, both
+submitted by the next Enter (review of #259, round 12, 2/9)."""
 
 
 @dataclass(frozen=True)
 class TellResult:
     """How a message reached (or did not reach) an agent: ``typed`` as :class:`PaneWrite` says
-    it, ``yes`` once its text and its Enter went through; ``maybe``, tmux did not answer in
-    time with one of them, which may still arrive. One field for the three, as on
+    it, ``yes`` once its text and its Enter went through; ``unsent``, its text is at the
+    agent's prompt and its Enter was refused; ``maybe``, tmux did not answer in time with one
+    of them, which may still arrive. One field for them all, as on
     :class:`PaneWrite`: ``delivered`` and a ``maybe`` beside it could say "delivered, maybe"
     (review of #259, round 11, 13/13)."""
 
@@ -385,7 +391,7 @@ def pasted_unsent(entered: PaneWrite, label: str, *, press: str, put: str = "pas
         how = entered.late(label, then=", and send it", again="press Enter")
         return TellResult("maybe", f"{put} it at its prompt, but {how}")
     return TellResult(
-        "no",
+        "unsent",
         f"{put} it at its prompt, but tmux could not press Enter ({entered.error}) — {press} "
         "to send it",
     )

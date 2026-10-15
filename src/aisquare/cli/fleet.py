@@ -443,7 +443,8 @@ def tell(
         told = {"label": label, "delivered": result.delivered, "typed": result.typed}
         typer.echo(json.dumps({**told, "how": result.how}))
         return
-    mark = "✓" if result.delivered else "→"
+    # `→` is a note filed; text at its prompt unsent, or on its way, is neither (round 12, 2/9).
+    mark = {"yes": "✓", "no": "→"}.get(result.typed, "…")
     stdout_console().print(f"{mark} {label}: {result.how}")
 
 

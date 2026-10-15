@@ -275,11 +275,13 @@ aisquare fleet tell coder-auth "use the existing JWT helper, do not add a depend
 
 Types the text into the agent — **only** when it is *waiting* and its pane is
 alive. Otherwise the message is filed as a board note addressed to that agent,
-and the output says which happened (`✓` typed, `→` noted). Never interrupts an
+and the output says which happened (`✓` typed, `→` noted, `…` neither yet: the
+line says what is at its prompt or on its way). Never interrupts an
 agent that is working or sitting on a permission prompt. Takes `--as SESSION`.
-Under `--json`, `typed` is `yes`, `no` or `maybe` beside `delivered`: `maybe` when
-tmux did not answer in time with the text or its Enter, which may still arrive, so
-read the agent's pane before you tell it again.
+Under `--json`, `typed` is `yes`, `no`, `unsent` or `maybe` beside `delivered`:
+`unsent` when the text is at its prompt and tmux refused its Enter (press Enter in
+its pane to send it), `maybe` when tmux did not answer in time with the text or its
+Enter, which may still arrive. Neither is to be told again: read the agent's pane.
 
 ### `fleet stop`
 

@@ -622,7 +622,24 @@ def test_tell_to_a_busy_agent_is_marked_as_a_note_not_a_delivery(
     assert tell.kwargs == {"sender": None}  # no --as: the user spoke
 
 
-@pytest.mark.parametrize("typed", ["yes", "no", "maybe"])
+@pytest.mark.parametrize("typed", ["unsent", "maybe"])
+def test_tell_neither_typed_nor_noted_is_not_marked_as_a_note(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch, typed: Typed
+) -> None:
+    """Review of #259, round 12, 2/9: text pasted at its prompt with its Enter refused, or one
+    tmux did not answer in time with, printed `→`, which says "noted", where no note was
+    filed: the line says what is at its prompt."""
+    how = "pasted it at its prompt, but tmux could not press Enter (refused)"
+    _install(monkeypatch, "tell", TellResult(typed=typed, how=how))
+
+    result = runner.invoke(app, ["fleet", "tell", "coder-auth", "ship it"])
+
+    assert result.exit_code == 0, result.output
+    assert f"… coder-auth: {how}" in _plain(result.stdout)
+    assert "→" not in result.stdout and "✓" not in result.stdout
+
+
+@pytest.mark.parametrize("typed", ["yes", "no", "unsent", "maybe"])
 def test_tell_json(
     runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch, typed: Typed
 ) -> None:

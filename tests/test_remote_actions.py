@@ -2602,7 +2602,9 @@ def test_an_enter_that_fails_after_the_paste_is_a_200_that_says_it_was_not_sent(
         "pasted it at its prompt, but tmux could not press Enter (send-keys Enter: lost "
         "server) — press Enter on the pad to send it"
     )
-    assert phone.audit()[0][1].startswith(f"tell coder-1@{project.id} mode=prompt delivered=no")
+    # Round 12, 2/9: `unsent`, not `no`, the word for text that never reached the pane.
+    assert response.json()["typed"] == "unsent"
+    assert phone.audit()[0][1].startswith(f"tell coder-1@{project.id} mode=prompt delivered=unsent")
 
 
 @pytest.mark.parametrize(

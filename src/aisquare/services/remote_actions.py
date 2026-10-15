@@ -1102,7 +1102,8 @@ def action_paste(
     where each typed newline would submit one. The paste is a single tmux call,
     so a paste that tmux refused typed nothing, and is a 409. An Enter that fails
     leaves the text unsent at the prompt. That is a 200 with ``delivered: false``
-    that says so, because text reached a live agent: the audit line records it, and
+    that says so (``typed: unsent``), because text reached a live agent: the audit line
+    records it (``delivered=unsent``), and
     the page keeps the card. An Enter that timed out may still send it, and is not
     advice to press Enter on the pad (``fleet.pasted_unsent``): the trail says
     ``delivered=maybe``.

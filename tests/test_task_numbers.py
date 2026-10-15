@@ -338,6 +338,34 @@ def test_a_number_names_the_task_on_the_callers_board_first(
     assert f"no task #7 on this board ({work_dir.name})" in said.stderr
 
 
+def test_a_refusal_names_the_board_by_its_nickname_as_every_list_does(
+    work_dir: Path, runner: CliRunner
+) -> None:
+    """Review of #259, round 14: a project nicknamed "Billing" is "Billing" in the sidebar,
+    ``project list`` and ``fleet ls``, and its refusals named its folder: "no task #99 on
+    this board (repo)", "no agent 'coder-9' in repo". They name it as the lists do."""
+    from aisquare.services import fleet as fleet_service
+    from aisquare.services import project as project_service
+
+    here = _board(work_dir)
+    with store_session() as store:
+        here = store.onboard_project(here)
+    project_service.set_nickname(here, "Billing")
+
+    with store_session() as store, pytest.raises(team_service.NoSuchTaskNumber) as refused:
+        team_service.find_task(store, "#99", here.id)
+    assert str(refused.value) == "no task #99 on this board (Billing)"
+    said = runner.invoke(app, ["task", "show", "#7"])  # cwd is `here`
+    assert said.exit_code == 1 and "no task #7 on this board (Billing)" in said.stderr
+    with store_session() as store:
+        assert team_service._board(store, None, work_dir).name == "Billing"  # receipts
+    with store_session() as store:
+        stored = store.get_project(here.id)
+    assert stored is not None
+    with pytest.raises(fleet_service.FleetError, match=r"no agent 'coder-9' in Billing"):
+        fleet_service.restart(stored, "coder-9")
+
+
 def _tailed(project: ProjectInfo, key: str, tail: str) -> TeamTask:
     """A task whose id ends in ``tail``: what a number used to tail-match (review of #261)."""
     now = datetime.now(tz=UTC)

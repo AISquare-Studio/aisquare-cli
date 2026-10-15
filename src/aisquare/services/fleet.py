@@ -84,6 +84,7 @@ from aisquare.models import (
 from aisquare.services import auto_mode, explainability_ops
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
+from aisquare.services import project as project_service
 
 FLEET_ROLES: tuple[str, ...] = ("manager", "coder", "tester", "reviewer", "validator", "ui-tester")
 """The fleet's own roles (§3.3). Any harness or ``team bind`` role is accepted too."""
@@ -768,7 +769,9 @@ def _now() -> datetime:
 
 
 def _name(project: ProjectInfo) -> str:
-    return project.root.name or project.id
+    """How a refusal or a note names ``project``: as every list does
+    (``project.display_name``: its nickname, else its directory, else its id)."""
+    return project_service.display_name(project)
 
 
 # --- names (§5.7) -------------------------------------------------------------------

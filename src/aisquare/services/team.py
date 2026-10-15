@@ -42,6 +42,7 @@ from aisquare.models import (
     TeamTask,
 )
 from aisquare.services import distill as distill_service
+from aisquare.services import project as project_service
 
 #: The fail-open reads of the fleet row say here what they swallowed. Nothing
 #: in the CLI configures logging, so a WARNING reaches stderr through the
@@ -386,7 +387,9 @@ def _resolve_session(store: ContextStore, ref: str | None) -> TeamSession | None
 
 @dataclass(frozen=True)
 class _Board:
-    """Where a command delivers, and how to talk about it in receipts."""
+    """Where a command delivers, and how to talk about it in receipts: ``name`` is the
+    project's as every list names it (``project.display_name``: its nickname, else its
+    directory, else its id), from its stored row."""
 
     id: str
     name: str
@@ -446,8 +449,18 @@ def _caller_board_id(store: ContextStore, session: TeamSession | None, cwd: Path
 def _board_of(store: ContextStore, project_id: str) -> _Board:
     """The board a known project id names (for task-ref commands)."""
     project = store.get_project(project_id)
-    name = (project.root.name if project is not None else "") or project_id
-    return _Board(id=project_id, name=name, root=project.root if project is not None else None)
+    if project is None:
+        return _Board(id=project_id, name=project_id, root=None)
+    return _Board(id=project_id, name=project_service.display_name(project), root=project.root)
+
+
+def _board_named(store: ContextStore, project: ProjectInfo) -> _Board:
+    """``project``'s board, named by its stored row: one worked out from a directory
+    (``orchestrator.team_project``) carries no nickname. Named by its folder, a refusal
+    said "no task #99 on this board (api-v2)" of the project every list calls "Billing"
+    (review of #259, round 14)."""
+    named = store.get_project(project.id) or project
+    return _Board(id=project.id, name=project_service.display_name(named), root=project.root)
 
 
 def _board(store: ContextStore, session: TeamSession | None, cwd: Path | None) -> _Board:
@@ -461,14 +474,13 @@ def _board(store: ContextStore, session: TeamSession | None, cwd: Path | None) -
     session's board produces a warning, never a reroute.
     """
     if session is None:
-        project = _project(store, cwd)
-        return _Board(id=project.id, name=project.root.name or project.id, root=project.root)
+        return _board_named(store, _project(store, cwd))
     board = _board_of(store, session.project_id)
     cwd_board = orchestrator.team_project(cwd)
     if cwd_board.id == board.id:
         return board
     warning = (
-        f"cwd resolves to board {cwd_board.root.name or cwd_board.id}, but session "
+        f"cwd resolves to board {_board_named(store, cwd_board).name}, but session "
         f"{short_id(session.id)} belongs to {board.name} — delivered to {board.name}"
     )
     return _Board(id=board.id, name=board.name, root=board.root, warning=warning)
@@ -599,7 +611,7 @@ def activate(cwd: Path | None = None) -> ProjectInfo:
         event = None
         if not store.team_active(project.id):
             event = _emit(store, project.id, "activate", "agent orchestrator activated")
-        board = _Board(id=project.id, name=project.root.name or project.id, root=project.root)
+        board = _board_named(store, project)
     if event is not None:
         _record_delivery(event, board)
     return project
@@ -778,8 +790,7 @@ def verify_receipt(
         if event is None:
             return VerifyResult(event=None, board_id=board.id, board_name=board.name)
         if event.project_id != board.id:
-            holder = store.get_project(event.project_id)
-            elsewhere = (holder.root.name if holder is not None else "") or event.project_id
+            elsewhere = _board_of(store, event.project_id).name
             return VerifyResult(
                 event=None, board_id=board.id, board_name=board.name, elsewhere=elsewhere
             )
@@ -2252,7 +2263,7 @@ def prune_sessions(
                 f"{released_total} orphaned claim(s) back to the pool",
             )
             emitted.append(summary)
-        board = _Board(id=project.id, name=project.root.name or project.id, root=project.root)
+        board = _board_named(store, project)
     if summary is not None:
         # Every event in the batch committed in its OWN transaction, so a
         # mid-batch death can lose earlier release events while later ones

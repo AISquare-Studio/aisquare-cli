@@ -1529,6 +1529,31 @@ def test_spawn_prompt_stops_waiting_at_the_timeout_and_types_anyway(
     assert (receipt.agent.pane_id, "paste", "hello") in tmux.typed
 
 
+def test_a_prompt_typed_past_the_timeout_is_not_typed_into_the_trust_question(
+    tmux: FakeTmux,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow first start draws the trust question just past the timeout: the prompt and its
+    Enter went in, Enter picked "No, exit", and the receipt said ``yes`` (review of #259,
+    round 13). One look first, on that path too."""
+    original = tmux.capture
+
+    def drawn_once_the_timeout_passed(pane_id: str, **kwargs: Any) -> Capture:
+        if clock.now >= PROMPT_TIMEOUT:
+            tmux.screens[pane_id] = TRUST_SCREEN
+        return original(pane_id, **kwargs)
+
+    monkeypatch.setattr(tmux, "capture", drawn_once_the_timeout_passed)
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="hello")
+
+    assert tmux.typed == [] and receipt.prompt_typed == "no"
+    assert any("folder-trust question" in note for note in receipt.notes)
+    assert PROMPT_TIMEOUT <= clock.now < PROMPT_TIMEOUT + 5, "one look, not a second wait"
+
+
 def test_a_multi_line_prompt_is_not_typed_before_the_agent_is_up(
     tmux: FakeTmux,
     clock: FakeClock,

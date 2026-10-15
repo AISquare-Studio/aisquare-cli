@@ -2961,7 +2961,11 @@ def _type_prompt(
     to pay silently, so it is not typed; the note says what to do instead.
 
     Nor into Claude Code's folder-trust question (:func:`_past_trust_prompt`), whose
-    highlighted answer is "No, exit": the prompt's Enter ended the agent there.
+    highlighted answer is "No, exit": the prompt's Enter ended the agent there. Asked on
+    the timeout's path too, with one look: an agent that came up at the question just past
+    :data:`PROMPT_TIMEOUT` was typed into, and the receipt said ``yes`` for an agent the
+    Enter had ended (review of #259, round 13). A question drawn after that look still
+    reads what was typed; no look can close that.
 
     Never raises: it runs after the row is recorded, and ``restart`` and
     ``switch`` read a raise out of ``spawn`` as "no replacement started" — they
@@ -3013,6 +3017,8 @@ def _type_prompt(
         )
         return "no"
     else:
+        if not _past_trust_prompt(srv, pane_id, notes, folder=folder, wait=False):
+            return "no"
         notes.append(
             f"the agent did not come up within {PROMPT_TIMEOUT:.0f} s — prompt typed anyway"
         )
@@ -3031,16 +3037,22 @@ def _type_prompt(
 
 
 def _past_trust_prompt(
-    srv: TmuxServer, pane_id: str, notes: list[str], *, folder: Path | None = None
+    srv: TmuxServer,
+    pane_id: str,
+    notes: list[str],
+    *,
+    folder: Path | None = None,
+    wait: bool = True,
 ) -> bool:
     """Whether the agent is past Claude Code's folder-trust question, waited for (bounded).
 
     The question shows when no account trusts the folder (``share_for_launch`` copied
     nothing). A human at the window may answer it within :data:`PROMPT_TIMEOUT`; after
     that the prompt is left untyped, with a note — typed, its Enter picks the highlighted
-    "No, exit". A screen tmux will not show is no question: typed as before.
+    "No, exit". A screen tmux will not show is no question: typed as before. Without
+    ``wait``, one look: for the prompt typed once that timeout has passed already.
     """
-    deadline = _monotonic() + PROMPT_TIMEOUT
+    deadline = _monotonic() + (PROMPT_TIMEOUT if wait else 0.0)
     asked = False
     while True:
         try:

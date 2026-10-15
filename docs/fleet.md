@@ -250,13 +250,20 @@ hook, and an Enter answers it with its default, *No, exit* (measured on Claude C
 2.1.300). So `--prompt` waits for the agent's `SessionStart`, which Claude Code
 fires once it sits at its prompt, past the dialog, and types the prompt then (a
 folder inside one the account trusts asks nothing, and it starts in a few
-seconds). If the session has not started within 20 s, the prompt is not typed: it
-is filed as a board note to the agent's label, and the receipt says so. Answer the
-dialog in the agent's pane (`aisquare fleet attach`), then `aisquare fleet tell
-<label> …` types its first prompt, whose delta carries the note. `fleet restart`,
-`fleet switch` and the automatic hand-over type their one line the same way. With
-the board off (`AISQUARE_TEAM=0`) no hook says anything, and the prompt is typed
-once the agent is in the foreground, as before. Codex takes its first prompt on its
+seconds). If the session has not started within 20 s and a dialog is on the
+agent's screen (its `Enter to confirm` row, under the folder-trust and MCP-server
+dialogs alike), the prompt is not typed: it is filed as a board note to the agent's
+label, and the receipt says so. Answer the dialog in the agent's pane (`aisquare
+fleet attach`), then `aisquare fleet tell <label> …` types its first prompt, whose
+delta carries the note. With no dialog on screen the start is waited for up to two
+minutes (a slow machine; Claude Code 2.1.300 started within a second resuming a
+67 MB transcript), and the same note follows only past that. `fleet restart`,
+`fleet switch` and the automatic hand-over type their one line the same way. Where
+no hook can say the session started — the board off (`AISQUARE_TEAM=0`), or a
+launch that names no session (`-- --continue`) — the prompt is typed once the agent
+is in the foreground, as before, and not while a dialog is on its screen: past 20 s
+at one it is not typed, and the receipt says to answer it and `fleet tell` the
+prompt. Codex takes its first prompt on its
 command line and submits it after its own folder-trust and hook-review dialogs are
 answered, so nothing is typed into a Codex pane at spawn.
 
@@ -350,7 +357,10 @@ it once the agent sits at its prompt, past the folder-trust dialog, so a fresh
 agent is typed into before its first prompt (a compaction's `SessionStart` comes
 mid-turn and changes nothing). Until it has started, the message is a board
 note: the folder-trust dialog fires no hook and is as quiet as a prompt, and an
-Enter there picks its default, *No, exit* (measured on Claude Code 2.1.300).
+Enter there picks its default, *No, exit* (measured on Claude Code 2.1.300). An
+agent whose start no hook can say (the board off, `-- --continue`) is typed into
+when it reads *waiting*, as before, unless a dialog of its own is on its screen:
+then the message is the board note, and with the board off `fleet tell` refuses.
 
 A **Codex** agent's pane going quiet does not show that it sits at its prompt —
 its folder-trust and hook-review dialogs are as quiet — so its own hooks decide:

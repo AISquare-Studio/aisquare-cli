@@ -122,6 +122,14 @@ sandbox, :func:`nudge_manager`). Its value is when; :func:`deliver_owed_nudge` t
 PROMPT_TIMEOUT = 20.0
 """How long ``spawn --prompt`` waits for the agent to come up before typing anyway."""
 
+START_TIMEOUT = 120.0
+"""How long ``spawn --prompt`` waits for the start of an agent whose start the board sees
+(``capabilities.starts_at_its_prompt``) while no dialog of its is on screen: past
+:data:`PROMPT_TIMEOUT` only a dialog stops the wait, which needs the human. Claude Code
+2.1.300 started within a second here even resuming a 67 MB transcript, or with an MCP
+server that never answered (measured), so this is a slow machine's margin, the receipt's
+delay only when the agent is neither started nor at a dialog."""
+
 ACTIVITY_WINDOW = timedelta(seconds=5)
 """Output within this window reads as ``working`` for an agent the board cannot
 vouch for (no hooks, or a stale row). Measured on tmux 3.7c: the plan's
@@ -2539,10 +2547,13 @@ def _type_prompt(
     (``capabilities.starts_at_its_prompt``: Claude Code) is up when that start has
     come, since ``launched``, for ``session_id``: :func:`_type_at_its_start`. Its
     foreground process is up long before, at its folder-trust dialog, which an Enter
-    answers ``No, exit``.
+    answers ``No, exit``. Only where the board can see that start: it is on, and the
+    launch names the session (``--continue`` does not, nor a wrapper the board does not
+    join), or the wait for it never ends (review r4 of #113, finding 4).
 
     Otherwise ready means the pane's foreground process is no longer our launcher (or it
-    has produced scrollback). Past :data:`PROMPT_TIMEOUT` a SINGLE-LINE prompt
+    has produced scrollback), and no dialog of the agent's before its start is on its
+    screen (``capabilities.start_dialog_mark``). Past :data:`PROMPT_TIMEOUT` a SINGLE-LINE prompt
     is typed anyway and the receipt says so — a slow start must not turn into a
     hang, and one line sits harmlessly in the pty's input buffer until the
     agent reads it.
@@ -2566,6 +2577,7 @@ def _type_prompt(
         adapter is not None
         and adapter.capabilities.starts_at_its_prompt
         and orchestrator.team_enabled()
+        and session_id is not None
     ):
         return _type_at_its_start(srv, agent, adapter, prompt, notes, project, session_id, launched)
     pane_id = agent.pane_id
@@ -2592,6 +2604,19 @@ def _type_prompt(
         _sleep(_POLL_INTERVAL)
     if ready:
         _sleep(_PROMPT_SETTLE)
+        if _at_a_start_dialog(srv, agent, adapter):
+            # Up, and as quiet as at its prompt: the dialog's answer is the human's.
+            while _at_a_start_dialog(srv, agent, adapter):
+                if _monotonic() >= deadline:
+                    notes.append(
+                        f"the agent was still at a dialog of its own after {PROMPT_TIMEOUT:.0f} "
+                        "s, where an Enter would answer it for you — the prompt was NOT "
+                        "typed. Answer it in its pane (`aisquare fleet attach`), then send "
+                        f"the prompt: `aisquare fleet tell {agent.label} …`"
+                    )
+                    return False
+                _sleep(_POLL_INTERVAL)
+            _sleep(_PROMPT_SETTLE)
     elif "\n" in prompt:
         notes.append(
             f"the agent did not come up within {PROMPT_TIMEOUT:.0f} s and the prompt has "
@@ -2632,12 +2657,18 @@ def _type_at_its_start(
     Enter as its default, ``No, exit`` — every spawn with a prompt in a folder its
     account had not trusted (each account slot keeps its own) exited the agent.
 
-    Past :data:`PROMPT_TIMEOUT` with no start the prompt is never typed: it is filed as
-    the board note to the agent's label, which its first prompt's delta carries
-    (``services.team`` keeps a new session's cursor before the notes to its row), and
-    the receipt says how to go on. Never raises, as :func:`_type_prompt`.
+    Past :data:`PROMPT_TIMEOUT` it waits on only while no such dialog is on its screen
+    (``capabilities.start_dialog_mark``), up to :data:`START_TIMEOUT`: a start that just
+    takes long, on a slow machine, is typed into once it comes, as the line restart,
+    switch and the unattended hand-over type must be, or the replacement idles at its
+    prompt (review r4 of #113, finding 8). A dialog is the human's to answer. With no
+    start the prompt is never typed: it is filed as the board note to the agent's label,
+    which its first prompt's delta carries (``services.team`` keeps a new session's
+    cursor before the notes to its row), and the receipt says how to go on. Never raises,
+    as :func:`_type_prompt`.
     """
-    deadline = _monotonic() + PROMPT_TIMEOUT
+    start = _monotonic()
+    deadline, ceiling = start + PROMPT_TIMEOUT, start + START_TIMEOUT
     while True:
         try:
             facts = srv.pane_facts(agent.pane_id)
@@ -2653,17 +2684,25 @@ def _type_at_its_start(
             return False
         if _started_since(session_id, launched):
             break
-        if _monotonic() >= deadline:
+        now = _monotonic()
+        at_a_dialog = now >= deadline and _at_a_start_dialog(srv, agent, adapter)
+        if at_a_dialog or now >= ceiling:
             try:
                 how = _file_note(project, agent.label, prompt, None)
             except Exception as exc:  # never raises: the receipt says it
                 how = f"not filed as a board note either ({exc})"
+            waited = PROMPT_TIMEOUT if at_a_dialog else START_TIMEOUT
+            then = (
+                "It is at a dialog of its own, which fires no hook and where an Enter "
+                "would answer it for you (`No, exit` at its folder-trust one): answer the "
+                "dialog in its pane (`aisquare fleet attach`), then"
+                if at_a_dialog
+                else "Once it is at its prompt,"
+            )
             notes.append(
-                f"its {adapter.label} session did not start within {PROMPT_TIMEOUT:.0f} s, "
-                f"so the prompt was NOT typed — {how}. It fires no hook at its folder-trust "
-                "dialog, where an Enter would exit it: answer the dialog in its pane "
-                f"(`aisquare fleet attach`), then `aisquare fleet tell {agent.label} …` "
-                "types its first prompt, which brings the note"
+                f"its {adapter.label} session did not start within {waited:.0f} s, so the "
+                f"prompt was NOT typed — {how}. {then} `aisquare fleet tell {agent.label} "
+                "…` types its first prompt, which brings the note"
             )
             return False
         _sleep(_POLL_INTERVAL)
@@ -2687,6 +2726,20 @@ def _started_since(session_id: str | None, launched: datetime) -> bool:
     except Exception:
         return False
     return session is not None and session.ended_at is None and session.last_seen_at >= launched
+
+
+def _at_a_start_dialog(srv: TmuxServer, agent: FleetAgent, adapter: AgentAdapter | None) -> bool:
+    """Whether ``agent``'s screen shows a dialog its agent puts up before its start, where
+    an Enter answers it for the human (``capabilities.start_dialog_mark``). A screen tmux
+    will not give shows none; never raises."""
+    mark = adapter.capabilities.start_dialog_mark if adapter is not None else None
+    if not mark:
+        return False
+    try:
+        screen = srv.screen_text(agent.pane_id)
+    except TmuxError:
+        return False
+    return any(mark in row for row in screen)
 
 
 #: How long after its end an agent whose window is still on the tmux server stays in
@@ -2999,6 +3052,15 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
     the one :func:`nudge_manager` already applies — and a pane that is not the
     agent's gets the board note instead.
 
+    An agent whose ``SessionStart`` fires at rest at its prompt
+    (``capabilities.starts_at_its_prompt``: Claude Code) and has not started is not
+    typed into: it is at its folder-trust dialog, as quiet as a prompt. That takes the
+    board seeing its start — the board on, the row naming its session; for one it
+    cannot see (the board off, ``--continue``, a wrapper the board does not join) the
+    rule above stands, provided no dialog of the agent's is on its screen
+    (``capabilities.start_dialog_mark``). Every such ``tell`` had been a note, and with
+    the board off a ``FleetError`` (review r4 of #113, finding 3).
+
     An agent whose pane cannot be read for readiness
     (``capabilities.reads_pane_readiness``: Codex) is typed into only at its prompt as
     :func:`_at_its_prompt` decides it: its own hooks freshly say ``waiting``, or, with
@@ -3015,9 +3077,16 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
     status = status_of(agent)
     adapter = recorded_adapter(agent.agent)
     srv = server_of(agent)
-    if adapter is not None and adapter.capabilities.starts_at_its_prompt and status.session is None:
+    if (
+        adapter is not None
+        and adapter.capabilities.starts_at_its_prompt
+        and orchestrator.team_enabled()
+        and agent.session_id is not None
+        and status.session is None
+    ):
         # Quiet, and not at its prompt: Claude Code fires no hook at its folder-trust
-        # dialog, whose default an Enter picks — `No, exit` (2.1.300).
+        # dialog, whose default an Enter picks — `No, exit` (2.1.300). Only where the
+        # board sees its start: the board on, the row naming its session.
         how = _file_note(project, label, text, sender)
         return TellResult(
             False,
@@ -3056,6 +3125,17 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
                 "it reads as waiting, but its pane is not running the agent yet (the "
                 f"launcher or a shell is in the foreground) — {how}",
             )
+        if status.session is None and _at_a_start_dialog(srv, agent, adapter):
+            # A start the board cannot see: as quiet at a dialog as at its prompt.
+            why = (
+                "its pane shows a dialog of the agent's, where an Enter would answer it "
+                "for you (answer it there: `aisquare fleet attach`)"
+            )
+            try:
+                how = _file_note(project, label, text, sender)
+            except FleetError as exc:
+                raise FleetError(f"not typed: {why}; {exc}") from exc
+            return TellResult(False, f"{why} — {how}")
         try:
             _type_line(srv, agent.pane_id, text)
         except TmuxError as exc:

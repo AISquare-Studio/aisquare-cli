@@ -103,6 +103,14 @@ class AgentCapabilities:
     prompt — a pane quiet for ``ACTIVITY_WINDOW`` that shows it is at its prompt, so
     ``fleet tell`` and the manager's nudge type there; the agent's folder-trust and
     hook-review dialogs are as quiet and show no such line."""
+    start_dialog_mark: str | None = None
+    """What the agent's screen shows while a dialog it puts up before its start holds it
+    for the human, where an Enter answers it: Claude Code's ``Enter to confirm``, under its
+    folder-trust and MCP-server dialogs alike, the folder's defaulting to ``No, exit``
+    (measured on 2.1.300). A spawn's prompt for an agent whose start the board sees
+    (:attr:`starts_at_its_prompt`) waits past ``PROMPT_TIMEOUT`` while none is on screen;
+    one the board cannot see start (``--continue``, the board off) is not typed while one
+    is, nor is ``fleet tell``."""
     resumes_across_homes: bool = False
     """A session resumes from another config dir (Claude Code finds a transcript by its
     absolute path), so ``fleet switch`` to another account resumes it; otherwise the

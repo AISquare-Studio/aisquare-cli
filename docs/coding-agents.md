@@ -777,7 +777,10 @@ tells its agent's own process from a nested child, across a `/clear` or a `/resu
 `reads_pane_readiness` (`fleet tell` may type into a pane that looks idle),
 `idle_prompt_mark` (what the last line of the screen starts with at an empty prompt,
 Codex's `? for shortcuts`: where a pane its hooks say nothing fresh about is typed into),
-`resumes_across_homes`, `exports_home_env`, `own_doctor_check`, `model_ladders`,
+`starts_at_its_prompt` (its `SessionStart` fires once it is at rest at its prompt,
+Claude Code's), `start_dialog_mark` (what its screen shows at a dialog before its start,
+where an Enter answers it: Claude Code's `Enter to confirm`, which keeps a prompt out
+and stops the wait for its start), `resumes_across_homes`, `exports_home_env`, `own_doctor_check`, `model_ladders`,
 `model_proxy`, `positional_prompt`, `first_context_file_only`, `sandbox_permissions`,
 `sandboxes_tools` (its tools run in an OS sandbox, which `store_access` must open to
 the store), `redraws_while_asking` (its UI redraws while it waits on the human, so an

@@ -102,6 +102,7 @@ class ClaudeCodeAdapter:
         ambient_first_run=True,
         reads_pane_readiness=True,
         starts_at_its_prompt=True,
+        start_dialog_mark="Enter to confirm",
         resumes_across_homes=True,
         pid_env="CLAUDE_PID",
         exports_home_env=False,

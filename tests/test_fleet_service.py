@@ -565,6 +565,24 @@ def tmux(monkeypatch: pytest.MonkeyPatch) -> FakeTmux:
 
 _STARTED_SINCE = fleet_service._started_since
 
+#: Claude Code 2.1.300's folder-trust dialog in a 120x40 tmux pane (measured): no hook
+#: fires while it is up, and an Enter picks its default. Its MCP-server dialog ends in
+#: the same ``Enter to confirm`` row.
+TRUST_DIALOG = [
+    "─" * 120,
+    " Accessing workspace:",
+    " /home/u/w",
+    " Quick safety check: Is this a project you created or one you trust? (Like your own "
+    "code, a well-known open source",
+    " project, or work from your team). If not, take a moment to review what's in this "
+    "folder first.",
+    " Claude Code'll be able to read, edit, and execute files here.",
+    " Security guide",
+    " \u276f No, exit",
+    "   Yes, I trust this folder",
+    " Enter to confirm · Esc to cancel",
+]
+
 
 @pytest.fixture
 def session_start_for_real(tmux: FakeTmux, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1479,6 +1497,7 @@ def test_a_claude_spawn_whose_session_never_starts_types_nothing_and_files_the_n
 
     def at_the_dialog(pane_id: str) -> PaneFacts | None:
         tmux.set_command(pane_id, "claude")
+        tmux.screens[pane_id] = TRUST_DIALOG
         return original(pane_id)
 
     monkeypatch.setattr(tmux, "pane_facts", at_the_dialog)
@@ -1499,6 +1518,111 @@ def test_a_claude_spawn_whose_session_never_starts_types_nothing_and_files_the_n
     assert session is not None
     team_service.hook_session_start(session, project.root, "startup")
     assert "start on tsk_1" in team_service.hook_prompt_heartbeat(session, project.root)
+
+
+@pytest.mark.parametrize("starts_at", [PROMPT_TIMEOUT + 25, None])
+def test_a_claude_spawn_slow_to_start_with_no_dialog_waits_on_for_it(
+    tmux: FakeTmux,
+    session_start_for_real: None,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    starts_at: float | None,
+) -> None:
+    """Review r4 of #113, finding 8: past PROMPT_TIMEOUT the prompt was never typed, for
+    a start that showed no dialog and just took longer too (a slow machine). The one
+    line restart, switch and the unattended hand-over type became a note that only a
+    later prompt delivers, and nothing typed one: the replacement idled. Only a dialog,
+    the human's to answer, stops the wait at PROMPT_TIMEOUT; otherwise the start is
+    waited for up to START_TIMEOUT."""
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    original = tmux.pane_facts
+
+    def starting(pane_id: str) -> PaneFacts | None:
+        tmux.set_command(pane_id, "claude")  # up, its screen not yet a dialog or a prompt
+        if starts_at is not None and clock.now >= starts_at:
+            with store_session() as store:
+                [row] = store.fleet_agents(project.id, live_only=True)
+            if not _STARTED_SINCE(row.session_id, row.created_at):
+                team_service.hook_session_start(row.session_id or "", project.root, "startup")
+        return original(pane_id)
+
+    monkeypatch.setattr(tmux, "pane_facts", starting)
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="start on tsk_1")
+
+    pane = receipt.agent.pane_id
+    if starts_at is not None:
+        assert receipt.prompt_typed is True and receipt.notes == []
+        assert tmux.typed == [(pane, "paste", "start on tsk_1"), (pane, "key", "Enter")]
+        assert starts_at <= clock.now < starts_at + 1 and _events(project, "note") == []
+        return
+    assert tmux.typed == [] and receipt.prompt_typed is False
+    [said] = receipt.failures
+    assert f"did not start within {fleet_service.START_TIMEOUT:.0f} s" in said
+    assert "NOT typed" in said and "Once it is at its prompt" in said
+    assert fleet_service.START_TIMEOUT <= clock.now < fleet_service.START_TIMEOUT + 1
+    assert _events(project, "note") == ["start on tsk_1"]
+
+
+def test_a_claude_spawn_the_board_cannot_see_start_types_once_it_is_up_never_at_a_dialog(
+    tmux: FakeTmux,
+    session_start_for_real: None,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review r4 of #113, finding 4: the wait for SessionStart ran for every Claude Code
+    spawn with the board on, and a ``--continue`` launch names no session, so nothing it
+    could see ever started: the spawn waited 20 s and filed a note, and the receipt's
+    advised ``fleet tell`` filed another (finding 3). Such a row is typed into once the
+    agent is up, as before the wait was added, and not while a dialog of its own is on
+    its screen, where an Enter would answer it for the human."""
+    original = tmux.pane_facts
+
+    def up(pane_id: str) -> PaneFacts | None:
+        tmux.set_command(pane_id, "claude")
+        return original(pane_id)
+
+    monkeypatch.setattr(tmux, "pane_facts", up)
+    receipt = fleet_service.spawn(
+        project, "coder", worktree=False, prompt="start on it", agent_args=["--continue"]
+    )
+
+    pane = receipt.agent.pane_id
+    assert receipt.agent.session_id is None
+    assert receipt.prompt_typed is True, receipt.notes
+    assert tmux.typed == [(pane, "paste", "start on it"), (pane, "key", "Enter")]
+    assert clock.now < PROMPT_TIMEOUT and _events(project, "note") == []
+    # At a dialog: typed once the human has answered it, never before.
+    tmux.typed.clear()
+    reads = 0
+    real_screen = tmux.screen_text
+
+    def answered_on_the_third_look(pane_id: str) -> list[str]:
+        nonlocal reads
+        reads += 1
+        tmux.screens[pane_id] = TRUST_DIALOG if reads < 3 else []
+        return real_screen(pane_id)
+
+    monkeypatch.setattr(tmux, "screen_text", answered_on_the_third_look)
+    second = fleet_service.spawn(
+        project, "coder", worktree=False, prompt="start on it", agent_args=["--continue"]
+    )
+    assert second.prompt_typed is True and reads == 3
+    pane = second.agent.pane_id
+    assert tmux.typed == [(pane, "paste", "start on it"), (pane, "key", "Enter")]
+    # Left at it: not typed, and the receipt says how to send it.
+    tmux.typed.clear()
+    monkeypatch.setattr(tmux, "screen_text", lambda pane_id: TRUST_DIALOG)
+    third = fleet_service.spawn(
+        project, "coder", worktree=False, prompt="start on it", agent_args=["--continue"]
+    )
+    assert tmux.typed == [] and third.prompt_typed is False
+    [said] = third.failures
+    assert "still at a dialog" in said and f"fleet tell {third.agent.label}" in said
+    assert _events(project, "note") == []
 
 
 def test_a_resumed_session_has_started_only_once_its_new_start_comes() -> None:
@@ -2400,6 +2524,49 @@ def test_a_fresh_claude_agent_waits_at_its_prompt_from_its_session_start(
         team_service.hook_prompt_heartbeat(agent.session_id, project.root)
         team_service.hook_session_start(agent.session_id, project.root, source)
         assert fleet_service.status_of(agent).state == "waiting", source
+
+
+@pytest.mark.parametrize("unseen", ["board off", "--continue"])
+def test_tell_types_into_a_waiting_claude_agent_whose_start_the_board_cannot_see(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    unseen: str,
+) -> None:
+    """Review r4 of #113, finding 3: ``tell`` took a Claude Code agent with no session
+    on the board for one at its folder-trust dialog, checking neither that the board was
+    on nor that the row names a session. With ``AISQUARE_TEAM=0`` every tell raised
+    'cannot file the message as a board note' (it typed before), and a ``--continue`` or
+    wrapper row, which the board never joins, was never typed into. The foreground rule
+    stands for them, and a dialog of the agent's on its screen still keeps the Enter out."""
+    agent = _coder(project, agent_args=["--continue"] if unseen == "--continue" else ())
+    if unseen == "board off":
+        assert agent.session_id is not None
+        monkeypatch.setenv("AISQUARE_TEAM", "0")
+    else:
+        assert agent.session_id is None
+    tmux.set_command(agent.pane_id, "claude")
+    tmux.printed(agent.pane_id, ago=timedelta(minutes=1))
+    assert fleet_service.status_of(agent).state == "waiting"
+
+    told = fleet_service.tell(project, agent.label, "please rebase")
+
+    assert told.delivered, told.how
+    assert tmux.typed == [
+        (agent.pane_id, "paste", "please rebase"),
+        (agent.pane_id, "key", "Enter"),
+    ]
+    tmux.typed.clear()
+    tmux.screens[agent.pane_id] = TRUST_DIALOG
+    if unseen == "board off":
+        with pytest.raises(FleetError, match=r"dialog of the agent's.*disabled"):
+            fleet_service.tell(project, agent.label, "please rebase")
+    else:
+        at_the_dialog = fleet_service.tell(project, agent.label, "please rebase")
+        assert not at_the_dialog.delivered and "dialog of the agent's" in at_the_dialog.how
+        assert _events(project, "note") == ["please rebase"]
+    assert tmux.typed == [], "no Enter for the dialog to take as No, exit"
 
 
 def test_a_fresh_claude_manager_is_nudged_before_its_first_prompt(
@@ -11315,7 +11482,8 @@ def test_the_automatic_hand_over_puts_what_its_switch_did_not_do_on_the_board(
     )
     [said] = [note for note in _events(project, "note") if note.startswith(f"{agent.label}: ")]
     assert said.startswith(f"{agent.label}: switched — ")
-    assert "session did not start within 20 s, so the prompt was NOT typed" in said
+    waited = f"{fleet_service.START_TIMEOUT:.0f} s"  # no dialog on its screen: a slow start
+    assert f"session did not start within {waited}, so the prompt was NOT typed" in said
     # What every switch says is not on the board: only what this one could not do.
     assert "launched as recorded" not in said and "headroom" not in said
 

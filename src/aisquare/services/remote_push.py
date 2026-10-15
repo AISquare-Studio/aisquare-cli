@@ -1072,6 +1072,14 @@ class RemotePushSender:
     takes one scan, and :meth:`push_run_due` does whatever has fallen due and says
     how long until the next thing will.
 
+    What it schedules (the coalescing window, each device's gap, the next system check)
+    runs on ``ticks``, ``time.monotonic`` unless a test gives its own; a test's ``clock``
+    alone drives both. ``clock``, the wall clock, is only for what is compared with a
+    stamp: a ``push_after``, a pushed mark, a deadline, a sign-in's end. All of it ran on
+    the wall clock, so one stepped back an hour (NTP, a VM snapshot restored) left the
+    window open, every gap unrun and no system check due for that hour: no needs push
+    went out, and no auto-off or expiry warning (review of #259, round 8, 3/9).
+
     An item is pushed when its ``push_after`` has passed, two consecutive scans
     showed it, and it is still in the watcher's feed when its coalescing window
     closes. Each subscribed device then gets ONE notification covering every
@@ -1090,22 +1098,25 @@ class RemotePushSender:
         *,
         transport: PushTransport | None = None,
         clock: Callable[[], datetime] | None = None,
+        ticks: Callable[[], float] | None = None,
     ) -> None:
         self._kit = kit
         self._transport = transport
         """``None``: :func:`push_https_transport`, looked up at each send."""
         self._clock = clock or _push_utc_now
+        self._ticks = ticks or (time.monotonic if clock is None else lambda: clock().timestamp())
         self._queue: queue.Queue[object] = queue.Queue()
         self._thread: threading.Thread | None = None
         self._streak: dict[str, int] = {}
         """Per item id, how many consecutive scans showed it. An absence forgets it."""
         self._window: set[str] = set()
         """Ids that became pushable since the coalescing window opened."""
-        self._window_closes: datetime | None = None
+        self._window_closes: float | None = None
+        """When the coalescing window closes, in ``ticks``."""
         self._owed: dict[str, set[str]] = {}
         """Per device id, the item ids its next notification covers, while its throttle runs."""
-        self._last_sent: dict[str, datetime] = {}
-        """Per device id, when its last needs notification went out."""
+        self._last_sent: dict[str, float] = {}
+        """Per device id, when its last needs notification went out, in ``ticks``."""
         self._untaken: dict[str, int] = {}
         """Per device id, its needs notifications in a row that its push service did not take:
         how many times what they covered has gone again, and how far off its next turn is."""
@@ -1114,7 +1125,8 @@ class RemotePushSender:
         whose push service took it (or refused it for good)."""
         self._pushed: dict[str, str] | None = None
         """``remote-push.json``'s ``pushed``, read once, then kept current by :meth:`_push_mark`."""
-        self._next_system_check: datetime | None = None
+        self._next_system_check: float | None = None
+        """When the next system check is due, in ``ticks``."""
         self._failing = False
         self._stopping = threading.Event()
         """Set by :meth:`push_end`: a pass in flight sends nothing more."""
@@ -1203,7 +1215,7 @@ class RemotePushSender:
             ):
                 self._window.add(item.id)
         if self._window and self._window_closes is None:
-            self._window_closes = self._clock() + timedelta(seconds=PUSH_COALESCE_SECONDS)
+            self._window_closes = self._ticks() + PUSH_COALESCE_SECONDS
 
     def push_run_due(self) -> float:
         """Do what is due now; the seconds until the next thing will be.
@@ -1216,17 +1228,17 @@ class RemotePushSender:
         promised no more (review of #243, sweep of round 4). What was gathered is let
         go unmarked: an extension that comes after pushes it then.
         """
-        now = self._clock()
+        now, tick = self._clock(), self._ticks()
         if self._push_gone_off(now):
             return PUSH_SYSTEM_CHECK_SECONDS
-        if self._window_closes is not None and now >= self._window_closes:
+        if self._window_closes is not None and tick >= self._window_closes:
             self._push_close_window(now)
         if self._owed:
-            self._push_send_owed(now)
-        if self._next_system_check is None or now >= self._next_system_check:
-            self._next_system_check = now + timedelta(seconds=PUSH_SYSTEM_CHECK_SECONDS)
+            self._push_send_owed(now, tick)
+        if self._next_system_check is None or tick >= self._next_system_check:
+            self._next_system_check = tick + PUSH_SYSTEM_CHECK_SECONDS
             self._push_system_checks(now)
-        return self._push_next_due(now)
+        return self._push_next_due(tick)
 
     def _push_gone_off(self, now: datetime) -> bool:
         """Whether Remote is past its auto-off deadline or turning off, or this sender is
@@ -1284,7 +1296,7 @@ class RemotePushSender:
         for device_id in subscriptions:
             self._owed.setdefault(device_id, set()).update(covered)
 
-    def _push_send_owed(self, now: datetime) -> None:
+    def _push_send_owed(self, now: datetime, tick: float) -> None:
         """One notification to each device its throttle allows, of what is still in the feed.
 
         What it covered is recorded as pushed once the device's push service took it, or
@@ -1304,7 +1316,7 @@ class RemotePushSender:
                 self._untaken.pop(device_id, None)
                 continue
             last = self._last_sent.get(device_id)
-            if last is not None and now - last < self._push_gap(device_id):
+            if last is not None and tick - last < self._push_gap(device_id):
                 continue
             if self._push_gone_off(self._clock()):
                 return
@@ -1318,7 +1330,7 @@ class RemotePushSender:
                 continue
             base = self._kit.kit_public_url()
             message = push_needs_message(items, total=len(feed), base_url=base)
-            self._last_sent[device_id] = now
+            self._last_sent[device_id] = tick
             status = self.deliver_one_push(device_id, record, message)
             covered = [item.id for item in items]
             untaken = self._untaken.get(device_id, 0)
@@ -1329,10 +1341,10 @@ class RemotePushSender:
             self._untaken.pop(device_id, None)
             self._push_mark(covered, now)
 
-    def _push_gap(self, device_id: str) -> timedelta:
-        """How long after its last needs notification a device's next may go: 20 s, doubled
-        for each one in a row its push service did not take."""
-        return timedelta(seconds=PUSH_MIN_INTERVAL_SECONDS * 2 ** self._untaken.get(device_id, 0))
+    def _push_gap(self, device_id: str) -> float:
+        """How long after its last needs notification a device's next may go, in seconds: 20 s,
+        doubled for each one in a row its push service did not take."""
+        return PUSH_MIN_INTERVAL_SECONDS * float(2 ** self._untaken.get(device_id, 0))
 
     def _push_system_checks(self, now: datetime) -> None:
         """Each warning that is due now. One still being tried that no longer is (a deadline
@@ -1425,14 +1437,14 @@ class RemotePushSender:
         else:
             self._system_sends[key] = (tries + 1, done)
 
-    def _push_next_due(self, now: datetime) -> float:
-        due = [self._next_system_check or now]
+    def _push_next_due(self, tick: float) -> float:
+        due = [self._next_system_check or tick]
         if self._window_closes is not None:
             due.append(self._window_closes)
         for device_id in self._owed:
             last = self._last_sent.get(device_id)
-            due.append(now if last is None else last + self._push_gap(device_id))
-        return max(0.0, (min(due) - now).total_seconds())
+            due.append(tick if last is None else last + self._push_gap(device_id))
+        return max(0.0, min(due) - tick)
 
     # --- what it reads ---
 

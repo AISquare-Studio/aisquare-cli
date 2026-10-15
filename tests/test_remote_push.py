@@ -873,6 +873,42 @@ def test_an_item_in_two_scans_is_pushed_once_when_its_window_closes(world: World
     assert len(world.transport.sent) == 2, "once per item, however long it stays"
 
 
+def test_a_wall_clock_stepped_back_holds_no_push_and_no_system_check(world: World) -> None:
+    """Review of #259, round 8, 3/9: the window, each device's gap and the next system check
+    ran on the wall clock. Stepped back an hour (NTP, a VM snapshot restored), none fell due
+    for that hour: no needs push, no auto-off warning. They run on the monotonic clock, and
+    the wall clock is read only against stamps."""
+    elapsed = [0.0]
+    world.sender = RemotePushSender(
+        world.kit, transport=world.transport, clock=world.clock, ticks=lambda: elapsed[0]
+    )
+
+    def later(seconds: float) -> None:
+        world.clock.advance(seconds)
+        elapsed[0] += seconds
+        world.sender.push_run_due()
+
+    world.sender.push_run_due()  # the first system check
+    first, second = needs_item(1), needs_item(2, push_after=T0 - timedelta(hours=3))
+    world.scan(first)
+    later(3)
+    world.scan(first)
+    world.clock.advance(-3600)  # stepped back an hour, inside the window
+    later(5)
+    assert world.titles() == every_device("aisquare-cli: coder-auth needs you")
+    world.scan(first, second)
+    later(3)
+    world.scan(first, second)
+    later(5)
+    assert len(world.titles()) == 2, "its window closed inside each device's 20 s gap"
+    world.clock.advance(-3600)
+    later(12)  # 20 s after the first push, on the monotonic clock
+    assert len(world.titles()) == 4
+    world.kit.runtime.set_auto_off(world.clock.now + timedelta(minutes=5))
+    later(30)
+    assert world.titles()[4:] == every_device(auto_off_title(5)), "the system check ran"
+
+
 def test_an_item_gone_inside_the_window_is_not_pushed(world: World) -> None:
     item = needs_item(1)
     world.scan(item)

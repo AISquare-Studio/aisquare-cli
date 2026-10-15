@@ -473,6 +473,16 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return home
 
 
+@pytest.fixture
+def project_capture(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``[projects] capture`` on: every directory a hooked session runs in gets a row, as
+    0.8.0 did (#139), for the tests written against that. Off is the default. Patched, not
+    written to config.toml, which a test's own ``save_config(AppConfig(...))`` replaces."""
+    from aisquare.services import project as project_service
+
+    monkeypatch.setattr(project_service, "capture_on", lambda: True)
+
+
 @pytest.fixture(autouse=True)
 def fresh_state() -> Iterator[None]:
     """Reset the global runtime state around every test."""

@@ -1793,7 +1793,9 @@ class SqliteStore:
 
         This is what a hook recording a prompt and the MCP server's session
         call — automatic registration, so prompt history and injection work in
-        every directory (#139). It never sets ``onboarded_at``, so a captured
+        every directory (#139) — and only while ``[projects] capture`` is on
+        (``services.project.tracked``); off, the default since 0.8.1, nothing
+        captures. It never sets ``onboarded_at``, so a captured
         directory stays off the list until something DELIBERATE registers it
         (:meth:`onboard_project`).
 

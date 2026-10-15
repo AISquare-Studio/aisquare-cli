@@ -32,6 +32,10 @@ from tests.stub_ci_server import StubCI, live_descriptor, serve
 
 from .test_shipping_redaction import SECRETS
 
+# These record in a directory nobody added (``tmp_path``), as they were written to:
+# with ``[projects] capture`` on. What capture off records — nothing — is tests/test_hooks.py's.
+pytestmark = pytest.mark.usefixtures("project_capture")
+
 
 @pytest.fixture
 def stub() -> Iterator[StubCI]:
@@ -215,6 +219,31 @@ def test_the_default_descriptor_pushes_on_prompts_only_and_announces_the_tool(
     assert start.trigger == "session_start"
     assert start.client_reason is ClientReason.trigger_not_in_descriptor
     assert start.instruction_version == ci_augment.INSTRUCTION_VERSION
+
+
+def test_with_capture_off_only_a_project_added_on_purpose_consults_or_records(
+    wired: StubCI, isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``[projects] capture`` off, the default (this module's mark turns it on): in a
+    directory nobody added neither hook consults the server or writes a row — the row
+    would be a turn of a project that does not exist. Once it is added, both do."""
+    from aisquare.core.store import store_session
+    from aisquare.core.workspace import current_project
+    from aisquare.services import project as project_service
+
+    monkeypatch.setattr(project_service, "capture_on", lambda: False)
+    assert hooks_service.session_start_context(tmp_path, session_id=SESSION) == ""
+    assert hooks_service.prompt_submitted("one", tmp_path, session_id=SESSION) == ""
+    assert wired.call_count == 0 and wired.descriptor_fetches == 0
+    assert metrics_service.recent(session_id=SESSION) == []
+
+    with store_session() as store:
+        store.onboard_project(current_project(tmp_path))
+    assert RECALL_TOOL in hooks_service.session_start_context(tmp_path, session_id=SESSION)
+    hooks_service.prompt_submitted("two", tmp_path, session_id=SESSION)
+    assert wired.call_count == 1
+    turns = metrics_service.recent(session_id=SESSION)
+    assert len(turns) == 2 and {t.trigger for t in turns} == {"prompt_submit", "session_start"}
 
 
 def test_the_descriptor_is_fetched_once_and_reused(

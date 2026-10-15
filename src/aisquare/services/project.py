@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 import shutil
 import subprocess
 from datetime import UTC, datetime, timedelta
@@ -9,7 +10,7 @@ from pathlib import Path
 
 from aisquare.core import paths
 from aisquare.core import snapshot as snapshot_core
-from aisquare.core.config import SnapshotSettings, load_config
+from aisquare.core.config import ProjectsSettings, SnapshotSettings, load_config
 from aisquare.core.entries import new_entry
 from aisquare.core.names import name_flaw
 from aisquare.core.state_file import StateUnwritableError
@@ -58,6 +59,46 @@ def list_projects(*, all: bool = False) -> list[ProjectInfo]:
     """The projects added on purpose — or, with ``all``, the captured directories too (#139)."""
     with store_session() as store:
         return store.list_projects(all=all)
+
+
+def capture_on() -> bool:
+    """``[projects] capture``: whether a directory a hooked session merely runs in gets a
+    row of its own, captured and unlisted (#139). Off by default since 0.8.1; an unreadable
+    config costs the setting, never the hook, as every section's does."""
+    try:
+        return load_config().projects.capture
+    except Exception:
+        return ProjectsSettings().capture
+
+
+def tracked(store: ContextStore, project: ProjectInfo, *, capture: bool = True) -> bool:
+    """Whether an automatic path may write rows tied to ``project``: a hook's prompt, turn
+    and board rows, the MCP server's session, a destination, a codename.
+
+    With capture on any directory may, and this captures it first, as #139 did
+    (:meth:`~aisquare.core.store.SqliteStore.ensure_project`) — unless ``capture`` is
+    False, for a caller that must not take the store's write lock to ask (a session
+    start). Off, only a project added on purpose may, and nothing is written here: a
+    directory nobody added gets no row, and a row captured before is neither revived nor
+    written to.
+    """
+    if capture_on():
+        if capture:
+            store.ensure_project(project)
+        return True
+    stored = store.get_project(project.id)
+    return stored is not None and stored.onboarded_at is not None
+
+
+class NotAdded(RuntimeError):
+    """A deliberate action needs a project row, capture is off, and nobody added this one."""
+
+    def __init__(self, project: ProjectInfo) -> None:
+        super().__init__(
+            f"{display_name(project)} is not one of your projects — add it first: "
+            f"aisquare project onboard {shlex.quote(str(project.root))}"
+        )
+        self.project = project
 
 
 def switch(name: str) -> ProjectInfo:

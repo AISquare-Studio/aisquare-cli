@@ -39,6 +39,22 @@ class CaptureSettings(BaseModel):
     enabled: bool = True
 
 
+class ProjectsSettings(BaseModel):
+    """Which directories become projects.
+
+    ``capture`` off, the default since 0.8.1: a project exists only once it is added on
+    purpose — ``aisquare project onboard``, ``init``, Welcome or ``+`` in ``asq``, a fleet
+    spawn, ``team on`` — and a hooked session in any other directory records nothing
+    there: no project row, no prompt, no turn row, no board. On, every directory a hooked
+    session runs in gets a row, captured and unlisted, as 0.8.0 did (#139).
+
+    Read from the config file alone, like ``[fleet]``: there is no
+    ``AISQUARE_PROJECTS_*`` variable.
+    """
+
+    capture: bool = False
+
+
 class RedactionSettings(BaseModel):
     """Settings controlling how captured data is scrubbed."""
 
@@ -685,6 +701,7 @@ class AppConfig(BaseModel):
     api_url: str = "https://api.aisquare.studio"
     default_pool: Pool = "project"
     capture: CaptureSettings = Field(default_factory=CaptureSettings)
+    projects: ProjectsSettings = Field(default_factory=ProjectsSettings)
     redaction: RedactionSettings = Field(default_factory=RedactionSettings)
     explainability: ExplainabilitySettings = Field(default_factory=ExplainabilitySettings)
     team: TeamSettings = Field(default_factory=TeamSettings)

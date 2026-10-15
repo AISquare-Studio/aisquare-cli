@@ -38,6 +38,7 @@ from aisquare.services import auto_mode, ci_augment, install_route
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import metrics as metrics_service
+from aisquare.services import project as project_service
 from aisquare.services import team as team_service
 
 
@@ -89,6 +90,7 @@ def session_start_context(
         project = active_project(store, cwd)
         entries = store.entries(project_id=project.id)
         has_prompts = bool(store.recent_prompts(project.id, limit=1))
+        recorded = project_service.tracked(store, project, capture=False)
     directive = _directive(project.id, has_prompts=has_prompts)
     block = build_block(entries, project) if entries else ""
     team_block = (
@@ -100,8 +102,12 @@ def session_start_context(
     )
     # Last, and only when the experiment is on: the standing instruction to
     # consult the recall tool, then any retrieved material — closest to what
-    # the agent is about to do, and the part it should weigh least.
-    instruction, retrieved = _session_start_ci(project, session_id, cwd, began=began)
+    # the agent is about to do, and the part it should weigh least. Not in a
+    # directory nobody added while capture is off: its row would be a turn
+    # tied to a project that does not exist.
+    instruction, retrieved = (
+        _session_start_ci(project, session_id, cwd, began=began) if recorded else ("", "")
+    )
     return "\n\n".join(
         part for part in (directive, block, team_block, instruction, retrieved) if part
     )
@@ -425,11 +431,14 @@ def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | No
     try:
         with store_session() as store:
             project = active_project(store, cwd)
-            # Unconditionally, even for an empty prompt: a metric row is written
-            # for every turn below, and a row whose project_id has no `project`
-            # row is unreachable from `metrics show --project <name>`, which
-            # resolves names through that table.
-            store.ensure_project(project)
+            # Before anything is written, even for an empty prompt: a metric row is
+            # written for every turn below, and a row whose project_id has no
+            # `project` row is unreachable from `metrics show --project <name>`,
+            # which resolves names through that table. With `[projects] capture`
+            # off, a directory nobody added records nothing at all: no prompt, no
+            # spool, no CI consult, no turn row.
+            if not project_service.tracked(store, project):
+                return ""
             if prompt is not None and prompt.strip():
                 store.add_prompt(prompt, project.id, source="claude-code")
         if prompt is not None and prompt.strip():

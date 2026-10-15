@@ -236,7 +236,8 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             "on_limit": "switch",
             "share_trust": True,
             "share_settings": False,
-        }
+        },
+        "projects": {"capture": False},
     }
     assert _overlay(_V1_DEFAULTS, changed) == system_defaults()
 

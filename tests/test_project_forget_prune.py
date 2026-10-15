@@ -882,7 +882,7 @@ def _capture(runner: CliRunner, monkeypatch: pytest.MonkeyPatch, directory: Path
 
 
 def test_a_hooked_session_captures_a_directory_without_listing_it(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, project_capture: None
 ) -> None:
     shown = _register(runner, monkeypatch, tmp_path / "shown")  # a fact by hand: on purpose
     scratch = _capture(runner, monkeypatch, tmp_path / "scratch")
@@ -906,7 +906,7 @@ def test_a_hooked_session_captures_a_directory_without_listing_it(
 
 
 def test_forget_sticks_against_the_next_prompt(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, project_capture: None
 ) -> None:
     """The issue's complaint: `ensure_project` cleared `forgotten_at`, so the next
     prompt in a forgotten directory put it back on the list. It now comes back
@@ -925,7 +925,7 @@ def test_forget_sticks_against_the_next_prompt(
 
 
 def test_a_pruned_capture_is_captured_again_by_the_next_prompt(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, project_capture: None
 ) -> None:
     """A forgotten row that a later prompt could not revive was a permanent, invisible
     tombstone: the prompt was written into it, `log` said nothing had been captured,
@@ -951,7 +951,7 @@ def test_a_pruned_capture_is_captured_again_by_the_next_prompt(
 
 
 def test_prune_captured_only_drops_stale_captures_and_keeps_the_rest(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, project_capture: None
 ) -> None:
     shown = _register(runner, monkeypatch, tmp_path / "shown")
     fresh = _capture(runner, monkeypatch, tmp_path / "fresh")
@@ -985,7 +985,7 @@ def test_prune_captured_only_drops_stale_captures_and_keeps_the_rest(
 
 
 def test_an_empty_list_names_the_captured_directories_it_hides(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, project_capture: None
 ) -> None:
     """With nothing but captures on the machine, `project list` said "No projects
     registered yet. Run: aisquare init" and `status` "0 project(s) registered" —
@@ -1001,7 +1001,7 @@ def test_an_empty_list_names_the_captured_directories_it_hides(
 
 
 def test_switching_to_a_captured_directory_lists_it(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, project_capture: None
 ) -> None:
     """Pinning a directory is choosing it: the active project must not be the one
     `project list` (no `*` row) and the sidebar leave out."""

@@ -1524,10 +1524,13 @@ def hook_session_start(
         project = orchestrator.team_project(cwd)
         if not project_service.tracked(store, project):
             return ""  # capture is off and nobody added it: no session row, no board (#139)
-        project_service.capture(store, project)
         role = orchestrator.env_role()
         if not store.team_active(project.id) and role is None:
             return ""
+        # Only now, for the session row below: captured before the board was asked, every
+        # session start in any directory took the store's write lock for nothing (review of
+        # #259, round 18).
+        project_service.capture(store, project)
         known = store.get_session(session_id)
         now = _now()
         # Computed before upsert_session(), which overwrites transcript_path.

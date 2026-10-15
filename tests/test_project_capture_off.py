@@ -124,6 +124,25 @@ def test_a_role_session_where_nothing_was_added_joins_no_board(
     assert "role: coder" in start.stdout
 
 
+def test_a_session_start_with_no_board_to_join_writes_nothing(
+    work_dir: Path, project_capture: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 18: with capture on, the team hook captured the directory (an
+    upsert, the store's write lock) before it asked whether a board was active or a role
+    set, then returned with nothing to write. A session start that joins no board writes
+    nothing; one with a role captures the directory for its session row."""
+    session = "eeee5555-0000-0000-0000-000000000000"
+
+    assert team_service.hook_session_start(session, work_dir, "startup") == ""
+    assert _rows() == []
+
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    assert "role: coder" in team_service.hook_session_start(session, work_dir, "startup")
+    assert [row.onboarded_at for row in _rows()] == [None], "captured, not added"
+    with store_session() as store:
+        assert store.get_session(session) is not None
+
+
 def test_team_spawn_adds_its_project_when_it_starts_the_session_not_when_it_prints(
     runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

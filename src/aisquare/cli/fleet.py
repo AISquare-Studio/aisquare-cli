@@ -920,9 +920,11 @@ def reap(
     for branch in report.branches_deleted:
         console.print(f"  🗑 branch {branch}")
     for branch in report.branches_kept:
+        # Named on every reap until it goes: reap deletes it once the default branch has
+        # its work, and only the operator knows when work it lacks is abandoned.
         console.print(
             f"  · kept branch {branch} — commits the default branch lacks; "
-            "a spawn for its task carries on there"
+            f"a spawn for its task carries on there, and `git branch -D {branch}` drops it"
         )
     for path, reason in report.worktrees_kept:
         console.print(f"  ⚠ kept {path} — {reason}")

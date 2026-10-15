@@ -1403,6 +1403,8 @@ def test_reap_json(runner: CliRunner, resolved: Seen, monkeypatch: pytest.Monkey
     assert "· kept branch fleet/amber-otter/billing — commits the default branch lacks" in (
         human.stdout
     )
+    said = " ".join(human.stdout.split())
+    assert "`git branch -D fleet/amber-otter/billing` drops it" in said, "and how to drop it"
 
 
 def test_reap_names_a_refused_release_and_exits_1(

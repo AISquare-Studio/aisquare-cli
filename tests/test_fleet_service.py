@@ -7969,6 +7969,43 @@ def test_a_restart_makes_a_gone_tree_again_on_the_branch_its_row_recorded(
     assert f"made it again on its branch {branch}" in " ".join(receipt.notes), receipt.notes
 
 
+@pytest.mark.parametrize("merge", ["fast-forward", "squash"])
+def test_reap_deletes_a_kept_fleet_branch_once_the_default_branch_has_its_work(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path, merge: str
+) -> None:
+    """Review of #259, round 15: a ``fleet/…`` branch reap kept when its tree went was
+    never looked at again — the tree gone, its row was no candidate — so it stayed for good
+    once merged, and with a squash or rebase merge its tip never reaches the default branch
+    at all. Every reap now asks each branch no tree has out: deleted once the default
+    branch holds its tip, or, pushed, once merging it would change nothing; the rest are
+    named again, each reap, with how to drop them (the CLI)."""
+    _remote(project, tmp_path)
+    branches: dict[str, str] = {}
+    for label in ("coder-merged", "coder-open"):
+        agent = fleet_service.spawn(project, "coder", label=label).agent
+        _commit(agent.cwd, f"{label}.txt")
+        branches[label] = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=agent.cwd)
+        _git("push", "-q", "origin", f"HEAD:feat/{label}", cwd=agent.cwd)
+        fleet_service.stop(project, label, force=True)
+    first = fleet_service.reap(project)
+    assert sorted(first.branches_kept) == sorted(branches.values())
+    assert first.branches_deleted == []
+    done, still = branches["coder-merged"], branches["coder-open"]
+    if merge == "fast-forward":
+        _git("merge", "-q", "--ff-only", done, cwd=project.root)
+    else:
+        _git("merge", "-q", "--squash", done, cwd=project.root)
+        _git("commit", "-q", "-m", "Squash-merge the merged coder's work", cwd=project.root)
+        assert _git("branch", "--list", "--merged", "main", done, cwd=project.root) == ""
+
+    again = fleet_service.reap(project)
+
+    assert again.worktrees_removed == [] and again.branches_deleted == [done]
+    assert _git("branch", "--list", done, cwd=project.root) == ""
+    assert again.branches_kept == [still], "still kept, and named again"
+    assert _git("branch", "--list", still, cwd=project.root)
+
+
 def test_reap_keeps_a_worktree_with_unpushed_commits_or_uncommitted_changes_and_says_why(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
 ) -> None:
@@ -8044,9 +8081,11 @@ def test_reap_deletes_only_a_fleet_branch(
 ) -> None:
     """An agent that switched its tree to a branch of its own and pushed it: the tree goes,
     as nothing is only there, and the branch stays — reap deletes the ``fleet/…`` branches
-    it made, never another."""
+    it made, never another. The one it was spawned on, left at main's tip, goes: main
+    holds it (review of #259, round 15)."""
     _remote(project, tmp_path)
     agent = fleet_service.spawn(project, "coder", label="coder-own").agent
+    spawned_on = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=agent.cwd)
     _git("switch", "-q", "-c", "my-own", cwd=agent.cwd)
     _commit(agent.cwd, "mine.txt")
     _git("push", "-q", "origin", "HEAD:my-own", cwd=agent.cwd)
@@ -8054,7 +8093,8 @@ def test_reap_deletes_only_a_fleet_branch(
 
     report = fleet_service.reap(project)
 
-    assert report.worktrees_removed == [agent.cwd] and report.branches_deleted == []
+    assert report.worktrees_removed == [agent.cwd] and report.branches_deleted == [spawned_on]
+    assert spawned_on.startswith("fleet/") and report.branches_kept == []
     assert _git("branch", "--list", "my-own", cwd=project.root)
 
 

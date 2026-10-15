@@ -441,12 +441,12 @@ class ReapReport:
     """An ended agent's worktree left in place, with why: uncommitted changes, or commits
     found nowhere but there (:func:`_remove_finished_worktrees`)."""
     branches_deleted: list[str] = field(default_factory=list)
-    """The ``fleet/…`` branches of removed worktrees, deleted once the default branch held
-    their tip."""
+    """The ``fleet/…`` branches no worktree had out, deleted once the default branch had
+    their work (:func:`_sweep_fleet_branches`)."""
     branches_kept: list[str] = field(default_factory=list)
-    """The ``fleet/…`` branches of removed worktrees that hold commits the default branch
-    lacks: kept, so a spawn for their task or a restart of their agent carries on from
-    them (:func:`_remake_worktree`)."""
+    """The ``fleet/…`` branches no worktree has out that hold commits the default branch
+    lacks, named on every reap: kept, so a spawn for their task or a restart of their agent
+    carries on from them (:func:`_remake_worktree`)."""
     claims_released: list[str] = field(default_factory=list)
     """Task ids the ended and lost rows' board sessions still held, returned to
     the pool — the same count ``shutdown`` reports, where ``reap`` used to
@@ -1314,35 +1314,31 @@ def _remove_finished_worktrees(
     is on the report with why. A tree a live agent still sits in (a respawn reused it)
     is never touched.
 
-    The tree goes; its ``fleet/…`` branch is deleted only once the default branch holds
-    its tip, and no other branch is. Deleted when pushed anywhere, as the tree is, it took
-    the task's commits with it: a coder spawned again for the task, after a reviewer
-    reopened it, asks for the same branch (:func:`branch_name`), found none, and started
-    a new one from the main checkout's HEAD, without its own pushed work, and nothing
-    said so (review of #259, round 14). A branch with commits the default branch lacks
-    is kept, costing nothing: a spawn for the task checks it out (:func:`_ensure_worktree`),
-    and a restart of the agent makes its tree again there (:func:`_remake_worktree`), on
-    the branch recorded on its row just before the tree went (:func:`_record_the_branch`),
-    whatever its name.
+    The tree goes, and its branch stays, recorded on the row just before the tree went
+    (:func:`_record_the_branch`), whatever its name: a spawn for the task checks it out
+    (:func:`_ensure_worktree`), and a restart of the agent makes its tree again there
+    (:func:`_remake_worktree`). Deleted when pushed anywhere, as the tree is, it took the
+    task's commits with it: a coder spawned again for the task, after a reviewer reopened
+    it, asks for the same branch (:func:`branch_name`), found none, and started a new one
+    from the main checkout's HEAD, without its own pushed work, and nothing said so
+    (review of #259, round 14). Which ``fleet/…`` branches go is :func:`_sweep_fleet_branches`,
+    asked on every reap, whether or not a tree was removed.
     """
     root = project.root
     if not is_git_project(root):
         return
+    try:
+        default = _default_branch(root)
+    except FleetError:
+        return  # no git here: nothing can be removed safely, so nothing is
     candidates = [
         agent
         for agent in store.fleet_agents(project.id)
         if agent.ended_at is not None and agent.worktree and agent.cwd.exists()
     ]
-    if not candidates:
-        return
     in_use = {agent.cwd.resolve() for agent in store.fleet_agents(project.id, live_only=True)} | {
         root.resolve()
     }
-    try:
-        branches = _worktree_branches(root)
-        default = _default_branch(root)
-    except FleetError:
-        return  # no git here: nothing can be removed safely, so nothing is
     seen: set[Path] = set()
     for agent in candidates:
         path = agent.cwd.resolve()
@@ -1362,14 +1358,61 @@ def _remove_finished_worktrees(
             report.worktrees_kept.append((agent.cwd, kept))
             continue
         report.worktrees_removed.append(agent.cwd)
-        branch = branches.get(path)
-        if branch is None or not branch.startswith(_FLEET_BRANCH_PREFIX):
+    _sweep_fleet_branches(root, default, report)
+
+
+def _fleet_branches(root: Path, *flags: str) -> list[str] | None:
+    """The local ``fleet/…`` branches, as ``git for-each-ref <flags>`` lists them; ``None``
+    when git would not."""
+    listed = _git(root, "for-each-ref", "--format=%(refname)", *flags, "refs/heads/fleet")
+    if listed.returncode != 0:
+        return None
+    names = (line.removeprefix("refs/heads/") for line in listed.stdout.splitlines())
+    return [name for name in names if name.startswith(_FLEET_BRANCH_PREFIX)]
+
+
+def _sweep_fleet_branches(root: Path, default: str, report: ReapReport) -> None:
+    """Delete each ``fleet/…`` branch no worktree has out once the default branch has its
+    work; name the rest, kept, in ``branches_kept``.
+
+    Its work is there when the default branch holds its tip, or when it is pushed and
+    every change it makes is on the default branch already (:func:`_squashed`): a squash
+    or rebase merge, whose tip the default branch never holds. Asked of every such branch
+    on every reap: a branch kept when its tree went was never looked at again, so it stayed
+    for good once merged, and the repo collected one a task (review of #259, round 15).
+    A branch some worktree has out, the tree gone by hand or not, is left alone. Only
+    ``fleet/…`` branches, the ones :func:`branch_name` makes, are ever deleted.
+    """
+    every = _fleet_branches(root)
+    merged = _fleet_branches(root, f"--merged={default}")
+    if not every or merged is None:
+        return
+    out = set(_worktree_branches(root).values())
+    for branch in every:
+        if branch in out:
             continue
-        merged = _git(root, "merge-base", "--is-ancestor", f"refs/heads/{branch}", default)
-        if merged.returncode != 0:
+        if branch not in merged and not _squashed(root, branch, default):
             report.branches_kept.append(branch)
         elif _git(root, "branch", "-D", branch).returncode == 0:
             report.branches_deleted.append(branch)
+
+
+def _squashed(root: Path, branch: str, default: str) -> bool:
+    """Whether ``branch`` is pushed and merging it into ``default`` would change nothing:
+    every change it makes is there already, though ``default`` lacks its tip.
+
+    Pushed, so its commits are safe on the remote once the branch goes. Asked of git's own
+    merge (``merge-tree --write-tree``, git 2.38): its tree is ``default``'s. An older git,
+    or a merge with conflicts, says no, and the branch is kept."""
+    ref = f"refs/heads/{branch}"
+    tip = _git(root, "rev-parse", "--verify", "--quiet", ref)
+    if tip.returncode != 0 or not _pushed(root, tip.stdout.strip(), default):
+        return False
+    merge = _git(root, "merge-tree", "--write-tree", default, ref)
+    tree = _git(root, "rev-parse", "--verify", "--quiet", f"{default}^{{tree}}")
+    if merge.returncode != 0 or tree.returncode != 0:
+        return False
+    return merge.stdout.split()[:1] == tree.stdout.split()
 
 
 # --- what tmux knows about a pane -----------------------------------------------------

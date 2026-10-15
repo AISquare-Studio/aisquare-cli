@@ -41,10 +41,10 @@ all of them, and the fleet cleans up the worktrees it made.**
   (`on_limit = "switch"`). `aisquare config reset` puts every setting back.
 - A launch copies a folder's trust from the Claude account that gave it, so an
   agent on another account no longer stops at "trust this folder?".
-- `fleet reap` removes a finished agent's worktree, and its `fleet/…` branch,
-  once its work is pushed to any branch, and keeps and names one that holds
-  work found nowhere else. The manager stops and reaps agents whose work is
-  done.
+- `fleet reap` removes a finished agent's worktree once its work is pushed to
+  any branch, and its `fleet/…` branch once the default branch has that work.
+  It keeps and names a tree or a branch that holds work found nowhere else. The
+  manager stops and reaps agents whose work is done.
 
 **Upgrading:**
 - From 0.8.0, run `aisquare upgrade`. It keeps your install's extras. The
@@ -426,11 +426,13 @@ all of them, and the fleet cleans up the worktrees it made.**
   only there.** The rule was "its branch is merged into the default branch", so
   a tree pushed to an integration branch (`push HEAD:feat/…`) was never
   removed. A tree now goes when it is clean and its commits are on the default
-  branch or pushed to **any** remote branch. Its `fleet/…` branch is then
-  deleted once the default branch holds its tip, and kept while it has commits
-  the default branch lacks, so a coder spawned again for its task checks it out
-  and carries on with them; reap never deleted a branch before, and deletes no
-  other. A tree with uncommitted changes, an untracked file that is not
+  branch or pushed to **any** remote branch. Its branch stays. Every `reap`
+  deletes a `fleet/…` branch no tree has out once the default branch has its
+  work (its tip, or, pushed, every change it makes, after a squash or rebase
+  merge), and keeps one with commits the default branch lacks, so a coder
+  spawned again for its task checks it out and carries on with them. A kept
+  branch is named on every reap, with `git branch -D` to drop it. Reap never
+  deleted a branch before, and deletes no other. A tree with uncommitted changes, an untracked file that is not
   ignored, or unpushed commits is kept and named with why; push it, and the
   next `reap` removes it. `--json` adds `worktrees_kept`, `branches_deleted`
   and `branches_kept` beside `worktrees_removed`. A live agent's tree is never

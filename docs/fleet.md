@@ -480,14 +480,19 @@ counts). A tree with uncommitted changes, an untracked file that is not ignored
 (even under `status.showUntrackedFiles=no`), or unpushed commits is kept and
 named, with why (`worktrees_kept` under `--json`, beside `worktrees_removed`);
 push it, and the next `reap` removes it. `fleet stop` says so for an agent that
-had a worktree. The removed tree's `fleet/…` branch is deleted only once the
-default branch holds its tip (`branches_deleted`). One with commits the default
-branch lacks — pushed to an integration branch, say — is kept and named
-(`branches_kept`): a branch costs nothing, and a coder spawned again for its
-task asks for the same branch, checks it out and carries on with its commits,
-where it used to start a new one from the main checkout's HEAD without them. A
-restart of an agent whose tree was removed makes the tree again on the branch
-reap kept: *One rule for a worktree and its branch* under [Naming](#naming).
+had a worktree. The removed tree's branch stays. Every `reap` then looks at
+each `fleet/…` branch no worktree has out, the ones kept before included, and
+deletes it once the default branch has its work (`branches_deleted`): the
+default branch holds its tip, or the branch is pushed and merging it would
+change nothing, as after a squash or rebase merge (git 2.38 or later). Only
+`fleet/…` branches are ever deleted. One with commits the default branch lacks
+— pushed to an integration branch, say — is kept and named on every reap
+(`branches_kept`), with `git branch -D <branch>` to drop it once its work is
+abandoned: a coder spawned again for its task asks for the same branch, checks
+it out and carries on with its commits, where it used to start a new one from
+the main checkout's HEAD without them. A restart of an agent whose tree was
+removed makes the tree again on the branch its row recorded: *One rule for a
+worktree and its branch* under [Naming](#naming).
 `--all` walks every project's fleet, not just this one.
 
 Each row is asked of its own server, at the socket its spawn recorded, so a
@@ -1129,7 +1134,8 @@ by that label belongs to the spawn that won the label.
 **One rule for a worktree and its branch: the branch outlives the tree.** A
 tree is disk, and goes when nothing in it is found only there (`fleet reap`);
 its `fleet/…` branch is the agent's work, and goes only once the default branch
-holds its tip. So whatever happened to the tree, an agent that carries on —
+has that work (its tip, or every change it makes after a squash or rebase
+merge of a pushed branch). So whatever happened to the tree, an agent that carries on —
 Restart, `fleet restart`, `fleet switch`, Remote's restart — does so on its own
 branch with every commit on it, and a spawn for the same task asks for the same
 branch and checks it out:

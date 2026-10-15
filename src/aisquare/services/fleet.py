@@ -28,6 +28,7 @@ team service may one day call back into it for nudges.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import os
 import re
 import shlex
@@ -998,6 +999,8 @@ def _git(cwd: Path, *args: str) -> _GitResult:
         raise FleetError("git is not installed (or not on PATH) — worktrees need it") from exc
     except subprocess.TimeoutExpired as exc:
         raise FleetError(f"git {args[0]} did not finish within {_GIT_TIMEOUT:.0f} s") from exc
+    finally:
+        _moved_on()  # under the branch lock, each git command is a step a waiter sees
     return _GitResult(completed.returncode, completed.stdout, completed.stderr)
 
 
@@ -1019,11 +1022,20 @@ def _git_common_dir(root: Path) -> Path:
     return common if common.is_absolute() else root / common
 
 
-#: How long a spawn waits on ONE holder of the branch lock (:func:`_branches_locked`) before
-#: it calls that holder stuck: a holder runs at most four git commands under it, each bounded
-#: by :data:`_GIT_TIMEOUT`. The wait starts again whenever the holder changes, so a queue of
-#: spawns, each holding it a moment, is waited through however long it is.
+#: How long a spawn waits on a holder of the branch lock (:func:`_branches_locked`) that says
+#: nothing before it calls that holder stuck. A holder says so after each step it takes under
+#: the lock (:func:`_moved_on`), and each step is bounded: a git command by
+#: :data:`_GIT_TIMEOUT`, the window's tmux commands by tmux's own timeout, the row by the
+#: store's busy timeout. So this is the patience for ONE step, with room to spare. It was the
+#: patience for one holder, sized for "at most four git commands", and a spawn holds the lock
+#: through its tree, its window and its row (review of #259, round 18): on a large repo a
+#: legitimate holder went past it, and a restart, its agent already stopped, was refused.
 _BRANCHES_LOCK_WAIT = 4 * _GIT_TIMEOUT
+
+_BRANCHES_HELD: contextvars.ContextVar[Path | None] = contextvars.ContextVar(
+    "_BRANCHES_HELD", default=None
+)
+"""The repository's own ``.git`` whose branch lock this context holds, for :func:`_moved_on`."""
 
 #: How often a waiter looks at who holds the branch lock (:func:`_lock_holder`).
 _HOLDER_LOOK = 1.0
@@ -1045,13 +1057,15 @@ def _branches_locked(common: Path, *, wait: float) -> Iterator[None]:
     and 18). A file in
     ``common``, which every worktree of the repository shares.
 
-    ``wait`` is the patience for one holder, not for the lock: each holder says who it is
-    beside the lock (:func:`_announce_holder`), and a waiter that sees another holder than
-    the one it last saw starts its wait again. A queue of spawns is busy, not stuck: with
-    one 120 s wait for the lock, the third of three spawns in a repo whose checkout is slow
-    was refused behind two ``git worktree add``, though nothing was stuck (review of #259,
-    round 17). Raises :class:`FleetError` when one holder keeps it past ``wait`` seconds
-    (``0`` asks once), or it cannot be taken at all.
+    ``wait`` is the patience for a holder that does not move, not for the lock: each holder
+    says beside the lock who it is (:func:`_announce_holder`), and again after each step it
+    takes under it (:func:`_moved_on`), and a waiter that sees another word than the one it
+    last saw starts its wait again. A queue of spawns is busy, not stuck: with one 120 s wait
+    for the lock, the third of three spawns in a repo whose checkout is slow was refused
+    behind two ``git worktree add``, though nothing was stuck (review of #259, round 17). Nor
+    is a spawn that holds it through a slow checkout, its window and its row (round 18).
+    Raises :class:`FleetError` when a holder says nothing for ``wait`` seconds (``0`` asks
+    once), or it cannot be taken at all.
     """
     path = common / "aisquare-fleet-branches.lock"
     taken = contextlib.ExitStack()
@@ -1080,7 +1094,11 @@ def _branches_locked(common: Path, *, wait: float) -> Iterator[None]:
             raise FleetError(f"{path} could not be locked ({exc})") from exc
     with taken:
         _announce_holder(common)
-        yield
+        held = _BRANCHES_HELD.set(common)
+        try:
+            yield
+        finally:
+            _BRANCHES_HELD.reset(held)
 
 
 def _holder_file(common: Path) -> Path:
@@ -1088,12 +1106,22 @@ def _holder_file(common: Path) -> Path:
 
 
 def _announce_holder(common: Path) -> None:
-    """Say, beside the branch lock just taken, that this taking holds it: a token no other
-    taking has, which a waiter compares (:func:`_branches_locked`). Not in the lock file,
+    """Say, beside the branch lock this taking holds, that it does, as of now: a token no
+    other taking, nor any other step of this one (:func:`_moved_on`), has, which a waiter
+    compares (:func:`_branches_locked`). Not in the lock file,
     which Windows locks byte 0 of against every other handle. Best effort: unsaid, a waiter
     is only as patient as it was before holders said."""
     with contextlib.suppress(OSError):
         _holder_file(common).write_text(f"{os.getpid()} {time.time_ns()}\n", encoding="utf-8")
+
+
+def _moved_on() -> None:
+    """Say, beside the branch lock this context holds, that its holder has taken a step: a new
+    word, which a waiter reads as a holder still moving (:func:`_branches_locked`). Nothing
+    when it holds none."""
+    common = _BRANCHES_HELD.get()
+    if common is not None:
+        _announce_holder(common)
 
 
 def _lock_holder(common: Path) -> str:
@@ -2683,6 +2711,7 @@ def spawn(
             )
         except TmuxError as exc:
             raise FleetError(f"tmux could not start the window: {exc}") from exc
+        _moved_on()  # the window is up: a step, said to whoever waits on the branch lock
         if window.resize_refused is not None:
             # The agent runs either way; what it costs is #149 itself, so it is said
             # rather than left for the diff panel to explain (review of #162, round 1).

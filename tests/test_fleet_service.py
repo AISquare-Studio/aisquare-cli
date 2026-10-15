@@ -8687,6 +8687,77 @@ def test_a_reap_or_a_spawn_asks_git_for_the_branch_locks_directory_once(
     assert asked.count(("rev-parse", "--git-common-dir")) == 1
 
 
+def test_a_waiter_on_the_branch_lock_waits_while_its_holder_moves_on(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 18: the wait on one holder was sized for "at most four git
+    commands", and a spawn now holds the lock through its tree, its window and its row; on a
+    large repo a holder still working went past it, and a restart, its agent stopped, was
+    refused as behind a stuck one. A holder says it moved on after each git command it runs
+    under the lock, and the waiter's patience is for one step. One that says nothing for
+    the wait is still called stuck."""
+    monkeypatch.setattr(fleet_service, "_HOLDER_LOOK", 0.05)
+    common = fleet_service._git_common_dir(repo)
+    holding, released = threading.Event(), threading.Event()
+
+    def a_holder(steps: bool) -> None:
+        """Holds the lock 1 s, through a git command every 0.2 s when it ``steps``."""
+        with fleet_service._branches_locked(common, wait=5):
+            holding.set()
+            for _step in range(5):
+                time.sleep(0.2)
+                if steps:
+                    fleet_service._git(repo, "rev-parse", "HEAD")
+        released.set()
+
+    for steps in (True, False):
+        holding.clear()
+        released.clear()
+        holder = threading.Thread(target=a_holder, args=(steps,))
+        holder.start()
+        try:
+            assert holding.wait(5)
+            if steps:
+                with fleet_service._branches_locked(common, wait=0.5):
+                    assert released.is_set(), "taken once the holder let go"
+            else:
+                with (
+                    pytest.raises(FleetError, match="may be stuck"),
+                    fleet_service._branches_locked(common, wait=0.5),
+                ):
+                    pass
+        finally:
+            holder.join(5)
+
+
+def test_a_spawn_says_it_moved_on_once_its_window_is_up(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Between the tree's last git command and the row's, a spawn opens its window: tmux
+    commands, not git. It says it moved on once the window is up."""
+    said: list[str] = []
+    real_window, real_announce = fleet_service.open_window, fleet_service._announce_holder
+
+    def window(*args: Any, **kwargs: Any) -> WindowInfo:
+        said.append("window")
+        return real_window(*args, **kwargs)
+
+    def announce(common: Path) -> None:
+        said.append("moved on")
+        real_announce(common)
+
+    monkeypatch.setattr(fleet_service, "open_window", window)
+    monkeypatch.setattr(fleet_service, "_announce_holder", announce)
+
+    fleet_service.spawn(project, "coder", label="coder-w")
+
+    assert said[said.index("window") + 1] == "moved on"
+    monkeypatch.setattr(fleet_service, "_announce_holder", real_announce)
+    said.clear()
+    fleet_service._git(project.root, "rev-parse", "HEAD")
+    assert said == [], "outside the lock, a git command says nothing"
+
+
 def test_a_spawn_waits_through_a_queue_of_holders_of_the_branch_lock(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

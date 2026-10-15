@@ -697,25 +697,54 @@ class _RemoteReach:
         return self._boards
 
 
-def _remote_task(ref: str, reach: Callable[[], set[str]]) -> TeamTask:
-    """The task a phone's ``ref``, an id, an id prefix or an id tail, names among those on a
-    board it may reach (``reach``, :class:`_RemoteReach`): ``KeyError(ref)`` for none, as the
-    board's services raise it, and ``AmbiguousIdError`` for several there
-    (:func:`_remote_board_refusals`).
+def _remote_task(
+    ref: str, reach: Callable[[], set[str]], *, session: str | None, project: str | None
+) -> TeamTask:
+    """The task a phone's ``ref`` names: ``KeyError(ref)`` for none, as the board's services
+    raise it, and ``AmbiguousIdError`` for several there (:func:`_remote_board_refusals`).
 
-    The services read a ref across every board, captured directories' included: a claim or
-    a close of a captured project's task answered with its title and detail, and the
-    answers to ``tsk_0``, ``tsk_00`` and on, a 200, a 404 or an ``ambiguous_id``, told
-    which ids were there (review of #243, round 10, 5/7). The service is then given the
-    task's id."""
+    A board number, ``12`` or ``#12``, as every board line shows it, is read on one board
+    (:func:`_remote_number_board`): ``session``'s, the id of the write's ``as``, else
+    ``project``'s, else the current project's, as ``asq task done 12`` reads it on its
+    ``--as``'s board or its directory's (``team.find_task``). Read as an id like any other
+    ref, ``12`` closed whichever reachable task's id ended in ``12``, on any board, and
+    ``#12`` was a 404 (review of #259, round 13).
+
+    Anything else is an id, an id prefix or an id tail among the tasks on a board the phone
+    may reach (``reach``, :class:`_RemoteReach`). The services read one across every board,
+    captured directories' included: a claim or a close of a captured project's task
+    answered with its title and detail, and the answers to ``tsk_0``, ``tsk_00`` and on, a
+    200, a 404 or an ``ambiguous_id``, told which ids were there (review of #243, round 10,
+    5/7). The service is then given the task's id."""
     from aisquare.core.store import store_session
+    from aisquare.services import team as team_service
 
-    boards = reach()
-    with store_session() as store:
-        task = store.get_task(ref, project_ids=boards)
+    number = team_service.task_number_of(ref)
+    if number is not None:
+        board = _remote_number_board(session, project)
+        with store_session() as store:
+            task = store.task_by_number(board, number)
+    else:
+        boards = reach()
+        with store_session() as store:
+            task = store.get_task(ref, project_ids=boards)
     if task is None:
         raise KeyError(ref)
     return task
+
+
+def _remote_number_board(session: str | None, project: str | None) -> str:
+    """The board a write reads a task number on: the session's, the id of the ``as`` it
+    resolved (:func:`_remote_author`, so a board a phone may reach), else the board of
+    ``project`` (:func:`_resolve_project`; the current project for ``None``)."""
+    from aisquare.core.store import store_session
+
+    if session is not None:
+        with store_session() as store:
+            found = store.get_session(session)
+        if found is not None:
+            return found.project_id
+    return _remote_board_project(_resolve_project(project).root).id
 
 
 @contextlib.contextmanager
@@ -3424,10 +3453,12 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
 
         ref = _required(body, "ref", limit=BOARD_REF_MAX)
         author = _optional_ref(body, "as", limit=BOARD_REF_MAX)
+        project = _optional_ref(body, "project")
         reach = _RemoteReach()
         with _remote_board_refusals(reach, ("ref", ref, "task"), ("as", author, "session")):
             session = _remote_author(author, reach)
-            task = team_service.claim_task(_remote_task(ref, reach).id, session_ref=session)
+            found = _remote_task(ref, reach, session=session, project=project)
+            task = team_service.claim_task(found.id, session_ref=session)
         return {"task": task.model_dump(mode="json")}, f"claimed {task.id} as={session or '-'}"
 
     def task_done(body: dict[str, Any]) -> tuple[dict[str, object], str]:
@@ -3439,10 +3470,11 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
         note = _optional_ref(body, "note")
         if note is not None:
             check_note_text(note, "note")
+        project = _optional_ref(body, "project")
         reach = _RemoteReach()
         with _remote_board_refusals(reach, ("ref", ref, "task"), ("as", author, "session")):
             session = _remote_author(author, reach)
-            found = _remote_task(ref, reach)
+            found = _remote_task(ref, reach, session=session, project=project)
             task = team_service.finish_task(found.id, note=note, session_ref=session)
         return {"task": task.model_dump(mode="json")}, f"done {task.id} as={session or '-'}"
 
@@ -3492,7 +3524,11 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
                 event = team_service.add_note(
                     text,
                     session_ref=session,
-                    task_ref=None if task is None else _remote_task(task, reach).id,
+                    task_ref=(
+                        None
+                        if task is None
+                        else _remote_task(task, reach, session=session, project=project).id
+                    ),
                     to_role=to,
                     kind=kind,
                     cwd=cwd,

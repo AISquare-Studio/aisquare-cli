@@ -610,6 +610,40 @@ def test_claiming_another_projects_task_needs_no_project(
     assert "another project's task" in _event_texts(remote_board_payload(other.id))
 
 
+def test_a_task_number_is_read_on_one_board_never_as_an_id_tail(
+    two_projects: tuple[ProjectInfo, ProjectInfo],
+) -> None:
+    """Every board line names a task ``#12``, and Remote read ``12`` as an id tail across
+    every board a phone reaches: it closed whichever task's id ended in ``12``, another
+    project's included, and ``#12`` was a 404 (review of #259, round 13). A number is read
+    on the current project's board, or ``project``'s."""
+    from aisquare.models import TeamTask
+
+    current, other = two_projects
+    now = datetime.now(UTC)
+    with store_session() as store:
+        for task_id, project in (("tsk_mine_ab", current), ("tsk_theirs_1", other)):
+            store.upsert_task(
+                TeamTask(
+                    id=task_id, project_id=project.id, key=task_id, title=task_id,
+                    created_at=now, updated_at=now,
+                )
+            )  # fmt: skip
+        assert store.task_by_number(current.id, 1).id == "tsk_mine_ab"  # type: ignore[union-attr]
+        assert store.task_by_number(other.id, 1).id == "tsk_theirs_1"  # type: ignore[union-attr]
+    writes = live_writes().handlers
+
+    _result, summary = writes["task/done"]({"ref": "1"})
+    assert summary == "done tsk_mine_ab as=-"
+    _result, summary = writes["task/claim"]({"ref": "#1", "project": other.id})
+    assert summary == "claimed tsk_theirs_1 as=-"
+    refused = _refused("task/done", {"ref": "#2"})
+    assert (refused.status, refused.error) == (404, "not_found")
+    with store_session() as store:
+        theirs = store.get_task("tsk_theirs_1")
+    assert theirs is not None and theirs.status == "doing", "claimed, never closed"
+
+
 @pytest.fixture
 def captured(two_projects: tuple[ProjectInfo, ProjectInfo], tmp_path: Path) -> ProjectInfo:
     """A directory the hooks captured (#139), with a board of its own: never added, never

@@ -240,7 +240,9 @@ and turning notifications on or off change only what you are shown, not the
 fleet, and need no write switch. Claiming or finishing a task and switching,
 adding or removing a project are write routes of the API (`api/task/claim`,
 `api/task/done`, `api/project/switch`, `add`, `remove`) that the page itself
-does not offer: Tasks is read-only there. `remove` takes a project's name,
+does not offer: Tasks is read-only there. A task's `ref` is its id, or its
+board number (`12` or `#12`), read on the board of the session `as` names, else
+of `project`, else of the current project. `remove` takes a project's name,
 codename or id, or its absolute path; a relative path is refused, since it would
 be read from wherever the server was started.
 

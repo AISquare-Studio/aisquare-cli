@@ -339,8 +339,8 @@ def _write_bodies(ref: str, agent_id: str) -> dict[str, list[dict[str, object]]]
         "project": ref,
     }
     return {
-        "task/claim": [{"ref": ref}, {"ref": "tsk_x", "as": ref}],
-        "task/done": [{"ref": ref}, {"ref": "tsk_x", "as": ref}],
+        "task/claim": [{"ref": ref}, {"ref": "tsk_x", "as": ref}, {"ref": "1", "project": ref}],
+        "task/done": [{"ref": ref}, {"ref": "tsk_x", "as": ref}, {"ref": "1", "project": ref}],
         "note": [
             {"text": "hi", "project": ref},
             {"text": "hi", "as": ref},

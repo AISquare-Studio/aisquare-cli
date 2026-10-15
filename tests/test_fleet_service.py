@@ -8091,6 +8091,33 @@ def test_reap_deletes_a_kept_fleet_branch_once_the_default_branch_has_its_work(
     assert _git("branch", "--list", still, cwd=project.root)
 
 
+def test_a_squash_merged_branch_goes_where_a_top_level_path_is_named_like_the_default_branch(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Review of #259, round 17: ``git rev-list <tips> --not main --remotes`` had no ``--``,
+    and in a checkout whose top level holds a ``main/`` git exits 128, "ambiguous argument
+    'main': both revision and filename". Read as "nothing pushed", every squash-merged
+    fleet branch was kept, and named again on every reap."""
+    (project.root / "main").mkdir()
+    (project.root / "main" / "README").write_text("a directory named like the branch\n")
+    _git("add", "main", cwd=project.root)
+    _git("commit", "-q", "-m", "a main/ directory", cwd=project.root)
+    _remote(project, tmp_path)
+    agent = fleet_service.spawn(project, "coder", label="coder-squash").agent
+    _commit(agent.cwd, "feature.txt")
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=agent.cwd)
+    _git("push", "-q", "origin", "HEAD:feat/squash", cwd=agent.cwd)
+    fleet_service.stop(project, agent.label, force=True)
+    _git("merge", "-q", "--squash", branch, cwd=project.root)
+    _git("commit", "-q", "-m", "Squash-merge the coder's work", cwd=project.root)
+
+    report = fleet_service.reap(project)
+
+    assert report.worktrees_removed == [agent.cwd]
+    assert report.branches_deleted == [(project.root, branch)] and report.branches_kept == []
+    assert _git("branch", "--list", branch, cwd=project.root) == ""
+
+
 def test_a_kept_branch_costs_a_reap_one_git_call_pushed_and_none_unpushed(
     tmux: FakeTmux,
     claude_on_path: Path,

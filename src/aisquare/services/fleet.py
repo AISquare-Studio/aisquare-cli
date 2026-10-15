@@ -1108,7 +1108,7 @@ def _reuse_worktree(
     if refuse_if_taken is not None:
         refuse_if_taken()
     if _branch_exists(root, branch):
-        _git_ok(path, "checkout", branch)
+        _git_ok(path, "checkout", branch, "--")  # the branch, never a path of that name
     else:
         _git_ok(path, "checkout", "-b", branch)
     notes.append(f"reusing the existing worktree at {path} — it was {where}, now on {branch}")
@@ -1548,7 +1548,9 @@ def _squashed(root: Path, tips: Mapping[str, str], default: str) -> set[str]:
     every time (review of #259, round 16)."""
     if not tips:
         return set()
-    alone = _git(root, "rev-list", *tips.values(), "--not", default, "--remotes")
+    # Ended by `--`: a top-level `main/` made `main` "both revision and filename", rev-list
+    # exited 128, and every squash-merged branch read as unpushed (review of #259, round 17).
+    alone = _git(root, "rev-list", *tips.values(), "--not", default, "--remotes", "--")
     tree = _git(root, "rev-parse", "--verify", "--quiet", f"{default}^{{tree}}")
     if alone.returncode != 0 or tree.returncode != 0:
         return set()

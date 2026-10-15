@@ -1017,9 +1017,14 @@ def _git_common_dir(root: Path) -> Path:
     return common if common.is_absolute() else root / common
 
 
-#: How long a spawn waits for the branch lock (:func:`_branches_locked`): a reap holds it
-#: for a few ``git branch -D``, another spawn for one ``git worktree add``.
-_BRANCHES_LOCK_WAIT = _GIT_TIMEOUT
+#: How long a spawn waits on ONE holder of the branch lock (:func:`_branches_locked`) before
+#: it calls that holder stuck: a holder runs at most four git commands under it, each bounded
+#: by :data:`_GIT_TIMEOUT`. The wait starts again whenever the holder changes, so a queue of
+#: spawns, each holding it a moment, is waited through however long it is.
+_BRANCHES_LOCK_WAIT = 4 * _GIT_TIMEOUT
+
+#: How often a waiter looks at who holds the branch lock (:func:`_lock_holder`).
+_HOLDER_LOOK = 1.0
 
 
 @contextlib.contextmanager
@@ -1033,21 +1038,66 @@ def _branches_locked(root: Path, *, wait: float) -> Iterator[None]:
     of #259, round 16). So :func:`_ensure_worktree` holds this from its first question
     about a branch until the tree is registered, and :func:`_sweep_fleet_branches` deletes
     only while it holds it, asking the trees again first. A file in the repository's own
-    ``.git``, which every worktree of it shares. Raises :class:`FleetError` when it cannot
-    be taken within ``wait`` seconds, or at all.
+    ``.git``, which every worktree of it shares.
+
+    ``wait`` is the patience for one holder, not for the lock: each holder says who it is
+    beside the lock (:func:`_announce_holder`), and a waiter that sees another holder than
+    the one it last saw starts its wait again. A queue of spawns is busy, not stuck: with
+    one 120 s wait for the lock, the third of three spawns in a repo whose checkout is slow
+    was refused behind two ``git worktree add``, though nothing was stuck (review of #259,
+    round 17). Raises :class:`FleetError` when one holder keeps it past ``wait`` seconds
+    (``0`` asks once), or it cannot be taken at all.
     """
-    path = _git_common_dir(root) / "aisquare-fleet-branches.lock"
+    common = _git_common_dir(root)
+    path = common / "aisquare-fleet-branches.lock"
     taken = contextlib.ExitStack()
-    try:
-        taken.enter_context(holding(path, wait_s=wait))
-    except TimeoutError as exc:
-        raise FleetError(
-            f"another aisquare held {path} past {wait:g} s (a spawn or a reap) — try again"
-        ) from exc
-    except OSError as exc:
-        raise FleetError(f"{path} could not be locked ({exc})") from exc
+    seen = _lock_holder(common)
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            left = max(0.0, deadline - time.monotonic())
+            taken.enter_context(holding(path, wait_s=min(left, _HOLDER_LOOK)))
+            break
+        except TimeoutError as exc:
+            now = _lock_holder(common)
+            if wait > 0 and now != seen:
+                seen, deadline = now, time.monotonic() + wait  # another holder: still moving
+            elif time.monotonic() >= deadline:
+                raise FleetError(
+                    f"another aisquare (a spawn or a reap) holds {path}"
+                    + (
+                        f", and has held it for {wait:g} s without letting go — it may be "
+                        "stuck; try again once it ends"
+                        if wait > 0
+                        else " — try again"
+                    )
+                ) from exc
+        except OSError as exc:
+            raise FleetError(f"{path} could not be locked ({exc})") from exc
     with taken:
+        _announce_holder(common)
         yield
+
+
+def _holder_file(common: Path) -> Path:
+    return common / "aisquare-fleet-branches.holder"
+
+
+def _announce_holder(common: Path) -> None:
+    """Say, beside the branch lock just taken, that this taking holds it: a token no other
+    taking has, which a waiter compares (:func:`_branches_locked`). Not in the lock file,
+    which Windows locks byte 0 of against every other handle. Best effort: unsaid, a waiter
+    is only as patient as it was before holders said."""
+    with contextlib.suppress(OSError):
+        _holder_file(common).write_text(f"{os.getpid()} {time.time_ns()}\n", encoding="utf-8")
+
+
+def _lock_holder(common: Path) -> str:
+    """The token the branch lock's latest holder announced, or ``""`` when none can be read."""
+    try:
+        return _holder_file(common).read_text(encoding="utf-8")
+    except OSError:
+        return ""
 
 
 def _exclude_worktrees(root: Path, worktree_dir: str, notes: list[str]) -> None:

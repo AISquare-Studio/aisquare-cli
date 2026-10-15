@@ -36,7 +36,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import claude_accounts as accounts_core
-from aisquare.core import claude_sharing, codenames, harness, paths, selfcli
+from aisquare.core import claude_sharing, codenames, harness, locking, paths, selfcli
 from aisquare.core import store as core_store
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import (
@@ -8494,6 +8494,62 @@ def test_a_reap_inside_a_spawn_never_deletes_the_branch_the_spawn_is_making_its_
     assert fleet_service.reap(project).branches_deleted == [(project.root, branch)], (
         "the next reap does"
     )
+
+
+def test_a_spawn_waits_through_a_queue_of_holders_of_the_branch_lock(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 17: the branch lock makes every worktree spawn in a repo wait
+    its turn, and the wait was one 120 s for the lock, so the third of three spawns in a
+    repo whose checkout is slow was refused behind two ``git worktree add``, though nothing
+    was stuck. The wait is per holder now: each says who it is, and another holder than the
+    last one seen starts the wait again."""
+    monkeypatch.setattr(fleet_service, "_BRANCHES_LOCK_WAIT", 0.2)
+    monkeypatch.setattr(fleet_service, "_HOLDER_LOOK", 0.05)
+    common = fleet_service._git_common_dir(repo)
+    first_in = threading.Event()
+    released = threading.Event()
+
+    def a_queue() -> None:
+        """Three holders, each for less than the wait and all of them for more: what a
+        waiter that loses each hand-over sees of three spawns' `git worktree add`. One
+        hold, and a new holder announced every 0.15 s, so no hand-over is the waiter's."""
+        with locking.holding(common / "aisquare-fleet-branches.lock", wait_s=5):
+            for _turn in range(3):
+                fleet_service._announce_holder(common)
+                first_in.set()
+                time.sleep(0.15)
+        released.set()
+
+    queue = threading.Thread(target=a_queue)
+    queue.start()
+    try:
+        first_in.wait(5)
+        with fleet_service._branches_locked(repo, wait=fleet_service._BRANCHES_LOCK_WAIT):
+            assert released.is_set(), "taken once the queue let go, 0.45 s on"
+    finally:
+        queue.join()
+
+
+def test_a_holder_of_the_branch_lock_that_never_lets_go_is_called_stuck(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(fleet_service, "_HOLDER_LOOK", 0.05)
+    common = fleet_service._git_common_dir(repo)
+    with locking.holding(common / "aisquare-fleet-branches.lock", wait_s=0):
+        fleet_service._announce_holder(common)
+        started = time.monotonic()
+        with (
+            pytest.raises(FleetError, match=r"has held it for 0\.2 s without letting go"),
+            fleet_service._branches_locked(repo, wait=0.2),
+        ):
+            pytest.fail("taken while another held it")
+        assert time.monotonic() - started >= 0.2
+        with (
+            pytest.raises(FleetError, match=r"holds .* — try again$"),
+            fleet_service._branches_locked(repo, wait=0),
+        ):
+            pytest.fail("taken while another held it")
 
 
 def test_reap_never_removes_a_live_agents_worktree(

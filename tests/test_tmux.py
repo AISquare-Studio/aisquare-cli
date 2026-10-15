@@ -50,6 +50,7 @@ from aisquare.core.tmux import (
     SocketAnswer,
     SocketReads,
     TmuxError,
+    TmuxPartlyTyped,
     TmuxServer,
     TmuxTimedOut,
     TmuxUnavailable,
@@ -1403,6 +1404,59 @@ def test_a_paste_that_fails_does_not_leave_its_text_on_the_server(
     quiet = FakeTmux()
     _server(quiet, fake_bin, conf).paste("%3", "sent")
     assert [command[0] for command in quiet.commands()] == ["load-buffer", "paste-buffer"]
+
+
+@pytest.mark.parametrize("fails", ["load-buffer", "paste-buffer"])
+def test_a_paste_tmux_did_not_answer_says_whether_it_can_still_land_and_tidies_up_briefly(
+    fake_bin: Path, conf: Path, monkeypatch: pytest.MonkeyPatch, fails: str
+) -> None:
+    """Review of #259, round 11, 7/13. A ``load-buffer`` that timed out never sent its
+    ``paste-buffer``, so nothing can arrive: a plain ``TmuxError``, where a timeout read
+    "it may still arrive". A ``paste-buffer`` that timed out may still paste. Either way
+    the buffer is tidied away, waiting ``_ASK_TIMEOUT`` at most on a server that just did
+    not answer: its ``delete-buffer`` held the agent's lock another 30 s."""
+    asked: list[tuple[str, float | None]] = []
+
+    def wedged(
+        argv: Sequence[str], stdin: bytes | None, *, timeout: float | None = None
+    ) -> Completed:
+        command = argv[5]
+        asked.append((command, timeout))
+        if command == fails:
+            raise TmuxTimedOut(f"tmux did not answer within 30s: {command}")
+        return OK
+
+    monkeypatch.setattr(tmux_module, "_tmux", wedged)
+    server = TmuxServer("sock", binary=str(fake_bin), conf=conf)
+    with pytest.raises(TmuxError) as raised:
+        server.paste("%3", "the prompt")
+    assert isinstance(raised.value, TmuxTimedOut) is (fails == "paste-buffer"), raised.value
+    tried = ["load-buffer", "paste-buffer"][: 1 + (fails == "paste-buffer")]
+    assert asked == [*((command, None) for command in tried), ("delete-buffer", 5.0)]
+
+
+def test_a_literal_whose_later_chunk_fails_says_how_much_of_it_was_typed(
+    fake_bin: Path, conf: Path
+) -> None:
+    """Review of #259, round 11, 7/13: of ``send_literal``'s up to 16 ``send-keys -H``
+    calls, one that failed after the first left the chunks before it in the pane and sent
+    none after it. As a plain refusal it read "nothing was typed", as a plain timeout "the
+    text may still arrive"; ``TmuxPartlyTyped`` says how many bytes went. A first chunk
+    that fails typed nothing, and is the plain error it was."""
+    text = "x" * (3 * 512)
+    refused = Completed(1, "", "server exited unexpectedly\n")
+    fake = FakeTmux(OK, refused)
+    with pytest.raises(TmuxPartlyTyped) as raised:
+        _server(fake, fake_bin, conf).send_literal("%3", text)
+    assert (raised.value.typed, raised.value.size) == (512, 3 * 512)
+    assert str(raised.value.cause) == "server exited unexpectedly"
+    assert len(fake.commands()) == 2, "no chunk is sent after the one that failed"
+
+    first = FakeTmux(refused)
+    with pytest.raises(TmuxError) as plain:
+        _server(first, fake_bin, conf).send_literal("%3", text)
+    assert not isinstance(plain.value, TmuxPartlyTyped)
+    assert len(first.commands()) == 1
 
 
 def test_resize_never_asks_for_a_zero_sized_window(fake_bin: Path, conf: Path) -> None:

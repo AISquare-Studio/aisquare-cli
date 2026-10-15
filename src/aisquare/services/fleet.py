@@ -61,6 +61,7 @@ from aisquare.core.tmux import (
     PaneFacts,
     SocketAnswer,
     TmuxError,
+    TmuxPartlyTyped,
     TmuxServer,
     TmuxTimedOut,
     TmuxUnavailable,
@@ -279,7 +280,8 @@ class TellResult:
 class PaneWrite:
     """How one write into an agent's pane ended (:func:`pane_write`): ``yes``, tmux typed it;
     ``no``, tmux refused it and typed nothing; ``maybe``, tmux did not answer in time
-    (``TmuxTimedOut``), and a wedged server may still type it once it recovers.
+    (``TmuxTimedOut``), and a wedged server may still type it once it recovers, or it typed
+    a part before it failed (``TmuxPartlyTyped``).
 
     Every write that types into an agent on someone's word asks it here: the remote's tell
     in each of its modes, its Escapes, ``send-keys`` and quick answers, and ``fleet tell``.
@@ -295,21 +297,33 @@ class PaneWrite:
     error: TmuxError | None = None
 
     def late(self, label: str, *, then: str = "", again: str = "send it again") -> str:
-        """``maybe``'s sentence: ``what`` may still reach ``label``'s pane (and ``then``), so
-        its live screen is read before anyone does ``again``."""
+        """``maybe``'s sentence: ``what`` may still reach ``label``'s pane (and ``then``), or a
+        part of it did, so its live screen is read before anyone does ``again``."""
+        error = self.error
+        read = f"read its live screen before you {again}"
+        if isinstance(error, TmuxPartlyTyped):
+            typed = f"tmux typed {error.typed} of the {error.size} bytes of {self.what} into"
+            if isinstance(error.cause, TmuxTimedOut):
+                return (
+                    f"{typed} {label}'s pane, then did not answer in time ({error.cause}): "
+                    f"more of it may still arrive{then} — {read}"
+                )
+            return f"{typed} {label}'s pane, then refused the rest ({error.cause}){then} — {read}"
         return (
-            f"tmux did not answer in time with {self.what} for {label}'s pane ({self.error}): "
-            f"it may still arrive{then} — read its live screen before you {again}"
+            f"tmux did not answer in time with {self.what} for {label}'s pane ({error}): "
+            f"it may still arrive{then} — {read}"
         )
 
 
 def pane_write(what: str, write: Callable[[], object]) -> PaneWrite:
     """``write()``, which types ``what`` into an agent's pane, and how it ended
     (:class:`PaneWrite`). ``TmuxError`` is every way a tmux call fails (``core.tmux._tmux``),
-    and ``TmuxTimedOut`` the one way that may still happen."""
+    ``TmuxTimedOut`` the one way that may still happen, and ``TmuxPartlyTyped`` a write of
+    several calls that failed past its first: ``core.tmux`` says which of its calls timed out
+    (review of #259, round 11, 7/13)."""
     try:
         write()
-    except TmuxTimedOut as exc:
+    except (TmuxTimedOut, TmuxPartlyTyped) as exc:
         return PaneWrite("maybe", what, exc)
     except TmuxError as exc:
         return PaneWrite("no", what, exc)

@@ -284,6 +284,19 @@ class TmuxTimedOut(TmuxError):
     refusal, it may still happen."""
 
 
+class TmuxPartlyTyped(TmuxError):
+    """A write of several tmux calls that failed after its first went through
+    (:meth:`TmuxServer.send_bytes`): ``typed`` of its ``size`` bytes reached the pane, and
+    ``cause`` is how the next call failed. The calls after that one were never sent, so of
+    the rest only the chunk a :class:`TmuxTimedOut` asked for may still arrive. Taken for a
+    plain timeout, it was "the text may still arrive", true of a prefix only; taken for a
+    refusal, "nothing was typed" (review of #259, round 11, 7/13)."""
+
+    def __init__(self, cause: TmuxError, typed: int, size: int) -> None:
+        super().__init__(f"{cause} (after {typed} of its {size} bytes)")
+        self.cause, self.typed, self.size = cause, typed, size
+
+
 #: How tmux says a LIVE server has no such session/window/pane — a benign
 #: "not there", distinct from the server being GONE (:data:`_ABSENT`) and from a
 #: socket that refused the probe. Measured on 3.7c: ``can't find session: NAME``
@@ -1696,11 +1709,18 @@ class TmuxServer:
         element PER BYTE: a pasted paragraph would otherwise build a command tmux
         3.7 refuses (more than 1000 arguments) and, longer still, a command line
         that fails with E2BIG. Chunks go in order down one synchronous path, so
-        the pane sees one uninterrupted stream; a typed run is one call.
+        the pane sees one uninterrupted stream; a typed run is one call. A chunk
+        after the first that fails is :class:`TmuxPartlyTyped`: the chunks before
+        it are in the pane.
         """
         for start in range(0, len(data), _HEX_CHUNK):
             chunk = data[start : start + _HEX_CHUNK]
-            self.run("send-keys", "-t", pane_id, "-H", *(f"{byte:02x}" for byte in chunk))
+            try:
+                self.run("send-keys", "-t", pane_id, "-H", *(f"{byte:02x}" for byte in chunk))
+            except TmuxError as exc:
+                if not start:
+                    raise
+                raise TmuxPartlyTyped(exc, start, len(data)) from exc
 
     def paste(self, pane_id: str, text: str) -> None:
         """Bracketed paste: the agent sees one paste, not one Enter per line.
@@ -1708,11 +1728,20 @@ class TmuxServer:
         The buffer belongs to THIS call (:data:`PASTE_BUFFER` says what one
         shared name cost), so ``-d`` deletes exactly the buffer this call
         created and an interleaved paste elsewhere cannot be delivered here.
+
+        A ``load-buffer`` that timed out is a plain :class:`TmuxError`: ``paste-buffer``
+        was never sent, so no server, recovered or not, can type the text. It was a
+        :class:`TmuxTimedOut`, "it may still arrive" (review of #259, round 11, 7/13).
         """
         if not text:
             return
         buffer_name = f"{PASTE_BUFFER}-{os.getpid()}-{next(_PASTE_SEQUENCE)}"
-        self.run("load-buffer", "-b", buffer_name, "-", stdin=text.encode("utf-8"))
+        try:
+            self.run("load-buffer", "-b", buffer_name, "-", stdin=text.encode("utf-8"))
+        except TmuxTimedOut as exc:
+            # A wedged server may still load it, and keep it: tidied as below, behind it.
+            self._tidy("delete-buffer", "-b", buffer_name)
+            raise TmuxError(f"{exc} — nothing was pasted") from exc
         try:
             self.run("paste-buffer", "-p", "-d", "-b", buffer_name, "-t", pane_id)
         except TmuxError:
@@ -1722,9 +1751,18 @@ class TmuxServer:
             # are looking at — and a per-call name is never reused, so nothing
             # overwrites it. Tidy it away; the error the caller gets is the
             # paste's, never the tidy-up's.
-            with contextlib.suppress(TmuxError):
-                self.run("delete-buffer", "-b", buffer_name)
+            self._tidy("delete-buffer", "-b", buffer_name)
             raise
+
+    def _tidy(self, *args: str) -> None:
+        """Run ``args`` after a command failed, to leave nothing of it behind: never raising,
+        and waiting :data:`_ASK_TIMEOUT` at most, not :data:`_COMMAND_TIMEOUT`. The server may
+        be wedged: a paste that timed out held the agent's lock 30 s more for its tidy-up
+        before its ``maybe`` was answered (review of #259, round 11, 7/13). Queued in a
+        wedged server, it runs after the command it tidies once the server recovers."""
+        runner = _tmux_asking if self._runner is _tmux else self._runner
+        with contextlib.suppress(TmuxError):
+            runner(self.argv(*args), None)
 
     def list_buffers(self) -> list[str]:
         """The server's paste buffers by name, the most recently written first.

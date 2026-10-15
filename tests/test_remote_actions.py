@@ -29,7 +29,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app as cli
 from aisquare.core.paths import remote_audit_path
 from aisquare.core.store import store_session
-from aisquare.core.tmux import TmuxError, TmuxTimedOut
+from aisquare.core.tmux import TmuxError, TmuxPartlyTyped, TmuxTimedOut
 from aisquare.core.workspace import find_project_root, project_id_for
 from aisquare.models import (
     ClaudeAccount,
@@ -2479,6 +2479,53 @@ def test_every_write_tmux_did_not_answer_in_time_says_it_may_still_land_and_audi
     assert log[-1] == f"late {write.late}", "nothing reached the agent after it"
     ((_, line),) = phone.audit()
     assert "=maybe " in f"{line} ", line
+
+
+@pytest.mark.parametrize("fails", ["Enter", "a later chunk"])
+def test_send_keys_whose_text_went_in_says_it_is_at_the_prompt_when_what_followed_did_not(
+    phone: Phone,
+    pane: FakePane,
+    log: list[str],
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    fails: str,
+) -> None:
+    """Review of #259, round 11, 4/13: text typed, then its Enter (or a later 512-byte chunk
+    of it) refused, answered only "coder-1: <tmux error>", audited ``failed``. The page keeps
+    the text in its box after a failure, and the natural Send again typed it a second time
+    after the first (or its prefix), the Enter submitting both as one message."""
+    _row(project)
+    if fails == "Enter":
+        pane.failing.add("Enter")
+    else:
+
+        def partly(pane_id: str, text: str) -> None:
+            log.append("part of literal")
+            cause = TmuxError("server exited unexpectedly")
+            raise TmuxPartlyTyped(cause, 512, len(text.encode()))
+
+        monkeypatch.setattr(pane, "send_literal", partly)
+    text = "carry on " * 120
+    response = phone.post("send-keys", agent=LABEL, text=text, enter=True)
+    assert response.status_code == 400 and response.json()["error"] == "write_failed"
+    said = response.json()["message"]
+    if fails == "Enter":
+        assert log == ["literal"], "the text went in, and nothing after the refused Enter"
+        assert said == (
+            "coder-1: typed it at its prompt, but tmux could not press Enter (send-keys "
+            "Enter: lost server) — press Enter on the pad to send it"
+        )
+        verdict = "failed"
+    else:
+        assert log == ["part of literal"], "no Enter after the text that did not all go"
+        assert said.startswith(
+            f"tmux typed 512 of the {len(text)} bytes of the text into coder-1's pane, then "
+            "refused the rest (server exited unexpectedly)"
+        ), said
+        assert said.endswith("read its live screen before you send it again"), said
+        verdict = "delivered=maybe"
+    ((_, line),) = phone.audit()
+    assert line.endswith(f" {verdict}"), line
 
 
 @pytest.mark.parametrize("mode", ["prompt", "interrupt"])

@@ -374,18 +374,19 @@ def type_then_enter(
     return TellResult("yes", done)
 
 
-def pasted_unsent(entered: PaneWrite, label: str, *, press: str) -> TellResult:
-    """A message pasted at ``label``'s prompt whose Enter did not go through (``entered``): the
-    text is there either way. Refused, it waits there unsent, and ``press`` says where an
-    Enter sends it. Not answered in time, the Enter may still send it, so nothing invites a
-    second one: that would answer whatever prompt the message brings up, "1. Yes" to a
-    permission nobody saw (review of #259, round 10, 3/9)."""
+def pasted_unsent(entered: PaneWrite, label: str, *, press: str, put: str = "pasted") -> TellResult:
+    """A message ``put`` at ``label``'s prompt (pasted, or typed as ``send-keys`` types it)
+    whose Enter did not go through (``entered``): the text is there either way. Refused, it
+    waits there unsent, and ``press`` says where an Enter sends it. Not answered in time, the
+    Enter may still send it, so nothing invites a second one: that would answer whatever
+    prompt the message brings up, "1. Yes" to a permission nobody saw (review of #259, round
+    10, 3/9)."""
     if entered.typed == "maybe":
         how = entered.late(label, then=", and send it", again="press Enter")
-        return TellResult("maybe", f"pasted it at its prompt, but {how}")
+        return TellResult("maybe", f"{put} it at its prompt, but {how}")
     return TellResult(
         "no",
-        f"pasted it at its prompt, but tmux could not press Enter ({entered.error}) — {press} "
+        f"{put} it at its prompt, but tmux could not press Enter ({entered.error}) — {press} "
         "to send it",
     )
 

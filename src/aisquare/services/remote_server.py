@@ -3589,7 +3589,9 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
         answer in time may still land (``fleet.PaneWrite``): it says so, and is audited
         ``delivered=maybe``. It was a plain ``write_failed`` "tmux did not answer within
         30s", and a Send again typed the text a second time beside the first, which a
-        queued Enter may already have submitted (review of #259, round 10, 5/9).
+        queued Enter may already have submitted (review of #259, round 10, 5/9). So did one
+        whose text went in and whose Enter did not, or whose text tmux typed a part of
+        (``core.tmux.TmuxPartlyTyped``): each says what is at the prompt (round 11, 4/13).
 
         ``dialog_guard`` is for a sender that does not see the pane, the page's
         Transcript tab: nothing is typed unless the agent is at rest at its prompt
@@ -3671,13 +3673,22 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
             if exits and (wrote.what != "the keys" or wrote.typed != "no"):
                 # A press that may land counts (review of #259, round 7, 4/9).
                 exit_keys.exit_keys_sent((target.id, label))
-            if wrote.typed == "maybe":
-                audit = f"{summary} delivered=maybe"
-                raise RequestError(400, "write_failed", wrote.late(label), audit=audit)
-            if wrote.typed == "no":
-                log.warning("remote: send-keys to %s failed: %s", label, wrote.error)
-                said = f"{label}: {wrote.error}"
-                raise RequestError(400, "write_failed", said, audit=f"{summary} failed")
+            if wrote.typed != "yes":
+                if text and wrote.what == "Enter":
+                    # The text is at its prompt either way: a Send again typed it a second
+                    # time beside the first (review of #259, round 11, 4/13).
+                    unsent = fleet_service.pasted_unsent(
+                        wrote, label, press="press Enter on the pad", put="typed"
+                    )
+                    said = f"{label}: {unsent.how}"
+                elif wrote.typed == "maybe":
+                    said = wrote.late(label)
+                else:
+                    said = f"{label}: {wrote.error}"
+                if wrote.typed == "no":
+                    log.warning("remote: send-keys to %s failed: %s", label, wrote.error)
+                verdict = "delivered=maybe" if wrote.typed == "maybe" else "failed"
+                raise RequestError(400, "write_failed", said, audit=f"{summary} {verdict}")
         return {"agent": label, "project": target.id, "sent": True}, summary
 
     return Writes(

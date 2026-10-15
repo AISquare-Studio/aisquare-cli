@@ -869,13 +869,16 @@ def needs_from_agent(
        sub-agent's has that one pending tool, so the prompt is also its notice, the
        ``last_seen_at`` each notification moves (:func:`_needs_subagent_prompt`). Nor
        while the notice asks for input (:data:`_INPUT_NOTICE`): an MCP server's
-       elicitation comes while its tool call is pending, and that form is rule 8's. Nor
-       after a notice later than the turn's first with nothing written since it
-       (:func:`_needs_later_notice`): the call's own prompt was answered, and what is up
-       now is rule 8's too. Once the agent wrote after the turn's first notice, a later
-       one's words are not on the board, and nothing tells a form asked then from its
-       tool's own prompt: it reads as the prompt, whose digits would go into the form.
-       Nor with no call up: more than one pending, and the screen names none of them;
+       elicitation comes while its tool call is pending, and that form is rule 8's. Nor,
+       of one call pending, after a notice later than the turn's first with nothing written
+       since it (:func:`_needs_later_notice`): the call's own prompt was answered, and what
+       is up now is rule 8's too. Of more than one, the screen named the call, and a later
+       notice is its prompt's own, which lands seconds after the prompt is drawn: the card
+       was the call's until then and rule 8's under another id after, one prompt pushed
+       twice (review of #259, round 9, 4/8). Once the agent wrote after the turn's first
+       notice, a later one's words are not on the board, and nothing tells a form asked
+       then from its tool's own prompt: it reads as the prompt, whose digits would go into
+       the form. Nor with no call up: more than one pending, and the screen names none;
     6. no pending tool, and the newest record an interruption later than the session's last
        hook, or one only Claude Code's own records follow (a local or ``!`` command run at
        the prompt since, which fires no hook either) → ``interrupted``, whatever the row
@@ -979,8 +982,11 @@ def needs_from_agent(
         if notice is not None:
             form = _INPUT_NOTICE.search(notice.text) is not None
         else:  # a sub-agent's prompts each send a notice, its records not this transcript's
+            # Of more than one call, the screen named this one's prompt, and a later notice is
+            # that prompt's own landing after its card: the card stays its (round 9, 4/8).
             form = (
-                call is not None
+                len(pending) == 1
+                and call is not None
                 and call.name not in _SUBAGENT_TOOLS
                 and _needs_later_notice(attention_event, tail, session)
             )

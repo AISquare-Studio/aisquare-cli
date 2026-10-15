@@ -574,7 +574,11 @@ def test_a_call_beside_one_answered_has_its_own_card_never_the_answered_calls(
     Rule 5's card was the first call's again, its id and its URL, and a tap of "1" on it
     re-derived as current and approved the other call. 1/12 hid the card while the pane
     printed after the newest notice, which rested on when Claude Code draws a call's prompt
-    beside another's. The card is the call the screen shows, however late it printed."""
+    beside another's. The card is the call the screen shows, however late it printed.
+
+    Round 9, 4/8: and it stays that call's card once the call's own notice lands, seconds
+    after its prompt is drawn. A notice later than the turn's first made it rule 8's card,
+    under another id and without answers, and both could be pushed for the one prompt."""
     row = _row()
     asked = NOW - timedelta(seconds=40)
     called = asked - timedelta(seconds=6)
@@ -605,8 +609,9 @@ def test_a_call_beside_one_answered_has_its_own_card_never_the_answered_calls(
     assert not needs_item_current(snap, card.id), "a tap on the first call's card is stale"
     assert needs_dialog_open(snap), "the second prompt is up all the same"
     noticed = _status(row, "attention", _session(row, state="attention", seen=NOW))
-    form = _one(_classify(noticed, tail, events, pane_screen=lambda: b_up))
-    assert form.id != card.id and form.answers == (), "a dialog the board has no words for"
+    landed = _one(_classify(noticed, tail, events, pane_screen=lambda: b_up))
+    assert landed.id == b_card.id, "its own notice landed: one card, one push, for its prompt"
+    assert landed.answers == b_card.answers != ()
     # A screen that names neither is the plain dialog's card, its answers the key pad's.
     for unread in (None, _at_work(*above)):
         dialog = _one(_classify(status, tail, events, pane_screen=lambda rows=unread: rows))

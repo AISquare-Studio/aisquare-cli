@@ -1091,13 +1091,11 @@ def _reuse_worktree(
     reserved in the store before anything is created, which no index here can
     express.
     """
-    head = _git(path, "rev-parse", "--abbrev-ref", "HEAD")
-    current = head.stdout.strip() if head.returncode == 0 else ""
-    # A detached HEAD is not a failure: `--abbrev-ref` exits 0 and prints the
-    # literal "HEAD" (measured with git 2.x). The empty string is the shapes
-    # that really do fail — an unborn HEAD, or no repository at all.
-    detached = current in ("", "HEAD")
-    where = "on a detached HEAD" if detached else f"on {current}"
+    try:
+        current = _tree_branch(path)  # the one reading of a tree's branch
+    except FleetError:
+        current = None  # an unborn HEAD: no branch to name, as on a detached one
+    where = f"on {current}" if current is not None else "on a detached HEAD"
     if current == branch:
         notes.append(f"reusing the existing worktree at {path} (already on {branch})")
         return
@@ -1266,7 +1264,9 @@ def _tree_branch(tree: Path) -> str | None:
 
     Raises :class:`FleetError` when git cannot say: no worktree there (asked in a
     directory without its ``.git``, git would answer for the main checkout above it), or
-    no answer."""
+    no answer — an unborn HEAD, say. A detached HEAD is not a failure: ``--abbrev-ref``
+    exits 0 and prints the literal ``HEAD`` (measured with git 2.x). Every question about
+    a tree's branch is asked here: at spawn, at reuse, at stop and at reap."""
     if not (tree / ".git").exists():
         raise FleetError(f"no worktree at {tree}")
     head = _git(tree, "rev-parse", "--abbrev-ref", "HEAD")

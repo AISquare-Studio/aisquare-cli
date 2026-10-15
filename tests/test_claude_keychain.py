@@ -402,7 +402,7 @@ REFUSED = core.KEYCHAIN_REFUSED
             "not correct.\n",
             REFUSED,
         ),
-        (128, "security: User canceled the operation.\n", REFUSED),
+        (128, "security: User canceled the operation.\n", LOCKED),
         (25, "security: something else\n", "could not read the Keychain (security exited 25)"),
     ],
     ids=["interaction-not-allowed", "locked", "denied", "canceled", "other"],
@@ -504,9 +504,13 @@ def test_the_token_never_appears_in_any_output_or_exception(
 
 
 @POSIX_ONLY
-def test_a_read_stands_for_a_few_seconds_and_a_refusal_for_a_minute(
+def test_a_read_stands_for_a_few_seconds_and_a_refusal_until_someone_asks_again(
     keychain: FakeKeychain, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The tester: a locked Keychain in a desktop session puts its unlock dialog up for each
+    read, and asq read every slot each tick. A refusal is asked again only when someone asks:
+    a forced refresh or the page opened (``forget_keychain_reads``), a sign-in's check
+    (``fresh``), or a command of its own (a new process)."""
     clock = [1000.0]
     monkeypatch.setattr(core, "_monotonic", lambda: clock[0])
     two, three = core.create_account(), core.create_account()
@@ -526,18 +530,46 @@ def test_a_read_stands_for_a_few_seconds_and_a_refusal_for_a_minute(
     service.describe(two)
     service.describe(three)
     assert (asked(two), asked(three)) == (1, 1)
-    clock[0] += 2  # past a read's few seconds, inside a refusal's minute
+    clock[0] += 2  # past a read's few seconds
     service.describe(two)
     service.describe(three)
     assert (asked(two), asked(three)) == (2, 1)
-    clock[0] += core.KEYCHAIN_FAILURE_MEMO_SECONDS
-    service.describe(three)
-    assert asked(three) == 2
+    for _ in range(100):  # a day of the sidebar's minute ticks and the page's two seconds
+        clock[0] += 900
+        service.describe(three)
+        service.cached_usage([three], now=NOW, fetch=_Usage({}))
+        service.read_fleet_headroom([three], now=NOW, fetch=_Usage({}))
+    assert asked(three) == 1, "a refusal is never asked again by a tick"
     core.credentials(two, fresh=True)  # a sign-in's check asks again
     assert asked(two) == 3
-    core.forget_keychain_reads()  # a forced refresh: the Keychain may have been unlocked
+    core.forget_keychain_reads()  # a forced refresh, or the page opened
     service.describe(three)
-    assert asked(three) == 3
+    assert asked(three) == 2
+
+
+@POSIX_ONLY
+def test_a_refusal_read_before_a_refresh_does_not_stand_after_it(
+    keychain: FakeKeychain, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review n6: a read in flight when the refresh forgets them all answers its own caller
+    but is not kept, so the read the refresh makes is the one that stands."""
+    two = core.create_account()
+    _identity(two, "two@example.com")
+    service_name = core.keychain_service(two)
+    ask = core._ask_keychain
+
+    def slow_locked(name: str, account: str) -> core.KeychainRead:
+        read = ask(name, account)  # locked, as it was when the read began
+        core.forget_keychain_reads()  # ↻ Refresh usage, pressed meanwhile
+        keychain.login(two, "sk-ant-oat01-unlocked")  # and the Keychain unlocked
+        return read
+
+    keychain.put(service_name, exit=36, stderr="User interaction is not allowed.")
+    monkeypatch.setattr(core, "_ask_keychain", slow_locked)
+    assert core.stored_login(two).unreadable == LOCKED
+    monkeypatch.setattr(core, "_ask_keychain", ask)
+    creds = core.credentials(two)
+    assert creds is not None and creds.access_token == "sk-ant-oat01-unlocked"
 
 
 @POSIX_ONLY
@@ -581,7 +613,7 @@ def test_refresh_usage_asks_a_locked_keychain_again_once_it_is_unlocked(
     assert locked.reason == LOCKED
     keychain.login(two, "sk-ant-oat01-2")  # unlocked
     [still] = service.cached_usage([two], now=NOW, fetch=fetch).values()
-    assert still.reason == LOCKED, "a refusal stands for a minute: not asked on every tick"
+    assert still.reason == LOCKED, "a refusal stands until someone asks: not on every tick"
     [read] = service.cached_usage([two], now=NOW, force=True, fetch=fetch).values()
     assert read.available and read.session_percent == 20
 

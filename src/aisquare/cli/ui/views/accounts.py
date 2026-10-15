@@ -897,7 +897,10 @@ class AccountsView(Vertical):
         self._usage_timer = self.set_interval(TICK_SECONDS, self.refresh_readings)
 
     def on_show(self) -> None:
+        """The page is opened: read it, and ask a Keychain that refused (locked, an unlock
+        cancelled) once more, which no tick does by itself (``core.read_keychain``)."""
         self._on_screen = True
+        core.forget_keychain_reads()
         self.refresh_readings()
 
     def on_hide(self) -> None:

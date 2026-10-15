@@ -484,15 +484,36 @@ def stored_login(account: ClaudeAccount, *, fresh: bool = False) -> StoredLogin:
     On macOS that is the login Keychain, in the item :func:`keychain_service` names for
     the account (:func:`read_keychain`); a Keychain with no such item is not the end of
     it, since some setups write ``.credentials.json`` there too (Claude Code falls back
-    to the file when it cannot write the Keychain), so the file is read then, as on
-    Linux, where Claude Code writes it (0600) into the config dir and nothing else.
-    ``fresh`` is :func:`credentials`'.
+    to the file when it cannot write the Keychain), so the file is read then
+    (:func:`plaintext_credentials_path`), as on Linux, where Claude Code writes it (0600)
+    into the config dir and nothing else. ``fresh`` is :func:`credentials`'.
     """
     if keychain_platform():
         read = read_keychain(keychain_service(account), keychain_account(), fresh=fresh)
         if read.found or read.unreadable is not None:
             return StoredLogin(read.credentials, read.unreadable)
+        return StoredLogin(credentials_in(_read_json(plaintext_credentials_path(account))))
     return StoredLogin(credentials_in(_read_json(credentials_path(account))))
+
+
+def plaintext_credentials_path(
+    account: ClaudeAccount, environ: Mapping[str, str] | None = None
+) -> Path:
+    """Where a Claude Code on macOS writes the file it falls back to without a Keychain item.
+
+    Its ``wx()``: the directory ``CLAUDE_SECURESTORAGE_CONFIG_DIR`` names when set (an empty
+    one is ``~/.claude``), NFC, as the item is keyed on it (:func:`keychain_service`); else
+    the account's config dir, :func:`credentials_path`. On Linux aisquare reads the config
+    dir's file whatever that variable says, as it always has.
+    """
+    import unicodedata
+
+    source = os.environ if environ is None else environ
+    directory = source.get(SECURE_STORAGE_VAR)
+    if directory is None:
+        return credentials_path(account)
+    base = Path(unicodedata.normalize("NFC", directory)) if directory else home_config_dir()
+    return base / ".credentials.json"
 
 
 def keychain_platform() -> bool:
@@ -525,11 +546,10 @@ KEYCHAIN_TIMEOUT_SECONDS = 5.0
 KEYCHAIN_MEMO_SECONDS = 10.0
 """How long a read that answered (the item, or none) stands for the next readers in this
 process: the Accounts page reads each slot every two seconds, and one usage round read each
-token three times over (the cache's key, the request, the reading's record)."""
-KEYCHAIN_FAILURE_MEMO_SECONDS = 60.0
-"""How long a read the Keychain refused stands: so a locked Keychain is not asked to unlock
-(a dialog, up to :data:`KEYCHAIN_TIMEOUT_SECONDS`) on every tick. A forced refresh asks
-again (:func:`forget_keychain_reads`)."""
+token three times over (the cache's key, the request, the reading's record). A read the
+Keychain refused (locked, an unlock cancelled, no answer) stands until someone asks again
+(:func:`forget_keychain_reads`): asked by itself, a locked Keychain in a desktop session
+puts its unlock dialog up for every read, which every tick of asq's would repeat."""
 SECURE_STORAGE_VAR = "CLAUDE_SECURESTORAGE_CONFIG_DIR"
 """Claude Code's override of the directory its secure storage is keyed on: it wins."""
 KEYCHAIN_ACCOUNT_FALLBACK = "claude-code-user"
@@ -537,6 +557,7 @@ KEYCHAIN_LOCKED = "the login Keychain is locked — unlock it (or log in to the 
 KEYCHAIN_REFUSED = (
     "macOS refused aisquare access to the Claude Code item — allow it in Keychain Access"
 )
+"""Said for errSecAuthFailed (51): the Deny button on the item's access prompt."""
 
 _KEYCHAIN_SERVICE = "Claude Code"
 _KEYCHAIN_OAUTH_SUFFIX = ""
@@ -546,8 +567,14 @@ _KEYCHAIN_ACCOUNT_NAME = re.compile(r"[a-zA-Z0-9._-]+")
 # `security` exits with the low byte of the OSStatus it got.
 _ITEM_NOT_FOUND = 44  # errSecItemNotFound (-25300)
 _NO_KEYCHAIN = frozenset({37, 50})  # errSecNoDefaultKeychain, errSecNoSuchKeychain
-_INTERACTION_NOT_ALLOWED = 36  # errSecInteractionNotAllowed (-25308): locked, no UI to unlock
-_REFUSED = frozenset({51, 128})  # errSecAuthFailed (-25293: Deny), errSecUserCanceled (-128)
+_LOCKED = frozenset(
+    {
+        36,  # errSecInteractionNotAllowed (-25308): locked, and no dialog to unlock it with
+        128,  # errSecUserCanceled (-128): the unlock dialog cancelled (/usr/bin/security made
+        # the item, so reading it asks nothing else)
+    }
+)
+_REFUSED = frozenset({51})  # errSecAuthFailed (-25293): Deny on the item's access prompt
 _HEX = re.compile(r"(?:[0-9a-fA-F]{2})+")
 
 
@@ -622,6 +649,9 @@ class KeychainRead:
 _KEYCHAIN_READS: dict[tuple[str, str], tuple[float, KeychainRead]] = {}
 """The last read of each (service, account), with when it was taken (``time.monotonic``)."""
 _KEYCHAIN_READS_LOCK = threading.Lock()
+_KEYCHAIN_GENERATION = [0]
+"""Bumped by each :func:`forget_keychain_reads`: a read that began before one is not kept,
+or a refusal from before an unlock would stand after the refresh that asked again."""
 
 
 def _monotonic() -> float:
@@ -633,6 +663,7 @@ def forget_keychain_reads() -> None:
     after someone unlocked the Keychain or allowed aisquare in at the row's word."""
     with _KEYCHAIN_READS_LOCK:
         _KEYCHAIN_READS.clear()
+        _KEYCHAIN_GENERATION[0] += 1
 
 
 def read_keychain(service: str, account: str, *, fresh: bool = False) -> KeychainRead:
@@ -642,27 +673,24 @@ def read_keychain(service: str, account: str, *, fresh: bool = False) -> Keychai
     list (never a shell) under :data:`KEYCHAIN_TIMEOUT_SECONDS`, prints the item's text,
     the same JSON as ``.credentials.json``. Nothing it prints is logged, kept or put into
     a reason or an exception; the credentials lifted out of it are kept in this process
-    for :data:`KEYCHAIN_MEMO_SECONDS` (a failure: :data:`KEYCHAIN_FAILURE_MEMO_SECONDS`)
+    for :data:`KEYCHAIN_MEMO_SECONDS` (a refusal: until :func:`forget_keychain_reads`)
     unless ``fresh``. A read is a subprocess, which callers run off the UI thread.
 
     No item (exit 44), or no login Keychain at all (37, 50), is ``found=False``; a locked
     Keychain, one that refused, a timeout and anything else is ``unreadable``, in words.
     """
     key = (service, account)
-    now = _monotonic()
-    if not fresh:
-        with _KEYCHAIN_READS_LOCK:
-            remembered = _KEYCHAIN_READS.get(key)
-        if remembered is not None:
-            taken, read = remembered
-            keep = (
-                KEYCHAIN_MEMO_SECONDS if read.unreadable is None else KEYCHAIN_FAILURE_MEMO_SECONDS
-            )
-            if 0 <= now - taken < keep:
-                return read
+    with _KEYCHAIN_READS_LOCK:
+        remembered = None if fresh else _KEYCHAIN_READS.get(key)
+        generation = _KEYCHAIN_GENERATION[0]
+    if remembered is not None:
+        taken, read = remembered
+        if read.unreadable is not None or 0 <= _monotonic() - taken < KEYCHAIN_MEMO_SECONDS:
+            return read
     read = _ask_keychain(service, account)
     with _KEYCHAIN_READS_LOCK:
-        _KEYCHAIN_READS[key] = (_monotonic(), read)
+        if _KEYCHAIN_GENERATION[0] == generation:
+            _KEYCHAIN_READS[key] = (_monotonic(), read)
     return read
 
 
@@ -724,13 +752,12 @@ def _keychain_problem(code: int, stderr: bytes) -> str:
     """Why ``security`` exited ``code``, in the row's words. By the exit code first, which
     is the OSStatus's low byte, then by what it said, as Claude Code classifies it."""
     said = stderr.decode("utf-8", "replace").lower()
-    if code == _INTERACTION_NOT_ALLOWED or any(
-        words in said for words in ("interaction is not allowed", "interactionnotallowed")
+    if code in _LOCKED or any(
+        words in said
+        for words in ("interaction is not allowed", "interactionnotallowed", "canceled")
     ):
         return KEYCHAIN_LOCKED
-    if code in _REFUSED or any(
-        words in said for words in ("name or passphrase", "authfailed", "usercanceled")
-    ):
+    if code in _REFUSED or any(words in said for words in ("name or passphrase", "authfailed")):
         return KEYCHAIN_REFUSED
     if "locked" in said or "unlock" in said:
         return KEYCHAIN_LOCKED

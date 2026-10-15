@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -27,7 +28,7 @@ from aisquare.core.agent_adapters.types import store_dir, store_read_only
 from aisquare.core.config import load_config, save_config
 from aisquare.core.entries import new_entry
 from aisquare.core.store import SqliteStore, store_session
-from aisquare.services import agent_launch, fleet, native_telemetry, team
+from aisquare.services import agent_launch, fleet, native_telemetry, store_broker, team
 
 
 def _user_texts(request: dict[str, Any]) -> list[str]:
@@ -663,6 +664,27 @@ def test_real_codex_panes_take_a_told_line_before_any_hook_and_the_managers_nudg
             thread.join(timeout=2)
 
 
+#: What a write to the store from a sandboxed command says: the store is read-only in a
+#: Codex agent's sandbox, all of it (review r9 of #113: the broker). SQLite says the
+#: first while another connection keeps the WAL's files, the second when it would have
+#: to make them in the read-only directory.
+_READ_ONLY = ("attempt to write a readonly database", "unable to open database file")
+
+
+def _refused_then_made(told: str, output: str, *, first: Any = None) -> None:
+    """The write ``told`` (``RUN <argv>``) was run in an agent's sandbox, and ``output``
+    is what it printed: refused there, the store being read-only. ``first`` checks what
+    the refusal left (nothing). The same write is then made here, outside, as a sandbox
+    could make it before the broker, so the launch records are still held to it."""
+    assert any(said in output for said in _READ_ONLY) and "rewrote 1" not in output, output
+    if first is not None:
+        first()
+    made = subprocess.run(
+        shlex.split(told.removeprefix("RUN ")), capture_output=True, text=True, check=False
+    )
+    assert made.returncode == 0 and "rewrote" in made.stdout, made.stdout + made.stderr
+
+
 class _Scripted(BaseHTTPRequestHandler):
     """A loopback Responses provider driven by the last user line: ``RUN <cmd>`` calls
     ``exec_command`` in the sandbox, ``ESC <cmd>`` asks for it outside (``sandbox_permissions
@@ -719,8 +741,10 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
     own home is under it, and so hid the defect), and short: Codex binds a socket in its
     home. Without the store profile a sandboxed ``aisquare note`` cannot open the store;
     a fleet coder (``--approve-for-me``) posts a note and claims a task on the first,
-    sandboxed attempt, cannot write the account homes or the credentials beside the
-    store, and an escalation its automatic reviewer allows rings no bell. Restarted onto
+    sandboxed attempt, through its launch's broker (review r9 of #113), runs every board
+    call of the role protocol there the same way, is refused one as another session,
+    writes nothing in the store (its database included), and an escalation its
+    automatic reviewer allows rings no bell. Restarted onto
     ``workspace:ask`` the human answers: Codex's own approval view in the pane, read as
     attention for as long as it redraws unanswered, working again after ``y``. A
     reviewer's read-only seat posts its verdict and cannot write the worktree.
@@ -836,6 +860,68 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             assert fleet.tell(project, label, claim).delivered
             until(lambda: answered(seen), 30, "the sandboxed claim ran", pane)
             assert "claimed" in outputs()[-1], outputs()[-1]
+            # Through the coder's own broker, which its launch runs outside the sandbox.
+            assert [d.name for d in (store / store_broker.DIR_NAME).iterdir()], "a broker"
+
+            def sandboxed_calls(commands: list[str], what: str) -> list[str]:
+                """Each of ``commands`` (aisquare's arguments) run in the coder's sandbox,
+                in one turn: each one's exit status."""
+                until(lambda: state(coder) == "waiting", 20, "waiting", pane)
+                seen = len(outputs())
+                chain = "; ".join(f'{cli} {c} >/dev/null 2>&1; echo "rc=$?"' for c in commands)
+                assert fleet.tell(project, label, f"RUN {chain}").delivered
+                until(lambda: answered(seen), 60, what, pane)
+                return re.findall(r"rc=(\d+)", outputs()[-1])
+
+            # Every board call the role protocols teach, enumerated, from the sandbox.
+            mine = row.id[:8]
+            task_a, task_b = (team.add_task(f"enumerated-{n}", cwd=workspace)[0].id for n in "ab")
+            enumerated = [
+                [
+                    f"task add enumerated-c --role coder --detail d --as {mine}",
+                    "task list",
+                    f"task show {task_a}",
+                    f"task next --role coder --as {mine}",
+                    f"task claim {task_a} --as {mine}",
+                ],
+                [
+                    f"task review {task_a} --note verify --as {mine}",
+                    f"task next --status review --as {mine}",
+                    f"task reopen {task_a} --reason again --as {mine}",
+                    f"task claim {task_a} --as {mine}",
+                    f"task done {task_a} --note done --as {mine}",
+                ],
+                [
+                    f"task claim {task_b} --as {mine}",
+                    f"task release {task_b} --as {mine}",
+                    f"task block {task_b} --reason stuck --as {mine}",
+                    f"task drop {task_b} --as {mine}",
+                    f"note 'a decision' --kind decision --as {mine}",
+                ],
+                [
+                    f"team focus enumerating --as {mine}",
+                    f"team signal fold-ready on --as {mine}",
+                    "team signals",
+                    f"team log -n 3 --as {mine}",
+                    "team verify 1",
+                ],
+                [
+                    "board",
+                    "team status",
+                    "remember 'a fact'",
+                    "context add 'another fact'",
+                    "context list",
+                ],
+                ["context search fact", "context preview", "inject", "log"],
+            ]
+            for number, commands in enumerate(enumerated):
+                codes = sandboxed_calls(commands, f"enumerated board calls {number}")
+                assert codes == ["0"] * len(commands), list(zip(commands, codes, strict=False))
+            with store_session() as handle:
+                done = {task.title: task.status for task in handle.team_tasks(project.id)}
+                said = [event.text for event in handle.recent_events(project.id, limit=80)]
+            assert done["enumerated-a"] == "done" and done["enumerated-b"] == "dropped"
+            assert done["enumerated-c"] == "todo" and "a decision" in said
             # A waiting manager is woken by a result the coder posts from its sandbox,
             # which tmux refuses: by the coder's own hook, which Codex runs outside it.
             manager = fleet.spawn(
@@ -855,6 +941,18 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
                 return any(text in _user_texts(request) for request in list(requests))
 
             until(lambda: waiting(manager), 40, "the manager waiting", manager.pane_id)
+            # A board call as another session (the manager's) is refused by the broker.
+            manager_seat = fleet.status_of(manager).session
+            assert manager_seat is not None
+            until(lambda: state(coder) == "waiting", 20, "waiting", pane)
+            seen = len(outputs())
+            forged = f"RUN {cli} note 'as the manager' --as {manager_seat.id[:8]}"
+            assert fleet.tell(project, label, forged).delivered
+            until(lambda: answered(seen), 30, "the forged note ran", pane)
+            assert "is not this agent's own session" in outputs()[-1], outputs()[-1]
+            with store_session() as handle:
+                texts = [event.text for event in handle.recent_events(project.id, limit=80)]
+            assert "as the manager" not in texts
             until(lambda: state(coder) == "waiting", 20, "waiting", pane)
             seen, reviewed = len(outputs()), reviews()
             socket = config.fleet.tmux_socket
@@ -947,10 +1045,11 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             assert "Read-only file system" in outputs()[-1]
             assert not (workspace / "edited").exists()
 
-            # Nothing the sandbox writes in the store chooses what runs outside it (review
-            # r3 of #113, findings 2 and 5; r4, findings 1, 2 and 6): from its read-only seat
-            # the reviewer rewrites its session's thread and home, its row's role, binary
-            # and account, and the project's directory. A replay takes its launch record.
+            # The sandbox writes nothing in the store (review r9 of #113: the broker): from
+            # its read-only seat the reviewer's rewrites of its session's thread and home,
+            # its row's role, binary and account, and the project's directory are refused.
+            # Made outside as it could once make them, they still choose nothing a replay
+            # runs (r3, findings 2 and 5; r4, 1, 2 and 6): it takes its launch record.
             def rewrite(table: str, column: str, value: str, row: str) -> str:
                 code = (
                     "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); c.execute("
@@ -960,12 +1059,12 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
                 db = str(store / "context.db")
                 return "RUN " + shlex.join([sys.executable, "-c", code, db, value, row])
 
-            def sandboxed(told: str, what: str) -> None:
+            def sandboxed(told: str, what: str, first: Any = None) -> None:
                 until(lambda: state(reviewer) == "waiting", 30, "waiting", reviewer.pane_id)
                 seen = len(outputs())
                 assert fleet.tell(project, reviewer.label, told).delivered
                 until(lambda: answered(seen), 30, what, reviewer.pane_id)
-                assert "rewrote 1" in outputs()[-1], outputs()[-1]
+                _refused_then_made(told, outputs()[-1], first=first)
 
             seat = fleet.status_of(reviewer).session
             assert seat is not None and seat.native_session_id
@@ -1141,8 +1240,9 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             until(lambda: state(checker) == "waiting", 40, "the replacement", checker.pane_id)
 
             # Finding 1: from its sandbox it INSERTs a live row naming another project's
-            # window and swaps the two projects' codenames. `fleet stop` of that row, and a
-            # scoped `shutdown`, type into and kill nothing of the other project's.
+            # window and swaps the two projects' codenames: refused, no row is made there.
+            # Made outside, `fleet stop` of that row, and a scoped `shutdown`, type into and
+            # kill nothing of the other project's.
             other_root = tmp_path / "other"
             other_root.mkdir()
             other = fleet.ensure_codename(team.activate(other_root))
@@ -1163,10 +1263,16 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             fake_id = f"agt_fake{os.getpid()}"
             db = str(store / "context.db")
             reviewer = checker
+
+            def no_fake_row() -> None:
+                with store_session() as handle:
+                    assert handle.get_fleet_agent(fake_id) is None, "the sandbox made no row"
+
             sandboxed(
                 "RUN "
                 + shlex.join([sys.executable, "-c", insert, db, checker.id, fake_id, their_pane]),
                 "the fake row",
+                first=no_fake_row,
             )
             ours = fleet.ensure_codename(project).codename or ""
             sandboxed(rewrite("project", "codename", "spare-heron", other.id), "their codename")
@@ -1408,9 +1514,11 @@ def test_real_codex_fleet_from_before_launch_records_and_rows_its_sandbox_rewrot
     aisquare before this one left them (it kept none). This aisquare's first fleet read
     takes the census and places them: they list running, a new spawn joins their session,
     `stop` ends one, `restart` starts one fresh, a dead one is reaped. Then a sandboxed
-    agent rewrites rows from its sandbox: two labels swapped (rule C) — `fleet stop` of a
-    label stops the agent its record gives that label — and its own `ended_at` (rule B) —
-    `restart` still finds it running and hands it over. `shutdown` takes it all down.
+    agent's rewrites of rows are refused in its sandbox (review r9: the store is read-only
+    there) and made outside as it could once make them: two labels swapped (rule C) —
+    `fleet stop` of a label stops the agent its record gives that label — and its own
+    `ended_at` (rule B) — `restart` still finds it running and hands it over. `shutdown`
+    takes it all down.
     """
     binary = shutil.which("codex")
     assert binary, "AISQUARE_TEST_CODEX requires an installed Codex"
@@ -1491,9 +1599,10 @@ def test_real_codex_fleet_from_before_launch_records_and_rows_its_sandbox_rewrot
             argv = [sys.executable, "-c", code, str(store / "context.db"), *values]
             until(lambda: state(agent) == "waiting", 30, "waiting to be told")
             seen = len(outputs())
-            assert fleet.tell(project, agent.label, "RUN " + shlex.join(argv)).delivered
+            told = "RUN " + shlex.join(argv)
+            assert fleet.tell(project, agent.label, told).delivered
             until(lambda: len(outputs()) > seen, 30, "the sandboxed rewrite ran")
-            assert "rewrote" in outputs()[-1], outputs()[-1]
+            _refused_then_made(told, outputs()[-1])
 
         try:
             manager, first, second = (
@@ -1557,9 +1666,10 @@ def test_real_codex_fleet_from_before_launch_records_and_rows_its_sandbox_rewrot
             ]  # fmt: skip
             until(lambda: state(third) == "waiting", 30, "coder-c waiting")
             seen = len(outputs())
-            assert fleet.tell(project, third.label, "RUN " + shlex.join(argv)).delivered
+            told = "RUN " + shlex.join(argv)
+            assert fleet.tell(project, third.label, told).delivered
             until(lambda: len(outputs()) > seen, 30, "the sandboxed swap ran")
-            assert "rewrote" in outputs()[-1], outputs()[-1]
+            _refused_then_made(told, outputs()[-1])
             gone = fleet.stop(project, third.label, force=True)
             assert gone.agent.id == third.id and srv.pane_facts(third.pane_id) is None
             assert srv.pane_facts(fourth.pane_id) is not None, "the swapped-in agent runs on"

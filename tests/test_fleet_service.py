@@ -13553,12 +13553,18 @@ def test_a_row_pinned_to_a_session_is_asked_for_its_screen_whatever_its_binary_i
 
 
 def test_an_agent_whose_hooks_run_on_a_hubs_board_is_never_asked_for_its_screen(
-    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Under ``AISQUARE_TEAM_HUB`` every session is on the hub's board, and the listing
     joins its project's own: no row had one, so every listing captured every pane, and
     an agent whose screen showed the question's words read as at it (review of #259,
-    round 13). Its session is found by its id."""
+    round 13). Its session is found by its id, in the listing's one store session: a
+    second one was opened for it on every listing, with the store's migration checks
+    (round 16), and handed on to a caller that reads it too."""
     hub = ProjectInfo(id="prj_hub000000", root=tmp_path / "hub", linked_repos=[])
     agent = _coder(project)
     tmux.set_command(agent.pane_id, "claude")
@@ -13574,11 +13580,24 @@ def test_an_agent_whose_hooks_run_on_a_hubs_board_is_never_asked_for_its_screen(
             )
         )  # fmt: skip
     tmux.captured.clear()
+    opens = 0
+    real_open = core_store.open_store
 
-    (status,) = fleet_service.list_agents(project)
+    def counting_open() -> ContextStore:
+        nonlocal opens
+        opens += 1
+        return real_open()
+
+    monkeypatch.setattr(core_store, "open_store", counting_open)
+    looked_up: dict[str, TeamSession | None] = {}
+
+    (status,) = fleet_service.list_agents(project, looked_up=looked_up)
 
     assert status.session is None, "the premise: the listing joins its own board's sessions"
     assert status.state != "attention" and tmux.captured == []
+    assert opens == 1, "one store session for the listing, its lookups included"
+    found = looked_up[agent.session_id]
+    assert found is not None and found.project_id == hub.id
 
 
 def test_spawn_never_types_its_prompt_into_the_trust_question(

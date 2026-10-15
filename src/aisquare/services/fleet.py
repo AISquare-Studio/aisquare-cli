@@ -2015,8 +2015,8 @@ def trust_prompt_detail(folder: Path) -> str:
 def _with_trust_prompts(
     statuses: list[FleetAgentStatus],
     config: FleetSettings,
+    by_id: Mapping[str, TeamSession | None],
     addresses: Mapping[str, _Address] | None = None,
-    looked_up: dict[str, TeamSession | None] | None = None,
 ) -> list[FleetAgentStatus]:
     """``statuses``, every agent at Claude Code's folder-trust question read ``attention``.
 
@@ -2028,29 +2028,18 @@ def _with_trust_prompts(
     the row began (:func:`_maybe_at_trust_prompt`): one capture each, which an agent
     whose hooks run never costs. A screen that cannot be read is no question.
 
-    A row's session is looked up by its id where the listing has none for it, in one read
-    of the store: :func:`list_agents` joins the sessions of the project's own board, and
-    under ``AISQUARE_TEAM_HUB`` every session is the hub's. Every row there read as silent,
-    so every listing captured every pane, and a pane that merely showed the question's
-    words (a reviewer reading ``claude_sharing``) read as at it (review of #259, round 13).
-    Each id looked up goes into ``looked_up`` when the caller gives one, ``None`` for an id
-    with no session: Remote's scan derives those rows again with their sessions, and read
-    them a second time (round 14).
+    A row the listing has no session for is asked with the one ``by_id`` holds for its
+    session id, read by the caller in its own store session: :func:`list_agents` joins the
+    sessions of the project's own board, and under ``AISQUARE_TEAM_HUB`` every session is
+    the hub's. Every row there read as silent, so every listing captured every pane, and a
+    pane that merely showed the question's words (a reviewer reading ``claude_sharing``)
+    read as at it (review of #259, round 13). Looked up here, they cost a second store
+    session, with the store's migration checks, on every listing that had such a row —
+    under a hub, every sidebar tick, Remote scan and ``status_of`` (round 16).
     """
-    elsewhere = {
-        status.agent.session_id
-        for status in statuses
-        if status.session is None and status.agent.session_id and _maybe_at_trust_prompt(status)
-    }
-    found: dict[str, TeamSession | None] = {}
-    if elsewhere:
-        with store_session() as store:
-            found = {session_id: store.get_session(session_id) for session_id in elsewhere}
-    if looked_up is not None:
-        looked_up.update(found)
     shown: list[FleetAgentStatus] = []
     for status in statuses:
-        session = status.session or found.get(status.agent.session_id or "")
+        session = status.session or by_id.get(status.agent.session_id or "")
         if _maybe_at_trust_prompt(status, session):
             agent = status.agent
             try:
@@ -3473,9 +3462,10 @@ def list_agents(
 ) -> list[FleetAgentStatus]:
     """The project's agents with their DERIVED state (§5.1).
 
-    ``looked_up``, when given, is filled with the sessions read by their ids for rows the
-    project's own board holds none for (:func:`_with_trust_prompts`), for a caller that
-    reads them too.
+    ``looked_up``, when given, is filled with the sessions read by their ids for the live
+    rows the project's own board holds none for (:func:`_with_trust_prompts`), ``None`` for
+    an id with no session, for a caller that reads them too: Remote's scan derives those
+    rows again with their sessions, and read them a second time (review of #259, round 14).
 
     Two things changed with #138, both so the store stops lagging the screen:
 
@@ -3498,6 +3488,16 @@ def list_agents(
         current = store.get_project(project.id) or project
         agents = store.fleet_agents(project.id, live_only=False)
         sessions = {session.id: session for session in store.team_sessions(project.id)}
+        # A live row's session another board keeps (under AISQUARE_TEAM_HUB, every one):
+        # read by its id here, in this one store session, for the folder-trust question
+        # (`_with_trust_prompts`), and for a caller that derives those rows again with it.
+        by_id = {
+            agent.session_id: store.get_session(agent.session_id)
+            for agent in agents
+            if agent.ended_at is None and agent.session_id and agent.session_id not in sessions
+        }
+    if looked_up is not None:
+        looked_up.update(by_id)
     now = _now()
     if live_only:
         cutoff = now - RECENTLY_ENDED
@@ -3530,7 +3530,7 @@ def list_agents(
         )
         for agent in agents
     ]
-    return _with_trust_prompts(statuses, config, addresses, looked_up)
+    return _with_trust_prompts(statuses, config, by_id, addresses)
 
 
 def _end_dead_rows(
@@ -3722,7 +3722,8 @@ def status_of(agent: FleetAgent) -> FleetAgentStatus:
     config = settings()
     observed = _observe(server_of(agent, config), tmux_session, [agent])
     status = _status(agent, session, observed, tmux_session, _now(), config)
-    return _with_trust_prompts([status], config)[0]
+    by_id = {agent.session_id: session} if agent.session_id else {}
+    return _with_trust_prompts([status], config, by_id)[0]
 
 
 def manager_of(project: ProjectInfo) -> FleetAgent | None:

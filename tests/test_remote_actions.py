@@ -2047,6 +2047,7 @@ def test_prompt_types_at_an_interrupted_prompt_while_the_row_still_reads_working
     assert response.json() == {
         "label": LABEL,
         "delivered": True,
+        "typed": "yes",
         "how": "typed into its pane at its prompt",
         "mode": "prompt",
         "project": project.id,
@@ -3090,6 +3091,7 @@ def test_an_auto_tell_while_a_prompt_may_be_up_is_a_board_note_and_never_fleet_t
     assert response.json() == {
         "label": LABEL,
         "delivered": False,
+        "typed": "no",
         "how": f"{why} — filed as board note #{note.seq} to coder-1",
         "mode": "auto",
         "project": project.id,

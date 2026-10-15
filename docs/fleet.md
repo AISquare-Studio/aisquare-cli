@@ -277,6 +277,9 @@ Types the text into the agent — **only** when it is *waiting* and its pane is
 alive. Otherwise the message is filed as a board note addressed to that agent,
 and the output says which happened (`✓` typed, `→` noted). Never interrupts an
 agent that is working or sitting on a permission prompt. Takes `--as SESSION`.
+Under `--json`, `typed` is `yes`, `no` or `maybe` beside `delivered`: `maybe` when
+tmux did not answer in time with the text or its Enter, which may still arrive, so
+read the agent's pane before you tell it again.
 
 ### `fleet stop`
 

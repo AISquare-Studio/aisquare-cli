@@ -1296,6 +1296,7 @@ def action_tell(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     result: dict[str, object] = {
         "label": label,
         "delivered": told.delivered,
+        "typed": told.typed,
         "how": told.how,
         "mode": mode,
         "project": target.id,

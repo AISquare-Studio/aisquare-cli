@@ -5957,7 +5957,7 @@ def test_an_answer_types_into_the_agent_is_audited_and_clears_its_card(live: Liv
 
 
 @pytest.mark.parametrize(
-    "then_up", ["the card's call", "the call beside it", "a prompt naming neither"]
+    "then_up", ["the card's call", "the call beside it", "a prompt naming neither", "no prompt"]
 )
 def test_an_answer_to_one_of_two_calls_is_typed_only_while_the_screen_still_shows_it(
     live: Live, monkeypatch: pytest.MonkeyPatch, then_up: str
@@ -5969,7 +5969,11 @@ def test_an_answer_to_one_of_two_calls_is_typed_only_while_the_screen_still_show
 
     Round 9, 2/8: the refusal's ``current`` was empty, and the page said "nothing waits on
     coder-1 now" while ``rm -rf dist`` waited. It is what the screen shows instead: the call
-    it names, or the dialog card when it names neither."""
+    it names, or the dialog card when it names neither.
+
+    Round 10, 1/9: with no prompt drawn at all, the prompt answered at the terminal and its
+    call at work, it was the dialog card too, a dialog nobody drew, and the tap was told
+    "shows another prompt". Nothing is up, and the refusal says so."""
     monkeypatch.setattr(remote_needs, "NEEDS_RESCAN_AFTER_ANSWER", 30.0)
     live.runtime.set_allow_write(True)
     called = datetime.now(UTC) - timedelta(minutes=1)
@@ -5979,7 +5983,9 @@ def test_an_answer_to_one_of_two_calls_is_typed_only_while_the_screen_still_show
     card = live.card("permission")
     assert card["id"] == needs_item_id(PROJECT.id, "permission", push.tool_use_id)
     assert card["detail"]["input"]["command"] == "git push --force origin main"
-    up = {"the card's call": push, "the call beside it": rm}.get(then_up, _SUB_AGENTS)
+    up = {"the card's call": push, "the call beside it": rm, "no prompt": None}.get(
+        then_up, _SUB_AGENTS
+    )
     live.tmux.screen = _screen_of(up, (push, rm))
     response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
     watcher = live.app.kit.lane_state["needs"]
@@ -5988,10 +5994,14 @@ def test_an_answer_to_one_of_two_calls_is_typed_only_while_the_screen_still_show
         assert live.tmux.typed == [("keys", "%7", "1")]
         return
     assert (response.status_code, response.json()["error"]) == (409, "stale"), response.text
-    assert "shows another prompt" in response.json()["message"]
     assert live.tmux.typed == [], "the 1 would have approved rm -rf dist"
     assert watcher.needs_lookup(card["id"]) is None
     assert not any(" needs/answer " in line for line in live.audit())
+    if up is None:
+        assert response.json()["message"] == "coder-1 shows no prompt now — nothing was sent"
+        assert response.json()["current"] == [], "no dialog card for a screen with none on it"
+        return
+    assert "shows another prompt" in response.json()["message"]
     (instead,) = response.json()["current"]
     assert instead["agent"] == "coder-1" and instead["id"] != card["id"]
     if then_up == "the call beside it":

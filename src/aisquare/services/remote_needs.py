@@ -2979,7 +2979,8 @@ def needs_prompt_now(
     """What the prompt on the agent's screen right now is, of the card ``item`` and the calls
     beside it, asked of tmux again: what a quick answer checks last, right before its keys.
     ``(item,)`` while it is still the call ``item`` names; otherwise the items of what is up
-    instead; ``None`` when tmux could not show the screen: not known either way.
+    instead, ``()`` when no prompt is drawn at all; ``None`` when tmux could not show the
+    screen: not known either way.
 
     With more than one call pending, the card was the call its screen named when it was
     derived (:func:`_needs_on_screen`), and the screen is read again here: a prompt answered
@@ -2996,7 +2997,11 @@ def needs_prompt_now(
     the board (:func:`needs_single_agent_now` reads the agent so too): the call it names, or
     rule 8's dialog card. The refusal carries it as ``current``, which the page says in the
     card's place. It carried none, and the page said "nothing waits on <agent> now" while
-    the next call's prompt waited (review of #259, round 9, 2/8).
+    the next call's prompt waited (review of #259, round 9, 2/8). A screen with no prompt on
+    it, the most common stale tap (the prompt answered at the terminal, its call at work),
+    is none: rule 8's card there was a dialog that was not drawn, the tap told "shows
+    another prompt" and the page "No longer needs you: coder-1 shows a dialog that needs
+    you" while nothing waited (round 10, 1/9).
     """
     status = snap.status
     pending = () if status is None else _needs_pending(snap.tail, status.agent)
@@ -3006,12 +3011,14 @@ def needs_prompt_now(
     rows = _needs_screen_now(status)
     if rows is None:
         return None
+    if _needs_prompt_region(rows) is None:
+        return ()
     if _needs_on_screen(pending, rows) is named[item.id]:
         return (item,)
     instead = needs_from_agent(
         status, snap.tail, project=snap.project, events=(), now=now, pane_screen=lambda: rows
     )
-    # A prompt is up, as the check read it, whatever the board would say of it.
+    # A prompt is drawn, whatever the board would say of it.
     return tuple(instead) or (
         _needs_dialog_item(status, None, None, project=snap.project, now=now),
     )
@@ -3919,7 +3926,8 @@ def _needs_answer_now(
         if item.id not in {one.id for one in shown}:
             # Out of the feed as an answered card is, until the scan after it says what is up.
             watcher.needs_answered(item.id)
-            gone = f"{label} shows another prompt than that {item.kind} now — nothing was sent"
+            instead = f"another prompt than that {item.kind}" if shown else "no prompt"
+            gone = f"{label} shows {instead} now — nothing was sent"
             current = [one.needs_item_json() for one in shown]
             raise RequestError(409, "stale", gone, current=current)
         try:

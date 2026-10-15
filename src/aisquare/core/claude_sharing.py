@@ -297,29 +297,39 @@ _TRUST_QUESTION = re.compile(r"\btrust (?:this folder|the files in this folder)\
 _TRUST_EXIT = re.compile(r"(?:\u276f ?|> ?)?(?:\d+\. ?)?No, exit")
 """The dialog's "No, exit" option, a row of its own: its pointer when highlighted, its
 number on the 1.x builds."""
-_DIALOG_FOOT = 3
-"""The rows that end a screen at the question, blank ones aside: "No, exit" is among them,
-with at most the other option and the key hint below it."""
+_INPUT_BOX = re.compile(r"[\u276f>](?! ?(?:\d+\. ?)?(?:Yes|No)\b).*")
+"""An input box's row: its pointer, with nothing, a placeholder or what is typed after it —
+never one of the dialog's options."""
+_BORDERS = "│┃║╭╮╰╯┌┐└┘─━═ "
+"""What a box draws around a row: stripped, so a bordered dialog's option is a row of its
+own, and a row of nothing else is no row."""
 
 
 def shows_trust_prompt(lines: Iterable[str]) -> bool:
-    """Whether a captured screen is Claude Code's folder-trust question.
+    """Whether a captured screen is, or may be, Claude Code's folder-trust question.
 
     2.1.299 draws "Yes, I trust this folder" under a highlighted "No, exit", over its key
     hint; the 1.x builds asked "Do you trust the files in this folder?" over a numbered
-    "2. No, exit". Read by the dialog's layout: the question's words on the screen, and
-    "No, exit" an option of its own among the screen's last rows (:data:`_DIALOG_FOOT`),
-    where the dialog takes the input box's place. Both phrases anywhere on the screen
-    read an agent at work as at the question when it showed the words — a reviewer
-    reading this module, or the captured screen pinned by the tests — and its input box,
-    under them, is what the screen ends on (review of #259, round 14). A Claude Code
-    string, not a contract: pinned by a test with the captured screen.
+    "2. No, exit", in a rounded box. Read fail-closed, since a screen read as not the
+    question is typed into, and Enter there picks "No, exit": the question's words on the
+    screen and "No, exit" an option of its own (box borders aside), with no input box under
+    it. At work, the screen ends on its input box (:data:`_INPUT_BOX`), and the dialog
+    takes the input box's place, so the words above one are a reviewer reading this module
+    or the captured screen the tests pin (review of #259, round 14). Anything else that
+    holds both reads as the question — a dialog in a box, a key hint wrapped in a narrow
+    pane, a row the build adds under it — rather than a fixed count of rows at the foot,
+    which each of those pushed "No, exit" out of (round 15). A Claude Code string, not a
+    contract: pinned by a test with the captured screen.
     """
-    rows = [row for line in lines if (row := " ".join(_SCREEN_ESCAPES.sub("", line).split()))]
-    foot = rows[-_DIALOG_FOOT:]
-    if not any(_TRUST_EXIT.fullmatch(row) for row in foot):
+    rows = [
+        row
+        for line in lines
+        if (row := " ".join(_SCREEN_ESCAPES.sub("", line).split()).strip(_BORDERS))
+    ]
+    exits = [at for at, row in enumerate(rows) if _TRUST_EXIT.fullmatch(row)]
+    if not exits or not _TRUST_QUESTION.search(" ".join(rows)):
         return False
-    return bool(_TRUST_QUESTION.search(" ".join(rows)))
+    return not any(_INPUT_BOX.fullmatch(row) for row in rows[exits[-1] + 1 :])
 
 
 # --- one settings.json ------------------------------------------------------------------

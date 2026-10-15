@@ -435,6 +435,34 @@ def test_the_trust_questions_words_on_a_screen_at_work_are_not_the_question() ->
     assert sharing.shows_trust_prompt([*screen, "", "", ""])
 
 
+def test_the_trust_question_in_any_layout_is_the_question_until_an_input_box_is_under_it() -> None:
+    """Review of #259, round 15: "No, exit" had to be a whole row among the screen's last
+    three, so a dialog drawn in a box, a key hint wrapped in a narrow pane, or a row added
+    under it read as no question — and the prompt was typed into it, where Enter picks
+    "No, exit". Read fail-closed now: both there and no input box under the option."""
+    boxed = [
+        "╭──────────────────────────────────────────╮",
+        "│ Do you trust the files in this folder?   │",
+        "│                                          │",
+        f"│ {CURSOR} 1. Yes, proceed                        │",
+        "│   2. No, exit                            │",
+        "╰──────────────────────────────────────────╯",
+        "   Enter to confirm · Esc to exit",
+    ]
+    assert sharing.shows_trust_prompt(boxed)
+    screen = (FIXTURES / "trust_prompt_2.1.299.txt").read_text(encoding="utf-8").splitlines()
+    *dialog, hint = [line for line in screen if line.strip()]
+    assert "confirm" in hint and "Esc" in hint
+    assert sharing.shows_trust_prompt([*dialog, " Enter to confirm · Esc to", " cancel"])
+    third = [*dialog[:-1], "   Yes, and remember this for every folder", dialog[-1], hint]
+    assert sharing.shows_trust_prompt(third)
+    assert sharing.shows_trust_prompt([*screen, " Press Ctrl-C again to quit"])
+    # The words above an input box are an agent at work, whatever its box shows.
+    for prompt in (f"{CURSOR} ", f'{CURSOR} Try "fix the lint errors"', "│ > │"):
+        assert not sharing.shows_trust_prompt([*screen, "─" * 40, prompt, "─" * 40]), prompt
+    assert not sharing.shows_trust_prompt([*boxed, "╭────╮", "│ > │", "╰────╯"])
+
+
 # --- aisquare accounts trust ---------------------------------------------------------------------
 
 

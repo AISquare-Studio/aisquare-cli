@@ -272,10 +272,12 @@ spoken for yet whose screen is Claude Code's folder-trust question reads
 `waiting for folder trust — approve it once, or aisquare accounts trust <dir>`
 (see *Folder trust* under [Accounts](#accounts)); only those rows have their
 screen read — a row with a board session, or whose binary is `claude` by name,
-never another harness's agent — and the screen is the question only when it
-ends on it (*No, exit* an option of its own among the last rows, where the
-dialog takes the input box's place), not when the words are anywhere on it. The
-detail beside the chip says why
+never another harness's agent — and the screen is the question when it holds
+the question's words and *No, exit* as an option of its own, in a box or not,
+with no input box under it: the dialog takes the input box's place, so the words
+above an input box are an agent at work. A screen that may be the question is
+read as it, so a spawn never types its prompt into the dialog, where Enter picks
+*No, exit*. The detail beside the chip says why
 when that is not obvious — an exit code, `no hooks` for a binary without our
 lifecycle hooks, `pane gone`.
 

@@ -238,8 +238,10 @@ def recall(project_id: str, query: str) -> str | None:
     with _lock(home, wait_s=_RECALL_LOCK_WAIT_S) as won:
         if not won:
             return None
+        # The query after `--`: it is the caller's text, a sandboxed agent's through its
+        # broker among them, and never an option of gbrain's (review r11 of #113, 12).
         if use_hybrid:
-            hybrid = _run(home, ["query", query, "--no-expand"], timeout=_CALL_TIMEOUT_S)
+            hybrid = _run(home, ["query", "--no-expand", "--", query], timeout=_CALL_TIMEOUT_S)
             if hybrid is not None:
                 return hybrid  # fell through: hybrid failed, degrade to keyword
-        return _run(home, ["search", query], timeout=_CALL_TIMEOUT_S)
+        return _run(home, ["search", "--", query], timeout=_CALL_TIMEOUT_S)

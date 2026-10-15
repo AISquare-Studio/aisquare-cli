@@ -13162,3 +13162,49 @@ def test_a_lock_the_filesystem_refuses_is_not_waited_on(
     with caplog.at_level("WARNING", logger="aisquare.core.launch_seal"):
         launch_seal.relabel("agt_nolock", "coder-7")
     assert any("was not rewritten" in record.message for record in caplog.records)
+
+
+def test_a_stop_whose_end_failed_leaves_no_mark_behind(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r11 of #113, finding 10: the once-only mark committed before the row's end, so
+    an end that failed (a store locked past its budget) left every later stop finding the
+    row "ended by another": no release, no ``agent_exited``, no nudge. One transaction."""
+    agent = _coder(project)
+    _ended_in_the_store(agent)
+
+    def locked(self: SqliteStore, row: FleetAgent) -> FleetAgent:
+        raise sqlite3.OperationalError("database is locked")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(SqliteStore, "upsert_fleet_agent", locked)
+        with store_session() as store, pytest.raises(sqlite3.OperationalError):
+            fleet_service._end_store_ended(store, agent.id, 0)
+    with store_session() as store:
+        again = fleet_service._end_store_ended(store, agent.id, 0)
+    assert again is not None and again.exit_status == 0, "the next stop ends it"
+
+
+def test_the_fleets_git_runs_no_hook_of_the_repository(tmp_path: Path) -> None:
+    """Review r11 of #113, finding 4: a hook that lives in the tree (``core.hooksPath`` into
+    ``.husky/``) is the sandboxed agent's to write, and the fleet's own ``git worktree add``,
+    outside any sandbox, ran its ``post-checkout``."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git = ["git", "-C", str(repo), "-c", "user.email=a@b", "-c", "user.name=t"]
+    subprocess.run([*git, "init", "-q"], check=True)
+    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+    hooks = repo / ".husky"
+    hooks.mkdir()
+    marker = tmp_path / "ran"
+    hook = hooks / "post-checkout"
+    hook.write_text(f"#!/bin/sh\ntouch {marker}\n", encoding="utf-8")
+    hook.chmod(0o755)
+    subprocess.run([*git, "config", "core.hooksPath", ".husky"], check=True)
+
+    added = fleet_service._git(repo, "worktree", "add", "-q", "-b", "wt", str(tmp_path / "wt"))
+
+    assert added.returncode == 0, added.stderr
+    assert not marker.exists(), "the fleet ran the tree's hook"
+    subprocess.run([*git, "worktree", "add", "-q", "-b", "wt2", str(tmp_path / "wt2")], check=True)
+    assert marker.exists(), "the repository's own git still runs it"

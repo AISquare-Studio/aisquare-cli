@@ -70,8 +70,14 @@ def main(argv: list[str]) -> int:
         with (home() / "puts.log").open("a", encoding="utf-8") as log:
             log.write(slug + "\n")
         return 0
+    # The query as an option parser reads it: after `--`, else the first non-option.
+    query = (
+        argv[argv.index("--") + 1]
+        if "--" in argv
+        else next((arg for arg in argv[1:] if not arg.startswith("-")), "")
+    )
     if command == "search":
-        print(f"results for: {argv[1]}")
+        print(f"results for: {query}")
         return 0
     if command == "query":
         config = home() / ".gbrain" / "config.json"
@@ -79,7 +85,7 @@ def main(argv: list[str]) -> int:
         if "embedding_disabled" in body:
             print("hybrid query needs a vectorized brain", file=sys.stderr)
             return 1
-        print(f"hybrid results for: {argv[1]}")
+        print(f"hybrid results for: {query}")
         return 0
     return 0
 
@@ -185,6 +191,18 @@ def test_recall_auto_drains_the_backlog(
     assert found.exit_code == 0, found.output
     assert "results for: auth" in found.stdout
     assert distill.drain(work_dir) == 0  # recall left nothing undistilled
+
+
+def test_a_recall_query_is_never_an_option_of_gbrains(
+    runner: CliRunner, fake_gbrain: Path, work_dir: Path
+) -> None:
+    """Review r11 of #113, finding 12: the query went into gbrain's argv as it was, so
+    ``recall -- --<opt>`` (a sandboxed agent's, through its broker) reached gbrain as an
+    option, outside the sandbox. It comes after ``--``."""
+    _seed_events(runner)
+    found = runner.invoke(app, ["recall", "--", "--format=json"])
+    assert found.exit_code == 0, found.output
+    assert "results for: --format=json" in found.stdout
 
 
 def test_distill_all_backfills_past_the_watermark(

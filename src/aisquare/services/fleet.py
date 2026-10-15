@@ -1329,10 +1329,15 @@ def _git(cwd: Path, *args: str) -> _GitResult:
     no model process, exactly like the ``rev-parse`` seams in ``core``. A
     non-zero exit is an answer (callers read ``returncode``); a missing git or
     a hang is not, and becomes a :class:`FleetError` with the reason.
+
+    No hook of the repository's runs: ``core.hooksPath`` is pointed at nothing for every
+    call, so a ``post-checkout`` that lives in the tree (``.husky/``, ``.githooks/``), which
+    a sandboxed agent may write, is never run by the fleet outside its sandbox (review r11
+    of #113, finding 4). A commit of the agent's own, or the operator's, runs them as ever.
     """
     try:
         completed = subprocess.run(
-            ["git", "-C", str(cwd), *args],
+            ["git", "-c", f"core.hooksPath={os.devnull}", "-C", str(cwd), *args],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -4435,15 +4440,17 @@ def _end_store_ended(
     ``end_fleet_agent_if_live`` is for a live row, so this one's is a mark taken once per
     row (``set_meta_once``): two stops at once (the UI's Stop beside ``shutdown``'s) wrote
     over each other's status, released twice and announced the exit twice (review r10 of
-    #113, finding 5)."""
-    if not store.set_meta_once(f"fleet-stopped:{agent_id}", _now().isoformat()):
-        return None
-    current = store.get_fleet_agent(agent_id)
-    if current is None:
-        return None
-    return store.upsert_fleet_agent(
-        current.model_copy(update={"ended_at": _now(), "exit_status": exit_status})
-    )
+    #113, finding 5). The mark and the end are one transaction: an end that fails takes the
+    mark back with it, so the next stop ends the row (r11, finding 10)."""
+    with store.transaction():
+        if not store.set_meta_once(f"fleet-stopped:{agent_id}", _now().isoformat()):
+            return None
+        current = store.get_fleet_agent(agent_id)
+        if current is None:
+            return None
+        return store.upsert_fleet_agent(
+            current.model_copy(update={"ended_at": _now(), "exit_status": exit_status})
+        )
 
 
 def _stop_row(

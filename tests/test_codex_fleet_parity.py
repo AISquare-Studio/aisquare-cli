@@ -129,6 +129,9 @@ class Codex:
         self.agent, self.project, self.home = agent, where, home
         self.monkeypatch, self.launch = monkeypatch, launch
         server.pids[agent.pane_id] = PANE_PID
+        # Its empty composer and the footer under it, which a turn keeps too (0.162.1):
+        # a test that draws something else on its screen sets it.
+        server.screens.setdefault(agent.pane_id, IDLE_PROMPT)
         self.become()
 
     def become(self) -> None:
@@ -696,6 +699,114 @@ def test_a_waiting_codex_manager_is_woken_with_the_enter_apart(
     assert len(typed) == 4
 
 
+#: Codex 0.162.1 after a turn near its five-hour limit, its Stop fired and its hooks saying
+#: waiting (lane F, a loopback provider; SMOKE3's LIM-coder2-pane.txt): a dialog of its own,
+#: where an Enter picks option 1 and switches the agent's model.
+RATE_LIMIT_DIALOG = [
+    "• ok",
+    "  Worked for <1s • 11:29 PM",
+    "  Approaching rate limits",
+    "  Switch to gpt-6-luna for lower credit usage?",
+    f"{CHEVRON} 1. Switch to gpt-6-luna                   Fast and affordable model for easier "
+    "tasks.",
+    "  2. Keep current model",
+    "  3. Keep current model (never show again)  Hide future rate limit reminders about switching "
+    "models",
+    "  enter select · esc back",
+]
+
+
+def test_a_codex_dialog_after_its_stop_gets_no_keystroke_though_its_hooks_say_waiting(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lane F measured it live: ``fleet tell`` typed into the dialog, the line was lost and
+    the Enter switched the agent to gpt-6-luna. Fresh hooks are not its prompt."""
+    manager = _waiting_manager_on("codex", project, tmux, tmp_path / "codex-home", monkeypatch)
+    tmux.screens[manager.pane_id] = RATE_LIMIT_DIALOG
+
+    assert fleet_service.nudge_manager(project.id, reason="task_review") is False
+    told = fleet_service.tell(project, manager.label, "carry on")
+    assert not told.delivered and "hooks say waiting" in told.how, told
+    assert "dialog" in told.how and "board note" in told.how, told
+    assert tmux.typed == []
+
+    receipt = fleet_service.stop(project, manager.label, grace=0)
+
+    assert tmux.typed == [], "no /exit, whose Enter would pick the cheaper model"
+    assert receipt.killed is not None and "dialog" in receipt.killed, receipt
+    assert manager.pane_id in tmux.killed and receipt.agent.ended_at is not None
+
+
+def test_every_fleet_codex_launch_hides_its_rate_limit_dialog_unless_the_operator_sets_it(
+    codex_agent: tuple[Codex, TeamTask],
+    tmux: FakeTmux,  # noqa: F811
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex, _ = codex_agent
+    flag = ["-c", "notice.hide_rate_limit_model_nudge=true"]
+
+    def hides() -> bool:
+        """Whether the newest window's own ``aisquare launch`` passes the flag, run with the
+        window's environment (``AISQUARE_FLEET_AGENT``, a blank ``AISQUARE_LAUNCH_ID``)."""
+        spawned = tmux.spawned[-1]
+        environment = spawned["env"]
+        assert isinstance(environment, dict)
+        for key, value in environment.items():
+            monkeypatch.setenv(key, value)
+        argv = _launched_argv(_command(tmux), runner, monkeypatch)
+        codex.become()  # the tests' own process is the agent again
+        return any(argv[at : at + 2] == flag for at in range(len(argv)))
+
+    assert hides(), "spawn"
+    _rollout(codex, THREAD_ONE)
+    codex.start(THREAD_ONE)
+    fleet_service.restart(codex.project, codex.agent.label)
+    assert hides(), "restart"
+    # Switch and the usage-limit hand-over replay through the same window launch.
+    (codex.home / "config.toml").write_text(
+        "[notice]\nhide_rate_limit_model_nudge = false\n", encoding="utf-8"
+    )
+    assert not hides(), "the operator's own setting"
+
+
+@pytest.mark.parametrize(
+    ("config", "args", "added"),
+    [
+        pytest.param("", [], True, id="none"),
+        pytest.param("[notice]\nhide_full_access_warning = true\n", [], True, id="another"),
+        pytest.param("[notice]\nhide_rate_limit_model_nudge = false\n", [], False, id="user"),
+        pytest.param("", ["-c", "notice.hide_rate_limit_model_nudge=false"], False, id="override"),
+        pytest.param("", ["-p", "quiet"], False, id="profile"),
+        pytest.param(None, [], False, id="unreadable"),
+    ],
+)
+def test_the_fleets_codex_setting_yields_to_any_layer_of_the_operators(
+    tmp_path: Path, config: str | None, args: list[str], added: bool
+) -> None:
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    if config is None:
+        (home / "config.toml").mkdir()  # a layer that cannot be read may set it
+    else:
+        (home / "config.toml").write_text(config, encoding="utf-8")
+    (home / "quiet.config.toml").write_text(
+        "[notice]\nhide_rate_limit_model_nudge = false\n", encoding="utf-8"
+    )
+    selected = agent_launch.resolve(agent="codex")
+    window = {"CODEX_HOME": str(home), "AISQUARE_FLEET_AGENT": "agt-1"}
+    expected = ["-c", "notice.hide_rate_limit_model_nudge=true"] if added else []
+    assert agent_launch.fleet_settings_args(selected, window, args) == expected
+    # Outside a fleet window the human answers Codex's dialogs, and nothing is added.
+    assert agent_launch.fleet_settings_args(selected, {"CODEX_HOME": str(home)}, args) == []
+    claude = agent_launch.resolve(agent="claude-code")
+    assert agent_launch.fleet_settings_args(claude, window, args) == []
+
+
 def _waiting_manager_on(
     agent: str, where: ProjectInfo, server: FakeTmux, home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> FleetAgent:
@@ -1254,6 +1365,49 @@ def test_codex_reads_working_off_its_status_line_only_where_codex_draws_it(
     answered. Only the row right above the composer counts (0.162.1, measured)."""
     read = CODEX.capabilities.working_on_screen
     assert read is not None and read(screen) is working
+
+
+#: Codex 0.162.1 in the terminal's own screen (``--no-alt-screen``), measured under tmux:
+#: its footer has no ``? for shortcuts`` hint, at its empty prompt or in a turn.
+INLINE_FOOTER = "  local-fixture default · /work/repo  ⚠ 6 warnings · f2 to view"
+INLINE_IDLE = [
+    f"{CHEVRON} Say OK",
+    "• fixture ok",
+    "  Worked for <1s • 1:12 AM",
+    f"{CHEVRON} Ask Codex to do anything",
+    INLINE_FOOTER,
+]
+
+
+@pytest.mark.parametrize(
+    ("screen", "idle"),
+    [
+        pytest.param(IDLE_PROMPT, True, id="alternate-screen"),
+        pytest.param(
+            ["• Working (2s • esc to interrupt)", *IDLE_PROMPT], True, id="alternate-mid-turn"
+        ),
+        pytest.param(DRAFT, False, id="alternate-draft"),
+        pytest.param(RATE_LIMIT_DIALOG, False, id="rate-limit-dialog"),
+        pytest.param(ASKING, False, id="approval"),
+        pytest.param(INLINE_IDLE, True, id="inline"),
+        pytest.param(
+            [f"{CHEVRON} SLOW x", "• Working (2s • esc to interrupt)", *INLINE_IDLE[-2:]],
+            True,
+            id="inline-mid-turn",
+        ),
+        pytest.param([f"{CHEVRON} half a draft", INLINE_FOOTER], False, id="inline-draft"),
+        pytest.param([*INLINE_IDLE[:-2], *RATE_LIMIT_DIALOG[2:]], False, id="inline-dialog"),
+        pytest.param([], False, id="nothing"),
+    ],
+)
+def test_codex_reads_idle_only_at_its_empty_prompt_in_either_screen(
+    screen: list[str], idle: bool
+) -> None:
+    """Measured on 0.162.1: ``? for shortcuts`` ends the alternate screen at an empty
+    prompt, and the inline layout never draws it; there the empty composer's placeholder,
+    the footer alone under it, is the prompt. A dialog or a draft is neither."""
+    read = CODEX.capabilities.idle_on_screen
+    assert read is not None and read(screen) is idle
 
 
 def test_the_status_lines_words_in_a_command_awaiting_approval_keep_the_bell(

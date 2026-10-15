@@ -323,6 +323,10 @@ class StopReceipt:
     vanished session row) costs the release and is SAID here — never the stop,
     which used to raise out of ``shutdown`` and report a dead, ended row as
     LEFT LIVE, keep the project's pause and exit 1 (review of the fold)."""
+    killed: str | None = None
+    """Why no exit command was typed and the window was killed at once, when it was not
+    (:func:`_stop_row`): the agent's screen showed a dialog of its own, not its empty
+    prompt, where the exit command's Enter would have answered it."""
     withheld: bool = False
     """A hand-over's stop ended the row itself, releasing and announcing nothing:
     the claims wait for the replacement, and if it never starts
@@ -3179,12 +3183,22 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
                 return TellResult(False, f"{queued} — {how}")
         if not _at_its_prompt(srv, agent, session, status.state, _now()):
             how = _file_note(project, label, text, sender)
-            unseen = (
-                f" and its pane is not at {adapter.label}'s empty prompt"
-                if adapter is not None and adapter.capabilities.idle_prompt_mark
-                else ""
+            if adapter is None or not adapter.capabilities.idle_prompt_mark:
+                return TellResult(False, f"no confirmed waiting native session — {how}")
+            if status.state == "waiting" and _hooks_fresh(session, _now()):
+                # Its hooks say waiting, its screen does not: a dialog of the agent's
+                # own, opened after its turn ended (Codex's `Switch to gpt-6-luna?`).
+                return TellResult(
+                    False,
+                    f"its hooks say waiting, but its pane is not at {adapter.label}'s empty "
+                    "prompt (a dialog of its own is open, where an Enter would answer for "
+                    f"you: `aisquare fleet attach`) — {how}",
+                )
+            return TellResult(
+                False,
+                "no confirmed waiting native session and its pane is not at "
+                f"{adapter.label}'s empty prompt — {how}",
             )
-            return TellResult(False, f"no confirmed waiting native session{unseen} — {how}")
     if status.state == "waiting":
         if not _pane_is_the_agent(srv, agent.pane_id):
             how = _file_note(project, label, text, sender)
@@ -3316,28 +3330,46 @@ def _at_its_prompt(
     An agent whose pane reads its readiness (``capabilities.reads_pane_readiness``) is
     there when it reads ``waiting``. Another is there when its own hooks freshly say
     ``waiting`` — and when they say nothing fresh (none fire before its first prompt, as
-    Codex's do not), when its pane is quiet (``waiting``) and the last line on its screen
-    is the agent's empty-prompt mark (``capabilities.idle_prompt_mark``). Quiet alone is
-    not enough: Codex's folder-trust and hook-review dialogs print nothing either, and an
-    Enter there answers them for the human (``enter continue`` on the folder's). Never
-    raises.
+    Codex's do not), when its pane is quiet (``waiting``) — and, for an agent with an
+    empty-prompt mark (``capabilities.idle_prompt_mark``), the last line on its screen is
+    at that prompt (:func:`_idle_screen`), however fresh its hooks. Quiet alone is not
+    enough: Codex's folder-trust and hook-review dialogs print nothing either, and an
+    Enter there answers them for the human (``enter continue`` on the folder's). Nor are
+    fresh hooks: after a turn's ``Stop`` Codex opens dialogs of its own, its ``Switch to
+    gpt-6-luna for lower credit usage?`` past a turn near its limit, where the Enter
+    after a typed line picked the cheaper model for the agent and the line was lost
+    (measured on 0.162.1). Never raises.
     """
     if state != "waiting":
         return False
     adapter = recorded_adapter(agent.agent)
     if adapter is not None and adapter.capabilities.reads_pane_readiness:
         return True
-    if _hooks_fresh(session, now):
-        return session is not None and session.state == "waiting"
     mark = adapter.capabilities.idle_prompt_mark if adapter is not None else None
-    if not mark:
+    if _hooks_fresh(session, now):
+        if session is None or session.state != "waiting":
+            return False
+    elif not mark:
         return False
+    if adapter is None or not mark:
+        return True
     try:
         screen = srv.screen_text(agent.pane_id)
     except TmuxError:
         return False
+    return _idle_screen(adapter, screen)
+
+
+def _idle_screen(adapter: AgentAdapter, screen: Sequence[str]) -> bool:
+    """Whether ``screen`` shows ``adapter``'s agent at its empty prompt: its own reading
+    (``capabilities.idle_on_screen``), else its last line starting with its empty-prompt
+    mark (``capabilities.idle_prompt_mark``)."""
+    idle = adapter.capabilities.idle_on_screen
+    if idle is not None:
+        return idle(screen)
+    mark = adapter.capabilities.idle_prompt_mark
     last = next((line.strip() for line in reversed(screen) if line.strip()), "")
-    return last.startswith(mark)
+    return bool(mark) and last.startswith(mark or "")
 
 
 def _type_line(srv: TmuxServer, pane_id: str, text: str, *, command: bool = False) -> None:
@@ -3541,9 +3573,12 @@ def _stop_row(
         )
 
     exited_here = False  # this stop's `/exit` reached a pane that was running
+    killed: str | None = None  # why no `/exit` was typed, when one was not
     try:
         window = _window()
         if not force and window is not None and not window.dead:
+            killed = _exit_withheld(srv, agent)
+        if not force and killed is None and window is not None and not window.dead:
             _type_line(srv, agent.pane_id, _exit_command(agent), command=True)
             exited_here = True
             deadline = _monotonic() + grace
@@ -3646,7 +3681,38 @@ def _stop_row(
     # and must not hold the write lock the woken manager's own hooks will want.
     if not handover and nudge:
         nudge_manager(ended.project_id, reason=f"{ended.label} exited")
-    return StopReceipt(ended, released, release_failed, withheld=handover)
+    return StopReceipt(ended, released, release_failed, killed=killed, withheld=handover)
+
+
+def _exit_withheld(srv: TmuxServer, agent: FleetAgent) -> str | None:
+    """Why :func:`_stop_row` types no exit command into ``agent``'s pane, or ``None`` to
+    type it.
+
+    An agent with an empty-prompt mark (``capabilities.idle_prompt_mark``) whose screen
+    does not show it at that prompt (:func:`_idle_screen`) is showing something its Enter
+    answers: a dialog of its own — Codex's ``Switch to gpt-6-luna for lower credit
+    usage?`` after a turn near its limit, where ``/exit`` and its Enter picked the cheaper
+    model and exited nothing (measured on 0.162.1) — or a draft the exit command would
+    join. Its window is then
+    killed at once, as ``--force`` kills it, and the receipt says why. A screen tmux
+    cannot read is no such evidence: the exit command is typed, as it always was. Never
+    raises.
+    """
+    adapter = recorded_adapter(agent.agent)
+    mark = adapter.capabilities.idle_prompt_mark if adapter is not None else None
+    if adapter is None or not mark:
+        return None
+    try:
+        screen = srv.screen_text(agent.pane_id)
+    except TmuxError:
+        return None
+    if _idle_screen(adapter, screen):
+        return None
+    return (
+        f"its pane showed {adapter.label} at a dialog or a draft, not its empty prompt, "
+        f"where {adapter.exit_command} and its Enter would have answered it: its window "
+        "was killed without one"
+    )
 
 
 def _refuse_unless_gone(agent: FleetAgent, srv: TmuxServer) -> None:

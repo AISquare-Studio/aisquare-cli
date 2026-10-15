@@ -481,12 +481,15 @@ def stop(
                     "agent": agent.model_dump(mode="json"),
                     "claims_released": released,
                     "release_failed": receipt.release_failed,
+                    "killed": receipt.killed,
                 }
             )
         )
     else:
         console = stdout_console()
         console.print(f"✓ stopped {agent.label} ({agent.id})")
+        if receipt.killed:
+            console.print(f"  ⚠ {receipt.killed}", markup=False)
         _say_released(console, len(released))
         # The work the stop returned to the pool is the one thing the next agent
         # inherits from this one; here the receipt carries the tasks, so they are

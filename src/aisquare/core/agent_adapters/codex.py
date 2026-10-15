@@ -191,6 +191,43 @@ _QUEUED_ROW = "  \u21b3 "
 _WRAPPED = "    "
 
 
+IDLE_PROMPT_MARK = "? for shortcuts"
+"""The hint Codex's footer ends its screen with at an empty prompt, in its alternate screen
+(the default): a draft in the composer, or a dialog, takes its place (0.162.1)."""
+#: What Codex's empty composer reads: its placeholder, the same in every session, and the
+#: one a follow-up shows (0.162.1).
+_PLACEHOLDERS = frozenset({"Ask Codex to do anything", "Ask a follow-up question"})
+
+
+def idle_on_screen(rows: Sequence[str]) -> bool:
+    """Whether ``rows``, Codex's visible screen, show it at its EMPTY prompt with nothing
+    drawn over it (``AgentCapabilities.idle_on_screen``).
+
+    Measured on 0.162.1 under tmux. In its alternate screen (the default) the last row is
+    the footer's :data:`IDLE_PROMPT_MARK`, which a draft in the composer, or any dialog,
+    replaces. In the terminal's own (``--no-alt-screen``) the footer has no such hint: the
+    last chevron row (U+203A) is then the empty composer's placeholder with the footer
+    alone under it (``<model> <effort> · <directory>``). A dialog's last chevron row is its
+    chosen option, its other options and its key hint under it (``1. Switch to
+    gpt-6-luna`` … ``enter select · esc back``, after a turn near the limit; the folder-trust
+    and hook-review dialogs), and a draft replaces the placeholder. A turn running keeps
+    both layouts' empty prompt, its status line above the composer.
+    """
+    lines = [row.rstrip() for row in rows if row.strip()]
+    if not lines:
+        return False
+    if lines[-1].strip().startswith(IDLE_PROMPT_MARK):
+        return True
+    composer = next(
+        (index for index in range(len(lines) - 1, -1, -1) if lines[index].startswith(_CHEVRON)),
+        None,
+    )
+    if composer is None or lines[composer][len(_CHEVRON) :].strip() not in _PLACEHOLDERS:
+        return False
+    footer = lines[composer + 1 :]
+    return len(footer) == 1 and footer[0].startswith("  ")
+
+
 def working_on_screen(rows: Sequence[str]) -> bool:
     """Whether ``rows``, Codex's visible screen, show its status line where Codex draws it
     while a turn runs unblocked (``AgentCapabilities.working_on_screen``).
@@ -278,7 +315,9 @@ class CodexAdapter:
         limits_in_transcript=True,
         native_telemetry=True,
         positional_prompt=True,
-        idle_prompt_mark="? for shortcuts",
+        idle_prompt_mark=IDLE_PROMPT_MARK,
+        idle_on_screen=idle_on_screen,
+        fleet_settings=("notice.hide_rate_limit_model_nudge=true",),
         first_context_file_only=True,
         sandbox_permissions=True,
         sandboxes_tools=True,

@@ -491,6 +491,7 @@ def launch(
         *model_args,
         *pinned_id,
         *native_trace_args,
+        *agent_launch.fleet_settings_args(selected, env, arguments.argv),
         *agent_launch.mcp_args(selected),
         *arguments.argv,
     ]

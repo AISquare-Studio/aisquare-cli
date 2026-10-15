@@ -371,7 +371,14 @@ message ran as the next turn of an interactive session busy with one). When they
 say nothing fresh — Codex fires no hook before its first prompt, so an agent
 started without one (asq Welcome's coders) has none yet — it is typed into when
 its pane is quiet and shows Codex's empty prompt (the footer `? for shortcuts`);
-`codex queue` cannot reach a thread before its first prompt. Anything else, or a
+`codex queue` cannot reach a thread before its first prompt (under
+`--no-alt-screen`, which draws no such footer, the empty composer with only its
+model line under it). Hooks that say *waiting* need that empty prompt too: after a turn ends Codex can open a dialog of its
+own (*Switch to gpt-6-luna for lower credit usage?*, past a turn near its limit),
+where the Enter after a typed line picks for you, so a message to a Codex showing
+anything else is a board note that says so. A fleet window's Codex launches with
+`-c notice.hide_rate_limit_model_nudge=true`, which keeps that dialog closed,
+unless your own config (or `-c`) sets that key. Anything else, or a
 queue that fails, is the board note. Every typed line is one paste with its Enter
 a moment later, as `fleet stop` types `/exit`: Codex reads keys in one burst as a
 paste and keeps an Enter inside it as text. The manager's wake-up nudge is typed
@@ -394,7 +401,11 @@ inherits is visible. A release the store refused — or one the board could not
 be told about — is reported, never swallowed: the row is down, the operator is
 told which claims stayed with the ended session, and the command **exits 1**,
 the same contract `fleet shutdown` and `fleet reap` keep for the same fact.
-`--force` skips the graceful exit.
+`--force` skips the graceful exit. A Codex agent whose screen does not show its
+empty prompt (kept under an empty composer through a turn) is showing a dialog or
+a draft that `/exit` and its Enter would answer, so nothing is
+typed: the window is killed at once and the output says why (`killed` under
+`--json`).
 
 **When tmux cannot confirm the pane died** — a wedged server, a `tmux` that
 left `PATH`, a socket that is there but refuses this user (`Permission denied`)

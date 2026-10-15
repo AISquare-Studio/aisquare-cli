@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -396,6 +396,41 @@ def resolved_model_args(
     )
 
 
+def _launch_home(selected: ResolvedAgent, env: Mapping[str, str]) -> Path:
+    """The home this launch's environment names: an account's (``apply_launch_env``) over
+    the binding's or the shell's, which ``selected`` was resolved with."""
+    adapter = selected.adapter
+    if env.get(adapter.home_env, "").strip():
+        return adapter.config_dir(agents._home(), env)
+    return selected.config_dir
+
+
+def fleet_settings_args(
+    selected: ResolvedAgent, env: Mapping[str, str], raw_args: list[str]
+) -> list[str]:
+    """The ``-c`` settings the agent of a fleet window launches with
+    (``capabilities.fleet_settings``), each one no config layer of the operator's sets
+    (``native_telemetry.operator_sets``: their overrides in ``raw_args``, the system and
+    user config of this launch's home, its ``-p`` profile); none outside a fleet window
+    (``AISQUARE_FLEET_AGENT``), where the human answers the agent's dialogs. A layer that
+    cannot be read may set it, and is left to: nothing is added for it."""
+    from aisquare.services import native_telemetry
+
+    settings = selected.adapter.capabilities.fleet_settings
+    if not settings or not env.get(orchestrator.FLEET_AGENT_ENV_VAR, "").strip():
+        return []
+    home = _launch_home(selected, env)
+    args: list[str] = []
+    for setting in settings:
+        try:
+            if native_telemetry.operator_sets(home, raw_args, setting.partition("=")[0]):
+                continue
+        except native_telemetry.NativeConfigError:
+            continue
+        args += ["-c", setting]
+    return args
+
+
 def telemetry_args(
     selected: ResolvedAgent,
     env: dict[str, str],
@@ -407,13 +442,7 @@ def telemetry_args(
     adapter = selected.adapter
     if not adapter.capabilities.native_telemetry:
         return [], ""
-    # The home this launch's environment names: an account's (`apply_launch_env`) over
-    # the binding's or the shell's, which `selected` was resolved with.
-    home = (
-        adapter.config_dir(agents._home(), env)
-        if env.get(adapter.home_env, "").strip()
-        else selected.config_dir
-    )
+    home = _launch_home(selected, env)
     try:
         settings = load_config().explainability
         if not settings.enabled:

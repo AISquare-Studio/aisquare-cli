@@ -244,6 +244,15 @@ adapter.**
   names the full window and when it resets. The newest reading is looked for in
   more of the account's sessions, because `/clear` and quick limits leave
   sessions without one.
+- A fleet message no longer answers a dialog in a Codex agent's pane. After a
+  turn near its limit, Codex 0.162.1 asks *Switch to gpt-6-luna for lower credit
+  usage?* while its hooks say waiting. `fleet tell` typed into it: the message was
+  lost and the Enter switched the agent to the cheaper model. Now a fleet Codex
+  launches with `-c notice.hide_rate_limit_model_nudge=true`, unless your own
+  config sets that key. `fleet tell` and the manager's nudge type into a Codex
+  only when its screen shows its empty prompt, whatever its hooks say, and a
+  board note says why. `fleet stop` types no `/exit` into a dialog or a draft: it
+  kills the window and says so.
 
 ## [0.8.0] - 2026-10-12
 

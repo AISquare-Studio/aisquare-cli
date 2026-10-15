@@ -149,6 +149,25 @@ def operator_configured(config_dir: Path, args: list[str]) -> bool:
     return any("otel" in table for config in configs for table in _selected(config, profile))
 
 
+def operator_sets(config_dir: Path, args: list[str], key: str) -> bool:
+    """Whether a config layer of this launch sets the dotted ``key``: an override in
+    ``args``, the system or user config, or the selected profile's file or legacy table
+    (:func:`_layers`), whatever the value. Raises :class:`NativeConfigError` for a layer
+    that cannot be read."""
+    path = key.split(".")
+
+    def sets(table: Any) -> bool:
+        for part in path:
+            if not isinstance(table, dict) or part not in table:
+                return False
+            table = table[part]
+        return True
+
+    overrides = [parsed for _, parsed in _overrides(args)]
+    configs, profile = _layers(config_dir, args, overrides)
+    return any(sets(table) for config in configs for table in _selected(config, profile))
+
+
 TOOL_SHELL_POLICY = "shell_environment_policy"
 """Codex's setting for the environment the shells its tools run in inherit, whose
 ``exclude`` keeps :data:`HEADERS_ENV` out of them (:func:`tool_shell_excludes`)."""

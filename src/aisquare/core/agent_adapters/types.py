@@ -100,11 +100,22 @@ class AgentCapabilities:
     idle_prompt_mark: str | None = None
     """What starts the last line of the agent's screen while it sits at an EMPTY prompt
     (Codex's footer ``? for shortcuts``, measured on 0.162.1; text in the prompt replaces
-    it, and a turn redraws the pane every second). For an agent without
-    :attr:`reads_pane_readiness` whose hooks say nothing fresh — none fire before its first
-    prompt — a pane quiet for ``ACTIVITY_WINDOW`` that shows it is at its prompt, so
-    ``fleet tell`` and the manager's nudge type there; the agent's folder-trust and
-    hook-review dialogs are as quiet and show no such line."""
+    it, and a turn redraws the pane every second, the footer kept below an empty
+    composer). For an agent without :attr:`reads_pane_readiness` whose hooks say nothing
+    fresh — none fire before its first prompt — a pane quiet for ``ACTIVITY_WINDOW`` that
+    shows it is at its prompt, so ``fleet tell`` and the manager's nudge type there; the
+    agent's folder-trust and hook-review dialogs are as quiet and show no such line. And
+    the line is asked for even when its hooks freshly say waiting, by them and by ``fleet
+    stop``'s ``/exit``: Codex opens dialogs of its own after a turn's ``Stop`` (``Switch
+    to gpt-6-luna for lower credit usage?``, past a turn near its limit), where an Enter
+    picks for the human."""
+    fleet_settings: tuple[str, ...] = ()
+    """``-c`` settings (``key=value``, Codex's config overrides) the agent of a fleet window
+    launches with, each unless a config layer of the operator's sets its key
+    (``services.agent_launch.fleet_settings_args``): Codex's
+    ``notice.hide_rate_limit_model_nudge=true``, which keeps its ``Switch to gpt-6-luna
+    for lower credit usage?`` dialog, opened past a turn near the five-hour limit while
+    its hooks say waiting, out of a pane the fleet types into (measured on 0.162.1)."""
     start_dialog_mark: str | None = None
     """What the agent's screen shows while a dialog it puts up before its start holds it
     for the human, where an Enter answers it: Claude Code's ``Enter to confirm``, under its
@@ -164,6 +175,12 @@ class AgentCapabilities:
     which is back the moment they do. The answer's first hook is the approved command's
     PostToolUse, which fires only when the command finishes, so without it an approved
     12-minute command read ``attention`` throughout."""
+    idle_on_screen: Callable[[Sequence[str]], bool] | None = None
+    """Whether the agent's screen (its visible rows) shows it at its EMPTY prompt with
+    nothing drawn over it, where a typed line and its Enter land as a prompt: read in
+    place of :attr:`idle_prompt_mark` alone, which an agent may draw only in one of its
+    layouts (Codex's ``? for shortcuts``, absent under ``--no-alt-screen``, measured on
+    0.162.1)."""
     legacy_fleet_args: bool = False
     """``fleet.roles.<role>.extra_args`` and ``permission_mode`` are in this agent's
     vocabulary (they predate adapters and are Claude Code's); another agent takes only

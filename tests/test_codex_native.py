@@ -1064,15 +1064,22 @@ class _AtItsLimit(BaseHTTPRequestHandler):
 
 
 @pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
+@pytest.mark.parametrize("dialog", [False, True], ids=["aisquare-hides-it", "operator-shows-it"])
 def test_real_codex_at_its_usage_limit_reaches_the_board_with_no_stop(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dialog: bool
 ) -> None:
     """SMOKE3 (tsk_01m4yj1n37f9): a fleet Codex told a line its account cannot pay for fires
     its prompt's hook and no other, and its row read working for good. The fleet's read of
     the row finds the failed turn at the end of its rollout: ``limited`` with the full
     window's reset, the board told once, the hand-over ``on_limit = "switch"`` asks for.
-    No command runs in Codex's sandbox here, so a runner whose bwrap cannot start one
-    (``_sandbox_refused``) runs it as well."""
+
+    Past the first turn, at 100 %, Codex offers a cheaper model in a dialog (``Switch to
+    gpt-6-luna for lower credit usage? 1/2/3``) while its hooks say waiting, where the Enter
+    after a typed line picked option 1 (tsk_01m4ysys67). The fleet's launch hides it
+    (``-c notice.hide_rate_limit_model_nudge=true``); an operator who keeps it on
+    (``[notice] … = false``) gets a board note from ``tell``, the dialog unanswered, and a
+    stop that kills the window without an ``/exit``. No command runs in Codex's sandbox
+    here, so a runner whose bwrap cannot start one (``_sandbox_refused``) runs it as well."""
     binary = shutil.which("codex")
     assert binary, "AISQUARE_TEST_CODEX requires an installed Codex"
     native_home = tmp_path / "codex"
@@ -1090,9 +1097,7 @@ def test_real_codex_at_its_usage_limit_reaches_the_board_with_no_stop(
             f'base_url = "http://127.0.0.1:{server.server_port}/v1"\n'
             "requires_openai_auth = false\n"
             f'[projects.{json.dumps(str(workspace))}]\ntrust_level = "trusted"\n'
-            # Past a turn at 100 %, Codex offers a cheaper model in a dialog (`Switch to
-            # gpt-6-luna for lower credit usage? 1/2/3`), which the next line typed answers.
-            "[notice]\nhide_rate_limit_model_nudge = true\n",
+            + ("[notice]\nhide_rate_limit_model_nudge = false\n" if dialog else ""),
             encoding="utf-8",
         )
         for key in tuple(os.environ):
@@ -1152,7 +1157,20 @@ def test_real_codex_at_its_usage_limit_reaches_the_board_with_no_stop(
                 "the first turn's Stop",
                 coder.pane_id,
             )
+            offer = "Switch to gpt-6-luna"
+            if dialog:
+                until(lambda: offer in screen(coder.pane_id), 20, "its dialog", coder.pane_id)
+                refused = fleet.tell(project, coder.label, "LIMIT probe")
+                assert not refused.delivered and "hooks say waiting" in refused.how, refused
+                time.sleep(1)
+                assert offer in screen(coder.pane_id), "nothing answered the dialog"
+                assert "LIMIT probe" not in screen(coder.pane_id)
+                stopped = fleet.stop(project, coder.label)
+                assert stopped.killed is not None and "dialog" in stopped.killed, stopped
+                assert detached == []
+                return
             until(lambda: quiet_at_its_prompt(coder), 30, "quiet after its turn", coder.pane_id)
+            assert offer not in screen(coder.pane_id), "the fleet's launch hides the dialog"
             told = fleet.tell(project, coder.label, "LIMIT probe")
             assert told.delivered and "typed" in told.how, told
             until(

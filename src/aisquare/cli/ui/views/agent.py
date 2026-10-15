@@ -319,6 +319,8 @@ class AgentView(Vertical):
         elif event.worker.name == STOP_WORKER:
             self.notify(f"✓ stopped {label}", timeout=5, markup=False)
             receipt = event.worker.result
+            if isinstance(receipt, fleet_service.StopReceipt) and receipt.killed:
+                self.notify(receipt.killed, severity="warning", timeout=8, markup=False)
             if isinstance(receipt, fleet_service.StopReceipt) and receipt.release_failed:
                 # `fleet stop` prints this and exits 1: a claim left with the ended
                 # session is not a clean stop, and the button must not read as one.

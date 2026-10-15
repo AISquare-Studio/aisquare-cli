@@ -900,7 +900,7 @@ def needs_from_agent(
     now: datetime,
     manager_live: bool = False,
     accounts: AccountsSettings | None = None,
-    hands_over: Callable[[int | None], bool] | None = None,
+    hands_over: Callable[[int | None], bool] = _needs_hands_over_anywhere,
     pane_output: Callable[[], datetime | None] | None = None,
     pane_screen: Callable[[], Sequence[str] | None] | None = None,
 ) -> list[NeedsItem]:
@@ -975,9 +975,11 @@ def needs_from_agent(
     or closing question belong to the process before it. Without a readable tail, rules
     3 to 6 and 9 cannot hold. ``exited`` and ``unknown`` agents need nothing here; ``crashed``,
     ``manager_down`` and ``fleet_down`` speak for them. ``manager_live`` and ``accounts``
-    decide only when a push may go out. ``pane_output`` says when the agent's pane last
-    printed, asked only of a sub-agent's prompt; ``pane_screen`` is what it shows, asked
-    only with more than one call pending.
+    decide only when a push may go out, and so does ``hands_over``, the source's question of
+    a limited agent (:attr:`NeedsSources.hands_over`, whose default it shares: one default,
+    never ``None`` read as yes). ``pane_output`` says when the agent's pane last printed,
+    asked only of a sub-agent's prompt; ``pane_screen`` is what it shows, asked only with
+    more than one call pending.
 
     A held row got rules 3 to 10 from its board while that was fresh: permission and
     question cards, pushed, whose every answer was a 409 ``not_agent`` (its pane id is
@@ -1349,7 +1351,7 @@ def _needs_limited_item(
     now: datetime,
     manager_live: bool,
     accounts: AccountsSettings | None,
-    hands_over: Callable[[int | None], bool] | None = None,
+    hands_over: Callable[[int | None], bool],
 ) -> NeedsItem:
     """A row parked on a usage limit: the subject is its newest ``limited`` event.
 
@@ -1382,7 +1384,7 @@ def _needs_limited_item(
     def handed_over() -> bool:
         account = session.account if session is not None else None
         leaving = claude_accounts_service.leaving_slot(agent.account_slot, account)
-        return hands_over is None or hands_over(leaving)
+        return hands_over(leaving)
 
     return _needs_item(
         "limited",
@@ -1426,7 +1428,7 @@ def _needs_limited_push(
     now: datetime,
     manager_live: bool,
     accounts: AccountsSettings | None,
-    hands_over: Callable[[], bool] | None = None,
+    hands_over: Callable[[], bool],
 ) -> datetime | None:
     """When a limit may push: never when it lifts soon; later when someone else is on it.
 
@@ -1445,7 +1447,7 @@ def _needs_limited_push(
         minutes=accounts.wait_if_reset_within_minutes
     ):
         return None
-    if manager_live or (accounts.on_limit == "switch" and (hands_over is None or hands_over())):
+    if manager_live or (accounts.on_limit == "switch" and hands_over()):
         return since + _LIMITED_PUSH_DELAY
     return since
 

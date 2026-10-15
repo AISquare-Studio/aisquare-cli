@@ -8566,18 +8566,20 @@ def test_a_reap_never_removes_a_tree_a_spawn_reused_after_it_read_the_rows(
     lock a spawn reuses trees under, before it removes one."""
     first = fleet_service.spawn(project, "coder", label="coder-auth").agent
     fleet_service.stop(project, "coder-auth", force=True)
-    real = fleet_service._why_kept
+    real = fleet_service._default_branch
     started: list[FleetAgent] = []
 
-    def a_spawn_meanwhile(root: Path, tree: Path, default: str) -> str | None:
+    def a_spawn_meanwhile(root: Path) -> str:
+        """Between the reap's read of the rows and its first tree: every question about a
+        tree is asked under the lock since round 18, which a spawn there would wait on."""
         if not started:
             if via == "spawn":
                 started.append(fleet_service.spawn(project, "coder", label="coder-auth").agent)
             else:
                 started.append(fleet_service.restart(project, "coder-auth").started)
-        return real(root, tree, default)
+        return real(root)
 
-    monkeypatch.setattr(fleet_service, "_why_kept", a_spawn_meanwhile)
+    monkeypatch.setattr(fleet_service, "_default_branch", a_spawn_meanwhile)
 
     report = fleet_service.reap(project)
 
@@ -8585,6 +8587,49 @@ def test_a_reap_never_removes_a_tree_a_spawn_reused_after_it_read_the_rows(
     assert again.cwd == first.cwd and again.ended_at is None
     assert first.cwd.is_dir(), "the new agent's tree is still there"
     assert report.worktrees_removed == [] and report.worktrees_kept == []
+
+
+@pytest.mark.parametrize("then", ["working", "ended"])
+def test_a_reap_records_no_branch_on_a_row_whose_tree_a_spawn_reused_after_it_read_the_rows(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    then: str,
+) -> None:
+    """Review of #259, round 18: reap recorded the tree's branch on the ended row it had read
+    before its loop, outside the branch lock. A spawn for another task that reused the tree
+    meanwhile had checked out its own branch there, which was written on the old row, and
+    the old row's branch, named by no row then, was never swept. The branch is recorded under
+    the lock, and only on a row no other has followed at the tree since the rows were read:
+    one working there, or one that ended there since."""
+    task_a, task_b = _add_task(project, "First job"), _add_task(project, "Second job")
+    first = fleet_service.spawn(project, "coder", label="coder-auth", task_id=task_a.id).agent
+    fleet_service.stop(project, "coder-auth", force=True)
+    on_a = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=first.cwd)
+    real = fleet_service._default_branch
+    started: list[FleetAgent] = []
+
+    def a_spawn_meanwhile(root: Path) -> str:
+        if not started:
+            receipt = fleet_service.spawn(project, "coder", label="coder-auth", task_id=task_b.id)
+            started.append(receipt.agent)
+            if then == "ended":
+                fleet_service.stop(project, "coder-auth", force=True)
+        return real(root)
+
+    monkeypatch.setattr(fleet_service, "_default_branch", a_spawn_meanwhile)
+
+    report = fleet_service.reap(project)
+
+    [second] = started
+    on_b = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=second.cwd)
+    assert second.cwd == first.cwd and on_b != on_a, "the premise: task B's branch, in A's tree"
+    with store_session() as store:
+        old, new = store.get_fleet_agent(first.id), store.get_fleet_agent(second.id)
+    assert old is not None and old.branch == on_a, "task A's branch, still"
+    assert new is not None and new.branch == on_b
+    assert report.worktrees_removed == [] and first.cwd.is_dir()
 
 
 def test_a_reap_inside_a_spawn_never_removes_the_tree_it_reused_before_its_row(

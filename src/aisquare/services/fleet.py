@@ -1040,8 +1040,9 @@ def _branches_locked(common: Path, *, wait: float) -> Iterator[None]:
     deleted it, and the spawn failed, or made its tree on a branch that was gone (review
     of #259, round 16). So :func:`spawn` holds this from its first question about a branch
     until its agent's row is written, :func:`_sweep_fleet_branches` deletes only while it
-    holds it, asking the trees again first, and :func:`_remove_unless_taken` removes a tree
-    only while it holds it, asking the live rows again first (round 17). A file in
+    holds it, asking the trees again first, and :func:`_reap_tree` records a tree's branch
+    and removes the tree only while it holds it, asking the rows again first (rounds 17
+    and 18). A file in
     ``common``, which every worktree of the repository shares.
 
     ``wait`` is the patience for one holder, not for the lock: each holder says who it is
@@ -1461,17 +1462,18 @@ def _remove_finished_worktrees(
     is never touched.
 
     The tree goes, and its branch stays, recorded on the newest row at its path just before
-    the tree went (:func:`_record_the_branch`), whatever its name: a spawn for the task checks
-    it out (:func:`_worktree_for`), and a restart of the agent makes its tree again there
-    (:func:`_remake_worktree`). Deleted when pushed anywhere, as the tree is, it took the
-    task's commits with it: a coder spawned again for the task, after a reviewer reopened
-    it, asks for the same branch (:func:`branch_name`), found none, and started a new one
-    from the main checkout's HEAD, without its own pushed work, and nothing said so
+    the tree went, under the branch lock (:func:`_reap_tree`), whatever its name: a spawn for
+    the task checks it out (:func:`_worktree_for`), and a restart of the agent makes its tree
+    again there (:func:`_remake_worktree`). Deleted when pushed anywhere, as the tree is, it
+    took the task's commits with it: a coder spawned again for the task, after a reviewer
+    reopened it, asks for the same branch (:func:`branch_name`), found none, and started a
+    new one from the main checkout's HEAD, without its own pushed work, and nothing said so
     (review of #259, round 14). Which ``fleet/…`` branches go is :func:`_sweep_fleet_branches`,
     asked on every reap of a project an agent with a tree has ended in, whether or not a tree
     was removed.
     """
     root = project.root
+    read_at = _now()
     rows = store.fleet_agents(project.id)
     if not any(row.ended_at is not None and row.worktree for row in rows):
         # No ended agent ever had a tree here — a project no agent ran in, the captured
@@ -1495,44 +1497,57 @@ def _remove_finished_worktrees(
     for path, agent in owners.items():
         if path in in_use or agent.ended_at is None or not agent.cwd.exists():
             continue
-        _record_the_branch(store, agent)
-        try:
-            kept = _why_kept(root, agent.cwd, default)
-        except FleetError as exc:
-            kept = f"git could not be asked ({exc})"
-        if kept is None:
-            removed, kept = _remove_unless_taken(store, project, agent.cwd, common)
-            if removed:
-                report.worktrees_removed.append(agent.cwd)
-                continue
-        if kept is not None:
+        removed, kept = _reap_tree(store, project, agent, default, common, read_at)
+        if removed:
+            report.worktrees_removed.append(agent.cwd)
+        elif kept is not None:
             report.worktrees_kept.append((agent.cwd, kept))
     # Read again: the branches recorded just now are the ones the sweep asks about.
     _sweep_fleet_branches(root, common, default, store.fleet_agents(project.id), report)
 
 
-def _remove_unless_taken(
-    store: ContextStore, project: ProjectInfo, tree: Path, common: Path
+def _reap_tree(
+    store: ContextStore,
+    project: ProjectInfo,
+    agent: FleetAgent,
+    default: str,
+    common: Path,
+    read_at: datetime,
 ) -> tuple[bool, str | None]:
-    """``git worktree remove`` of ``tree``, an ended agent's that holds nothing found only
-    there, unless a live agent works in it now; whether it went, and when it did not, why
-    (``None`` for one a live agent took, left unsaid, as a tree in use always was).
+    """Reap ``agent``'s tree: ``agent`` ended, and was the newest row at the tree's path when
+    :func:`reap` read the rows at ``read_at``. Record on its row the branch the tree is on
+    (:func:`_record_the_branch`), then ``git worktree remove`` it when it holds nothing found
+    only there (:func:`_why_kept`). Whether it went, and when it did not, why (``None`` for a
+    tree another agent took, left unsaid, as a tree in use always was).
 
-    Under the branch lock :func:`spawn` makes or reuses a tree under and holds until its
-    agent's row is written, and with the live rows read again there. :func:`reap` decided
-    from the rows it read before its loop, and each tree costs it a few git calls: a spawn
-    or restart for a label whose ended tree was in that snapshot reused it meanwhile, and
-    the tree, read as ended, clean and pushed, was removed under the new agent (review of
-    #259, round 17). Never waited for: a spawn holds the lock through a ``git worktree add``
-    and a window, and the next reap asks again.
+    All of it under the branch lock, which :func:`spawn` makes or reuses a tree under and
+    holds until its agent's row is written, and only while no other row has been at the
+    tree since ``read_at``: none live there, and none that ended since. Reap decided from
+    the rows it read before its loop, and each tree costs it a few git calls. A spawn or
+    restart for the label reused the tree meanwhile, and the tree, read as ended, clean and
+    pushed, was removed under the new agent (review of #259, round 17), and the branch the
+    spawn checked out there was recorded on the ended row. The branch that row had
+    recorded, then named by no row, was never swept, and a restart of a gone tree was made
+    on the spawn's (round 18). Never waited for: a spawn holds the lock through a ``git
+    worktree add`` and a window, and the next reap asks again.
     """
+    tree = agent.cwd
+    here = tree.resolve()
     try:
         with _branches_locked(common, wait=0):
-            here = tree.resolve()
-            if any(
-                row.cwd.resolve() == here for row in store.fleet_agents(project.id, live_only=True)
-            ):
+            since = [
+                *store.fleet_agents(project.id, live_only=True),
+                *store.fleet_agents_ended_since(project.id, read_at),
+            ]
+            if any(row.id != agent.id and row.cwd.resolve() == here for row in since):
                 return False, None
+            _record_the_branch(store, agent)
+            try:
+                kept = _why_kept(project.root, tree, default)
+            except FleetError as exc:
+                kept = f"git could not be asked ({exc})"
+            if kept is not None:
+                return False, kept
             removal = _git(project.root, "worktree", "remove", str(tree))
     except FleetError as exc:
         return False, f"not removed now: {exc}"
@@ -2608,7 +2623,7 @@ def spawn(
     tmux_session = session_name(codename)
     width, height = size if size is not None else (DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
     # The tree, made or reused, and the row that says an agent works in it, under one hold
-    # of the branch lock a reap removes trees under (`_remove_unless_taken`): a reap that
+    # of the branch lock a reap removes trees under (`_reap_tree`): a reap that
     # landed between a reuse and the row read the tree as an ended agent's, clean and
     # pushed, and removed it from under the agent starting in it (review of #259, round 17).
     common = _git_common_dir(project.root) if use_worktree else None

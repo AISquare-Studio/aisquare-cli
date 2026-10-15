@@ -1259,6 +1259,8 @@ def recall(
     """Search the team's long-term memory (decisions, results, outcomes)."""
     try:
         output = team_service.recall(query)
+    except ValueError as exc:
+        fail(str(exc), error="invalid_query")
     except STORE_ERRORS as exc:
         _fail_team(exc)
     if output is None:

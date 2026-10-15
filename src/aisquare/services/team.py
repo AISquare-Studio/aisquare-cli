@@ -1460,6 +1460,7 @@ def recall(query: str, cwd: Path | None = None) -> str | None:
     and takes a few seconds; subsequent ones are instant.
     """
     _require_enabled()
+    brain.check_query(query)  # before anything is drained or asked
     project = orchestrator.team_project(cwd)
     with store_session() as store:
         backlog = distill_service.pending(store, project.id)

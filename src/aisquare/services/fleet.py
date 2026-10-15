@@ -839,7 +839,9 @@ def only_project(ref: str, matches: list[ProjectInfo]) -> ProjectInfo:
     return matches[0]
 
 
-def ensure_codename(project: ProjectInfo, store: ContextStore | None = None) -> ProjectInfo:
+def ensure_codename(
+    project: ProjectInfo, store: ContextStore | None = None, *, onboard: bool = False
+) -> ProjectInfo:
     """Give the project its codename if it has none (lazily, on first fleet contact).
 
     ``codename_for`` walks past the names a SNAPSHOT of the store called taken,
@@ -853,17 +855,29 @@ def ensure_codename(project: ProjectInfo, store: ContextStore | None = None) -> 
     call this too, and neither is a deliberate add: ``fleet attach`` in a
     captured directory listed it and was then refused, since it had no session
     to attach to. A codename still needs a live row to sit on, so a directory
-    with none, never seen or forgotten, is CAPTURED here, as the next prompt
-    there would capture it. The deliberate callers onboard for themselves:
-    :func:`spawn` once its agent is recorded, :func:`rename` before it writes
-    (review of #168, round 2).
+    with none, never seen or forgotten, is CAPTURED here while ``[projects]
+    capture`` is on, as the next prompt there would capture it. The deliberate
+    callers onboard for themselves: :func:`spawn` once its agent is recorded,
+    :func:`rename` before it writes (review of #168, round 2).
+
+    With capture off there is nothing to capture into: a directory with no live
+    row gets none, and comes back without a codename (the callers name its
+    session by :func:`codenames.codename_for`, as a walk with nothing taken
+    would), unless ``onboard`` — a spawn's, which then adds it here, before its
+    window: a deliberate start in a directory is an add, and its codename names
+    the session and the branches it is about to make.
     """
     if project.codename:
         return project
 
     def assign(store: ContextStore) -> ProjectInfo:
         if store.get_project(project.id) is None:
-            store.ensure_project(project)
+            if project_service.capture_on():
+                store.ensure_project(project)
+            elif onboard:
+                store.onboard_project(project)
+            else:
+                return project
         for _ in range(_CODENAME_RETRIES):
             current = store.get_project(project.id)
             if current is not None and current.codename:
@@ -2275,9 +2289,10 @@ def spawn(
     # The spawn goes ahead: the codename names its tmux session and its branch. A
     # directory with no live row, never seen or forgotten, is captured for it
     # (`ensure_codename`), not listed, and a worktree or a window that then cannot
-    # be made leaves it captured.
+    # be made leaves it captured. With `[projects] capture` off there is no captured
+    # row to leave: a spawn someone asked for adds the directory here instead.
     with store_session() as store:
-        project = ensure_codename(project, store)
+        project = ensure_codename(project, store, onboard=onboard)
     codename = project.codename or codenames.codename_for(project.id)
     if codename != observed:
         # A forgotten project's ended rows keep their windows under the codename its

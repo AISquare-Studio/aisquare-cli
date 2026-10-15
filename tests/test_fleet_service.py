@@ -87,6 +87,7 @@ from aisquare.services.fleet import (
 )
 from tests import fakebin
 from tests.fsperms import can_symlink
+from tests.projects import add_project
 
 PYTHON_LAUNCHER = "python3"
 """What ``pane_current_command`` reads while ``python -m aisquare launch`` is resolving."""
@@ -1875,6 +1876,35 @@ def test_a_codename_is_not_an_onboarding(
         assert [p.id for p in store.list_projects()] == [unseen.id]
 
 
+def test_with_capture_off_a_codename_or_an_attach_writes_no_row(
+    tmux: FakeTmux, tmp_path: Path
+) -> None:
+    """``[projects] capture`` off: ``fleet attach`` and a stop ask for the codename, and
+    neither is an add, so a directory nobody added gets no row — its session is named
+    by the walk with nothing taken, as the callers fall back to."""
+    unseen = team_project(tmp_path / "unseen")
+    assert fleet_service.ensure_codename(unseen).codename is None
+    with pytest.raises(FleetError, match="nothing to attach to"):
+        fleet_service.attach_argv(unseen)
+    with store_session() as store:
+        assert store.list_projects(all=True) == []
+
+
+def test_with_capture_off_a_spawn_where_nothing_was_added_adds_it(
+    tmux: FakeTmux, claude_on_path: Path, repo: Path
+) -> None:
+    """The deliberate path still adds: a spawn someone asked for in a directory nobody
+    added onboards it at the codename, which names the window's session, and leaves
+    nothing captured."""
+    asked = team_project(repo)
+    receipt = fleet_service.spawn(asked, "coder", worktree=False)
+    with store_session() as store:
+        [listed] = store.list_projects()
+        assert store.captured_projects() == []
+    assert listed.id == asked.id and listed.codename
+    assert receipt.tmux_session == f"asq-{listed.codename}"
+
+
 def test_the_automatic_hand_over_lists_nothing_a_forget_left_captured(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2411,7 +2441,7 @@ def test_ensure_codename_walks_on_when_another_process_took_the_name(
     assert fleet_service.resolve_project(named.codename).id == project.id
     # Negative control: with nothing in the way the walk runs once.
     calls.clear()
-    third = fleet_service.ensure_codename(team_project(tmp_path / "third"))
+    third = fleet_service.ensure_codename(add_project(tmp_path / "third"))
     assert third.codename and len(calls) == 1
 
 
@@ -2434,7 +2464,7 @@ def test_resolve_project_names_the_codenames_when_basenames_collide(tmp_path: Pa
     for parent in ("work", "oss"):
         root = tmp_path / parent / "api"
         root.mkdir(parents=True)
-        info = fleet_service.ensure_codename(team_project(root))
+        info = fleet_service.ensure_codename(add_project(root))
         infos.append(info)
     with pytest.raises(fleet_service.NoSuchProject, match="matches several projects") as caught:
         fleet_service.resolve_project("api")

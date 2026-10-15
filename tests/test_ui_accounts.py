@@ -1103,6 +1103,7 @@ def test_sign_out_takes_the_keys_the_cli_minted_with_it_as_logout_does(
     ]
     with store_session() as store:
         for project, uid in zip(projects, ("key-web", "key-api"), strict=True):
+            store.onboard_project(project)  # a destination is an added project's (#139)
             destinations.choose(
                 store,
                 project,

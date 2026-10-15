@@ -564,6 +564,13 @@ def use(
             "workspaces",
             error="usage",
         )
+    try:
+        # Before the sign-in and the network: a directory nobody added is refused
+        # while `[projects] capture` is off, and nothing it asks for changes that.
+        with store_session() as store:
+            dest.require_project(store, project)
+    except dest.DestinationError as exc:
+        fail(exc.message, error=exc.code, ref=str(project.root), detail=exc.message)
     session = _session_or_fail()
     workspace_ref, _, studio_ref = destination.partition("/")
     try:

@@ -1,5 +1,5 @@
 """``[projects] capture`` off, the default since 0.8.1: no project row unless one is added on
-purpose (#139) — the board.
+purpose (#139) — the board and a destination.
 
 The rest of the call sites are tested beside their own: the hooks in tests/test_hooks.py
 and tests/test_ci_augment.py, the shell in tests/test_ui_shell.py, the fleet in
@@ -18,6 +18,7 @@ from aisquare.cli.app import app
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
 from aisquare.models import ProjectInfo
+from aisquare.services import destinations as dest
 from aisquare.services import team as team_service
 
 
@@ -137,3 +138,38 @@ def test_team_spawn_adds_its_project_when_it_starts_the_session_not_when_it_prin
     assert started.exit_code == 0, started.output
     with store_session() as store:
         assert [p.id for p in store.list_projects()] == [team_project(work_dir).id]
+
+
+# --- a destination ---------------------------------------------------------------------
+
+
+def test_a_destination_where_nothing_was_added_is_refused_before_any_sign_in(
+    runner: CliRunner, work_dir: Path
+) -> None:
+    """``explainability use`` names the destination of a project; one nobody added is
+    refused first — no sign-in asked for, no row written."""
+    result = runner.invoke(app, ["--json", "explainability", "use", "acme/Frontend"])
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert payload["error"] == "not_added"
+    assert "aisquare project onboard" in payload["detail"]
+    assert _rows() == []
+
+
+def test_a_destination_needs_the_project_added_or_captured(
+    work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.services import project as project_service
+
+    project = team_project(work_dir)
+    with store_session() as store:
+        with pytest.raises(dest.DestinationError) as refused:
+            dest.require_project(store, project)
+        assert refused.value.code == "not_added"
+        monkeypatch.setattr(project_service, "capture_on", lambda: True)
+        dest.require_project(store, project)  # captured, as 0.8.0 did
+        assert [p.id for p in store.captured_projects()] == [project.id]
+        monkeypatch.setattr(project_service, "capture_on", lambda: False)
+        store.onboard_project(project)
+        dest.require_project(store, project)

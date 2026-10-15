@@ -2414,6 +2414,11 @@ _LATE_WRITES = [
         LateWrite("agent/tell", {"mode": "interrupt"}, "paste", "working"),
         id="interrupt's paste",
     ),
+    pytest.param(LateWrite("agent/tell", {"mode": "prompt"}, "Enter"), id="prompt's Enter"),
+    pytest.param(
+        LateWrite("agent/tell", {"mode": "interrupt"}, "Enter", "working"),
+        id="interrupt's Enter",
+    ),
     *(
         pytest.param(
             LateWrite(name, {**PINNED, "dismiss_dialog": True}, "Escape", "dialog"),
@@ -2454,6 +2459,30 @@ def test_every_write_tmux_did_not_answer_in_time_says_it_may_still_land_and_audi
     assert log[-1] == f"late {write.late}", "nothing reached the agent after it"
     ((_, line),) = phone.audit()
     assert "=maybe " in f"{line} ", line
+
+
+@pytest.mark.parametrize("mode", ["prompt", "interrupt"])
+def test_an_enter_that_timed_out_after_the_paste_may_still_send_it_and_asks_for_none_again(
+    phone: Phone, needs: FakeNeeds, pane: FakePane, project: ProjectInfo, mode: str
+) -> None:
+    """Review of #259, round 10, 3/9: an Enter tmux did not answer in time was told "press
+    Enter on the pad to send it" and audited ``delivered=no``, while a wedged server may still
+    press it. Two Enters: the first sends the message, the second answers whatever comes up
+    next, "1. Yes" to a permission the message asked for. It may still send it, says so, and
+    the trail says ``delivered=maybe``."""
+    _row(project)
+    needs.at_prompt = mode == "prompt"
+    if mode == "interrupt":
+        needs.state = "working"
+    pane.timing_out.add("Enter")
+    response = phone.post("agent/tell", agent=LABEL, text="hi", mode=mode)
+    assert response.status_code == 200 and response.json()["delivered"] is False
+    how = response.json()["how"]
+    assert "pasted it at its prompt, but tmux did not answer in time with Enter" in how, how
+    assert "it may still arrive, and send it" in how and "on the pad" not in how
+    assert phone.audit()[0][1].startswith(
+        f"tell coder-1@{project.id} mode={mode} delivered=maybe text=2ch"
+    )
 
 
 def test_an_enter_that_fails_after_the_paste_is_a_200_that_says_it_was_not_sent(

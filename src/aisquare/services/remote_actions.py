@@ -78,7 +78,7 @@ import threading
 import time
 import unicodedata
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, TypeVar
 
@@ -91,6 +91,7 @@ if TYPE_CHECKING:
     from starlette.routing import BaseRoute
 
     from aisquare.models import FleetAgent, ProjectInfo
+    from aisquare.services.fleet import TellResult
     from aisquare.services.remote_needs import AgentNow
     from aisquare.services.remote_server import Device, RemoteKit, WriteHandler
 
@@ -1086,16 +1087,18 @@ def action_paste(
     *,
     interrupted: bool,
     trail: Callable[[str], str],
-) -> tuple[bool, str]:
+) -> TellResult:
     """Type ``text`` into the agent's pane the way ``fleet tell`` does: one bracketed paste,
-    then Enter. Returns ``(delivered, how)``.
+    then Enter.
 
     A paste, not keystrokes: Claude Code takes every line of it as one message,
     where each typed newline would submit one. The paste is a single tmux call,
     so a paste that tmux refused typed nothing, and is a 409. An Enter that fails
     leaves the text unsent at the prompt. That is a 200 with ``delivered: false``
     that says so, because text reached a live agent: the audit line records it, and
-    the page keeps the card.
+    the page keeps the card. An Enter that timed out may still send it, and is not
+    advice to press Enter on the pad (``fleet.pasted_unsent``): the trail says
+    ``delivered=maybe``.
 
     A paste that timed out (``TmuxTimedOut``) is a 409 too, but may still land: a wedged
     server may run the queued ``paste-buffer`` once it recovers, as it may an Escape
@@ -1105,7 +1108,6 @@ def action_paste(
     text may still arrive, unsent (``fleet.PaneWrite``), and is audited as
     ``trail("delivered=maybe …")``.
     """
-    from aisquare.core.tmux import TmuxError
     from aisquare.services import fleet as fleet_service
 
     agent = action_pane_agent(snap, label)
@@ -1126,14 +1128,11 @@ def action_paste(
             "fleet_error",
             f"{sent}tmux could not type into {label}'s pane ({pasted.error}) — nothing was typed",
         )
-    try:
-        server.send_keys(agent.pane_id, "Enter")
-    except TmuxError as exc:
-        return False, (
-            f"{first}pasted it at its prompt, but tmux could not press Enter ({exc}) — "
-            "press Enter on the pad to send it"
-        )
-    return True, f"{first}typed into its pane at its prompt"
+    entered = fleet_service.pane_write("Enter", lambda: server.send_keys(agent.pane_id, "Enter"))
+    if entered.typed != "yes":
+        told = fleet_service.pasted_unsent(entered, label, press="press Enter on the pad")
+        return replace(told, how=first + told.how)
+    return fleet_service.TellResult(True, f"{first}typed into its pane at its prompt")
 
 
 def action_type_now(
@@ -1145,7 +1144,7 @@ def action_type_now(
     pin: str,
     interrupt: bool,
     trail: Callable[[str], str],
-) -> tuple[bool, str]:
+) -> TellResult:
     """``prompt`` and ``interrupt``: type ``text`` at the agent's input prompt, now.
 
     Both refuse an open dialog, which the Enter would answer, a pane that is not
@@ -1204,7 +1203,7 @@ def action_tell_auto(
     pin: str,
     agent_id: str | None,
     trail: Callable[[str], str],
-) -> tuple[bool, str]:
+) -> TellResult:
     """``auto``: ``fleet tell`` of the pinned row, or a board note while the agent may be
     showing a dialog. ``agent_id`` is the body's: a row it named that is no longer the
     live one is ``stale`` (:func:`action_pinned_call`).
@@ -1247,15 +1246,14 @@ def action_tell_auto(
         if snap.status is not None and snap.status.agent.session_id is None:
             # The board reaches an agent through its hooks: `no hooks`, and the note waits unread.
             filed += ", which it is not shown without aisquare's hooks: Interrupt & tell types it"
-        return False, f"{why} — {filed}"
+        return fleet_service.TellResult(False, f"{why} — {filed}")
     with action_audited(lambda error: trail(f"delivered=no failed={error}")):
-        told = action_pinned_call(
+        return action_pinned_call(
             target,
             label,
             agent_id,
             lambda: fleet_service.tell(target, label, text, sender=None, agent_id=pin),
         )
-    return told.delivered, told.how
 
 
 # --- the actions ---------------------------------------------------------------------------
@@ -1284,11 +1282,11 @@ def action_tell(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     with action_locked(target, label, agent_id) as row:
         snap = action_check_needs(target, label, row.id, needs_id)
         if mode == "auto":
-            delivered, how = action_tell_auto(
+            told = action_tell_auto(
                 target, label, text, snap, pin=row.id, agent_id=agent_id, trail=trail
             )
         else:
-            delivered, how = action_type_now(
+            told = action_type_now(
                 target,
                 label,
                 text,
@@ -1299,12 +1297,12 @@ def action_tell(body: dict[str, Any]) -> tuple[dict[str, object], str]:
             )
     result: dict[str, object] = {
         "label": label,
-        "delivered": delivered,
-        "how": how,
+        "delivered": told.delivered,
+        "how": told.how,
         "mode": mode,
         "project": target.id,
     }
-    return result, trail(f"delivered={action_yes_no(delivered)}")
+    return result, trail(f"delivered={told.typed}")
 
 
 def action_stop(body: dict[str, Any]) -> tuple[dict[str, object], str]:

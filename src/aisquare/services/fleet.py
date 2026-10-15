@@ -244,10 +244,18 @@ class SpawnReceipt:
 
 @dataclass(frozen=True)
 class TellResult:
-    """How a message reached (or did not reach) an agent."""
+    """How a message reached (or did not reach) an agent. ``maybe``: not delivered, but tmux
+    did not answer in time with its text or its Enter, which may still arrive
+    (:class:`PaneWrite`)."""
 
     delivered: bool
     how: str
+    maybe: bool = False
+
+    @property
+    def typed(self) -> Typed:
+        """``delivered`` as an audit line says it."""
+        return "yes" if self.delivered else "maybe" if self.maybe else "no"
 
 
 Typed = Literal["yes", "no", "maybe"]
@@ -293,6 +301,22 @@ def pane_write(what: str, write: Callable[[], object]) -> PaneWrite:
     except TmuxError as exc:
         return PaneWrite("no", what, exc)
     return PaneWrite("yes", what)
+
+
+def pasted_unsent(entered: PaneWrite, label: str, *, press: str) -> TellResult:
+    """A message pasted at ``label``'s prompt whose Enter did not go through (``entered``): the
+    text is there either way. Refused, it waits there unsent, and ``press`` says where an
+    Enter sends it. Not answered in time, the Enter may still send it, so nothing invites a
+    second one: that would answer whatever prompt the message brings up, "1. Yes" to a
+    permission nobody saw (review of #259, round 10, 3/9)."""
+    if entered.typed == "maybe":
+        how = entered.late(label, then=", and send it", again="press Enter")
+        return TellResult(False, f"pasted it at its prompt, but {how}", maybe=True)
+    return TellResult(
+        False,
+        f"pasted it at its prompt, but tmux could not press Enter ({entered.error}) — {press} "
+        "to send it",
+    )
 
 
 @dataclass(frozen=True)

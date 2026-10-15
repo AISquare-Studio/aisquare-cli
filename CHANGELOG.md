@@ -118,29 +118,37 @@ adapter.**
   The bell holds while Codex redraws its approval view and clears the moment
   the human allows the command, when Codex's working line is back on its
   screen, so a long approved command reads working while it runs.
-- **Codex's sandbox reaches the board.** The fleet runs a sandboxed Codex agent
-  under a permission profile of its own, `aisquare`: Codex's `:workspace` (or
-  `:read-only` for a reviewer) with the aisquare home writable and, inside it,
-  what runs or chooses what runs outside the sandbox read-only: the account
-  homes, the config, credentials and keys, `fleet-tmux.conf` and `agents.json`.
-  The store stays writable, and nothing written there chooses what runs
-  outside the sandbox, what is typed into or what is killed: restart, switch,
-  the hand-over and `fleet tell`'s queue read an agent's launch record in
-  `launch-seals/`, which the sandbox can only read, written by its spawner and
-  its own hook, and nothing else from the store; `tell`, `stop`, `shutdown` and
-  the manager's nudge type into and kill only the pane that record places, by
-  its agent's rules, and `shutdown` only the project's own sessions, by tmux's
-  id, all through one resolver a test holds every tmux server and target to; a
-  failed turn's limit is read from the record's transcript; a native id goes on
-  Codex's command line only as a UUID (agents spawned before this version are
-  placed by a census taken before anything sandboxed could write the store). Its
-  `aisquare` calls
-  succeed on the first, sandboxed attempt instead of each needing an approval,
-  and a reviewer's verdict reaches the board while its worktree stays read-only.
-  The fleet's tmux stays out of the sandbox's reach, so a result, question,
-  task review, done, block or reopen written there cannot type the manager's
-  wake-up nudge itself: it leaves the nudge owed in the store, and the agent's
-  own hook, which Codex runs outside the sandbox, sends it as the command ends.
+- **Codex's sandbox reaches the board, and writes nothing in the store.** The
+  fleet runs a sandboxed Codex agent under a permission profile of its own,
+  `aisquare`: Codex's `:workspace` (or `:read-only` for a reviewer) with the
+  aisquare home read-only inside it, all of it: the board's database, the launch
+  records, the census, the config, the account homes, credentials and keys,
+  `fleet-tmux.conf`, `agents.json` and the model probe's cache. Its board calls
+  (`aisquare note`, `task claim`, `board` and the rest of the role protocol) go,
+  unchanged, through a broker its launch runs outside the sandbox, which runs
+  only a whitelist of board and memory commands, only as the agent's own board
+  sessions (the ones its own hooks registered), only on its own board, and never
+  a fleet operation, a launch, a hook, the config or an account. The sandbox
+  writes one path in the store, its launch's broker inbox. So nothing in the
+  store that a replay, a kill, a typed line or paste, a launch, a model or
+  account choice or a worktree removal reads can have been written from inside a
+  sandbox. The transport is a spool directory and a FIFO, not a socket: Codex
+  0.162.1's sandbox refuses `connect` on every unix socket (measured). The launch
+  records stay as defence in depth: restart, switch, the hand-over and `fleet
+  tell`'s queue read an agent's launch record in `launch-seals/`, written by its
+  spawner and its own hook, and nothing else from the store; `tell`, `stop`,
+  `shutdown` and the manager's nudge type into and kill only the pane that record
+  places, by its agent's rules, and `shutdown` only the project's own sessions,
+  by tmux's id, all through one resolver a test holds every tmux server and
+  target to; a failed turn's limit is read from the record's transcript; a native
+  id goes on Codex's command line only as a UUID (agents spawned before this
+  version are placed by a census). Its `aisquare` calls succeed on the first,
+  sandboxed attempt instead of each needing an approval, and a reviewer's verdict
+  reaches the board while its worktree stays read-only. A result, question, task
+  review, done, block or reopen the broker runs wakes a waiting manager from
+  outside the sandbox; where tmux refuses the nudge it is left owed, and the
+  agent's own hook, which Codex runs outside the sandbox, sends it as the command
+  ends.
   A `--sandbox` in a role's own native arguments replaces the profile. See
   [the sandbox and the store](docs/coding-agents.md#the-sandbox-and-the-aisquare-store).
 - **One permission per role, for every agent.** `fleet.roles.<role>.permission`

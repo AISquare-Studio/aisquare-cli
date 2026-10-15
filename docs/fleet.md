@@ -186,11 +186,12 @@ manager is woken (a fixed one-line nudge typed into its pane, only while it is
 *waiting*) and reads the update on its next turn; when the manager stops with
 new board events pending, its `Stop` hook lets it continue. No daemon, no poll
 loop, and it works with the UI closed (Phase 5). A Codex agent's board write
-runs in Codex's sandbox, where the fleet's tmux socket is refused (and stays
-refused: from there it could type into any pane), so the write leaves the nudge
-owed in the store and the agent's own `PostToolUse` hook, which Codex runs
-outside the sandbox, sends it as the command ends (its `Stop` hook, if that one
-could not), only while the manager has not yet read the news.
+is run by its launch's broker, outside Codex's sandbox (where the fleet's tmux
+socket is refused, and stays refused: from there it could type into any pane), so
+the nudge is sent from there; where tmux refuses it all the same, the write
+leaves the nudge owed in the store and the agent's own `PostToolUse` hook, which
+Codex runs outside the sandbox, sends it as the command ends (its `Stop` hook, if
+that one could not), only while the manager has not yet read the news.
 
 Standalone use is unchanged: `aisquare launch planner` and `aisquare launch
 runner` keep working outside any fleet.
@@ -484,8 +485,8 @@ tmux_socket` may point anywhere). A project's sessions are every one its spawns
 made, by tmux's own id for it (`$3`), kept beside the launch records, plus the ones
 its records name and the session its agents from before this version run in (the
 one tmux says holds their panes) — whatever rows are left, or how long ago they
-ended, and never by the project's codename in the store, which an agent's sandbox
-can write. A row ended in the store while its window runs is stopped like a running
+ended, and never by the project's codename in the store, which no agent's sandbox
+can write now (the store is read-only there) and none trusts. A row ended in the store while its window runs is stopped like a running
 one. `--all` also sweeps every `asq-` session tmux lists, sparing one that holds a
 row the run left live. A server with nothing left on it exits by itself, so the
 next `asq` or `fleet spawn` starts a fresh one on whichever account that shell
@@ -868,29 +869,33 @@ exactly what each agent gets with nothing set. Claude Code has no sandbox,
 so its read-only is the reviewer's denial of the tools that edit files, given once
 even where the role's own arguments carry it too.
 
-Codex runs its tools in a sandbox, and every `aisquare` call an agent makes writes the
-store in the aisquare home, a board read included. The **store profile** is the
-fleet's own Codex permission profile: Codex's built-in `:workspace` or `:read-only`,
-with the aisquare home writable and, within it, the account homes, the credentials,
-the keys, the config, the fleet's tmux conf and the agent registry read-only, since
-what is written there runs, or chooses what runs, outside any sandbox. The rows a
-restart, switch or hand-over replays stay in the writable store, so none of them is
-replayed from there: `fleet spawn` writes each agent's launch record in
-`launch-seals/`, which is read-only to the sandbox (binary, arguments, permission,
-role, agent, directory, account, and the tmux socket and pane its window is in), the
-agent's own hook adds its session (transcript, thread, home), and a replay and `fleet
-tell`'s queue read that record and nothing else. What `tell`, `stop` (restart, switch,
-the hand-over, `shutdown`) and the manager's nudge type into or kill is the pane the
-record places, by the record's agent's rules, and `shutdown` takes down the sessions
-the records name; a failed turn's limit is read from the record's transcript. One
-resolver (`fleet.resolve_place`) answers every such question, and
+Codex runs its tools in a sandbox. The **store profile** is the fleet's own Codex
+permission profile: Codex's built-in `:workspace` or `:read-only`, with the aisquare
+home read-only within it, all of it (the board's database, the launch records, the
+census, the config, the account homes, credentials and keys, the fleet's tmux conf, the
+agent registry, the model probe's cache), and one path writable: the launch's broker
+inbox. Every `aisquare` board call the agent makes there goes, unchanged, through that
+broker, which its launch runs outside the sandbox: it runs only a whitelist of board and
+memory commands, only as the agent's own board sessions, only on its own board, and
+never a fleet operation (`spawn`, `stop`, `restart`, `switch`, `tell`, `shutdown` …), a
+launch, a hook, the config or an account. So nothing in the store that a restart, a
+switch, a hand-over, `tell`, `stop`, `shutdown`, the manager's nudge, `reap` or a spawn
+reads can have been written from inside a sandbox. The launch records stay as defence
+in depth: `fleet spawn` writes each agent's launch record in `launch-seals/` (binary,
+arguments, permission, role, agent, directory, account, and the tmux socket and pane
+its window is in), the agent's own hook adds its session (transcript, thread, home), and
+a replay and `fleet tell`'s queue read that record and nothing else. What `tell`, `stop`
+(restart, switch, the hand-over, `shutdown`) and the manager's nudge type into or kill
+is the pane the record places, by the record's agent's rules, and `shutdown` takes down
+the sessions the records name; a failed turn's limit is read from the record's
+transcript. One resolver (`fleet.resolve_place`) answers every such question, and
 `tests/test_fleet_placement.py` fails on a tmux call that does not go through it. A row
 rewritten to name another pane is told nothing and stopped where its record places it;
 a row without one has its window killed by `stop` with nothing typed, only in a session
 a record of its project names, and its replay, like a project whose directory in the
-store is not the record's, is refused with the reason. So a
-Codex agent's board calls succeed on their first, sandboxed attempt, a reviewer's
-verdict included, while its worktree stays read-only
+store is not the record's, is refused with the reason. So a Codex agent's board calls
+succeed on their first, sandboxed attempt, a reviewer's verdict included, while its
+worktree stays read-only
 ([the sandbox and the store](coding-agents.md#the-sandbox-and-the-aisquare-store)).
 `ask` is the human's to answer on Codex as on Claude Code: the reviewer is pinned on
 every spawn and restart, as a resumed thread keeps its own otherwise, so `fleet

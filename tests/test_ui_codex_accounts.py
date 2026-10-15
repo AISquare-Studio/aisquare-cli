@@ -96,7 +96,10 @@ def _sign_in_codex(home: Path, email: str, plan: str = "plus") -> None:
 
 
 def _rollout(home: Path, *, recorded: datetime, session: float, week: float) -> Path:
-    """A rollout whose newest ``token_count`` carries a five-hour and a weekly window."""
+    """A rollout whose newest ``token_count`` carries a five-hour and a weekly window, both
+    still to reset when the test runs (the clock read then, not at import: a suite that
+    reached the page an hour after collection read its reading an hour older)."""
+    now = datetime.now(tz=UTC)
     day = home / "sessions" / f"{recorded:%Y}" / f"{recorded:%m}" / f"{recorded:%d}"
     day.mkdir(parents=True, exist_ok=True)
     path = day / f"rollout-{recorded:%Y-%m-%dT%H-%M-%S}-01a0-test.jsonl"
@@ -112,12 +115,12 @@ def _rollout(home: Path, *, recorded: datetime, session: float, week: float) -> 
                     "primary": {
                         "used_percent": session,
                         "window_minutes": 300,
-                        "resets_at": int((NOW + timedelta(hours=2)).timestamp()),
+                        "resets_at": int((now + timedelta(hours=2)).timestamp()),
                     },
                     "secondary": {
                         "used_percent": week,
                         "window_minutes": 10080,
-                        "resets_at": int((NOW + timedelta(days=3)).timestamp()),
+                        "resets_at": int((now + timedelta(days=3)).timestamp()),
                     },
                     "credits": None,
                     "plan_type": "plus",
@@ -300,7 +303,10 @@ def test_a_codex_slot_renders_in_its_own_section_with_offline_usage_bars(
 ) -> None:
     account = core.create_account(CODEX)
     _sign_in_codex(account.config_dir, "codex@example.com")
-    _rollout(account.config_dir, recorded=NOW - timedelta(hours=3), session=42, week=7)
+    # Three hours before the page reads it, by the clock now: NOW is the module's import
+    # time, and the Windows suite reached this test over an hour after collecting it.
+    recorded = datetime.now(tz=UTC).replace(microsecond=0) - timedelta(hours=3)
+    _rollout(account.config_dir, recorded=recorded, session=42, week=7)
     overview = _real_overview()
     slot = account.slot
 

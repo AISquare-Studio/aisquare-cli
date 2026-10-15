@@ -1467,9 +1467,13 @@ class Runtime:
         next write put this process's version-2 state over it: within 30 s, the flush,
         everything the later release had added gone (review of #259, round 7, 1/9). A
         version-1 file is still written over, as version 2; one that does not parse is too.
+
+        Bytes this process last read or wrote (:attr:`_disk`, only ever a version it knows)
+        are not parsed again: every unlock, revoke, extend and flush paid a parse of a file
+        it had just compared (review of #259, round 8, 9/9).
         """
         on_disk = self._signature()
-        if on_disk is None:
+        if on_disk is None or on_disk == self._disk:
             return
         try:
             raw = json.loads(on_disk.decode("utf-8-sig"))

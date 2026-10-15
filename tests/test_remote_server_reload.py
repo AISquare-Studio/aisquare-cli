@@ -192,6 +192,31 @@ def test_a_later_release_s_file_under_a_running_server_is_never_written_over(
     assert json.loads(remote_state_path().read_bytes())["version"] == 2
 
 
+def test_a_write_over_the_file_this_process_wrote_does_not_parse_it_again(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 8, 9/9: the later-file check read and parsed the whole of
+    ``remote.json`` before every write, though its bytes were most often the ones this
+    process had last written or read. Those are not parsed again; a file changed since is,
+    and a later release's is still refused."""
+    runtime.set_allow_write(True)
+    own = remote_state_path().read_bytes().decode("utf-8")
+    parsed: list[str] = []
+    loads = json.loads
+
+    def counting(text: str | bytes, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(text, str) and text == own:
+            parsed.append(text)
+        return loads(text, *args, **kwargs)
+
+    monkeypatch.setattr(json, "loads", counting)
+    runtime.set_allow_write(False)
+    assert parsed == [], "its own bytes, parsed again"
+    other_process_writes(lambda raw: raw.update({"version": 3}))
+    with pytest.raises(LaterRemoteState):
+        runtime.set_allow_write(True)
+
+
 def test_a_phone_refused_by_a_later_release_s_file_is_told_so_not_of_a_full_disk(
     client: TestClient, runtime: Runtime
 ) -> None:

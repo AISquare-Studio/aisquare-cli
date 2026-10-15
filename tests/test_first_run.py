@@ -351,7 +351,9 @@ def test_the_two_second_probe_reads_each_file_again_only_once_it_changes(
     """Round 25 of #257: Welcome's probe, every two seconds until Claude Code is connected,
     read every CLAUDE.md whole and settings.json twice to ask whether connect would refuse,
     and loaded config.toml twice. A file is read again once it changes; the config once a
-    probe. Connect itself still reads every file (``_read_before_writing``)."""
+    probe (``one_load``): read once, and parsed at most once, not at all since ``load_config``
+    keeps its last parse (round 18 of #259). Connect itself still reads every file
+    (``_read_before_writing``)."""
     where = agent_core.ambient_hook_dir("claude-code")
     assert where is not None
     where.mkdir(parents=True)
@@ -360,19 +362,21 @@ def test_the_two_second_probe_reads_each_file_again_only_once_it_changes(
     notes.write_text("# notes\n" * 1000, encoding="utf-8")
     config_core.save_config(config_core.AppConfig())
     read: list[str] = []
-    parsed: list[bytes] = []
-    real_read, real_parse = agents_service._read_agent_file, config_core._parse_toml
+    loads: list[object] = []
+    from aisquare.core.paths import despite_windows_contention as real_load
+
+    real_read = agents_service._read_agent_file
 
     def reading(path: Path) -> str | None:
         read.append(path.name)
         return real_read(path)
 
-    def parsing(raw: bytes) -> dict[str, Any]:
-        parsed.append(raw)
-        return real_parse(raw)
+    def loading(action: Callable[[], Any]) -> Any:
+        loads.append(action)  # config.toml's bytes, read by load_config
+        return real_load(action)
 
     monkeypatch.setattr(agents_service, "_read_agent_file", reading)
-    monkeypatch.setattr(config_core, "_parse_toml", parsing)
+    monkeypatch.setattr(config_core, "despite_windows_contention", loading)
     binary = str(tmp_path / "claude")
 
     def tick(connected: Callable[[], bool] | None = lambda: False) -> first_run.ClaudeState:
@@ -388,9 +392,9 @@ def test_the_two_second_probe_reads_each_file_again_only_once_it_changes(
     assert first.refused is None and second.refused is None
 
     monkeypatch.setattr(first_run, "_connected_default", lambda cwd=None: True)
-    parsed.clear()
+    loads.clear()
     assert tick(connected=None).connected, "the coders' folder asked: the config read"
-    assert len(parsed) == 1, "once for the agent binding and the coders' folder"
+    assert len(loads) == 1, "once for the agent binding and the coders' folder"
     connected = agents_service._read_before_writing("claude-code", None)
     assert connected[0].startswith("# notes, edited"), "connect reads the texts as they are"
 

@@ -61,40 +61,18 @@ def list_projects(*, all: bool = False) -> list[ProjectInfo]:
         return store.list_projects(all=all)
 
 
-_capture_read: tuple[tuple[str, tuple[int, int, int] | None], bool] | None = None
-"""The last reading of ``[projects] capture``, keyed by config.toml as ``stat`` saw it (its path,
-and its inode, mtime and size, or ``None`` for no file): :func:`capture_on`'s, read again only
-when that changes."""
-
-
 def capture_on() -> bool:
     """``[projects] capture``: whether a directory a hooked session merely runs in gets a
     row of its own, captured and unlisted (#139). Off by default since 0.8.1; an unreadable
-    config costs the setting, never the hook, as every section's does.
+    config costs the setting, never the hook, as every section's does, and is read again on
+    the next ask (review of #259, round 18).
 
-    Parsed once until config.toml changes: a SessionStart asked twice, each prompt once, and
-    asq's UI thread on every refresh tick, and each ask read, parsed and validated the
-    whole file (review of #259, round 17). What is kept is keyed by the file as ``stat``
-    sees it, so an edit, or a save that replaces it, is read on the next ask. A read that
-    failed is not kept: its fallback, kept under a file that does not change, turned capture
-    off for the life of the process after one read a retry would have cleared (round 18)."""
-    global _capture_read
-    path = paths.config_path()
-    key: tuple[str, tuple[int, int, int] | None]
+    Asked twice a SessionStart, once a prompt, and on asq's UI thread every refresh tick:
+    :func:`~aisquare.core.config.load_config` parses the file again only when it changed."""
     try:
-        seen = path.stat()
-        key = (str(path), (seen.st_ino, seen.st_mtime_ns, seen.st_size))
-    except OSError:
-        key = (str(path), None)
-    kept = _capture_read
-    if kept is not None and kept[0] == key:
-        return kept[1]
-    try:
-        value = load_config(path).projects.capture
+        return load_config(paths.config_path()).projects.capture
     except Exception:
         return ProjectsSettings().capture
-    _capture_read = (key, value)
-    return value
 
 
 def tracked(store: ContextStore, project: ProjectInfo) -> bool:

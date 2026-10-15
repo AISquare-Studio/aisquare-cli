@@ -262,19 +262,20 @@ def test_the_setting_is_parsed_once_until_config_toml_changes(
 ) -> None:
     """Review of #259, round 17: ``capture_on()`` read, parsed and validated config.toml on
     every call — twice a SessionStart, once a prompt, and on asq's UI thread every refresh
-    tick. It is parsed again only when the file changes."""
+    tick. It is parsed again only when the file changes (``load_config``'s memo, since
+    round 18: tests/test_config.py)."""
     from aisquare.core import config as config_core
     from aisquare.core import paths
     from aisquare.services import project as project_service
 
-    real = config_core.load_config
-    loads: list[object] = []
+    real = config_core._parse_toml
+    loads: list[bytes] = []
 
-    def counted(path: Path | None = None) -> config_core.AppConfig:
-        loads.append(path)
-        return real(path)
+    def counted(raw: bytes) -> dict[str, object]:
+        loads.append(raw)
+        return real(raw)
 
-    monkeypatch.setattr(project_service, "load_config", counted)
+    monkeypatch.setattr(config_core, "_parse_toml", counted)
     config = paths.config_path()
     config.parent.mkdir(parents=True, exist_ok=True)
     config.write_text("[projects]\ncapture = false\n", encoding="utf-8")

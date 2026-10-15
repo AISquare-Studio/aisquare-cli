@@ -954,12 +954,19 @@ def one_load() -> Iterator[None]:
         _ONE_LOAD.reset(token)
 
 
+_LAST_PARSE: tuple[Path, bytes, AppConfig] | None = None
+"""The last file :func:`load_config` parsed: its path, its bytes, and what they validated to,
+which no caller is handed (each gets a copy)."""
+
+
 def load_config(path: Path | None = None) -> AppConfig:
     """Load configuration from ``path`` (default: the standard location).
 
     The file is laid over the system defaults (:func:`_overlay`): what it sets wins, and
     whatever it leaves out is the default. A missing file yields the defaults alone.
     Within :func:`one_load`, a file loaded already is not read again.
+
+    Parsed again only when its bytes change (:func:`_parsed`).
     """
     target = path or paths.config_path()
     loaded = _ONE_LOAD.get()
@@ -968,11 +975,36 @@ def load_config(path: Path | None = None) -> AppConfig:
     if not target.exists():
         config = AppConfig()
     else:
-        data = _parse_toml(despite_windows_contention(target.read_bytes))
-        _migrate(data)
-        config = AppConfig.model_validate(_overlay(system_defaults(), data))
+        config = _parsed(target, despite_windows_contention(target.read_bytes))
     if loaded is not None:
         loaded[target] = config
+    return config
+
+
+def _parsed(target: Path, raw: bytes) -> AppConfig:
+    """``raw``, the bytes of the config file at ``target``, as an :class:`AppConfig` the caller
+    may change: a copy of the last parse when the bytes are that parse's, else parsed,
+    migrated and validated, and kept.
+
+    asq's refresh tick asked the file for ``[projects] capture``, the fleet's settings once
+    per project, the roles' and the accounts' settings, and each ask read, parsed and
+    validated it whole: about 250 µs for a 1.3 KB config, where reading it and copying the
+    kept model is about 45 µs (review of #259, round 18). Keyed by the bytes, not by
+    ``stat``: a file rewritten in place to the same size within one tick of the kernel's
+    coarse clock has the same inode, size and mtime, and Remote's ``remote.json`` measured
+    195 same-size rewrites of 200 sharing one
+    (:meth:`aisquare.services.remote_server.Runtime.reload_if_changed`). A copy,
+    because callers change what they are handed and save it. A file that will not parse
+    raises, and nothing is kept: the next load reads it again.
+    """
+    global _LAST_PARSE
+    last = _LAST_PARSE
+    if last is not None and last[0] == target and last[1] == raw:
+        return last[2].model_copy(deep=True)
+    data = _parse_toml(raw)
+    _migrate(data)
+    config = AppConfig.model_validate(_overlay(system_defaults(), data))
+    _LAST_PARSE = (target, raw, config.model_copy(deep=True))
     return config
 
 

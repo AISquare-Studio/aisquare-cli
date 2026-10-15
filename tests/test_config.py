@@ -32,6 +32,74 @@ def test_load_missing_file_returns_defaults() -> None:
     assert load_config() == AppConfig()
 
 
+def test_the_file_is_parsed_again_only_when_its_bytes_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 18: asq's refresh tick asked config.toml for the fleet's, the
+    roles', the accounts' and the capture setting, and each ask parsed and validated the
+    whole file; only ``capture`` had a memo. ``load_config`` keeps its last parse, keyed by
+    the file's bytes: a rewrite in place to the same size, with the same inode and mtime as
+    a write within one tick of the kernel's coarse clock has, is read for what it says."""
+    import os
+
+    from aisquare.core import config as config_core
+
+    real = config_core._parse_toml
+    parses: list[bytes] = []
+
+    def counted(raw: bytes) -> dict[str, object]:
+        parses.append(raw)
+        return real(raw)
+
+    monkeypatch.setattr(config_core, "_parse_toml", counted)
+    path = tmp_path / "config.toml"
+    path.write_text("[fleet]\nmax_agents_per_project = 4\n", encoding="utf-8")
+
+    assert [load_config(path).fleet.max_agents_per_project for _ in range(3)] == [4, 4, 4]
+    assert len(parses) == 1, "parsed once"
+
+    seen = path.stat()
+    with path.open("r+b") as handle:  # in place: the same inode
+        handle.write(b"[fleet]\nmax_agents_per_project = 5\n")
+    os.utime(path, ns=(seen.st_atime_ns, seen.st_mtime_ns))
+    again = path.stat()
+    assert (again.st_ino, again.st_size, again.st_mtime_ns) == (
+        seen.st_ino,
+        seen.st_size,
+        seen.st_mtime_ns,
+    )
+    assert load_config(path).fleet.max_agents_per_project == 5
+    assert len(parses) == 2, "and again once its bytes changed"
+
+
+def test_each_load_hands_out_its_own_config(tmp_path: Path) -> None:
+    """The kept parse is never handed out: a caller changes what it loaded and saves it, and a
+    change it did not save is not what the next load reads."""
+    path = tmp_path / "config.toml"
+    path.write_text("[fleet]\nmax_agents_per_project = 4\n", encoding="utf-8")
+
+    first = load_config(path)
+    first.fleet.max_agents_per_project = 9  # a nested model: a shallow copy would share it
+
+    second = load_config(path)
+    assert second.fleet.max_agents_per_project == 4
+    assert second is not first and second.fleet is not first.fleet
+
+
+def test_a_file_that_will_not_parse_is_read_again_each_load(tmp_path: Path) -> None:
+    """Nothing is kept of a load that raised: the next load reads the file again, and a
+    broken file after a good one raises rather than handing out the good one."""
+    path = tmp_path / "config.toml"
+    path.write_text("[fleet\n", encoding="utf-8")
+    with pytest.raises(tomllib.TOMLDecodeError):
+        load_config(path)
+    path.write_text("[fleet]\nmax_agents_per_project = 4\n", encoding="utf-8")
+    assert load_config(path).fleet.max_agents_per_project == 4
+    path.write_text("[fleet\n", encoding="utf-8")
+    with pytest.raises(tomllib.TOMLDecodeError):
+        load_config(path)
+
+
 def test_an_unknown_key_in_the_file_still_loads(tmp_path: Path) -> None:
     # The safety net under every key this schema has ever dropped, and the
     # reason `team.bins` could simply be deleted instead of deprecated. Extras

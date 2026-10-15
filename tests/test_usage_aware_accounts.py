@@ -605,13 +605,19 @@ def test_with_the_registry_unreadable_a_limit_still_reaches_the_worker_that_says
     """Review of #259, round 14: ``somewhere_to_hand_over`` said no where the registry could
     not be read, and the hook returned without a word, where the worker used to post "not
     switched — accounts registry unreadable …". Which accounts are enabled is not known, so
-    the worker is started, and its pick, which takes nothing from that registry, says why."""
+    with another slot among the directories the worker is started, and its pick, which
+    takes nothing from that registry, says why."""
     monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
     started: list[list[str]] = []
     monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
     mine = _slot("work@example.com", "tok-work")
+    _slot("home@example.com", "tok-home")
     _session(work, "sess-fleet")
     _fleet_row(work, "agt_limited4", "coder-db", "sess-fleet")
+    with store_session() as store:
+        row = store.fleet_agent_for_session(work.id, "sess-fleet")
+        assert row is not None
+        store.upsert_fleet_agent(row.model_copy(update={"account_slot": mine.slot}))
     unreadable = "accounts registry unreadable (database is locked)"
     monkeypatch.setattr(service, "_read_arranged", lambda: (core.list_accounts(), unreadable))
 
@@ -622,6 +628,35 @@ def test_with_the_registry_unreadable_a_limit_still_reaches_the_worker_that_says
     hooks_service.hand_over("sess-fleet", reason="weekly limit")
     said = [text for kind, text in _events(work) if "not switched" in text]
     assert said and unreadable in said[0], _events(work)
+
+
+def test_with_the_registry_unreadable_and_no_other_slot_a_limit_starts_no_hand_over(
+    fake_home: Path, work: ProjectInfo, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 15: with a registry note the answer was always yes, though the
+    slot directories it falls back to showed nowhere to go: a disabled flag only takes an
+    account away. On a one-account machine whose store was locked, every limit started a
+    worker that posted "not switched — accounts registry unreadable", and Remote held the
+    push 90 s: round 13's noise again. The fallback list answers."""
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    started: list[list[str]] = []
+    monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
+    mine = _slot("work@example.com", "tok-work")
+    _session(work, "sess-fleet")
+    _fleet_row(work, "agt_limited6", "coder-db", "sess-fleet")
+    with store_session() as store:
+        row = store.fleet_agent_for_session(work.id, "sess-fleet")
+        assert row is not None
+        store.upsert_fleet_agent(row.model_copy(update={"account_slot": mine.slot}))
+    unreadable = "accounts registry unreadable (database is locked)"
+    monkeypatch.setattr(service, "_read_arranged", lambda: (core.list_accounts(), unreadable))
+
+    assert not service.somewhere_to_hand_over(mine.slot)
+    assert not service.somewhere_to_hand_over(None), "one slot is not two"
+    _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
+
+    assert started == []
+    assert not any("switch" in text for kind, text in _events(work) if kind != "limited")
 
 
 def test_with_the_slot_directories_unlistable_the_worker_says_why_rather_than_dying(

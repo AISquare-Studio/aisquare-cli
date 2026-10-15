@@ -880,12 +880,15 @@ def somewhere_to_hand_over(leaving: int | None = None) -> bool:
     enabled, signed-in one other than ``leaving``. Not knowing which slot the agent is on
     (``None``), two such accounts, so that one is not the agent's.
 
-    Where the registry cannot be read, which accounts are enabled is not known, and the
-    answer is yes: the hand-over is started, and :func:`choose_for_handover` picks nothing
-    from that registry and says why, which the worker posts ("not switched — accounts
-    registry unreadable …"). A no here stopped the hook without a word: nothing on the
-    board said the configured ``switch`` was skipped, or why (review of #259, round 14).
-    So does one whose slot directories cannot be listed (round 15).
+    Where the registry cannot be read, the answer comes from the slot directories it falls
+    back to: which accounts are enabled is not known, but a disabled flag only takes an
+    account away, so with no other signed-in slot there no hand-over can succeed, and a
+    yes started a worker to say "not switched" at every limit (review of #259, round 15).
+    With one, the hand-over is started (a no stopped the hook without a word, round 14), and
+    :func:`choose_for_handover` picks nothing from that registry and says why, which the
+    worker posts ("not switched — accounts registry unreadable …"). Where the slot
+    directories cannot even be listed, nothing is known, and the answer is yes, for the
+    worker to say so.
 
     ``on_limit = "switch"`` is the default since 0.8.1, so a machine with one account has it
     too. There every limit started a hand-over that could only refuse, posted "not
@@ -893,10 +896,9 @@ def somewhere_to_hand_over(leaving: int | None = None) -> bool:
     (review of #259, round 13). ``choose`` drops its "nothing to pick" note for ``pick`` on
     the same grounds.
     """
-    accounts, registry_note = _read_for_handover()
-    if registry_note is not None:
+    accounts, _note = _read_for_handover()
+    if accounts is None:
         return True
-    assert accounts is not None  # listed, or there is a note
     usable = [
         account.slot for account in accounts if not account.disabled and core.signed_in(account)
     ]

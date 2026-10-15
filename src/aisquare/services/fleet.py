@@ -1797,6 +1797,7 @@ def _with_trust_prompts(
     statuses: list[FleetAgentStatus],
     config: FleetSettings,
     addresses: Mapping[str, _Address] | None = None,
+    looked_up: dict[str, TeamSession | None] | None = None,
 ) -> list[FleetAgentStatus]:
     """``statuses``, every agent at Claude Code's folder-trust question read ``attention``.
 
@@ -1813,20 +1814,21 @@ def _with_trust_prompts(
     under ``AISQUARE_TEAM_HUB`` every session is the hub's. Every row there read as silent,
     so every listing captured every pane, and a pane that merely showed the question's
     words (a reviewer reading ``claude_sharing``) read as at it (review of #259, round 13).
+    Each id looked up goes into ``looked_up`` when the caller gives one, ``None`` for an id
+    with no session: Remote's scan derives those rows again with their sessions, and read
+    them a second time (round 14).
     """
     elsewhere = {
         status.agent.session_id
         for status in statuses
         if status.session is None and status.agent.session_id and _maybe_at_trust_prompt(status)
     }
-    found: dict[str, TeamSession] = {}
+    found: dict[str, TeamSession | None] = {}
     if elsewhere:
         with store_session() as store:
-            found = {
-                session_id: session
-                for session_id in elsewhere
-                if (session := store.get_session(session_id)) is not None
-            }
+            found = {session_id: store.get_session(session_id) for session_id in elsewhere}
+    if looked_up is not None:
+        looked_up.update(found)
     shown: list[FleetAgentStatus] = []
     for status in statuses:
         session = status.session or found.get(status.agent.session_id or "")
@@ -3237,8 +3239,17 @@ def _handed_over(agent: FleetAgent, session: TeamSession | None, now: datetime) 
     )
 
 
-def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+def list_agents(
+    project: ProjectInfo,
+    *,
+    live_only: bool = True,
+    looked_up: dict[str, TeamSession | None] | None = None,
+) -> list[FleetAgentStatus]:
     """The project's agents with their DERIVED state (§5.1).
+
+    ``looked_up``, when given, is filled with the sessions read by their ids for rows the
+    project's own board holds none for (:func:`_with_trust_prompts`), for a caller that
+    reads them too.
 
     Two things changed with #138, both so the store stops lagging the screen:
 
@@ -3293,7 +3304,7 @@ def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAg
         )
         for agent in agents
     ]
-    return _with_trust_prompts(statuses, config, addresses)
+    return _with_trust_prompts(statuses, config, addresses, looked_up)
 
 
 def _end_dead_rows(

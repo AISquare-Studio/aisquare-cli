@@ -5214,6 +5214,57 @@ def test_under_a_team_hub_a_projects_rows_are_derived_again_in_one_look_at_tmux(
     assert items[0].reason == "coder-2 shows a dialog that needs you"
 
 
+def test_under_a_team_hub_each_rows_session_is_read_once_a_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 14: the listing read each silent row's hub session by its id,
+    for the trust question alone, and dropped it; the scan then read the same ids again to
+    derive the rows. Two store opens and two lookups per live row, every 3 s. The scan
+    takes the listing's."""
+    from aisquare.core.store import SqliteStore
+
+    now = datetime.now(UTC)
+    hub = _rooted(tmp_path / "hub")
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub.root))
+    labels = ("coder-1", "coder-2")
+    with store_session() as store:
+        alpha = store.onboard_project(_rooted(tmp_path / "alpha"))
+        store.ensure_project(hub)
+        for n, label in enumerate(labels, start=1):
+            store.upsert_session(
+                TeamSession(
+                    id=f"ses_{label}", project_id=hub.id, role="coder", label=label,
+                    started_at=now - timedelta(hours=1), last_seen_at=now - timedelta(minutes=1),
+                    state="attention" if label == "coder-2" else "working",
+                )
+            )  # fmt: skip
+            store.upsert_fleet_agent(
+                FleetAgent(
+                    id=f"agt_{label}", project_id=alpha.id, label=label, role="coder",
+                    pane_id=f"%{n}", session_id=f"ses_{label}", cwd=alpha.root,
+                    created_at=now - timedelta(hours=1),
+                )
+            )  # fmt: skip
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    asked: list[str] = []
+    get_session = SqliteStore.get_session
+
+    def counted(self: SqliteStore, session_id: str) -> TeamSession | None:
+        asked.append(session_id)
+        return get_session(self, session_id)
+
+    monkeypatch.setattr(SqliteStore, "get_session", counted)
+
+    statuses = remote_needs.live_needs_sources().list_agents(alpha)
+
+    assert sorted(asked) == ["ses_coder-1", "ses_coder-2"], "each once"
+    assert {status.agent.label: status.state for status in statuses} == {
+        "coder-1": "working",
+        "coder-2": "attention",
+    }, "derived with their sessions all the same"
+
+
 def _rooted(root: Path) -> ProjectInfo:
     """A project as ``asq init`` registers it: its id derived from its root, which is where
     the team writes its board too (``team_project``), and where the scan reads it."""

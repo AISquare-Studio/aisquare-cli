@@ -3320,7 +3320,9 @@ def live_needs_sources() -> NeedsSources:
         return None if task is None else task.status
 
     def needs_live_agents(project: ProjectInfo) -> list[FleetAgentStatus]:
-        return _needs_with_board_sessions(fleet_service.list_agents(project, live_only=True))
+        looked_up: dict[str, TeamSession | None] = {}
+        listed = fleet_service.list_agents(project, live_only=True, looked_up=looked_up)
+        return _needs_with_board_sessions(listed, looked_up)
 
     def needs_tmux_answers(socket: str, path: Path | None) -> bool:
         return fleet_service.server_for(socket).at(path).answers()
@@ -3364,7 +3366,9 @@ def live_needs_sources() -> NeedsSources:
     )
 
 
-def _needs_with_board_sessions(statuses: list[FleetAgentStatus]) -> list[FleetAgentStatus]:
+def _needs_with_board_sessions(
+    statuses: list[FleetAgentStatus], looked_up: Mapping[str, TeamSession | None] | None = None
+) -> list[FleetAgentStatus]:
     """The listing, each live row whose session the team keeps on another project's board
     derived again with it, the session found by its id.
 
@@ -3382,6 +3386,10 @@ def _needs_with_board_sessions(statuses: list[FleetAgentStatus]) -> list[FleetAg
     that resumed a session on an account that never trusted the folder read as the old
     session's ``waiting``, with no card and no push (review of #259, round 13). Its screen
     is not captured again: the listing looked at it a moment ago.
+
+    ``looked_up`` holds the sessions the listing already read by their ids, to see whether
+    an agent was at that question (``fleet.list_agents``): they are not read again, and the
+    store is opened only for the rest, if any (review of #259, round 14).
     """
     from aisquare.core.store import store_session
     from aisquare.services import fleet as fleet_service
@@ -3393,13 +3401,16 @@ def _needs_with_board_sessions(statuses: list[FleetAgentStatus]) -> list[FleetAg
     ]
     if not elsewhere:
         return statuses
-    with store_session() as store:
-        held = {
-            status.agent.id: session
-            for status in elsewhere
-            if status.agent.session_id
-            and (session := store.get_session(status.agent.session_id)) is not None
-        }
+    read = dict(looked_up or {})
+    unread = {status.agent.session_id or "" for status in elsewhere} - read.keys()
+    if unread:
+        with store_session() as store:
+            read.update({session_id: store.get_session(session_id) for session_id in unread})
+    held = {
+        status.agent.id: session
+        for status in elsewhere
+        if (session := read.get(status.agent.session_id or "")) is not None
+    }
     if not held:
         return statuses
     rows = [status.agent for status in elsewhere if status.agent.id in held]

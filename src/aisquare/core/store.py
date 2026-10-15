@@ -965,6 +965,13 @@ _SCHEMA_V29 = ""
 # ``team_task`` at all (doctor's damaged-store case) must still open and be described,
 # as :func:`_add_column_if_absent` already lets it for a column.
 _SCHEMA_V30 = ""
+# v31 (review of #259, round 15): the branch a fleet agent's worktree was on, as git said
+# at spawn, at stop and at reap before the tree went: where a restart or switch makes a
+# gone tree again. It was looked for in git's worktree list, which every spawn's prune
+# empties, and in notes in the repo's git config keyed by a path labels reuse, which went
+# stale. The column is the whole step, so the script is empty: it is in :data:`_PRODUCTS`;
+# a row from before it keeps NULL, which a restart of a gone tree reads as no branch known.
+_SCHEMA_V31 = ""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -997,6 +1004,7 @@ _MIGRATIONS = (
     _SCHEMA_V28,
     _SCHEMA_V29,
     _SCHEMA_V30,
+    _SCHEMA_V31,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -1049,6 +1057,7 @@ _PRODUCTS: dict[int, _Products] = {
     27: _Products(columns=(("claude_usage", "token_fingerprint", "TEXT"),)),
     28: _Products(columns=(("team_task", "number", "INTEGER"),)),
     29: _Products(("team_task_number", "team_task_unnumbered")),
+    30: _Products(columns=(("fleet_agent", "branch", "TEXT"),)),
 }
 
 _PROJECT_COLUMNS = (
@@ -1129,7 +1138,7 @@ _EVENT_COLUMNS = "seq, id, project_id, session_id, kind, text, task_id, to_role,
 _FLEET_AGENT_COLUMNS = (
     "id, project_id, label, role, binary, tmux_socket, pane_id, session_id, cwd, worktree, "
     "task_id, spawned_by, created_at, ended_at, exit_status, account_slot, launch_spec, "
-    "socket_path, boot_id, server_started_at"
+    "socket_path, boot_id, server_started_at, branch"
 )
 _CLAUDE_ACCOUNT_COLUMNS = "slot, config_dir, alias, position, is_default, disabled, created_at"
 
@@ -1339,6 +1348,7 @@ class ContextStore(Protocol):
         self, agent_id: str, *, exit_status: int | None = None
     ) -> FleetAgent | None: ...
     def forget_fleet_agent_server_start(self, agent_id: str, started: datetime) -> bool: ...
+    def record_fleet_agent_branch(self, agent_id: str, branch: str | None) -> None: ...
     # The Claude account registry (v15, #145): the arrangement of the slots.
     def claude_accounts(self) -> list[ClaudeAccountRecord]: ...
     def upsert_claude_account(self, slot: int, config_dir: Path) -> ClaudeAccountRecord: ...
@@ -1429,6 +1439,7 @@ def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
         socket_path=Path(row["socket_path"]) if row["socket_path"] else None,
         boot_id=row["boot_id"],
         server_started_at=_maybe_dt(row["server_started_at"]),
+        branch=row["branch"],
     )
 
 
@@ -3132,14 +3143,14 @@ class SqliteStore:
         """
         self._conn.execute(
             f"INSERT INTO fleet_agent ({_FLEET_AGENT_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "pane_id = excluded.pane_id, session_id = excluded.session_id, "
             "cwd = excluded.cwd, worktree = excluded.worktree, task_id = excluded.task_id, "
             "ended_at = excluded.ended_at, exit_status = excluded.exit_status, "
             "account_slot = excluded.account_slot, launch_spec = excluded.launch_spec, "
             "socket_path = excluded.socket_path, boot_id = excluded.boot_id, "
-            "server_started_at = excluded.server_started_at",
+            "server_started_at = excluded.server_started_at, branch = excluded.branch",
             (
                 agent.id,
                 agent.project_id,
@@ -3161,6 +3172,7 @@ class SqliteStore:
                 str(agent.socket_path) if agent.socket_path is not None else None,
                 agent.boot_id,
                 agent.server_started_at.isoformat() if agent.server_started_at else None,
+                agent.branch,
             ),
         )
         self._conn.commit()
@@ -3858,6 +3870,14 @@ class SqliteStore:
         )
         self._conn.commit()
         return cursor.rowcount > 0
+
+    def record_fleet_agent_branch(self, agent_id: str, branch: str | None) -> None:
+        """Record the branch a fleet agent's worktree is on now (``None``: a detached HEAD).
+
+        Whether the row is live or ended: ``services.fleet`` records it at stop and at reap,
+        before the tree can go, and a restart makes a gone tree again on it."""
+        self._conn.execute("UPDATE fleet_agent SET branch = ? WHERE id = ?", (branch, agent_id))
+        self._conn.commit()
 
     # --- the Claude account registry (v15, #145) --------------------------------------------
     #

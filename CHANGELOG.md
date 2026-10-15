@@ -71,7 +71,7 @@ all of them, and the fleet cleans up the worktrees it made.**
   names those settings before it moves; to keep one there, set it after the
   move. When that release saves the file whole again, this release reads it as
   it did the first time: values equal to 0.8.0's defaults follow today's.
-- The store migrates to schema v30 on first open, from 0.8.0's v25, in five
+- The store migrates to schema v31 on first open, from 0.8.0's v25, in six
   steps:
   - v26: `fleet_agent.server_started_at`, when each agent's tmux server
     started, as the server said at spawn. It is the identity of the server the
@@ -89,8 +89,13 @@ all of them, and the fleet cleans up the worktrees it made.**
   - v30: a unique index on (project, number), and one of the tasks without a
     number, which every open asks for (a store an earlier 0.8.1 candidate made
     v30 gets it at its next open).
+  - v31: `fleet_agent.branch`, the branch each agent's worktree was on, as git
+    said at spawn, at stop and at reap before the tree went. A restart or
+    switch makes a gone tree again on it. An agent started before 0.8.1
+    recorded none, so a restart of one whose tree is gone is refused, saying
+    so. `fleet ls --json` carries the field.
 
-  0.8.0 opens a v30 store as it is. A task it adds gets no number there; the
+  0.8.0 opens a v31 store as it is. A task it adds gets no number there; the
   next open by 0.8.1 numbers it after the last number on its board, in the
   order such tasks were added.
 - Remote keeps its state in `~/.aisquare`: `remote.json` (owner-only),
@@ -430,8 +435,9 @@ all of them, and the fleet cleans up the worktrees it made.**
   next `reap` removes it. `--json` adds `worktrees_kept`, `branches_deleted`
   and `branches_kept` beside `worktrees_removed`. A live agent's tree is never
   touched, as before. A restart or switch of an agent whose tree is gone —
-  reaped, or deleted by hand — makes it again on the branch it was on, and is
-  refused, saying so, only when that branch is gone too.
+  reaped, or deleted by hand — makes it again on the branch it was on, which
+  its row records (whatever its name, and through any `git worktree prune`),
+  and is refused, saying so, only when that branch is gone too.
 - **`fleet stop` says** that `fleet reap` removes the agent's worktree once its
   work is pushed, for an agent that had one.
 - **The role cycles clean up.** The manager's cycle says to stop (`fleet stop`)

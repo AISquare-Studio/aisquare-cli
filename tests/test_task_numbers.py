@@ -22,7 +22,7 @@ from aisquare.cli.app import app
 from aisquare.core import paths
 from aisquare.core.ids import new_task_id
 from aisquare.core.orchestrator import team_project
-from aisquare.core.store import open_store, store_session
+from aisquare.core.store import SCHEMA_VERSION, open_store, store_session
 from aisquare.models import ProjectInfo, TeamTask
 from aisquare.services import mcp_server
 from aisquare.services import team as team_service
@@ -243,13 +243,13 @@ def test_a_v30_store_an_earlier_build_of_this_line_made_gets_the_board_stamps_in
     """Integrate #3: rc/0.8.1 put ``team_event_project_created`` into its v26 step after this
     line had stamped stores v30 without it, and added no version. The presence pass checks
     every product at every open, so such a store gets the index at its next open, with its
-    task numbers and their index as they were and its version still 30."""
+    task numbers and their index as they were, and the ladder takes it on from 30."""
     here = _board(work_dir)
     first = _add(here, "a")
     raw = sqlite3.connect(str(paths.db_path()))
     try:
         raw.execute("DROP INDEX team_event_project_created")  # this line's v30, before the merge
-        assert raw.execute("PRAGMA user_version").fetchone()[0] == 30
+        raw.execute("PRAGMA user_version = 30")  # as that build stamped it
     finally:
         raw.close()
 
@@ -262,7 +262,7 @@ def test_a_v30_store_an_earlier_build_of_this_line_made_gets_the_board_stamps_in
     finally:
         raw.close()
     assert {"team_event_project_created", "team_task_number"} <= indexes
-    assert version == 30
+    assert version == SCHEMA_VERSION
     with store_session() as store:
         assert store.missing_schema() == []
         assert _number(store.get_task(first.id)) == 1
@@ -296,7 +296,7 @@ def test_a_store_with_every_task_numbered_finds_none_unnumbered_without_reading_
         version = raw.execute("PRAGMA user_version").fetchone()[0]
     finally:
         raw.close()
-    assert "team_task_unnumbered" in indexes and version == 30
+    assert "team_task_unnumbered" in indexes and version == SCHEMA_VERSION
     with store_session() as store:
         assert store.missing_schema() == []
 

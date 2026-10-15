@@ -1136,16 +1136,20 @@ branch and checks it out:
 | tree and branch there | kept as it stands | reuses the tree, on the task's branch |
 | tree deleted by hand, branch there | the tree made again on the branch it was on, at the same path | checks the branch out |
 | pushed (to any remote branch) and reaped: tree removed, branch kept | the tree made again on that branch | checks the branch out |
-| merged and reaped: tree removed, branch deleted | refused: git no longer knows which branch it was on | a new branch from HEAD — which holds the work when HEAD is the default branch |
+| merged and reaped: tree removed, branch deleted | refused: the branch is gone | a new branch from HEAD — which holds the work when HEAD is the default branch |
 | tree and branch both deleted by hand | refused: the branch is gone too | a new branch from HEAD |
 
-A restart finds the branch where it was left: git keeps a hand-deleted tree's
-branch in its worktree list until a `git worktree prune`, and `reap` notes the
-tree it removed on the branch it keeps (`branch.<name>.aisquare-worktree` in the
-repo's git config, which `git branch -D` drops with the branch). A refusal says
-which of the two it found, before anything is stopped, and names the way on:
-spawn a new agent for the task. A branch another tree has checked out by then
-is refused too, naming that tree.
+The branch a restart makes the tree again on is the one the agent's row records
+(`branch` in `fleet ls --json`): the tree's branch as git said it at spawn, at
+`fleet stop`, and at `fleet reap` just before the tree went. So it is the branch
+the agent was last on, whatever its name: one that ran `git checkout -b fix/auth`
+is restarted on `fix/auth`, not on the `fleet/…` branch it was spawned on. A
+`git worktree prune`, which every spawn runs and every role's cleanup asks for,
+loses nothing, and neither does a later agent under the same label and path.
+A row from before 0.8.1 records no branch, so its gone tree is refused. A refusal
+says what it found, before anything is stopped and without writing anything, and
+names the way on: spawn a new agent for the task. A branch another tree has
+checked out by then is refused too, naming that tree.
 
 Worked examples: `~/Code/AISquare/ws2/aisquare-cli` → `aisquare-cli`,
 codename `amber-otter`, session `asq-amber-otter`, branches

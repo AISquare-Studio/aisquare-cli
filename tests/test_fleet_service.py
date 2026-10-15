@@ -7833,7 +7833,7 @@ _LIFECYCLE: dict[str, tuple[str | None, str]] = {
     "tree and branch there": (None, "tip"),
     "tree deleted by hand": (None, "tip"),
     "pushed, reaped: branch kept": (None, "tip"),
-    "merged, reaped: branch deleted": ("git no longer knows which branch it was on", "tip"),
+    "merged, reaped: branch deleted": ("and so is its branch", "tip"),
     "tree and branch deleted by hand": ("and so is its branch", "main"),
 }
 
@@ -7848,12 +7848,13 @@ def test_a_worktree_and_its_branch_over_their_lifecycle(
     case: str,
     then: str,
 ) -> None:
-    """Review of #259, rounds 13 and 14: one rule for an agent's tree and its branch. A
-    tree that is gone is made again on the branch it was on (deleted by hand, or reaped
-    with the branch kept), and a restart is refused only when that branch is gone, saying
-    so — not blaming ``fleet reap``, which deletes a branch only once main holds it. A
-    spawn for the task asks for the same branch and carries on from it. Refused, nothing
-    is recorded: the 💤 row stays, and no tree is made at its path."""
+    """Review of #259, rounds 13 to 15: one rule for an agent's tree and its branch. A
+    tree that is gone is made again on the branch its row recorded (deleted by hand, or
+    reaped with the branch kept), and a restart is refused only when that branch is gone,
+    saying so — not blaming ``fleet reap``, which deletes a branch only once main holds it.
+    A spawn for the task asks for the same branch and carries on from it. Refused, nothing
+    is written: the 💤 row stays as it was, no tree is made at its path, and the repo's
+    git config is untouched (round 15 left a note behind for a branch that was gone)."""
     _remote(project, tmp_path)
     task = _add_task(project, "Wire the auth flow")
     coder = fleet_service.spawn(project, "coder", task_id=task.id).agent
@@ -7880,6 +7881,9 @@ def test_a_worktree_and_its_branch_over_their_lifecycle(
         assert _git("rev-parse", "HEAD", cwd=cwd) == (tip if spawned_on == "tip" else main)
         return
     if refusal is not None:
+        git_config = (project.root / ".git" / "config").read_bytes()
+        with store_session() as store:
+            [before] = store.fleet_agents(project.id)
         with pytest.raises(FleetError) as refused:
             fleet_service.restart(project, coder.label)
         said = str(refused.value)
@@ -7888,22 +7892,81 @@ def test_a_worktree_and_its_branch_over_their_lifecycle(
         assert not coder.cwd.exists(), "no tree was made in its place"
         with store_session() as store:
             [row] = store.fleet_agents(project.id)
-        assert row.id == coder.id and row.ended_at is not None
+        assert row == before and row.id == coder.id and row.ended_at is not None
+        assert (project.root / ".git" / "config").read_bytes() == git_config
         return
     receipt = fleet_service.restart(project, coder.label)
     assert receipt.started.cwd == coder.cwd
     assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=coder.cwd) == branch
     assert _git("rev-parse", "HEAD", cwd=coder.cwd) == tip, "every commit is there"
+    assert receipt.started.branch == branch, "the replacement's row records it too"
     remade = f"its worktree {coder.cwd} was gone — made it again on its branch {branch}"
     assert (remade in receipt.notes) == (case != "tree and branch there"), receipt.notes
-    noted = subprocess.run(
-        ["git", "config", "--get-regexp", "aisquare-worktree"],
-        cwd=project.root,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert noted.stdout == "", "the note goes once the tree is back"
+
+
+def _move_to_a_branch_of_its_own(tree: Path, name: str) -> str:
+    """``git checkout -b <name>`` in ``tree``, a commit there, pushed to ``origin``: the tip."""
+    _git("checkout", "-q", "-b", name, cwd=tree)
+    _commit(tree, "fix.txt")
+    _git("push", "-q", "origin", name, cwd=tree)
+    return _git("rev-parse", "HEAD", cwd=tree)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "on a branch of its own, stopped, its tree deleted by hand",
+        "on a branch of its own, exited, reaped",
+        "deleted by hand, then git's worktree list pruned",
+        "its label's earlier tree was on another branch",
+    ],
+)
+def test_a_restart_makes_a_gone_tree_again_on_the_branch_its_row_recorded(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path, case: str
+) -> None:
+    """Review of #259, round 15: the branch of a gone tree was looked for in notes in the
+    repo's git config, written only for a ``fleet/…`` branch and keyed by the tree's path,
+    and in git's worktree list. So a coder that moved to ``fix/auth`` and was reaped could
+    not be restarted (no note, and git had forgotten the tree); one whose tree was deleted
+    by hand could not either once any spawn had pruned; and one whose label's earlier
+    tree was reaped from ``fleet/…`` was rebuilt there, on the earlier agent's branch,
+    without its own commits. The row records the branch at spawn, at stop and at reap,
+    and a restart makes the tree again there, at its tip."""
+    _remote(project, tmp_path)
+    task = _add_task(project, "Wire the auth flow")
+    coder = fleet_service.spawn(project, "coder", task_id=task.id).agent
+    _commit(coder.cwd, "feature.txt")
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=coder.cwd)
+    tip = _git("rev-parse", "HEAD", cwd=coder.cwd)
+    if case == "on a branch of its own, stopped, its tree deleted by hand":
+        branch, tip = "fix/auth", _move_to_a_branch_of_its_own(coder.cwd, "fix/auth")
+        fleet_service.stop(project, coder.label, force=True)
+        shutil.rmtree(coder.cwd)
+    elif case == "on a branch of its own, exited, reaped":
+        branch, tip = "fix/auth", _move_to_a_branch_of_its_own(coder.cwd, "fix/auth")
+        tmux.die(coder.pane_id, 0)
+        assert fleet_service.reap(project).worktrees_removed == [coder.cwd]
+    elif case == "deleted by hand, then git's worktree list pruned":
+        fleet_service.stop(project, coder.label, force=True)
+        shutil.rmtree(coder.cwd)
+        _git("worktree", "prune", cwd=project.root)  # as any spawn, or a role's cleanup
+    else:
+        _git("push", "-q", "origin", f"{branch}:feat/integration", cwd=coder.cwd)
+        fleet_service.stop(project, coder.label, force=True)
+        assert fleet_service.reap(project).branches_kept == [branch]
+        coder = fleet_service.spawn(project, "coder", task_id=task.id).agent
+        assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=coder.cwd) == branch
+        branch, tip = "fix/auth", _move_to_a_branch_of_its_own(coder.cwd, "fix/auth")
+        fleet_service.stop(project, coder.label, force=True)
+        assert fleet_service.reap(project).worktrees_removed == [coder.cwd]
+    assert not coder.cwd.exists()
+
+    receipt = fleet_service.restart(project, coder.label)
+
+    assert receipt.started.cwd == coder.cwd
+    assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=coder.cwd) == branch
+    assert _git("rev-parse", "HEAD", cwd=coder.cwd) == tip, "its own commits"
+    assert f"made it again on its branch {branch}" in " ".join(receipt.notes), receipt.notes
 
 
 def test_reap_keeps_a_worktree_with_unpushed_commits_or_uncommitted_changes_and_says_why(

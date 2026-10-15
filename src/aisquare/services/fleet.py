@@ -1070,6 +1070,7 @@ def _ensure_worktree(
     *,
     refuse_if_taken: Callable[[], None] | None = None,
     own: Path | None = None,
+    own_branch: str | None = None,
 ) -> Path:
     """``<root>/<worktree_dir>/<label>`` on ``branch``, created or reused.
 
@@ -1091,16 +1092,16 @@ def _ensure_worktree(
     — and a clean one was moved to a branch the agent never worked on (review
     of #203, final round, FLEET-2).
 
-    A tree ``own`` names that is gone is made again on the branch it was on, or refused
-    when that branch cannot be found (:func:`_remake_worktree`): never made anew from the
-    main checkout's HEAD, without the agent's commits.
+    A tree ``own`` names that is gone is made again on ``own_branch``, the branch its row
+    recorded it on, or refused when there is none or it is gone (:func:`_remake_worktree`):
+    never made anew from the main checkout's HEAD, without the agent's commits.
 
     ``refuse_if_taken`` reaches :func:`_reuse_worktree`, which asks it once more
     before switching branches; a tree this call CREATES cannot be another
     agent's, because ``git worktree add`` refuses an existing directory.
     """
     if own is not None and not own.exists():
-        return _remake_worktree(root, own, notes)
+        return _remake_worktree(root, own, own_branch, notes)
     path = root / worktree_dir / label
     if path.exists():
         if (path / ".git").exists():
@@ -1161,64 +1162,75 @@ def _default_branch(root: Path) -> str:
 #: The prefix of every branch :func:`branch_name` makes: the only branches reap deletes.
 _FLEET_BRANCH_PREFIX = "fleet/"
 
-#: The key under ``branch.<name>`` in the repo's git config where ``fleet reap`` notes the
-#: worktree it removed from a ``fleet/…`` branch it kept. git forgets a removed tree's
-#: branch, and a restart of the agent that worked there needs it; ``git branch -D`` drops
-#: the key with the branch.
-_TREE_KEY = "aisquare-worktree"
+
+def _tree_branch(tree: Path) -> str | None:
+    """The branch the worktree ``tree`` is on, as git says now; ``None`` on a detached HEAD.
+
+    Raises :class:`FleetError` when git cannot say: no worktree there (asked in a
+    directory without its ``.git``, git would answer for the main checkout above it), or
+    no answer."""
+    if not (tree / ".git").exists():
+        raise FleetError(f"no worktree at {tree}")
+    head = _git(tree, "rev-parse", "--abbrev-ref", "HEAD")
+    if head.returncode != 0:
+        raise FleetError(f"git could not say which branch {tree} is on")
+    current = head.stdout.strip()
+    return None if current == "HEAD" else current  # --abbrev-ref says HEAD when detached
 
 
-def _noted_trees(root: Path) -> list[tuple[str, Path]]:
-    """``(branch, tree)`` for each branch :func:`_note_the_tree` noted a removed tree on."""
-    listed = _git(root, "config", "--get-regexp", rf"^branch\..*\.{_TREE_KEY}$")
-    if listed.returncode != 0:
-        return []  # 1: none noted
-    noted: list[tuple[str, Path]] = []
-    for line in listed.stdout.splitlines():
-        key, _, value = line.partition(" ")
-        branch = key.removeprefix("branch.").removesuffix(f".{_TREE_KEY}")
-        noted.append((branch, Path(value).resolve()))
-    return noted
+def _spawned_on(tree: Path) -> str | None:
+    """The branch a spawn's worktree is on, for its row; ``None`` when git cannot say,
+    which costs the spawn nothing but a restart's way back to a tree that is gone."""
+    try:
+        return _tree_branch(tree)
+    except FleetError:
+        return None
 
 
-def _note_the_tree(root: Path, branch: str, tree: Path) -> None:
-    """Note on ``branch`` that ``tree`` was on it when it was removed — and on no other
-    branch, so the tree's last branch is the one found."""
-    for other, path in _noted_trees(root):
-        if other != branch and path == tree.resolve():
-            _git(root, "config", "--unset", f"branch.{other}.{_TREE_KEY}")
-    _git(root, "config", f"branch.{branch}.{_TREE_KEY}", str(tree))
+def _record_the_branch(store: ContextStore, agent: FleetAgent) -> None:
+    """Record on ``agent``'s row the branch its worktree is on now (:attr:`FleetAgent.branch`),
+    while the tree is there to ask: at stop, and at reap before the tree can go. An agent
+    that ran ``git checkout -b fix/auth`` is restarted there, not on the branch it was
+    spawned on. A tree that is gone, or that git cannot read, leaves what was recorded."""
+    if not agent.worktree:
+        return
+    try:
+        branch = _tree_branch(agent.cwd)
+    except FleetError:
+        return
+    if branch != agent.branch:
+        store.record_fleet_agent_branch(agent.id, branch)
 
 
-def _branch_of_a_gone_tree(root: Path, own: Path) -> str:
-    """The branch ``own``, the worktree an agent worked in and gone now, was on: where
-    :func:`_remake_worktree` makes it again.
+def _branch_of_a_gone_tree(root: Path, own: Path, branch: str | None) -> str:
+    """``branch``, the one its row recorded ``own`` on — the worktree an agent worked in,
+    gone now — when :func:`_remake_worktree` can make the tree again there.
 
-    Found where it was left: on the ``fleet/…`` branch ``fleet reap`` kept when it removed
-    the tree (:func:`_note_the_tree`), else in git's list of worktrees, which keeps a tree
-    deleted by hand until a ``git worktree prune``. Found there, it is noted the same way,
-    as any spawn prunes. Raises :class:`FleetError`, saying what was found, when no branch
-    is known, the one found is gone, or another tree has it out: carried on in a new
-    tree, the agent would work without its commits.
+    Asked of the row, never of git's worktree list, which every spawn's prune empties, nor
+    of anything keyed by the tree's path, which a later agent under the same label reuses
+    (review of #259, round 15). Writes nothing, so a restart refused afterwards leaves
+    nothing behind. Raises :class:`FleetError`, saying what it found, when the row recorded
+    no branch, the branch is gone, or another tree has it out: carried on in a new tree,
+    the agent would work without its commits.
     """
-    gone = own.resolve()
-    registered = _worktree_branches(root)
-    branch = next((b for b, tree in _noted_trees(root) if tree == gone), None)
-    if branch is None and (branch := registered.get(gone)) is not None:
-        _note_the_tree(root, branch, own)
     instead = (
         "carried on in a new tree, it would work without its commits. Spawn a new agent "
         "for its task instead, which checks out the task's branch when there is one"
     )
     if branch is None:
         raise FleetError(
-            f"its worktree {own} is gone, and git no longer knows which branch it was on: "
-            + instead
+            f"its worktree {own} is gone, and its row records no branch it was on (a "
+            "detached HEAD, or an agent spawned before 0.8.1): " + instead
         )
     if _git(root, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode != 0:
         raise FleetError(f"its worktree {own} is gone, and so is its branch {branch}: " + instead)
+    gone = own.resolve()
     holder = next(
-        (tree for tree, b in registered.items() if b == branch and tree != gone and tree.exists()),
+        (
+            tree
+            for tree, b in _worktree_branches(root).items()
+            if b == branch and tree != gone and tree.exists()
+        ),
         None,
     )
     if holder is not None:
@@ -1229,22 +1241,20 @@ def _branch_of_a_gone_tree(root: Path, own: Path) -> str:
     return branch
 
 
-def _remake_worktree(root: Path, own: Path, notes: list[str]) -> Path:
+def _remake_worktree(root: Path, own: Path, branch: str | None, notes: list[str]) -> Path:
     """Make ``own`` again — the worktree a restarted or switched agent worked in, gone
-    now — on the branch it was on (:func:`_branch_of_a_gone_tree`), so the replacement
-    carries on with every commit there.
+    now — on ``branch``, the one its row recorded (:func:`_branch_of_a_gone_tree`), so the
+    replacement carries on with every commit there.
 
     A tree deleted by hand, its branch still holding the work, was made again on it until
     round 13 of #259 refused every tree that was gone and blamed ``fleet reap`` (round
     14). One reap removed is made again on the branch reap kept; a branch reap deleted
-    had nothing the default branch lacks. The note goes once the tree is back: git says
-    its branch from then on.
+    had nothing the default branch lacks.
     """
-    branch = _branch_of_a_gone_tree(root, own)
+    branch = _branch_of_a_gone_tree(root, own, branch)
     own.parent.mkdir(parents=True, exist_ok=True)
     _git(root, "worktree", "prune")  # a tree deleted by hand still holds its branch
     _git_ok(root, "worktree", "add", str(own), branch)
-    _git(root, "config", "--unset", f"branch.{branch}.{_TREE_KEY}")
     notes.append(f"its worktree {own} was gone — made it again on its branch {branch}")
     return own
 
@@ -1296,9 +1306,10 @@ def _remove_finished_worktrees(
     reopened it, asks for the same branch (:func:`branch_name`), found none, and started
     a new one from the main checkout's HEAD, without its own pushed work, and nothing
     said so (review of #259, round 14). A branch with commits the default branch lacks
-    is kept, costing nothing, with the tree noted on it (:func:`_note_the_tree`): a
-    spawn for the task checks it out (:func:`_ensure_worktree`), and a restart of the
-    agent makes its tree again there (:func:`_remake_worktree`).
+    is kept, costing nothing: a spawn for the task checks it out (:func:`_ensure_worktree`),
+    and a restart of the agent makes its tree again there (:func:`_remake_worktree`), on
+    the branch recorded on its row just before the tree went (:func:`_record_the_branch`),
+    whatever its name.
     """
     root = project.root
     if not is_git_project(root):
@@ -1324,6 +1335,7 @@ def _remove_finished_worktrees(
         if path in in_use or path in seen:
             continue
         seen.add(path)
+        _record_the_branch(store, agent)
         try:
             kept = _why_kept(root, agent.cwd, default)
         except FleetError as exc:
@@ -1341,7 +1353,6 @@ def _remove_finished_worktrees(
             continue
         merged = _git(root, "merge-base", "--is-ancestor", f"refs/heads/{branch}", default)
         if merged.returncode != 0:
-            _note_the_tree(root, branch, agent.cwd)
             report.branches_kept.append(branch)
         elif _git(root, "branch", "-D", branch).returncode == 0:
             report.branches_deleted.append(branch)
@@ -2005,6 +2016,7 @@ def spawn(
     onboard: bool = True,
     bin_flag: bool = True,
     own_worktree: Path | None = None,
+    own_branch: str | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -2026,7 +2038,8 @@ def spawn(
     such a replacement's too: the tree the agent it replaces worked in, which
     is taken as it stands — branch, uncommitted work and all — when it is the
     tree this spawn lands in (:func:`_ensure_worktree`), never put on the
-    branch today's task and codename would name.
+    branch today's task and codename would name; gone, it is made again on
+    ``own_branch``, the branch the replaced row recorded it on.
 
     Every ``None`` means "the role's default" (config, then built-in). Refuses
     past ``max_agents_per_project``, a second manager, a worktree in a non-git
@@ -2226,6 +2239,7 @@ def spawn(
             notes,
             refuse_if_taken=refuse_if_taken,
             own=own_worktree,
+            own_branch=own_branch,
         )
     notes.extend(f"accounts: {note}" for note in choice.notes)
     made: list[str] = []
@@ -2409,6 +2423,7 @@ def spawn(
         socket_path=socket_path,
         boot_id=tmux_core.boot_id(),
         server_started_at=server_started,
+        branch=_spawned_on(cwd) if use_worktree else None,
         created_at=_now(),
     )
     stored = _record(
@@ -3871,6 +3886,7 @@ def _stop_row(
         # both then announced the one death (review of #163, round 1). Re-reading a
         # window earlier, in a connection of its own, neither closed the gap nor
         # paid for itself (round 5).
+        _record_the_branch(store, agent)
         ended = store.end_fleet_agent_if_live(agent.id, exit_status=exit_status)
         if ended is None:
             current = store.get_fleet_agent(agent.id)
@@ -5614,6 +5630,7 @@ def _respawn(
         # grace): the refusal names no `--bin`, which no command that gets here takes.
         bin_flag=False,
         own_worktree=agent.cwd if agent.worktree else None,
+        own_branch=agent.branch,
     )
     if agent.launch_spec is not None:
         # Said once the replacement is up, for what it really took from the row: a
@@ -5657,8 +5674,8 @@ def _refuse_a_replay_that_cannot_start(
     That one was asked only inside the spawn, after the stop had typed ``/exit``: an agent
     whose own server listens at another path was stopped, and its replacement refused,
     which left it down (review of #259, round 2). And a worktree that is gone with no
-    branch to make it again on (:func:`_branch_of_a_gone_tree`); ``root`` is the
-    project's.
+    branch to make it again on (:func:`_branch_of_a_gone_tree`, which writes nothing);
+    ``root`` is the project's.
     """
     _launch_binary(
         agent.role,
@@ -5670,7 +5687,7 @@ def _refuse_a_replay_that_cannot_start(
     )
     _refuse_an_env_file_it_cannot_read(agent.role)
     if agent.worktree and not agent.cwd.exists():
-        _branch_of_a_gone_tree(root, agent.cwd)
+        _branch_of_a_gone_tree(root, agent.cwd, agent.branch)
     config = settings()
     srv = server(config)
     _refuse_a_freed_socket(srv, config, srv.listener())

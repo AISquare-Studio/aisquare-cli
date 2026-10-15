@@ -1069,6 +1069,11 @@ class FleetAgent(BaseModel):
     one it runs on, which lost its socket file and may run on (``core.tmux.server_may_run``,
     ``services.fleet._outlived``). ``None`` on rows spawned before 0.8.1, or when tmux did
     not say."""
+    branch: str | None = None
+    """The branch its worktree was on, as git said at spawn, at stop, and at reap before
+    the tree went: where a restart or switch makes a gone tree again
+    (``services.fleet._remake_worktree``). ``None`` for an agent with no worktree, one on
+    a detached HEAD, or a row spawned before 0.8.1."""
     created_at: datetime
     ended_at: datetime | None = None
     exit_status: int | None = None

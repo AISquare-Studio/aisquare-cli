@@ -1535,6 +1535,47 @@ def test_a_multi_line_prompt_is_not_typed_before_the_agent_is_up(
     assert second.notes == []
 
 
+@pytest.mark.parametrize(
+    ("late", "says"),
+    [
+        ("paste", "tmux did not answer in time with the prompt for the agent's pane"),
+        ("Enter", "the prompt: pasted it at its prompt, but tmux did not answer in time"),
+        ("refused Enter", "the prompt: pasted it at its prompt, but tmux could not press Enter"),
+    ],
+)
+def test_spawn_prompt_that_tmux_did_not_take_says_how_far_it_got(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    late: str,
+    says: str,
+) -> None:
+    """Review of #259, round 10, 8/9: a paste or an Enter that timed out, or an Enter refused
+    after the paste went in, was "could not type the prompt", and the prompt sent again with
+    ``fleet tell`` went in beside the first. One that timed out may still arrive; one whose
+    Enter was refused waits at the agent's prompt, unsent."""
+    original = tmux.pane_facts
+
+    def up(pane_id: str) -> PaneFacts | None:
+        tmux.set_command(pane_id, "claude")
+        return original(pane_id)
+
+    def wedged(*args: object) -> None:
+        if late == "refused Enter":
+            raise TmuxError("send-keys failed (fake)")
+        raise TmuxTimedOut("tmux did not answer within 30s: send-keys")
+
+    monkeypatch.setattr(tmux, "pane_facts", up)
+    monkeypatch.setattr(tmux, "paste" if late == "paste" else "send_keys", wedged)
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="start on tsk_1")
+    assert receipt.prompt_typed is False
+    (note,) = [note for note in receipt.notes if "prompt" in note]
+    assert note.startswith(says), note
+    assert ("it may still arrive" in note) is (late != "refused Enter"), note
+    assert "could not type the prompt" not in note
+
+
 def test_spawn_prompt_is_not_typed_into_a_dead_pane(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

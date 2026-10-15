@@ -2711,6 +2711,12 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
     announced its exit and woke the manager for a second worker (review of
     #203, final round, FLEET-4). So a poll tmux will not answer (a wedged
     server's timeout, an OS refusal) is a note, as a refused paste already was.
+
+    The paste and its Enter say how they ended as a tell's do (:class:`PaneWrite`): one
+    tmux did not answer in time may still arrive, and an Enter that did not go through
+    leaves the prompt at the agent's, unsent (:func:`pasted_unsent`). Both were "could not
+    type the prompt", and the prompt sent again with ``fleet tell`` went in beside the first
+    (review of #259, round 10, 8/9).
     """
     deadline = _monotonic() + PROMPT_TIMEOUT
     ready = False
@@ -2748,11 +2754,17 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
         notes.append(
             f"the agent did not come up within {PROMPT_TIMEOUT:.0f} s — prompt typed anyway"
         )
-    try:
-        srv.paste(pane_id, prompt)
-        srv.send_keys(pane_id, "Enter")
-    except TmuxError as exc:
-        notes.append(f"could not type the prompt: {exc}")
+    pasted = pane_write("the prompt", lambda: srv.paste(pane_id, prompt))
+    if pasted.typed == "maybe":
+        notes.append(pasted.late("the agent", then=" at its prompt, unsent"))
+        return False
+    if pasted.typed == "no":
+        notes.append(f"could not type the prompt: {pasted.error}")
+        return False
+    entered = pane_write("Enter", lambda: srv.send_keys(pane_id, "Enter"))
+    if entered.typed != "yes":
+        unsent = pasted_unsent(entered, "the agent", press="press Enter in its pane")
+        notes.append(f"the prompt: {unsent.how}")
         return False
     return True
 

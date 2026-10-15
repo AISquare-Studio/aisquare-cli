@@ -56,11 +56,12 @@ from aisquare.core import insights
 from aisquare.core.ids import new_trace_id
 from aisquare.core.injection import TOOL_FRAME_VERSION, cap_tool_payload
 from aisquare.core.redaction import redact
-from aisquare.core.store import is_locked_error, store_session
+from aisquare.core.store import ContextStore, is_locked_error, store_session
 from aisquare.core.workspace import active_project
-from aisquare.models import ClientReason
+from aisquare.models import ClientReason, ProjectInfo
 from aisquare.services import ci_augment, ci_client
 from aisquare.services import metrics as metrics_service
+from aisquare.services import project as project_service
 from aisquare.services.ci_contract import (
     MAX_PROMPT_CHARS,
     MAX_REASON_CHARS,
@@ -180,12 +181,12 @@ def forward_recall(
     trace_id = new_trace_id()
     opened = ci_augment.gate()
     with store_session() as store:
-        project = active_project(store, cwd)
+        recorded = _recorded_as(store, active_project(store, cwd))
     if not opened.open or opened.descriptor is None or opened.run_id is None:
         augmentation = ci_augment.Augmentation(
             "agent_request", trace_id, opened.reason, opened.detail, run_id=opened.run_id
         )
-        _record(augmentation, project.id, recall.session_id)
+        _record(augmentation, recorded, recall.session_id)
         return None, augmentation
     descriptor = opened.descriptor
     source = opened.delivery_source
@@ -201,7 +202,7 @@ def forward_recall(
             delivery_source=source,
             **extra,
         )
-        _record(augmentation, project.id, recall.session_id)
+        _record(augmentation, recorded, recall.session_id)
         return augmentation
 
     pull = descriptor.mcp_pull
@@ -254,7 +255,7 @@ def forward_recall(
         delivery_source=source,
         frame_version=TOOL_FRAME_VERSION,
     )
-    _record(augmentation, project.id, recall.session_id)
+    _record(augmentation, recorded, recall.session_id)
     return call, augmentation
 
 
@@ -283,14 +284,28 @@ def _refused_at_the_boundary(session_id: str, detail: str) -> dict[str, Any]:
     )
     with contextlib.suppress(sqlite3.DatabaseError, OSError, ValidationError):
         with store_session() as store:
-            project = active_project(store)
-        _record(augmentation, project.id, wire_session_id(session_id))
+            recorded = _recorded_as(store, active_project(store))
+        _record(augmentation, recorded, wire_session_id(session_id))
     return _envelope("unavailable", ClientReason.schema_mismatch.value, detail)
 
 
-def _record(augmentation: ci_augment.Augmentation, project_id: str, wire_session: str) -> None:
-    """One row and one join record per recall. The row's session id is the raw
-    form the board uses, recovered from the ``ses_`` the agent passed."""
+def _recorded_as(store: ContextStore, project: ProjectInfo) -> str | None:
+    """The project id a recall's row is written under, or ``None`` for none: with
+    ``[projects] capture`` off, a directory nobody added records nothing, as the hooks
+    write no CI row there (each would be a turn tied to a project that does not exist).
+    The recall itself is carried all the same (review of #259, round 17). Asked without a
+    write."""
+    return project.id if project_service.tracked(store, project, capture=False) else None
+
+
+def _record(
+    augmentation: ci_augment.Augmentation, project_id: str | None, wire_session: str
+) -> None:
+    """One row and one join record per recall, under ``project_id`` — none at all for
+    ``None`` (:func:`_recorded_as`). The row's session id is the raw form the board uses,
+    recovered from the ``ses_`` the agent passed."""
+    if project_id is None:
+        return
     session_id = wire_session.removeprefix("ses_")
     metrics_service.open_turn(augmentation.metric(project_id, session_id, closed=True))
     if augmentation.run_id:

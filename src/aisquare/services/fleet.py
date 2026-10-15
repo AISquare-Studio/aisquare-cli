@@ -3189,12 +3189,18 @@ def tell(
         )
         if not isinstance(told, PaneWrite):
             return told
-        how = _file_note(project, label, text, sender)
         if told.typed == "maybe":
             # A wedged server may still run what it was asked (review of #259, round 9, 1/8),
-            # which the remote's trail says as `delivered=maybe` (round 10, 6/9).
+            # which the remote's trail says as `delivered=maybe` (round 10, 6/9), a note that
+            # could not be filed too: it was the note's error, `delivered=no` (round 11, 6/13).
+            try:
+                how = _file_note(project, label, text, sender)
+            except FleetError as exc:
+                late = told.late(label, then=" at its prompt, unsent", again="type into it")
+                return TellResult("maybe", f"{late}. It was not filed as a board note: {exc}")
             late = told.late(label, then=" at its prompt as well, unsent", again="type into it")
             return TellResult("maybe", f"{how}, and {late}")
+        how = _file_note(project, label, text, sender)
         return TellResult("no", f"tmux could not type it ({told.error}) — {how}")
     how = _file_note(project, label, text, sender)
     return TellResult("no", f"it is {status.state} — {how}")

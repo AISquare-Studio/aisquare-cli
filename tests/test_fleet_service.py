@@ -2451,6 +2451,35 @@ def test_tell_says_a_paste_that_timed_out_may_be_typed_as_well_as_noted(
     assert _events(project, "note") == ["please rebase"]
 
 
+def test_a_tell_whose_paste_timed_out_is_maybe_when_its_note_cannot_be_filed(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 11, 6/13: the note a timed-out paste falls back to is filed after
+    a paste that may still land, and an unknown sender (or a Team switched off) raised from
+    it: the tell answered only the note's error, and the remote's trail `delivered=no`."""
+    agent = _coder(project)
+    _board_session(agent, "waiting")
+    tmux.set_command(agent.pane_id, "claude")
+
+    def wedged(pane_id: str, text: str) -> None:
+        raise TmuxTimedOut("tmux did not answer within 30s: paste-buffer")
+
+    monkeypatch.setattr(tmux, "paste", wedged)
+    result = fleet_service.tell(project, "coder-1", "please rebase", sender="nope")
+    assert result.typed == "maybe", result
+    assert result.how.startswith("tmux did not answer in time with the text"), result.how
+    assert "it may still arrive at its prompt, unsent" in result.how
+    assert result.how.endswith("It was not filed as a board note: unknown sender session 'nope'"), (
+        result.how
+    )
+    assert _events(project, "note") == []
+
+    # Control: a paste tmux refused typed nothing, and the note's error is the tell's.
+    monkeypatch.setattr(tmux, "paste", lambda pane_id, text: (_ for _ in ()).throw(TmuxError("x")))
+    with pytest.raises(FleetError, match="unknown sender session 'nope'"):
+        fleet_service.tell(project, "coder-1", "please rebase", sender="nope")
+
+
 def test_tell_does_not_type_into_a_pane_that_is_not_the_agent_yet(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

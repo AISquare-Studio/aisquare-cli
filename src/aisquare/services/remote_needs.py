@@ -3120,6 +3120,15 @@ _NEEDS_KEPT_PARTS = ("dismissed", "first_seen")
 """The parts of ``remote-needs.json``: item id → when a dismissal was last needed, and the
 watcher's memory key → when a scan first saw what it dates (:func:`_needs_dated`)."""
 
+_NEEDS_KEPT_VERSION = 1
+"""The ``version`` this aisquare writes ``remote-needs.json`` as, and the last it builds on."""
+
+
+class LaterNeedsFile(OSError):
+    """``remote-needs.json`` is a version this aisquare does not know (a later release's, run
+    in another shell): it is never written over. An ``OSError``, so every write's caller says
+    it as the write that could not be made it is: a dismissal's 503, the watcher's streak."""
+
 
 def _needs_kept() -> dict[str, dict[str, str]]:
     """Each part of ``remote-needs.json``, ``key → ISO stamp``; empty where unreadable."""
@@ -3152,11 +3161,22 @@ def _needs_kept_raw() -> object:
         raise ValueError("it nests deeper than JSON is read here") from exc
 
 
-def _needs_kept_whole(raw: object) -> dict[str, dict[str, str]]:
-    """Each part of ``raw`` when all of it is as this version writes it, else ``ValueError``:
-    an object whose parts, where there, are objects of strings."""
+def _needs_kept_whole(raw: object) -> tuple[dict[str, dict[str, str]], dict[str, object]]:
+    """Each part of ``raw`` when all of it is as this version writes it, and every other key
+    it holds as it is; else ``ValueError``: an object whose parts, where there, are objects of
+    strings, and whose ``version``, where there, is a number. A ``version`` later than
+    :data:`_NEEDS_KEPT_VERSION` is :class:`LaterNeedsFile`: a file this version cannot build
+    on, and must not move aside from the release that wrote it either."""
     if raw is not None and not isinstance(raw, dict):
         raise ValueError("it is not a JSON object")
+    version = None if raw is None else raw.get("version", _NEEDS_KEPT_VERSION)
+    if version is not None and (type(version) is not int or version < 1):
+        raise ValueError(f"its version is {version!r}, not a version")
+    if version is not None and version > _NEEDS_KEPT_VERSION:
+        raise LaterNeedsFile(
+            f"remote-needs.json is version {version}, written by a later aisquare: it is left "
+            "as it is — run Remote with that version"
+        )
     parts: dict[str, dict[str, str]] = {}
     for part in _NEEDS_KEPT_PARTS:
         kept = None if raw is None else raw.get(part)
@@ -3165,7 +3185,9 @@ def _needs_kept_whole(raw: object) -> dict[str, dict[str, str]]:
         if not isinstance(kept, dict) or not all(isinstance(v, str) for v in kept.values()):
             raise ValueError(f"its {part!r} is not an object of strings")
         parts[part] = dict(kept)
-    return parts
+    known = {"version", *_NEEDS_KEPT_PARTS}
+    rest = {} if raw is None else {key: value for key, value in raw.items() if key not in known}
+    return parts, rest
 
 
 def _needs_keep(edit: Callable[[dict[str, dict[str, str]]], None]) -> None:
@@ -3175,26 +3197,34 @@ def _needs_keep(edit: Callable[[dict[str, dict[str, str]]], None]) -> None:
     What is written builds on the whole file, so only a file that is not there is empty. A
     read that failed (``EIO``, ``EACCES``) is the ``OSError`` it was, and nothing is written:
     a dismissal answers 503, and the watcher tells its streak. A file this version cannot
-    read in full (not JSON, a hand edit, a later version's shape) is moved aside to
+    read in full (not JSON, a hand edit, a part of another shape) is moved aside to
     ``remote-needs.json.bad``, kept for the human, and a new one started. It was read as
     empty and replaced by the one entry being written, every dismissal and first sighting
     in it lost for good: every dismissed card back on every phone, and pushed again, an
     ongoing outage under a new id (review of #259, remote focus, 3/12).
+
+    A file of a later ``version`` is :class:`LaterNeedsFile`, and left as it is. Its parts
+    were read as whole when they kept this version's shape, and rewritten as ``version: 1``
+    without whatever else the later release kept there, with no copy and no word (review of
+    #259, round 8, 5/9). A key this version does not know, in a file of its own version, is
+    written back as it was.
     """
     from aisquare.core.atomic import write_replacing
     from aisquare.core.paths import remote_needs_path
 
     with _dismissals_lock:
         path = remote_needs_path()
-        parts = _needs_kept_to_write(path)
+        parts, rest = _needs_kept_to_write(path)
         edit(parts)
         path.parent.mkdir(parents=True, exist_ok=True)
-        write_replacing(path, json.dumps({"version": 1, **parts}, indent=2), owner_only=True)
+        whole = {"version": _NEEDS_KEPT_VERSION, **rest, **parts}
+        write_replacing(path, json.dumps(whole, indent=2), owner_only=True)
 
 
-def _needs_kept_to_write(path: Path) -> dict[str, dict[str, str]]:
-    """The parts of ``path`` for a write to build on, empty once a file it cannot build on
-    was moved to ``remote-needs.json.bad``; the caller holds ``_dismissals_lock``."""
+def _needs_kept_to_write(path: Path) -> tuple[dict[str, dict[str, str]], dict[str, object]]:
+    """The parts of ``path`` for a write to build on, and its other keys, empty once a file it
+    cannot build on was moved to ``remote-needs.json.bad``; the caller holds
+    ``_dismissals_lock``. A later version's is :class:`LaterNeedsFile`, left where it is."""
     try:
         return _needs_kept_whole(_needs_kept_raw())
     except ValueError as exc:  # json's, a text that is not UTF-8, or the shape's

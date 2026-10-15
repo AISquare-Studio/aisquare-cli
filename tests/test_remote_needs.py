@@ -2647,6 +2647,8 @@ _KEPT_BEFORE = {
         b'{"dismissed": ["ny_1"]}',
         b'{"dismissed": {"ny_1": {"at": "2026-10-07T11:00:00+00:00"}}}',  # a later shape
         _TOO_DEEP.encode(),
+        b'{"version": "2", "dismissed": {}}',
+        b'{"version": 0, "dismissed": {}}',
     ],
     ids=lambda b: b[:16].decode(errors="replace"),
 )
@@ -2665,6 +2667,37 @@ def test_a_needs_file_a_write_cannot_read_whole_is_kept_aside_not_overwritten(
     assert path.with_name("remote-needs.json.bad").read_bytes() == body
     assert set(load_needs_dismissals()) == {"ny_newest"}
     assert "remote-needs.json.bad" in caplog.text
+
+
+def test_a_later_versions_needs_file_is_never_written_over() -> None:
+    """Review of #259, round 8, 5/9: the reader looked at neither ``version`` nor any part it
+    does not know, so a later release's file whose two known parts kept this shape was read
+    as whole and rewritten as ``version: 1``, what that release added there gone, with no
+    copy and no word. A later version's file is the write's ``OSError`` (a dismissal's 503,
+    the watcher's streak), left as it is and not moved aside; its dismissals still hide."""
+    path = remote_needs_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    later = {**_KEPT_BEFORE, "version": 2, "snoozed": {"ny_9": _KEPT_AT}}
+    body = json.dumps(later).encode()
+    path.write_bytes(body)
+    with pytest.raises(remote_needs.LaterNeedsFile, match="version 2, written by a later"):
+        record_needs_dismissal("ny_newest")
+    assert isinstance(remote_needs.LaterNeedsFile("x"), OSError), "said as a failed write"
+    assert path.read_bytes() == body
+    assert not path.with_name("remote-needs.json.bad").exists()
+    assert set(load_needs_dismissals()) == set(_KEPT_DISMISSED)
+
+
+def test_a_key_the_needs_file_holds_that_this_version_does_not_know_is_written_back() -> None:
+    """A key of its own version's file that no part here reads is carried through the write,
+    as it was."""
+    path = remote_needs_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({**_KEPT_BEFORE, "pinned": {"ny_9": [1, 2]}}), encoding="utf-8")
+    record_needs_dismissal("ny_newest")
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert written["pinned"] == {"ny_9": [1, 2]} and written["version"] == 1
+    assert set(written["dismissed"]) == {*_KEPT_DISMISSED, "ny_newest"}
 
 
 def test_a_needs_file_that_could_not_be_read_is_never_written(

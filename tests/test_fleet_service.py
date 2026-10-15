@@ -40,6 +40,7 @@ from aisquare.core.config import (
     REVIEWER_ARGS,
     FleetRoleSettings,
     FleetSettings,
+    load_config,
     replacing_the_former_reviewer_default,
     replacing_the_former_reviewer_default_first,
 )
@@ -423,6 +424,17 @@ class FakeTmux(TmuxServer):
     def windows_or_raise(self, session: str) -> list[WindowInfo]:
         self.reachable()
         return self.list_windows(session)
+
+    def live_panes_or_raise(self) -> dict[str, set[str]]:
+        self.reachable()
+        if not self._read():
+            return {}
+        return {
+            self.session_ids.get(name, name): {
+                window.pane_id for window in windows if not self.facts[window.pane_id].dead
+            }
+            for name, windows in self.sessions.items()
+        }
 
     def pane_facts_or_raise(self, pane_id: str) -> PaneFacts | None:
         self.reachable()
@@ -10284,6 +10296,30 @@ def test_a_fresh_switch_still_tells_the_replacement_it_moved_to_another_account(
     )
 
 
+def test_a_manual_switch_with_no_reason_is_not_said_as_a_usage_limit(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SMOKE5 of #113: a ``fleet switch`` the operator ran told the replacement "it stopped on
+    a usage limit", which it had not. It says the operator moved it."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _with_transcript(agent, None)
+    original_spawn = tmux.spawn_window
+
+    def ready_spawn(*args: Any, **kwargs: Any) -> WindowInfo:
+        window = original_spawn(*args, **kwargs)
+        tmux.set_command(window.pane_id, "claude")
+        return window
+
+    monkeypatch.setattr(tmux, "spawn_window", ready_spawn)
+
+    fleet_service.switch(project, agent.label)
+
+    [prompt] = [text for _pane, kind, text in tmux.typed if kind == "paste"]
+    assert "usage limit" not in prompt and "the operator moved it" in prompt, prompt
+    assert "usage limit" not in fleet_service._resume_prompt(agent, None, automatic=False)
+
+
 # --- the review of #138, round 2 -----------------------------------------------------------------
 
 
@@ -13044,3 +13080,85 @@ def test_a_clean_automatic_hand_over_puts_no_note_beside_switched(
     [receipt] = receipts
     assert any(note.startswith("launched as recorded") for note in receipt.notes)
     assert receipt.failures == []
+
+
+def test_two_stops_of_a_row_ended_in_the_store_end_and_announce_it_once(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Review r10 of #113, finding 5: the stop of a row ended in the store wrote its end
+    with no compare-and-set, so two stops at once (the UI's Stop beside ``shutdown``'s)
+    both ended it: the second wrote over the first's status, released again and announced
+    the exit twice. The first to take the row's stop mark ends it; the second ends nothing."""
+    agent = _coder(project)
+    _ended_in_the_store(agent)
+    with store_session() as store:
+        first = fleet_service._end_store_ended(store, agent.id, 0)
+        second = fleet_service._end_store_ended(store, agent.id, None)
+    assert first is not None and first.exit_status == 0
+    assert second is None
+    with store_session() as store:
+        row = store.get_fleet_agent(agent.id)
+    assert row is not None and row.exit_status == 0, "the first stop's status stands"
+
+
+def test_the_listing_asks_each_server_once_for_its_panes(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r10 of #113, finding 11: whether a row ended in the store still runs asked tmux
+    three times per session of the project's on every listing (the UI's 2 s tick). Now one
+    start time and one ``list-panes -a`` per server, and no session is asked about."""
+    first, second = _coder(project), _coder(project)
+    _ended_in_the_store(first)
+    _ended_in_the_store(second)
+    asked: list[str] = []
+    for name in ("has_session_or_raise", "windows_or_raise", "live_panes_or_raise", "started_at"):
+        real = getattr(tmux, name)
+
+        def counted(*args: object, _name: str = name, _real: Any = real) -> object:
+            asked.append(_name)
+            return _real(*args)
+
+        monkeypatch.setattr(tmux, name, counted)
+
+    fleet = load_config().fleet
+    running = fleet_service._running_ids(project.id, {first.id, second.id}, fleet)
+
+    assert running == {first.id, second.id}
+    assert sorted(asked) == ["live_panes_or_raise", "started_at"], asked
+
+
+def test_reap_forgets_the_windows_of_the_rows_it_ends(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Review r10 of #113, finding 11: the project's window entries were pruned only by
+    ``shutdown``, so the listing's question grew with every spawn. ``reap`` drops the
+    windows of the rows it ends."""
+    agent = _coder(project)
+    assert agent.id in {entry.row_id for entry in launch_seal.project_windows(project.id)}
+    tmux.facts[agent.pane_id] = replace(tmux.facts[agent.pane_id], dead=True, dead_status=0)
+
+    report = fleet_service.reap(project)
+
+    assert [row.id for row in report.ended] == [agent.id]
+    assert agent.id not in {entry.row_id for entry in launch_seal.project_windows(project.id)}
+
+
+def test_a_lock_the_filesystem_refuses_is_not_waited_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review r10 of #113, finding 12: the records' lock retried every ``OSError`` for 5 s,
+    and the rewrite dropped the agent's session facts in silence. On a home whose
+    filesystem refuses locks (NFS, SMB: ``ENOLCK``) it fails at once, and says so."""
+    import errno as errno_module
+
+    def refusing(fd: int) -> None:
+        raise OSError(errno_module.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(launch_seal, "lock_exclusive", refusing)
+    started = time.monotonic()
+    with pytest.raises(OSError), launch_seal._locked(tmp_path / "record.json"):
+        pass
+    assert time.monotonic() - started < 1.0, "not waited on"
+    with caplog.at_level("WARNING", logger="aisquare.core.launch_seal"):
+        launch_seal.relabel("agt_nolock", "coder-7")
+    assert any("was not rewritten" in record.message for record in caplog.records)

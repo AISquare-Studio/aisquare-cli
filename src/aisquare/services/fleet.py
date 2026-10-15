@@ -1040,30 +1040,35 @@ def _running_ids(project_id: str, candidates: Collection[str], config: FleetSett
     session, listed by the name the census holds. Never from ``ended_at`` or a row's age:
     a manager whose row read ended in 2000 was hidden from ``fleet ls``, and a second was
     spawned beside it (review r9 of #113, finding 6). Asks tmux nothing when no candidate
-    has a window recorded; a server that does not answer shows none."""
+    has a window recorded, and each server twice at most (its start, every live pane of it:
+    r10, finding 11), however many sessions; a server that does not answer shows none."""
     wanted = set(candidates)
     if not wanted:
         return set()
     running: set[str] = set()
     entries = [entry for entry in launch_seal.project_windows(project_id) if entry.row_id in wanted]
-    if entries:
-        for session in _indexed_sessions(project_id, config):
-            mine = [
-                entry
-                for entry in entries
-                if (entry.tmux_socket, entry.session_id) == (session.address.name, session.target)
-            ]
-            if not mine:
+    servers: dict[_Address, list[tuple[PlacedSession, list[launch_seal.WindowEntry]]]] = {}
+    for session in _indexed_sessions(project_id, config) if entries else ():
+        mine = [
+            entry
+            for entry in entries
+            if (entry.tmux_socket, entry.session_id) == (session.address.name, session.target)
+        ]
+        if mine:
+            servers.setdefault(session.address, []).append((session, mine))
+    for sessions in servers.values():
+        try:
+            srv = sessions[0][0].server()
+            started = srv.started_at()
+            live = srv.live_panes_or_raise()
+        except TmuxError:
+            continue
+        for session, mine in sessions:
+            # A session or window recorded before the server started is another's under
+            # the same id (`_outlived`): the next server numbers them afresh.
+            if session.created_at is not None and _outlived(session.created_at, started):
                 continue
-            try:
-                if not session.present_or_raise():
-                    continue
-                started = session.server().started_at()
-                alive = {window.pane_id for window in session.panes_or_raise() if not window.dead}
-            except TmuxError:
-                continue
-            # A window recorded before the server started is another's under the same id
-            # (`_outlived`): the next server numbers its panes, and its sessions, afresh.
+            alive = live.get(session.target, set())
             running |= {
                 entry.row_id
                 for entry in mine
@@ -4149,6 +4154,9 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
                 return TellResult(False, f"{queued} — {how}")
         if not _at_its_prompt(pane, agent, session, status.state, _now()):
             how = _file_note(project, label, text, sender)
+            gone = _socket_gone(pane)
+            if gone is not None:
+                return TellResult(False, f"{gone} — {how}")
             if adapter is None or not adapter.capabilities.idle_prompt_mark:
                 return TellResult(False, f"no confirmed waiting native session — {how}")
             if status.state == "waiting" and _hooks_fresh(session, _now()):
@@ -4419,6 +4427,25 @@ def stop(
     return _stop_row(project, agent, force=force, grace=grace, handover=handover, nudge=nudge)
 
 
+def _end_store_ended(
+    store: ContextStore, agent_id: str, exit_status: int | None
+) -> FleetAgent | None:
+    """End the row ``agent_id``, ended in the store while its window ran, as this stop's:
+    its end and status; ``None`` when another stop ended it first. The compare-and-set
+    ``end_fleet_agent_if_live`` is for a live row, so this one's is a mark taken once per
+    row (``set_meta_once``): two stops at once (the UI's Stop beside ``shutdown``'s) wrote
+    over each other's status, released twice and announced the exit twice (review r10 of
+    #113, finding 5)."""
+    if not store.set_meta_once(f"fleet-stopped:{agent_id}", _now().isoformat()):
+        return None
+    current = store.get_fleet_agent(agent_id)
+    if current is None:
+        return None
+    return store.upsert_fleet_agent(
+        current.model_copy(update={"ended_at": _now(), "exit_status": exit_status})
+    )
+
+
 def _stop_row(
     project: ProjectInfo,
     agent: FleetAgent,
@@ -4666,14 +4693,7 @@ def _stop_row(
             # does — its exit status, its release, `agent_exited` and the manager's nudge
             # below — or the manager waited on a coder that was gone (r9, finding 15). Its
             # end and status are this stop's: the store's end was the sandbox's word.
-            current = store.get_fleet_agent(agent.id)
-            ended = (
-                store.upsert_fleet_agent(
-                    current.model_copy(update={"ended_at": _now(), "exit_status": exit_status})
-                )
-                if current is not None
-                else None
-            )
+            ended = _end_store_ended(store, agent.id, exit_status)
         else:
             ended = store.end_fleet_agent_if_live(agent.id, exit_status=exit_status)
         if ended is None:
@@ -4809,6 +4829,25 @@ def _refuse_unless_gone(label: str, agent: FleetAgent, srv: TmuxServer) -> None:
         f"{label!r} was not stopped: its server's socket {path} could not be asked, so "
         "it may still be running, and its row is left live; run this again where it can be "
         "asked"
+    )
+
+
+def _socket_gone(pane: PlacedPane) -> str | None:
+    """Why nothing reaches ``pane``: its server's socket is gone (moved or removed; the
+    server may still run), as ``stop`` says it (:func:`_refuse_unless_gone`). ``None`` when
+    the socket is there, or could not be asked. ``tell`` read the screen it could not get as
+    a dialog of the agent's own (SMOKE5 of #113)."""
+    srv = pane.server()
+    try:
+        if srv.listener(pane.address.path) != "gone":
+            return None
+        path = pane.address.path or srv.socket_path()
+    except (TmuxError, TmuxUnavailable):
+        return None
+    return (
+        f"its server's socket {path} is gone, so no tmux client can reach the server, which "
+        "may still be running: send that server SIGUSR1, which makes tmux create its socket "
+        "again"
     )
 
 
@@ -6468,8 +6507,14 @@ def switch(
             fresh=fresh,
             # What a FRESH replacement is told it takes over from: the account move is
             # the one thing it cannot read off the board.
-            reason=(f"it stopped on {reason or 'a usage limit'} under another {whose} account"),
-            resume_prompt=_resume_prompt(stopped, reason),
+            reason=(
+                f"it stopped on {reason or 'a usage limit'} under another {whose} account"
+                if reason is not None or automatic
+                # A manual switch with no reason given was the operator's move, not a
+                # limit's (SMOKE5 of #113).
+                else f"the operator moved it from another {whose} account (`fleet switch`)"
+            ),
+            resume_prompt=_resume_prompt(stopped, reason, automatic=automatic),
             takes_over=True,
             spawned_by=spawned_by,
             # The hook's hand-over is nobody's add (#139): `spawn`'s `onboard`.
@@ -7208,15 +7253,16 @@ def _restart_prompt(agent: FleetAgent) -> str:
     )
 
 
-def _resume_prompt(agent: FleetAgent, reason: str | None) -> str:
+def _resume_prompt(agent: FleetAgent, reason: str | None, *, automatic: bool = True) -> str:
     """The first message of a RESUMED replacement — one line, so it is typed even past the wait.
+    A manual switch with no reason given is said as the operator's move, never a limit.
 
     ``claude --resume`` opens the old conversation at an idle prompt and waits
     for input; without a line the "moved" agent never continued (review of
     #205, finding 5). One line on purpose: :func:`_type_prompt` types a
     single-line prompt past its timeout and refuses a multi-line one.
     """
-    why = reason or "a usage limit"
+    why = reason or ("a usage limit" if automatic else "its operator's `fleet switch`")
     return (
         f"You are {agent.label}, moved to another Claude account after {why} and resumed "
         "mid-task: re-read `aisquare board` and `git status`, then continue exactly where "
@@ -7383,6 +7429,11 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
                             report.ended.append(ended)
                             _emit_exit(store, ended)
             _remove_merged_worktrees(store, current, report)
+    gone: dict[str, list[str]] = {}
+    for row in (*report.ended, *report.lost):
+        gone.setdefault(row.project_id, []).append(row.id)
+    for project_id, rows in gone.items():
+        launch_seal.forget_row_windows(project_id, rows)
     for ended in report.ended:
         nudge_manager(ended.project_id, reason=f"{ended.label} exited")
     return report

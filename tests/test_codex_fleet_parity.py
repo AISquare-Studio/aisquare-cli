@@ -741,6 +741,27 @@ def test_a_codex_dialog_after_its_stop_gets_no_keystroke_though_its_hooks_say_wa
     assert manager.pane_id in tmux.killed and receipt.agent.ended_at is not None
 
 
+def test_tell_to_a_codex_agent_names_a_socket_that_is_gone(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SMOKE5 of #113: with the fleet's socket moved away (from ``/tmp``, before the store
+    profile held it read-only: review r10, finding 4), ``fleet tell`` said the agent was at
+    "a dialog of its own" while ``stop`` named the socket. Both say what it is."""
+    manager = _waiting_manager_on("codex", project, tmux, tmp_path / "codex-home", monkeypatch)
+    tmux.screens[manager.pane_id] = []
+    tmux.socket_file = False
+
+    told = fleet_service.tell(project, manager.label, "carry on")
+
+    assert not told.delivered and "socket" in told.how and "is gone" in told.how, told.how
+    assert "dialog of its own" not in told.how and "SIGUSR1" in told.how
+    assert tmux.typed == []
+
+
 @pytest.mark.parametrize("rewritten", [None, "claude-code", "not-an-agent"])
 def test_a_codex_row_whose_agent_column_was_rewritten_gets_no_keystroke_at_its_dialog(
     rewritten: str | None,

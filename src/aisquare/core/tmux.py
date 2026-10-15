@@ -1232,6 +1232,24 @@ class TmuxServer:
             )
         return windows
 
+    def live_panes_or_raise(self) -> dict[str, set[str]]:
+        """Every live pane of every session on this server, by tmux's own id for its session
+        (``$N``): one ``list-panes -a`` where the fleet's listing tick asked three questions
+        per session (review r10 of #113, finding 11). ``{}`` when no server listens
+        (:data:`_ABSENT`); a question that could not be put raises :class:`TmuxError`."""
+        fields = _SEP.join(("#{session_id}", "#{pane_id}", "#{pane_dead}"))
+        completed = self._runner(self.argv("list-panes", "-a", "-F", fields), None)
+        if completed.returncode != 0:
+            if _ABSENT.search(completed.stderr):
+                return {}
+            raise TmuxError(completed.stderr.strip() or "tmux list-panes could not be reached")
+        panes: dict[str, set[str]] = {}
+        for line in completed.stdout.splitlines():
+            parts = line.split(_SEP)
+            if len(parts) == 3 and parts[2] != "1":
+                panes.setdefault(parts[0], set()).add(parts[1])
+        return panes
+
     def list_windows(self, session: str) -> list[WindowInfo]:
         """Every window (one pane each) of ``session``; empty when it does not exist."""
         completed = self._runner(

@@ -1,9 +1,11 @@
 """Nothing a sandboxed agent writes chooses what runs outside its sandbox.
 
 The rule. The store is read-only inside an agent's sandbox, all of it
-(:func:`~aisquare.core.agent_adapters.types.store_read_only`), and its board calls go
-through its launch's broker, outside it (``services.store_broker``): nothing in a
-sandbox writes the store. Before the broker every board call opened it for writing,
+(:func:`~aisquare.core.agent_adapters.types.store_read_only`), and so are the project's
+trees' launch inputs, the other agents' worktrees and the tmux sockets' directories
+(``services.store_broker.launch_paths``); its board calls go through its launch's broker,
+outside it (``services.store_broker``): nothing in a sandbox writes the store or what a
+launch outside it reads. Before the broker every board call opened it for writing,
 and a prompt-injected Codex coder could rewrite any row in it, its own and every
 other agent's; what follows was the defence then, and stays as defence in depth. No
 value read from the store may choose what runs outside the sandbox: an executable, a
@@ -76,11 +78,12 @@ of its instructions through its sandbox helper, and where bwrap cannot bring up 
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
 import tempfile
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -92,6 +95,7 @@ from aisquare.core.atomic import write_replacing
 from aisquare.core.locking import lock_exclusive, unlock
 from aisquare.models import LaunchSpec
 
+_log = logging.getLogger(__name__)
 DIR_NAME = "launch-seals"
 VERSION = 1
 """The version of :class:`LaunchRecord` this aisquare writes; a newer one is refused."""
@@ -547,6 +551,22 @@ def forget_project_sessions(
     _update_index(project_id, forget)
 
 
+def forget_row_windows(project_id: str, row_ids: Collection[str]) -> None:
+    """Drop the windows of the rows ``row_ids`` (ended and gone: ``reap``'s) from the
+    project's index, so the windows the listing asks about do not grow with every spawn
+    between two shutdowns (review r10 of #113, finding 11). Never raises."""
+    gone = set(row_ids)
+    if not gone:
+        return
+
+    def forget(kept: ProjectSessions) -> ProjectSessions:
+        return kept.model_copy(
+            update={"windows": [entry for entry in kept.windows if entry.row_id not in gone]}
+        )
+
+    _update_index(project_id, forget)
+
+
 def rename_project_session(project_id: str, session_id: str, socket: str, name: str) -> None:
     """The project's session ``session_id`` on ``socket`` is called ``name`` now. Never
     raises; a write that fails keeps the old name, which reports alone use."""
@@ -572,9 +592,14 @@ _LOCK_WAIT_S = 5.0
 @contextmanager
 def _locked(path: Path) -> Iterator[None]:
     """Hold ``<path>.lock`` exclusively for the block, waiting at most :data:`_LOCK_WAIT_S`
-    (``core.locking``: non-blocking, polled, dropped by the OS if the holder dies); raises
-    ``OSError`` when it cannot be had. Only processes outside the sandbox take it (the
-    directory is read-only in it)."""
+    (``core.locking``: non-blocking, polled, dropped by the OS if the holder dies) while
+    another holds it; raises ``OSError`` when it cannot be had. Only a held lock is waited
+    on (``state_file._HELD``): a home whose filesystem refuses ``flock`` (``ENOLCK``,
+    ``EOPNOTSUPP`` on NFS or SMB) will not grant it on a retry, and waited 5 s in every hook
+    for nothing (review r10 of #113, finding 12). Only processes outside the sandbox take
+    it (the directory is read-only in it)."""
+    from aisquare.core.state_file import _HELD
+
     lock = path.with_name(f"{path.name}.lock")
     fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
     try:
@@ -583,8 +608,8 @@ def _locked(path: Path) -> Iterator[None]:
             try:
                 lock_exclusive(fd)
                 break
-            except OSError:
-                if time.monotonic() >= deadline:
+            except OSError as exc:
+                if exc.errno not in _HELD or time.monotonic() >= deadline:
                     raise
                 time.sleep(0.02)
         try:
@@ -601,14 +626,19 @@ def _rewrite(agent_id: str, change: Callable[[LaunchRecord], LaunchRecord | None
     back when it changed. The spawner (a re-picked label) and the agent's own hook (its
     session) both rewrite the whole record from two processes, and each lost the other's
     field (review r9 of #113, finding 13). A legacy record is the census's and is left
-    alone. Never raises."""
-    with suppress(OSError), _locked(_path(agent_id)):
-        record = read(agent_id)
-        if not isinstance(record, LaunchRecord) or record.legacy:
-            return
-        changed = change(record)
-        if changed is not None and changed != record:
-            write(changed)
+    alone. Never raises: a rewrite that cannot be made is logged, naming the record and
+    why (a home whose filesystem refuses locks among them: r10, finding 12), never
+    dropped in silence."""
+    try:
+        with _locked(_path(agent_id)):
+            record = read(agent_id)
+            if not isinstance(record, LaunchRecord) or record.legacy:
+                return
+            changed = change(record)
+            if changed is not None and changed != record:
+                write(changed)
+    except OSError as exc:
+        _log.warning("the launch record of %s was not rewritten: %s", agent_id, exc)
 
 
 def relabel(agent_id: str, label: str) -> None:

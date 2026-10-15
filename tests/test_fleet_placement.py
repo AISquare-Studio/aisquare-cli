@@ -89,6 +89,10 @@ ACTS: dict[str, dict[str, str]] = {
         "_server_at": "`.at(path)`: an `_Address`'s path, minted from a record (MINTS)",
         "_unreached": "a socket probe at the path a placed row's launch record holds",
         "_refuse_unless_gone": "a socket probe at the path a placed row's launch record holds",
+        "_socket_gone": (
+            "a socket probe at the path a placed pane's launch record holds (`tell`'s reason "
+            "when that socket is gone)"
+        ),
         "_cannot_run": (
             "a socket probe at a row's own `socket_path` for a row no record places, only "
             "ever to END that row: a sandbox that wrote it could end its row itself"

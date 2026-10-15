@@ -1553,6 +1553,58 @@ def test_a_cancel_whose_settling_fails_never_says_nothing_changed(
         assert "Permission denied" in said and "the new slot is left as it is" in said
 
 
+def test_a_poll_that_raises_is_said_once_and_the_window_waits_on(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review of #259, round 16: a poll that raised (a ``.claude.json`` it may not read, or
+    one half written) read as "not landed" without a word, and each tick failed the same
+    way: a user who had finished signing in watched "waiting for the log-in below…" until
+    they cancelled. It is said, once a window, and the window, its Claude Code still
+    running, waits on."""
+    _script_claude_sign_in(monkeypatch, tmp_path, lands=False)
+
+    def unreadable(acct: ClaudeAccount, *, since: str | None = None) -> ClaudeIdentity | None:
+        raise PermissionError(13, "Permission denied", ".claude.json")
+
+    alive = tmux_core.PaneFacts(
+        pane_id="%7",
+        width=80,
+        height=24,
+        cursor_x=0,
+        cursor_y=0,
+        cursor_visible=True,
+        alternate_on=False,
+        history_size=0,
+        dead=False,
+        dead_status=None,
+        in_mode=False,
+        current_command="claude",
+        title="",
+    )
+    monkeypatch.setattr(accounts_service, "sign_in_landed", unreadable)
+    monkeypatch.setattr(TmuxServer, "pane_facts", lambda self, pane_id: alive)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str, bool]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await pilot.click("#claude-add")
+        await settle(app)
+        view._poll_login()
+        await settle(app)
+        first = notice(view)
+        view._notice("something since")
+        view._poll_login()  # fails the same way
+        await settle(app)
+        return first, notice(view), view.login is not None
+
+    first, after, waiting = drive(go)
+    said = " ".join(first.split())
+    assert said.startswith("⚠ account 2: could not tell whether the log-in landed"), said
+    assert "Permission denied" in said and "still waiting" in said
+    assert after == "something since", "said once a window"
+    assert waiting
+
+
 def test_a_log_in_over_a_login_the_keychain_will_not_show_opens_no_window(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

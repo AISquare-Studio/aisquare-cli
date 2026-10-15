@@ -484,6 +484,9 @@ class _ClaudeLogin:
     since: str | None = None
     """The stored login as the window opened (``login_fingerprint``), for a log-in over an
     expired or rejected token: the window waits for a different one, not that one."""
+    poll_failed: bool = False
+    """A poll of this window raised, and the page has said so: once, as each tick fails the
+    same way (:meth:`AccountsView._login_polled`)."""
 
 
 def _hooks_did_not_install(error: object) -> str:
@@ -1694,7 +1697,11 @@ class AccountsView(Vertical):
 
     def _login_polled(self, worker: Worker[Any], state: WorkerState) -> None:
         """A poll answered: close the window on a landed login, or once Claude Code has gone.
-        An answer for a window closed meanwhile is nobody's."""
+        An answer for a window closed meanwhile is nobody's.
+
+        A poll that raised (a ``.claude.json`` it may not read, or one half written) is said,
+        once a window: read as "not landed" without a word, a user who had signed in watched
+        "waiting for the log-in below…" until they cancelled (review of #259, round 16)."""
         result = worker.result if state is WorkerState.SUCCESS else None
         polled, landed = result if isinstance(result, tuple) else (None, None)
         login = self.login
@@ -1703,6 +1710,13 @@ class AccountsView(Vertical):
         if isinstance(landed, ClaudeIdentity):
             self._finish_login(landed.email)
             return
+        if state is WorkerState.ERROR and not login.poll_failed:
+            login.poll_failed = True
+            self._notice(
+                f"⚠ {self._name_of(login.account)}: could not tell whether the log-in landed "
+                f"({worker.error}) — still waiting; finish it below, or Cancel",
+                "warn",
+            )
         facts = login.server.pane_facts(login.pane_id)
         if facts is None or facts.dead:
             self._abandon_login("Claude Code closed before a sign-in landed")

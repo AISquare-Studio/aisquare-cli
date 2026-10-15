@@ -775,6 +775,63 @@ def test_a_scan_that_cannot_read_a_screen_keeps_its_last_cards_and_makes_none_of
     assert scan_needs_you(_sources(fleet), now=later, dismissed=(), kept=first) == []
 
 
+def test_one_agents_screen_not_captured_is_that_agents_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 12, 4/9: a capture that failed was a failed read of the whole
+    project's scan. Every agent's cards froze at their last, and every action on every agent
+    of the project was a 503, for one pane that closed between the listing and its capture.
+    It is that agent's alone: its last card stands and its actions are a 503; the other
+    agent's card is derived anew, and its actions go on."""
+    from aisquare.core.tmux import TmuxError
+    from aisquare.services.remote_server import RequestError
+
+    calls = {
+        "coder-1": (_PUSH, _RM),
+        "coder-2": (replace(_PUSH, tool_use_id="toolu_push2"), replace(_RM, tool_use_id="x")),
+    }
+    fleet = Fleet()
+    for label, pending in calls.items():
+        row = _row(label)
+        fleet.agents.append(_status(row, "attention", _session(row, state="attention")))
+        fleet.tails[f"/transcripts/{label}.jsonl"] = _tail(*pending)
+    screens: dict[str, list[str] | None] = {
+        label: _screen_of(pending[0], pending) for label, pending in calls.items()
+    }
+
+    def screen(status: FleetAgentStatus) -> list[str]:
+        shown = screens[status.agent.label]
+        if shown is None:
+            raise TmuxError("can't find pane: %7")
+        return shown
+
+    def card(pending: PendingTool) -> str:
+        return needs_item_id(PROJECT.id, "permission", pending.tool_use_id)
+
+    sources = replace(_sources(fleet), pane_screen=screen)
+    first = scan_needs_you(sources, now=NOW, dismissed=())
+    two_push = card(calls["coder-2"][0])
+    assert {(item.agent, item.id) for item in first} == {
+        ("coder-1", card(_PUSH)),
+        ("coder-2", two_push),
+    }
+
+    screens["coder-1"] = _screen_of(_RM, calls["coder-1"])  # its push answered, its rm asks
+    screens["coder-2"] = None
+    later = scan_needs_you(sources, now=NOW + timedelta(seconds=3), dismissed=(), kept=first)
+    assert {(item.agent, item.id) for item in later} == {
+        ("coder-1", card(_RM)),
+        ("coder-2", two_push),
+    }
+
+    monkeypatch.setattr(remote_needs, "live_needs_sources", lambda: sources)
+    assert [item.id for item in needs_agent_now(PROJECT, "coder-1", now=NOW).items] == [card(_RM)]
+    with pytest.raises(RequestError) as refused:
+        needs_agent_now(PROJECT, "coder-2", now=NOW)
+    assert (refused.value.status, refused.value.error) == (503, "unavailable")
+    assert "coder-2's screen could not be read: can't find pane" in refused.value.message
+
+
 @pytest.mark.parametrize("asking", [_ASK, _PLAN], ids=["question", "plan"])
 @pytest.mark.parametrize("beside", [_TASK, _tool("toolu_read", "Read", file_path="/a.py")])
 def test_a_question_or_plan_beside_a_call_it_cannot_name_has_a_card_before_any_notice(

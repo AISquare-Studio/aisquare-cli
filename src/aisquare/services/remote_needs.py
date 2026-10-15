@@ -451,7 +451,8 @@ class NeedsSources:
     waits beside a call the screen cannot name (:func:`needs_from_agent`)."""
     pane_screen: Callable[[FleetAgentStatus], list[str] | None] = _needs_no_screen
     """The rows the row's pane shows now (``capture-pane``); ``None``: a source with no screen
-    to show. One tmux could not show raises, a failed read (:func:`_needs_screen_read`).
+    to show. One tmux could not show raises, a failed read of that agent's alone
+    (:func:`_needs_screen_read`).
     Asked only of an agent with more than one call pending, whose prompt on screen may be
     any of them (:func:`_needs_on_screen`)."""
     board_project: Callable[[ProjectInfo], str] = _needs_own_board
@@ -2009,6 +2010,9 @@ class _NeedsProject:
     """The read that failed (:class:`_NeedsReads`): then none of the above is to be used."""
     failed_read: str
     """What that read was of."""
+    blind: Mapping[str, Exception]
+    """Agent id → the capture of its screen that failed (:class:`_NeedsReads`): that agent's
+    own item is not to be used, and every other's is."""
 
 
 _T = TypeVar("_T")
@@ -2016,23 +2020,32 @@ _T = TypeVar("_T")
 
 class _NeedsReads:
     """Every read of one project's scan, each through :meth:`needs_read`. ``failed`` is the
-    first that failed, ``failed_read`` what it was of; ``None`` while all worked."""
+    first that failed, ``failed_read`` what it was of; ``None`` while all worked. ``blind``
+    holds the agents whose screen could not be captured, by row id, each one's failure."""
 
     def __init__(self, project: ProjectInfo) -> None:
         self.project = project
         self.failed: Exception | None = None
         self.failed_read = ""
+        self.blind: dict[str, Exception] = {}
 
-    def needs_read(self, read: Callable[[], _T], what: str) -> _T | None:
+    def needs_read(self, read: Callable[[], _T], what: str, *, agent: str = "") -> _T | None:
         """``read()``; ``None`` once a read failed, this one or one before: nothing is read
-        after one fails, since nothing the scan finds then is used."""
+        after one fails, since nothing the scan finds then is used. A read of one agent's own
+        (``agent``, its row's id: its screen) that fails is that agent's alone. Taken for the
+        project's, one pane that closed between the listing and its capture failed the whole
+        scan, and every action on every other agent of the project was a 503 (review of #259,
+        round 12, 4/9)."""
         if self.failed is not None:
             return None
         try:
             return read()
         except Exception as exc:
             log.debug("remote: needs could not read %s of %s", what, self.project.id, exc_info=True)
-            self.failed, self.failed_read = exc, what
+            if agent:
+                self.blind[agent] = exc
+            else:
+                self.failed, self.failed_read = exc, what
             return None
 
 
@@ -2054,6 +2067,8 @@ def _needs_scan_project(
     no card; events not read named a dialog anew, its dismissal lost (review of #243,
     rounds 22 to 27). So when one fails the scan's items are not used: its last items
     stand (:func:`scan_needs_you`), and an action's check is a 503 (:func:`needs_agent_now`).
+    A screen tmux could not capture is one agent's read: that agent's item alone is not
+    used, the same way (``blind``).
     The ended rows go back a day before the board's day: a result to the manager is judged
     by the stop in its own day (:func:`needs_from_board`), and read a day from now, a result
     an hour after a stop became a card once the stop was a day old (round 25, 3/4).
@@ -2106,7 +2121,7 @@ def _needs_scan_project(
     tails: dict[str, TranscriptTail | None] = {}
     for status in statuses:
         tail = tails[status.agent.id] = _needs_tail_of(sources, status, reads)
-        for item in needs_from_agent(
+        derived = needs_from_agent(
             status,
             tail,
             project=project,
@@ -2120,7 +2135,8 @@ def _needs_scan_project(
             accounts=accounts,
             pane_output=_needs_output_of(sources, status, reads),
             pane_screen=_needs_screen_of(sources, status, reads),
-        ):
+        )
+        for item in [] if status.agent.id in reads.blind else derived:
             undated = item.kind == "lost" or item.since == now
             items.append(_needs_dated(item, first_seen, seen) if undated else item)
     own = board_id == project.id
@@ -2158,6 +2174,7 @@ def _needs_scan_project(
         tails=tails,
         failed=reads.failed,
         failed_read=reads.failed_read,
+        blind=reads.blind,
     )
 
 
@@ -2233,8 +2250,10 @@ def _needs_output_of(
 def _needs_screen_of(
     sources: NeedsSources, status: FleetAgentStatus, reads: _NeedsReads
 ) -> Callable[[], list[str] | None]:
-    """What the pane of ``status``'s row shows, asked of tmux only when called."""
-    return lambda: reads.needs_read(partial(sources.pane_screen, status), "tmux")
+    """What the pane of ``status``'s row shows, asked of tmux only when called: that agent's
+    read alone (:meth:`_NeedsReads.needs_read`)."""
+    read = partial(sources.pane_screen, status)
+    return lambda: reads.needs_read(read, "a screen", agent=status.agent.id)
 
 
 def _needs_window(
@@ -2587,7 +2606,8 @@ def scan_needs_you(
     A project whose scan could not read all it needs (:func:`_needs_scan_project`), or
     failed outright, decides nothing: its items of ``kept``, the last scan's, stand as they
     were, ids and all, so a dismissal still hides them and a push's streak goes on, and no
-    item is new (review of #243, round 27). ``first_seen`` is the watcher's
+    item is new (review of #243, round 27). So does an agent's whose screen could not be
+    captured, alone (:func:`_needs_blind_kept`). ``first_seen`` is the watcher's
     memory of when it first saw the items whose facts carry no date; without
     it, each scan is the first. What it holds for a project that could not be
     looked at this time is kept for the next look. ``failing`` is the watcher's
@@ -2621,6 +2641,7 @@ def scan_needs_you(
                 log.info("remote: the needs scan of %s works again", project.id)
         if scanned is not None and scanned.failed is None:
             items.extend(scanned.items)
+            items.extend(_needs_blind_kept(scanned, project, kept, memory, seen, failing))
         else:
             _needs_still_remembered(memory, seen, project)
             items.extend(item for item in kept if item.project_id == project.id)
@@ -2628,6 +2649,38 @@ def scan_needs_you(
         del memory[key]
     items = _needs_board_once(items, boards)
     return _needs_ranked([item for item in items if item.id not in dismissed])
+
+
+def _needs_blind_kept(
+    scanned: _NeedsProject,
+    project: ProjectInfo,
+    kept: Sequence[NeedsItem],
+    first_seen: MutableMapping[str, datetime],
+    seen: set[str],
+    failing: MutableSet[str] | None,
+) -> list[NeedsItem]:
+    """The items of ``kept`` that stand for the agents whose screen ``scanned`` could not
+    capture: each one's own item, as a project's stand when its scan cannot read all it needs.
+    Its board items are the board's, read this scan. The project's first sightings are kept
+    through the scan, as for a project's (:func:`_needs_still_remembered`): one agent's are
+    not told apart from the rest's. Each such agent is told once a streak
+    (:func:`_needs_failed`)."""
+    prefix = f"{project.id}|"
+    if failing is not None:
+        told = {key for key in failing if key.startswith(prefix)}
+        failing -= told - {prefix + agent_id for agent_id in scanned.blind}
+    if not scanned.blind:
+        return []
+    labels = {status.agent.id: status.agent.label for status in scanned.statuses}
+    for agent_id, exc in scanned.blind.items():
+        what = f"the needs scan of {project.id} reading {labels.get(agent_id, agent_id)}'s screen"
+        _needs_failed(what, exc, failing, prefix + agent_id)
+    _needs_still_remembered(first_seen, seen, project)
+    return [
+        item
+        for item in kept
+        if item.agent_id in scanned.blind and item.kind not in _NEEDS_BOARD_KINDS
+    ]
 
 
 def _needs_read_once(sources: NeedsSources) -> NeedsSources:
@@ -2761,7 +2814,9 @@ def needs_agent_now(project: ProjectInfo, label: str, *, now: datetime | None = 
     Restart on a ``crashed`` or ``manager_down`` card was told "That agent is gone." (review
     of #243, round 25, 4/4); without the day, the exits or a session's events the card's
     item was missing or named anew, and its action a 409 ``stale`` (rounds 26 and 27). So
-    an action that names no card is told to try again too. Raises ``fleet.NoSuchAgent``
+    an action that names no card is told to try again too. A screen tmux could not capture
+    is its agent's alone: a 503 for the label whose it is, and no other's (review of #259,
+    round 12, 4/9). Raises ``fleet.NoSuchAgent``
     only when the label has had no row at all among the scan's (two days of ended ones).
     """
     from aisquare.services import fleet as fleet_service
@@ -2781,6 +2836,9 @@ def needs_agent_now(project: ProjectInfo, label: str, *, now: datetime | None = 
         raise fleet_service.NoSuchAgent(f"no agent {label!r} in {where} within the last two days")
     newest = max(rows, key=lambda row: row.created_at)
     status = next((s for s in scanned.statuses if s.agent.id == newest.id), None)
+    if status is not None and status.agent.id in scanned.blind:
+        said = f"{label}'s screen could not be read: {scanned.blind[status.agent.id]}"
+        raise RequestError(503, "unavailable", said)
     return _needs_snapshot(
         project,
         status,
@@ -3087,14 +3145,14 @@ def _needs_screen_now(status: FleetAgentStatus) -> list[str] | None:
 def _needs_screen_read(status: FleetAgentStatus) -> list[str]:
     """The rows the pane of ``status``'s row shows now, on the server the row lives on; raises
     ``TmuxError`` when tmux cannot say: the live sources' ``pane_screen``, whose failure is a
-    failed read of the scan (:class:`_NeedsReads`).
+    failed read of the scan's, that agent's alone (:class:`_NeedsReads`).
 
     It answered ``None`` there, a screen that names no call, and a quick answer's
     re-derivation (:func:`needs_agent_now`) no longer had the card about one of several
     calls: a 409 ``stale`` "no longer shows that question", the card dropped from the page,
     before :func:`needs_prompt_now` could answer the 503 that keeps it (review of #259,
-    round 11, 3/13). Unknown is not absent: the scan's last items stand, and an action's
-    check is a 503."""
+    round 11, 3/13). Unknown is not absent: the agent's last item stands, and an action's
+    check on it is a 503."""
     return _needs_pane_server(status).capture(status.agent.pane_id).lines
 
 

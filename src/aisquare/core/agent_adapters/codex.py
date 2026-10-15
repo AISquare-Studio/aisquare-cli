@@ -751,16 +751,29 @@ class CodexAdapter:
             f"{profile}.filesystem={_filesystem(store_read_only(store), ())}",
         ]
 
-    def broker_access(self, args: Sequence[str], store: Path, inbox: Path) -> list[str] | None:
+    def broker_access(
+        self,
+        args: Sequence[str],
+        store: Path,
+        inbox: Path,
+        *,
+        protect: Sequence[Path] = (),
+        writable: Sequence[Path] = (),
+    ) -> list[str] | None:
         """``args`` with every ``-c permissions.aisquare.filesystem=…`` (the store's
-        profile, :meth:`store_access`) replaced by the store read-only and ``inbox``
-        writable: what the profile holds is this rule's, whatever a recorded launch spec
-        said (one from before it had the store writable). ``None`` when ``args`` set no
-        such table: the session runs unsandboxed or in a sandbox the operator chose. One
-        ``-c`` cannot add a path to the table: Codex splits a ``-c`` key on every dot,
-        and a home's path has them (``~/.aisquare``)."""
+        profile, :meth:`store_access`) replaced by the store and ``protect`` read-only and
+        ``inbox`` and ``writable`` writable: what the profile holds is this rule's,
+        whatever a recorded launch spec said (one from before it had the store writable).
+        ``None`` when ``args`` set no such table: the session runs unsandboxed or in a
+        sandbox the operator chose. One ``-c`` cannot add a path to the table: Codex
+        splits a ``-c`` key on every dot, and a home's path has them (``~/.aisquare``).
+
+        Measured on 0.162.1: a ``read`` path inside the writable workspace (or ``/tmp``)
+        refuses every write under it, a path that does not exist yet included, which
+        then cannot be made; nothing is left on the host where it was absent. Codex
+        itself keeps ``.git`` and ``.agents`` read-only in the workspace."""
         key = f"permissions.{PERMISSION_PROFILE}.filesystem"
-        table = _filesystem(store_read_only(store), (inbox,))
+        table = _filesystem((*store_read_only(store), *protect), (inbox, *writable))
         found = False
 
         def rewrite(value: str) -> str:

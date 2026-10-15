@@ -401,9 +401,39 @@ def _resolve_session(
 def brokered() -> bool:
     """Whether this command is one a sandboxed agent's broker runs for it
     (``services.store_broker.CALLER_ENV``)."""
-    from aisquare.services.store_broker import CALLER_ENV
+    from aisquare.services.store_broker import brokered_call
 
-    return os.environ.get(CALLER_ENV) == "1"
+    return brokered_call()
+
+
+def _own_task(store: ContextStore, ref: str) -> TeamTask:
+    """The task ``ref`` names; for a command a sandboxed agent's broker runs, only one of
+    its launch's own board (``services.store_broker.BOARD_ENV``): task ids resolve across
+    every board, and a task of another one done, blocked or released from a sandbox would
+    retire that board's assignments and wake its manager (review r10 of #113, finding 3)."""
+    from aisquare.services.store_broker import OutOfScope, own_board
+
+    task = store.get_task(ref)
+    if task is None:
+        raise KeyError(ref)
+    board = own_board()
+    if board is not None and task.project_id != board:
+        raise OutOfScope(
+            f"task {task.id} is on another board than this agent's: a command from its "
+            "sandbox names only its own board's tasks"
+        )
+    return task
+
+
+def note_refusal(project_id: str, text: str, *, key: str) -> bool:
+    """Put ``text`` on ``project_id``'s board for its manager, once per ``key``: a refusal
+    of what a sandboxed agent asked its broker for (``services.store_broker.
+    record_refusal``). ``False`` when this key's note is there already."""
+    with store_session() as store:
+        if not store.set_meta_once(key, _now().isoformat()):
+            return False
+        _emit(store, project_id, "note", text, to_role="manager")
+    return True
 
 
 def _acting_as(store: ContextStore, session: TeamSession, ref: str) -> TeamSession:
@@ -414,11 +444,13 @@ def _acting_as(store: ContextStore, session: TeamSession, ref: str) -> TeamSessi
     outside the sandbox, where nothing inside it writes (``types.store_read_only``)."""
     if not brokered():
         return session
-    own = [
-        bound
-        for prefix, token in agent_sessions.launch_tokens()
-        if (bound := store.get_meta(f"{prefix}-session:{token}"))
-    ]
+    own = list(
+        dict.fromkeys(
+            bound
+            for prefix, token in agent_sessions.launch_tokens()
+            if (bound := store.get_meta(f"{prefix}-session:{token}"))
+        )
+    )
     if session.id not in own:
         raise ForeignSessionError(ref, own)
     return session
@@ -449,12 +481,27 @@ def _board(store: ContextStore, session: TeamSession | None, cwd: Path | None) -
     identity (#20's misrouting bug: cwd resolution silently sent writes to a
     different board than the session's audience). Without a session, cwd
     resolves the board exactly as before. A cwd that disagrees with the
-    session's board produces a warning, never a reroute.
+    session's board produces a warning, never a reroute. A command a sandboxed agent's
+    broker runs delivers only to its launch's board (``services.store_broker.BOARD_ENV``),
+    asked before any project is registered.
     """
+    from aisquare.services.store_broker import OutOfScope, own_board
+
+    own = own_board()
     if session is None:
+        if own is not None and orchestrator.team_project(cwd).id != own:
+            raise OutOfScope(
+                "this directory's board is not this agent's: a command from its sandbox "
+                "writes only its own board"
+            )
         project = _project(store, cwd)
         return _Board(id=project.id, name=project.root.name or project.id, root=project.root)
     board = _board_of(store, session.project_id)
+    if own is not None and board.id != own:
+        raise OutOfScope(
+            f"session {short_id(session.id)} is on another board than this agent's launch: "
+            "a command from its sandbox writes only its own board"
+        )
     cwd_board = orchestrator.team_project(cwd)
     if cwd_board.id == board.id:
         return board
@@ -813,8 +860,12 @@ def set_signal(
     session_ref: str | None = None,
     cwd: Path | None = None,
     project_id: str | None = None,
+    agent_tool: bool = False,
 ) -> tuple[SignalState, str | None]:
     """Set a named board state (``team signal NAME VALUE``); returns (state, prev).
+    The fleet's own signals (``fleet-paused``) are set by the fleet and its operator, never
+    by an agent's tool: a command its sandbox's broker runs, or its MCP ``signal`` tool
+    (``agent_tool``; review r10 of #113, finding 8).
 
     Names and values are single tokens by contract — that is exactly what
     makes the emitted ``signal`` event's text decodable into structured
@@ -826,10 +877,10 @@ def set_signal(
     _require_enabled()
     _DELIVERY.set(None)  # FIRST: a refused signal must not leave the last write's receipt readable
     _validate_signal(name, value)  # before any store is opened or board resolved
-    if brokered() and name.startswith(_FLEET_SIGNAL_PREFIX):
+    if (brokered() or agent_tool) and name.startswith(_FLEET_SIGNAL_PREFIX):
         raise ValueError(
-            f"signal {name!r} is the fleet's own: a command from an agent's sandbox may "
-            "read it, not set it"
+            f"signal {name!r} is the fleet's own: an agent's tool, its sandbox's commands "
+            "included, may read it, not set it"
         )
     with store_session() as store:
         session = _resolve_session(store, session_ref)
@@ -1125,9 +1176,7 @@ def show_task(ref: str) -> TeamTask:
     """One task in full. Raises ``KeyError`` if nothing matches."""
     _require_enabled()
     with store_session() as store:
-        task = store.get_task(ref)
-        if task is None:
-            raise KeyError(ref)
+        task = _own_task(store, ref)
         return task
 
 
@@ -1188,9 +1237,7 @@ def claim_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
     _require_enabled()
     _DELIVERY.set(None)
     with store_session() as store:
-        task = store.get_task(ref)
-        if task is None:
-            raise KeyError(ref)
+        task = _own_task(store, ref)
         session = _resolve_session(store, session_ref)
         claimant = session.id if session else "cli"
         lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
@@ -1223,9 +1270,7 @@ def _finish_task(
 ) -> tuple[TeamTask, _Board]:
     _DELIVERY.set(None)
     with store_session() as store:
-        task = store.get_task(ref)
-        if task is None:
-            raise KeyError(ref)
+        task = _own_task(store, ref)
         session = _resolve_session(store, session_ref)
         updated = store.set_task_status(task.id, status)
         if status in CLOSED_STATUSES:
@@ -1273,9 +1318,7 @@ def reopen_task(ref: str, *, reason: str, session_ref: str | None = None) -> Tea
     _require_enabled()
     _DELIVERY.set(None)
     with store_session() as store:
-        task = store.get_task(ref)
-        if task is None:
-            raise KeyError(ref)
+        task = _own_task(store, ref)
         session = _resolve_session(store, session_ref)
         reopened = store.reopen_task(task.id)
         event = _emit(
@@ -1370,9 +1413,7 @@ def release_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
     _require_enabled()
     _DELIVERY.set(None)
     with store_session() as store:
-        task = store.get_task(ref)
-        if task is None:
-            raise KeyError(ref)
+        task = _own_task(store, ref)
         session = _resolve_session(store, session_ref)
         released = store.release_task(task.id)
         event = _emit(

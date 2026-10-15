@@ -162,6 +162,25 @@ def _ensure_virtual_session() -> str:
     return session.id
 
 
+def _sandboxed_launch_board() -> str | None:
+    """The board this server's tools are bound to when it serves an agent that sandboxes
+    its tools (its launch's tokens and family in its environment): its tools then name
+    only that board's tasks, as the agent's broker does (``services.store_broker``;
+    review r10 of #113, finding 8). ``None`` for any other client."""
+    from aisquare.core.agent_adapters import get_adapter
+    from aisquare.core.orchestrator import team_project
+
+    family = os.environ.get(LAUNCH_AGENT_ENV, "").strip()
+    if not family or not agent_sessions.launch_tokens():
+        return None
+    try:
+        if not get_adapter(family).capabilities.sandboxes_tools:
+            return None
+        return team_project(None).id
+    except Exception:
+        return None
+
+
 def _tool_error(message: str) -> Exception:
     """A ``ToolError`` carrying ``message`` verbatim (``mcp`` imports lazily)."""
     from mcp.server.mcpserver.exceptions import ToolError
@@ -176,8 +195,13 @@ def _guard(fn: Any, *args: Any, **kwargs: Any) -> str:
     used — remote agents self-correct off it — moved off the success channel
     onto the protocol's error channel.
     """
+    from aisquare.services.store_broker import OutOfScope, scoped_board
+
     try:
-        return str(fn(*args, **kwargs))
+        with scoped_board(_sandboxed_launch_board()):
+            return str(fn(*args, **kwargs))
+    except OutOfScope as exc:
+        raise _tool_error(f"error: {exc}") from exc
     except TeamDisabledError as exc:
         raise _tool_error(
             "error: the agent orchestrator is disabled on the host (AISQUARE_TEAM=0)"
@@ -375,7 +399,7 @@ def signal(name: str, value: str | None = None) -> str:
             return (
                 f"{state.name} = {state.value} · set by {state.set_by or 'cli'} · seq {state.seq}"
             )
-        state, prev = team_service.set_signal(name, value, session_ref=me)
+        state, prev = team_service.set_signal(name, value, session_ref=me, agent_tool=True)
         was = f" (was {prev})" if prev is not None else ""
         return f"signal {state.name}: {state.value}{was} · seq {state.seq}"
 

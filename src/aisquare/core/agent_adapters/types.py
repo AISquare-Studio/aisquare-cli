@@ -560,13 +560,25 @@ class AgentAdapter(Protocol):
         stands between them) and for a scope the agent runs unsandboxed (``full``)."""
         ...
 
-    def broker_access(self, args: Sequence[str], store: Path, inbox: Path) -> list[str] | None:
+    def broker_access(
+        self,
+        args: Sequence[str],
+        store: Path,
+        inbox: Path,
+        *,
+        protect: Sequence[Path] = (),
+        writable: Sequence[Path] = (),
+    ) -> list[str] | None:
         """``args`` with ``inbox``, the launch's broker inbox (``services.store_broker``),
         the one path under ``store`` the sandbox may write, and the rest of the store
         read-only whatever ``args`` recorded (a launch spec from before this rule); every
         launch of an agent with ``capabilities.sandboxes_tools`` asks this before it
-        starts. ``None`` where ``args`` run no sandbox of :meth:`store_access`'s (the agent
-        unsandboxed, or a sandbox the operator chose), which no broker serves."""
+        starts. ``protect`` is read-only there too, outside the store, whether or not it
+        exists yet (the launch inputs of the project's trees, the other agents' worktrees,
+        the tmux sockets' directory: ``services.store_broker.launch_paths``), and
+        ``writable`` stays writable within it (the agent's own worktree), the more specific
+        path winning. ``None`` where ``args`` run no sandbox of :meth:`store_access`'s (the
+        agent unsandboxed, or a sandbox the operator chose), which no broker serves."""
         ...
 
     def fleet_args(

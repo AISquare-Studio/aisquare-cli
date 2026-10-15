@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -24,7 +25,7 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import selfcli
+from aisquare.core import paths, selfcli
 from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.agent_adapters.types import store_dir
 from aisquare.core.store import store_session
@@ -193,16 +194,27 @@ def test_a_request_not_signed_by_its_launch_or_run_before_is_refused(
     assert replayed["code"] == 77 and "run already" in str(replayed["stderr"])
 
 
-def test_a_request_from_another_board_is_refused(work: Path, tmp_path: Path) -> None:
-    """The broker runs commands on its launch's own board: a cwd the sandbox chose in
-    another repository would otherwise make a project row there, and post to it."""
+@pytest.mark.parametrize("hub", [False, True])
+def test_a_request_from_outside_the_launchs_tree_is_refused(
+    hub: bool, work: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The broker runs commands only in its launch's own tree: a cwd the sandbox chose in
+    another repository would otherwise make a project row there, and post to it. Asked of
+    the directory, never of its board: with ``AISQUARE_TEAM_HUB``, which every launch with
+    a project sets, every directory resolved to the hub's board and passed (review r10 of
+    #113, finding 3)."""
+    if hub:
+        monkeypatch.setenv("AISQUARE_TEAM_HUB", str(work))
     other = tmp_path / "other"
     other.mkdir()
     subprocess.run(["git", "init", "-q", str(other)], check=True)
-    answer = _answer(_broker(tmp_path), _request(["task", "add", "planted"], other))
-    assert answer["code"] == 2 and "another board" in str(answer["stderr"])
+    for where in (other, Path("/")):
+        answer = _answer(_broker(tmp_path), _request(["task", "add", "planted"], where))
+        assert answer["code"] == 2 and "outside this agent's tree" in str(answer["stderr"])
     nowhere = _answer(_broker(tmp_path), _request(["board"], tmp_path / "missing"))
     assert nowhere["code"] == 2
+    log = paths.log_dir() / store_broker.LOG_NAME
+    assert "board: " in log.read_text(encoding="utf-8"), "the refusal is on record"
 
 
 def test_the_command_runs_as_the_launchs_own_session_and_no_other(
@@ -479,3 +491,328 @@ def test_team_spawn_exec_starts_the_broker_as_launch_does(
     result = runner.invoke(app, ["team", "spawn", "coder", "--agent", "codex", "--exec"])
     assert result.exit_code == 0, result.output
     assert started and executed == [[*started[0], "--with-inbox"]]
+
+
+# --- review r10 of #113 -----------------------------------------------------------------
+
+
+def _brokered(monkeypatch: pytest.MonkeyPatch, work: Path) -> str:
+    """This process as a command the launch's broker runs, scoped to ``work``'s board and
+    pool; the board's id."""
+    from aisquare.core.orchestrator import team_project
+    from aisquare.core.workspace import current_project
+
+    board = team_project(work).id
+    monkeypatch.setenv(store_broker.CALLER_ENV, "1")
+    monkeypatch.setenv(store_broker.BOARD_ENV, board)
+    monkeypatch.setenv(store_broker.POOL_ENV, current_project(work).id)
+    return board
+
+
+def _other_repo(tmp_path: Path) -> Path:
+    other = tmp_path / "other"
+    other.mkdir()
+    subprocess.run(["git", "init", "-q", str(other)], check=True)
+    team_service.activate(other)
+    return other
+
+
+def test_a_brokered_command_names_only_its_own_boards_tasks(
+    work: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r10 of #113, finding 3: task ids resolve across every board, so a sandboxed
+    agent's ``task done`` (block, drop, release, reopen, claim, review, show) acted on any
+    board's task, retiring its assignments and waking that board's manager."""
+    other = _other_repo(tmp_path)
+    theirs, _ = team_service.add_task("their task", cwd=other)
+    mine, _ = team_service.add_task("my task", cwd=work)
+    _brokered(monkeypatch, work)
+    for act in (
+        lambda ref: team_service.finish_task(ref, session_ref=MINE),
+        lambda ref: team_service.claim_task(ref, session_ref=MINE),
+        lambda ref: team_service.block_task(ref, reason="x", session_ref=MINE),
+        lambda ref: team_service.release_task(ref, session_ref=MINE),
+        lambda ref: team_service.drop_task(ref, session_ref=MINE),
+        team_service.show_task,
+    ):
+        with pytest.raises(store_broker.OutOfScope, match="another board"):
+            act(theirs.id)
+    with store_session() as store:
+        untouched = store.get_task(theirs.id)
+    assert untouched is not None and untouched.status == "todo"
+    assert team_service.claim_task(mine.id, session_ref=MINE).status == "doing"
+    with pytest.raises(store_broker.OutOfScope, match="this directory's board"):
+        team_service.add_note("planted", cwd=other)
+
+
+def test_a_brokered_command_writes_only_its_own_projects_pool(
+    work: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """Review r10 of #113, finding 3 (and SMOKE5's ``remember --user``): the user pool is
+    given to every project's agents, and another project's pool to that project's."""
+    from aisquare.services import context as context_service
+
+    other = _other_repo(tmp_path)
+    _brokered(monkeypatch, work)
+    with pytest.raises(store_broker.OutOfScope, match="user pool"):
+        context_service.add_entry("everyone's", "user", [])
+    assert context_service.add_entry("ours", None, []).pool == "project", "the default"
+    refused = runner.invoke(app, ["remember", "everyone's", "--user"])
+    assert refused.exit_code == 1 and "user pool" in refused.output
+    monkeypatch.chdir(other)
+    with pytest.raises(store_broker.OutOfScope, match="not this agent's project"):
+        context_service.add_entry("theirs", "project", [])
+
+
+def test_a_refusal_is_logged_and_noted_once_per_kind(
+    work: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SMOKE5 of #113 (tsk_01m50ex2xtjw): a refused request left nothing outside the
+    caller's stderr. Each is a line in the brokers' log; a forged identity, another board's
+    task, a fleet operation or a bad signature is also a note on the board, once per launch
+    and kind, for the manager and the human."""
+    board = _brokered(monkeypatch, work)
+    for _ in range(2):
+        store_broker.record_refusal("identity", "--as bbbb2222 is not this agent's own session")
+    store_broker.record_refusal("fleet", "aisquare fleet stop coder-1 is a fleet operation")
+    store_broker.record_refusal("command", "aisquare config set x y cannot run")
+    lines = (paths.log_dir() / store_broker.LOG_NAME).read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 4 and all(f"launch={LAUNCH}" in line for line in lines)
+    with store_session() as store:
+        notes = [
+            event.text for event in store.recent_events(board, limit=50) if event.kind == "note"
+        ]
+    assert len([note for note in notes if "refused (identity)" in note]) == 1
+    assert len([note for note in notes if "refused (fleet)" in note]) == 1
+    assert not any("refused (command)" in note for note in notes)
+
+
+def test_no_agent_tool_sets_the_fleets_own_signals(
+    work: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r10 of #113, finding 8: the guard held only for a brokered command, while the
+    same agent's MCP ``signal`` tool, which runs outside its sandbox, set ``fleet-paused``."""
+    from aisquare.core.spawn import LAUNCH_AGENT_ENV
+    from aisquare.services import mcp_server
+
+    with pytest.raises(ValueError, match="the fleet's own"):
+        team_service.set_signal("fleet-paused", "off", agent_tool=True)
+    told: dict[str, object] = {}
+
+    def fake(name: str, value: str, **kwargs: object) -> tuple[object, None]:
+        told.update(kwargs)
+        raise ValueError("stop here")
+
+    monkeypatch.setattr(team_service, "set_signal", fake)
+    monkeypatch.setattr(mcp_server, "_ensure_virtual_session", lambda: MINE)
+    with pytest.raises(Exception, match="stop here"):
+        mcp_server.signal("fleet-paused", "off")
+    assert told.get("agent_tool") is True
+    # Its tools name only its board's tasks when it serves an agent that sandboxes them.
+    monkeypatch.setenv(LAUNCH_AGENT_ENV, "codex")
+    assert mcp_server._sandboxed_launch_board() == _brokered(monkeypatch, work)
+    monkeypatch.setenv(LAUNCH_AGENT_ENV, "claude-code")
+    assert mcp_server._sandboxed_launch_board() is None
+
+
+def test_a_bell_this_process_may_not_open_is_not_a_broker_that_is_gone(
+    running: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Review r10 of #113, finding 2: any failure to open the bell read as "not running",
+    exit 75, though the request was in ``in/`` and the broker polls it: a retrying agent
+    filed its note twice where a sandbox refuses the FIFO (Seatbelt, Landlock)."""
+    os.chmod(running / store_broker.BELL, 0o400)
+    assert store_broker.forward(["note", "rung or not", "--as", MINE[:8]]) == 0
+    assert "✓ shared (note): rung or not" in capsys.readouterr().out
+
+
+def _no_broker(tmp_path: Path) -> Path:
+    if sys.platform == "win32":
+        pytest.skip("POSIX's")
+    directory = tmp_path / "launch"
+    (directory / store_broker.INBOX).mkdir(parents=True)
+    (directory / store_broker.OUTBOX).mkdir()
+    os.mkfifo(directory / store_broker.BELL)
+    return directory
+
+
+def test_a_command_no_broker_took_is_withdrawn_and_said_not_to_have_run(
+    tmp_path: Path,
+) -> None:
+    directory = _no_broker(tmp_path)
+    with pytest.raises(store_broker.BrokerGone, match="not running"):
+        store_broker.ask(directory, ["note", "x"])
+    assert list((directory / store_broker.INBOX).iterdir()) == [], "withdrawn: it never runs"
+
+
+def test_a_command_its_broker_took_and_did_not_answer_may_have_run(tmp_path: Path) -> None:
+    """Said so, never "failed": the agent reads the board before it runs it again."""
+    if sys.platform == "win32":
+        pytest.skip("POSIX's")
+    directory = _no_broker(tmp_path)
+    reader = os.open(directory / store_broker.BELL, os.O_RDONLY | os.O_NONBLOCK)
+    inbox = directory / store_broker.INBOX
+
+    def take() -> None:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            for entry in inbox.iterdir():
+                if entry.name.endswith(".json"):
+                    entry.rename(inbox / f".{entry.name}.taken")
+                    return
+            time.sleep(0.01)
+
+    taker = threading.Thread(target=take)
+    taker.start()
+    try:
+        with pytest.raises(store_broker.BrokerUnavailable, match="may have run"):
+            store_broker.ask(directory, ["note", "x"], wait=1.0)
+    finally:
+        taker.join()
+        os.close(reader)
+
+
+def test_the_cli_asks_the_store_itself_whether_it_may_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r10 of #113, finding 6: ``access(2)`` sees bwrap's read-only mount but not a
+    sandbox that refuses at ``open`` (Landlock), and no variable tells a sandboxed command
+    from an escalated one (measured). A file is made and removed to know."""
+    import tempfile
+
+    home = tmp_path / "home"
+    home.mkdir()
+    assert store_broker._writable(home) and list(home.iterdir()) == [], "nothing left behind"
+
+    def refused(**kwargs: object) -> tuple[int, str]:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(tempfile, "mkstemp", refused)
+    assert not store_broker._writable(home)
+
+
+def _sleeper(seconds: float) -> list[str]:
+    return [sys.executable, "-c", f"import time; time.sleep({seconds})"]
+
+
+def test_the_broker_ends_its_commands_when_its_agent_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r10 of #113, finding 7: the broker left its commands running when the agent
+    exited, so a claim taken just before ``fleet stop`` landed after the session's claims
+    were released. They are ended, and nothing more is taken."""
+    broker = _broker(tmp_path)
+    monkeypatch.setattr(selfcli, "argv_for", lambda argv: _sleeper(30))
+    answers: list[dict[str, object]] = []
+    worker = threading.Thread(
+        target=lambda: answers.append(broker._run(["note", "x"], str(tmp_path), os.environ))
+    )
+    worker.start()
+    deadline = time.monotonic() + 10
+    while not broker._children and time.monotonic() < deadline:
+        time.sleep(0.02)
+    started = time.monotonic()
+    broker.close(grace=0.5)
+    worker.join(timeout=10)
+    assert time.monotonic() - started < 8
+    [answer] = answers
+    assert isinstance(answer["code"], int) and answer["code"] < 0
+    assert "exited while the command ran" in str(answer["stderr"])
+    after = broker.answer(_request(["board"], tmp_path), RID)
+    assert after["code"] == 75 and "has exited" in str(after["stderr"])
+
+
+def test_a_directory_in_the_inbox_is_removed_and_never_taken_again(tmp_path: Path) -> None:
+    """Review r10 of #113, finding 9: a directory named like a request was opened, refused
+    and left, then taken again every half second for the broker's life."""
+    broker = _broker(tmp_path)
+    (broker.directory / store_broker.OUTBOX).mkdir(parents=True)
+    inbox = broker.directory / store_broker.INBOX
+    planted = inbox / f"{RID}.json"
+    (planted / "inside").mkdir(parents=True)
+    (planted / "inside" / "file").write_text("x", encoding="utf-8")
+    fd = os.open(inbox, os.O_RDONLY)
+    try:
+        broker.take_requests(fd)
+        deadline = time.monotonic() + 5
+        while not broker.idle() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert list(inbox.iterdir()) == []
+        answer = json.loads((broker.directory / store_broker.OUTBOX / f"{RID}.json").read_text())
+        assert "not a file" in answer["stderr"]
+        broker.take_requests(fd)
+        assert broker.idle()
+    finally:
+        os.close(fd)
+
+
+def test_output_past_the_cap_is_cut_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r10 of #113, finding 10: output was cut at 4 MB with the exit status kept, so a
+    large ``--json`` answer came back unparseable with exit 0 and no sign it was cut."""
+    broker = _broker(tmp_path)
+    monkeypatch.setattr(store_broker, "MAX_OUTPUT", 100)
+    monkeypatch.setattr(
+        selfcli, "argv_for", lambda argv: [sys.executable, "-c", "print('x' * 1000)"]
+    )
+    answer = broker._run(["board", "--json"], str(tmp_path), os.environ)
+    assert answer["code"] == 74 and len(str(answer["stdout"])) == 100
+    assert "cut this command's output" in str(answer["stderr"])
+
+
+def test_launch_paths_hold_the_project_trees_inputs_and_the_tmux_sockets(
+    tmp_path: Path,
+) -> None:
+    """Review r10 of #113, findings 1 and 4: outside the store, a sandboxed agent wrote the
+    project tree's launch inputs (``.claude/``, ``.mcp.json`` …) and the other agents'
+    worktrees, which an unsandboxed Claude Code start there runs, and could move the
+    fleet's tmux socket out of ``/tmp``. Each is named read-only; its own worktree stays
+    writable, its own inputs read-only within it."""
+    if sys.platform == "win32":
+        pytest.skip("POSIX's")
+    root = tmp_path / "proj"
+    root.mkdir()
+    git = ["git", "-C", str(root)]
+    subprocess.run([*git, "init", "-q"], check=True)
+    subprocess.run(
+        [*git, "-c", "user.email=a@b", "-c", "user.name=t", "commit", "-q", "--allow-empty",
+         "-m", "init"],
+        check=True,
+    )  # fmt: skip
+    worktree = root / ".aisquare-worktrees" / "coder-1"
+    subprocess.run([*git, "worktree", "add", "-q", "-b", "c1", str(worktree)], check=True)
+    env = {"TMUX": "/somewhere/tmux-1000/asq,123,0", "TMUX_TMPDIR": str(tmp_path / "tt")}
+
+    protect, writable = store_broker.launch_paths(env, worktree)
+
+    real = root.resolve()
+    for name in store_broker.LAUNCH_INPUTS:
+        assert real / name in protect, name
+        assert worktree.resolve() / name in protect, name
+    assert real / ".aisquare-worktrees" in protect, "the other agents' worktrees"
+    assert writable == (worktree.resolve(),), "its own"
+    assert Path("/somewhere/tmux-1000") in protect
+    assert (tmp_path / "tt").resolve() / f"tmux-{os.getuid()}" in protect
+    _, at_root = store_broker.launch_paths(env, root)
+    assert at_root == (), "a role with no worktree writes none of the others'"
+
+
+def test_codex_profile_carries_the_launch_paths(tmp_path: Path) -> None:
+    import tomllib
+
+    store, inbox = tmp_path / "home", tmp_path / "home" / "broker" / "l" / "in"
+    protect, writable = (tmp_path / "proj" / ".claude", tmp_path / "s"), (tmp_path / "wt",)
+    codex = get_adapter("codex")
+    args = codex.broker_access(
+        codex.store_access("workspace", store), store, inbox, protect=protect, writable=writable
+    )
+    assert args is not None
+    table = tomllib.loads(f"t = {args[-1].partition('=')[2]}")["t"]
+    assert table == {
+        str(store): "read",
+        str(protect[0]): "read",
+        str(protect[1]): "read",
+        str(inbox): "write",
+        str(writable[0]): "write",
+    }

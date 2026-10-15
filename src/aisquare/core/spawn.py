@@ -338,7 +338,7 @@ SEAMS: dict[str, Seam] = {
         "r9 of #113): a process of ours, no model process. NOT stripped: what it runs is the "
         "agent's own board calls, which keep the agent's Run as from its tool shell",
     ),
-    "aisquare/services/store_broker.py::answer": Seam(
+    "aisquare/services/store_broker.py::_run": Seam(
         EXCLUDED,
         "one whitelisted board call (`aisquare <argv>`) the broker runs for its sandboxed "
         "agent; no model process. NOT stripped: it is the agent's own call, filed under its "

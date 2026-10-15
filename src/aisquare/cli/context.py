@@ -53,7 +53,12 @@ def add(
     ] = None,
 ) -> None:
     """Add a context entry."""
-    entry = context_service.add_entry(text, pool=resolve_pool(user, project), tags=tag or [])
+    from aisquare.services.store_broker import OutOfScope
+
+    try:
+        entry = context_service.add_entry(text, pool=resolve_pool(user, project), tags=tag or [])
+    except OutOfScope as exc:
+        fail(str(exc), error="out_of_scope")
     emit_entry(entry, verb="added")
 
 

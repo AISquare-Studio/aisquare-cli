@@ -38,12 +38,31 @@ def list_entries() -> list[ContextEntry]:
 
 
 def add_entry(text: str, pool: Pool | None, tags: list[str]) -> ContextEntry:
-    """Add a context entry to the user or project pool."""
-    resolved: Pool = pool or load_config().default_pool
+    """Add a context entry to the user or project pool.
+
+    From a sandboxed agent's broker (``services.store_broker.own_pool``) only its launch's
+    project pool: the user pool is injected into every project's agents, and another
+    project's pool into that project's (review r10 of #113, finding 3)."""
+    from aisquare.services.store_broker import OutOfScope, own_pool
+
+    scoped = own_pool()
+    if scoped is not None and pool == "user":
+        raise OutOfScope(
+            "the user pool is given to every project's agents: a command from an agent's "
+            "sandbox writes only its own project's pool (drop --user)",
+            kind="pool",
+        )
+    resolved: Pool = pool or ("project" if scoped is not None else load_config().default_pool)
     with store_session() as store:
         project_id: str | None = None
         if resolved == "project":
             project = active_project(store)
+            if scoped is not None and project.id != scoped:
+                raise OutOfScope(
+                    f"{project.root} is not this agent's project: a command from its sandbox "
+                    "writes only its own project's pool",
+                    kind="pool",
+                )
             store.onboard_project(project)  # a fact added by hand is a deliberate add (#139)
             project_id = project.id
         return store.add(new_entry(text, resolved, project_id, tags, "cli"))

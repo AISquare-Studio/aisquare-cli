@@ -195,7 +195,15 @@ class FakeAgentAdapter:
             return []
         return [arg for path in store_read_only(store) for arg in ("--readonly", str(path))]
 
-    def broker_access(self, args: Sequence[str], store: Path, inbox: Path) -> list[str] | None:
+    def broker_access(
+        self,
+        args: Sequence[str],
+        store: Path,
+        inbox: Path,
+        *,
+        protect: Sequence[Path] = (),
+        writable: Sequence[Path] = (),
+    ) -> list[str] | None:
         # The store's run read-only whatever `args` held, the inbox writable beside it.
         result: list[str] = []
         found = False
@@ -205,6 +213,8 @@ class FakeAgentAdapter:
                 path = next(tokens, "")
                 if path == str(store):
                     result += ["--readonly", path, "--writable", str(inbox)]
+                    result += [arg for kept in protect for arg in ("--readonly", str(kept))]
+                    result += [arg for kept in writable for arg in ("--writable", str(kept))]
                     found = True
                 else:
                     result += [arg, path]

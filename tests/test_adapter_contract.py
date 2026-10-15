@@ -537,7 +537,10 @@ def test_the_fake_agent_runs_through_the_fleet_like_any_other(
     # With its broker's inbox writable in its sandbox, the rest of the store read-only;
     # the broker named in its environment where one runs (POSIX: its bell is a FIFO).
     broker = store_broker.launch_dir(store_dir(), launched_env["AISQUARE_LAUNCH_ID"])
-    expected = fake_agent.broker_access(native, store_dir(), broker / store_broker.INBOX)
+    protect, writable = store_broker.launch_paths(launched_env, Path.cwd())
+    expected = fake_agent.broker_access(
+        native, store_dir(), broker / store_broker.INBOX, protect=protect, writable=writable
+    )
     assert expected is not None and argv[-len(expected) :] == expected
     if sys.platform != "win32":
         assert launched_env[store_broker.DIR_ENV] == str(broker)

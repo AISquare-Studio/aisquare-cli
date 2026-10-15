@@ -34,11 +34,12 @@ from aisquare.core.store import (
     is_locked_error,
     store_recovery,
 )
-from aisquare.services import agent_launch, explainability_ops
+from aisquare.services import agent_launch, explainability_ops, store_broker
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
+from aisquare.services.store_broker import OutOfScope
 from aisquare.services.team import (
     DeliveryUnconfirmedError,
     ForeignSessionError,
@@ -58,6 +59,7 @@ SessionRef = Annotated[
 STORE_ERRORS = (
     TeamDisabledError,
     ForeignSessionError,
+    OutOfScope,
     KeyError,
     AmbiguousIdError,
     DeliveryUnconfirmedError,
@@ -70,7 +72,13 @@ def _fail_team(exc: Exception, ref: str | None = None) -> NoReturn:
     if isinstance(exc, TeamDisabledError):
         fail(str(exc), error="team_disabled")
     if isinstance(exc, ForeignSessionError):
+        if team_service.brokered():
+            store_broker.record_refusal("identity", str(exc))
         fail(str(exc), error="not_your_session", ref=exc.ref)
+    if isinstance(exc, OutOfScope):
+        if team_service.brokered():
+            store_broker.record_refusal(exc.kind, str(exc))
+        fail(str(exc), error="out_of_scope")
     if isinstance(exc, AmbiguousIdError):
         fail(f"'{exc.ref}' is ambiguous — use more characters", error="ambiguous_id", ref=exc.ref)
     if isinstance(exc, DeliveryUnconfirmedError):

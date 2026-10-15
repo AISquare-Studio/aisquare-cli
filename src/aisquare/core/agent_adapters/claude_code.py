@@ -341,7 +341,15 @@ class ClaudeCodeAdapter:
     def store_access(self, write: WriteScope, store: Path) -> list[str]:
         return []  # no sandbox: its tools write wherever the user can, the store included
 
-    def broker_access(self, args: Sequence[str], store: Path, inbox: Path) -> list[str] | None:
+    def broker_access(
+        self,
+        args: Sequence[str],
+        store: Path,
+        inbox: Path,
+        *,
+        protect: Sequence[Path] = (),
+        writable: Sequence[Path] = (),
+    ) -> list[str] | None:
         return None  # no sandbox, so no broker: its board calls write the store themselves
 
     def fleet_args(

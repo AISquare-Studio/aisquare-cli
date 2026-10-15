@@ -1,9 +1,12 @@
-"""Nothing a sandboxed agent can write in the store chooses what runs outside its sandbox.
+"""Nothing a sandboxed agent writes chooses what runs outside its sandbox.
 
-The rule. The store (``context.db``) is writable from inside an agent's sandbox: every
-board call opens it for writing (``AgentAdapter.store_access``), so a prompt-injected
-Codex coder can rewrite any row in it, its own and every other agent's. No value read
-from the store may therefore choose what runs outside the sandbox: an executable, a
+The rule. The store is read-only inside an agent's sandbox, all of it
+(:func:`~aisquare.core.agent_adapters.types.store_read_only`), and its board calls go
+through its launch's broker, outside it (``services.store_broker``): nothing in a
+sandbox writes the store. Before the broker every board call opened it for writing,
+and a prompt-injected Codex coder could rewrite any row in it, its own and every
+other agent's; what follows was the defence then, and stays as defence in depth. No
+value read from the store may choose what runs outside the sandbox: an executable, a
 native argument, the directory or the home an unsandboxed process starts in, the
 conversation it resumes, or the role, agent, worktree, account or permission a
 replacement runs with (review r2 of #113, finding 3; r3, findings 1, 2, 3 and 5; r4,

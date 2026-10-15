@@ -574,12 +574,14 @@ def _server_at(address: _Address, config: FleetSettings | None = None) -> TmuxSe
 
 # --- where the fleet acts: the ONE resolver ------------------------------------------
 #
-# The store is writable from an agent's sandbox (`core.launch_seal`), so no value read
-# from it — a row's pane, socket, socket path or agent, a project's codename — may say
-# where the fleet types, reads or kills. Every tmux question about a row's window, and
-# every act on it — typing (`tell`, the nudge, a spawn's prompt), `/exit` and the kill
-# (`stop`, and restart, switch, the hand-over and `shutdown` through it), liveness (the
-# listings, `reap`, a spawn's and a restart's reconcile), lingering and late panes,
+# The store is read-only in an agent's sandbox (`types.store_read_only`; its board calls
+# go through its launch's broker, `services.store_broker`), and still, as defence in
+# depth (`core.launch_seal`), no value read from it — a row's pane, socket, socket path
+# or agent, a project's codename — may say where the fleet types, reads or kills. Every
+# tmux question about a row's window, and every act on it — typing (`tell`, the nudge, a
+# spawn's prompt), `/exit` and the kill (`stop`, and restart, switch, the hand-over and
+# `shutdown` through it), liveness (the listings, `reap`, a spawn's and a restart's
+# reconcile), lingering and late panes,
 # `shutdown`'s sessions, `rename` and `attach` — is put to a `PlacedPane` or a
 # `PlacedSession`, and only `resolve_place` mints those from a launch record (the
 # recordless kill's `_recordless_pane` and `--all`'s `_listed_session` from what tmux
@@ -779,7 +781,8 @@ def take_census() -> None:
     is. The doctor, which writes nothing, never takes it."""
     if launch_seal.census_taken() or launch_seal.records_kept():
         # Taken already; or never to be: records were kept here before it, by an aisquare
-        # that took none, and an agent sandboxed since may have written the store.
+        # that took none, and an agent sandboxed since under that aisquare's profile,
+        # which left the store writable, may have written it.
         return
     with suppress(Exception):
         with store_session() as store:
@@ -846,7 +849,8 @@ def resolve_place(
     boot, the time and the agent its launch record holds (``launch_seal.WindowPlace``), as
     tmux answered the spawner and as the spawner resolved the agent — or :class:`Unplaced`
     with why. Never the row's ``pane_id``, ``tmux_socket``, ``socket_path`` or ``agent``, nor
-    the project's codename: an agent's sandbox writes those.
+    the project's codename: store columns, which a sandbox could write before its
+    broker (``services.store_broker``) and no record vouches for.
 
     Pointed at any pane of the user's, ``tell`` typed there and ``stop`` typed ``/exit`` and
     killed that window (review r5 of #113, finding 1); with its ``agent`` set to another's,
@@ -2619,8 +2623,8 @@ def spawn(
     elif identity.session_id is not None:
         session = launch_seal.SessionFacts(id=identity.session_id, agent=selected.adapter.id)
     # Everything a replay starts this agent with, written before it runs, by this
-    # process alone (`core.launch_seal`): the store is writable from an agent's
-    # sandbox, the records are not, and nothing reads the store to write one.
+    # process alone (`core.launch_seal`): the records, as the whole store now, are
+    # read-only to an agent's sandbox, and nothing reads the store to write one.
     launch_record = launch_seal.LaunchRecord(
         id=agent_id,
         project_id=project.id,
@@ -2681,9 +2685,9 @@ def spawn(
     created_at, boot = _now(), tmux_core.boot_id()
     # Where the window is, beside its record, before the row names it: every line the
     # fleet types into the agent, and every kill of its window, is aimed there, never at
-    # the row's pane and socket, which an agent's sandbox writes (review r5 of #113,
-    # finding 1). A window whose place cannot be recorded is one no `tell` or `stop`
-    # could reach, so it is not left running.
+    # the row's pane and socket, which a sandbox could write before its broker (review
+    # r5 of #113, finding 1). A window whose place cannot be recorded is one no `tell`
+    # or `stop` could reach, so it is not left running.
     unplaced = launch_seal.placed(
         agent_id,
         launch_seal.WindowPlace(
@@ -4211,9 +4215,9 @@ def _queue_message(
 
     It runs with the caller's rights, outside any sandbox, so everything it runs with
     is the row's launch record's (``core.launch_seal``): the binary, and the thread and
-    the home the agent's own hook reported, never the store's columns, which an agent's
-    sandbox writes (review r3 of #113, finding 1; r4, finding 1's class). The thread,
-    even so, only in the shape the agent makes it (r3, finding 2).
+    the home the agent's own hook reported, never the store's columns, which a sandbox
+    could write before its broker (review r3 of #113, finding 1; r4, finding 1's class).
+    The thread, even so, only in the shape the agent makes it (r3, finding 2).
     """
     if adapter.queue_args(session.id, text) is None:
         return None  # no queue: asked before anything it would run with is read
@@ -6632,13 +6636,13 @@ def _resumable(
     (``capabilities.assigns_session_id``), resumed by the transcript's path; another
     agent's is its native id (Codex resumes ``codex resume <id>`` from its home). Both
     are the record's, as the agent's own hook reported them (``core.launch_seal``),
-    never the board session's columns, which an agent's sandbox writes: a transcript
-    there was a conversation of the sandbox's making, its user turns included (review
-    r4 of #113, finding 1). And the native id only in the shape the agent makes it (a
-    UUID; ``codex resume`` reads one that starts with ``-`` as its own option, r3,
-    finding 2). An agent that never reached a hook has no session recorded, and one
-    recorded with no native id has nothing to name the thread by: both start fresh
-    and say so.
+    never the board session's columns, which a sandbox could write before its broker:
+    a transcript there was a conversation of the sandbox's making, its user turns
+    included (review r4 of #113, finding 1). And the native id only in the shape the
+    agent makes it (a UUID; ``codex resume`` reads one that starts with ``-`` as its own
+    option, r3, finding 2). An agent that never reached a hook has no session recorded,
+    and one recorded with no native id has nothing to name the thread by: both start
+    fresh and say so.
     """
     facts = record.session
     if facts is None:
@@ -6698,7 +6702,8 @@ def _launch_record(project: ProjectInfo, agent: FleetAgent, verb: str) -> launch
     (``core.launch_seal``) — refused, with the reason, when there is none to take.
 
     The replacement runs outside any sandbox, and the store, the row and the project's
-    with it, is writable from an agent's sandbox: nothing it runs comes from there, so a
+    with it, was writable from an agent's sandbox before its broker (read-only there
+    now, ``types.store_read_only``): nothing it runs comes from there, so a
     row with no record is refused, never replayed on the row's values or on today's
     resolution of a role the row names (review r2 of #113, finding 3; r3, finding 5;
     r4, findings 2, 5 and 6). ``project`` is the store's word for the agent's project,
@@ -6899,8 +6904,8 @@ def restart(
     # `spawn`'s refusals for the binary and the account, asked here for the same
     # reason. The account is the record's slot, whose number outlives a removed slot,
     # and none when its spawn chose none: never the one the session's row says it ran
-    # under, a column an agent's sandbox writes (review r4 of #113, finding 6). The
-    # replacement is started on what was resolved here.
+    # under, a column a sandbox could write before its broker (review r4 of #113,
+    # finding 6). The replacement is started on what was resolved here.
     slot = record.account_slot
     # An account of the agent the replacement runs: a Codex row's slot is a Codex
     # slot, which the resolver refused as "not a Claude Code account" for want of it.
@@ -7569,10 +7574,12 @@ def nudge_manager(project_id: str, *, reason: str) -> bool:
     A tmux that refuses to be asked is a writer that may not reach it: a command in
     Codex's sandbox, which runs in namespaces of its own where the fleet's socket is
     ``Operation not permitted`` (measured on 0.162.1). Every board write a sandboxed
-    agent made lost its nudge there, and the fleet stalled on a waiting manager. The
-    sandbox is not widened to the socket — that would let it type into any pane — so
-    the nudge is left owed (:data:`NUDGE_OWED`) for a process outside it to send:
-    :func:`deliver_owed_nudge`, from the writer's own hooks, which Codex runs outside.
+    agent made there lost its nudge, and the fleet stalled on a waiting manager; its
+    broker (``services.store_broker``) now runs those writes outside the sandbox, and
+    this is for one tmux refuses all the same. The sandbox is not widened to the socket
+    — that would let it type into any pane — so the nudge is left owed
+    (:data:`NUDGE_OWED`) for a process outside it to send: :func:`deliver_owed_nudge`,
+    from the writer's own hooks, which Codex runs outside.
     """
     return _nudge(project_id, owe=True)
 
@@ -7604,8 +7611,8 @@ def _nudge(project_id: str, *, owe: bool) -> bool:
     otherwise :func:`deliver_owed_nudge`'s, due only for unread news. Typed into the pane
     the manager's launch record places, by its record's agent's rules (:func:`resolve_place`),
     never its row's: a delivery runs from a sandboxed agent's own hooks, outside its
-    sandbox, and the row is the sandbox's to write (review r5 of #113, finding 1; r6,
-    finding 1)."""
+    sandbox, and the row was the sandbox's to write before its broker (review r5 of
+    #113, finding 1; r6, finding 1)."""
     try:
         with store_session() as store:
             found = _by_label(store, project_id, MANAGER_LABEL, live_only=True)

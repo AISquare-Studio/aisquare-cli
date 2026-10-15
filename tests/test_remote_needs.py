@@ -2622,6 +2622,69 @@ def test_a_limit_is_held_by_the_hand_over_question_asked_with_the_agents_own_slo
     assert asked == [], "settled before it: a manager, a near reset, or `wait`"
 
 
+def test_the_hand_over_question_is_asked_once_a_scan_and_only_of_a_limited_row() -> None:
+    """Review of #259, round 14: the scan read ``limit_settings`` every 3 s whatever the rows
+    said — a store open, the registry's reconcile, every account's ``.claude.json`` parsed —
+    for an answer only a limited row uses. Asked of a limited row alone, once a scan for
+    its slot, however many rows are on it."""
+    asked: list[int | None] = []
+
+    def hands_over(leaving: int | None) -> bool:
+        asked.append(leaving)
+        return True
+
+    working = _row("coder-1")
+    fleet = Fleet(agents=[_status(working, "working", _session(working))])
+    sources = replace(_sources(fleet), hands_over=hands_over)
+    scan_needs_you(sources, now=NOW, dismissed=())
+    assert asked == [], "no limited row: never asked"
+
+    rows = [_row(label).model_copy(update={"account_slot": 2}) for label in ("coder-1", "coder-2")]
+    resets = NOW + timedelta(hours=3)
+    limited = [
+        _status(row, "limited", _session(row, state="limited", resets=resets)) for row in rows
+    ]
+    sources = replace(_sources(Fleet(agents=limited)), hands_over=hands_over)
+    items = scan_needs_you(sources, now=NOW, dismissed=())
+    assert [item.kind for item in items] == ["limited", "limited"]
+    assert asked == [2], "one question for the slot, in one scan"
+
+
+def test_the_live_hand_over_question_is_kept_a_minute_and_a_raise_is_a_yes(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 14: the question could raise where ``accounts_settings`` never
+    could — an ``OSError`` listing the slot directories — and a raise there was the
+    project's failed read: a 503 on every action. It is a yes, as an unreadable registry
+    is, and kept a minute, as an agent no hand-over can move stays limited for hours."""
+    from aisquare.services import claude_accounts as claude_accounts_service
+
+    calls: list[int | None] = []
+
+    def unreadable(leaving: int | None) -> bool:
+        calls.append(leaving)
+        raise OSError("[Errno 13] Permission denied: 'claude-accounts'")
+
+    clock = [1000.0]
+    monkeypatch.setattr(remote_needs, "_hands_over", {})
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(claude_accounts_service, "somewhere_to_hand_over", unreadable)
+    hands_over = remote_needs.live_needs_sources().hands_over
+
+    assert hands_over(2) is True and hands_over(2) is True
+    assert calls == [2], "kept"
+    clock[0] += remote_needs._NEEDS_HANDS_OVER_KEPT
+    assert hands_over(2) is True and calls == [2, 2], "asked again a minute on"
+
+    monkeypatch.undo()
+    monkeypatch.setattr(
+        claude_accounts_service,
+        "_read_arranged",
+        lambda: (_ for _ in ()).throw(OSError("[Errno 13] Permission denied")),
+    )
+    assert claude_accounts_service.somewhere_to_hand_over(2), "as an unreadable registry is"
+
+
 def test_a_limits_reset_reaches_the_phone_as_an_instant_never_the_machines_clock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

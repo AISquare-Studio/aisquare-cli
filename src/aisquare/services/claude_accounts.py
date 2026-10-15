@@ -868,7 +868,10 @@ def somewhere_to_hand_over(leaving: int | None = None) -> bool:
     (review of #259, round 13). ``choose`` drops its "nothing to pick" note for ``pick`` on
     the same grounds.
     """
-    accounts, registry_note = _read_arranged()
+    try:
+        accounts, registry_note = _read_arranged()
+    except OSError as exc:  # the slot directories could not be listed: as unreadable
+        accounts, registry_note = [], f"accounts unreadable ({exc})"
     if registry_note is not None:
         return True
     usable = [

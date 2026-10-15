@@ -2785,8 +2785,8 @@ def _needs_blind_kept(
 
 
 def _needs_read_once(sources: NeedsSources) -> NeedsSources:
-    """``sources`` with each board's day, window and sessions, each tmux server's answer and
-    the accounts read once for a whole scan.
+    """``sources`` with each board's day, window and sessions, each tmux server's answer, the
+    accounts and each slot's hand-over question read once for a whole scan.
 
     Under ``AISQUARE_TEAM_HUB`` every project's board is the hub's, and each project's
     scan read the same day, window and sessions of it again: N copies every 3 s
@@ -2811,6 +2811,7 @@ def _needs_read_once(sources: NeedsSources) -> NeedsSources:
         board_sessions=once("sessions", sources.board_sessions),
         tmux_answers=once("tmux", sources.tmux_answers),
         accounts=once("accounts", sources.accounts),
+        hands_over=once("hands over", sources.hands_over),
     )
 
 
@@ -3353,7 +3354,7 @@ def live_needs_sources() -> NeedsSources:
         task_status=needs_task_status,
         transcript_tail=_needs_cached_tail,
         accounts=claude_accounts_service.accounts_settings,
-        hands_over=claude_accounts_service.somewhere_to_hand_over,
+        hands_over=_needs_hands_over_kept,
         has_live_agents=needs_rows_live,
         tmux_answers=needs_tmux_answers,
         session_event=needs_session_event,
@@ -3429,6 +3430,49 @@ def _needs_with_board_sessions(statuses: list[FleetAgentStatus]) -> list[FleetAg
         return found
 
     return [again(status) for status in statuses]
+
+
+_NEEDS_HANDS_OVER_KEPT = 60.0
+"""Seconds an answer of :func:`_needs_hands_over_kept` is kept: the question opens the store
+and parses every account's ``.claude.json`` (tens of MB) and ``.credentials.json``, and an
+agent that no hand-over can move stays limited for hours, every 3 s scan of them."""
+_hands_over: dict[tuple[str, int | None], tuple[float, bool]] = {}
+_hands_over_lock = threading.Lock()
+
+
+def _needs_hands_over_kept(leaving: int | None) -> bool:
+    """``claude_accounts.somewhere_to_hand_over(leaving)`` for the scan: kept a minute
+    (:data:`_NEEDS_HANDS_OVER_KEPT`), by the machine's accounts directory and the slot,
+    and fail-open.
+
+    It is asked only of a limited row that no reset, live manager or ``wait`` settles
+    first (:func:`_needs_limited_push`). Read as ``[accounts]`` itself was, every scan
+    whatever the rows said, it cost every 3 s scan a store open, the registry's
+    reconcile and a parse of each account's files, and it could raise where
+    ``accounts_settings`` never could: an ``OSError`` listing the slot directories was the
+    project's failed read, a 503 on every action there (review of #259, round 14). A
+    question that raises is a yes, as an unreadable registry is: the hand-over's worker
+    says on the board why it switched nothing, and the push waits for it.
+    """
+    from aisquare.core import claude_accounts as claude_accounts_core
+    from aisquare.services import claude_accounts as claude_accounts_service
+
+    key = (str(claude_accounts_core.accounts_root()), leaving)
+    now = time.monotonic()
+    with _hands_over_lock:
+        kept = _hands_over.get(key)
+    if kept is not None and now - kept[0] < _NEEDS_HANDS_OVER_KEPT:
+        return kept[1]
+    try:
+        answer = claude_accounts_service.somewhere_to_hand_over(leaving)
+    except Exception as exc:
+        log.debug("remote: whether slot %s can be handed over is not known: %s", leaving, exc)
+        answer = True
+    with _hands_over_lock:
+        if len(_hands_over) > 64:  # one accounts directory a machine; bounded all the same
+            _hands_over.clear()
+        _hands_over[key] = (now, answer)
+    return answer
 
 
 _tails: dict[str, tuple[tuple[int, int], TranscriptTail | None]] = {}

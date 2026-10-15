@@ -1220,9 +1220,11 @@ def action_tell_auto(
     ``fleet tell`` took for one waiting at its prompt, whatever it showed. The board
     reaches an agent through aisquare's hooks, so of one started without them (``no
     hooks``) ``how`` says the note is not shown to it, and that Interrupt & tell, whose
-    Escape goes first, types the text. ``fleet tell`` pastes before it presses Enter,
-    and files a note when that fails, so it can fail with the text already in the pane:
-    on the trail.
+    Escape goes first, types the text. ``fleet tell`` pastes before it presses Enter
+    (``fleet.type_then_enter``): a paste refused or not answered in time is filed as a
+    note, the second of them perhaps typed as well (``delivered=maybe``); an Enter that
+    did not go through files nothing, the text left at the agent's prompt
+    (``fleet.pasted_unsent``). Either way the trail says how it ended.
     """
     from aisquare.services import fleet as fleet_service
 

@@ -725,6 +725,28 @@ def test_each_dialog_drawn_while_a_question_waits_is_a_card_of_its_own() -> None
     assert _one(landed).id == two.id, "its notice landing names it the same: one push"
 
 
+def test_a_dialog_drawn_while_a_question_waits_is_dated_by_the_scan_that_first_saw_it() -> None:
+    """Review of #259, round 11, 8/13: the card was dated when the question was asked, so a
+    sub-agent's prompt drawn 25 minutes after it was a card 25 minutes old, in the feed and
+    in ``asq remote needs``. It is dated by the first scan that saw it, and keeps that date."""
+    row = _row()
+    asked_at = NOW - timedelta(minutes=25)
+    session = _session(row, state="working", seen=asked_at)
+    task, ask = replace(_TASK, at=asked_at), replace(_ASK, at=asked_at)
+    fleet = Fleet(
+        agents=[_status(row, "working", session)],
+        screen=_bash_screen("npm test", above=(f"● {_TASK.summary}",)),
+    )
+    fleet.tails[f"/transcripts/{row.label}.jsonl"] = _tail(task, ask, at=asked_at)
+    memory: dict[str, datetime] = {}
+    (first,) = scan_needs_you(_sources(fleet), now=NOW, dismissed=(), first_seen=memory)
+    assert first.reason == "coder-1 shows a dialog that needs you"
+    assert (first.since, first.push_after) == (NOW, NOW)
+    later = NOW + timedelta(minutes=5)
+    (again,) = scan_needs_you(_sources(fleet), now=later, dismissed=(), first_seen=memory)
+    assert (again.id, again.since, again.push_after) == (first.id, NOW, NOW)
+
+
 def test_a_scan_that_cannot_read_a_screen_keeps_its_last_cards_and_makes_none_of_its_own() -> None:
     """Review of #259, round 11, 5/13: a question queued behind a sub-agent at work, whose
     screen could not be captured, was "shows a dialog that needs you", pushed while nothing

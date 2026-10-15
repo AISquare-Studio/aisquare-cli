@@ -1114,7 +1114,10 @@ def _needs_dialog_item(
     session, agent = status.session, status.agent
     seen = session.last_seen_at if session is not None else now
     if asked is not None and drawn is not None:
-        subject, since = f"dialog:{asked.tool_use_id}:{drawn}", asked.at or seen
+        # Drawn when no fact says: as of now, dated by the first scan that saw it (round 11,
+        # 8/13). It was the question's asking, and a sub-agent's prompt drawn 25 minutes
+        # after it was a card 25 minutes old.
+        subject, since = f"dialog:{asked.tool_use_id}:{drawn}", now
     else:
         seq = "-" if attention_event is None else str(attention_event.seq)
         subject, since = f"attention:{seq}:{seen.isoformat()}", seen
@@ -2055,8 +2058,8 @@ def _needs_scan_project(
     by the stop in its own day (:func:`needs_from_board`), and read a day from now, a result
     an hour after a stop became a card once the stop was a day old (round 25, 3/4).
     ``first_seen`` dates the items whose facts carry no date (a pane gone, tmux
-    not answering) from the first scan that saw them; ``seen`` collects what
-    this scan saw, so the caller can forget the rest.
+    not answering, a dialog drawn: an agent's item dated ``now``) from the first scan that
+    saw them; ``seen`` collects what this scan saw, so the caller can forget the rest.
 
     The board's sessions and events are read from ``board_id``, the project's board
     (:func:`_needs_board_of`), its rows by its own id. Under ``AISQUARE_TEAM_HUB``
@@ -2118,7 +2121,8 @@ def _needs_scan_project(
             pane_output=_needs_output_of(sources, status, reads),
             pane_screen=_needs_screen_of(sources, status, reads),
         ):
-            items.append(_needs_dated(item, first_seen, seen) if item.kind == "lost" else item)
+            undated = item.kind == "lost" or item.since == now
+            items.append(_needs_dated(item, first_seen, seen) if undated else item)
     own = board_id == project.id
     exits = board if own else _needs_exits(sources, project, day, reads) or []
     items.extend(

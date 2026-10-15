@@ -1774,11 +1774,12 @@ def spawn(
             f"--account selects an account, and {selected.adapter.label} has no account slots"
         )
 
-    # Where its launch record goes, asked before the codename and the worktree, as every
-    # refusal that needs no window is (#139): refused once they were made, a spawn left a
-    # captured project and a new worktree and branch for an agent that never started
-    # (review r5 of #113, finding 9). What the record holds is written below.
-    unrecordable = launch_seal.ensure_dir()
+    # Whether its launch record can be written, asked before the codename and the worktree,
+    # as every refusal that needs no window is (#139): refused once they were made, a spawn
+    # left a captured project and a new worktree and branch for an agent that never started
+    # (review r5 of #113, finding 9), a directory that is there but takes no write included
+    # (SMOKE4). What the record holds is written below.
+    unrecordable = launch_seal.writable()
     if unrecordable is not None:
         raise FleetError(_unrecorded_refusal(unrecordable))
     # The spawn goes ahead: the codename names its tmux session and its branch. A

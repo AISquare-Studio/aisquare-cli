@@ -19,6 +19,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tomllib
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -1792,7 +1793,9 @@ def test_a_refusal_whose_note_was_not_written_is_said_by_the_next(
 
 
 @pytest.mark.parametrize("kind", ["codex", "claude-code"])
+@pytest.mark.parametrize("seals", ["a file in its place", "a read-only directory"])
 def test_a_spawn_refused_for_its_record_makes_no_worktree_and_captures_no_project(
+    seals: str,
     kind: str,
     tmux: FakeTmux,  # noqa: F811
     codex_on_path: Path,  # noqa: F811
@@ -1802,18 +1805,30 @@ def test_a_spawn_refused_for_its_record_makes_no_worktree_and_captures_no_projec
     """Review r5 of #113, finding 9: refused once the codename and the worktree were made,
     a spawn whose record could not be written left a captured project and a new worktree
     and branch for an agent that never started. Asked first, as spawn's #139 order asks
-    every refusal that needs no window. No agent starts without its record: it holds the
-    pane every ``tell`` and ``stop`` is aimed at."""
-    shutil.rmtree(launch_seal.seals_dir(), ignore_errors=True)
-    launch_seal.seals_dir().write_text("not a directory", encoding="utf-8")
+    every refusal that needs no window, by writing in the directory: SMOKE4 found one that
+    is there but read-only refused only at the record's own write. No agent starts without
+    its record: it holds the pane every ``tell`` and ``stop`` is aimed at."""
+    directory = launch_seal.seals_dir()
+    if seals == "a file in its place":
+        shutil.rmtree(directory, ignore_errors=True)
+        directory.write_text("not a directory", encoding="utf-8")
+    else:
+        if sys.platform == "win32" or os.geteuid() == 0:
+            pytest.skip("a mode that refuses this user a write is a POSIX non-root fact")
+        directory.mkdir(parents=True, exist_ok=True)
+        directory.chmod(0o555)
     with store_session() as store:
         before = store.get_project(project.id)
     branches = subprocess.run(
         ["git", "branch", "--list"], cwd=project.root, capture_output=True, text=True, check=True
     ).stdout
 
-    with pytest.raises(fleet_service.FleetError, match="no agent is started without one"):
-        fleet_service.spawn(project, "coder", agent=kind, worktree=True)
+    try:
+        with pytest.raises(fleet_service.FleetError, match="no agent is started without one"):
+            fleet_service.spawn(project, "coder", agent=kind, worktree=True)
+    finally:
+        if directory.is_dir():
+            directory.chmod(0o755)
 
     with store_session() as store:
         assert store.get_project(project.id) == before, "not captured, no codename"

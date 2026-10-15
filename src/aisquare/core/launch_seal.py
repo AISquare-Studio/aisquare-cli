@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -163,6 +164,26 @@ def ensure_dir() -> str | None:
         directory.mkdir(exist_ok=True)
     except OSError as exc:
         return f"{directory} could not be made ({exc.strerror or exc})"
+    return None
+
+
+def writable() -> str | None:
+    """``None`` when a record can be written in :func:`seals_dir` now, otherwise why not:
+    the directory made (:func:`ensure_dir`), then a file created, written and removed in
+    it, as :func:`write` writes one. What a spawn asks before it captures the project or
+    makes a worktree: a directory that is there but takes no write (read-only, its disk
+    full) refused the record only after both were made (review r5 of #113, finding 9;
+    SMOKE4). Never raises."""
+    why = ensure_dir()
+    if why is not None:
+        return why
+    directory = seals_dir()
+    try:
+        with tempfile.NamedTemporaryFile(dir=directory, prefix=".probe-", suffix=".tmp") as probe:
+            probe.write(b"{}\n")
+            probe.flush()
+    except OSError as exc:
+        return f"{directory} cannot be written ({exc.strerror or exc})"
     return None
 
 

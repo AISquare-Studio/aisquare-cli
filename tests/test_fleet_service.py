@@ -2522,6 +2522,43 @@ def test_a_write_tmux_typed_a_part_of_is_maybe_and_says_how_much(cause: TmuxErro
     assert said.endswith("— read its live screen before you send it again"), said
 
 
+def test_a_chain_of_writes_says_what_went_in_before_the_one_that_did_not() -> None:
+    """Review of #259, round 12, 8/9: ``pane_writes`` answered only the write that failed, and
+    each caller worked out by hand what was already in the pane, a quick answer not at all
+    (1/9). It says what went in (``went``); refused past it, the chain is ``unsent``, and
+    one sentence and one audit word say it for every caller."""
+    typed: list[str] = []
+
+    def refused() -> None:
+        raise TmuxError("send-keys failed (fake)")
+
+    def late() -> None:
+        raise TmuxTimedOut("tmux did not answer within 30s: send-keys")
+
+    wrote = fleet_service.pane_writes(
+        ("the text", lambda: typed.append("text")),
+        None,
+        ("Enter", refused),
+        ("more", lambda: typed.append("more")),
+    )
+    assert (wrote.typed, wrote.what, wrote.went, wrote.audited) == (
+        "unsent",
+        "Enter",
+        ("the text",),
+        "delivered=unsent",
+    )
+    assert typed == ["text"], "nothing after the write that did not go"
+    assert wrote.said("coder-1", press="press Enter on the pad") == (
+        "coder-1: typed it at its prompt, but tmux could not press Enter (send-keys failed "
+        "(fake)) — press Enter on the pad to send it"
+    )
+    first = fleet_service.pane_writes(("the text", refused), ("Enter", lambda: None))
+    assert (first.typed, first.went, first.audited) == ("no", (), "failed")
+    waits = fleet_service.pane_writes(("the keys", lambda: None), ("Enter", late))
+    assert (waits.typed, waits.went, waits.audited) == ("maybe", ("the keys",), "delivered=maybe")
+    assert "it may still arrive, and send it" in waits.said("coder-1", press="press Enter")
+
+
 def test_tell_says_a_paste_that_timed_out_may_be_typed_as_well_as_noted(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -446,7 +446,8 @@ def test_a_send_that_fails_after_typing_is_still_on_the_audit_trail(
     runtime: Runtime, pane: FakePane, tmp_path: Path
 ) -> None:
     """The text reached the pane, then Enter failed: the write answered 400 and used to
-    leave no audit line, though a live agent had been typed into (review of #243)."""
+    leave no audit line, though a live agent had been typed into (review of #243). The line
+    says the text waits there, unsent (review of #259, round 12, 8/9)."""
     client = make_client(build_app(runtime, sources=_sources(), dist_dir=tmp_path))
     device_id = unlock(client, runtime).json()["device"]["id"]
     runtime.set_allow_write(True)
@@ -458,7 +459,7 @@ def test_a_send_that_fails_after_typing_is_still_on_the_audit_trail(
     assert pane.sent == [("literal", "rm -rf")]
     _ts, who, endpoint, summary = _audit_lines()[-1]
     assert (who, endpoint) == (device_id, "send-keys")
-    assert summary == "coder-1@prj_p text=6ch keys=0 enter=True failed"
+    assert summary == "coder-1@prj_p text=6ch keys=0 enter=True delivered=unsent"
 
 
 def test_a_send_of_32_keys_that_fails_still_says_failed_and_enter_on_its_audit_line(

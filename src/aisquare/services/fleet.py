@@ -36,7 +36,7 @@ import subprocess
 import time
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
@@ -285,7 +285,8 @@ class TellResult:
 @dataclass(frozen=True)
 class PaneWrite:
     """How one write into an agent's pane ended (:func:`pane_write`): ``yes``, tmux typed it;
-    ``no``, tmux refused it and typed nothing; ``maybe``, tmux did not answer in time
+    ``no``, tmux refused it and typed nothing; ``unsent``, refused past the writes of its chain
+    that went in (``went``); ``maybe``, tmux did not answer in time
     (``TmuxTimedOut``), and a wedged server may still type it once it recovers, or it typed
     a part before it failed (``TmuxPartlyTyped``).
 
@@ -301,6 +302,23 @@ class PaneWrite:
     typed: Typed
     what: str
     error: TmuxError | None = None
+    went: tuple[str, ...] = ()
+    """The writes of a chain (:func:`pane_writes`) that went through before ``what``, which are
+    in the pane whatever came of it: refused past them, it is ``unsent``."""
+
+    def said(self, label: str, *, press: str, again: str = "send it again") -> str:
+        """The sentence for an ``unsent`` or ``maybe`` write into ``label``'s pane: past a write
+        that went in (``went``), what waits at its prompt, or its Enter on its way
+        (:func:`pasted_unsent`, ``press``); otherwise what tmux may still type (:meth:`late`,
+        ``again``). A ``no`` typed nothing, and its caller words it."""
+        if self.went:
+            return f"{label}: {pasted_unsent(self, label, press=press, put='typed').how}"
+        return self.late(label, again=again)
+
+    @property
+    def audited(self) -> str:
+        """The word its audit line ends on: ``failed`` for a ``no``, else ``delivered=…``."""
+        return "failed" if self.typed == "no" else f"delivered={self.typed}"
 
     def late(self, label: str, *, then: str = "", again: str = "send it again") -> str:
         """``maybe``'s sentence: ``what`` may still reach ``label``'s pane (and ``then``), or a
@@ -339,15 +357,21 @@ def pane_write(what: str, write: Callable[[], object]) -> PaneWrite:
 def pane_writes(*writes: tuple[str, Callable[[], object]] | None) -> PaneWrite:
     """``writes`` in turn, each ``(what, write)`` as :func:`pane_write` takes it (``None``: none
     here), up to the first that did not go through: how that one ended, its ``what`` saying
-    which it was; the last one's when all did. What comes after a write tmux refused or did
-    not answer would land beside it, or ahead of what may still arrive. ``send-keys`` and a
-    quick answer chained it by hand, the first beside a stand-in "nothing" write (review of
-    #259, round 11, 12/13)."""
+    which it was and ``went`` the ones before it, in the pane; the last one's when all did.
+    What comes after a write tmux refused or did not answer would land beside it, or ahead of
+    what may still arrive. ``send-keys`` and a quick answer chained it by hand, the first
+    beside a stand-in "nothing" write (review of #259, round 11, 12/13). And each worked out
+    by hand what was in the pane before the write that failed, a quick answer not at all
+    (round 12, 1/9 and 8/9): :meth:`PaneWrite.said` says it, :attr:`PaneWrite.audited`
+    audits it."""
     wrote = PaneWrite("yes", "nothing")
+    went: tuple[str, ...] = ()
     for what, write in filter(None, writes):
         wrote = pane_write(what, write)
         if wrote.typed != "yes":
-            break
+            typed: Typed = "unsent" if went and wrote.typed == "no" else wrote.typed
+            return replace(wrote, typed=typed, went=went)
+        went = (*went, what)
     return wrote
 
 
@@ -371,13 +395,13 @@ def type_then_enter(
     ``done``, or :func:`pasted_unsent` (``press``). The three wrote paste, Enter and
     :func:`pasted_unsent` out each in words of its own (review of #259, round 11, 12/13).
     """
-    pasted = pane_write(what, lambda: server.paste(pane_id, text))
-    if pasted.typed != "yes":
-        return pasted
-    entered = pane_write("Enter", lambda: server.send_keys(pane_id, "Enter"))
-    if entered.typed != "yes":
-        return pasted_unsent(entered, label, press=press)
-    return TellResult("yes", done)
+    wrote = pane_writes(
+        (what, lambda: server.paste(pane_id, text)),
+        ("Enter", lambda: server.send_keys(pane_id, "Enter")),
+    )
+    if wrote.typed == "yes":
+        return TellResult("yes", done)
+    return pasted_unsent(wrote, label, press=press) if wrote.went else wrote
 
 
 def pasted_unsent(entered: PaneWrite, label: str, *, press: str, put: str = "pasted") -> TellResult:

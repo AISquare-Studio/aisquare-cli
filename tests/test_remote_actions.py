@@ -2516,6 +2516,26 @@ def test_a_send_keys_that_did_not_go_through_is_in_the_servers_log(
     assert ("did not answer" in record.getMessage()) is (fails == "timing_out"), record
 
 
+def test_send_keys_whose_keys_went_in_says_so_when_its_enter_did_not(
+    phone: Phone, pane: FakePane, project: ProjectInfo
+) -> None:
+    """Review of #259, round 12, 8/9: what went in before the write that failed was worked out
+    by hand for text alone, so keys typed and their Enter refused answered "coder-1: <tmux
+    error>", audited ``failed``, as if nothing had reached the pane: a Send again pressed
+    Down a second time, and its Enter took the option after the one meant."""
+    _row(project)
+    pane.failing.add("Enter")
+    response = phone.post("send-keys", agent=LABEL, keys=["Down"], enter=True)
+    assert response.status_code == 400 and response.json()["error"] == "write_failed"
+    assert response.json()["message"] == (
+        "coder-1: typed it at its prompt, but tmux could not press Enter (send-keys Enter: lost "
+        "server) — press Enter on the pad to send it"
+    )
+    assert pane.sent == [("%7", "key", "Down")]
+    ((_, line),) = phone.audit()
+    assert line.endswith(" delivered=unsent"), line
+
+
 @pytest.mark.parametrize("fails", ["Enter", "a later chunk"])
 def test_send_keys_whose_text_went_in_says_it_is_at_the_prompt_when_what_followed_did_not(
     phone: Phone,
@@ -2550,7 +2570,7 @@ def test_send_keys_whose_text_went_in_says_it_is_at_the_prompt_when_what_followe
             "coder-1: typed it at its prompt, but tmux could not press Enter (send-keys "
             "Enter: lost server) — press Enter on the pad to send it"
         )
-        verdict = "failed"
+        verdict = "delivered=unsent"  # round 12, 8/9: what went in is not `failed`
     else:
         assert log == ["part of literal"], "no Enter after the text that did not all go"
         assert said.startswith(

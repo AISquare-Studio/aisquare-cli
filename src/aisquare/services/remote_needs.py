@@ -4059,23 +4059,16 @@ def _needs_answer_now(
             current = [one.needs_item_json() for one in shown]
             raise RequestError(409, "stale", gone, current=current)
         wrote = _needs_send(snap.status, keys, text, enter)
-        if wrote.typed != "yes" and wrote.what == "Enter":
-            # The answer is at the prompt, unsent or its Enter on its way: never typed again.
-            watcher.needs_answered(item.id)
-            unsent = fleet_service.pasted_unsent(
-                wrote, label, press="press Enter on the pad", put="typed"
-            )
-            said, verdict = f"{label}: {unsent.how}", f"delivered={unsent.typed}"
-            raise RequestError(503, "fleet_unavailable", said, audit=f"{summary} {verdict}")
-        if wrote.typed == "maybe":
-            # Unanswered, not refused: a wedged server may still type it once it recovers, and
-            # a card left live meanwhile typed its digit again (review of #259, round 8, 2/9).
-            watcher.needs_answered(item.id)
-            said = wrote.late(label, again="answer again")
-            raise RequestError(503, "fleet_unavailable", said, audit=f"{summary} delivered=maybe")
         if wrote.typed == "no":
             said = f"tmux could not type it: {wrote.error}"
             raise RequestError(503, "fleet_unavailable", said, audit=f"{summary} failed")
+        if wrote.typed != "yes":
+            # In the pane, or on its way: a wedged server may still type it once it recovers,
+            # and a card left live meanwhile typed its digit again (review of #259, round 8,
+            # 2/9); an answer whose Enter did not go waits at the prompt (round 12, 1/9).
+            watcher.needs_answered(item.id)
+            said = wrote.said(label, press="press Enter on the pad", again="answer again")
+            raise RequestError(503, "fleet_unavailable", said, audit=f"{summary} {wrote.audited}")
         watcher.needs_answered(item.id)
         return {"answered": item.id, "agent": label, "project": project.id, "sent": True}, summary
 

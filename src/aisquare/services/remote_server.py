@@ -3674,21 +3674,15 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
                 # A press that may land counts (review of #259, round 7, 4/9).
                 exit_keys.exit_keys_sent((target.id, label))
             if wrote.typed != "yes":
-                if text and wrote.what == "Enter":
-                    # The text is at its prompt either way: a Send again typed it a second
-                    # time beside the first (review of #259, round 11, 4/13).
-                    unsent = fleet_service.pasted_unsent(
-                        wrote, label, press="press Enter on the pad", put="typed"
-                    )
-                    said = f"{label}: {unsent.how}"
-                elif wrote.typed == "maybe":
-                    said = wrote.late(label)
-                else:
+                # What went in is at its prompt: a Send again typed it a second time beside
+                # the first (review of #259, round 11, 4/13; `PaneWrite.said`, round 12, 8/9).
+                if wrote.typed == "no":
                     said = f"{label}: {wrote.error}"
+                else:
+                    said = wrote.said(label, press="press Enter on the pad")
                 # A wedged tmux is in the server's log too, not only the trail (round 11, 10/13).
                 log.warning("remote: send-keys to %s failed: %s", label, wrote.error)
-                verdict = "delivered=maybe" if wrote.typed == "maybe" else "failed"
-                raise RequestError(400, "write_failed", said, audit=f"{summary} {verdict}")
+                raise RequestError(400, "write_failed", said, audit=f"{summary} {wrote.audited}")
         return {"agent": label, "project": target.id, "sent": True}, summary
 
     return Writes(

@@ -1,25 +1,34 @@
-"""Nothing a sandboxed agent writes chooses what aisquare itself runs outside its sandbox.
+"""A fleet row's launch, sealed where its sandboxed agent cannot write it.
 
-The boundary. A sandboxed agent is trusted to the extent of the tree it may write, as a
-Claude Code agent (no OS sandbox) and a human contributor are: what the user's own tools
-later run from that tree (git hooks that live in it, a project's own venv, a
-subdirectory's settings, ``CLAUDE.md``/``AGENTS.md``) is inside that trust, documented,
-not sealed. What aisquare ITSELF runs or reads outside the sandbox on the agent's behalf
-never comes from that tree: the store and these launch records are read-only in the
-sandbox, all of it (:func:`~aisquare.core.agent_adapters.types.store_read_only`), and so
-are the tree tops' launch inputs, the other agents' worktrees and the tmux sockets'
-directories (``services.store_broker.launch_paths``); a launch is refused where the
-sandbox may write the aisquare its hooks and broker run
-(``services.store_broker.refuse_inside``); the fleet's own git runs no hook of the
-repository's; and the agent's board calls go through its launch's broker, outside it
-(``services.store_broker``). Before the broker every board call opened the store for writing,
-and a prompt-injected Codex coder could rewrite any row in it, its own and every
-other agent's; what follows was the defence then, and stays as defence in depth. No
-value read from the store may choose what runs outside the sandbox: an executable, a
-native argument, the directory or the home an unsandboxed process starts in, the
-conversation it resumes, or the role, agent, worktree, account or permission a
-replacement runs with (review r2 of #113, finding 3; r3, findings 1, 2, 3 and 5; r4,
-findings 1, 2, 5, 6 and 10).
+The boundary (docs/coding-agents.md, "The trust boundary"). A sandboxed agent is trusted
+to the extent of the tree it may write, as a Claude Code agent (no OS sandbox) and a human
+contributor are: what the user's own tools later run from that tree is inside that trust,
+documented, not sealed (git hooks that live in it and git config its repository includes
+from it, a project's own venv, a subdirectory's settings, what the user's own ``aisquare
+project onboard`` packs it with, ``CLAUDE.md``/``AGENTS.md``). What aisquare itself runs
+or reads outside the sandbox on the agent's behalf, from its hooks and its broker, is kept
+from that tree by these means, and only these: in the store's profile, which every
+sandboxed launch of aisquare's runs under unless the operator picks a native
+``--sandbox`` (which replaces it, and these paths with it), the store and these launch
+records are read-only, all of it but the launch's broker inbox
+(:func:`~aisquare.core.agent_adapters.types.store_read_only`), and so are the launch
+inputs at the tops of its trees, ``.git``, the other agents' worktrees and the tmux
+sockets (``services.store_broker.launch_paths``); whatever the sandbox, a launch is
+refused, by ``aisquare launch`` and by ``fleet spawn`` before any window, where its
+sandbox may write an aisquare that runs outside it, the launcher's own or the one its
+hooks run, as read from what that sandbox may write (``store_broker.refuse_inside``,
+``AgentAdapter.sandbox_writes``); every git aisquare runs runs no hook and no fsmonitor of
+the repository's (``core.workspace.git_argv``); gbrain starts in its brain's home, never
+in the tree (``core.brain``); and the agent's board calls go through its launch's broker
+(``services.store_broker``).
+
+Before the broker every board call opened the store for writing, and a prompt-injected
+Codex coder could rewrite any row in it, its own and every other agent's; what follows
+was the defence then, and stays as defence in depth. No value read from the store may
+choose what runs outside the sandbox: an executable, a native argument, the directory or
+the home an unsandboxed process starts in, the conversation it resumes, or the role,
+agent, worktree, account or permission a replacement runs with (review r2 of #113,
+finding 3; r3, findings 1, 2, 3 and 5; r4, findings 1, 2, 5, 6 and 10).
 
 Sealing the store's columns one by one did not converge: each round left the next one
 open. So a fleet row's launch is ONE record (:class:`LaunchRecord`), written in

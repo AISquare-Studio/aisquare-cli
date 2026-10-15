@@ -874,22 +874,30 @@ permission profile: Codex's built-in `:workspace` or `:read-only`, with the aisq
 home read-only within it, all of it (the board's database, the launch records, the
 census, the config, the account homes, credentials and keys, the fleet's tmux conf, the
 agent registry, the model probe's cache), and one path writable: the launch's broker
-inbox. Read-only too: what the project's trees hold that a launch outside any sandbox
-reads (`.claude/`, `.mcp.json`, `.codex/`, `.agents/`, `.aisquare`, `.git`), every
-worktree but the agent's own, and the directories tmux keeps its sockets in, so a Codex
-tester in the project's directory cannot write the manager's Claude Code settings, nor
-move the fleet's socket out of `/tmp`. Every `aisquare` board call the agent makes there
+inbox. Read-only too: what the tops of the launch's trees hold that a launch outside any
+sandbox reads (`.claude/`, `.mcp.json`, `.codex/`, `.agents/`, `.aisquare`, `.git`),
+every worktree but the agent's own (and that one too for a `read-only` seat), and the
+directories tmux keeps its sockets in (the socket itself where that directory is a shared
+one, `/tmp`), so a Codex tester in the project's directory cannot write the manager's
+Claude Code settings, nor move the fleet's socket out of `/tmp`. A native `--sandbox`
+the operator picks replaces the profile, and these paths with it. Every `aisquare` board call the agent makes there
 goes, unchanged, through that broker, which its launch runs outside the sandbox: it runs
 only a whitelist of board and memory commands, only as the agent's own board sessions,
 only in its own tree, on its own board's tasks and in its own project's memory pool, and
 never a fleet operation (`spawn`, `stop`, `restart`, `switch`, `tell`, `shutdown` …), a
 launch, a hook, the config or an account. So nothing that a restart, a switch, a
 hand-over, `tell`, `stop`, `shutdown`, the manager's nudge, `reap` or a spawn reads can
-have been written from inside a sandbox, and the fleet's own git runs no hook of the
-repository's. The boundary is the tree the agent may write: what the user's own tools run
-from it (git hooks in the tree, a project venv, a subdirectory's settings, `CLAUDE.md`) is
-the agent's to write, as on Claude Code, and a sandboxed launch is refused where its
-sandbox may write the aisquare its hooks and broker run
+have been written from inside a sandbox; every git aisquare runs runs no hook and no
+fsmonitor of the repository's, and gbrain starts in its brain's home. The boundary is the
+tree the agent may write: what the user's own tools run from it (git hooks in the tree
+and git config the repository includes from it, a project venv, a subdirectory's
+settings, what `aisquare project onboard` packs it with, `CLAUDE.md`) is the agent's to
+write, as on Claude Code. Whatever its sandbox, a launch is refused, by `fleet spawn`
+before any window and by `aisquare launch`, where that sandbox may write an aisquare that
+runs outside it, the launcher's own install or the one the agent's hooks run, as read
+from its arguments (the workspace, `-C`, `--add-dir`, `/tmp`; none of them for a
+`read-only` seat): install `aisquare-cli` outside the project (`uv tool install
+aisquare-cli`) and connect the hooks with it
 ([the trust boundary](coding-agents.md#the-sandbox-and-the-aisquare-store)). The launch records stay as defence
 in depth: `fleet spawn` writes each agent's launch record in `launch-seals/` (binary,
 arguments, permission, role, agent, directory, account, and the tmux socket and pane

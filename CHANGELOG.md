@@ -124,25 +124,38 @@ adapter.**
   aisquare home read-only inside it, all of it: the board's database, the launch
   records, the census, the config, the account homes, credentials and keys,
   `fleet-tmux.conf`, `agents.json` and the model probe's cache. Read-only too:
-  what the project's trees hold that a launch outside any sandbox reads
+  what the tops of the launch's trees hold that a launch outside any sandbox reads
   (`.claude/`, `.mcp.json`, `.codex/`, `.agents/`, `.aisquare`, `.git`), every
-  other agent's worktree, and the directories tmux keeps its sockets in. Its board
+  other agent's worktree (and its own for a `read-only` seat), and the directories
+  tmux keeps its sockets in (the socket itself in a shared `/tmp`); a native
+  `--sandbox` the operator picks replaces the profile, and these with it. Its board
   calls (`aisquare note`, `task claim`, `board` and the rest of the role protocol)
   go, unchanged, through a broker its launch runs outside the sandbox, which runs
   only a whitelist of board and memory commands, only as the agent's own board
   sessions (the ones its own hooks registered), only in its own tree, on its own
-  board's tasks and in its own project's memory pool (never the user pool), and
-  never a fleet operation, a launch, a hook, the config or an account; a refusal
-  is logged, and a forged identity, another board's task or a fleet operation is
-  put on its board once. The sandbox writes one path in the store, its launch's
-  broker inbox. So nothing that a replay, a kill, a typed line or paste, a launch,
-  a model or account choice or a worktree removal the fleet makes reads can have
-  been written from inside a sandbox: a sandboxed agent is trusted to the extent of
-  the tree it may write, as a Claude Code agent is (git hooks in the tree, a
-  project venv, a subdirectory's settings and `CLAUDE.md` stay its to write), and
-  what aisquare itself runs outside the sandbox never comes from that tree: a
-  sandboxed launch is refused where its sandbox may write the aisquare its hooks
-  and broker run, and the fleet's own git runs no hook of the repository's. The transport is a spool directory and a FIFO, not a socket: Codex
+  board's tasks and in its own project's memory pool for writes and reads alike
+  (never the user pool, past any `project switch` pin), and never a fleet
+  operation, a launch, a hook, the config or an account; every refusal it or a
+  command it runs makes is logged, and a forged identity, another board's task or
+  pool, a fleet operation or an unsigned request is put on its board once per
+  launch and kind. The sandbox writes one path in the store, its launch's broker
+  inbox. So nothing that a replay, a kill, a typed line or paste, a launch, a model
+  or account choice or a worktree removal the fleet makes reads can have been
+  written from inside a sandbox. A sandboxed agent is trusted to the extent of the
+  tree it may write, as a Claude Code agent is: what the user's own tools run from
+  it (git hooks in the tree and git config the repository includes from it, a
+  project venv, a subdirectory's settings, what `aisquare project onboard` packs it
+  with, `CLAUDE.md`) stays its to write. What aisquare itself runs outside the
+  sandbox on its behalf is kept from that tree: whatever its sandbox, a launch is
+  refused, by `aisquare launch` and by `fleet spawn` before any window, where that
+  sandbox may write an aisquare that runs outside it, the launcher's own install or
+  the one the agent's hooks run, as read from its arguments (the workspace, `-C`,
+  `--add-dir`, `/tmp`; none for a `read-only` seat), with the remedy (`uv tool
+  install aisquare-cli`) and a doctor warning; every git aisquare runs runs no hook
+  and no fsmonitor of the repository's (the fleet's worktrees, the CI turn
+  snapshot's `stash create` from the agent's hooks); and gbrain, which a brokered
+  `recall` and a note's distill run, starts in its brain's home, not the tree.
+  The transport is a spool directory and a FIFO, not a socket: Codex
   0.162.1's sandbox refuses `connect` on every unix socket (measured). The launch
   records stay as defence in depth: restart, switch, the hand-over and `fleet
   tell`'s queue read an agent's launch record in `launch-seals/`, written by its

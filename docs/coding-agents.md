@@ -463,27 +463,56 @@ tree it may write, exactly as a Claude Code agent (no OS sandbox) and a human co
 are. What the user's own tools later run from that tree is inside that trust, documented
 here rather than sealed: git hooks that live in the tree (`core.hooksPath` into
 `.husky/`, `.githooks/`, what `lefthook.yml` or `.pre-commit-config.yaml` generate), which
-the user's own `git commit` runs; a project's own virtualenv; a subdirectory's
-`.claude/`, `.mcp.json` or `.codex/`, which a `claude` started there reads; and
+the user's own `git commit` runs, and git config the repository includes from its own
+tree (an `[include]` in `.git/config` naming a file there); a project's own virtualenv; a
+subdirectory's `.claude/`, `.mcp.json` or `.codex/`, which a `claude` started there reads;
+what the user's own `aisquare project onboard` packs the tree with (repomix, or `npx
+repomix`, run in the project's directory, reads its config and `node_modules` there); and
 `CLAUDE.md` and `AGENTS.md`, which agents read (a prompt-injection path, as on Claude
-Code). What aisquare ITSELF runs or reads outside the sandbox on the agent's behalf never
-comes from that tree:
+Code). What aisquare itself runs or reads outside the sandbox on the agent's behalf, from
+its hooks and its broker, is kept from that tree by these means, and only these:
 
-- the aisquare store, its launch records first (read-only in the sandbox, all of it);
-- the aisquare install its hooks and its broker run: a sandboxed launch is refused where
-  its sandbox may write it (a project `.venv`, an editable `src/` in the tree, `/tmp`:
-  `store_broker.refuse_inside`), naming the remedy, and `aisquare doctor` warns;
-- the fleet's tmux socket directories;
-- the launch inputs at the top of the launch's trees (below), which the fleet's own
-  launches there read;
-- the hooks of the repository's, for the fleet's own git (`git worktree add` and the
-  rest): it runs none of them (`core.hooksPath` pointed at nothing).
+- under the store's profile (below; a native `--sandbox` the operator picks replaces it,
+  and these paths with it), the aisquare store, its launch records first, read-only in
+  the sandbox, all of it but the launch's broker inbox; and with it the launch inputs at
+  the top of the launch's trees, which the fleet's own launches there read, `.git`, the
+  other agents' worktrees and the fleet's tmux sockets;
+- whatever the sandbox, the aisquare that runs outside it: the launcher's own install,
+  which the broker runs (its interpreter and the installation that comes from, its
+  environment and the user site it loads, whose `.pth` files run at every start, its
+  package, an editable install's source tree), and the program each of the agent's
+  aisquare hooks runs with that program's environment (read from its `hooks.json`: hooks
+  connected from another install keep running that one). A
+  launch is refused where its sandbox may write one of them, by `aisquare launch` and by
+  `fleet spawn` before any window is made (`store_broker.refuse_inside`), naming the
+  remedy, and `aisquare doctor` warns. What the sandbox may write is read from the
+  launch's own arguments (`AgentAdapter.sandbox_writes`, measured on 0.162.1): under
+  `workspace-write` (the store's profile over `:workspace`, `--sandbox workspace-write`,
+  `--approve-for-me`, or none named) the workspace (`-C`/`--cd`, else the launch's
+  directory), `/tmp`, `$TMPDIR`, each `--add-dir` and
+  `sandbox_workspace_write.writable_roots`; under `read-only` (over `:read-only`, or
+  `--sandbox read-only`) none of those; and in either, the profile's own `write` paths.
+  A `read-only` seat in the project is not refused; an unsandboxed one
+  (`danger-full-access`, the bypass flags) is trusted as its user is. The remedy is to
+  install the `aisquare-cli` distribution outside every directory the agent may write
+  (`uv tool install aisquare-cli`, or `pipx install aisquare-cli`) and connect the hooks
+  with that install; from above the project (a launch from the home, whose tree holds
+  every install under it), to launch from the project's directory;
+- every git aisquare runs (`core.workspace.git_argv`: the fleet's worktrees, the CI turn
+  snapshot's `stash create`, which the agent's own hooks run, the project root's lookup):
+  no hook and no fsmonitor of the repository's (`core.hooksPath` at the null device,
+  `core.fsmonitor=false`);
+- gbrain, which a brokered `recall` and a note's distill run: it starts in its brain's
+  home, never in the tree, as a runtime may read its configuration from the directory it
+  starts in (Bun, gbrain's, reads `bunfig.toml` and `.env` there).
 
 The aisquare store (the aisquare home: `context.db`, the launch records, the config,
-the account homes, the caches) is **read-only in a Codex agent's sandbox, all of it**,
-and the board calls its role protocol makes there go through a broker that its launch
-runs outside the sandbox. So are the launch inputs at the tops of the project's trees
-and the tmux sockets' directories (below). Claude Code runs its tools unsandboxed and is
+the account homes, the caches) is **read-only in a Codex agent's sandbox, all of it**
+(under the store's profile, which every sandboxed launch of aisquare's runs under unless
+the operator picks a native `--sandbox`), and the board calls its role protocol makes
+there go through a broker that its launch runs outside the sandbox. So are the launch
+inputs at the tops of the launch's trees, `.git`, the other agents' worktrees and the
+tmux sockets (below). Claude Code runs its tools unsandboxed and is
 unchanged: its board calls write the store themselves.
 
 The profile, `aisquare`, is defined by the launch (`CodexAdapter.store_access`, then
@@ -497,7 +526,7 @@ The profile, `aisquare`, is defined by the launch (`CodexAdapter.store_access`, 
      "<tree>/.agents" = "read", "<tree>/.aisquare" = "read", "<tree>/.git" = "read",
      "<project>/.aisquare-worktrees" = "read", "/tmp/tmux-<uid>" = "read", …,
      "<aisquare home>/broker/<launch id>/in" = "write",
-     "<project>/.aisquare-worktrees/<its own>" = "write"}
+     "<project>/.aisquare-worktrees/<its own>" = "write"}  # a workspace seat's alone
 ```
 
 This is Codex's built-in profile for the write scope with, read-only within it (the
@@ -505,7 +534,9 @@ more specific path wins over a writable one around it: the workspace, `/tmp`):
 
 - the aisquare home, all of it;
 - in every tree the launch touches (its own directory and checkout, its project's
-  principal one, its launch record's), what a launch outside any sandbox reads there
+  principal one and its project's root, a non-git project's `.aisquare` marker
+  included, its launch record's, and each tree Codex is given with `-C`/`--cd`,
+  `--add-dir` or `writable_roots`), what a launch outside any sandbox reads there
   (`store_broker.LAUNCH_INPUTS`): Claude Code's project settings, hooks and MCP servers
   (`.claude/`, `.mcp.json`), Codex's project config and agents (`.codex/`, `.agents/`),
   aisquare's root marker (`.aisquare`) and the repository (`.git`, whose hooks and
@@ -515,12 +546,15 @@ more specific path wins over a writable one around it: the workspace, `/tmp`):
   `AGENTS.md` and `CLAUDE.md` are content an agent reads, not what runs: they stay
   writable;
 - every worktree of the project (the fleet's `worktree_dir`) but the agent's own, which
-  stays writable, its own launch inputs read-only within it;
+  a seat that writes its workspace writes again, its own launch inputs read-only within
+  it; a `read-only` seat in its own worktree (a fleet reviewer's) writes none of it;
 - the directories tmux keeps sockets in: the one its window's server listens in
-  (`$TMUX`), `$TMUX_TMPDIR` or `/tmp`'s `tmux-<uid>`, and a configured socket path's;
-  never a shared directory itself (`/tmp`, `$TMPDIR`), where `tmux -S /tmp/x` puts one.
-  From `/tmp`, which every sandbox may write, the fleet's socket could be moved away,
-  and the fleet cut off its agents (finding 4; SMOKE5).
+  (`$TMUX`), `$TMUX_TMPDIR` or `/tmp`'s `tmux-<uid>`; never a shared directory itself
+  (`/`, `/tmp`, `/var/tmp`, `$TMPDIR`, the home), where `tmux -S /tmp/x` puts one: then
+  the socket file itself (measured on 0.162.1: read-only, its `mv` and `rm` from the
+  sandbox fail with EBUSY while `/tmp` stays writable). From `/tmp`, which every sandbox
+  may write, the fleet's socket could be moved away, and the fleet cut off its agents
+  (finding 4; SMOKE5).
 
 Each path is named whether or not it exists yet: then it cannot be made. Measured on
 0.162.1 in a real turn, in the worktree layout (a path inside the workspace, outside
@@ -555,13 +589,16 @@ request as `aisquare <argv>` in the launch's environment, never the caller's, an
   session's id is refused ("is not this agent's own session"), and so is any before
   the agent's first hook ran. A filter (`team log --by`) names any session;
 - on the launch's own board and in its own project's pool: a request runs only in the
-  launch's own tree (its worktree, its project's directory: from its launch record),
+  launch's own tree (a fleet agent's worktree and its project's directory, from its
+  launch record; a hand launch's directory, its checkout, its project's principal
+  checkout and its project's root),
   never by the board a cwd resolves to (with `AISQUARE_TEAM_HUB`, which every launch
   with a project sets, every directory resolved to the hub's); a task ref names only a
   task of its board (`services.team._own_task`: task ids resolve across every board);
   `remember`/`context add` write only its project's pool, never the user pool, which
   every project's agents are given (`--user` is refused, and the default is the
-  project's: review r10 of #113, finding 3);
+  project's: review r10 of #113, finding 3), and `inject` and `context list`, `search`
+  and `preview` read that pool: the launch's project's, past any `project switch` pin;
 - signed with the launch's nonce, which only the agent's environment holds (another
   launch's sandbox has its own pid namespace and cannot read it): a request carries a
   MAC under it, never the nonce, as a request file is readable from every sandbox, and
@@ -570,12 +607,19 @@ request as `aisquare <argv>` in the launch's environment, never the caller's, an
   tool sets them: the MCP `signal` tool is refused them too (finding 8), and an MCP
   server serving an agent that sandboxes its tools names only its board's tasks.
 
-A refusal leaves a record outside the caller's stderr: one line in
-`<aisquare home>/log/store-broker.log` for every one, and, for a session that is not its
-own, another board's task or another project's pool, a fleet operation (its signals
-included) or a request not signed by its launch, one note on its board for its manager
-and the human, once per launch and kind (SMOKE5). A read asked from outside its tree
-(`cd /tmp && aisquare board`) is refused and logged, never noted.
+Every refusal leaves a record outside the caller's stderr, one line in
+`<aisquare home>/log/store-broker.log`: each the broker makes (a command off its
+whitelist; a request that is not a file, does not parse, is of another version, names no
+command, holds a NUL, names no directory it can run in, was run already, is not signed by
+its launch, or comes once the agent has exited; a directory outside the tree) and each
+scope refusal of a command it runs (another session, another board's task or another
+project's pool, a fleet operation or signal, a directory outside the tree). Of those, a
+session that is not its own (kind `identity`), another board's task or a write asked
+from outside the tree (`board`), another project's pool (`pool`), a fleet operation, its
+signals included (`fleet`), and a request not signed by its launch (`signature`) also put
+one note on its board for its manager and the human, once per launch and kind (SMOKE5); a
+refusal with no launch to name is logged only. A read asked from outside its tree (`cd
+/tmp && aisquare board`, kind `read`) is refused and logged, never noted.
 
 The transport is files, not a socket, by measurement: on 0.162.1 the sandbox's seccomp
 filter refuses `connect` on every unix socket (a path one, on a read-only or a writable

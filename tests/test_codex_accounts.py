@@ -493,6 +493,7 @@ def test_at_the_limit_the_account_reads_the_window_before_the_windowless_premium
     assert reading.available and (reading.session_percent, reading.week_percent) == (100.0, 24.0)
     assert reading.session_resets_at == _at(resets)
     assert codex.limit_from_transcript(path, now=NOW) == core.LimitNotice("session", _at(resets))
+    assert codex.failed_turn(path) == core.FailedTurn("turn-9", "rate_limit", SPEND_CAP)
 
 
 def test_a_session_that_hit_the_limit_at_once_takes_the_window_another_session_recorded(
@@ -538,6 +539,42 @@ def test_a_session_that_hit_the_limit_at_once_takes_the_window_another_session_r
 def _records_of(path: Path) -> list[dict[str, Any]]:
     """A rollout's records past its ``session_meta``, as :func:`_rollout` took them."""
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()[1:]]
+
+
+@pytest.mark.parametrize(
+    ("records", "expected"),
+    [
+        pytest.param(
+            [_event("task_started"), _failed("other", '{"error": "bad"}', turn_id="t")],
+            core.FailedTurn("t", "other", '{"error": "bad"}'),
+            id="any-other-error",
+        ),
+        pytest.param(
+            [_event("task_started"), _failed({"http_connection_failed": {"status": 502}}, "x")],
+            core.FailedTurn(None, "http_connection_failed", "x"),
+            id="an-error-with-details",
+        ),
+        pytest.param(
+            [_event("task_started"), _failed("other", "You've hit your usage limit.")],
+            core.FailedTurn(None, "rate_limit", "You've hit your usage limit."),
+            id="a-limit-by-its-message",
+        ),
+        pytest.param([_event("task_started"), _event("task_complete")], None, id="completed"),
+        pytest.param([_event("task_started"), _event("turn_aborted")], None, id="interrupted"),
+        pytest.param(
+            [_event("task_started"), _failed("other"), _event("task_started")],
+            None,
+            id="a-newer-turn-runs",
+        ),
+        pytest.param([_event("task_started")], None, id="running"),
+    ],
+)
+def test_a_failed_turn_is_the_newest_turns_task_complete_error(
+    home: Path, records: list[dict[str, Any]], expected: core.FailedTurn | None
+) -> None:
+    path = _rollout(home / "rollouts", records)
+    assert codex.failed_turn(path) == expected
+    assert core.ClaudeCodeAccounts().failed_turn(path) is None  # Claude has StopFailure
 
 
 def _turn_context(reviewer: str | None) -> dict[str, Any]:
@@ -894,9 +931,14 @@ def team_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AISQUARE_HARNESS_PROBE", "0")
 
 
-def _codex_fleet_row(tmp_path: Path, directory: Path) -> tuple[str, ProjectInfo]:
-    """A Codex session started by the fleet under ``directory`` (its account's home)."""
+def _codex_fleet_row(
+    tmp_path: Path, directory: Path, transcript: Path | None = None
+) -> tuple[str, ProjectInfo]:
+    """A Codex session started by the fleet under ``directory`` (its account's home), its
+    start naming ``transcript`` as Codex's does (it fires with the first prompt)."""
     payload = {"session_id": "native-one", "cwd": str(tmp_path), "hook_event_name": "SessionStart"}
+    if transcript is not None:
+        payload["transcript_path"] = str(transcript)
     agent_events.handle(CODEX, payload, directory)
     session_id = agent_events.session_key(CODEX, directory, "native-one")
     project = team_project(tmp_path)
@@ -1054,6 +1096,111 @@ def test_a_healthy_codex_stop_is_handled_as_it_always_was(
     with store_session() as store:
         session = store.get_session(session_id)
     assert session is not None and session.state == "waiting"
+
+
+@pytest.mark.parametrize(
+    ("info", "message", "state", "kind"),
+    [
+        pytest.param("usage_limit_exceeded", SPEND_CAP, "limited", "limited", id="limit"),
+        pytest.param("other", "fixture says no", "waiting", "turn_failed", id="other-error"),
+    ],
+)
+def test_a_codex_turn_that_failed_with_no_stop_reaches_the_board_on_the_fleets_read(
+    home: Path,
+    team_on: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    info: str,
+    message: str,
+    state: str,
+    kind: str,
+) -> None:
+    """SMOKE3: Codex 0.162.1 fires only the prompt's hook for a turn that fails, so the row
+    read working for good. The fleet's read of the row finds the failure at the end of
+    its rollout and records it as Claude Code's StopFailure is, once."""
+    from aisquare.services import fleet
+
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", "fleet-one")
+    slot = _codex_slot("full@example.com")
+    resets = datetime.now(tz=UTC) + timedelta(hours=3)
+    transcript = _rollout(
+        slot.config_dir,
+        [
+            _event("task_started", turn_id="turn-1"),
+            _token_count(datetime.now(tz=UTC), _window(100, 300, resets)),
+            _premium(datetime.now(tz=UTC)),
+            _failed(info, message, turn_id="turn-1"),
+        ],
+    )
+    session_id, project = _codex_fleet_row(tmp_path, slot.config_dir, transcript)
+    prompt = {
+        "session_id": "native-one",
+        "cwd": str(tmp_path),
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "Reply with exactly: LIMIT-PROBE",
+        "transcript_path": str(transcript),
+        "turn_id": "turn-1",
+    }
+    agent_events.handle(CODEX, prompt, slot.config_dir)  # the one hook the turn fires
+    config = load_config()
+    config.accounts = AccountsSettings(on_limit="switch")
+    save_config(config)
+    detached: list[list[str]] = []
+    monkeypatch.setattr(hooks, "_detach", detached.append)
+    monkeypatch.setattr(fleet, "_observe", lambda *a, **k: None)  # tmux is not asked
+    with store_session() as store:
+        assert (row := store.get_session(session_id)) is not None and row.state == "working"
+        agent = store.get_fleet_agent("fleet-one")
+    assert agent is not None
+    assert fleet.status_of(agent).state == state
+    assert [status.state for status in fleet.list_agents(project)] == [state]
+
+    with store_session() as store:
+        session = store.get_session(session_id)
+        kinds = [e.kind for e in store.recent_events(project.id, limit=10)]
+    assert session is not None and session.state == state
+    assert kinds.count(kind) == 1, kinds  # told once, though read twice
+    if state == "limited":
+        assert session.limit_resets_at == _at(resets)
+        [argv] = detached
+        assert argv[-4:-2] == ["hand-over", session_id] and argv[-1] == "session limit"
+    else:
+        assert detached == []
+    # A reader holding the row as it was before (another listing at the same moment)
+    # claims the turn too late and records nothing.
+    assert row is not None and not agent_events.failed_turn(CODEX, row)
+
+
+def test_a_codex_turn_still_running_is_not_read_as_failed(
+    home: Path, team_on: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.services import fleet
+
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", "fleet-one")
+    slot = _codex_slot("me@example.com")
+    # The previous turn failed; the one the prompt below began is running.
+    transcript = _rollout(
+        slot.config_dir,
+        [_event("task_started"), _failed("usage_limit_exceeded"), _event("task_started")],
+    )
+    _session_id, project = _codex_fleet_row(tmp_path, slot.config_dir, transcript)
+    prompt = {
+        "session_id": "native-one",
+        "cwd": str(tmp_path),
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "carry on",
+        "transcript_path": str(transcript),
+        "turn_id": "turn-2",
+    }
+    agent_events.handle(CODEX, prompt, slot.config_dir)
+    failed = Mock()
+    monkeypatch.setattr(hooks, "turn_failed", failed)
+    monkeypatch.setattr(fleet, "_observe", lambda *a, **k: None)
+
+    [status] = fleet.list_agents(project)
+
+    failed.assert_not_called()
+    assert status.session is not None and status.session.state == "working"
 
 
 # --------------------------------------------------------------------------- the hand-over

@@ -617,6 +617,19 @@ class LimitNotice:
     (or one this parser could not read — the raw text stays on the board event)."""
 
 
+@dataclass(frozen=True)
+class FailedTurn:
+    """A turn the session's transcript records as ended on an error the agent fired no hook
+    for (``AgentAccounts.failed_turn``): the agent's id for the turn, the error as a
+    ``turn_failed`` event names it (``rate_limit`` for a usage limit, as Claude Code's
+    ``StopFailure`` does; its window and reset are ``limit_from_transcript``'s), and its
+    text."""
+
+    turn_id: str | None
+    error: str
+    message: str
+
+
 def parse_limit_notice(text: str | None, *, now: datetime | None = None) -> LimitNotice | None:
     """Read ``You've hit your session limit · resets 12:30am (America/Toronto)``, or ``None``.
 
@@ -1029,4 +1042,8 @@ class ClaudeCodeAccounts:
         self, path: Path, *, now: datetime | None = None
     ) -> LimitNotice | None:
         # Claude Code reports a limit itself, through StopFailure (``parse_limit_notice``).
+        return None
+
+    def failed_turn(self, path: Path) -> FailedTurn | None:
+        # And every other failed turn, through the same hook.
         return None

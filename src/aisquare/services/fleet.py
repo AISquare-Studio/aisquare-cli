@@ -87,7 +87,7 @@ from aisquare.models import (
     TeamSession,
     TeamTask,
 )
-from aisquare.services import agent_launch, auto_mode, explainability_ops
+from aisquare.services import agent_events, agent_launch, auto_mode, explainability_ops
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 
@@ -2857,6 +2857,7 @@ def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAg
         agents = [ended.get(agent.id, agent) for agent in agents]
     if live_only:
         agents = _with_lingering_windows(agents, views, config)
+    sessions = _record_failed_turns(agents, sessions)
     return [
         _status(
             agent,
@@ -2868,6 +2869,39 @@ def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAg
         )
         for agent in agents
     ]
+
+
+def _record_failed_turns(
+    agents: Sequence[FleetAgent], sessions: Mapping[str, TeamSession]
+) -> dict[str, TeamSession]:
+    """``sessions``, each live row's re-read once its transcript says its turn failed with
+    no hook (``services.agent_events.failed_turn``), recorded on every read as
+    :func:`_end_dead_rows` records a death.
+
+    Codex 0.162.1 fires no ``Stop`` for a turn that fails — on its usage limit or any other
+    error — so its row read ``working`` for good: no ``limited``, no manager told, no
+    hand-over, and a ``tell`` queued for a turn that would never come (SMOKE3). Only a row
+    whose board session says ``working`` is read, of an agent that records failures in
+    its transcript (``capabilities.limits_in_transcript``), and only the transcript's last
+    bytes. Recorded, the row reads ``limited`` or ``waiting`` (:func:`_derive`) from this
+    very read on; one that could not be recorded is left to the next.
+    """
+    fresh = dict(sessions)
+    for agent in agents:
+        session = fresh.get(agent.session_id) if agent.session_id else None
+        if (
+            agent.ended_at is not None
+            or session is None
+            or session.ended_at is not None
+            or session.state != "working"
+        ):
+            continue
+        adapter = recorded_adapter(_family(session) or agent.agent)
+        if adapter is None or not agent_events.failed_turn(adapter, session):
+            continue
+        with suppress(sqlite3.Error), store_session() as store:
+            fresh[session.id] = store.get_session(session.id) or session
+    return fresh
 
 
 def _end_dead_rows(
@@ -3053,6 +3087,8 @@ def status_of(agent: FleetAgent) -> FleetAgentStatus:
         agent = store.get_fleet_agent(agent.id) or agent
         project = store.get_project(agent.project_id)
         session = store.get_session(agent.session_id) if agent.session_id else None
+    if session is not None:
+        session = _record_failed_turns([agent], {session.id: session})[session.id]
     tmux_session = session_name(project.codename) if project and project.codename else None
     config = settings()
     observed = _observe(server_of(agent, config), tmux_session, [agent])

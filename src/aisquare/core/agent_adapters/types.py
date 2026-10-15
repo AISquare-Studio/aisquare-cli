@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, get_args
 from aisquare.core import harness, paths
 
 if TYPE_CHECKING:
-    from aisquare.core.claude_accounts import LimitNotice
+    from aisquare.core.claude_accounts import FailedTurn, LimitNotice
     from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage
 
 
@@ -79,7 +79,9 @@ class AgentCapabilities:
     limits_in_transcript: bool = False
     """No turn-failed event: a usage limit is read off the end of the session's
     transcript (``accounts.limit_from_transcript``) when a turn stops, is interrupted
-    or the session ends. Claude Code reports it in ``StopFailure``."""
+    or the session ends, and a turn that failed with no hook at all (Codex 0.162.1 fires
+    no ``Stop`` for one) when the fleet reads a row its board says is working
+    (``accounts.failed_turn``). Claude Code reports both in ``StopFailure``."""
     ambient_first_run: bool = False
     """``agents connect`` makes a config dir the agent has not made yet only when it is
     the one a session from this shell reads (Claude Code: a typo must not get hooks);
@@ -813,4 +815,10 @@ class AgentAccounts(Protocol):
         self, path: Path, *, now: datetime | None = None
     ) -> LimitNotice | None:
         """A usage limit the session's own transcript records at its end, or ``None``."""
+        ...
+
+    def failed_turn(self, path: Path) -> FailedTurn | None:
+        """The transcript's newest turn when it ended on an error that fired no hook, or
+        ``None`` (an agent whose hooks report every failure: ``None`` always). Read on
+        every fleet listing of a working row, so it reads only the transcript's end."""
         ...

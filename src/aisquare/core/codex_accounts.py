@@ -31,7 +31,9 @@ again on 0.162.1:
   turn's ``task_complete`` ``error`` whose ``codex_error_info`` is
   ``usage_limit_exceeded`` (0.162.1), or either's message (``You've hit your
   usage limit…``, the text the binary carries; ``You hit your spend cap set in
-  your workspace…``, the server's own).
+  your workspace…``, the server's own). On 0.162.1 a turn that fails, on its
+  limit or any other error, fires no ``Stop`` at all, so a failed turn is read
+  off the rollout's end too (:func:`failed_turn`), by the fleet.
 """
 
 from __future__ import annotations
@@ -46,7 +48,7 @@ from pathlib import Path
 from typing import Any
 
 from aisquare.core import paths
-from aisquare.core.claude_accounts import LimitNotice
+from aisquare.core.claude_accounts import FailedTurn, LimitNotice
 from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage
 
 AGENT = "codex"
@@ -73,6 +75,10 @@ NEWEST_ROLLOUTS = 20
 none, nor has a session that only ran ``/clear`` or hit its limit at once: in SMOKE3 the
 account's newest window was in the seventh rollout written last. Past the first reading,
 a rollout written before it was recorded is not read (:func:`newest_rate_limits`)."""
+
+TURN_END_BYTES = 64 * 1024
+"""How much of a rollout's end :func:`failed_turn` reads: a failed turn's ``task_complete`` is
+the rollout's last record, and a working row's rollout is read on every fleet listing."""
 
 LIMIT_ERROR_INFOS = frozenset({"usage_limit_reached", "usage_limit_exceeded"})
 """A limit error's ``codex_error_info``: an ``error`` event's on 0.154.0, the turn's
@@ -169,11 +175,11 @@ def plan(account: ClaudeAccount) -> str | None:
 # --- usage: the newest token_count a session recorded ------------------------------------------
 
 
-def _records_from_end(path: Path) -> Iterator[dict[str, Any]]:
+def _records_from_end(path: Path, *, limit: int = MAX_SCAN_BYTES) -> Iterator[dict[str, Any]]:
     """The rollout's JSON records, NEWEST FIRST, reading back from the end in growing chunks.
 
     A line cut by a chunk's start is skipped until a larger read holds it whole;
-    nothing before :data:`MAX_SCAN_BYTES` from the end is read.
+    nothing before ``limit`` bytes from the end is read.
     """
     try:
         size = path.stat().st_size
@@ -182,7 +188,7 @@ def _records_from_end(path: Path) -> Iterator[dict[str, Any]]:
         return
     with handle:
         seen = 0  # complete lines already yielded, counted from the end
-        span = TAIL_BYTES
+        span = min(TAIL_BYTES, limit)
         while True:
             start = max(size - span, 0)
             try:
@@ -202,9 +208,9 @@ def _records_from_end(path: Path) -> Iterator[dict[str, Any]]:
                 if isinstance(record, dict):
                     yield record
             seen = len(complete)
-            if start == 0 or span >= MAX_SCAN_BYTES:
+            if start == 0 or span >= limit:
                 return
-            span *= 2
+            span = min(span * 2, limit)
 
 
 def _payload(record: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -478,6 +484,36 @@ def limit_from_transcript(path: Path, *, now: datetime | None = None) -> LimitNo
     return LimitNotice("usage", None)
 
 
+def failed_turn(path: Path) -> FailedTurn | None:
+    """The rollout's newest turn when it ended on an error, else ``None``.
+
+    Measured on 0.162.1, a loopback provider answering a turn with an error and the TUI
+    under tmux: the turn records its ``task_complete`` with an ``error``
+    (``{message, codex_error_info}``) and fires no ``Stop`` hook and no ``notify``
+    program — only its ``UserPromptSubmit`` had fired — for the usage limit
+    (``usage_limit_exceeded``, the live SMOKE3 limit's shape) and a plain ``400``
+    (``other``) alike. The rollout's end is where it shows. Only its last
+    :data:`TURN_END_BYTES` are read: the failed turn's ``task_complete`` is its last record,
+    and a turn still running (its ``task_started`` newer) is no failure. A usage limit
+    reads as ``rate_limit``, as Claude Code's ``StopFailure`` names one (its window and
+    reset: :func:`limit_from_transcript`); any other error as its ``codex_error_info``.
+    """
+    for record in _records_from_end(path, limit=TURN_END_BYTES):
+        if _is_event(record, "task_started") or _is_event(record, "turn_aborted"):
+            return None
+        if not _is_event(record, "task_complete"):
+            continue
+        error = _turn_error(record)
+        if error is None:
+            return None
+        turn = _payload(record).get("turn_id")
+        said = error.get("message")
+        message = said.strip() if isinstance(said, str) and said.strip() else "the turn failed"
+        kind = "rate_limit" if _limit_error(record) else _error_kind(error) or "unknown"
+        return FailedTurn(turn if _has(turn) else None, kind, message)
+    return None
+
+
 def approvals_reviewer(path: Path) -> str | None:
     """Who answers the session's approval requests, as its rollout last recorded it:
     ``user`` (the human, in the pane) or ``auto_review`` (Codex's automatic reviewer,
@@ -545,3 +581,6 @@ class CodexAccounts:
         self, path: Path, *, now: datetime | None = None
     ) -> LimitNotice | None:
         return limit_from_transcript(path, now=now)
+
+    def failed_turn(self, path: Path) -> FailedTurn | None:
+        return failed_turn(path)

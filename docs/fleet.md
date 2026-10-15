@@ -718,7 +718,11 @@ details):
   Claude slot for it (or the reverse) is refused, naming both.
 - **A usage limit** is read off the end of the session's rollout when its turn
   stops (Codex has no `StopFailure`), and the row turns **⏳ limited** the same
-  way. A Codex agent's `fleet switch`, by hand or by `on_limit = "switch"`, is
+  way. Codex 0.162.1 fires no `Stop` for a turn that ends on its limit (or on any
+  other error), so every read of the fleet (`fleet ls`, the app, `fleet tell`)
+  reads the end of a working Codex row's rollout too: a failed turn is recorded
+  there once, **⏳ limited** for a limit, waiting with a `turn_failed` line for
+  any other error. A Codex agent's `fleet switch`, by hand or by `on_limit = "switch"`, is
   **fresh** onto another account: its thread lives under the old `CODEX_HOME` and
   cannot be resumed from another, so the replacement starts with the hand-off
   prompt and takes the claims over at its first start. A target on the home the

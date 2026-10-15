@@ -234,7 +234,7 @@ fixes.
 | Prompt capture (`aisquare log`) | `UserPromptSubmit` | Same, with `source=codex`. | Smoke 4; live hooks |
 | ▶ working / ⏸ waiting | From its hooks; a fresh agent is waiting from its `SessionStart`, which fires once it sits at its prompt | Same, from Codex's hooks. | Smoke 5. Claude Code's fresh agent: SMOKE2 (it read working until a first prompt), fixed in `c29a2670` |
 | 🔔 attention | `Notification`: a permission prompt or a question | 🔔 for an approval the human answers ("Codex needs your approval") and for `request_user_input`. None for one Codex's automatic reviewer decides under `--approve-for-me`. **Differs:** Codex fires `PermissionRequest` with the same payload for both, so the reviewer is read from the session's rollout. Codex also redraws its approval view every second, so pane activity does not clear the bell. It clears when Codex's working line (`esc to interrupt`) is back on the screen, which is the moment the human allows the command, or on Esc, `Stop` or the next prompt. | Smoke 5 failed both ways (seven false bells for one task; a real approval read working). Fixed in `3b11964c`, `182f70e7` and `467d4ef4` (review r2). Live sandbox: a reviewed escalation rang no bell, attention held through the redraws, and the row read working within 5 s of `y`, while the approved 8 s command still ran |
-| ⏳ limited and `on_limit = "switch"` | The `StopFailure` hook. Claude Code's own wait-and-continue runs at the reset. | **Differs:** Codex has no `StopFailure`. The limit is read off the rollout at `Stop` and `Interrupt`, and nothing continues at the reset. | Synthetic rollouts only: no real limit was available, so not exercised live |
+| ⏳ limited and `on_limit = "switch"` | The `StopFailure` hook. Claude Code's own wait-and-continue runs at the reset. | **Differs:** Codex has no `StopFailure`, and 0.162.1 fires no `Stop` for a turn that ends on its limit. The limit is read off the rollout at `Stop` and `Interrupt`, and by the fleet's read of a row its board says is working; nothing continues at the reset. | Live: a team plan at its spend cap (SMOKE3) and a loopback provider answering the same `429` (`tests/test_codex_native.py`) |
 | Manager continuation | The `Stop` hook's "keep going" decision | Same: "Blocked by hook: 1 board update(s)…", and the manager went on. | Smoke 6 |
 | Waking a waiting manager | The nudge is typed into its prompt. | Same. Every line the fleet types is now a bracketed paste with its Enter 0.2 s later. **Differs:** Codex reads a burst of keys as a paste and keeps an Enter inside it as text. A manager whose hooks went stale is nudged only when its pane shows the empty prompt. A board write made in Codex's sandbox cannot reach the fleet's tmux, which stays out of its reach: it leaves the nudge owed, and the agent's own `PostToolUse` hook, which Codex runs outside the sandbox, sends it as the command ends. | Smoke 6 failed (three nudges left unsent in the composer). Fixed in `6ee17ee3`. Live panes: a waiting manager runs the nudge a coder's task review sends. SMOKE2 6 failed: a sandboxed result, verdict or block never woke the manager, Codex's or Claude Code's. Fixed in `43237797`. Live sandbox: a sandboxed `--kind result` wakes the waiting Codex manager, and `tmux` from the sandbox is still refused |
 | `fleet tell` | Typed when it is waiting, else a board note | Typed when its hooks say waiting. **Differs:** a busy agent's message is queued with `codex queue --message=<text>` and runs as its next turn (`✓ queued for its next turn`), even a message that starts with `-`. Claude Code has no queue. Before its first prompt (no hook yet), the message is typed when the pane is quiet and shows `? for shortcuts`. At the folder-trust or hook-review dialog, which is as quiet, or with a draft in its composer, it is a board note, so the dialog and the draft stay the human's. | Smoke 7 (typed, then queued; a never-prompted agent got only a note). That case was fixed in `47c9f23b`. Live panes: "reply ok" told before any hook ran, and the hook review was left alone. Live hooks: a queued `--no-verify …` ran as the next turn (`fc860457`, review r2) |
@@ -309,11 +309,18 @@ on a usage limit.
   refused as ambiguous.
 - **Usage limits.** Codex has no `StopFailure` hook. On its `Stop` and
   `Interrupt` events AISquare reads the end of the session's rollout: a
-  `rate_limit_reached_type` on the newest `token_count`, or an `error` event of
-  this turn with `codex_error_info: usage_limit_reached` (or the text
-  `You've hit your usage limit`), parks the row **limited** with the reset time
-  of the window that is full, puts `limited` on the board and wakes the
-  manager — exactly what Claude Code's limit does. With `[accounts] on_limit =
+  `rate_limit_reached_type` on the newest `token_count`, or this turn's error
+  saying so — an `error` event with `codex_error_info: usage_limit_reached`, the
+  turn's `task_complete` `error` with `usage_limit_exceeded` (0.162.1), or the text
+  `You've hit your usage limit` or `spend cap` — parks the row **limited** with the
+  reset time of the window that is full, puts `limited` on the board and wakes the
+  manager — exactly what Claude Code's limit does. Codex 0.162.1 fires no `Stop`
+  for a turn that fails, on its limit or any other error (only its
+  `UserPromptSubmit`, and no `notify`), so the fleet's read of a row the board
+  says is working (`fleet ls`, the app's tick, `fleet tell`) reads the end of its
+  rollout as well: a limit is recorded as above, once per turn, and any other
+  error returns the row to waiting with a `turn_failed` line, as Claude Code's
+  `StopFailure` does. With `[accounts] on_limit =
   "switch"` the hand-over moves the agent to the Codex account with the most
   headroom. A limit found when the session ends is recorded without a move.
   AISquare relies on no wait-and-continue from Codex at the reset (Claude
@@ -784,7 +791,7 @@ tools' shells and never in its own hooks, Codex's `CODEX_THREAD_ID`) — how a f
 tells its agent's own process from a nested child, across a `/clear` or a `/resume` —
 `assigns_session_id` (AISquare names the session at launch),
 `requires_hook_trust`, `hook_names_home`, `strict_hooks_file`, `stop_reason_as_prompt`,
-`limits_in_transcript` (no turn-failed event), `ambient_first_run`,
+`limits_in_transcript` (no turn-failed event: the accounts slot's `limit_from_transcript` and `failed_turn` read it), `ambient_first_run`,
 `reads_pane_readiness` (`fleet tell` may type into a pane that looks idle),
 `idle_prompt_mark` (what the last line of the screen starts with at an empty prompt,
 Codex's `? for shortcuts`: where a pane its hooks say nothing fresh about is typed into),

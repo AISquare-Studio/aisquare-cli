@@ -41,8 +41,11 @@ def _user_texts(request: dict[str, Any]) -> list[str]:
     ]
 
 
-def _answer(handler: BaseHTTPRequestHandler, item: dict[str, Any]) -> None:
-    """Answer a Responses request with ``item`` as its one output, streamed as Codex reads it."""
+def _answer(
+    handler: BaseHTTPRequestHandler, item: dict[str, Any], headers: dict[str, str] | None = None
+) -> None:
+    """Answer a Responses request with ``item`` as its one output, streamed as Codex reads it,
+    with ``headers`` beside the stream's own."""
     response = {
         "id": "resp_local",
         "object": "response",
@@ -69,6 +72,8 @@ def _answer(handler: BaseHTTPRequestHandler, item: dict[str, Any]) -> None:
     ).encode()
     handler.send_response(200)
     handler.send_header("Content-Type", "text/event-stream")
+    for name, value in (headers or {}).items():
+        handler.send_header(name, value)
     handler.send_header("Content-Length", str(len(data)))
     handler.end_headers()
     handler.wfile.write(data)
@@ -995,3 +1000,179 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             server.shutdown()
             thread.join(timeout=2)
             shutil.rmtree(outside, ignore_errors=True)
+
+
+class _AtItsLimit(BaseHTTPRequestHandler):
+    """A loopback Responses provider for an account at its usage limit. A turn whose last
+    user line starts ``LIMIT`` is answered as the ChatGPT backend answered a team plan at its
+    spend cap: ``429`` ``usage_limit_reached`` with the server's own text, the active limit
+    ``premium``. Codex 0.162.1 records it as it recorded SMOKE3's live limit (a ``premium``
+    reading with both windows ``null``, then the turn's ``task_complete`` ``error``
+    ``usage_limit_exceeded``) and fires no ``Stop`` for it. Every other turn is answered with
+    the five-hour window at 100 % in its headers, resetting at ``server.resets_at``."""
+
+    def do_POST(self) -> None:
+        raw = self.rfile.read(int(self.headers["Content-Length"]))
+        if not self.path.endswith("/responses"):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"{}")
+            return
+        said = _user_texts(json.loads(raw))
+        resets: int = self.server.resets_at  # type: ignore[attr-defined]
+        windows = {
+            "x-codex-primary-used-percent": "100.0",
+            "x-codex-primary-window-minutes": "300",
+            "x-codex-primary-reset-at": str(resets),
+            "x-codex-secondary-used-percent": "24.0",
+            "x-codex-secondary-window-minutes": "10080",
+            "x-codex-secondary-reset-at": str(resets + 4 * 24 * 3600),
+        }
+        if not (said and said[-1].startswith("LIMIT")):
+            _answer(self, _message("ok"), windows)
+            return
+        body = json.dumps(
+            {
+                "error": {
+                    "type": "usage_limit_reached",
+                    "message": "You hit your spend cap set in your workspace. "
+                    "Increase your spend cap to continue.",
+                    "plan_type": "team",
+                    "resets_at": resets,
+                }
+            }
+        ).encode()
+        self.send_response(429)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("x-codex-active-limit", "premium")
+        self.send_header("x-codex-credits-has-credits", "true")
+        self.send_header("x-codex-credits-unlimited", "false")
+        self.send_header("x-codex-rate-limit-reached-type", "workspace_owner_usage_limit_reached")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+
+@pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
+def test_real_codex_at_its_usage_limit_reaches_the_board_with_no_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SMOKE3 (tsk_01m4yj1n37f9): a fleet Codex told a line its account cannot pay for fires
+    its prompt's hook and no other, and its row read working for good. The fleet's read of
+    the row finds the failed turn at the end of its rollout: ``limited`` with the full
+    window's reset, the board told once, the hand-over ``on_limit = "switch"`` asks for.
+    No command runs in Codex's sandbox here, so a runner whose bwrap cannot start one
+    (``_sandbox_refused``) runs it as well."""
+    binary = shutil.which("codex")
+    assert binary, "AISQUARE_TEST_CODEX requires an installed Codex"
+    native_home = tmp_path / "codex"
+    native_home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    with ThreadingHTTPServer(("127.0.0.1", 0), _AtItsLimit) as server:
+        resets = int(time.time()) + 3 * 3600
+        server.resets_at = resets  # type: ignore[attr-defined]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        (native_home / "config.toml").write_text(
+            'model = "local-fixture"\nmodel_provider = "local"\n'
+            '[model_providers.local]\nname = "Local fixture"\nwire_api = "responses"\n'
+            f'base_url = "http://127.0.0.1:{server.server_port}/v1"\n'
+            "requires_openai_auth = false\n"
+            f'[projects.{json.dumps(str(workspace))}]\ntrust_level = "trusted"\n'
+            # Past a turn at 100 %, Codex offers a cheaper model in a dialog (`Switch to
+            # gpt-6-luna for lower credit usage? 1/2/3`), which the next line typed answers.
+            "[notice]\nhide_rate_limit_model_nudge = true\n",
+            encoding="utf-8",
+        )
+        for key in tuple(os.environ):
+            if key.startswith(("OPENAI_", "ANTHROPIC_", "CODEX_")):
+                monkeypatch.delenv(key)
+        monkeypatch.setenv("CODEX_HOME", str(native_home))
+        monkeypatch.setattr(agents, "_aisquare_command", lambda: shlex.join(selfcli.argv_for([])))
+        agents.install_hooks("codex", native_home)
+        config = load_config()
+        config.fleet.tmux_socket = f"asq-codex-limit-{os.getpid()}"
+        config.accounts.on_limit = "switch"
+        save_config(config)
+        # The hand-over is decided by the read below, in this process: its worker is not run.
+        from aisquare.services import hooks
+
+        detached: list[list[str]] = []
+        monkeypatch.setattr(hooks, "_detach", detached.append)
+        project = team.activate(workspace)
+        srv = fleet.server(config.fleet)
+
+        def screen(pane: str) -> str:
+            return srv.run("capture-pane", "-p", "-t", pane)
+
+        def until(check: Any, seconds: float, what: str, pane: str) -> None:
+            deadline = time.monotonic() + seconds
+            while not check():
+                if time.monotonic() >= deadline:
+                    raise AssertionError(f"{what}:\n{screen(pane)}")
+                time.sleep(0.2)
+
+        def board(agent: Any) -> Any:
+            with store_session() as store:
+                row = store.get_fleet_agent(agent.id)
+                return store.get_session(row.session_id) if row and row.session_id else None
+
+        def quiet_at_its_prompt(agent: Any) -> bool:
+            lines = [line.strip() for line in screen(agent.pane_id).splitlines() if line.strip()]
+            return (
+                fleet.status_of(agent).state == "waiting"
+                and bool(lines)
+                and lines[-1].startswith("? for shortcuts")
+            )
+
+        try:
+            coder = fleet.spawn(
+                project,
+                "coder",
+                agent="codex",
+                worktree=False,
+                agent_args=["--dangerously-bypass-hook-trust"],
+            ).agent
+            until(lambda: quiet_at_its_prompt(coder), 30, "a quiet empty prompt", coder.pane_id)
+            assert fleet.tell(project, coder.label, "reply ok").delivered
+            until(
+                lambda: (session := board(coder)) is not None and session.state == "waiting",
+                30,
+                "the first turn's Stop",
+                coder.pane_id,
+            )
+            until(lambda: quiet_at_its_prompt(coder), 30, "quiet after its turn", coder.pane_id)
+            told = fleet.tell(project, coder.label, "LIMIT probe")
+            assert told.delivered and "typed" in told.how, told
+            until(
+                lambda: "Usage limit reached" in screen(coder.pane_id),
+                20,
+                "the limit on its screen",
+                coder.pane_id,
+            )
+            session = board(coder)
+            assert session is not None and session.state == "working", "no Stop came"
+            until(
+                lambda: fleet.status_of(coder).state == "limited",
+                10,
+                "the fleet's read parks it",
+                coder.pane_id,
+            )
+            session = board(coder)
+            assert session is not None
+            assert session.limit_resets_at == datetime.fromtimestamp(resets, tz=UTC)
+            assert [status.state for status in fleet.list_agents(project)] == ["limited"]
+            with store_session() as store:
+                events = store.recent_events(project.id, limit=20)
+            assert [event.kind for event in events].count("limited") == 1, events
+            [argv] = detached
+            assert argv[-4:-2] == ["hand-over", session.id] and argv[-1] == "session limit"
+        finally:
+            if srv.has_session(fleet.session_name(fleet.ensure_codename(project).codename or "")):
+                srv.run("kill-server")
+            server.shutdown()
+            thread.join(timeout=2)

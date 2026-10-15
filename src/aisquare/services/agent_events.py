@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from aisquare.core import agents
 from aisquare.core.agent_adapters.types import AgentAdapter, AgentEvent
 from aisquare.core.claude_accounts import LimitNotice
 from aisquare.core.store import ContextStore, store_session
+from aisquare.models import TeamSession
 from aisquare.services import hooks, metrics
 
 
@@ -300,6 +302,53 @@ def _usage_limit(
         return adapter.accounts.limit_from_transcript(Path(transcript))
     except Exception:
         return None
+
+
+def failed_turn(adapter: AgentAdapter, session: TeamSession) -> bool:
+    """Record the turn ``session``'s transcript says ended on an error that fired no hook
+    (``AgentAccounts.failed_turn``: Codex 0.162.1 fires no ``Stop`` for a failed turn);
+    ``True`` when this call recorded it.
+
+    As Claude Code's ``StopFailure`` is recorded (``hooks.turn_failed``): a usage limit
+    parks the session ``limited`` with the reset ``limit_from_transcript`` reads, tells the
+    manager and hands a fleet agent over where ``[accounts] on_limit`` says so; any other
+    error returns it to ``waiting`` with a ``turn_failed`` line. Once per turn, whoever
+    reads it first — every fleet listing reads a working row's transcript
+    (``services.fleet``) — under the ``agent-event:`` key of a ``turn_failed`` of that
+    turn, pruned with the session's others; the limit's window is read only by the one
+    that records it. Never raises: a transcript that cannot be read is no failure, and a
+    record that could not be written gives the turn back to the next read.
+    """
+    accounts = adapter.accounts
+    transcript = session.transcript_path
+    if accounts is None or not adapter.capabilities.limits_in_transcript or not transcript:
+        return False
+    try:
+        failure = accounts.failed_turn(Path(transcript))
+    except Exception:
+        return False
+    if failure is None:
+        return False
+    # A turn with no id of its own is the one the prompt that stamped `last_seen_at` began.
+    turn = failure.turn_id or session.last_seen_at.isoformat()
+    key = f"agent-event:{session.id}:turn_failed:{turn}"
+    claim = json.dumps({"pending_at": time.time(), "owner": uuid4().hex})
+    try:
+        with store_session() as store:
+            if not store.set_meta_once(key, claim):
+                return False
+        limit = failure.error == "rate_limit"
+        hooks.turn_failed(
+            session_id=session.id,
+            error=failure.error,
+            message=failure.message,
+            notice=accounts.limit_from_transcript(Path(transcript)) if limit else None,
+        )
+    except Exception:
+        with suppress(Exception), store_session() as store:
+            store.delete_meta(key, expected=claim)
+        return False
+    return True
 
 
 def harness_lease() -> datetime:

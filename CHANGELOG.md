@@ -229,6 +229,13 @@ adapter.**
   a board note to the agent instead, and the receipt says how to go on; a new
   session's first prompt now carries the notes left for its agent before it
   started, which it missed once the board had moved on.
+- A Codex agent that hits its usage limit turns ⏳ limited. Codex 0.162.1 fires
+  no `Stop` for a turn that fails, so its row read ▶ working for good: no
+  limited chip, no word to the manager, no `on_limit = "switch"` hand-over, and
+  `fleet tell` queued lines for a turn that never came. Now every read of the
+  fleet (`fleet ls`, the app, `fleet tell`) looks at the end of a working Codex
+  row's rollout. A failed turn is recorded once: **limited** for a limit, or
+  back to waiting with a `turn_failed` line for any other error.
 - A Codex account at its limit shows its usage and its reset. At the limit
   Codex records a reading with no windows after the account's own, which the
   account then showed as "no rate-limit window", and the limit named no reset.

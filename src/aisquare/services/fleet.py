@@ -441,12 +441,12 @@ class ReapReport:
     """An ended agent's worktree left in place, with why: uncommitted changes, or commits
     found nowhere but there (:func:`_remove_finished_worktrees`)."""
     branches_deleted: list[str] = field(default_factory=list)
-    """The ``fleet/…`` branches no worktree had out, deleted once the default branch had
-    their work (:func:`_sweep_fleet_branches`)."""
+    """The ``fleet/…`` branches ended agents' rows recorded and no worktree had out, deleted
+    once the default branch had their work (:func:`_sweep_fleet_branches`)."""
     branches_kept: list[str] = field(default_factory=list)
-    """The ``fleet/…`` branches no worktree has out that hold commits the default branch
-    lacks, named on every reap: kept, so a spawn for their task or a restart of their agent
-    carries on from them (:func:`_remake_worktree`)."""
+    """The ``fleet/…`` branches ended agents' rows recorded and no worktree has out that hold
+    commits the default branch lacks, named on every reap: kept, so a spawn for their task
+    or a restart of their agent carries on from them (:func:`_remake_worktree`)."""
     claims_released: list[str] = field(default_factory=list)
     """Task ids the ended and lost rows' board sessions still held, returned to
     the pool — the same count ``shutdown`` reports, where ``reap`` used to
@@ -1339,9 +1339,16 @@ def _remove_finished_worktrees(
     it, asks for the same branch (:func:`branch_name`), found none, and started a new one
     from the main checkout's HEAD, without its own pushed work, and nothing said so
     (review of #259, round 14). Which ``fleet/…`` branches go is :func:`_sweep_fleet_branches`,
-    asked on every reap, whether or not a tree was removed.
+    asked on every reap of a project an agent with a tree has ended in, whether or not a tree
+    was removed.
     """
     root = project.root
+    rows = store.fleet_agents(project.id)
+    if not any(row.ended_at is not None and row.worktree for row in rows):
+        # No ended agent ever had a tree here — a project no agent ran in, the captured
+        # directories `reap()` walks included: no tree and no branch is the fleet's to take,
+        # and git is not asked (review of #259, round 16).
+        return
     if not is_git_project(root):
         return
     try:
@@ -1353,12 +1360,8 @@ def _remove_finished_worktrees(
     # for its task — leaves older rows at the same path, each with the branch it recorded
     # when it ended; the tree's branch written to the oldest was a restart's of the newest
     # rebuilding on the branch before it (review of #259, round 16).
-    owners = {
-        agent.cwd.resolve(): agent for agent in store.fleet_agents(project.id) if agent.worktree
-    }
-    in_use = {agent.cwd.resolve() for agent in store.fleet_agents(project.id, live_only=True)} | {
-        root.resolve()
-    }
+    owners = {agent.cwd.resolve(): agent for agent in rows if agent.worktree}
+    in_use = {agent.cwd.resolve() for agent in rows if agent.ended_at is None} | {root.resolve()}
     for path, agent in owners.items():
         if path in in_use or agent.ended_at is None or not agent.cwd.exists():
             continue
@@ -1375,7 +1378,8 @@ def _remove_finished_worktrees(
             report.worktrees_kept.append((agent.cwd, kept))
             continue
         report.worktrees_removed.append(agent.cwd)
-    _sweep_fleet_branches(root, default, report)
+    # Read again: the branches recorded just now are the ones the sweep asks about.
+    _sweep_fleet_branches(root, default, store.fleet_agents(project.id), report)
 
 
 def _fleet_branches(root: Path, *flags: str) -> list[str] | None:
@@ -1388,8 +1392,11 @@ def _fleet_branches(root: Path, *flags: str) -> list[str] | None:
     return [name for name in names if name.startswith(_FLEET_BRANCH_PREFIX)]
 
 
-def _sweep_fleet_branches(root: Path, default: str, report: ReapReport) -> None:
-    """Delete each ``fleet/…`` branch no worktree has out once the default branch has its
+def _sweep_fleet_branches(
+    root: Path, default: str, rows: Sequence[FleetAgent], report: ReapReport
+) -> None:
+    """Delete each ``fleet/…`` branch an ENDED row of ``rows`` recorded
+    (:attr:`FleetAgent.branch`) that no worktree has out, once the default branch has its
     work; name the rest, kept, in ``branches_kept``.
 
     Its work is there when the default branch holds its tip, or when it is pushed and
@@ -1397,16 +1404,30 @@ def _sweep_fleet_branches(root: Path, default: str, report: ReapReport) -> None:
     or rebase merge, whose tip the default branch never holds. Asked of every such branch
     on every reap: a branch kept when its tree went was never looked at again, so it stayed
     for good once merged, and the repo collected one a task (review of #259, round 15).
-    A branch some worktree has out, the tree gone by hand or not, is left alone. Only
-    ``fleet/…`` branches, the ones :func:`branch_name` makes, are ever deleted.
+    A branch some worktree has out, the tree gone by hand or not, is left alone.
+
+    Only a branch a row recorded is the fleet's. Any ``fleet/…`` branch was, and every reap
+    deleted a merged ``git branch fleet/my-own-notes`` in each project it walked, one no
+    agent ever ran in included (review of #259, round 16). A branch no row names — made by
+    hand, or one its agent left for another — is left as it is, and so is a recorded one
+    that is not ``fleet/…`` (``fix/auth``): only branches :func:`branch_name` makes go.
     """
+    recorded = {
+        row.branch
+        for row in rows
+        if row.ended_at is not None
+        and row.branch is not None
+        and row.branch.startswith(_FLEET_BRANCH_PREFIX)
+    }
+    if not recorded:
+        return
     every = _fleet_branches(root)
     merged = _fleet_branches(root, f"--merged={default}")
     if not every or merged is None:
         return
     out = set(_worktree_branches(root).values())
     for branch in every:
-        if branch in out:
+        if branch not in recorded or branch in out:
             continue
         if branch not in merged and not _squashed(root, branch, default):
             report.branches_kept.append(branch)

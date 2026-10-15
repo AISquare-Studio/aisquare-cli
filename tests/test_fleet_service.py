@@ -8131,26 +8131,60 @@ def test_reap_keeps_an_untracked_file_that_status_show_untracked_files_hides(
     assert _git("branch", "--list", branch, cwd=project.root), f"{branch} kept"
 
 
-def test_reap_deletes_only_a_fleet_branch(
-    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+#: Which branches a reap deletes (docs/fleet.md, ``fleet reap``): a ``fleet/…`` branch an
+#: ended agent's row recorded, no tree has out, goes once main has its work and is named,
+#: kept, until then. Every other branch is not the fleet's and is left as it is, merged or
+#: not: case → ``"deleted"``, ``"kept"`` or ``"left"``.
+_SWEEP: dict[str, str] = {
+    "an ended agent's, merged": "deleted",
+    "an ended agent's, pushed and not merged": "kept",
+    "made by hand, merged, in a project no agent ran in": "left",
+    "made by hand, merged, beside an ended agent's": "left",
+    "spawned on, then left by its agent for a branch of its own": "left",
+    "an ended agent's own, not fleet/…, merged": "left",
+}
+
+
+@pytest.mark.parametrize("case", list(_SWEEP))
+def test_reap_deletes_only_a_fleet_branch_an_ended_agent_recorded(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path, case: str
 ) -> None:
-    """An agent that switched its tree to a branch of its own and pushed it: the tree goes,
-    as nothing is only there, and the branch stays — reap deletes the ``fleet/…`` branches
-    it made, never another. The one it was spawned on, left at main's tip, goes: main
-    holds it (review of #259, round 15)."""
+    """Review of #259, round 16: every reap deleted ANY merged ``fleet/…`` branch no tree
+    had out, in every project it walked — a user's ``git branch fleet/my-own-notes`` in a
+    repo no agent ever ran in included, as ``fleet reap --all`` walks every captured
+    directory. Only a branch an ended agent's row recorded is the fleet's to delete; a
+    branch no row names, or one that is not ``fleet/…``, is never touched."""
     _remote(project, tmp_path)
-    agent = fleet_service.spawn(project, "coder", label="coder-own").agent
-    spawned_on = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=agent.cwd)
-    _git("switch", "-q", "-c", "my-own", cwd=agent.cwd)
-    _commit(agent.cwd, "mine.txt")
-    _git("push", "-q", "origin", "HEAD:my-own", cwd=agent.cwd)
-    fleet_service.stop(project, "coder-own", force=True)
+    if case == "made by hand, merged, in a project no agent ran in":
+        branch = "fleet/my-own-notes"
+        _git("branch", branch, cwd=project.root)
+    else:
+        agent = fleet_service.spawn(project, "coder", label="coder-x").agent
+        branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=agent.cwd)
+        if case == "an ended agent's, pushed and not merged":
+            _commit(agent.cwd, "feature.txt")
+            _git("push", "-q", "origin", "HEAD:feat/integration", cwd=agent.cwd)
+        elif case == "made by hand, merged, beside an ended agent's":
+            branch = "fleet/my-own-notes"
+            _git("branch", branch, cwd=project.root)
+        elif case != "an ended agent's, merged":
+            _git("switch", "-q", "-c", "my-own", cwd=agent.cwd)
+            _commit(agent.cwd, "mine.txt")
+            _git("push", "-q", "origin", "HEAD:my-own", cwd=agent.cwd)
+            if case == "an ended agent's own, not fleet/…, merged":
+                _git("merge", "-q", "--ff-only", "my-own", cwd=project.root)
+                branch = "my-own"
+        fleet_service.stop(project, "coder-x", force=True)
+    assert branch in _git("branch", "--list", "--merged", "main", cwd=project.root) or (
+        _SWEEP[case] == "kept"
+    ), "the premise: main holds its tip, so only whose branch it is decides"
 
     report = fleet_service.reap(project)
 
-    assert report.worktrees_removed == [agent.cwd] and report.branches_deleted == [spawned_on]
-    assert spawned_on.startswith("fleet/") and report.branches_kept == []
-    assert _git("branch", "--list", "my-own", cwd=project.root)
+    verdict = _SWEEP[case]
+    assert (branch in report.branches_deleted) == (verdict == "deleted"), report
+    assert (branch in report.branches_kept) == (verdict == "kept"), report
+    assert bool(_git("branch", "--list", branch, cwd=project.root)) == (verdict != "deleted")
 
 
 def test_reap_never_removes_a_live_agents_worktree(

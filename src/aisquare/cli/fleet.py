@@ -864,10 +864,12 @@ def reap(
     """Record exited agents, mark vanished panes lost, remove finished worktrees.
 
     A finished worktree is an ended agent's tree that is clean and whose commits
-    are on the default branch or pushed to any remote branch; its `fleet/…` branch
-    goes with it. A tree with uncommitted changes or unpushed commits is kept, and
-    named with why. This project by default, `--all` for every project — never
-    both. Exits 1 when a released claim could not be given back to the board.
+    are on the default branch or pushed to any remote branch. Its `fleet/…` branch
+    stays until the default branch has its work, and is named until then; a branch
+    no agent's row recorded is never touched. A tree with uncommitted changes or
+    unpushed commits is kept, and named with why. This project by default, `--all`
+    for every project — never both. Exits 1 when a released claim could not be given
+    back to the board.
     """
     refuse_conflicting_scope(every, project)
     target = None if every else _project(project)

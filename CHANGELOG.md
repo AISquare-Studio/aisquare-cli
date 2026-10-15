@@ -451,12 +451,13 @@ all of them, and the fleet cleans up the worktrees it made.**
   a tree pushed to an integration branch (`push HEAD:feat/…`) was never
   removed. A tree now goes when it is clean and its commits are on the default
   branch or pushed to **any** remote branch. Its branch stays. Every `reap`
-  deletes a `fleet/…` branch no tree has out once the default branch has its
-  work (its tip, or, pushed, every change it makes, after a squash or rebase
-  merge), and keeps one with commits the default branch lacks, so a coder
-  spawned again for its task checks it out and carries on with them. A kept
-  branch is named on every reap, with `git branch -D` to drop it. Reap never
-  deleted a branch before, and deletes no other. A tree with uncommitted changes, an untracked file that is not
+  deletes a `fleet/…` branch an ended agent's row recorded, and no tree has out,
+  once the default branch has its work (its tip, or, pushed, every change it
+  makes, after a squash or rebase merge), and keeps one with commits the default
+  branch lacks, so a coder spawned again for its task checks it out and carries
+  on with them. A kept branch is named on every reap, with `git branch -D` to
+  drop it. Reap never deleted a branch before, and deletes no other: not one
+  made by hand, nor one an agent left for another. A tree with uncommitted changes, an untracked file that is not
   ignored, or unpushed commits is kept and named with why; push it, and the
   next `reap` removes it. `--json` adds `worktrees_kept`, `branches_deleted`
   and `branches_kept` beside `worktrees_removed`. A live agent's tree is never

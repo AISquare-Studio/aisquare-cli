@@ -481,11 +481,14 @@ counts). A tree with uncommitted changes, an untracked file that is not ignored
 named, with why (`worktrees_kept` under `--json`, beside `worktrees_removed`);
 push it, and the next `reap` removes it. `fleet stop` says so for an agent that
 had a worktree. The removed tree's branch stays. Every `reap` then looks at
-each `fleet/…` branch no worktree has out, the ones kept before included, and
-deletes it once the default branch has its work (`branches_deleted`): the
-default branch holds its tip, or the branch is pushed and merging it would
-change nothing, as after a squash or rebase merge (git 2.38 or later). Only
-`fleet/…` branches are ever deleted. One with commits the default branch lacks
+each `fleet/…` branch an ended agent's row recorded (`branch` in `fleet ls
+--json`) that no worktree has out, the ones kept before included, and deletes it
+once the default branch has its work (`branches_deleted`): the default branch
+holds its tip, or the branch is pushed and merging it would change nothing, as
+after a squash or rebase merge (git 2.38 or later). Only those are ever deleted:
+a branch no row names — made by hand, or one an agent left for another — and a
+branch that is not `fleet/…` are left as they are, and a project no agent with a
+worktree has ended in is not looked at. One with commits the default branch lacks
 — pushed to an integration branch, say — is kept and named on every reap
 (`branches_kept`), with `git branch -D <branch>` to drop it once its work is
 abandoned: a coder spawned again for its task asks for the same branch, checks

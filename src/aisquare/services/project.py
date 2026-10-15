@@ -132,8 +132,11 @@ class ProjectBusyError(Exception):
         # row on a server it cannot reach, and an operator following that advice
         # after a hand-run `tmux kill-server` reaped nothing, twice. The scoped
         # `fleet shutdown` is the command that can, on their word.
-        # Its folder's name may hold a space or a `$`: quoted for this shell (review of #257).
-        scope = project.codename or display_name(project)
+        # Named by its codename, else its id, never its nickname: free text that
+        # `find_projects` matches last, so `--project web` for a project nicknamed "web"
+        # shut down `/work/web`'s fleet when that was registered too (review of #259,
+        # round 13). Quoted for this shell all the same (review of #257).
+        scope = project.codename or project.id
         shutdown = install_route.command_line(["aisquare", "fleet", "shutdown", "--project", scope])
         super().__init__(
             f"{display_name(project)} has {len(agents)} live fleet agent(s): {labels} — "

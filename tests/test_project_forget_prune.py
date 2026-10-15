@@ -1033,12 +1033,14 @@ def test_older_than_without_captured_only_is_refused(
 
 
 @pytest.mark.parametrize("folder", ["My Repo", "repo-$HOME"], ids=["space", "dollar"])
-def test_a_busy_project_names_the_shutdown_to_run_quoted_for_its_folder(
+def test_a_busy_project_names_the_shutdown_to_run_by_its_id_without_a_codename(
     tmp_path: Path, folder: str
 ) -> None:
     """With no codename yet, a busy project's refusal named `fleet shutdown --project` with
     its folder's name bare: a space split it, and a `$` was expanded by the shell when
-    pasted (review of #257). Quoted for this shell, it reads back as that one name."""
+    pasted (review of #257). Then with its nickname, which another project's folder could
+    take (below). It names the id, quoted for this shell, which reads back as that one ref;
+    the prose names the folder."""
     from aisquare.services import install_route
     from aisquare.services import project as project_service
 
@@ -1055,6 +1057,36 @@ def test_a_busy_project_names_the_shutdown_to_run_quoted_for_its_folder(
     said = str(project_service.ProjectBusyError(project, [agent]))
     printed = said.split("gone too, ", 1)[1].removesuffix(" records them")
 
-    argv = ["aisquare", "fleet", "shutdown", "--project", folder]
+    argv = ["aisquare", "fleet", "shutdown", "--project", "p-1"]
     assert printed == install_route.command_line(argv), said
     assert install_route.split_line(printed) == argv, said
+    assert said.startswith(f"{folder} has 1 live fleet agent(s)"), said
+
+
+def test_a_busy_nicknamed_projects_shutdown_is_never_another_projects(work_dir: Path) -> None:
+    """`/work/api` nicknamed "web", and `/work/web` registered too: forgetting `api` was
+    refused with `fleet shutdown --project web`, which `find_projects` reads as `/work/web`
+    (a nickname matches last), and running it shut down that project's fleet (review of
+    #259, round 13). The command names the project it refused."""
+    from aisquare.services import fleet as fleet_service
+    from aisquare.services import install_route
+    from aisquare.services import project as project_service
+
+    roots = [work_dir / "api", work_dir / "web"]
+    with store_session() as store:
+        api, web = (
+            store.onboard_project(ProjectInfo(id=project_id_for(root), root=root, linked_repos=[]))
+            for root in roots
+        )
+    api = project_service.set_nickname(api, "web")
+    agent = FleetAgent(
+        id="a-1", project_id=api.id, label="coder-a", role="coder", pane_id="%1",
+        cwd=api.root, created_at=datetime.now(UTC),
+    )  # fmt: skip
+
+    said = str(project_service.ProjectBusyError(api, [agent]))
+    printed = said.split("gone too, ", 1)[1].removesuffix(" records them")
+    ref = install_route.split_line(printed)[-1]
+
+    assert said.startswith("web has 1 live fleet agent(s)"), said  # the prose: its nickname
+    assert fleet_service.resolve_project(ref).id == api.id != web.id

@@ -26,7 +26,7 @@ from aisquare.core import agents, launch_seal, outbox, selfcli
 from aisquare.core.agent_adapters.types import store_dir, store_read_only
 from aisquare.core.config import load_config, save_config
 from aisquare.core.entries import new_entry
-from aisquare.core.store import store_session
+from aisquare.core.store import SqliteStore, store_session
 from aisquare.services import agent_launch, fleet, native_telemetry, team
 
 
@@ -1058,11 +1058,15 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             # Its turn ends on its own; the row no longer names its pane to watch it by.
             time.sleep(3)
             seen = len(outputs())
-            not_its = "is not the pane its launch record places"
+            not_its = "its row was rewritten in the store"
             told = fleet.tell(project, reviewer.label, "LEAKED LINE")
             assert not told.delivered and not_its in told.how, told.how
-            with pytest.raises(fleet.LaunchRefused, match=not_its):
-                fleet.stop(project, reviewer.label)
+            assert len(outputs()) == seen, "nothing reached the reviewer either"
+            # Review r6 of #113, finding 4: refused, that one UPDATE made the agent one no
+            # stop could end. It is stopped where its launch record places it.
+            stopped = fleet.stop(project, reviewer.label)
+            assert stopped.agent.ended_at is not None
+            assert srv.pane_facts(reviewer.pane_id) is None, "its own window is gone"
             screen = subprocess.run(
                 ["tmux", "-L", users, "capture-pane", "-p", "-t", users_pane],
                 capture_output=True,
@@ -1070,7 +1074,12 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
                 check=True,
             ).stdout
             assert "LEAKED" not in screen and "/exit" not in screen, screen
-            assert len(outputs()) == seen, "nothing reached the reviewer either"
+            assert (
+                subprocess.run(
+                    ["tmux", "-L", users, "has-session", "-t", "main"], check=False
+                ).returncode
+                == 0
+            ), "the user's pane runs on"
             with store_session() as handle:
                 said = [
                     event.text
@@ -1244,6 +1253,17 @@ def test_real_codex_at_its_usage_limit_reaches_the_board_with_no_stop(
                 until(lambda: offer in screen(coder.pane_id), 20, "its dialog", coder.pane_id)
                 refused = fleet.tell(project, coder.label, "LIMIT probe")
                 assert not refused.delivered and "hooks say waiting" in refused.how, refused
+                # Review r6 of #113, finding 1: the row's agent column, rewritten as a
+                # sandbox can (NULL reads as Claude Code's, whose check reads no dialog),
+                # chooses nothing: the record's agent decides tell's and stop's typing.
+                with store_session() as handle:
+                    assert isinstance(handle, SqliteStore)
+                    handle._conn.execute(
+                        "UPDATE fleet_agent SET agent = NULL WHERE id = ?", (coder.id,)
+                    )
+                    handle._conn.commit()
+                rewritten = fleet.tell(project, coder.label, "LIMIT probe")
+                assert not rewritten.delivered and "rewritten" in rewritten.how, rewritten
                 time.sleep(1)
                 assert offer in screen(coder.pane_id), "nothing answered the dialog"
                 assert "LIMIT probe" not in screen(coder.pane_id)

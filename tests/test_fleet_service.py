@@ -7769,6 +7769,29 @@ def test_reap_removes_a_worktree_pushed_to_any_remote_branch_and_its_fleet_branc
     assert _git("rev-parse", "origin/feat/integration", cwd=project.root), "the work is safe"
 
 
+def test_a_restart_of_an_agent_whose_worktree_was_reaped_is_refused(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Review of #259, round 13: the reaped agent's 💤 row could still be restarted, and
+    its replacement carried on in a tree made anew from main on a new branch, without its
+    commits, with nothing said. Refused, before anything is recorded: the row stays, and
+    no tree is made at its path."""
+    _remote(project, tmp_path)
+    coder = fleet_service.spawn(project, "coder", label="coder-reaped").agent
+    _commit(coder.cwd, "feature.txt")
+    _git("push", "-q", "origin", "HEAD:feat/integration", cwd=coder.cwd)
+    fleet_service.stop(project, "coder-reaped", force=True)
+    assert fleet_service.reap(project).worktrees_removed == [coder.cwd]
+
+    with pytest.raises(FleetError, match=r"worktree .* is gone .*fleet reap"):
+        fleet_service.restart(project, "coder-reaped")
+
+    assert not coder.cwd.exists(), "no tree was made in its place"
+    with store_session() as store:
+        [row] = store.fleet_agents(project.id)
+    assert row.id == coder.id and row.ended_at is not None
+
+
 def test_reap_keeps_a_worktree_with_unpushed_commits_or_uncommitted_changes_and_says_why(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
 ) -> None:

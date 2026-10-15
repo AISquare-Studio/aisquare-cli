@@ -1084,10 +1084,14 @@ def _ensure_worktree(
     — and a clean one was moved to a branch the agent never worked on (review
     of #203, final round, FLEET-2).
 
+    A tree ``own`` names that is gone is refused, not made anew
+    (:func:`_refuse_a_worktree_that_is_gone`).
+
     ``refuse_if_taken`` reaches :func:`_reuse_worktree`, which asks it once more
     before switching branches; a tree this call CREATES cannot be another
     agent's, because ``git worktree add`` refuses an existing directory.
     """
+    _refuse_a_worktree_that_is_gone(own)
     path = root / worktree_dir / label
     if path.exists():
         if (path / ".git").exists():
@@ -5501,9 +5505,29 @@ def _refuse_a_replay_that_cannot_start(agent: FleetAgent, session: TeamSession |
         bin_flag=False,
     )
     _refuse_an_env_file_it_cannot_read(agent.role)
+    _refuse_a_worktree_that_is_gone(agent.cwd if agent.worktree else None)
     config = settings()
     srv = server(config)
     _refuse_a_freed_socket(srv, config, srv.listener())
+
+
+def _refuse_a_worktree_that_is_gone(own: Path | None) -> None:
+    """Raise when ``own``, the worktree an agent worked in, is no longer there.
+
+    ``fleet reap`` removes an ended agent's tree once its work is pushed, and deletes its
+    ``fleet/…`` branch, while the 💤 row can still be restarted (:data:`RECENTLY_ENDED`).
+    Replaced as before, the agent carried on in a tree :func:`_ensure_worktree` made anew
+    on a new branch from the main checkout's HEAD, without its commits, and nothing said
+    so: its conversation went on about work that was not there (review of #259, round 13).
+    Asked by the restart and the switch before anything is stopped, and by
+    :func:`_ensure_worktree` for a tree reaped meanwhile.
+    """
+    if own is not None and not own.exists():
+        raise FleetError(
+            f"its worktree {own} is gone (`aisquare fleet reap` removes an ended "
+            "agent's tree once its work is pushed): carried on in a new tree, it would work "
+            "without its commits. Spawn a new agent on the branch it pushed instead"
+        )
 
 
 def _refuse_an_env_file_it_cannot_read(role: str) -> None:

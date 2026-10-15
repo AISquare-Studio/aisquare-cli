@@ -473,8 +473,10 @@ way. A tree with uncommitted changes, an untracked file that is not ignored
 (even under `status.showUntrackedFiles=no`), or unpushed commits is kept and
 named, with why (`worktrees_kept` under `--json`, beside `worktrees_removed` and
 `branches_deleted`); push it, and the next `reap` removes it. `fleet stop` says
-so for an agent that had a worktree. `--all` walks every project's fleet, not
-just this one.
+so for an agent that had a worktree. An agent whose tree was removed is not
+restarted (Restart, `fleet restart`, Remote's restart): its conversation would
+carry on in a new tree without its commits, so spawn a new one on the branch it
+pushed. `--all` walks every project's fleet, not just this one.
 
 Each row is asked of its own server, at the socket its spawn recorded, so a
 shell under another `TMUX_TMPDIR` reaps exactly what the spawning shell would,

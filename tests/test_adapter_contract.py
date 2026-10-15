@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tomllib
 from collections.abc import Iterator
 from importlib import import_module
@@ -51,7 +52,7 @@ from aisquare.core.agent_adapters.types import (
 from aisquare.core.config import FleetRoleSettings, load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
-from aisquare.services import agent_events
+from aisquare.services import agent_events, store_broker
 from aisquare.services import fleet as fleet_service
 from tests import fakebin
 from tests.fake_agent import FakeAgentAdapter
@@ -406,12 +407,11 @@ def _named(args: list[str]) -> set[str]:
     return named
 
 
-def test_a_sandboxed_agent_reaches_the_store(adapter: AgentAdapter, tmp_path: Path) -> None:
-    """Every board call an agent makes (``aisquare note``, ``task claim``, a read too) opens
-    the aisquare store for writing: an agent whose sandbox confines its tools' writes
-    declares how its launch reaches the store (``store_access``), with the account homes,
-    the credentials and the config read-only within it, and every permission the fleet
-    maps for it carries that, the role's built-in ones included."""
+def test_a_sandboxed_agent_has_the_store_read_only(adapter: AgentAdapter, tmp_path: Path) -> None:
+    """An agent whose sandbox confines its tools' writes declares the launch arguments that
+    hold the aisquare store read-only in it, all of it (``store_access``,
+    ``store_read_only``), and every permission the fleet maps for it carries them, the
+    role's built-in ones included."""
     # A Windows home too, on every platform: its spelling in the launch is the agent's to
     # choose (TOML escapes Codex's backslashes), and only a Windows runner had one.
     windows = cast(Path, PureWindowsPath(r"C:\Users\me\.aisquare"))
@@ -424,8 +424,7 @@ def test_a_sandboxed_agent_reaches_the_store(adapter: AgentAdapter, tmp_path: Pa
             elif write != "full":
                 named = _named(access)
                 assert str(store) in named, f"{adapter.id}'s {write} sandbox leaves out {store}"
-                for kept in store_read_only(store):
-                    assert str(kept) in named, f"{kept} must stay read-only in the sandbox"
+                assert store_read_only(store) == (store,), "all of the store"
     for write in get_args(WriteScope):
         for approvals in get_args(Approvals):
             intent = PermissionIntent(write, approvals)
@@ -438,6 +437,33 @@ def test_a_sandboxed_agent_reaches_the_store(adapter: AgentAdapter, tmp_path: Pa
         write = PermissionIntent.for_role(role).write
         launched = adapter.fleet_args(role, f"{role}-1", None)
         assert _runs_within(adapter.store_access(write, store_dir()), launched), role
+
+
+def test_an_agent_that_sandboxes_its_tools_declares_its_broker(
+    adapter: AgentAdapter, tmp_path: Path
+) -> None:
+    """The store is read-only in the sandbox, so a sandboxed agent's board calls go through
+    its launch's broker (``services.store_broker``): the adapter declares how a launch makes
+    the broker's inbox the one writable path in the store (``broker_access``), over every
+    permission the fleet maps for it, and an agent with no sandbox has no broker."""
+    store = tmp_path / "aisquare-home"
+    inbox = store / "broker" / "launch-1" / "in"
+    for write in get_args(WriteScope):
+        for approvals in get_args(Approvals):
+            try:
+                args = adapter.permission_args(PermissionIntent(write, approvals), "coder")
+            except ValueError:
+                continue
+            args = [*args, *adapter.store_access(write, store)]
+            launched = adapter.broker_access(args, store, inbox)
+            if not adapter.capabilities.sandboxes_tools or write == "full":
+                assert launched is None, f"{adapter.id} {write}: no sandbox, no broker"
+                continue
+            assert launched is not None, f"{adapter.id} declares no broker for {write}"
+            assert str(inbox) in _named(launched), f"{adapter.id}'s inbox is not in its sandbox"
+            assert str(inbox) not in _named(args)
+            assert str(store) in _named(launched), "the store stays named, read-only"
+    assert adapter.broker_access(["--unrelated"], store, inbox) is None
 
 
 def test_resume_exit_mcp_context_teams_and_telemetry(adapter: AgentAdapter, tmp_path: Path) -> None:
@@ -506,9 +532,15 @@ def test_the_fake_agent_runs_through_the_fleet_like_any_other(
     monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
     result = runner.invoke(app, command[command.index("launch") :])
     assert result.exit_code == 0, result.output
-    argv = execute.call_args.args[1]
+    argv, launched_env = execute.call_args.args[1], execute.call_args.args[2]
     assert Path(argv[0]).name.startswith("fakeagent")
-    assert argv[-len(native) :] == native
+    # With its broker's inbox writable in its sandbox, the rest of the store read-only;
+    # the broker named in its environment where one runs (POSIX: its bell is a FIFO).
+    broker = store_broker.launch_dir(store_dir(), launched_env["AISQUARE_LAUNCH_ID"])
+    expected = fake_agent.broker_access(native, store_dir(), broker / store_broker.INBOX)
+    assert expected is not None and argv[-len(expected) :] == expected
+    if sys.platform != "win32":
+        assert launched_env[store_broker.DIR_ENV] == str(broker)
 
     # The adapter's own exit command, typed by `fleet stop`.
     assert fleet_service._exit_command(receipt.agent) == "/quit"

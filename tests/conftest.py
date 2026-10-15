@@ -461,6 +461,23 @@ def no_hook_binary_probe(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def no_store_broker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never start a store broker process from a test's launch; mark it ready instead.
+
+    ``aisquare launch`` of an agent that sandboxes its tools starts one per launch
+    (``services.store_broker.run_broker``), owned by the process the agent becomes, which
+    in a test is the suite itself: each would poll until the run ends. Tests of the broker
+    capture the real function at import and start it against their own directory.
+    """
+    from aisquare.services import store_broker
+
+    def ready(directory: Path, env: object) -> None:
+        (directory / store_broker.READY).write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(store_broker, "run_broker", ready)
+
+
+@pytest.fixture(autouse=True)
 def no_repomix(monkeypatch: pytest.MonkeyPatch) -> None:
     """Disable the repomix subprocess by default so tests never shell out.
 

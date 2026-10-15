@@ -200,7 +200,11 @@ def _append_flags(
     text.append(f"{adapter.label} ", style="dim")
     text.append(shlex.join(shown) if shown or store else "(no permission flag)", style="dim")
     if store:
-        text.append(f" + the aisquare store, writable in its {store} sandbox", style="dim")
+        text.append(
+            f" + the aisquare store, read-only in its {store} sandbox (board calls through "
+            "its broker)",
+            style="dim",
+        )
 
 
 def _without_store_access(adapter: AgentAdapter, flags: list[str]) -> tuple[list[str], str]:

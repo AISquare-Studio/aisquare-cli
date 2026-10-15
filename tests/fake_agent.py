@@ -189,12 +189,28 @@ class FakeAgentAdapter:
         ]
 
     def store_access(self, write: WriteScope, store: Path) -> list[str]:
-        # Its sandbox takes more writable directories, and read-only ones within them;
-        # with `full` it has none.
+        # Its sandbox takes read-only directories, and writable ones within them; with
+        # `full` it has none.
         if write == "full":
             return []
-        kept = [arg for path in store_read_only(store) for arg in ("--readonly", str(path))]
-        return ["--writable", str(store), *kept]
+        return [arg for path in store_read_only(store) for arg in ("--readonly", str(path))]
+
+    def broker_access(self, args: Sequence[str], store: Path, inbox: Path) -> list[str] | None:
+        # The store's run read-only whatever `args` held, the inbox writable beside it.
+        result: list[str] = []
+        found = False
+        tokens = iter(args)
+        for arg in tokens:
+            if arg in ("--readonly", "--writable"):
+                path = next(tokens, "")
+                if path == str(store):
+                    result += ["--readonly", path, "--writable", str(inbox)]
+                    found = True
+                else:
+                    result += [arg, path]
+                continue
+            result.append(arg)
+        return result if found else None
 
     def fleet_args(
         self,

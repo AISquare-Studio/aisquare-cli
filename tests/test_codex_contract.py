@@ -235,11 +235,13 @@ def test_ask_and_auto_pin_who_answers_unless_the_launch_says() -> None:
     )
 
 
-def test_the_store_profile_keeps_what_runs_outside_the_sandbox_read_only(tmp_path: Path) -> None:
-    """Codex's built-in profile for the scope with the aisquare home writable and, within
-    it, every account home, the credentials and the config read-only: a hook or a setting
-    written there would run outside the sandbox (measured on 0.162.1: a blanket
-    ``--add-dir`` of the home let a sandboxed command rewrite its own CODEX_HOME)."""
+def test_the_store_is_read_only_in_the_sandbox_all_of_it(tmp_path: Path) -> None:
+    """Codex's built-in profile for the scope with the aisquare home read-only within it,
+    all of it: nothing a sandboxed command writes reaches the board, the launch records,
+    the config or an account home, and so nothing there that chooses what runs outside the
+    sandbox can have been written from it (the structural fix for #113's sandbox-boundary
+    class; a blanket writable home let a sandboxed command rewrite its own CODEX_HOME,
+    then every column a replay or a kill read). Its board calls go through its broker."""
     home = tmp_path / "aisquare home"
     scopes: tuple[tuple[WriteScope, str], ...] = (
         ("workspace", ":workspace"),
@@ -255,15 +257,43 @@ def test_the_store_profile_keeps_what_runs_outside_the_sandbox_read_only(tmp_pat
         ]
         key, _, table = args[5].partition("=")
         assert args[4] == "-c" and key == "permissions.aisquare.filesystem"
-        entries = tomllib.loads(f"t = {table}")["t"]
-        assert entries[str(home)] == "write"
-        for name in ("codex-accounts", "claude-accounts", "credentials", "config.toml"):
-            assert entries[str(home / name)] == "read", name
-        # The seals of the launches a replay runs (review r2 of #113, finding 3; r3, 5);
-        # never a path denied reading, with which Codex did not start on a GitHub runner.
-        assert entries[str(home / "launch-seals")] == "read"
-        assert set(entries.values()) == {"write", "read"}
+        # Never a path denied reading, with which Codex did not start on a GitHub runner.
+        assert tomllib.loads(f"t = {table}")["t"] == {str(home): "read"}
     assert codex.store_access("full", home) == []
+
+
+def test_a_launch_adds_its_broker_inbox_and_holds_the_store_read_only_whatever_was_recorded(
+    tmp_path: Path,
+) -> None:
+    """Each launch makes its broker's inbox the one path in the store its sandbox may
+    write (``services.store_broker``), in place of the table the launch spec carries: a
+    spec recorded before this rule had the store writable, and its replay must not."""
+    home = tmp_path / "aisquare home"
+    inbox = home / "broker" / "launch-1" / "in"
+    old_table = f'{{{json.dumps(str(home))} = "write"}}'
+    recorded = [
+        "--approve-for-me",
+        "-c",
+        'default_permissions="aisquare"',
+        "--config",
+        'permissions.aisquare.extends=":workspace"',
+        "-c",
+        f"permissions.aisquare.filesystem={old_table}",
+        "-c",
+        'model="gpt-5"',
+    ]
+    launched = codex.broker_access(recorded, home, inbox)
+    assert launched is not None
+    assert launched[:5] == recorded[:5] and launched[-2:] == recorded[-2:]
+    key, _, table = launched[6].partition("=")
+    assert key == "permissions.aisquare.filesystem"
+    assert tomllib.loads(f"t = {table}")["t"] == {str(home): "read", str(inbox): "write"}
+    # Its own profile, as store_access writes it, gets the same.
+    fresh = codex.broker_access(codex.store_access("read_only", home), home, inbox)
+    assert fresh is not None and fresh[-1].endswith(f'{json.dumps(str(inbox))} = "write"}}')
+    # No store profile: unsandboxed, or a sandbox the operator chose. No broker serves it.
+    assert codex.broker_access(["--sandbox", "danger-full-access"], home, inbox) is None
+    assert codex.broker_access(["-c", 'sandbox_mode="workspace-write"'], home, inbox) is None
 
 
 def _sandbox_of(command: list[str]) -> str | None:

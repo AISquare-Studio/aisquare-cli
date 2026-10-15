@@ -100,12 +100,29 @@ def launch_identity(env: dict[str, str], selected: ResolvedAgent, hub: Path | No
     return parent_run
 
 
+def start_broker(
+    selected: ResolvedAgent, env: dict[str, str], argv: list[str]
+) -> tuple[list[str], str]:
+    """``argv`` with this launch's broker inbox in its sandbox's profile and the broker
+    started outside it, for an agent that sandboxes its tools (``services.store_broker.
+    start``); a line to print when it could not be. Never raises: a broker that does not
+    start costs the agent its board calls from the sandbox, which then say so, never the
+    launch."""
+    from aisquare.services import store_broker
+
+    try:
+        return store_broker.start_for_launch(env, selected.adapter, argv)
+    except Exception as exc:
+        return argv, f"{selected.adapter.label}: its store broker did not start ({exc})"
+
+
 def prepare_sandbox(selected: ResolvedAgent) -> None:
-    """Before an agent that sandboxes its tools is exec'd: make what its store profile
+    """Before an agent that sandboxes its tools is exec'd: make the store its profile
     names (``types.prepare_store``), which its sandbox would otherwise leave an empty
     file in place of, and take the fleet's census of the rows spawned before launch
-    records were kept (``services.fleet.take_census``) if it was not, while nothing in a
-    sandbox can have written the store yet."""
+    records were kept (``services.fleet.take_census``) if it was not. Nothing in a
+    sandbox can write the store (``types.store_read_only``), so the census is taken from
+    rows no sandbox wrote whenever it is taken."""
     from aisquare.core.agent_adapters.types import prepare_store, store_dir
 
     if selected.adapter.capabilities.sandboxes_tools:

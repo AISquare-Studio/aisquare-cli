@@ -39,7 +39,11 @@ from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
-from aisquare.services.team import DeliveryUnconfirmedError, TeamDisabledError
+from aisquare.services.team import (
+    DeliveryUnconfirmedError,
+    ForeignSessionError,
+    TeamDisabledError,
+)
 
 app = typer.Typer(help="Coordinate parallel agent sessions on this project.", no_args_is_help=True)
 
@@ -53,6 +57,7 @@ SessionRef = Annotated[
 # family — none of them may reach the user as a traceback.
 STORE_ERRORS = (
     TeamDisabledError,
+    ForeignSessionError,
     KeyError,
     AmbiguousIdError,
     DeliveryUnconfirmedError,
@@ -64,6 +69,8 @@ def _fail_team(exc: Exception, ref: str | None = None) -> NoReturn:
     """Translate service errors into the shared CLI error contract."""
     if isinstance(exc, TeamDisabledError):
         fail(str(exc), error="team_disabled")
+    if isinstance(exc, ForeignSessionError):
+        fail(str(exc), error="not_your_session", ref=exc.ref)
     if isinstance(exc, AmbiguousIdError):
         fail(f"'{exc.ref}' is ambiguous — use more characters", error="ambiguous_id", ref=exc.ref)
     if isinstance(exc, DeliveryUnconfirmedError):
@@ -547,6 +554,11 @@ def spawn(
         if native_trace_note:
             typer.echo(native_trace_note, err=True)
         argv = [argv[0], *native_trace_args, *argv[1:]]
+        # As `aisquare launch`: the store is read-only in the agent's sandbox, and its
+        # board calls go through this launch's broker.
+        argv, broker_note = agent_launch.start_broker(selected, env, argv)
+        if broker_note:
+            typer.echo(broker_note, err=True)
         agent_launch.prepare_sandbox(selected)
         os.execvpe(argv[0], argv, env)
     if not get_state().json_output:

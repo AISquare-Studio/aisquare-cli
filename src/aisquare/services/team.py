@@ -217,6 +217,20 @@ class DeliveryUnconfirmedError(RuntimeError):
         self.board_name = board_name
 
 
+class ForeignSessionError(PermissionError):
+    """A command a sandboxed agent's broker runs (``services.store_broker.CALLER_ENV``)
+    named a session that is not its launch's own: one the agent's own hooks, outside the
+    sandbox, bound to that launch (``core.agent_sessions.bind_launch_session``)."""
+
+    def __init__(self, ref: str, own: list[str]) -> None:
+        mine = ", ".join(short_id(value) for value in own) or "none yet: its first hook has not run"
+        super().__init__(
+            f"--as {ref} is not this agent's own session (its own: {mine}): a command from "
+            "its sandbox acts only as the sessions its own launch registered"
+        )
+        self.ref = ref
+
+
 class ManagerWakeupError(RuntimeError):
     """The manager's wake-up branch failed; the row still says ``waiting``, as before.
 
@@ -370,12 +384,43 @@ def _project_root(store: ContextStore, project_id: str) -> Path | None:
     return project.root if project is not None else None
 
 
-def _resolve_session(store: ContextStore, ref: str | None) -> TeamSession | None:
+def _resolve_session(
+    store: ContextStore, ref: str | None, *, acting: bool = True
+) -> TeamSession | None:
+    """The session ``ref`` names (an id prefix); the one a command acts as unless it is
+    only a filter (``acting``), which a brokered command may name only when it is its own
+    (:func:`_acting_as`)."""
     if ref is None:
         return None
     session = store.get_session(ref)
     if session is None:
         raise KeyError(ref)
+    return _acting_as(store, session, ref) if acting else session
+
+
+def brokered() -> bool:
+    """Whether this command is one a sandboxed agent's broker runs for it
+    (``services.store_broker.CALLER_ENV``)."""
+    from aisquare.services.store_broker import CALLER_ENV
+
+    return os.environ.get(CALLER_ENV) == "1"
+
+
+def _acting_as(store: ContextStore, session: TeamSession, ref: str) -> TeamSession:
+    """``session``, when this command may act as it: any session for a command run here,
+    only its launch's own for one a sandboxed agent's broker runs (:func:`brokered`).
+    Its own are the sessions bound to the launch's tokens, which the broker's environment
+    carries (the launch's, never the caller's) and only the agent's own hooks bind, from
+    outside the sandbox, where nothing inside it writes (``types.store_read_only``)."""
+    if not brokered():
+        return session
+    own = [
+        bound
+        for prefix, token in agent_sessions.launch_tokens()
+        if (bound := store.get_meta(f"{prefix}-session:{token}"))
+    ]
+    if session.id not in own:
+        raise ForeignSessionError(ref, own)
     return session
 
 
@@ -658,7 +703,7 @@ def log_events(
     with store_session() as store:
         session = _resolve_session(store, session_ref)
         board = _board(store, session, cwd)
-        author = _resolve_session(store, by)
+        author = _resolve_session(store, by, acting=False)
         task_id: str | None = None
         if task_ref is not None:
             task = store.get_task(task_ref)
@@ -729,6 +774,9 @@ def verify_receipt(
 
 _SIGNAL_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 _SIGNAL_VALUE = re.compile(r"\S{1,128}")
+#: The fleet's own signals (``services.fleet.PAUSE_SIGNAL``, ``fleet-paused``): set by the
+#: fleet and its operator, never by a command a sandboxed agent's broker runs.
+_FLEET_SIGNAL_PREFIX = "fleet-"
 
 
 @dataclass(frozen=True)
@@ -778,6 +826,11 @@ def set_signal(
     _require_enabled()
     _DELIVERY.set(None)  # FIRST: a refused signal must not leave the last write's receipt readable
     _validate_signal(name, value)  # before any store is opened or board resolved
+    if brokered() and name.startswith(_FLEET_SIGNAL_PREFIX):
+        raise ValueError(
+            f"signal {name!r} is the fleet's own: a command from an agent's sandbox may "
+            "read it, not set it"
+        )
     with store_session() as store:
         session = _resolve_session(store, session_ref)
         # A caller that names the project by ID resolves the board id-addressed,
@@ -918,7 +971,7 @@ def set_role(role: str, session_ref: str, cwd: Path | None = None) -> TeamSessio
     # CLI prints no receipt for it.
     _DELIVERY.set(None)
     with store_session() as store:
-        session = store.get_session(session_ref)
+        session = _resolve_session(store, session_ref)
         if session is None:
             raise KeyError(session_ref)
         return store.update_session(session.id, role=role)
@@ -929,7 +982,7 @@ def set_focus(text: str, session_ref: str, cwd: Path | None = None) -> TeamSessi
     _require_enabled()
     _DELIVERY.set(None)
     with store_session() as store:
-        session = store.get_session(session_ref)
+        session = _resolve_session(store, session_ref)
         if session is None:
             raise KeyError(session_ref)
         updated = store.update_session(session.id, focus=text)
@@ -2180,7 +2233,7 @@ def prune_sessions(
     released_total = 0
     with store_session() as store:
         project = _project(store, cwd)
-        spare = _resolve_session(store, keep) if keep else None
+        spare = _resolve_session(store, keep, acting=False) if keep else None
         spare_id = spare.id if spare else None
         for session in store.team_sessions(project.id):
             if session.ended_at is not None or session.id == spare_id:

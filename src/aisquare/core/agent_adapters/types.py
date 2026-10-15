@@ -9,7 +9,6 @@ holds every registered adapter to it).
 
 from __future__ import annotations
 
-import json
 import re
 import tomllib
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -159,9 +158,10 @@ class AgentCapabilities:
     """``fleet.roles.<role>.sandbox``/``approval_policy``/``approve_for_me`` apply."""
     sandboxes_tools: bool = False
     """The agent runs its tools' commands in an OS sandbox that confines their writes
-    (Codex's), and every board call an agent makes opens the aisquare store for writing,
-    a read included: its permission flags make the store reachable from the sandbox
-    (:meth:`AgentAdapter.store_access`), or each ``aisquare`` call is an escalation.
+    (Codex's). Its permission flags make the aisquare store read-only there
+    (:meth:`AgentAdapter.store_access`), and every board call it makes there goes through
+    its launch's broker, outside the sandbox (``services.store_broker``), whose inbox is
+    the one path in the store its sandbox may write (:meth:`AgentAdapter.broker_access`).
     Claude Code runs its tools unsandboxed."""
     redraws_while_asking: bool = False
     """The agent's UI keeps redrawing while it waits on the human (Codex's approval view,
@@ -317,72 +317,33 @@ def store_dir() -> Path:
         return home.absolute()
 
 
-def _store_dirs(store: Path) -> tuple[Path, ...]:
-    """The directories :func:`store_read_only` names: every agent's account homes and
-    their temporary directories, the sign-in tokens' cache, and the records of the
-    launches a replay runs (``core.launch_seal``)."""
-    from aisquare.core import launch_seal
-    from aisquare.core.agent_adapters import adapters
-
-    homes = sorted({adapter.accounts.dir_name for adapter in adapters() if adapter.accounts})
-    home = paths.aisquare_home()
-    cache = paths.cache_dir().relative_to(home)
-    return (
-        *(store / name for name in homes),
-        *(store / cache / name for name in homes),
-        store / paths.oidc_cache_dir().relative_to(home),
-        store / launch_seal.DIR_NAME,
-    )
-
-
 def store_read_only(store: Path) -> tuple[Path, ...]:
-    """What under the aisquare home ``store`` a sandboxed agent may read and not write:
-    what runs, or chooses what runs, outside any sandbox, so a write there is a way out of
-    it. Every agent's account homes and their temporary directories (their hooks,
-    settings and logins), the config (every later launch's flags), the tmux conf every
-    fleet server loads, the agent registry (the dirs ``upgrade`` reconnects hooks in), the
-    keys and sign-in tokens, and the launch records a replay runs. Everything else there,
-    the store's database first, is the board's to write, and a replay reads nothing from
-    it (``core.launch_seal``)."""
-    from aisquare.core.tmux import CONF_NAME
-
-    return (
-        *_store_dirs(store),
-        store / paths.credentials_path().name,
-        store / paths.config_path().name,
-        store / CONF_NAME,
-        store / paths.agents_registry_path().name,
-        store / paths.explainability_key_path().name,
-    )
+    """What under the aisquare home ``store`` a sandboxed agent may read and not write: all
+    of it, the store's database first. So nothing a process in its sandbox writes reaches
+    the board, the launch records, the census, the config, the account homes, the model
+    probe's cache or anything else there, and nothing there that chooses what runs outside
+    the sandbox (a replay, a kill, a typed line, a launch, a model or an account, a
+    worktree removal, a paste) can have been written from inside one. The one path there
+    the sandbox may write is its own launch's broker inbox
+    (:meth:`AgentAdapter.broker_access`), whose requests the broker runs only from its
+    whitelist, as the launch's own sessions (``services.store_broker``)."""
+    return (store,)
 
 
 def prepare_store(store: Path) -> None:
-    """Make, before an agent's sandbox can, what :func:`store_read_only` names under
-    ``store``. Codex's sandbox leaves an empty file on the host where a path its profile
-    names does not exist (0.162.1, measured): in a directory's place, which no ``mkdir``
-    then makes, and over a file a writer writes in place, which then cannot (the tmux
-    conf, the agent registry). A file whose empty reading is its absent one (the config,
-    the credentials, a key) is left to that. The launch records' directory too
-    (``launch_seal.ensure_dir``); a fleet agent's own record was written before its
-    window started, and an agent that sandboxes its tools is not started without one.
-    Never raises: what is not made is the profile's to hold as it can."""
+    """Make, before an agent's sandbox can, the store its profile names. Codex's sandbox
+    leaves an empty file on the host where a path its profile names does not exist
+    (0.162.1, measured), which no ``mkdir`` then makes; the broker's inbox, the profile's
+    other path, is made by ``services.store_broker.start_for_launch`` before the agent starts. The
+    launch records' directory too (``launch_seal.ensure_dir``): a fleet agent's own record
+    was written before its window started, and an agent that sandboxes its tools is not
+    started without one. Never raises: what is not made is the profile's to hold as it
+    can."""
     from aisquare.core import launch_seal
-    from aisquare.core.tmux import BUNDLED_CONF, CONF_NAME
 
+    with suppress(OSError):
+        store.mkdir(parents=True, exist_ok=True)
     launch_seal.ensure_dir()
-    for directory in _store_dirs(store):
-        with suppress(OSError):
-            directory.mkdir(parents=True, exist_ok=True)
-    made = {
-        store / CONF_NAME: BUNDLED_CONF,
-        store / paths.agents_registry_path().name: json.dumps(
-            {"connected": [], "connections": {}}, indent=2
-        )
-        + "\n",
-    }
-    for path, body in made.items():
-        with suppress(OSError), path.open("x", encoding="utf-8") as handle:
-            handle.write(body)
 
 
 # --- version probe, hooks switch, plugin route ---------------------------------------------
@@ -471,7 +432,8 @@ class AgentAdapter(Protocol):
     the config dir), ``capabilities.hooks`` with :func:`hook_args`, ``hooks_off_setting``
     with :meth:`hooks_switch`, ``plugin``. Events: :meth:`decode_event` and
     :meth:`encode_reply`. Launch: :meth:`model_args`, :meth:`permission_args`,
-    :meth:`store_access`, :meth:`fleet_args`, :meth:`label_args`, :meth:`resume_args`,
+    :meth:`store_access`, :meth:`broker_access`, :meth:`fleet_args`,
+    :meth:`label_args`, :meth:`resume_args`,
     ``exit_command``, :meth:`queue_args`,
     :meth:`mcp_args`, :meth:`context_files`, :meth:`disable_native_teams`,
     :meth:`telemetry_args`. Accounts: ``accounts``. ``capabilities`` says the rest.
@@ -591,11 +553,20 @@ class AgentAdapter(Protocol):
         ...
 
     def store_access(self, write: WriteScope, store: Path) -> list[str]:
-        """Launch arguments through which a session sandboxed at ``write`` reaches the
-        aisquare store in ``store`` (:func:`store_dir`), its board, with what else lives
-        there read-only (:func:`store_read_only`). ``[]`` without
-        ``capabilities.sandboxes_tools`` (nothing stands between them) and for a scope the
-        agent runs unsandboxed (``full``)."""
+        """Launch arguments that run a session sandboxed at ``write`` with the aisquare
+        store in ``store`` (:func:`store_dir`) read-only in its sandbox, all of it
+        (:func:`store_read_only`); its board calls go through its broker
+        (:meth:`broker_access`). ``[]`` without ``capabilities.sandboxes_tools`` (nothing
+        stands between them) and for a scope the agent runs unsandboxed (``full``)."""
+        ...
+
+    def broker_access(self, args: Sequence[str], store: Path, inbox: Path) -> list[str] | None:
+        """``args`` with ``inbox``, the launch's broker inbox (``services.store_broker``),
+        the one path under ``store`` the sandbox may write, and the rest of the store
+        read-only whatever ``args`` recorded (a launch spec from before this rule); every
+        launch of an agent with ``capabilities.sandboxes_tools`` asks this before it
+        starts. ``None`` where ``args`` run no sandbox of :meth:`store_access`'s (the agent
+        unsandboxed, or a sandbox the operator chose), which no broker serves."""
         ...
 
     def fleet_args(

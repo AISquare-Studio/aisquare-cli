@@ -332,6 +332,18 @@ SEAMS: dict[str, Seam] = {
         "`doctor --live` needs the EXPLAINABILITY_* environment to diagnose the "
         "machine it is on, the same reason `sdk_doctor` is not",
     ),
+    "aisquare/services/store_broker.py::run_broker": Seam(
+        EXCLUDED,
+        "the store broker a launch of a sandboxed agent starts outside its sandbox (review "
+        "r9 of #113): a process of ours, no model process. NOT stripped: what it runs is the "
+        "agent's own board calls, which keep the agent's Run as from its tool shell",
+    ),
+    "aisquare/services/store_broker.py::answer": Seam(
+        EXCLUDED,
+        "one whitelisted board call (`aisquare <argv>`) the broker runs for its sandboxed "
+        "agent; no model process. NOT stripped: it is the agent's own call, filed under its "
+        "Run as it would be from the tool shell it came from",
+    ),
     "aisquare/cli/fleet.py::_exec_attach": Seam(
         EXCLUDED,
         "`tmux attach` — a terminal client on the fleet server, not an agent; "

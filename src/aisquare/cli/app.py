@@ -164,5 +164,15 @@ app.add_typer(explainability.app, name="explainability")
 
 
 def main() -> None:
-    """Console-script entry point for both ``aisquare`` and ``asq``."""
+    """Console-script entry point for both ``aisquare`` and ``asq``.
+
+    In an agent's sandbox, where the aisquare store is read-only, a command goes to its
+    launch's broker outside it and prints what ran there (``services.store_broker``)."""
+    import sys
+
+    from aisquare.services import store_broker
+
+    code = store_broker.forward(sys.argv[1:])
+    if code is not None:
+        raise SystemExit(code)
     app()

@@ -51,7 +51,6 @@ from aisquare.core.config import (
 )
 from aisquare.core.keys import Drop, Translation, translate
 from aisquare.core.store import SqliteStore, store_session
-from aisquare.core.tmux import BUNDLED_CONF
 from aisquare.models import (
     ClaudeAccount,
     FleetAgent,
@@ -1594,31 +1593,20 @@ def _rewrite(table: str, column: str, value: object, row_id: str) -> None:
         store._conn.commit()
 
 
-def test_the_store_profile_keeps_what_runs_outside_the_sandbox_out_of_its_reach() -> None:
-    """The store is writable from Codex's sandbox, the board's to write; what chooses or
-    runs something outside it is read-only there (the tmux conf every fleet server loads,
-    the registry ``upgrade`` reconnects hooks by, keys and sign-in tokens, the digests of
-    the launch specs a replay runs). No path is denied reading: with one, Codex reads its
-    own instructions through its sandbox helper, and on a host whose bwrap cannot bring up
-    loopback (a GitHub runner) the session did not start (CI on ca6d43ea)."""
+def test_the_store_profile_keeps_the_whole_store_out_of_the_sandboxs_reach() -> None:
+    """The store is read-only from Codex's sandbox, all of it: the board's database, the
+    digests of the launch specs a replay runs, the census, the tmux conf every fleet
+    server loads, the registry ``upgrade`` reconnects hooks by, the model probe's cache
+    (review r9 of #113, finding 14), keys and sign-in tokens. Its board calls go through
+    its broker (``services.store_broker``). No path is denied reading: with one, Codex
+    reads its own instructions through its sandbox helper, and on a host whose bwrap
+    cannot bring up loopback (a GitHub runner) the session did not start (CI on
+    ca6d43ea)."""
     store = store_dir()
     args = CODEX.store_access("workspace", store)
     table = args[args.index("-c", 4) + 1].partition("=")[2]
-    entries = tomllib.loads(f"t = {table}")["t"]
 
-    assert entries[str(store)] == "write"
-    for kept in (
-        "fleet-tmux.conf",
-        "agents.json",
-        "explainability-key",
-        "cache/oidc",
-        "config.toml",
-        "credentials",
-    ):
-        assert entries[str(store / kept)] == "read", kept
-    assert entries[str(store / launch_seal.DIR_NAME)] == "read"
-    assert set(entries.values()) == {"write", "read"}
-    assert str(store / "context.db") not in entries, "the board's"
+    assert tomllib.loads(f"t = {table}")["t"] == {str(store): "read"}
 
 
 def test_the_store_profile_names_a_windows_home_as_codex_reads_it() -> None:
@@ -1627,39 +1615,32 @@ def test_the_store_profile_names_a_windows_home_as_codex_reads_it() -> None:
     contract test that looked for ``C:\\Users\\…`` in the command line as written failed on
     the Windows runner only (CI on e8f95719), where the escaped spelling is the right one."""
     store = PureWindowsPath(r"C:\Users\me\.aisquare")
+    inbox = store / "broker" / "launch-1" / "in"
     args = CODEX.store_access("workspace", cast(Path, store))
     table = args[args.index("-c", 4) + 1].partition("=")[2]
 
-    assert r'"C:\\Users\\me\\.aisquare" = "write"' in table, "TOML's escape, as Codex reads it"
-    entries = tomllib.loads(f"t = {table}")["t"]
-    assert entries[r"C:\Users\me\.aisquare"] == "write"
-    assert entries[r"C:\Users\me\.aisquare\cache\oidc"] == "read"
-    assert entries[r"C:\Users\me\.aisquare\fleet-tmux.conf"] == "read"
-    assert entries[rf"C:\Users\me\.aisquare\{launch_seal.DIR_NAME}"] == "read"
-    assert all(key.startswith("C:\\Users\\me\\.aisquare") for key in entries), entries
+    assert r'"C:\\Users\\me\\.aisquare" = "read"' in table, "TOML's escape, as Codex reads it"
+    assert tomllib.loads(f"t = {table}")["t"] == {r"C:\Users\me\.aisquare": "read"}
+    launched = CODEX.broker_access(args, cast(Path, store), cast(Path, inbox))
+    assert launched is not None
+    entries = tomllib.loads(f"t = {launched[-1].partition('=')[2]}")["t"]
+    assert entries == {
+        r"C:\Users\me\.aisquare": "read",
+        r"C:\Users\me\.aisquare\broker\launch-1\in": "write",
+    }
 
 
 def test_a_sandboxed_launch_makes_what_its_profile_names_before_the_sandbox_can() -> None:
     """Codex's sandbox leaves an empty file on the host where a path its profile names did
-    not exist (0.162.1, measured): a directory's place taken by a file, a file a writer
-    that writes in place cannot write. The launcher makes them first."""
+    not exist (0.162.1, measured), which no ``mkdir`` then makes. The launcher makes the
+    store, and the launch records' directory; the broker's inbox is made where the broker
+    is started (``services.store_broker.start_for_launch``)."""
     store = store_dir()
+    shutil.rmtree(store, ignore_errors=True)
     prepare_store(store)
 
-    for directory in ("codex-accounts", "claude-accounts", "cache/codex-accounts", "cache/oidc"):
-        assert (store / directory).is_dir(), directory
-    assert (store / "fleet-tmux.conf").read_text(encoding="utf-8") == BUNDLED_CONF
-    assert json.loads((store / "agents.json").read_text(encoding="utf-8")) == {
-        "connected": [],
-        "connections": {},
-    }
+    assert store.is_dir()
     assert (store / launch_seal.DIR_NAME).is_dir()
-    # What is there already is left as it is.
-    (store / "agents.json").write_text('{"connected": ["codex"]}', encoding="utf-8")
-    prepare_store(store)
-    assert json.loads((store / "agents.json").read_text(encoding="utf-8")) == {
-        "connected": ["codex"]
-    }
 
 
 @pytest.mark.parametrize(
@@ -2339,7 +2320,7 @@ def test_the_settings_line_shows_one_permission_for_every_agent() -> None:
     assert line.index("Codex --approve-for-me") < line.index("Claude Code --permission-mode auto")
     assert "workspace:auto" in line and "--name" not in line
     # The store's profile is the same long run for every role: named, not spelled out.
-    assert "+ the aisquare store, writable in its workspace sandbox" in line
+    assert "+ the aisquare store, read-only in its workspace sandbox" in line
     assert "permissions.aisquare" not in line
     reviewer = launch_line("reviewer", "codex", FleetRoleSettings()).plain
     assert 'approvals_reviewer="auto_review"' in reviewer and "its read_only sandbox" in reviewer

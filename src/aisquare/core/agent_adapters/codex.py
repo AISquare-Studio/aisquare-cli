@@ -30,6 +30,7 @@ from aisquare.core.agent_adapters.types import (
     option_values,
     payload_cwd,
     payload_text,
+    rewrite_option_values,
     store_dir,
     store_read_only,
 )
@@ -152,6 +153,16 @@ _SANDBOX_SETTINGS = (
     "default_permissions",
     "permission_profile",
 )
+
+
+def _filesystem(read: Sequence[Path], write: Sequence[Path]) -> str:
+    """A ``[permissions.<name>].filesystem`` table as a ``-c`` value: ``read`` read-only,
+    ``write`` writable, each path a TOML string (a Windows one's backslashes escaped)."""
+    entries = {**dict.fromkeys(read, "read"), **dict.fromkeys(write, "write")}
+    body = ", ".join(f"{json.dumps(str(path))} = {json.dumps(at)}" for path, at in entries.items())
+    return f"{{{body}}}"
+
+
 #: Who answers an approval request (``approvals_reviewer``): the human, or Codex's
 #: automatic reviewer (``--approve-for-me``; its old name ``guardian_subagent`` is
 #: recorded as this one).
@@ -512,8 +523,6 @@ class CodexAdapter:
         return NativeChoice(models[-1] if models else model, effort)
 
     def native_args(self, args: list[str]) -> list[str]:
-        from aisquare.core.agent_adapters.types import rewrite_option_values
-
         def config(value: str) -> str:
             parsed = config_assignment(value)
             if parsed is not None:
@@ -713,26 +722,25 @@ class CodexAdapter:
     def store_access(self, write: WriteScope, store: Path) -> list[str]:
         """``-c`` settings that run the session under the profile :data:`PERMISSION_PROFILE`:
         Codex's built-in one for ``write`` (``:read-only``, ``:workspace``) with ``store``
-        writable and :func:`store_read_only` read-only within it, the more specific path
-        winning. ``full`` runs unsandboxed: nothing to add. Never a path denied reading
-        (``none``): with one, Codex reads its own instructions through its sandbox helper,
-        and where bwrap cannot bring up loopback (a GitHub runner) the session did not
-        start (CI on ca6d43ea).
+        read-only within it, all of it (:func:`store_read_only`), the more specific path
+        winning over a writable one around it (the workspace, ``/tmp``). Each launch adds
+        its broker's inbox, the one path there its sandbox may write (:meth:`broker_access`).
+        ``full`` runs unsandboxed: nothing to add. Never a path denied reading (``none``):
+        with one, Codex reads its own instructions through its sandbox helper, and where
+        bwrap cannot bring up loopback (a GitHub runner) the session did not start (CI on
+        ca6d43ea).
 
-        Measured on 0.162.1, with the store outside ``/tmp`` (which every sandbox may
-        write): ``aisquare note`` and ``aisquare board`` succeed on their first, sandboxed
-        attempt in the TUI, ``exec`` and ``resume``; the profile holds beside
-        ``--approve-for-me`` and over a ``sandbox_mode`` in config.toml, and gives way to
-        ``--sandbox`` and to a pick in Codex's own ``/permissions``, which drops it until
-        the next launch. Codex's guards in the workspace (``.git``, ``.codex``,
-        ``.agents``) still hold, and a read-only path that does not exist cannot be made.
+        Measured on 0.162.1, with the store outside ``/tmp``: from a sandboxed command
+        the store's database reads and does not write (``attempt to write a readonly
+        database``), and no file there can be made or changed; ``aisquare note`` and
+        ``aisquare task claim`` succeed on their first, sandboxed attempt through the
+        broker in the TUI and ``exec``. The profile holds beside ``--approve-for-me`` and
+        over a ``sandbox_mode`` in config.toml, and gives way to ``--sandbox`` and to a pick
+        in Codex's own ``/permissions``, which drops it until the next launch. Codex's
+        guards in the workspace (``.git``, ``.codex``, ``.agents``) still hold.
         """
         if write == "full":
             return []
-        entries = {store: "write", **dict.fromkeys(store_read_only(store), "read")}
-        table = ", ".join(
-            f"{json.dumps(str(path))} = {json.dumps(at)}" for path, at in entries.items()
-        )
         profile = f"permissions.{PERMISSION_PROFILE}"
         return [
             "-c",
@@ -740,8 +748,31 @@ class CodexAdapter:
             "-c",
             f"{profile}.extends={json.dumps(_BUILT_IN_PROFILES[write])}",
             "-c",
-            f"{profile}.filesystem={{{table}}}",
+            f"{profile}.filesystem={_filesystem(store_read_only(store), ())}",
         ]
+
+    def broker_access(self, args: Sequence[str], store: Path, inbox: Path) -> list[str] | None:
+        """``args`` with every ``-c permissions.aisquare.filesystem=…`` (the store's
+        profile, :meth:`store_access`) replaced by the store read-only and ``inbox``
+        writable: what the profile holds is this rule's, whatever a recorded launch spec
+        said (one from before it had the store writable). ``None`` when ``args`` set no
+        such table: the session runs unsandboxed or in a sandbox the operator chose. One
+        ``-c`` cannot add a path to the table: Codex splits a ``-c`` key on every dot,
+        and a home's path has them (``~/.aisquare``)."""
+        key = f"permissions.{PERMISSION_PROFILE}.filesystem"
+        table = _filesystem(store_read_only(store), (inbox,))
+        found = False
+
+        def rewrite(value: str) -> str:
+            nonlocal found
+            assigned, separator, _ = value.partition("=")
+            if not separator or assigned.strip() != key:
+                return value
+            found = True
+            return f"{key}={table}"
+
+        rewritten = rewrite_option_values(args, rewrite, "-c", "--config")
+        return rewritten if found else None
 
     def _sandbox(self, write: WriteScope, native: Sequence[str]) -> list[str]:
         """The sandbox for ``write``, unless ``native`` chose one: a native ``--sandbox``

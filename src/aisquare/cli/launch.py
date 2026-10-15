@@ -495,6 +495,11 @@ def launch(
         *agent_launch.mcp_args(selected),
         *arguments.argv,
     ]
+    # Last, over the environment as it will be exec'd: the store is read-only in the
+    # agent's sandbox, and its board calls go through this launch's broker.
+    argv, broker_note = agent_launch.start_broker(selected, env, argv)
+    if broker_note:
+        stderr_console().print(broker_note, markup=False)
     # Text.assemble rather than "[bold]{role}[/bold]": this is the one line that
     # styles a single token instead of the whole line, and it interpolates a
     # role name, a binary path and a project name. A Text carries its styling

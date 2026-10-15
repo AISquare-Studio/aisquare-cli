@@ -4411,9 +4411,11 @@ def store_recovery(exc: BaseException) -> str:
         return damaged_store_recovery()
     return (
         f"Leave it where it is: nothing in it is damaged, and this process may not write "
-        f"{paths.db_path().parent}. Inside an agent's sandbox, run the command outside it "
-        f"(an approval) — an `aisquare fleet` launch lets its agents reach the store — "
-        f"or give the directory back its permissions"
+        f"{paths.db_path().parent}. Inside an agent's sandbox, where the store is read-only, "
+        f"its board calls go through its launch's broker: an agent `aisquare fleet` or "
+        f"`aisquare launch` started has one (restart it if it says the broker is not "
+        f"running); otherwise run the command outside the sandbox (an approval), or give "
+        f"the directory back its permissions"
     )
 
 

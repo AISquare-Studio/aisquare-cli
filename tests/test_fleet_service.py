@@ -7225,7 +7225,8 @@ def _two_slots_with_usage(monkeypatch: pytest.MonkeyPatch, work: float, personal
 
 
 def _with_transcript(agent: FleetAgent, transcript: Path | None) -> None:
-    """The board row the agent's hooks would have written, naming its transcript."""
+    """The board row the agent's hooks would have written, naming its transcript, and
+    what its own hook adds to its launch record (``core.launch_seal.observe``)."""
     assert agent.session_id is not None
     now = datetime.now(tz=UTC)
     with store_session() as store:
@@ -7239,6 +7240,39 @@ def _with_transcript(agent: FleetAgent, transcript: Path | None) -> None:
                 transcript_path=str(transcript) if transcript is not None else None,
             )
         )
+    _hooked(agent, transcript)
+
+
+def _hooked(agent: FleetAgent, transcript: Path | None) -> None:
+    """What the agent's own hook adds to its launch record: its session, as handed."""
+    record = launch_seal.read(agent.id)
+    assert isinstance(record, launch_seal.LaunchRecord), record
+    facts = launch_seal.SessionFacts(
+        id=agent.session_id or "",
+        agent=record.agent,
+        native_id=agent.session_id,
+        transcript=str(transcript) if transcript is not None else None,
+    )
+    assert launch_seal.write(record.model_copy(update={"session": facts})) is None
+
+
+def _as_recorded(row: FleetAgent) -> FleetAgent:
+    """``row`` as its spawn would have recorded it: its launch record rewritten to hold
+    the row's launch (``core.launch_seal``), as only a spawner writes one."""
+    record = launch_seal.read(row.id)
+    assert isinstance(record, launch_seal.LaunchRecord), record
+    assert row.launch_spec is not None
+    update = {
+        "role": row.role,
+        "agent": row.agent or record.agent,
+        "binary": row.binary,
+        "cwd": str(row.cwd),
+        "worktree": row.worktree,
+        "account_slot": row.account_slot,
+        "spec": row.launch_spec,
+    }
+    assert launch_seal.write(record.model_copy(update=update)) is None
+    return row
 
 
 def _session_state(session_id: str) -> str:
@@ -8667,17 +8701,18 @@ def test_a_reused_pane_id_never_lets_stop_or_spawn_take_another_agents_last_scre
     assert tmux.killed == [old.pane_id, new.pane_id]
 
 
-def test_restart_keeps_the_account_a_row_without_a_slot_ran_under(
+def test_restart_takes_the_account_its_record_holds_never_the_session_rows(
     tmux: FakeTmux,
     claude_on_path: Path,
     project: ProjectInfo,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A row with no ``account_slot`` (spawned before the column) restarted on the
-    resolver's pick, and then resumed a transcript written under another config dir
-    — the leg ``switch`` calls unverified. It reads the session's account, as
-    ``switch`` does (``_account_slot_of``)."""
+    """Review r4 of #113, finding 6: a row with no ``account_slot`` restarted on the slot
+    its session's row said it ran under, a column an agent's sandbox writes, so the
+    sandbox chose which of the operator's accounts the unsandboxed replacement ran on.
+    The account is the launch record's; the row's slot and the session's account are
+    the store's, and change nothing."""
     from aisquare.core import claude_accounts as accounts_core
 
     _two_slots_with_usage(monkeypatch, work=10, personal=90)  # the pick would be slot 2
@@ -8685,13 +8720,10 @@ def test_restart_keeps_the_account_a_row_without_a_slot_ran_under(
     assert agent.session_id is not None
     transcript = tmp_path / "manager.jsonl"
     transcript.write_text("{}\n", encoding="utf-8")
+    _hooked(agent, transcript)
     now = datetime.now(tz=UTC)
     with store_session() as store:
-        # A row from before the column, sealed as the first run after an upgrade seals
-        # the rows it finds (`core.launch_seal`).
-        launch_seal.record(
-            store.upsert_fleet_agent(agent.model_copy(update={"account_slot": None}))
-        )
+        store.upsert_fleet_agent(agent.model_copy(update={"account_slot": None}))
         store.upsert_session(
             TeamSession(
                 id=agent.session_id,
@@ -8700,7 +8732,7 @@ def test_restart_keeps_the_account_a_row_without_a_slot_ran_under(
                 started_at=now,
                 last_seen_at=now,
                 transcript_path=str(transcript),
-                account=str(accounts_core.accounts_root() / "3"),
+                account=str(accounts_core.accounts_root() / "2"),
             )
         )
     tmux.die(agent.pane_id, 130)
@@ -8873,40 +8905,17 @@ def test_a_running_agent_is_not_stopped_for_a_restart_its_account_or_binary_woul
     PATH were refused inside ``spawn``, AFTER the stop, leaving no agent at all. Both
     are asked first now, as ``switch`` resolves its account before its stop, and so is
     the role, which ``spawn`` refuses before either."""
-    from aisquare.core import claude_accounts as accounts_core
 
     agent = _coder(project)
-    now = datetime.now(tz=UTC)
-    with store_session() as store:
-        # A row from before the column, sealed as the first run after an upgrade seals
-        # the rows it finds (`core.launch_seal`).
-        launch_seal.record(
-            store.upsert_fleet_agent(agent.model_copy(update={"account_slot": None}))
-        )
-        store.upsert_session(
-            TeamSession(
-                id=agent.session_id or "",
-                project_id=project.id,
-                role="coder",
-                started_at=now,
-                last_seen_at=now,
-                account=str(accounts_core.accounts_root() / "4"),  # a slot since removed
-            )
-        )
+    assert agent.launch_spec is not None
+    # Recorded on slot 4, a slot since removed.
+    removed = agent.launch_spec.model_copy(update={"account_slot": 4})
+    _as_recorded(agent.model_copy(update={"account_slot": 4, "launch_spec": removed}))
 
     with pytest.raises(FleetError, match="cannot restart 'coder-1': no Claude account in slot 4"):
         fleet_service.restart(project, agent.label)
     assert tmux.typed == [] and tmux.killed == []
-    with store_session() as store:
-        store.upsert_session(
-            TeamSession(
-                id=agent.session_id or "",
-                project_id=project.id,
-                role="coder",
-                started_at=now,
-                last_seen_at=now,
-            )
-        )
+    _as_recorded(agent)
     with monkeypatch.context() as patched:
         patched.setenv("PATH", str(tmp_path / "nowhere"))
         # The binary asked about is the one the replay starts: the recorded one (#144).
@@ -9941,6 +9950,7 @@ def test_a_resumed_restart_is_told_in_one_line_to_carry_on(
                 transcript_path=str(transcript),
             )
         )
+    _hooked(agent, transcript)
 
     receipt = fleet_service.restart(project, agent.label)
 
@@ -10356,7 +10366,7 @@ def test_a_launch_that_passed_no_permission_flag_is_restarted_without_one(
         legacy_row = store.upsert_fleet_agent(
             receipt.started.model_copy(update={"launch_spec": legacy})
         )
-    launch_seal.record(legacy_row)
+    _as_recorded(legacy_row)
     tmux.die(receipt.started.pane_id, 1)
     fleet_service.restart(project, agent.label)
     assert "--permission-mode" not in _command(tmux)
@@ -10394,15 +10404,15 @@ def test_a_restart_given_a_permission_mode_changes_the_mode_alone_and_records_it
     assert command.count("--effort") == 1 and "--quiet" not in command, "the rest is replayed"
     assert receipt.started.launch_spec is not None
     assert receipt.started.launch_spec.permission_mode == "acceptEdits"
-    assert any("binary and arguments come from the row" in note for note in receipt.notes)
+    assert any("binary and arguments come from its launch record" in note for note in receipt.notes)
     tmux.die(receipt.started.pane_id, 1)
 
     again = fleet_service.restart(project, agent.label)
 
     assert _flag(_command(tmux), "--permission-mode") == "acceptEdits", "the role says auto"
     assert (
-        "launched as recorded — binary, permission mode and arguments come from the row, "
-        "not from today's config (#144)" in again.notes
+        "launched as recorded — binary, permission mode and arguments come from its launch "
+        "record, not from today's config (#144)" in again.notes
     )
 
 
@@ -10495,10 +10505,10 @@ def test_a_restart_whose_recorded_binary_left_the_path_resolves_it_again_and_say
         and "'claude' (chosen by: default)" in note
         for note in receipt.notes
     )
-    # Not beside it "the binary comes from the row" (review of #169, F7): it did not.
+    # Not beside it "the binary is the recorded one" (review of #169, F7): it was not.
     assert (
-        "launched as recorded — permission mode and arguments come from the row, not from "
-        "today's config (#144)" in receipt.notes
+        "launched as recorded — permission mode and arguments come from its launch record, "
+        "not from today's config (#144)" in receipt.notes
     ), receipt.notes
     assert receipt.started.launch_spec is not None
     assert receipt.started.launch_spec.binary == "claude", "the spec records what ran"
@@ -10643,7 +10653,7 @@ def test_a_spec_that_holds_a_session_choice_does_not_replay_it(
     )
     with store_session() as store:
         legacy_row = store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
-    launch_seal.record(legacy_row)
+    _as_recorded(legacy_row)
     transcript = tmp_path / "t.jsonl"
     transcript.write_text("{}\n", encoding="utf-8")
     _with_transcript(agent, transcript)
@@ -10695,7 +10705,7 @@ def test_a_reviewer_restarted_from_a_spec_0_7_0_recorded_gets_its_shell_back(
     legacy = agent.launch_spec.model_copy(update={"recorded_by": None})  # as 0.7.0 wrote it
     with store_session() as store:
         legacy_row = store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
-    launch_seal.record(legacy_row)
+    _as_recorded(legacy_row)
     transcript = tmp_path / "t.jsonl"
     transcript.write_text("{}\n", encoding="utf-8")
     _with_transcript(agent, transcript)
@@ -10748,7 +10758,7 @@ def test_a_0_7_0_reviewer_is_restarted_with_the_arguments_today_s_config_gives_t
     legacy = agent.launch_spec.model_copy(update={"recorded_by": None})  # as 0.7.0 wrote it
     with store_session() as store:
         legacy_row = store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
-    launch_seal.record(legacy_row)
+    _as_recorded(legacy_row)
     transcript = tmp_path / "t.jsonl"
     transcript.write_text("{}\n", encoding="utf-8")
     _with_transcript(agent, transcript)
@@ -10786,7 +10796,7 @@ def test_a_0_7_0_reviewer_its_caller_locked_down_is_never_restarted_with_every_t
     legacy = agent.launch_spec.model_copy(update={"recorded_by": None})  # as 0.7.0 wrote it
     with store_session() as store:
         legacy_row = store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
-    launch_seal.record(legacy_row)
+    _as_recorded(legacy_row)
     transcript = tmp_path / "t.jsonl"
     transcript.write_text("{}\n", encoding="utf-8")
     _with_transcript(agent, transcript)
@@ -10871,7 +10881,7 @@ def test_a_0_7_0_reviewer_spawned_with_arguments_of_its_own_gets_its_shell_back(
     legacy = agent.launch_spec.model_copy(update={"recorded_by": None})  # as 0.7.0 wrote it
     with store_session() as store:
         legacy_row = store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
-    launch_seal.record(legacy_row)
+    _as_recorded(legacy_row)
     transcript = tmp_path / "t.jsonl"
     transcript.write_text("{}\n", encoding="utf-8")
     _with_transcript(agent, transcript)
@@ -10914,7 +10924,7 @@ def test_a_0_7_0_reviewer_whose_config_chose_restricted_is_restarted_without_a_s
     legacy = agent.launch_spec.model_copy(update={"recorded_by": None})  # as 0.7.0 wrote it
     with store_session() as store:
         legacy_row = store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
-    launch_seal.record(legacy_row)
+    _as_recorded(legacy_row)
     transcript = tmp_path / "t.jsonl"
     transcript.write_text("{}\n", encoding="utf-8")
     _with_transcript(agent, transcript)
@@ -11193,56 +11203,45 @@ def test_a_replay_refused_inside_the_replacements_spawn_names_no_bin_either(
     check (a relink during the stop's grace, a binding edited meanwhile) was refused
     there with "pass --bin", which neither ``restart`` nor ``switch`` takes."""
     agent = _coder(project)
-    with store_session() as store:
-        # A row from before the column, sealed as the first run after an upgrade seals
-        # the rows it finds (`core.launch_seal`).
-        launch_seal.record(store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": None})))
     tmux.die(agent.pane_id, 1)
     # The binary goes after the check before the stop has passed.
     monkeypatch.setattr(
-        fleet_service, "_refuse_a_replay_that_cannot_start", lambda project, agent, session: None
+        fleet_service, "_refuse_a_replay_that_cannot_start", lambda project, record: None
     )
+    claude_on_path.unlink()
     monkeypatch.setenv("AISQUARE_BIN_CODER", str(tmp_path / "gone" / "claude"))
 
-    with pytest.raises(FleetError, match="is not on your PATH") as refused:
+    with pytest.raises(FleetError, match="is no longer on your PATH") as refused:
         fleet_service.restart(project, agent.label)
 
     assert "--bin" not in str(refused.value), str(refused.value)
-    assert "install it, or change the role's binding" in str(refused.value)
+    assert "or change the role's binding" in str(refused.value)
 
 
-def test_a_row_spawned_before_the_launch_spec_is_refused_its_replay_before_the_stop(
+def test_a_row_spawned_before_launch_records_is_refused_its_replay_before_the_stop(
     tmux: FakeTmux,
     claude_on_path: Path,
     project: ProjectInfo,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
-    """Review of #169, round 1: a row spawned before v18 has no launch spec, so its
-    replay starts the role's binary as the role resolves it today. With that binary
-    gone, the check before the stop is the one thing between the operator and an
-    agent stopped for a replacement that never starts — and no test asked it. It is
-    `spawn`'s own choice (`_launch_binary`), asked by `restart` and by `switch`
-    before either marks the session or types `/exit`, and its refusal names only
-    ways out a restart has: neither takes `--bin`."""
+    """Review r4 of #113, finding 5: rows spawned before this version had their launch
+    sealed by whichever run first made the directory, from the store as it then stood,
+    which a sandboxed agent could have rewritten. Nothing scans the store for a record
+    now: a row with none is refused, before the stop, with the way out, and the agent
+    keeps running."""
     _two_slots_with_usage(monkeypatch, work=95, personal=10)
     agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
     _with_transcript(agent, None)
-    with store_session() as store:
-        # A row from before the column, sealed as the first run after an upgrade seals
-        # the rows it finds (`core.launch_seal`).
-        launch_seal.record(store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": None})))
-    gone = tmp_path / "gone" / "claude"
-    monkeypatch.setenv("AISQUARE_BIN_CODER", str(gone))
+    launch_seal._path(agent.id).unlink()  # as an aisquare that kept no records left it
     started = len(tmux.spawned)
-    refusal = re.escape(
-        f"{str(gone)!r} is not on your PATH (chosen by: env) — install it, or change the "
-        "role's binding"
+    refusal = (
+        "no launch record was written for it (it was spawned by an aisquare that keeps "
+        "none, or its record could not be written)"
     )
 
-    with pytest.raises(FleetError, match=f"^cannot restart {agent.label!r}: {refusal}$"):
+    with pytest.raises(FleetError, match=re.escape(f"cannot restart {agent.label!r}: {refusal}")):
         fleet_service.restart(project, agent.label)
-    with pytest.raises(FleetError, match=f"^{refusal}$"):
+    with pytest.raises(FleetError, match=re.escape(f"cannot switch {agent.label!r}: {refusal}")):
         fleet_service.switch(project, agent.label)
 
     assert tmux.typed == [] and tmux.killed == [], "no /exit typed, no window killed"
@@ -11250,7 +11249,7 @@ def test_a_row_spawned_before_the_launch_spec_is_refused_its_replay_before_the_s
     with store_session() as store:
         live = store.fleet_agent_by_label(project.id, agent.label, live_only=True)
         session = store.get_session(agent.session_id or "")
-    assert live is not None and live.id == agent.id and live.launch_spec is None
+    assert live is not None and live.id == agent.id
     assert session is not None and session.state == "working", "the session is not marked"
 
 

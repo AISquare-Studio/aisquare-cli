@@ -2,109 +2,123 @@
 
 The rule. The store (``context.db``) is writable from inside an agent's sandbox: every
 board call opens it for writing (``AgentAdapter.store_access``), so a prompt-injected
-Codex coder can rewrite any row in it. No value read from the store may therefore choose
-what runs outside the sandbox (an executable, a native argument, the home an unsandboxed
-native command reads, or the role, agent, worktree or account a replacement runs with)
-unless it is sealed here or validated against something the sandbox cannot write (review
-r2 of #113, finding 3; r3, findings 1, 2, 3 and 5):
+Codex coder can rewrite any row in it, its own and every other agent's. No value read
+from the store may therefore choose what runs outside the sandbox: an executable, a
+native argument, the directory or the home an unsandboxed process starts in, the
+conversation it resumes, or the role, agent, worktree, account or permission a
+replacement runs with (review r2 of #113, finding 3; r3, findings 1, 2, 3 and 5; r4,
+findings 1, 2, 5, 6 and 10).
 
-- Sealed: a fleet row's launch (:func:`sealed`: its launch spec, binary, agent, role,
-  worktree, working directory, account slot and project), which ``fleet restart``,
-  ``fleet switch`` and the usage-limit hand-over replay, and whose binary ``fleet tell``
-  queues with. ``fleet spawn`` records its digest in :func:`seals_dir`, which the store
-  profile names read-only (:func:`~aisquare.core.agent_adapters.types.store_read_only`).
-  A row whose digest is not there is not replayed and not queued with: the caller
-  refuses it and says why (:func:`refusal`), and never falls back to the row's values.
-- Validated: a native session id goes on a command line only in the shape the agent
-  makes it (:func:`native_id`: Codex's thread ids are UUIDs, and ``codex resume`` and
-  ``codex queue`` read one that starts with ``-`` as an option), a transcript only by its
-  absolute path, and the home an unsandboxed native command runs under only when it is
-  one of that agent's account homes (``services.fleet``). A digest's file is named by
-  the digest of the row's id, never by the id itself, which the store chose.
+Sealing the store's columns one by one did not converge: each round left the next one
+open. So a fleet row's launch is ONE record (:class:`LaunchRecord`), written in
+:func:`seals_dir`, which the store profile keeps read-only
+(:func:`~aisquare.core.agent_adapters.types.store_read_only`):
+
+- ``fleet spawn`` writes it before the window starts, from what it resolved itself:
+  the project and its directory, the role, the agent, the binary, the working
+  directory and whether it is a worktree, the account (its slot and its home) and the
+  launch spec (permission mode, arguments, the window's command line).
+- The agent's own hook adds its session (:class:`SessionFacts`: the id, the native id,
+  the transcript and the home), from the payload the agent handed it, in a process
+  outside any sandbox (:func:`observe`, :func:`adopted`): Claude Code has none, and
+  Codex runs its hooks outside the one it gives its tools (measured on 0.162.1). A
+  tool in the sandbox that runs a hook itself cannot write here.
+- ``fleet restart``, ``fleet switch``, the usage-limit hand-over and ``fleet tell``'s
+  queue read that record and nothing else from the store for what they run. A row
+  with no record, or one that cannot be read, is refused with the reason, and so is a
+  project whose directory in the store is not the record's.
+
+Nothing scans the store to mint a record: a row spawned before this version has none,
+and its replay is refused, naming the way out (stop it, spawn it again). What a record
+holds is read back as it was written, never compared with a digest of today's model,
+so a release that adds a field reads an older record with that field's default.
+
+Validated, besides: a native session id goes on a command line only in the shape the
+agent makes it (:func:`native_id`; ``codex resume`` and ``codex queue`` read one that
+starts with ``-`` as an option), even from the record. A record's file is named by the
+digest of the row's id, never by the id itself, which the store chose.
 
 Read-only, not unreadable: a path Codex's profile denies reading sends Codex's own reads
 of its instructions through its sandbox helper, and where bwrap cannot bring up loopback
 (a GitHub runner) the agent did not start at all (CI on ca6d43ea).
-
-The directory is ready once it holds :data:`READY`, written after every row the store
-held when it was first made has been recorded (as every spawn before it would have
-been): the agents running across an upgrade keep their launch. Until then each process
-that needs it records them again, so a recording that failed, or one still under way in
-another process, is never read as a seal that does not hold. A store migration that
-changes a sealed column (:func:`sealed`) has to seal the rows it changed again.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from pathlib import Path
-from typing import Any
 
-from aisquare.core import paths
+from pydantic import BaseModel, ValidationError
+
+from aisquare.core import orchestrator, paths
 from aisquare.core.atomic import write_replacing
-from aisquare.models import FleetAgent
+from aisquare.models import LaunchSpec
 
 DIR_NAME = "launch-seals"
-READY = "ready"
-"""The file that says :func:`seals_dir` is complete (:func:`ensure_dir`)."""
+VERSION = 1
+"""The version of :class:`LaunchRecord` this aisquare writes; a newer one is refused."""
 
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
 
 
+class SessionFacts(BaseModel):
+    """The agent session a replay resumes, as the agent's own hook was handed it."""
+
+    id: str
+    """The board's id for the session (Claude Code's own; another agent's key)."""
+    agent: str
+    """The adapter id of the agent whose hook it was."""
+    native_id: str | None = None
+    """The agent's own id for it (``codex resume <id>``)."""
+    transcript: str | None = None
+    """Its transcript, by the path the agent gave (``claude --resume <path>``)."""
+    home: str | None = None
+    """The config dir it runs under, where its native queue is (``CODEX_HOME``)."""
+
+
+class LaunchRecord(BaseModel):
+    """Everything a replay of one fleet row starts outside any sandbox with."""
+
+    version: int = VERSION
+    id: str
+    project_id: str
+    project_root: str
+    role: str
+    agent: str
+    binary: str
+    cwd: str
+    worktree: bool = False
+    account_slot: int | None = None
+    account_home: str | None = None
+    """The config dir the launch resolved for the account, when it resolved one."""
+    spec: LaunchSpec
+    session: SessionFacts | None = None
+
+
+#: The session facts this process's hooks were handed, by the board's session id: what
+#: :func:`adopted` writes when the row moves onto that session.
+_SEEN: dict[str, SessionFacts] = {}
+
+
 def seals_dir() -> Path:
-    """Where the digests of the launches ``fleet spawn`` recorded are kept."""
+    """Where the records of the launches ``fleet spawn`` made are kept."""
     return paths.aisquare_home() / DIR_NAME
 
 
-def sealed(agent: FleetAgent) -> dict[str, Any]:
-    """What of ``agent``'s row the seal covers: everything a replay starts it with."""
-    spec = agent.launch_spec
-    return {
-        "id": agent.id,
-        "project_id": agent.project_id,
-        "role": agent.role,
-        "agent": agent.agent,
-        "binary": agent.binary,
-        "cwd": str(agent.cwd),
-        "worktree": agent.worktree,
-        "account_slot": agent.account_slot,
-        "launch_spec": spec.model_dump(mode="json") if spec is not None else None,
-    }
-
-
-def digest(agent: FleetAgent) -> str:
-    """The SHA-256 of :func:`sealed`, as JSON with sorted keys."""
-    body = json.dumps(sealed(agent), sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(body.encode("utf-8")).hexdigest()
-
-
-def _seal_path(agent_id: str) -> Path:
-    """The file of the row ``agent_id``'s seal, named by the id's digest: the id is the
+def _path(agent_id: str) -> Path:
+    """The record of the row ``agent_id``, named by the id's digest: the id is the
     store's, and joined into the path it could name a file the sandbox wrote (``..``, a
     separator, an absolute path)."""
     name = hashlib.sha256(agent_id.encode("utf-8", "surrogatepass")).hexdigest()
-    return seals_dir() / f"{name}.sha256"
-
-
-def _write(agent: FleetAgent) -> None:
-    write_replacing(_seal_path(agent.id), digest(agent) + "\n", keep_mode=False)
+    return seals_dir() / f"{name}.json"
 
 
 def ensure_dir() -> str | None:
-    """``None`` once :func:`seals_dir` is ready, made and filled when it is not; otherwise
-    why it is not. Never raises.
-
-    The empty file a Codex sandbox leaves where a path its profile names did not exist
-    (measured on 0.162.1) is replaced. Every row the store holds is recorded before
-    :data:`READY` is written, so another process finds the directory ready only once
-    it is complete; a store that cannot be read leaves it unready, for the next process
-    to fill.
-    """
+    """``None`` once :func:`seals_dir` exists, made when it is not; otherwise why it could
+    not be. Never raises. The empty file a Codex sandbox leaves where a path its profile
+    names did not exist (measured on 0.162.1) is replaced."""
     directory = seals_dir()
-    if (directory / READY).is_file():
-        return None
     try:
         if directory.is_file() and directory.stat().st_size == 0:
             directory.unlink()
@@ -112,69 +126,113 @@ def ensure_dir() -> str | None:
         directory.mkdir(exist_ok=True)
     except OSError as exc:
         return f"{directory} could not be made ({exc.strerror or exc})"
-    from aisquare.core.store import store_session
-
-    try:
-        with store_session() as store:
-            rows = store.every_fleet_agent()
-        for row in rows:
-            _write(row)
-        write_replacing(directory / READY, "", keep_mode=False)
-    except Exception as exc:  # a store that cannot be read, a directory that refuses a write
-        return (
-            f"the launches the store held when {directory} was first made could not be "
-            f"recorded ({type(exc).__name__}: {exc})"
-        )
     return None
 
 
-def record(agent: FleetAgent) -> str | None:
-    """Seal ``agent``'s row as its launch: ``None`` when sealed, otherwise why it could not
-    be. Only a process outside the sandbox can (the directory is read-only in it)."""
+def write(record: LaunchRecord) -> str | None:
+    """Write ``record``: ``None`` when written, otherwise why it could not be. Only a
+    process outside the sandbox can (the directory is read-only in it)."""
     why = ensure_dir()
     if why is not None:
         return why
     try:
-        _write(agent)
+        write_replacing(_path(record.id), record.model_dump_json(indent=1) + "\n", keep_mode=False)
     except OSError as exc:
-        return f"{_seal_path(agent.id)} could not be written ({exc.strerror or exc})"
+        return f"{_path(record.id)} could not be written ({exc.strerror or exc})"
     return None
 
 
-def refusal(agent: FleetAgent) -> str | None:
-    """``None`` when ``agent`` is the row ``fleet spawn`` sealed; otherwise why a replay
-    of it, or a command run with its binary, is refused. Never raises."""
-    why = ensure_dir()
-    if why is not None:
-        return f"no launch seal could be checked: {why}"
+def read(agent_id: str) -> LaunchRecord | str:
+    """The record of the row ``agent_id``, or why there is none to replay. Never raises."""
+    path = _path(agent_id)
     try:
-        recorded = _seal_path(agent.id).read_text(encoding="ascii").strip()
+        body = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return (
-            "no launch seal was recorded for its row (it was spawned by an aisquare that "
-            "keeps none, or while seals could not be written, or written into the store by "
-            "something other than `fleet spawn`)"
+            "no launch record was written for it (it was spawned by an aisquare that "
+            "keeps none, or its record could not be written)"
         )
     except (OSError, UnicodeDecodeError) as exc:
-        return f"its launch seal could not be read ({exc})"
-    if recorded != digest(agent):
+        return f"its launch record could not be read ({exc})"
+    try:
+        record = LaunchRecord.model_validate_json(body)
+    except ValidationError as exc:
+        return f"its launch record could not be read ({exc.error_count()} invalid fields)"
+    if record.version > VERSION:
         return (
-            "its row is not the launch `fleet spawn` sealed: its launch spec, binary, agent, "
-            "role, worktree, directory or account changed in the store since"
+            f"its launch record was written by a newer aisquare (version {record.version}); "
+            "upgrade to replay it"
         )
-    return None
+    if record.id != agent_id:
+        return "its launch record names another row"
+    return record
 
 
-def holds(agent: FleetAgent) -> bool:
-    """Whether ``agent`` is the row ``fleet spawn`` sealed (:func:`refusal`)."""
-    return refusal(agent) is None
+def observe(
+    session_id: str,
+    *,
+    agent: str,
+    native: str | None,
+    transcript: str | None,
+    home: str | None,
+    own: bool | None,
+) -> None:
+    """Note what this hook process was handed for ``session_id``, for :func:`adopted`,
+    and add it to the record of this window's row (``AISQUARE_FLEET_AGENT``) when it is
+    that row's own session: the one its record already names (a Claude Code agent's id,
+    minted at the spawn, which its row never moves onto, so its transcript is known only
+    now), or, for a record that names none yet, the first one the agent's own process
+    (``own``, ``core.agent_sessions.own_process``) starts, as the launch's own binding
+    takes it (a Codex thread's id binds at its start). Never raises; written only from
+    outside any sandbox."""
+    facts = SessionFacts(
+        id=session_id, agent=agent, native_id=native, transcript=transcript, home=home
+    )
+    _SEEN[session_id] = facts
+    agent_id = orchestrator.env_fleet_agent()
+    if agent_id is None:
+        return
+    record = read(agent_id)
+    if not isinstance(record, LaunchRecord) or record.agent != agent:
+        return
+    kept = record.session
+    if (kept is None and own is True) or (kept is not None and kept.id == session_id):
+        _with_session(record, facts)
+
+
+def adopted(agent_id: str, session_id: str) -> None:
+    """The row ``agent_id`` moved onto ``session_id``, as its own agent's hook proved
+    (``services.team._adopt``): its record takes what this process was handed for that
+    session. Nothing when this process was handed nothing for it. Never raises."""
+    facts = _SEEN.get(session_id)
+    if facts is None:
+        return
+    record = read(agent_id)
+    if isinstance(record, LaunchRecord):
+        _with_session(record, facts)
+
+
+def _with_session(record: LaunchRecord, facts: SessionFacts) -> None:
+    kept = record.session
+    if kept is not None and kept.id == facts.id:
+        # A later hook of the same session may know less (a prompt names no home).
+        facts = SessionFacts(
+            id=facts.id,
+            agent=facts.agent,
+            native_id=facts.native_id or kept.native_id,
+            transcript=facts.transcript or kept.transcript,
+            home=facts.home or kept.home,
+        )
+    if facts == kept:
+        return
+    write(record.model_copy(update={"session": facts}))
 
 
 def native_id(value: str | None) -> str | None:
     """``value`` when it is a session id in the shape an agent makes one (a UUID, Codex's
     thread id and Claude Code's session id both), ``None`` otherwise: what goes on a
-    native command line from the store (``codex resume <id>``, ``codex queue --thread
-    <id>``) is never an option or a name the store chose."""
+    native command line (``codex resume <id>``, ``codex queue --thread <id>``) is never
+    an option or a name."""
     if value is None or not _UUID.fullmatch(value):
         return None
     return value

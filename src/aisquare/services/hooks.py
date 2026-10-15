@@ -23,11 +23,12 @@ import os
 import shutil
 import subprocess
 import sys
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import insights, selfcli
+from aisquare.core import insights, launch_seal, selfcli
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core import spawn as spawn_core
 from aisquare.core.injection import build_block
@@ -90,6 +91,7 @@ def session_start_context(
     began = datetime.now(tz=UTC)  # the row's started_at: when the hook was entered
     record_trace_join(session_id)
     if session_id:
+        _observe(session_id, agent, native_session_id, transcript_path, account)
         with store_session() as store:
             from aisquare.core.agent_adapters import recorded_adapter
             from aisquare.core.agent_sessions import bind_launch_session, own_process
@@ -130,6 +132,41 @@ def session_start_context(
     return "\n\n".join(
         part for part in (directive, block, team_block, instruction, retrieved) if part
     )
+
+
+def _observe(
+    session_id: str,
+    agent: str,
+    native_session_id: str | None,
+    transcript_path: str | None,
+    account: str | None,
+) -> None:
+    """What the agent handed this hook of its session, for its fleet row's launch record
+    (``core.launch_seal.observe``): written there only from a process outside any
+    sandbox, and only for the row's own session. Never raises: the record is a
+    replay's, never the hook's to fail over."""
+    with suppress(Exception):
+        from aisquare.core.agent_adapters import recorded_adapter
+        from aisquare.core.agent_sessions import own_process
+
+        adapter = recorded_adapter(agent)
+        launch_seal.observe(
+            session_id,
+            agent=agent,
+            native=native_session_id or session_id,
+            transcript=transcript_path,
+            home=account or _home_of(agent),
+            own=own_process(adapter) if adapter is not None else None,
+        )
+
+
+def _home_of(agent: str) -> str | None:
+    """The config dir this hook's agent runs under, as its launch exported it."""
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    adapter = recorded_adapter(agent)
+    value = os.environ.get(adapter.home_env, "").strip() if adapter is not None else ""
+    return value or None
 
 
 def _session_start_ci(
@@ -180,6 +217,7 @@ def prompt_submitted(
     retrieved = capture_prompt(prompt, cwd, session_id=session_id, source=source)
     if session_id is None:
         return retrieved
+    _observe(session_id, agent, native_session_id, transcript_path, account)
     delta = team_service.hook_prompt_heartbeat(
         session_id,
         cwd,

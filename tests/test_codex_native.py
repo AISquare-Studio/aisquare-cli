@@ -867,15 +867,16 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
                 f"RUN touch {store / 'credentials'}; touch {store / 'codex-accounts' / 'x'};"
                 f" touch {store / 'config.toml'}; touch {store / 'fleet-tmux.conf'};"
                 f" touch {store / 'agents.json'};"
-                f" touch {launch_seal._seal_path(coder.id)}; echo probed"
+                f" touch {launch_seal._path(coder.id)}; echo probed"
             )
             assert fleet.tell(project, label, probe).delivered
             until(lambda: answered(seen), 30, "the probe ran", pane)
             # Refused, each: "Read-only file system", or "Permission denied" where the
             # path did not exist and the sandbox left its read-only empty file there.
             assert outputs()[-1].count("cannot touch") == 6, outputs()[-1]
-            # The seal a replay checks the coder's row against is still its own.
-            assert launch_seal.holds(fleet.status_of(coder).agent)
+            # The record a replay takes the coder's launch from is still its spawn's.
+            recorded = launch_seal.read(coder.id)
+            assert isinstance(recorded, launch_seal.LaunchRecord) and recorded.binary == "codex"
             # An escalation Codex's reviewer answers: reviewed, and no bell.
             until(lambda: state(coder) == "waiting", 20, "waiting", pane)
             seen, reviewed = len(outputs()), reviews()
@@ -942,8 +943,9 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             assert not (workspace / "edited").exists()
 
             # Nothing the sandbox writes in the store chooses what runs outside it (review
-            # r3 of #113, findings 2 and 5): from its read-only seat the reviewer rewrites
-            # its session's thread id, then its replacement's row, and neither is replayed.
+            # r3 of #113, findings 2 and 5; r4, findings 1, 2 and 6): from its read-only seat
+            # the reviewer rewrites its session's thread and home, its row's role, binary
+            # and account, and the project's directory. A replay takes its launch record.
             def rewrite(table: str, column: str, value: str, row: str) -> str:
                 code = (
                     "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); c.execute("
@@ -953,33 +955,39 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
                 db = str(store / "context.db")
                 return "RUN " + shlex.join([sys.executable, "-c", code, db, value, row])
 
-            until(
-                lambda: state(reviewer) == "waiting", 30, "the reviewer waiting", reviewer.pane_id
-            )
+            def sandboxed(told: str, what: str) -> None:
+                until(lambda: state(reviewer) == "waiting", 30, "waiting", reviewer.pane_id)
+                seen = len(outputs())
+                assert fleet.tell(project, reviewer.label, told).delivered
+                until(lambda: answered(seen), 30, what, reviewer.pane_id)
+                assert "rewrote 1" in outputs()[-1], outputs()[-1]
+
             seat = fleet.status_of(reviewer).session
             assert seat is not None and seat.native_session_id
+            recorded_thread = seat.native_session_id
             flag = "--dangerously-bypass-approvals-and-sandbox"
-            seen = len(outputs())
-            told = rewrite("team_session", "native_session_id", flag, seat.id)
-            assert fleet.tell(project, reviewer.label, told).delivered
-            until(lambda: answered(seen), 30, "the thread id rewritten", reviewer.pane_id)
-            assert "rewrote 1" in outputs()[-1], outputs()[-1]
+            sandboxed(rewrite("team_session", "native_session_id", flag, seat.id), "thread")
+            sandboxed(rewrite("team_session", "account", str(workspace), seat.id), "home")
+            sandboxed(rewrite("fleet_agent", "role", "coder", reviewer.id), "role")
+            sandboxed(rewrite("fleet_agent", "binary", "/tmp/x", reviewer.id), "binary")
+            sandboxed(rewrite("fleet_agent", "account_slot", "7", reviewer.id), "account")
             until(lambda: state(reviewer) == "waiting", 20, "waiting", reviewer.pane_id)
             replaced = fleet.restart(project, reviewer.label)
-            assert not replaced.resumed
-            assert any("is not one Codex makes" in note for note in replaced.notes)
-            assert replaced.started.launch_spec is not None
-            assert flag not in replaced.started.launch_spec.command
+            command = replaced.started.launch_spec.command if replaced.started.launch_spec else []
+            assert replaced.resumed, replaced.notes
+            assert flag not in command and "/tmp/x" not in command and "--account" not in command
+            at = command.index("resume")
+            assert command[at : at + 2] == ["resume", recorded_thread], "the recorded thread"
+            assert command[command.index("launch") + 1] == "reviewer", "the recorded role"
             reviewer = replaced.started
             until(lambda: state(reviewer) == "waiting", 40, "the replacement", reviewer.pane_id)
-            seen = len(outputs())
-            told = rewrite("fleet_agent", "role", "coder", reviewer.id)
-            assert fleet.tell(project, reviewer.label, told).delivered
-            until(lambda: answered(seen), 30, "the role rewritten", reviewer.pane_id)
-            assert "rewrote 1" in outputs()[-1], outputs()[-1]
-            sealed = "is not the launch `fleet spawn` sealed"
-            with pytest.raises(fleet.FleetError, match=sealed):
-                fleet.restart(project, reviewer.label)
+            sandboxed(rewrite("project", "root", str(outside), project.id), "the project's root")
+            with store_session() as handle:
+                stored = handle.get_project(project.id)
+            assert stored is not None and stored.root == outside
+            moved = "is not the one it was spawned in"
+            with pytest.raises(fleet.FleetError, match=moved):
+                fleet.restart(stored, reviewer.label)
             assert fleet.status_of(reviewer).state in {"waiting", "working"}, "left running"
         finally:
             if srv.has_session(fleet.session_name(fleet.ensure_codename(project).codename or "")):

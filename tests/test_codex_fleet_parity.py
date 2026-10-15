@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import sqlite3
 import subprocess
 import tomllib
 from collections.abc import Callable, Iterator
@@ -56,6 +55,7 @@ from aisquare.models import (
     ClaudeAccount,
     FleetAgent,
     FleetAgentStatus,
+    LaunchSpec,
     ProjectInfo,
     TeamSession,
     TeamTask,
@@ -428,8 +428,7 @@ def test_a_codex_row_with_no_bound_thread_restarts_fresh_and_says_so(
 
     assert receipt.resumed is False
     assert any(
-        "no session is bound to the row" in note and "starts fresh" in note
-        for note in receipt.notes
+        "no session is recorded for it" in note and "starts fresh" in note for note in receipt.notes
     ), receipt.notes
     assert "resume" not in _native(_command(tmux))
 
@@ -440,22 +439,8 @@ def test_a_codex_session_recorded_without_its_native_id_restarts_fresh_and_says_
 ) -> None:
     codex, _ = codex_agent
     rollout = _rollout(codex, THREAD_OLD)
-    now = datetime.now(tz=UTC)
-    with store_session() as store:
-        store.upsert_session(
-            TeamSession(
-                id="board-only",
-                project_id=codex.project.id,
-                role="coder",
-                started_at=now,
-                last_seen_at=now,
-                transcript_path=str(rollout),
-                agent="codex",
-            )
-        )
-        row = store.get_fleet_agent(codex.agent.id)
-        assert row is not None
-        store.upsert_fleet_agent(row.model_copy(update={"session_id": "board-only"}))
+    session = launch_seal.SessionFacts(id="board-only", agent="codex", transcript=str(rollout))
+    _recorded(codex.agent, session=session)
 
     receipt = fleet_service.restart(codex.project, codex.agent.label)
 
@@ -1378,8 +1363,7 @@ def test_a_replay_its_agent_refuses_is_refused_before_anything_is_stopped(
     project: ProjectInfo,  # noqa: F811
 ) -> None:
     agent = fleet_service.spawn(project, "coder", agent="codex", worktree=False).agent
-    _rewrite("fleet_agent", "agent", "claude-code", agent.id)  # agent and binary disagree
-    assert launch_seal.record(_row(agent.id)) is None, "as if spawn had sealed it so"
+    _recorded(agent, agent="claude-code")  # agent and binary disagree, as recorded
     spawned = len(tmux.spawned)
 
     with pytest.raises(fleet_service.FleetError, match="runs codex, but claude-code"):
@@ -1390,11 +1374,22 @@ def test_a_replay_its_agent_refuses_is_refused_before_anything_is_stopped(
 
 
 # --- nothing a sandbox writes in the store chooses what runs outside it -----------------
-# (review r2 of #113, finding 3; r3, findings 1, 2, 3, 5 and 10: `core.launch_seal`)
+# (review r2 of #113, finding 3; r3, findings 1, 2, 3 and 5; r4, findings 1, 2, 5, 6 and
+# 10: `core.launch_seal`)
 
 
-#: How a replay of a row the store changed since ``fleet spawn`` sealed it is refused.
-UNSEALED = "is not the launch `fleet spawn` sealed"
+#: How a replay of a row with no launch record to take is refused.
+UNRECORDED = "no launch record was written for it"
+
+
+def _recorded(row: FleetAgent, **fields: object) -> launch_seal.LaunchRecord:
+    """``row``'s launch record with ``fields`` changed, as its spawn would have written
+    it: only a spawner writes one (a sandbox cannot)."""
+    record = launch_seal.read(row.id)
+    assert isinstance(record, launch_seal.LaunchRecord), record
+    record = record.model_copy(update=fields)
+    assert launch_seal.write(record) is None
+    return record
 
 
 def _tamper(agent: FleetAgent, path: str, value: object) -> None:
@@ -1489,153 +1484,156 @@ def test_a_sandboxed_launch_makes_what_its_profile_names_before_the_sandbox_can(
     [
         ("$.binary", "/tmp/x"),  # the program a replay runs
         ("$.extra_args", ["-c", 'notify=["sh","-c","/tmp/x"]']),  # one Codex runs
-        ("binary", "/tmp/x"),  # the program `fleet tell` queues with
-        ("role", "coder"),  # a reviewer's read-only seat comes back workspace-write
-        ("agent", "claude-code"),  # a Codex row comes back with no OS sandbox
+        ("$.permission_mode", "full:never"),
+        ("binary", "/tmp/x"),  # the program `fleet tell` queued with
+        ("role", "coder"),  # a reviewer's read-only seat came back workspace-write
+        ("agent", "claude-code"),  # a Codex row came back with no OS sandbox
         ("cwd", "/tmp"),  # a directory the sandbox wrote
         ("worktree", 1),
         ("account_slot", 7),
-        ("launch_spec", None),  # no spec: the role as it resolves today
+        ("launch_spec", None),  # no spec: the role as it resolved today
     ],
 )
-def test_a_row_the_store_changed_is_never_replayed(
+def test_nothing_a_sandbox_writes_in_a_row_reaches_its_replacement(
     column: str,
     value: object,
     tmux: FakeTmux,  # noqa: F811
     codex_on_path: Path,  # noqa: F811
     project: ProjectInfo,  # noqa: F811
 ) -> None:
-    """The store is writable from Codex's sandbox and the row's launch is replayed outside
-    it, by restart, switch and the usage-limit hand-over. Its spec was sealed and the rest
-    of the row was not (r3 finding 5): the role, the agent and the worktree a replacement
-    ran with came from the row, and a spec that failed its seal fell back to them. Any
-    change since the spawn sealed it is refused now, with the reason, before anything is
-    stopped; nothing falls back."""
+    """The store is writable from Codex's sandbox and a row's launch is replayed outside
+    it, by restart, switch and the usage-limit hand-over. Each round sealed one more of
+    the row's columns and the next was found open (r2 3, r3 1, 2, 3 and 5, r4 1, 2, 5 and
+    6). A replay reads its launch record and nothing else, so a row rewritten in the
+    store, any column of it, starts the replacement exactly as the spawn recorded it."""
     agent = fleet_service.spawn(project, "reviewer", agent="codex", worktree=False).agent
-    assert launch_seal.holds(_row(agent.id)), "the row as the store holds it is the one sealed"
+    spawned = _command(tmux)
     if column.startswith("$."):
         _tamper(agent, column, value)
     else:
         _rewrite("fleet_agent", column, value, agent.id)
+
+    receipt = fleet_service.restart(project, agent.label)
+
+    command = _command(tmux)
+    assert "/tmp/x" not in " ".join(command)
+    assert command[command.index("launch") : command.index("launch") + 2] == ["launch", "reviewer"]
+    assert _flag(command, "--agent") == "codex" and _flag(command, "--account") is None
+    replayed = _native(command)
+    assert replayed[: replayed.index("--")] == _native(spawned), "the reviewer's own flags"
+    assert tmux.spawned[-1]["cwd"] == project.root
+    assert receipt.started.role == "reviewer" and receipt.started.agent == "codex"
+
+
+def test_a_project_directory_the_store_chose_is_refused(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """r4 finding 2: a replay outside a worktree started in ``project.root``, and the
+    hand-over, asq's Restart and ``-p`` read the project from the store: a sandbox's
+    ``UPDATE project SET root`` chose the directory the unsandboxed replacement started
+    in, its hooks, config and instructions with it. It has to be the record's."""
+    agent = fleet_service.spawn(project, "coder", agent="codex", worktree=False).agent
+    elsewhere = tmp_path / "sandbox-chose"
+    elsewhere.mkdir()
+    _rewrite("project", "root", str(elsewhere), project.id)
+    with store_session() as store:
+        stored = store.get_project(project.id)
+    assert stored is not None and stored.root == elsewhere
     spawned = len(tmux.spawned)
 
     for replay in (
-        lambda: fleet_service.restart(project, agent.label),
-        lambda: fleet_service.switch(project, agent.label, to="0"),
-        lambda: fleet_service.switch(project, agent.label, automatic=True),
+        lambda: fleet_service.restart(stored, agent.label),
+        lambda: fleet_service.switch(stored, agent.label, automatic=True),
     ):
-        with pytest.raises(fleet_service.FleetError, match=UNSEALED):
+        with pytest.raises(fleet_service.FleetError, match="is not the one it was spawned in"):
             replay()
 
-    assert tmux.typed == [] and agent.pane_id not in tmux.killed, "left running"
-    assert len(tmux.spawned) == spawned, "nothing started"
+    assert len(tmux.spawned) == spawned and tmux.typed == []
 
 
-def test_a_row_untouched_since_its_seal_is_replayed_as_recorded(
+def test_a_replay_with_no_record_is_refused_and_none_is_minted(
     tmux: FakeTmux,  # noqa: F811
     codex_on_path: Path,  # noqa: F811
     project: ProjectInfo,  # noqa: F811
 ) -> None:
-    """Control: an untouched row still replays, its arguments the recorded ones, and its
-    replacement is sealed in turn."""
-    agent = fleet_service.spawn(
-        project, "coder", agent="codex", worktree=False, agent_args=["--search"]
-    ).agent
-
-    receipt = fleet_service.restart(project, agent.label)
-
-    assert "--search" in _command(tmux)
-    assert launch_seal.holds(_row(receipt.started.id))
-
-
-def test_the_rows_recorded_before_the_seals_keep_their_launch_across_the_upgrade(
-    tmux: FakeTmux,  # noqa: F811
-    codex_on_path: Path,  # noqa: F811
-    project: ProjectInfo,  # noqa: F811
-) -> None:
-    """An agent spawned before this version left no seal: there was nowhere to. The first
-    run that makes the seals' directory records every row the store holds, so the agents
-    running across an upgrade still restart as recorded; a row changed AFTER that does
-    not."""
-    agent = fleet_service.spawn(
-        project, "coder", agent="codex", worktree=False, agent_args=["--search"]
-    ).agent
-    shutil.rmtree(launch_seal.seals_dir())  # as the previous version left the home
-
-    receipt = fleet_service.restart(project, agent.label)
-
-    assert "--search" in _command(tmux)
-    _tamper(receipt.started, "$.extra_args", ["--search", "--yolo"])
-    with pytest.raises(fleet_service.FleetError, match=UNSEALED):
-        fleet_service.restart(project, agent.label)
-    assert "--yolo" not in _command(tmux)
-
-
-def test_a_seal_directory_another_process_is_still_filling_is_filled_before_it_is_read(
-    tmux: FakeTmux,  # noqa: F811
-    codex_on_path: Path,  # noqa: F811
-    project: ProjectInfo,  # noqa: F811
-) -> None:
-    """r3 finding 10: the directory was made before the rows were recorded into it, and a
-    restart in that window read an untouched row as changed, dropping its spec for good.
-    A directory not yet marked ready is filled by whoever reads it."""
-    agent = fleet_service.spawn(
-        project, "coder", agent="codex", worktree=False, agent_args=["--search"]
-    ).agent
-    shutil.rmtree(launch_seal.seals_dir())
-    launch_seal.seals_dir().mkdir()  # made, nothing recorded yet
-
-    fleet_service.restart(project, agent.label)
-
-    assert "--search" in _command(tmux)
-    assert (launch_seal.seals_dir() / launch_seal.READY).is_file()
-
-
-def test_a_store_unreadable_at_the_first_making_leaves_the_seals_to_the_next_run(
-    tmux: FakeTmux,  # noqa: F811
-    codex_on_path: Path,  # noqa: F811
-    project: ProjectInfo,  # noqa: F811
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """r3 finding 10: a store that could not be read when the directory was first made
-    left every row before it unsealed for good, and the refusal blamed a change. The
-    directory stays unready, the refusal names what happened, and the next run seals."""
-    agent = fleet_service.spawn(
-        project, "coder", agent="codex", worktree=False, agent_args=["--search"]
-    ).agent
-    shutil.rmtree(launch_seal.seals_dir())
-    with monkeypatch.context() as patched:
-        busy = Mock(side_effect=sqlite3.OperationalError("database is locked"))
-        patched.setattr(SqliteStore, "every_fleet_agent", busy)
-        with pytest.raises(fleet_service.FleetError, match="no launch seal could be checked"):
-            fleet_service.restart(project, agent.label)
-        assert not (launch_seal.seals_dir() / launch_seal.READY).exists()
-
-    fleet_service.restart(project, agent.label)
-
-    assert "--search" in _command(tmux)
-
-
-def test_a_home_where_the_seals_cannot_be_made_says_so(
-    tmux: FakeTmux,  # noqa: F811
-    codex_on_path: Path,  # noqa: F811
-    project: ProjectInfo,  # noqa: F811
-) -> None:
-    """r3 finding 10: "changed since, or recorded by another version" was said of a home
-    where the directory could not be made at all."""
+    """r4 finding 5: until the directory was marked ready every run sealed the store as
+    it stood, and a sandboxed agent that kept it unready could have its rewritten row
+    sealed. Nothing reads the store to write a record now: a row with none is refused,
+    with the way out, and stays refused."""
     agent = fleet_service.spawn(project, "coder", agent="codex", worktree=False).agent
-    shutil.rmtree(launch_seal.seals_dir())
-    launch_seal.seals_dir().write_text("not a directory", encoding="utf-8")
+    shutil.rmtree(launch_seal.seals_dir())  # as an aisquare that kept no records left it
 
-    with pytest.raises(fleet_service.FleetError, match="could not be made") as refused:
+    for _ in range(2):
+        with pytest.raises(fleet_service.FleetError, match=UNRECORDED) as refused:
+            fleet_service.restart(project, agent.label)
+        assert "then spawn a new agent" in str(refused.value)
+    assert not launch_seal._path(agent.id).exists()
+
+
+@pytest.mark.parametrize(
+    ("body", "why"),
+    [
+        ("{not json", "could not be read"),
+        ('{"version": 99}', "could not be read"),
+    ],
+)
+def test_a_record_that_cannot_be_read_is_refused(
+    body: str,
+    why: str,
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    agent = fleet_service.spawn(project, "coder", agent="codex", worktree=False).agent
+    launch_seal._path(agent.id).write_text(body, encoding="utf-8")
+
+    with pytest.raises(fleet_service.FleetError, match=why):
         fleet_service.restart(project, agent.label)
 
-    assert "no launch seal could be checked" in str(refused.value)
-    assert "changed" not in str(refused.value)
+
+def test_a_record_a_newer_aisquare_wrote_is_refused_naming_the_upgrade(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """r4 finding 10: a digest over today's model changed with every field a release
+    adds, and refused every running agent's replay as tampered. A record is read back as
+    written, a field it lacks takes its default; only a newer record's version refuses."""
+    agent = fleet_service.spawn(project, "coder", agent="codex", worktree=False).agent
+    path = launch_seal._path(agent.id)
+    written = json.loads(path.read_text(encoding="utf-8"))
+    del written["spec"]["recorded_by"]  # a field an older release did not write
+    path.write_text(json.dumps(written), encoding="utf-8")
+    assert isinstance(launch_seal.read(agent.id), launch_seal.LaunchRecord)
+    path.write_text(json.dumps({**written, "version": launch_seal.VERSION + 1}), encoding="utf-8")
+
+    with pytest.raises(fleet_service.FleetError, match="written by a newer aisquare"):
+        fleet_service.restart(project, agent.label)
+
+
+def test_an_agent_that_sandboxes_its_tools_is_not_started_without_its_record(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """r4 finding 5's other half: ``prepare_store`` started a sandboxed agent whatever
+    became of the seals. A spawn that cannot write the record refuses a Codex agent
+    before its window, and says why."""
+    shutil.rmtree(launch_seal.seals_dir(), ignore_errors=True)
+    launch_seal.seals_dir().write_text("not a directory", encoding="utf-8")
+    spawned = len(tmux.spawned)
+
+    with pytest.raises(fleet_service.FleetError, match="is not started without one") as refused:
+        fleet_service.spawn(project, "coder", agent="codex", worktree=False)
+
+    assert "could not be made" in str(refused.value) and len(tmux.spawned) == spawned
 
 
 @pytest.mark.parametrize("forged", ["../planted", "a/../../planted", "{absolute}"])
-def test_a_row_id_the_store_chose_never_names_the_seal_that_is_read(
+def test_a_row_id_the_store_chose_never_names_the_record_that_is_read(
     forged: str,
     tmux: FakeTmux,  # noqa: F811
     codex_on_path: Path,  # noqa: F811
@@ -1643,23 +1641,22 @@ def test_a_row_id_the_store_chose_never_names_the_seal_that_is_read(
     tmp_path: Path,
 ) -> None:
     """r3 finding 3: the seal's file was the row's id joined into the path, so an id with
-    ``..`` or an absolute one named a file the sandbox wrote, holding the digest of
-    whatever the row carries. The file is named by the id's own digest."""
+    ``..`` or an absolute one named a file the sandbox wrote. The record's file is named
+    by the id's own digest."""
     forged = forged.format(absolute=tmp_path / "planted")
     agent = fleet_service.spawn(project, "coder", agent="codex", worktree=False).agent
-    _tamper(agent, "$.binary", "/tmp/x")
+    planted = _recorded(agent).model_copy(update={"id": forged, "binary": "/tmp/x"})
     _rewrite("fleet_agent", "id", forged, agent.id)
-    row = _row(forged)
-    # Where a lookup that joined the id into the path read the seal, planted to hold.
-    planted = Path(os.path.normpath(launch_seal.seals_dir() / f"{forged}.sha256"))
-    planted.parent.mkdir(parents=True, exist_ok=True)
-    planted.write_text(launch_seal.digest(row) + "\n", encoding="ascii")
+    # Where a lookup that joined the id into the path read the record, planted.
+    target = Path(os.path.normpath(launch_seal.seals_dir() / f"{forged}.json"))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(planted.model_dump_json(), encoding="utf-8")
 
-    with pytest.raises(fleet_service.FleetError, match="no launch seal was recorded"):
+    with pytest.raises(fleet_service.FleetError, match=UNRECORDED):
         fleet_service.restart(project, agent.label)
 
     assert "/tmp/x" not in _command(tmux)
-    assert launch_seal._seal_path(forged).parent == launch_seal.seals_dir()
+    assert launch_seal._path(forged).parent == launch_seal.seals_dir()
 
 
 @pytest.mark.parametrize(
@@ -1673,7 +1670,8 @@ def test_a_native_id_the_store_chose_never_reaches_codex_resume(
     """r3 finding 2: ``codex resume <id>`` reads an id that starts with ``-`` as one of its
     own options (``-c``, ``-s``, ``--dangerously-bypass-approvals-and-sandbox``: 0.162.1's
     ``--help``) and any other word as a session's name. The id came from the session row,
-    which the sandbox writes; only a UUID, Codex's thread id, is resumed by now."""
+    which the sandbox writes. It is the record's now, as the agent's own start hook
+    reported it, and only a UUID even there."""
     codex, _ = codex_agent
     _rollout(codex, THREAD_ONE)
     codex.start(THREAD_ONE)
@@ -1681,28 +1679,39 @@ def test_a_native_id_the_store_chose_never_reaches_codex_resume(
 
     receipt = fleet_service.restart(codex.project, codex.agent.label)
 
-    assert receipt.resumed is False
-    assert any(
-        "is not one Codex makes" in note and "starts fresh" in note for note in receipt.notes
-    ), receipt.notes
-    assert "resume" not in _native(_command(tmux)) and native not in _command(tmux)
+    assert receipt.resumed is True and native not in _command(tmux)
+    at = _native(_command(tmux)).index("resume")
+    assert _native(_command(tmux))[at : at + 2] == ["resume", THREAD_ONE]
+
+    session = _recorded(receipt.started).session
+    assert session is not None
+    _recorded(receipt.started, session=session.model_copy(update={"native_id": native}))
+    again = fleet_service.restart(codex.project, codex.agent.label)
+    assert again.resumed is False and native not in _command(tmux)
+    assert any("is not one Codex makes" in note for note in again.notes), again.notes
 
 
-def test_a_transcript_the_store_names_relatively_is_never_resumed(
+def test_a_transcript_the_store_names_is_never_resumed(
     tmux: FakeTmux,  # noqa: F811
     claude_on_path: Path,  # noqa: F811
     project: ProjectInfo,  # noqa: F811
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Claude Code resumes ``--resume <transcript>``, the path from the session row: one
-    the store names relatively (``--dangerously-skip-permissions``, a file of that name
-    where the restart runs) would be an option of Claude Code's, not its value."""
-    flag = "--dangerously-skip-permissions"
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / flag).write_text("{}\n", encoding="utf-8")
+    """r4 finding 1: Claude Code resumes ``--resume <transcript>``, the path from the
+    session row: a sandboxed Codex agent pointed any Claude row's session at a file it
+    wrote, and the unsandboxed replacement started on a conversation of its making, its
+    user turns included. The transcript is the one the agent's own hook reported."""
     agent = fleet_service.spawn(project, "coder", worktree=False).agent
     assert agent.session_id is not None
+    real = tmp_path / "real.jsonl"
+    real.write_text("{}\n", encoding="utf-8")
+    forged = tmp_path / "sandbox-wrote" / "evil.jsonl"
+    forged.parent.mkdir()
+    forged.write_text('{"type":"user"}\n', encoding="utf-8")
+    session = launch_seal.SessionFacts(
+        id=agent.session_id, agent="claude-code", native_id=agent.session_id, transcript=str(real)
+    )
+    _recorded(agent, session=session)
     now = datetime.now(tz=UTC)
     with store_session() as store:
         store.upsert_session(
@@ -1712,64 +1721,84 @@ def test_a_transcript_the_store_names_relatively_is_never_resumed(
                 role=agent.role,
                 started_at=now,
                 last_seen_at=now,
-                transcript_path=flag,
+                transcript_path=str(forged),
             )
         )
+    tmux.die(agent.pane_id, 1)
 
     receipt = fleet_service.restart(project, agent.label)
 
-    assert receipt.resumed is False and flag not in _command(tmux)
+    assert receipt.resumed is True
+    assert _flag(_command(tmux), "--resume") == str(real) and str(forged) not in _command(tmux)
 
 
-def test_tell_never_queues_with_a_binary_the_store_chose(
-    codex_agent: tuple[Codex, TeamTask], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """r3 finding 1: ``fleet tell`` to a busy Codex agent ran the row's ``binary`` as
-    ``<binary> queue …`` with the caller's rights, and a sandboxed agent can rewrite its
-    row. The message goes to the board instead, saying why."""
-    codex, _ = codex_agent
-    codex.start(THREAD_ONE)
-    codex.hook("UserPromptSubmit", THREAD_ONE, prompt="work", turn_id="turn-1")
-    _rewrite("fleet_agent", "binary", "/tmp/x", codex.agent.id)
-    monkeypatch.setattr(fleet_service, "_run_native", Mock(side_effect=AssertionError("ran")))
-
-    told = fleet_service.tell(codex.project, codex.agent.label, "rebase on main first")
-
-    assert told.delivered is False and UNSEALED in told.how, told.how
-    assert _notes_to(codex.project, codex.agent.label) == ["rebase on main first"]
-
-
-@pytest.mark.parametrize(
-    ("column", "value", "why"),
-    [
-        ("native_session_id", "--remote=ws://127.0.0.1:9", "is not one Codex makes"),
-        ("account", "{elsewhere}", "is not one of Codex's account homes"),
-    ],
-)
-def test_tell_never_queues_on_a_thread_or_home_the_store_chose(
-    column: str,
-    value: str,
-    why: str,
+def test_tell_queues_with_the_records_binary_thread_and_home_never_the_stores(
     codex_agent: tuple[Codex, TeamTask],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """``codex queue`` runs outside any sandbox with ``--thread`` and ``CODEX_HOME`` from
-    the session row: a thread only in Codex's shape, and a home only one of Codex's own,
-    never a directory whose config the sandbox wrote."""
+    """r3 finding 1: ``fleet tell`` to a busy Codex agent ran the row's ``binary`` as
+    ``<binary> queue …`` with the caller's rights, with ``--thread`` and ``CODEX_HOME``
+    from the session row, and a sandboxed agent can rewrite all three. The queue runs
+    with its launch record's, as its spawn and its own hook wrote them."""
     codex, _ = codex_agent
     codex.start(THREAD_ONE)
     codex.hook("UserPromptSubmit", THREAD_ONE, prompt="work", turn_id="turn-1")
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     (elsewhere / "config.toml").write_text('notify = ["/tmp/x"]\n', encoding="utf-8")
-    _rewrite("team_session", column, value.format(elsewhere=elsewhere), codex.board_id(THREAD_ONE))
+    _rewrite("fleet_agent", "binary", "/tmp/x", codex.agent.id)
+    board = codex.board_id(THREAD_ONE)
+    _rewrite("team_session", "native_session_id", "--remote=ws://127.0.0.1:9", board)
+    _rewrite("team_session", "account", str(elsewhere), board)
+    calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def run(argv: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        calls.append((argv, env))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(fleet_service, "_run_native", run)
+
+    told = fleet_service.tell(codex.project, codex.agent.label, "rebase on main first")
+
+    assert told.delivered is True, told.how
+    [(argv, env)] = calls
+    assert Path(argv[0]).name.startswith("codex") and "/tmp/x" not in argv
+    assert argv[1:4] == ["queue", "--thread", THREAD_ONE]
+    assert env["CODEX_HOME"] == str(codex.home)
+
+
+def test_tell_queues_nothing_for_a_row_with_no_record(
+    codex_agent: tuple[Codex, TeamTask], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    codex, _ = codex_agent
+    codex.start(THREAD_ONE)
+    codex.hook("UserPromptSubmit", THREAD_ONE, prompt="work", turn_id="turn-1")
+    launch_seal._path(codex.agent.id).unlink()
     monkeypatch.setattr(fleet_service, "_run_native", Mock(side_effect=AssertionError("ran")))
 
     told = fleet_service.tell(codex.project, codex.agent.label, "rebase on main first")
 
-    assert told.delivered is False and why in told.how, told.how
+    assert told.delivered is False and UNRECORDED in told.how, told.how
     assert _notes_to(codex.project, codex.agent.label) == ["rebase on main first"]
+
+
+def test_a_tool_shells_hook_never_writes_the_record(
+    codex_agent: tuple[Codex, TeamTask],
+) -> None:
+    """Only the agent's own process reports its session: a ``codex exec`` one of its tools
+    starts (``CODEX_THREAD_ID`` set, and inside the sandbox besides) records nothing."""
+    codex, _ = codex_agent
+    codex.child(THREAD_TWO)
+    codex.start(THREAD_THREE)
+    record = launch_seal.read(codex.agent.id)
+    assert isinstance(record, launch_seal.LaunchRecord) and record.session is None
+
+    codex.become()
+    codex.start(THREAD_ONE)
+    record = launch_seal.read(codex.agent.id)
+    assert isinstance(record, launch_seal.LaunchRecord) and record.session is not None
+    assert record.session.native_id == THREAD_ONE
 
 
 # --- one permission per role, mapped per agent (acceptance 4) ----------------------------
@@ -2274,22 +2303,29 @@ def test_a_switch_resumes_only_onto_the_home_the_thread_ran_under(tmp_path: Path
     home, other = tmp_path / "codex-a", tmp_path / "codex-b"
     home.mkdir()
     other.mkdir()
-    now = datetime.now(UTC)
-    session = TeamSession(
-        id="s",
+    spec = LaunchSpec(binary="codex")
+    record = launch_seal.LaunchRecord(
+        id="agt_x",
         project_id="prj",
+        project_root=str(tmp_path),
         role="coder",
-        started_at=now,
-        last_seen_at=now,
         agent="codex",
-        account=str(home),
+        binary="codex",
+        cwd=str(tmp_path),
+        account_home=str(other),
+        spec=spec,
+        session=launch_seal.SessionFacts(id="s", agent="codex", home=str(home)),
     )
 
     def account(where: Path) -> ClaudeAccount:
         return ClaudeAccount(slot=7, config_dir=where, managed=True, agent="codex")
 
-    assert fleet_service._same_home(session, account(home))
-    assert fleet_service._same_home(session, account(home / "." / ""))
-    assert not fleet_service._same_home(session, account(other))
-    assert not fleet_service._same_home(None, account(home))
+    assert fleet_service._same_home(record, account(home)), "the session's, as its hook said"
+    assert fleet_service._same_home(record, account(home / "." / ""))
+    assert not fleet_service._same_home(record, account(other))
+    unstarted = record.model_copy(update={"session": None})
+    assert fleet_service._same_home(unstarted, account(other)), "else the spawn's account's"
+    assert not fleet_service._same_home(
+        unstarted.model_copy(update={"account_home": None}), account(home)
+    )
     assert not get_adapter("codex").capabilities.resumes_across_homes

@@ -20,13 +20,22 @@ import re
 import sqlite3
 import sys
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
 
-from aisquare.core import agent_sessions, brain, harness, insights, orchestrator, workspace
+from aisquare.core import (
+    agent_sessions,
+    brain,
+    harness,
+    insights,
+    launch_seal,
+    orchestrator,
+    workspace,
+)
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core.agent_adapters import DEFAULT_AGENT, recorded_adapter
 from aisquare.core.config import FleetSettings, load_config
@@ -2570,7 +2579,13 @@ def _adopt(store: ContextStore, agent: FleetAgent, session_id: str) -> bool:
     if holds is False or (holds is None and agent.session_id is not None):
         return False
     lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
-    return store.adopt_fleet_agent_session(agent.id, agent.session_id, session_id, lease)
+    if not store.adopt_fleet_agent_session(agent.id, agent.session_id, session_id, lease):
+        return False
+    # The row's launch record takes the session this hook was handed (`core.launch_seal`):
+    # what a replay resumes, never the session row an agent's sandbox can write.
+    with suppress(Exception):
+        launch_seal.adopted(agent.id, session_id)
+    return True
 
 
 def _handing_over_a_fleet_row(store: ContextStore, session: TeamSession) -> bool:

@@ -299,8 +299,8 @@ def store_dir() -> Path:
 
 def _store_dirs(store: Path) -> tuple[Path, ...]:
     """The directories :func:`store_read_only` names: every agent's account homes and
-    their temporary directories, the sign-in tokens' cache, and the digests of the launch
-    specs a replay runs (``core.launch_seal``)."""
+    their temporary directories, the sign-in tokens' cache, and the records of the
+    launches a replay runs (``core.launch_seal``)."""
     from aisquare.core import launch_seal
     from aisquare.core.agent_adapters import adapters
 
@@ -321,9 +321,9 @@ def store_read_only(store: Path) -> tuple[Path, ...]:
     it. Every agent's account homes and their temporary directories (their hooks,
     settings and logins), the config (every later launch's flags), the tmux conf every
     fleet server loads, the agent registry (the dirs ``upgrade`` reconnects hooks in), the
-    keys and sign-in tokens, and the digests of the launch specs a replay runs. Everything
-    else there, the store's database first, is the board's to write; the launch specs in
-    it a replay takes only as their digest says (``core.launch_seal``)."""
+    keys and sign-in tokens, and the launch records a replay runs. Everything else there,
+    the store's database first, is the board's to write, and a replay reads nothing from
+    it (``core.launch_seal``)."""
     from aisquare.core.tmux import CONF_NAME
 
     return (
@@ -342,9 +342,10 @@ def prepare_store(store: Path) -> None:
     names does not exist (0.162.1, measured): in a directory's place, which no ``mkdir``
     then makes, and over a file a writer writes in place, which then cannot (the tmux
     conf, the agent registry). A file whose empty reading is its absent one (the config,
-    the credentials, a key) is left to that. The launch specs' directory is made the way
-    that records the specs already there (``launch_seal.ensure_dir``). Never raises: what
-    is not made is the profile's to hold as it can."""
+    the credentials, a key) is left to that. The launch records' directory too
+    (``launch_seal.ensure_dir``); a fleet agent's own record was written before its
+    window started, and an agent that sandboxes its tools is not started without one.
+    Never raises: what is not made is the profile's to hold as it can."""
     from aisquare.core import launch_seal
     from aisquare.core.tmux import BUNDLED_CONF, CONF_NAME
 

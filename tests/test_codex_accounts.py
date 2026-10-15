@@ -29,12 +29,13 @@ from aisquare.cli import accounts as accounts_cli
 from aisquare.cli.app import app
 from aisquare.core import claude_accounts as core
 from aisquare.core import codex_accounts as codex
+from aisquare.core import launch_seal
 from aisquare.core.agent_adapters import adapters, get_adapter
 from aisquare.core.agent_adapters import get_adapter as _get_adapter
 from aisquare.core.config import AccountsSettings, load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
-from aisquare.models import ClaudeAccount, FleetAgent, ProjectInfo
+from aisquare.models import ClaudeAccount, FleetAgent, LaunchSpec, ProjectInfo
 from aisquare.services import agent_events, hooks
 from aisquare.services import claude_accounts as service
 from aisquare.services import settings as settings_service
@@ -825,6 +826,24 @@ def _codex_fleet_row(tmp_path: Path, directory: Path) -> tuple[str, ProjectInfo]
                 session_id=session_id,
             )
         )
+    # What its spawn and its own start hook would have written (`core.launch_seal`).
+    launch_seal.write(
+        launch_seal.LaunchRecord(
+            id="fleet-one",
+            project_id=project.id,
+            project_root=str(project.root),
+            role="coder",
+            agent="codex",
+            binary="codex",
+            cwd=str(project.root),
+            account_slot=core.managed_slot(directory, "codex"),
+            account_home=str(directory),
+            spec=LaunchSpec(binary="codex"),
+            session=launch_seal.SessionFacts(
+                id=session_id, agent="codex", native_id="native-one", home=str(directory)
+            ),
+        )
+    )
     return session_id, project
 
 
@@ -964,9 +983,7 @@ def test_a_codex_switch_goes_fresh_to_the_codex_account_with_room(
     assert agent is not None
     monkeypatch.setattr(fleet, "_live_agent", lambda store, project, label, agent_id=None: agent)
     monkeypatch.setattr(fleet, "_require_role", lambda role: None)
-    monkeypatch.setattr(
-        fleet, "_refuse_a_replay_that_cannot_start", lambda project, agent, session: None
-    )
+    monkeypatch.setattr(fleet, "_refuse_a_replay_that_cannot_start", lambda project, record: None)
     monkeypatch.setattr(fleet, "_mark_handing_over", lambda *a, **k: None)
     monkeypatch.setattr(fleet, "_unmark_handing_over", lambda session: None)
     monkeypatch.setattr(fleet, "stop", lambda *a, **k: Mock(agent=agent, withheld=False))

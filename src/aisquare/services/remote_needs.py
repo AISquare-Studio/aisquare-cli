@@ -3314,7 +3314,7 @@ def live_needs_sources() -> NeedsSources:
         board_sessions=needs_board_sessions,
         task_status=needs_task_status,
         transcript_tail=_needs_cached_tail,
-        accounts=claude_accounts_service.accounts_settings,
+        accounts=claude_accounts_service.limit_settings,
         has_live_agents=needs_rows_live,
         tmux_answers=needs_tmux_answers,
         session_event=needs_session_event,

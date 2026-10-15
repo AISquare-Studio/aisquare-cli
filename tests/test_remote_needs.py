@@ -2560,6 +2560,16 @@ def test_a_limit_pushes_never_near_its_reset_and_later_when_someone_is_on_it(
     assert item.reason == "coder-1 hit its usage limit" + lifts
 
 
+def test_a_limit_with_no_account_to_switch_to_is_pushed_at_once(isolated_home: Path) -> None:
+    """``on_limit = "switch"`` is the default on a machine with one account too, where no
+    hand-over can start: the limit's push waited 90 s for one (review of #259, round 13).
+    The scan reads ``[accounts]`` as a limit is met (``limit_settings``): ``wait`` there."""
+    accounts = remote_needs.live_needs_sources().accounts()
+    assert accounts.on_limit == "wait"
+    item = _one(_classify(_limited(NOW + timedelta(hours=3)), accounts=accounts))
+    assert item.push_after == item.since
+
+
 def test_a_limits_reset_reaches_the_phone_as_an_instant_never_the_machines_clock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2636,7 +2646,8 @@ def test_the_guide_says_when_each_kind_is_pushed_as_the_scan_decides_it() -> Non
          {delays["lost"], delays["manager_down"], delays["fleet_down"]}, {timedelta(minutes=1)}),
         ("a usage limit: never when it lifts within `[accounts] wait_if_reset_within_minutes`"
          " (15 by default)", AccountsSettings().wait_if_reset_within_minutes, 15),
-        ('after 90 seconds when `on_limit = "switch"` or a live manager is on it',
+        ('after 90 seconds when `on_limit = "switch"` and another account can take the agent,'
+         " or a live manager is on it",
          remote_needs._LIMITED_PUSH_DELAY, timedelta(seconds=90)),
         ("an interruption: after 10 minutes", delays["interrupted"], timedelta(minutes=10)),
     ]  # fmt: skip

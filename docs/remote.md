@@ -490,7 +490,8 @@ that someone else is already on:
 - a usage limit: never when it lifts within
   `[accounts] wait_if_reset_within_minutes` (15 by default), since Claude Code
   carries on by itself at the reset; after 90 seconds when `on_limit = "switch"`
-  or a live manager is on it; at once otherwise. Claude Code's "Session paused"
+  and another account can take the agent, or a live manager is on it; at once
+  otherwise. Claude Code's "Session paused"
   dialog, which a limit can show instead, goes at once: no hand-over starts on
   it, and no manager hears of it;
 - an interruption: after 10 minutes, since it follows your own Esc.

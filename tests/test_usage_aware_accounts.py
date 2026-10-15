@@ -501,6 +501,8 @@ def test_the_hook_starts_a_detached_hand_over_only_when_configured_and_the_reset
         raise AssertionError("the hook must not switch inline")
 
     monkeypatch.setattr(fleet_service, "switch", never)
+    _slot("work@example.com", "tok-work")
+    _slot("home@example.com", "tok-home")  # somewhere to hand it over to
     _session(work, "sess-fleet")
     _fleet_row(work, "agt_limited2", "coder-db", "sess-fleet")
 
@@ -549,6 +551,47 @@ def test_the_hook_starts_a_detached_hand_over_only_when_configured_and_the_reset
     )
 
 
+@pytest.mark.parametrize("accounts", ["one", "one enabled of two"])
+def test_with_no_other_account_a_limit_starts_no_hand_over_and_posts_nothing_of_it(
+    fake_home: Path,
+    work: ProjectInfo,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    accounts: str,
+) -> None:
+    """``on_limit = "switch"`` is the default since 0.8.1, on a machine with one account too:
+    every limit there started a hand-over that could only refuse and said "not switched" on
+    the board, and Remote held the limit's push 90 s for it (review of #259, round 13). With
+    no other enabled, signed-in account it is ``wait``; a second one makes it ``switch``."""
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    started: list[list[str]] = []
+    monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
+    mine = _slot("work@example.com", "tok-work")
+    if accounts == "one enabled of two":
+        other = _slot("home@example.com", "tok-home")
+        service.set_disabled(str(other.slot), True)
+    _session(work, "sess-fleet")
+    _fleet_row(work, "agt_limited2", "coder-db", "sess-fleet")
+    with store_session() as store:
+        row = store.fleet_agent_for_session(work.id, "sess-fleet")
+        assert row is not None
+        store.upsert_fleet_agent(row.model_copy(update={"account_slot": mine.slot}))
+
+    _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
+
+    assert started == []
+    assert not any("switch" in text for kind, text in _events(work) if kind != "limited")
+    assert service.limit_settings().on_limit == "wait"
+    assert service.accounts_settings().on_limit == "switch"  # as configured
+
+    _slot("spare@example.com", "tok-spare")  # an account to go to: switch it is
+    assert service.limit_settings().on_limit == "switch"
+    with store_session() as store:
+        store.touch_session("sess-fleet", state="working")
+    _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
+    assert len(started) == 1
+
+
 def test_a_re_fire_for_the_same_window_starts_no_second_worker(
     fake_home: Path, work: ProjectInfo, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -559,6 +602,8 @@ def test_a_re_fire_for_the_same_window_starts_no_second_worker(
     started: list[list[str]] = []
     monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
     _settings(on_limit="switch", wait_if_reset_within_minutes=15)
+    _slot("work@example.com", "tok-work")
+    _slot("home@example.com", "tok-home")  # somewhere to hand it over to
     _session(work, "sess-fleet")
     _fleet_row(work, "agt_refire", "coder-db", "sess-fleet")
 

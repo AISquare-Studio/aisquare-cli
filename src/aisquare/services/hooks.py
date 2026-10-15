@@ -259,6 +259,12 @@ def _hand_over_if_configured(failure: team_service.TurnFailure) -> None:
         project = store.get_project(session.project_id)
     if agent is None or project is None:
         return  # a hand-typed session is the operator's to move
+    # As `fleet.switch` reads where the agent is: the row's slot, else its session's.
+    leaving = agent.account_slot
+    if leaving is None and session.account:
+        leaving = claude_accounts_service.slot_of(session.account)
+    if not claude_accounts_service.somewhere_to_hand_over(leaving):
+        return  # one account: `wait`, with no board note on every limit that it is
     resets_at = failure.notice.resets_at if failure.notice is not None else None
     if resets_at is not None:
         wait = timedelta(minutes=settings.wait_if_reset_within_minutes)

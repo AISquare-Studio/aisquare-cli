@@ -851,6 +851,38 @@ def accounts_settings() -> AccountsSettings:
         return AccountsSettings()
 
 
+def somewhere_to_hand_over(leaving: int | None = None) -> bool:
+    """Whether a hand-over of an agent on slot ``leaving`` has an account to go to: an
+    enabled, signed-in one other than ``leaving``. Not knowing which slot the agent is on
+    (``None``), two such accounts, so that one is not the agent's. No account to go to
+    where the registry cannot be read, which :func:`choose_for_handover` picks nothing from.
+
+    ``on_limit = "switch"`` is the default since 0.8.1, so a machine with one account has it
+    too. There every limit started a hand-over that could only refuse, posted "not
+    switched" on the board each time, and held Remote's push of the limit 90 s for it
+    (review of #259, round 13). ``choose`` drops its "nothing to pick" note for ``pick`` on
+    the same grounds.
+    """
+    accounts, registry_note = _read_arranged()
+    if registry_note is not None:
+        return False
+    usable = [
+        account.slot for account in accounts if not account.disabled and core.signed_in(account)
+    ]
+    if leaving is None:
+        return len(usable) >= 2
+    return any(slot != leaving for slot in usable)
+
+
+def limit_settings() -> AccountsSettings:
+    """:func:`accounts_settings` as a usage limit is met: ``on_limit = "switch"`` reads as
+    ``wait`` where no hand-over has an account to go to (:func:`somewhere_to_hand_over`)."""
+    settings = accounts_settings()
+    if settings.on_limit == "switch" and not somewhere_to_hand_over():
+        return settings.model_copy(update={"on_limit": "wait"})
+    return settings
+
+
 def sample_usage(
     account: ClaudeAccount, *, now: datetime | None = None, fetch: Fetch | None = None
 ) -> ClaudeUsage:

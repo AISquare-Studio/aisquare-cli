@@ -652,7 +652,9 @@ class AccountsSettings(BaseModel):
     wait-and-continue-at-reset in place; ``switch``, the default, also hands the
     agent over — ``aisquare fleet switch`` — to the account with the most headroom,
     unless the limit resets within ``wait_if_reset_within_minutes`` (a reset ten
-    minutes away is cheaper than a cold start elsewhere). ``switch_at`` doubles as
+    minutes away is cheaper than a cold start elsewhere). With no other enabled,
+    signed-in account to go to, ``switch`` is ``wait``
+    (``services.claude_accounts.somewhere_to_hand_over``). ``switch_at`` doubles as
     the line the Accounts page colours red and ``doctor --live`` warns at.
 
     Both defaults were ``default`` and ``wait`` through 0.8.0; a file those builds

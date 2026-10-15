@@ -662,7 +662,9 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   With `on_limit = "switch"`, the default (*on a usage limit* in App settings;
   `wait` leaves the agent parked for you or the manager), the fleet
   does this by itself when the limit lifts more than
-  `wait_if_reset_within_minutes` away, in a worker detached from the agent's
+  `wait_if_reset_within_minutes` away and another enabled, signed-in account
+  is there to take it (with one account, `switch` is `wait`), in a worker
+  detached from the agent's
   own hook; a hand-over that finds no headroom leaves the agent parked, its
   own wait intact, and says so on the board. One that goes ahead says on the
   board what it could not do (a first line it could not type, claims it could

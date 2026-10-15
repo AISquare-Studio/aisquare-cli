@@ -420,7 +420,8 @@ When an agent's turn ends on a usage limit — Claude Code's `StopFailure` hook,
 `You've hit your session limit · resets 12:30am` — its row shows **⏳ limited**
 with the reset time, the manager is woken with the one command that moves it,
 and Claude Code's own wait-and-continue at the reset is left in place. With
-`on_limit = switch`, the default, the fleet hands the agent over on its own: it stops the
+`on_limit = switch`, the default, and a second signed-in account to go to, the fleet
+hands the agent over on its own: it stops the
 agent, starts it again on the account with the most headroom, and resumes the
 same session by its transcript (`claude --resume <path>`), unless the limit
 lifts within `wait_if_reset_within_minutes` (a reset ten minutes away is cheaper

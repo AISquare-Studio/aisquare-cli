@@ -1540,8 +1540,12 @@ def _needs_unnamed_dialog(screen: Callable[[], Sequence[str] | None] | None) -> 
     4), but beside a call with no mark (a ``Task``, a ``Read``, an MCP tool) the screen
     names none of them (:func:`_needs_on_screen`), and rule 8 waited for a notice that
     Claude Code may never send: no card at all (review of #259, round 9, 5/8). Only while a
-    dialog is drawn (:func:`_needs_prompt_region`), or the screen cannot be read: a question
-    waiting behind a command at work is not up yet. The card is named after the question or
+    dialog is drawn (:func:`_needs_prompt_region`): a question waiting behind a command at
+    work is not up yet. Nor from a screen nobody could read, which counted as one drawn: a
+    question queued behind a sub-agent at work, two captures failing, was pushed "shows a
+    dialog that needs you" while nothing was, under the id its real dialog needed later
+    (round 11, 5/13). A live scan that cannot read it decides nothing, its last items
+    standing (:func:`_needs_screen_read`). The card is named after the question or
     the plan (:func:`_needs_dialog_item`), so a notice landing later names it the same: it
     no longer waits :data:`_NOTICE_WAIT` for one, which a notice later still outran.
 
@@ -1551,10 +1555,8 @@ def _needs_unnamed_dialog(screen: Callable[[], Sequence[str] | None] | None) -> 
     and the guards that read it refused a merely pending tool as "is showing a prompt"
     (review of #259, round 10, 9/9).
     """
-    if screen is None:
-        return False
-    rows = screen()
-    return rows is None or _needs_prompt_region(rows) is not None
+    rows = None if screen is None else screen()
+    return rows is not None and _needs_prompt_region(rows) is not None
 
 
 def _needs_prompt_call(

@@ -697,6 +697,34 @@ def test_a_card_with_digits_is_only_ever_the_call_whose_prompt_is_up(
         assert [item.id for item in digits] == [named], items
 
 
+def test_a_scan_that_cannot_read_a_screen_keeps_its_last_cards_and_makes_none_of_its_own() -> None:
+    """Review of #259, round 11, 5/13: a question queued behind a sub-agent at work, whose
+    screen could not be captured, was "shows a dialog that needs you", pushed while nothing
+    was drawn, under the id its real dialog needed later. Unread, the screen decides
+    nothing: the scan keeps its last cards, and makes none of its own."""
+    from aisquare.core.tmux import TmuxError
+
+    row = _row()
+    session = _session(row, state="working", seen=NOW - timedelta(minutes=2))
+    fleet = Fleet(
+        agents=[_status(row, "working", session)],
+        screen=_question_screen(above=(f"● {_TASK.summary}",)),
+    )
+    fleet.tails[f"/transcripts/{row.label}.jsonl"] = _tail(_TASK, _ASK)
+    first = scan_needs_you(_sources(fleet), now=NOW, dismissed=())
+    assert [item.reason for item in first] == ["coder-1 shows a dialog that needs you"]
+
+    def unreadable(status: FleetAgentStatus) -> list[str]:
+        raise TmuxError("tmux did not answer within 30s: capture-pane")
+
+    blind = replace(_sources(fleet), pane_screen=unreadable)
+    later = NOW + timedelta(seconds=3)
+    assert scan_needs_you(blind, now=later, dismissed=(), kept=first) == first
+    assert scan_needs_you(blind, now=later, dismissed=()) == []
+    fleet.screen = _at_work(f"● {_TASK.summary}")
+    assert scan_needs_you(_sources(fleet), now=later, dismissed=(), kept=first) == []
+
+
 @pytest.mark.parametrize("asking", [_ASK, _PLAN], ids=["question", "plan"])
 @pytest.mark.parametrize("beside", [_TASK, _tool("toolu_read", "Read", file_path="/a.py")])
 def test_a_question_or_plan_beside_a_call_it_cannot_name_has_a_card_before_any_notice(
@@ -719,8 +747,10 @@ def test_a_question_or_plan_beside_a_call_it_cannot_name_has_a_card_before_any_n
     assert (card.kind, card.answers) == ("permission", ())
     assert card.reason == "coder-1 shows a dialog that needs you"
     assert card.id == needs_item_id(PROJECT.id, "permission", f"dialog:{asking.tool_use_id}")
+    # Round 11, 5/13: a screen nobody could read is unknown, and makes no card: it was one,
+    # pushed while nothing was drawn, under the id the dialog drawn later then needed.
     unread = _classify(status, tail, pane_screen=lambda: None)
-    assert [item.id for item in unread] == [card.id], "a screen nobody could read may show it"
+    assert unread == [], "a screen nobody could read is not a dialog drawn"
     just = _classify(
         status, tail, pane_screen=lambda: drawn, pane_output=lambda: NOW - timedelta(seconds=3)
     )

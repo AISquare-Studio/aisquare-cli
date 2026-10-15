@@ -3198,10 +3198,11 @@ def _needs_keep(edit: Callable[[dict[str, dict[str, str]]], None]) -> None:
     read that failed (``EIO``, ``EACCES``) is the ``OSError`` it was, and nothing is written:
     a dismissal answers 503, and the watcher tells its streak. A file this version cannot
     read in full (not JSON, a hand edit, a part of another shape) is moved aside to
-    ``remote-needs.json.bad``, kept for the human, and a new one started. It was read as
-    empty and replaced by the one entry being written, every dismissal and first sighting
-    in it lost for good: every dismissed card back on every phone, and pushed again, an
-    ongoing outage under a new id (review of #259, remote focus, 3/12).
+    ``remote-needs.json.bad`` (or the next free ``.bad.<n>``), kept for the human, and a new
+    one started. It was read as empty and replaced by the one entry being written, every
+    dismissal and first sighting in it lost for good: every dismissed card back on every
+    phone, and pushed again, an ongoing outage under a new id (review of #259, remote
+    focus, 3/12).
 
     A file of a later ``version`` is :class:`LaterNeedsFile`, and left as it is. Its parts
     were read as whole when they kept this version's shape, and rewritten as ``version: 1``
@@ -3228,10 +3229,24 @@ def _needs_kept_to_write(path: Path) -> tuple[dict[str, dict[str, str]], dict[st
     try:
         return _needs_kept_whole(_needs_kept_raw())
     except ValueError as exc:  # json's, a text that is not UTF-8, or the shape's
-        aside = path.with_name(f"{path.name}.bad")
+        aside = _needs_aside(path)
         os.replace(path, aside)
         log.warning("remote: %s could not be read (%s); it is kept as %s", path, exc, aside)
         return _needs_kept_whole(None)
+
+
+def _needs_aside(path: Path) -> Path:
+    """Where a ``remote-needs.json`` this version cannot build on is kept: ``.bad``, or the
+    first of ``.bad.1``, ``.bad.2``… not taken. Moved over the one before, the second file
+    put aside took the first one's dismissals and first sightings with it, the copy kept
+    for the human lost (review of #259, round 8, 8/9). The caller holds the lock every
+    writer of the file takes."""
+    aside = path.with_name(f"{path.name}.bad")
+    n = 0
+    while aside.exists() or aside.is_symlink():
+        n += 1
+        aside = path.with_name(f"{path.name}.bad.{n}")
+    return aside
 
 
 def load_needs_dismissals() -> dict[str, str]:

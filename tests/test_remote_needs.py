@@ -2669,6 +2669,29 @@ def test_a_needs_file_a_write_cannot_read_whole_is_kept_aside_not_overwritten(
     assert "remote-needs.json.bad" in caplog.text
 
 
+def test_each_needs_file_kept_aside_is_kept_under_a_name_of_its_own(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Review of #259, round 8, 8/9: ``os.replace(path, aside)`` put the second file a write
+    could not read over the first one's ``.bad``, and the dismissals and first sightings
+    the first held, the copy kept for the human, were gone. Each goes to the first free
+    ``.bad``, ``.bad.1``…"""
+    path = remote_needs_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    bodies = [b"[1]", b"[2]", b"[3]"]
+    for body in bodies:
+        path.write_bytes(body)
+        with caplog.at_level(logging.WARNING, logger=remote_needs.log.name):
+            record_needs_dismissal("ny_newest")
+    kept = [
+        path.with_name(name)
+        for name in ("remote-needs.json.bad", *(f"remote-needs.json.bad.{n}" for n in (1, 2)))
+    ]
+    assert [aside.read_bytes() for aside in kept] == bodies
+    assert "remote-needs.json.bad.2" in caplog.text
+    assert set(load_needs_dismissals()) == {"ny_newest"}
+
+
 def test_a_later_versions_needs_file_is_never_written_over() -> None:
     """Review of #259, round 8, 5/9: the reader looked at neither ``version`` nor any part it
     does not know, so a later release's file whose two known parts kept this shape was read

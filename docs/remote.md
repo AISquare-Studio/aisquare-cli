@@ -340,16 +340,20 @@ whose input is over 16 KiB never reaches the phone, and its card says that
 instead. A permission a sub-agent asks for shows the task the sub-agent was
 given, and says that the call it answers is the sub-agent's own, which the card
 cannot show. Open the agent to read such a call before you answer it. When one
-reply calls two tools that each ask, the second one's card comes a few seconds
-after its prompt, once its own notification lands: until then the card would be
-the first call's, already answered. Under a permission, a question or a plan, the bottom of the agent's live screen is shown
-too, so the real option labels are on screen next to the buttons.
+reply makes more than one call, the card is the call whose prompt the agent's
+screen shows, read from the screen itself: its command, its file, its URL or
+its question. A screen that does not say which (a sub-agent's prompt, an MCP
+tool, a plan beside another call) gives a card with no quick answers, and you
+answer from the key pad beside the live screen. Under a permission, a question
+or a plan, the bottom of the agent's live screen is shown too, so the real
+option labels are on screen next to the buttons.
 
 **Quick answers** are the card's buttons: `1`, `2` and No for a tool's
 permission; one per option, and Cancel, for a single question with one answer to
 pick from at most nine; `1` to `3` and Keep planning for a plan. A quick answer
 is checked against the agent **as it is now**: if the prompt has already gone,
-the card says "No longer needs you" and nothing is typed. An answered card leaves
+or the screen now shows another call's prompt, the card says "No longer needs
+you" and nothing is typed. An answered card leaves
 the feed at once, on every phone and before any notification goes out, and is
 back a second later if the prompt is still there. Anything else (one of
 Claude Code's own dialogs, a form an MCP server asks you to fill in, a question of

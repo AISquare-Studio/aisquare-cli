@@ -13,9 +13,9 @@ rules (:func:`needs_from_agent`), each project by a few more (``crashed``,
 ``manager_down``, ``fleet_down``) and the board by who asked whom
 (:func:`needs_from_board`).
 
-Every item has an id derived from what it is about (the OLDEST pending
-``tool_use`` of a permission prompt, with its notification when a sub-agent
-asks, the marker record of an interruption, the seq of a board event), so it
+Every item has an id derived from what it is about (the pending ``tool_use``
+whose prompt is up, with its notification when a sub-agent asks, the marker
+record of an interruption, the seq of a board event), so it
 keeps its id from scan to scan and a new prompt is a new id — and a new push.
 A ``reason`` is a fixed template with every interpolated name passed through
 :func:`needs_push_safe`, because it is what a lock screen shows; the content a
@@ -208,14 +208,36 @@ _SUBAGENT_TOOLS = frozenset({"Task", "Agent"})
 """The tools a sub-agent runs inside: a prompt pending under one is the sub-agent's."""
 
 _NOTICE_WAIT = timedelta(seconds=20)
-"""How long after its pane printed a sub-agent's prompt, or the prompt of a call beside
-another, may still be waiting for the notification that names it
-(:func:`_needs_drawn_since_notice`). Claude Code sends it 6 s after the prompt is drawn;
-the hook's process starts in a second or so, and may wait out the store's busy timeout (5 s)
-for its write; tmux tells the time of output to the second, rounded down. That is about 13 s
-at worst. A notification later than this leaves the
+"""How long after its pane printed a sub-agent's prompt may still be waiting for the
+notification that names it (:func:`_needs_drawn_since_notice`). Claude Code sends it 6 s
+after the prompt is drawn; the hook's process starts in a second or so, and may wait out the
+store's busy timeout (5 s) for its write; tmux tells the time of output to the second,
+rounded down. That is about 13 s at worst. A notification later than this leaves the
 prompt named after the one before until it lands, and a redraw (an attach, a resize, a
 key that moves the highlight) hides the card this long."""
+
+_PROMPT_MARK_MIN = 6
+_PROMPT_MARK_MAX = 40
+"""A call's mark (:func:`_needs_prompt_mark`) is the first ``_PROMPT_MARK_MAX`` characters
+of the text its prompt shows, squashed (:func:`_needs_squashed`): a long command is cut or
+wrapped on screen. One under ``_PROMPT_MARK_MIN`` (``ls``, ``a.py``) is found in too much
+text to name its call by being found (:func:`_needs_on_screen`)."""
+
+_PROMPT_OPTION_ONE = re.compile(r"[\s│┃║|]*(?:[\u276f\u203a>▶]\s*)?1\.\s")
+"""A dialog's first option, ``1. Yes``, after the pointer that highlights it or not, in a
+box or not."""
+_PROMPT_RULE = re.compile(r"\s*[╭╰┌└├]?[─━═]{8,}")
+"""A row drawn as a rule: a dialog's top edge or a box's, or the input box's two edges."""
+_PROMPT_UNSPACED = re.compile(r"[\s─-╿…`*]+")
+"""What :func:`_needs_squashed` drops: blanks, wraps, box edges, an ellipsis and the marks a
+terminal draws as style."""
+
+_NEEDS_ASKING_TOOLS = frozenset({"AskUserQuestion", "ExitPlanMode"})
+"""The tools whose card needs no notice: their dialog is the call itself."""
+
+_PROMPT_FILE_TOOLS = frozenset({"Edit", "MultiEdit", "Write", "NotebookEdit"})
+"""The tools whose prompt names the file by its base name, in the line above its options
+("Do you want to make this edit to cache.py?"), however tall its diff."""
 
 _DETAIL_INPUT_KEYS = (
     "command",
@@ -365,6 +387,11 @@ def _needs_no_output(agent: FleetAgent) -> datetime | None:
     return None
 
 
+def _needs_no_screen(agent: FleetAgent) -> list[str] | None:
+    """A source's ``pane_screen`` when it says nothing: no screen, so no prompt read on it."""
+    return None
+
+
 def _needs_own_board(project: ProjectInfo) -> str:
     """A source's ``board_project`` when it says nothing: each project writes its own board."""
     return project.id
@@ -420,6 +447,10 @@ class NeedsSources:
     pane_output: Callable[[FleetAgent], datetime | None] = _needs_no_output
     """When the row's pane last printed (``#{window_activity}``); ``None``: tmux would not
     say. Asked only of an agent whose sub-agent waits on a prompt (:func:`needs_from_agent`)."""
+    pane_screen: Callable[[FleetAgent], list[str] | None] = _needs_no_screen
+    """The rows the row's pane shows now (``capture-pane``); ``None``: tmux would not say.
+    Asked only of an agent with more than one call pending, whose prompt on screen may be
+    any of them (:func:`_needs_on_screen`)."""
     board_project: Callable[[ProjectInfo], str] = _needs_own_board
     """The id of the project whose board a project's agents write: the project's own, a
     worktree's principal checkout's, or under ``AISQUARE_TEAM_HUB`` the hub's, as ``asq board``
@@ -809,8 +840,20 @@ def needs_from_agent(
     manager_live: bool = False,
     accounts: AccountsSettings | None = None,
     pane_output: Callable[[], datetime | None] | None = None,
+    pane_screen: Callable[[], Sequence[str] | None] | None = None,
 ) -> list[NeedsItem]:
     """What one agent needs from the human: at most one item, by the first rule that holds.
+
+    Rules 3 to 5 are about the call whose prompt is up (:func:`_needs_prompt_call`): the one
+    pending call, or with more than one, the call the prompt on the pane's screen names
+    (:func:`_needs_on_screen`), never one taken by its place among them. With more than one
+    the screen may show any of them: a call answered writes nothing until it ends, a call
+    Claude Code lets run may run beside the next one's prompt, and a question after a
+    command is not drawn until the command's prompt is answered. The first
+    ``AskUserQuestion`` anywhere was the card while a ``git push --force`` beside it was
+    prompting, and its "1" approved the push (review of #259, round 8, 1/9). A screen that
+    names none of them, or more than one, is rule 8's dialog card, whose answers are the
+    key pad's beside the live pane.
 
     In order (SPEC §4.2):
 
@@ -818,11 +861,11 @@ def needs_from_agent(
        (``FleetAgentStatus.held``), whatever its board says: its agent is one nothing here
        reaches, so it is a ``lost`` card of its own reason, never a prompt (below);
     2. derived ``limited`` → ``limited``;
-    3. a pending ``AskUserQuestion`` → ``question``;
-    4. a pending ``ExitPlanMode`` → ``plan``;
-    5. any other pending tool, with attention → ``permission``, about the OLDEST one: each
-       prompt has its own tool use, so the 2nd prompt of a turn is a new item. Not under
-       a ``Task``, whose sub-agent's tool uses are in its own records: every prompt of the
+    3. the call up an ``AskUserQuestion`` → ``question``;
+    4. the call up an ``ExitPlanMode`` → ``plan``;
+    5. a pending tool, with attention → ``permission``, about the call up: each prompt has
+       its own tool use, so the 2nd prompt of a turn is a new item. Not under a ``Task``,
+       whose sub-agent's tool uses are in its own records: every prompt of the
        sub-agent's has that one pending tool, so the prompt is also its notice, the
        ``last_seen_at`` each notification moves (:func:`_needs_subagent_prompt`). Nor
        while the notice asks for input (:data:`_INPUT_NOTICE`): an MCP server's
@@ -832,9 +875,7 @@ def needs_from_agent(
        now is rule 8's too. Once the agent wrote after the turn's first notice, a later
        one's words are not on the board, and nothing tells a form asked then from its
        tool's own prompt: it reads as the prompt, whose digits would go into the form.
-       Nor, with more than one call pending, while the pane printed after the newest
-       notice (:func:`_needs_drawn_since_notice`): the oldest call's prompt answered, the
-       next call's is up, and its own notice has not come;
+       Nor with no call up: more than one pending, and the screen names none of them;
     6. no pending tool, and the newest record an interruption later than the session's last
        hook, or one only Claude Code's own records follow (a local or ``!`` command run at
        the prompt since, which fires no hook either) → ``interrupted``, whatever the row
@@ -865,8 +906,8 @@ def needs_from_agent(
     3 to 6 and 9 cannot hold. ``exited`` and ``unknown`` agents need nothing here; ``crashed``,
     ``manager_down`` and ``fleet_down`` speak for them. ``manager_live`` and ``accounts``
     decide only when a push may go out. ``pane_output`` says when the agent's pane last
-    printed, asked only of a sub-agent's prompt and of a prompt with more than one call
-    pending.
+    printed, asked only of a sub-agent's prompt; ``pane_screen`` is what it shows, asked
+    only with more than one call pending.
 
     A held row got rules 3 to 10 from its board while that was fresh: permission and
     question cards, pushed, whose every answer was a 409 ``not_agent`` (its pane id is
@@ -923,13 +964,14 @@ def needs_from_agent(
             )
         ]
     pending = _needs_pending(tail, agent)
-    asking = next((tool for tool in pending if tool.name == "AskUserQuestion"), None)
-    if asking is not None:
-        return [_needs_question_item(asking, project=project, agent=agent, name=name, now=now)]
-    planning = next((tool for tool in pending if tool.name == "ExitPlanMode"), None)
-    if planning is not None:
-        return [_needs_plan_item(planning, project=project, agent=agent, name=name, now=now)]
     attention = _needs_attention(status)
+    # The screen is read only where a card could come of it: not for calls at work, unasked.
+    asked = attention or any(tool.name in _NEEDS_ASKING_TOOLS for tool in pending)
+    call = _needs_prompt_call(pending, pane_screen) if asked else None
+    if call is not None and call.name == "AskUserQuestion":
+        return [_needs_question_item(call, project=project, agent=agent, name=name, now=now)]
+    if call is not None and call.name == "ExitPlanMode":
+        return [_needs_plan_item(call, project=project, agent=agent, name=name, now=now)]
     if pending:
         if not attention:
             return []  # a tool running, or the 6 s before Claude Code's notification
@@ -940,16 +982,12 @@ def needs_from_agent(
             form = pending[0].name not in _SUBAGENT_TOOLS and _needs_later_notice(
                 attention_event, tail, session
             )
-        if not form:
-            if pending[0].name in _SUBAGENT_TOOLS and session is not None:
+        if not form and call is not None:
+            if call.name in _SUBAGENT_TOOLS and session is not None:
                 return _needs_subagent_prompt(
-                    pending[0], session, pane_output, project=project, agent=agent, now=now
+                    call, session, pane_output, project=project, agent=agent, now=now
                 )
-            if len(pending) > 1 and _needs_drawn_since_notice(session, pane_output, now):
-                return []  # the oldest call's prompt answered, maybe, and the next one's up
-            return [
-                _needs_permission_item(pending[0], project=project, agent=agent, name=name, now=now)
-            ]
+            return [_needs_permission_item(call, project=project, agent=agent, name=name, now=now)]
     elif tail is not None and _needs_marker_later(status, tail):
         return [_needs_interrupted_item(tail, project=project, agent=agent, name=name, now=now)]
     if attention or _needs_unanswered(status, tail, unread=False):
@@ -1407,18 +1445,98 @@ def _needs_drawn_since_notice(
     """The pane printed after the notice ``last_seen_at`` names, less than :data:`_NOTICE_WAIT`
     ago: the prompt on screen may be one whose notification has not landed yet.
 
-    A prompt answered writes nothing until its tool ends, so with two calls of one message
-    pending, the oldest's answered, the next one's prompt is drawn under the same
-    ``last_seen_at`` and the same pending tools. Rule 5's card was the oldest call's again,
-    its id and its command, and a tap of "1" on it re-derived as current and approved the
-    other call (review of #259, remote focus, 1/12). A sub-agent's prompts are all under
-    its one ``Task`` (:func:`_needs_subagent_prompt`). Its cost is a redraw (an attach, a
-    resize, a key that moves the highlight) hiding the card this long.
+    A sub-agent's prompts are all under its one ``Task`` (:func:`_needs_subagent_prompt`),
+    so only the notice tells one from the next. Its cost is a redraw (an attach, a resize, a
+    key that moves the highlight) hiding the card this long. Calls of the agent's own are
+    told apart by what the screen shows (:func:`_needs_on_screen`), not by when it printed:
+    that rested on when Claude Code draws a call's prompt beside another call, which nothing
+    here knows (review of #259, round 8, 1/9).
     """
     if session is None:
         return False
     output = None if pane_output is None else pane_output()
     return output is not None and output > session.last_seen_at and now - output < _NOTICE_WAIT
+
+
+def _needs_prompt_call(
+    pending: Sequence[PendingTool], pane_screen: Callable[[], Sequence[str] | None] | None
+) -> PendingTool | None:
+    """The pending call whose prompt is up: the one call, or of more than one, the call the
+    pane's screen names (:func:`_needs_on_screen`); ``None`` when nothing says which."""
+    if len(pending) <= 1:
+        return pending[0] if pending else None
+    return _needs_on_screen(pending, None if pane_screen is None else pane_screen())
+
+
+def _needs_on_screen(
+    pending: Sequence[PendingTool], rows: Sequence[str] | None
+) -> PendingTool | None:
+    """Of more than one pending call, the one whose prompt the screen ``rows`` show: the only
+    one whose mark (:func:`_needs_prompt_mark`) is in the prompt's text above its options
+    (:func:`_needs_prompt_region`); ``None`` when that is not exactly one.
+
+    It fails closed. A call with no mark (an MCP tool, a ``Task`` whose sub-agent's call is
+    on screen, a plan whose first line may have scrolled away) may be the one up, so beside
+    one nothing is named. A mark found beside another's (a description that quotes the next
+    command) names neither. A mark under :data:`_PROMPT_MARK_MIN` (``ls``) found is found in
+    too much text to name its call, though one not found rules its call out. A card then
+    has no quick answers, and the key pad beside the live pane answers what it shows.
+    """
+    region = None if rows is None else _needs_prompt_region(rows)
+    if region is None:
+        return None
+    shown: list[tuple[PendingTool, str]] = []
+    for tool in pending:
+        mark = _needs_prompt_mark(tool)
+        if mark is None:
+            return None
+        if mark in region:
+            shown.append((tool, mark))
+    if len(shown) != 1 or len(shown[0][1]) < _PROMPT_MARK_MIN:
+        return None
+    return shown[0][0]
+
+
+def _needs_prompt_mark(tool: PendingTool) -> str | None:
+    """The text a call's prompt shows of it, squashed and cut to :data:`_PROMPT_MARK_MAX`:
+    a question's words, a command, a file's base name, a URL; ``None`` for a call whose
+    prompt is not known to show one, or that shows nothing of it."""
+    if tool.name == "AskUserQuestion":
+        questions = _needs_questions(tool.input.get("questions"))
+        text = questions[0]["question"] if questions else ""
+    elif tool.name == "Bash":
+        text = _needs_str(tool.input.get("command"))
+    elif tool.name in _PROMPT_FILE_TOOLS:
+        path = _needs_str(tool.input.get("file_path")) or _needs_str(
+            tool.input.get("notebook_path")
+        )
+        text = path.replace("\\", "/").rsplit("/", 1)[-1]
+    elif tool.name == "WebFetch":
+        text = _needs_str(tool.input.get("url"))
+    else:
+        return None
+    return _needs_squashed(text)[:_PROMPT_MARK_MAX] or None
+
+
+def _needs_prompt_region(rows: Sequence[str]) -> str | None:
+    """The squashed text of the dialog on screen above its options: from the rule nearest
+    above its first option (or the screen's top) to that option; ``None`` with no option
+    row, or with the input box drawn below it (two rules: a list in the conversation, not
+    a dialog, which replaces the input box while it is up)."""
+    plain = [_ESCAPES.sub("", row) for row in rows]
+    option = next(
+        (n for n in range(len(plain) - 1, -1, -1) if _PROMPT_OPTION_ONE.match(plain[n])), None
+    )
+    if option is None or sum(1 for row in plain[option + 1 :] if _PROMPT_RULE.match(row)) > 1:
+        return None
+    top = next((n + 1 for n in range(option - 1, -1, -1) if _PROMPT_RULE.match(plain[n])), 0)
+    return _needs_squashed("".join(plain[top:option]))
+
+
+def _needs_squashed(text: str) -> str:
+    """``text`` without what a terminal changes when it draws it (:data:`_PROMPT_UNSPACED`),
+    case folded: a command wrapped across three rows of a box is the command."""
+    return _PROMPT_UNSPACED.sub("", _ESCAPES.sub("", text)).casefold()
 
 
 def _needs_tool_detail(
@@ -1884,6 +2002,7 @@ def _needs_scan_project(
             manager_live=taking is not None and taking.id != status.agent.id,
             accounts=accounts,
             pane_output=_needs_output_of(sources, status.agent, reads),
+            pane_screen=_needs_screen_of(sources, status.agent, reads),
         ):
             items.append(_needs_dated(item, first_seen, seen) if item.kind == "lost" else item)
     own = board_id == project.id
@@ -1991,6 +2110,13 @@ def _needs_output_of(
 ) -> Callable[[], datetime | None]:
     """When ``agent``'s pane last printed, asked of tmux only when called."""
     return lambda: reads.needs_read(partial(sources.pane_output, agent), "tmux")
+
+
+def _needs_screen_of(
+    sources: NeedsSources, agent: FleetAgent, reads: _NeedsReads
+) -> Callable[[], list[str] | None]:
+    """What ``agent``'s pane shows, asked of tmux only when called."""
+    return lambda: reads.needs_read(partial(sources.pane_screen, agent), "tmux")
 
 
 def _needs_window(
@@ -2564,7 +2690,7 @@ def needs_single_agent_now(
     (review of #243, round 3, 4/13).
 
     So ``items`` are what :func:`needs_from_agent` derives for this agent without
-    the board, and no project-level kind is derived. What the predicates read of
+    the board or its screen, and no project-level kind is derived. What the predicates read of
     them is the same: the usage-limit dialog, which the board names by its
     notification's text, is the plain dialog's ``permission`` item here, a dialog
     all the same. An id may differ from the scan's, so no card is matched against
@@ -2781,6 +2907,36 @@ def needs_item_current(snap: AgentNow, item_id: str) -> bool:
     return any(item.id == item_id for item in snap.items)
 
 
+def needs_prompt_still_up(snap: AgentNow, item: NeedsItem) -> bool:
+    """Whether the prompt on the agent's screen right now is still the call ``item`` names,
+    asked of tmux again: what a quick answer checks last, right before its keys.
+
+    With more than one call pending, the card was the call its screen named when it was
+    derived (:func:`_needs_on_screen`), and the screen is read again here: a prompt answered
+    at the terminal meanwhile, and the next call's drawn, is not the card's. With one call
+    pending the prompt can only be its own, as rule 5 says, and a card naming no call (the
+    plain dialog's) is answered from the live pane, which shows what is up.
+    """
+    status = snap.status
+    pending = () if status is None else _needs_pending(snap.tail, status.agent)
+    named = {needs_item_id(snap.project.id, item.kind, tool.tool_use_id): tool for tool in pending}
+    if len(pending) <= 1 or item.id not in named or status is None:
+        return True
+    return _needs_on_screen(pending, _needs_screen_now(status.agent)) is named[item.id]
+
+
+def _needs_screen_now(agent: FleetAgent) -> list[str] | None:
+    """The rows ``agent``'s pane shows now, on the server its row lives on; ``None`` when
+    tmux cannot say (a pane gone, a server not answering)."""
+    from aisquare.core.tmux import TmuxError
+    from aisquare.services import fleet as fleet_service
+
+    try:
+        return fleet_service.server_of(agent).capture(agent.pane_id).lines
+    except TmuxError:
+        return None
+
+
 # --- the live sources ---------------------------------------------------------------------
 
 
@@ -2866,6 +3022,7 @@ def live_needs_sources() -> NeedsSources:
         tmux_answers=needs_tmux_answers,
         session_event=needs_session_event,
         pane_output=needs_pane_output,
+        pane_screen=_needs_screen_now,
         board_project=needs_board_project,
     )
 
@@ -3560,8 +3717,11 @@ def _needs_answer_now(
     re-derived first (:func:`needs_agent_now`), and a card no longer current is a 409
     ``stale`` carrying what is current instead. The gates are asked again right before
     typing (:meth:`RemoteKit.kit_write_still_allowed`): the re-derivation came between
-    them and the keys. A tmux that fails mid-answer is a 503 whose ``audit`` says it was
-    tried, as part of it may have reached the pane.
+    them and the keys. So is the screen, last (:func:`needs_prompt_still_up`): a card about
+    one of several calls pending is answered only while the prompt up is still its call's,
+    and otherwise is a 409 ``stale``, out of the feed until the next scan. A tmux that fails
+    mid-answer is a 503 whose ``audit`` says it was tried, as part of it may have reached
+    the pane.
 
     The card leaves ``watcher``'s feed as soon as the keys are typed, here on the write
     thread (:meth:`RemoteNeedsWatcher.needs_answered`). It left once the audit line was written,
@@ -3596,6 +3756,11 @@ def _needs_answer_now(
             f"text={len(text)}ch enter={enter}"
         )
         kit.kit_write_still_allowed(device)
+        if not needs_prompt_still_up(snap, item):
+            # Out of the feed as an answered card is, until the scan after it says what is up.
+            watcher.needs_answered(item.id)
+            gone = f"{label} shows another prompt than that {item.kind} now — nothing was sent"
+            raise RequestError(409, "stale", gone, current=[])
         try:
             _needs_send(snap.status.agent, keys, text, enter)
         except Exception as exc:
@@ -3793,6 +3958,7 @@ __all__ = [
     "needs_from_board",
     "needs_item_current",
     "needs_item_id",
+    "needs_prompt_still_up",
     "needs_push_safe",
     "needs_routes",
     "needs_scanned_iso",

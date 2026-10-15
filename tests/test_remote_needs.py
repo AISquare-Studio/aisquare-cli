@@ -232,6 +232,58 @@ def _one(items: list[NeedsItem]) -> NeedsItem:
     return items[0]
 
 
+# --- what a pane shows: Claude Code's screens, as ``capture-pane -e`` gives their rows --------
+
+_RULE = "\x1b[2m" + "─" * 78 + "\x1b[0m"
+_POINTER = "\u276f"
+"""The heavy angle quote Claude Code draws before a dialog's highlighted option."""
+_ASK_AGAIN = ("Yes", "Yes, and don't ask again for this command", "No, and tell Claude (esc)")
+
+
+def _dialog(*words: str, options: tuple[str, ...], above: tuple[str, ...] = ()) -> list[str]:
+    """A screen at a dialog: the conversation ``above``, the dialog's top rule, its ``words``
+    and its numbered ``options``, the first highlighted. The dialog replaces the input box."""
+    choices = [f" {_POINTER if n == 1 else ' '} {n}. {o}" for n, o in enumerate(options, start=1)]
+    return [*above, "", _RULE, *(f" {line}" for line in words), "", *choices]
+
+
+def _bash_screen(command: str, description: str = "", *, above: tuple[str, ...] = ()) -> list[str]:
+    """Bash's permission prompt for ``command``, its title and command styled."""
+    return _dialog(
+        "\x1b[1mBash command\x1b[0m",
+        "",
+        f"  \x1b[36m{command}\x1b[0m",
+        f"  {description}",
+        "",
+        "Do you want to proceed?",
+        options=_ASK_AGAIN,
+        above=above,
+    )
+
+
+def _question_screen(*, above: tuple[str, ...] = ()) -> list[str]:
+    """AskUserQuestion's dialog for :data:`QUESTION`."""
+    return _dialog(
+        "☐ Cache",
+        "",
+        "Which store should the cache use?",
+        options=("Redis", "SQLite", "none", "Type something."),
+        above=above,
+    )
+
+
+def _fetch_screen(url: str, *, above: tuple[str, ...] = ()) -> list[str]:
+    return _dialog(
+        "Fetch", "", f"  {url}", "", "Do you want to allow Claude to fetch this content?",
+        options=_ASK_AGAIN, above=above,
+    )  # fmt: skip
+
+
+def _at_work(*above: str) -> list[str]:
+    """A screen with no dialog up: the conversation, then the input box between its rules."""
+    return [*above, "", _RULE, "> ", _RULE, "  ? for shortcuts"]
+
+
 # --- one agent: the table, in its order (SPEC §4.2) ---------------------------------------
 
 
@@ -303,7 +355,10 @@ def test_rule_3_a_pending_question_is_a_question_while_the_row_reads_working() -
         _tool("toolu_b", command="ls"),
         _tool("toolu_q", "AskUserQuestion", at=NOW - timedelta(minutes=1), **QUESTION),
     )
-    item = _one(_classify(_status(row, "working", _session(row)), tail))
+    on_screen = _question_screen(above=("● Bash(ls)", "  ⎿  a.py b.py"))
+    item = _one(
+        _classify(_status(row, "working", _session(row)), tail, pane_screen=lambda: on_screen)
+    )
     assert item.kind == "question"
     assert item.id == needs_item_id(PROJECT.id, "question", "toolu_q")
     assert item.reason == "coder-1 asks you a question"
@@ -335,14 +390,15 @@ def test_rule_4_a_pending_plan_is_a_plan() -> None:
     assert item.answers[-1].keys == ("Escape",)
 
 
-def test_rule_5_a_pending_tool_with_attention_is_a_prompt_about_the_oldest_tool() -> None:
+def test_rule_5_a_pending_tool_with_attention_is_a_prompt_about_the_call_up() -> None:
     row = _row()
     session = _session(row, state="attention")
     tail = _tail(
         _tool("toolu_a", command="git push --force", description="push it"),
         _tool("toolu_b", command="ls", at=NOW - timedelta(minutes=1)),
     )
-    item = _one(_classify(_status(row, "attention", session), tail))
+    up = _bash_screen("git push --force", "push it", above=("● Bash(git push --force)",))
+    item = _one(_classify(_status(row, "attention", session), tail, pane_screen=lambda: up))
     assert item.kind == "permission"
     assert item.id == needs_item_id(PROJECT.id, "permission", "toolu_a")
     assert item.reason == "coder-1 waits for a permission answer to use Bash"
@@ -509,16 +565,16 @@ def test_a_sub_agents_next_prompt_has_no_item_until_its_notice() -> None:
     assert _one(_classify(status, tail, pane_output=lambda: None)).since == seen
 
 
-def test_a_call_beside_one_answered_has_no_card_until_its_own_notice(
+def test_a_call_beside_one_answered_has_its_own_card_never_the_answered_calls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Review of #259, remote focus, 1/12: one message calls two tools that each need a
-    permission. The first's prompt is answered, which writes nothing until it ends, and the
-    second's is drawn: the same pending calls, the same ``last_seen_at``, the row reading
-    ``attention`` again once the pane has been quiet 5 s. Rule 5's card was the first call's
-    again, its id and its URL, and a tap of "1" on it re-derived as current and approved the
-    other call. Until the second prompt's notice lands, the pane printed after the newest
-    notice: no card, and nothing a tap could match."""
+    """Review of #259, remote focus, 1/12, and round 8, 1/9: one message calls two tools that
+    each need a permission. The first's prompt is answered, which writes nothing until it
+    ends, and the second's is drawn: the same pending calls, the same ``last_seen_at``.
+    Rule 5's card was the first call's again, its id and its URL, and a tap of "1" on it
+    re-derived as current and approved the other call. 1/12 hid the card while the pane
+    printed after the newest notice, which rested on when Claude Code draws a call's prompt
+    beside another's. The card is the call the screen shows, however late it printed."""
     row = _row()
     asked = NOW - timedelta(seconds=40)
     called = asked - timedelta(seconds=6)
@@ -529,26 +585,126 @@ def test_a_call_beside_one_answered_has_no_card_until_its_own_notice(
     second = _tool("toolu_b", "WebFetch", at=called, url="https://b.example/")
     tail = _tail(first, second, at=called)
     status = _status(row, "attention", session)
-    card = _one(_classify(status, tail, events, pane_output=lambda: called))
+    above = ("● Fetch(https://a.example/)", "● Fetch(https://b.example/)")
+    a_up = _fetch_screen("https://a.example/", above=above)
+    b_up = _fetch_screen("https://b.example/", above=above)
+    card = _one(_classify(status, tail, events, pane_screen=lambda: a_up))
     assert card.id == needs_item_id(PROJECT.id, "permission", "toolu_a")
     assert card.detail["input"] == {"url": "https://a.example/"}
-    drawn = NOW - timedelta(seconds=6)
-    assert _classify(status, tail, events, pane_output=lambda: drawn) == []
-    slow = NOW - timedelta(seconds=13)
-    assert _classify(status, tail, events, pane_output=lambda: slow) == [], "a hook slowed"
-    fleet = Fleet(agents=[status], events=events, output_at=drawn)
+    for drawn in (NOW - timedelta(seconds=6), NOW - timedelta(seconds=25), None):
+        b_card = _one(
+            _classify(
+                status, tail, events, pane_output=lambda at=drawn: at, pane_screen=lambda: b_up
+            )
+        )
+        assert b_card.id == needs_item_id(PROJECT.id, "permission", "toolu_b"), drawn
+        assert b_card.detail["input"] == {"url": "https://b.example/"}
+    fleet = Fleet(agents=[status], events=events, screen=b_up)
     fleet.tails[f"/transcripts/{row.label}.jsonl"] = tail
     snap = _now_of(fleet, FakeTmux(reference=NOW), monkeypatch)
     assert not needs_item_current(snap, card.id), "a tap on the first call's card is stale"
     assert needs_dialog_open(snap), "the second prompt is up all the same"
     noticed = _status(row, "attention", _session(row, state="attention", seen=NOW))
-    form = _one(_classify(noticed, tail, events, pane_output=lambda: drawn))
+    form = _one(_classify(noticed, tail, events, pane_screen=lambda: b_up))
     assert form.id != card.id and form.answers == (), "a dialog the board has no words for"
-    # Negative controls: one call pending, or a redraw long after the notice, hides nothing.
-    alone = _tail(first, at=called)
-    assert _one(_classify(status, alone, events, pane_output=lambda: drawn)).id == card.id
-    long_after = _classify(status, tail, events, pane_output=lambda: NOW - timedelta(seconds=25))
-    assert _one(long_after).id == card.id
+    # A screen that names neither is the plain dialog's card, its answers the key pad's.
+    for unread in (None, _at_work(*above)):
+        dialog = _one(_classify(status, tail, events, pane_screen=lambda rows=unread: rows))
+        assert dialog.kind == "permission" and dialog.answers == () and dialog.id != card.id
+    # Negative control: with one call pending its prompt can only be its own, screen or not.
+    assert _one(_classify(status, _tail(first, at=called), events)).id == card.id
+
+
+_PUSH = _tool("toolu_push", command="git push --force origin main", description="Publish it")
+_RM = _tool("toolu_rm", command="rm -rf dist", description="Clear the build")
+_TESTS = _tool("toolu_tests", command="npm test -- --watch=false", description="Run the tests")
+_LS = _tool("toolu_ls", command="ls", description="List the files")
+_ASK = _tool("toolu_q", "AskUserQuestion", **QUESTION)
+_TASK = _tool("toolu_task", "Task", description="the cache", prompt="Find the cache")
+_PLAN = _tool("toolu_p", "ExitPlanMode", plan="# Cache plan\n\n1. Add SQLite")
+_SUB_AGENTS = PendingTool("toolu_sub", "Bash", "Bash(cat .env)", {"command": "cat .env"}, None)
+"""A call of a sub-agent's: its prompt is on the agent's screen, its record in its own."""
+
+
+def _screen_of(up: PendingTool | None, pending: tuple[PendingTool, ...]) -> list[str]:
+    """The agent's screen with ``up``'s prompt drawn under the conversation, which shows a
+    line for every call pending; with ``up`` ``None``, a tool at work, a numbered list in the
+    conversation above the input box (no dialog)."""
+    above = tuple(f"● {tool.summary}" for tool in pending)
+    if up is None:
+        return _at_work(*above, "  1. git push --force origin main", "  2. rm -rf dist")
+    if up.name == "AskUserQuestion":
+        return _question_screen(above=above)
+    return _bash_screen(str(up.input["command"]), str(up.input.get("description", "")), above=above)
+
+
+_ORDERINGS = [
+    # (what is pending, oldest first; whose prompt the screen may show)
+    ("a question after a permission", (_PUSH, _ASK), (_PUSH, _ASK, None)),
+    ("a question before a permission", (_ASK, _PUSH), (_ASK, _PUSH, None)),
+    ("two permissions", (_PUSH, _RM), (_PUSH, _RM, None)),
+    ("a call running beside a prompt", (_TESTS, _RM), (_RM, None)),
+    ("a sub-agent beside a call", (_TASK, _RM), (_SUB_AGENTS, _RM, None)),
+    ("a plan beside a call", (_RM, _PLAN), (_RM, None)),
+    ("a call too short to name", (_LS, _ASK), (_LS, _ASK, None)),
+]
+
+
+@pytest.mark.parametrize("state", ["attention", "working"])
+@pytest.mark.parametrize(
+    ("pending", "up"),
+    [
+        pytest.param(pending, up, id=f"{name}, {'nothing' if up is None else up.tool_use_id} up")
+        for name, pending, ups in _ORDERINGS
+        for up in ups
+    ],
+)
+def test_a_card_with_digits_is_only_ever_the_call_whose_prompt_is_up(
+    pending: tuple[PendingTool, ...], up: PendingTool | None, state: str
+) -> None:
+    """Review of #259, round 8, 1/9 (major): rule 5 took the first ``AskUserQuestion``
+    anywhere among the calls pending, then the first ``ExitPlanMode``, then the oldest call.
+    One message calls ``git push --force`` and asks a question: Claude Code runs them in
+    order, so the push's prompt is up and the question not drawn, and the card was the
+    question's, whose "1" approved the push. Every ordering, every prompt it may show: a
+    card whose answers type a digit names the call up, and a screen that shows none of the
+    agent's own calls (a sub-agent's, a tool at work) has no such card."""
+    row = _row()
+    session = _session(row, state=state, seen=NOW - timedelta(seconds=30))
+    said = "Claude needs your permission to use Bash"
+    events = [_event(4, "attention", said, session=session, at=NOW - timedelta(seconds=30))]
+    screen = _screen_of(up, pending)
+    items = _classify(
+        _status(row, state, session), _tail(*pending), events, pane_screen=lambda: screen
+    )
+    digits = [item for item in items if any(key.isdigit() for a in item.answers for key in a.keys)]
+    if up is None or up not in pending:
+        assert digits == [], items
+        return
+    named = needs_item_id(PROJECT.id, digits[0].kind if digits else "-", up.tool_use_id)
+    assert [item.id for item in digits] in ([], [named]), items
+    # And the card is there wherever the screen names the call up among calls it can tell apart.
+    told = up is not _LS and _TASK not in pending and _PLAN not in pending
+    if told and (state == "attention" or up is _ASK):
+        assert [item.id for item in digits] == [named], items
+
+
+def test_a_description_that_quotes_the_call_beside_it_names_neither() -> None:
+    """Both marks above the options, the screen names neither call, and the card is the plain
+    dialog's: the key pad beside the live pane answers what it shows."""
+    row = _row()
+    session = _session(row, state="attention")
+    events = [_event(4, "attention", "Claude needs your permission to use Bash", session=session)]
+    screen = _bash_screen("rm -rf dist", "Clear it, then git push --force origin main")
+    item = _one(
+        _classify(
+            _status(row, "attention", session),
+            _tail(_PUSH, _RM),
+            events,
+            pane_screen=lambda: screen,
+        )
+    )
+    assert item.answers == () and item.reason == "coder-1 shows a dialog that needs you"
 
 
 def test_rule_6_a_prompt_dismissed_with_esc_is_interrupted_not_a_prompt() -> None:
@@ -1018,6 +1174,8 @@ class Fleet:
     """Every session the scan asked the store for its newest event of a kind since a time."""
     output_at: datetime | None = None
     """When every pane last printed, as tmux tells it; ``None``: it would not say."""
+    screen: list[str] | None = None
+    """What every pane shows, as tmux captures it; ``None``: it would not say."""
     windows: int = 0
     """How many times the scan read the window of the newest events."""
 
@@ -1082,6 +1240,7 @@ def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> Needs
         tmux_answers=tmux_answers,
         session_event=session_event,
         pane_output=lambda agent: fleet.output_at,
+        pane_screen=lambda agent: fleet.screen,
     )
 
 
@@ -2609,6 +2768,8 @@ class FakeTmux:
         self.asked: list[str] = []
         """Every pane asked about, once per question."""
         self.typed: list[tuple[str, ...]] = []
+        self.screen: list[str] | None = None
+        """What the pane shows when it is captured; ``None`` is a pane tmux cannot capture."""
 
     def output_epoch(self) -> str:
         """``#{window_activity}`` as tmux prints it: whole seconds, or nothing."""
@@ -2632,6 +2793,13 @@ class FakeTmux:
 
     def started_at(self) -> datetime | None:
         return self.started
+
+    def capture(self, pane_id: str) -> SimpleNamespace:
+        if self.screen is None:
+            from aisquare.core.tmux import TmuxError
+
+            raise TmuxError(f"can't find pane: {pane_id}")
+        return SimpleNamespace(lines=list(self.screen))
 
     def answers(self) -> bool:
         return True
@@ -5655,6 +5823,37 @@ def test_an_answer_types_into_the_agent_is_audited_and_clears_its_card(live: Liv
         "enter=False"
     )
     _until_true(lambda: watcher.needs_scanned_at() != scanned)
+
+
+@pytest.mark.parametrize("then_up", ["the card's call", "the call beside it"])
+def test_an_answer_to_one_of_two_calls_is_typed_only_while_the_screen_still_shows_it(
+    live: Live, monkeypatch: pytest.MonkeyPatch, then_up: str
+) -> None:
+    """Review of #259, round 8, 1/9: with two calls pending the card is the call whose prompt
+    the screen showed when it was derived, and the screen is read again right before the
+    keys. The prompt answered at the terminal meanwhile and the next one up, the tap is a
+    409 ``stale``, nothing typed, and the card is out of the feed until the next scan."""
+    monkeypatch.setattr(remote_needs, "NEEDS_RESCAN_AFTER_ANSWER", 30.0)
+    live.runtime.set_allow_write(True)
+    called = datetime.now(UTC) - timedelta(minutes=1)
+    push, rm = replace(_PUSH, at=called), replace(_RM, at=called)
+    live.fleet.tails["/transcripts/coder-1.jsonl"] = _tail(push, rm, at=called)
+    live.fleet.screen = _screen_of(push, (push, rm))
+    card = live.card("permission")
+    assert card["id"] == needs_item_id(PROJECT.id, "permission", push.tool_use_id)
+    assert card["detail"]["input"]["command"] == "git push --force origin main"
+    live.tmux.screen = _screen_of(push if then_up == "the card's call" else rm, (push, rm))
+    response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
+    watcher = live.app.kit.lane_state["needs"]
+    if then_up == "the card's call":
+        assert response.status_code == 200, response.text
+        assert live.tmux.typed == [("keys", "%7", "1")]
+        return
+    assert (response.status_code, response.json()["error"]) == (409, "stale"), response.text
+    assert "shows another prompt" in response.json()["message"]
+    assert live.tmux.typed == [], "the 1 would have approved rm -rf dist"
+    assert watcher.needs_lookup(card["id"]) is None
+    assert not any(" needs/answer " in line for line in live.audit())
 
 
 def test_an_answered_card_leaves_the_feed_at_once_as_a_dismissed_one_does(

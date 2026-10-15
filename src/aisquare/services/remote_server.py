@@ -3685,8 +3685,8 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
                     said = wrote.late(label)
                 else:
                     said = f"{label}: {wrote.error}"
-                if wrote.typed == "no":
-                    log.warning("remote: send-keys to %s failed: %s", label, wrote.error)
+                # A wedged tmux is in the server's log too, not only the trail (round 11, 10/13).
+                log.warning("remote: send-keys to %s failed: %s", label, wrote.error)
                 verdict = "delivered=maybe" if wrote.typed == "maybe" else "failed"
                 raise RequestError(400, "write_failed", said, audit=f"{summary} {verdict}")
         return {"agent": label, "project": target.id, "sent": True}, summary

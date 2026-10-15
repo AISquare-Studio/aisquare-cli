@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import sqlite3
 import threading
 from collections.abc import Callable
@@ -2479,6 +2480,26 @@ def test_every_write_tmux_did_not_answer_in_time_says_it_may_still_land_and_audi
     assert log[-1] == f"late {write.late}", "nothing reached the agent after it"
     ((_, line),) = phone.audit()
     assert "=maybe " in f"{line} ", line
+
+
+@pytest.mark.parametrize("fails", ["failing", "timing_out"])
+def test_a_send_keys_that_did_not_go_through_is_in_the_servers_log(
+    phone: Phone,
+    pane: FakePane,
+    project: ProjectInfo,
+    caplog: pytest.LogCaptureFixture,
+    fails: str,
+) -> None:
+    """Review of #259, round 11, 10/13: before 4ec85aac every failure, a timeout included, was
+    logged as "remote: send-keys to coder-1 failed"; since, only a refusal was, and a wedged
+    tmux showed only in ``remote-audit.log``, not where an operator looks."""
+    _row(project)
+    getattr(pane, fails).add("Escape")
+    with caplog.at_level(logging.WARNING, logger="aisquare.services.remote_server"):
+        response = phone.post("send-keys", agent=LABEL, keys=["Escape"])
+    assert response.status_code == 400
+    (record,) = [r for r in caplog.records if "send-keys to coder-1 failed" in r.getMessage()]
+    assert ("did not answer" in record.getMessage()) is (fails == "timing_out"), record
 
 
 @pytest.mark.parametrize("fails", ["Enter", "a later chunk"])

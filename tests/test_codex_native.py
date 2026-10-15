@@ -1087,6 +1087,97 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
                     if event.kind == "note" and not_its in event.text
                 ]
             assert said, "the reason is on the board"
+
+            # Review r7 of #113: every tmux act goes through the one placement resolver.
+            # The project's directory is put back first, as its operator would, so its next
+            # agents are spawned and replayed in it.
+            with store_session() as handle:
+                assert isinstance(handle, SqliteStore)
+                handle._conn.execute(
+                    "UPDATE project SET root = ? WHERE id = ?", (str(workspace), project.id)
+                )
+                handle._conn.commit()
+            # Finding 3: from its sandbox an agent points its row at a dead window of the
+            # fleet's session; `restart` still finds it running where its launch record
+            # places it, and hands it over there, the dead window untouched.
+            seen = len(outputs())
+            checker = fleet.spawn(
+                project,
+                "reviewer",
+                label="checker",
+                agent="codex",
+                worktree=False,
+                prompt=f"RUN {cli} note 'checker up'",
+                agent_args=["--dangerously-bypass-hook-trust", "--no-alt-screen"],
+            ).agent
+            until(lambda: answered(seen), 40, "the checker's note ran", checker.pane_id)
+            [checker_place] = [
+                placement.session
+                for placement in [fleet.resolve_place(checker)]
+                if isinstance(placement, fleet.Placed)
+            ]
+            assert checker_place is not None
+            decoy = srv.run(
+                "new-window", "-d", "-P", "-F", "#{pane_id}", "-t", f"{checker_place.target}:",
+                "-n", "decoy", "--", "true",
+            ).strip()  # fmt: skip
+
+            def decoy_dead() -> bool:
+                facts = srv.pane_facts(decoy)
+                return facts is not None and facts.dead
+
+            until(decoy_dead, 10, "the decoy window dead", decoy)
+            reviewer = checker  # `sandboxed` tells the reviewer's label
+            sandboxed(rewrite("fleet_agent", "pane_id", decoy, checker.id), "the dead pane")
+            until(lambda: state(checker) == "waiting", 30, "waiting", checker.pane_id)
+            again = fleet.restart(project, checker.label)
+            assert again.was_running, "it runs where its record places it"
+            assert srv.pane_facts(checker.pane_id) is None, "handed over: its own window is gone"
+            dead = srv.pane_facts(decoy)
+            assert dead is not None and dead.dead, "the dead window it named is untouched"
+            checker = again.started
+            until(lambda: state(checker) == "waiting", 40, "the replacement", checker.pane_id)
+
+            # Finding 1: from its sandbox it INSERTs a live row naming another project's
+            # window and swaps the two projects' codenames. `fleet stop` of that row, and a
+            # scoped `shutdown`, type into and kill nothing of the other project's.
+            other_root = tmp_path / "other"
+            other_root.mkdir()
+            other = fleet.ensure_codename(team.activate(other_root))
+            theirs = fleet.session_name(other.codename or "")
+            srv.run("new-session", "-d", "-s", theirs, "-n", "theirs", "--", "cat")
+            their_pane = srv.run("display-message", "-p", "-t", f"={theirs}:", "#{pane_id}").strip()
+            insert = (
+                "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); "
+                "cols = [r[1] for r in c.execute('PRAGMA table_info(fleet_agent)')]; "
+                "row = dict(zip(cols, c.execute('SELECT * FROM fleet_agent WHERE id = ?', "
+                "(sys.argv[2],)).fetchone())); "
+                "row.update(id=sys.argv[3], label='coder-9', pane_id=sys.argv[4], "
+                "session_id=None, ended_at=None); "
+                "c.execute('INSERT INTO fleet_agent (%s) VALUES (%s)' % (','.join(row), "
+                "','.join('?' * len(row))), list(row.values())); "
+                "c.commit(); print('rewrote', c.total_changes)"
+            )
+            fake_id = f"agt_fake{os.getpid()}"
+            db = str(store / "context.db")
+            reviewer = checker
+            sandboxed(
+                "RUN "
+                + shlex.join([sys.executable, "-c", insert, db, checker.id, fake_id, their_pane]),
+                "the fake row",
+            )
+            ours = fleet.ensure_codename(project).codename or ""
+            sandboxed(rewrite("project", "codename", "spare-heron", other.id), "their codename")
+            sandboxed(rewrite("project", "codename", other.codename or "", project.id), "ours")
+            sandboxed(rewrite("project", "codename", ours, other.id), "the swap")
+            with pytest.raises(fleet.FleetError, match="no fleet session a launch record"):
+                fleet.stop(project, "coder-9")
+            report = fleet.shutdown(project, force=True)
+            assert fake_id in [row.agent.id for row in report.failed], report
+            assert srv.has_session(theirs), "the other project's session stands"
+            their_screen = srv.run("capture-pane", "-p", "-t", their_pane)
+            facts = srv.pane_facts(their_pane)
+            assert facts is not None and not facts.dead and "/quit" not in their_screen
         finally:
             if srv.has_session(fleet.session_name(fleet.ensure_codename(project).codename or "")):
                 srv.run("kill-server")

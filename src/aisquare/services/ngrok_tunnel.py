@@ -110,6 +110,10 @@ STOP_SECONDS = 5.0
 again after SIGKILL."""
 READER_JOIN_SECONDS = 1.0
 """How long stopping waits, once ngrok's group is gone, for the log reader to see its end."""
+PIPE_END_WAIT_SECONDS = 0.5
+"""How long ngrok's tied parent (:data:`_TIED`), once ngrok ended, waits for the end of the pipe
+from this process before it ends as ngrok did: the hangup that SIGTERMs ngrok's group comes a
+moment before this process is gone."""
 _OWN_GROUP: dict[str, Any] = {} if sys.platform == "win32" else {"process_group": 0}
 """Popen's word for a process group of ngrok's own: POSIX only, and the fleet UI runs there."""
 _TIED = """\
@@ -142,7 +146,7 @@ ending = threading.Event()
 watching = threading.Thread(target=gone, daemon=True)
 watching.start()
 code = child.wait()
-if ending.is_set():
+if ending.wait(%(settle)r):
     watching.join()
 if code < 0:
     for name in ("SIGTERM", "SIGINT", "SIGPIPE"):
@@ -161,7 +165,13 @@ The SIGKILL goes whether or not ngrok itself is still there, and the parent wait
 once the pipe has ended: nobody reads its exit by then. It went only while ngrok was, so a
 launcher's ngrok that ended on the SIGTERM ended the parent with it, and the real ngrok
 it runs, trapping the SIGTERM, ran on untied, the public link on a port nobody held
-(review of #259, round 8, 6/9)."""
+(review of #259, round 8, 6/9).
+
+Once ngrok ended, the parent gives the pipe :data:`PIPE_END_WAIT_SECONDS` to end before it
+ends as ngrok did. A hangup or a SIGTERM of the fleet UI SIGTERMs ngrok's group first
+(``ngrok_ends_with``), and only then is the fleet UI gone and the pipe with it: a launcher
+that ended on that SIGTERM before the pipe's end was seen ended the parent, the SIGKILL never
+went, and the real ngrok ran on as before (review of #259, round 9, 6/8)."""
 
 COMMAND_LINE_TUNNEL = "command_line"
 """ngrok's name, in its log and its API, for the tunnel ``ngrok http`` asks for."""
@@ -457,7 +467,8 @@ def popen_tied(command: list[str], **kwargs: Any) -> subprocess.Popen[str]:
     if sys.platform == "win32" or not sys.executable:
         return subprocess.Popen(command, **kwargs)
     kwargs["stdin"] = subprocess.PIPE
-    tied = [sys.executable, "-I", "-c", _TIED % {"stop": STOP_SECONDS}, *command]
+    script = _TIED % {"stop": STOP_SECONDS, "settle": PIPE_END_WAIT_SECONDS}
+    tied = [sys.executable, "-I", "-c", script, *command]
     return subprocess.Popen(tied, **kwargs)
 
 

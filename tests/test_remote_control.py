@@ -517,6 +517,65 @@ def test_what_a_launchers_ngrok_leaves_in_its_group_ends_with_the_fleet_ui_too(
                 os.kill(pid, signal.SIGKILL)
 
 
+def test_a_launchers_ngrok_ended_by_the_fleet_uis_own_sigterm_takes_its_group_with_it(
+    tmp_path: Path,
+) -> None:
+    """Review of #259, round 9, 6/8: a hangup or a SIGTERM of the fleet UI SIGTERMs ngrok's
+    group (``ngrok_ends_with``), and only then is the fleet UI gone and the pipe with it. A
+    launcher that ended on the SIGTERM before the parent saw the pipe's end ended the parent,
+    which never sent its SIGKILL: the real ngrok, trapping the SIGTERM, ran on. The fleet UI
+    here outlives its SIGTERM of the group by a moment, as a slow exit would."""
+    if sys.platform == "win32":
+        pytest.skip("process groups are POSIX")
+    pids = tmp_path / "pids"
+    body = (
+        "import os, signal\n"
+        "child = os.fork()\n"
+        "if child == 0:\n"
+        "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "    time.sleep(60)\n"
+        "    os._exit(0)\n"
+        f"open({str(pids)!r}, 'w').write(str(os.getpid()) + ' ' + str(child))\n"
+        f"print({json.dumps(json.dumps(STARTED))}, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    command = ngrok_printing(tmp_path, body)
+    fleet_ui = tmp_path / "fleet-ui.py"
+    fleet_ui.write_text(
+        "import os, sys, time\n"
+        "from aisquare.services import ngrok_tunnel\n"
+        "ngrok_tunnel.STOP_SECONDS = 0.5\n"
+        f"tunnel = ngrok_tunnel.NgrokTunnel(8750, command={command!r}, "
+        "popen=ngrok_tunnel.popen_tied)\n"
+        "assert tunnel.start_tunnel() is None\n"
+        "print(tunnel.wait_for_url(10), flush=True)\n"
+        "sys.stdin.readline()\n"
+        "ngrok_tunnel.end_every_tunnel_now()  # what its SIGTERM handler does first\n"
+        "time.sleep(0.2)\n"
+        "os._exit(0)\n"
+    )
+    ui = subprocess.Popen(
+        [sys.executable, str(fleet_ui)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True
+    )
+    started: list[int] = []
+    try:
+        assert ui.stdin is not None and ui.stdout is not None
+        assert ui.stdout.readline().strip() == STARTED["url"]
+        started = [int(pid) for pid in pids.read_text().split()]
+        ui.stdin.write("\n")
+        ui.stdin.flush()
+        ui.wait(10)
+        launcher, real = started
+        assert gone(launcher), "the launcher ends on the SIGTERM"
+        assert gone(real), "the real ngrok, which traps it, outlived the fleet UI"
+    finally:
+        with contextlib.suppress(OSError):
+            ui.kill()
+        for pid in started:
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
+
+
 def test_the_tied_parent_ends_as_ngrok_ended_its_code_or_its_signal(tmp_path: Path) -> None:
     """What reads ngrok's exit (the reason a tunnel never came, ``_exit_sentence``) reads the
     parent's: it is ngrok's code, or the signal that ended ngrok."""

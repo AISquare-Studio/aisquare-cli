@@ -1484,7 +1484,9 @@ def test_the_dead_manager_line_never_creates_the_home(isolated_home: Path) -> No
 # --- the projects line (#139) -------------------------------------------------------------------
 
 
-def test_doctor_counts_the_captured_directories_it_hides(home: Path, tmp_path: Path) -> None:
+def test_doctor_counts_the_captured_directories_it_hides(
+    home: Path, tmp_path: Path, project_capture: None
+) -> None:
     from aisquare.models import ProjectInfo
 
     assert diagnostics._check_captured_projects() == []  # nothing captured: silent

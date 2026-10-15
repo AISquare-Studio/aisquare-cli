@@ -54,6 +54,7 @@ from aisquare.services import credits as credits_service
 from aisquare.services import distill as distill_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
+from aisquare.services import project as project_service
 from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
 from aisquare.services.ci_contract import DeliveryDescriptor
@@ -1438,7 +1439,10 @@ def _check_captured_projects() -> list[DoctorCheck]:
     """How many directories are registered but hidden (#139) — and how to see or drop them.
 
     Silent when there are none; gated on the store existing (doctor creates
-    nothing). ``ok``: a hidden capture is the design working, not a fault.
+    nothing). ``ok``: a hidden capture is the design working, not a fault. With
+    ``[projects] capture`` off, every one is left from before it was: nothing lists
+    them, nothing captures more, and the prune that drops them all is named, with
+    ``--older-than 0`` since none of them is going to be touched again.
     """
     if _uncreated_home("projects") is not None:
         return []
@@ -1450,6 +1454,16 @@ def _check_captured_projects() -> list[DoctorCheck]:
     if not captured:
         return []
     noun = "directory" if captured == 1 else "directories"
+    if not project_service.capture_on():
+        return [
+            _ok(
+                "projects",
+                f"{captured} captured {noun} left from before project capture was turned off "
+                "(a hooked session ran there; nothing added it on purpose) — listed only by "
+                "aisquare project list --all; drop them: aisquare project prune --captured-only "
+                "--older-than 0",
+            )
+        ]
     return [
         _ok(
             "projects",

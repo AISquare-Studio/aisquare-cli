@@ -1,5 +1,5 @@
 """``[projects] capture`` off, the default since 0.8.1: no project row unless one is added on
-purpose (#139) — the board and a destination.
+purpose (#139) — the board, a destination and doctor.
 
 The rest of the call sites are tested beside their own: the hooks in tests/test_hooks.py
 and tests/test_ci_augment.py, the shell in tests/test_ui_shell.py, the fleet in
@@ -19,6 +19,7 @@ from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
 from aisquare.models import ProjectInfo
 from aisquare.services import destinations as dest
+from aisquare.services import diagnostics
 from aisquare.services import team as team_service
 
 
@@ -173,3 +174,19 @@ def test_a_destination_needs_the_project_added_or_captured(
         monkeypatch.setattr(project_service, "capture_on", lambda: False)
         store.onboard_project(project)
         dest.require_project(store, project)
+
+
+# --- doctor ----------------------------------------------------------------------------
+
+
+def test_doctor_names_the_prune_that_clears_what_capture_left(tmp_path: Path) -> None:
+    """The rows captured before capture was off stay, unlisted, until someone drops them:
+    ``project list --all`` shows them and doctor names the prune that takes them all."""
+    with store_session() as store:
+        store.ensure_project(ProjectInfo(id="prj_one", root=tmp_path / "one"))  # 0.8.0's
+
+    [check] = diagnostics._check_captured_projects()
+
+    assert check.detail.startswith("1 captured directory left from before project capture")
+    assert "aisquare project list --all" in check.detail
+    assert check.detail.endswith("aisquare project prune --captured-only --older-than 0")

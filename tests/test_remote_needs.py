@@ -15,6 +15,7 @@ import logging
 import re
 import shlex
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -2575,7 +2576,27 @@ def test_a_card_and_an_actions_refusal_name_a_project_as_the_project_list_does()
     assert "'coder-9' in Billing" in str(remote_server._no_live_agent(billing, "coder-9"))
     stale = remote_server.remote_stale(billing, "coder-9", None, done="nothing was sent")
     assert "in Billing now" in stale.message
-    assert remote_server.remote_project_name(PROJECT) == "alpha"  # no nickname: its directory
+    assert remote_needs._needs_project_name(PROJECT) == "alpha"  # no nickname: its directory
+
+
+def test_naming_a_project_on_a_card_does_not_load_the_remote_server() -> None:
+    """Review of #259, round 16: ``_needs_item`` named its project through
+    ``remote_server.remote_project_name``, a one-line wrapper of the project service, and
+    so loaded all of ``remote_server`` in processes that need nothing else of it
+    (``aisquare remote needs``, ``needs_single_agent_now``). Asked in a fresh interpreter,
+    as an import is once per process."""
+    probe = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from aisquare.models import ProjectInfo\n"
+        "from aisquare.services import remote_needs\n"
+        "named = remote_needs._needs_project_name(ProjectInfo(id='prj_a', root=Path('alpha')))\n"
+        "print(named, 'aisquare.services.remote_server' in sys.modules)\n"
+    )
+    ran = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True, timeout=60
+    )
+    assert ran.stdout.split() == ["alpha", "False"], ran.stdout + ran.stderr
 
 
 def test_a_limit_with_no_account_to_switch_to_is_pushed_at_once(isolated_home: Path) -> None:

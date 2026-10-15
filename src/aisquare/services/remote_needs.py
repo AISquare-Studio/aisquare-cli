@@ -810,10 +810,13 @@ def _needs_now() -> datetime:
 
 def _needs_project_name(project: ProjectInfo) -> str:
     """How a card, its push and an action's refusal name ``project``: as Remote's project
-    list does (``remote_server.remote_project_name``), its nickname first."""
-    from aisquare.services.remote_server import remote_project_name
+    list does (``project.display_name``), its nickname first. Asked of the project service
+    itself, as ``fleet`` and ``team`` ask it: ``remote_server``, 8,000 lines, was imported
+    for its one-line wrapper, by ``aisquare remote needs`` and ``needs_single_agent_now``,
+    which need nothing else of it (review of #259, round 16)."""
+    from aisquare.services import project as project_service
 
-    return remote_project_name(project)
+    return project_service.display_name(project)
 
 
 def _needs_item(

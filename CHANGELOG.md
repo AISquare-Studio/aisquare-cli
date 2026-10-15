@@ -47,12 +47,16 @@ adapter.**
   directory, account, and the tmux socket and pane of its window) and the
   agent's own hook adds its session (transcript, thread, home). `fleet tell`,
   `fleet stop`, `fleet shutdown` and the manager's nudge type into and kill only
-  the pane the record places. Agents spawned before this version have none:
-  their restart or switch is refused before anything is stopped, `tell` files
-  its message as a board note, and `stop` and `shutdown` leave them running,
-  naming the way out (end the agent in its window, `aisquare fleet attach`, and
-  spawn it again); so is a project whose directory in the store is not the one
-  the agent was spawned in. The reason is a board note too, once per agent and
+  the pane the record places, by the record's agent's rules, and `shutdown`
+  takes down the sessions the records name. A row rewritten in the store is told
+  nothing and stopped where its record places it, the board saying what was
+  rewritten. Agents spawned before this version have none: their restart or
+  switch is refused before anything is stopped, naming the way out (stop the
+  agent and spawn it again), `tell` files its message as a board note, and
+  `stop` and `shutdown` kill its window in its project's fleet session with no
+  exit command typed; a scoped `shutdown` leaves such a project's session to
+  `--all`. A project whose directory in the store is not the one the agent was
+  spawned in is refused too. The reason is a board note too, once per agent and
   reason, so an unattended hand-over says why it did not happen. A spawn whose
   record cannot be written starts no agent, of either kind.
 - `fleet.roles.<role>.permission` is new and unset; an existing
@@ -109,9 +113,12 @@ adapter.**
   the hand-over and `fleet tell`'s queue read an agent's launch record in
   `launch-seals/`, which the sandbox can only read, written by its spawner and
   its own hook, and nothing else from the store; `tell`, `stop`, `shutdown` and
-  the manager's nudge type into and kill only the pane that record places; a
-  failed turn's limit is read from the record's transcript; a native id goes on
-  Codex's command line only as a UUID. Its `aisquare` calls
+  the manager's nudge type into and kill only the pane that record places, by
+  its agent's rules, and `shutdown` only the sessions it names; a failed turn's
+  limit is read from the record's transcript; a native id goes on Codex's
+  command line only as a UUID (an agent spawned before this version, with no
+  record, is still stopped by its row's pane in its fleet session). Its
+  `aisquare` calls
   succeed on the first, sandboxed attempt instead of each needing an approval,
   and a reviewer's verdict reaches the board while its worktree stays read-only.
   The fleet's tmux stays out of the sandbox's reach, so a result, question,

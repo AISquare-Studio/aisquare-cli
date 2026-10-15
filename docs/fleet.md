@@ -861,9 +861,12 @@ role, agent, directory, account, and the tmux socket and pane its window is in),
 agent's own hook adds its session (transcript, thread, home), and a replay and `fleet
 tell`'s queue read that record and nothing else. What `tell`, `stop` (restart, switch,
 the hand-over, `shutdown`) and the manager's nudge type into or kill is the pane the
-record places, and a failed turn's limit is read from the record's transcript. A row
-without one, one that names another pane, or a project whose directory in the store
-is not the record's, is refused with the reason. So a
+record places, by the record's agent's rules, and `shutdown` takes down the sessions
+the records name; a failed turn's limit is read from the record's transcript. A row
+rewritten to name another pane is told nothing and stopped where its record places it;
+a row without one has its window killed by `stop` with nothing typed, and its replay,
+like a project whose directory in the store is not the record's, is refused with the
+reason. So a
 Codex agent's board calls succeed on their first, sandboxed attempt, a reviewer's
 verdict included, while its worktree stays read-only
 ([the sandbox and the store](coding-agents.md#the-sandbox-and-the-aisquare-store)).

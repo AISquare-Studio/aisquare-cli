@@ -532,14 +532,20 @@ was written, so a release that adds a field reads an older record with that fiel
 default.
 
 What is typed into a row's pane, or kills its window, goes to the pane the record
-places, never to the row's `pane_id` at its `socket_path`: `fleet tell`'s typing,
-`fleet stop` and with it restart, switch, the hand-over and `shutdown`, and the
-manager's nudge, which a sandboxed agent's own hooks deliver from outside its sandbox.
-A row that names another pane than its record, or whose record places none (spawned
-before this version recorded it), is not typed into or killed: `tell` files the
-board note, `stop` and a replay are refused before anything is typed, `shutdown`
-leaves the row live and its session up, and the reason is a board note. The way out
-is the agent's own window (`aisquare fleet attach`), where it can be ended by hand.
+places, never to the row's `pane_id` at its `socket_path`, and by the rules of the
+record's agent, never the row's `agent` (whose readiness check keeps an Enter out of
+Codex's dialogs): `fleet tell`'s typing, `fleet stop` and with it restart, switch,
+the hand-over and `shutdown`, and the manager's nudge, which a sandboxed agent's own
+hooks deliver from outside its sandbox. A row rewritten in the store to name another
+pane, socket or agent is not typed into (`tell` files the board note, the nudge
+waits), and is stopped where its record places it, so one `UPDATE` of its own row
+does not make an agent unstoppable; the board says what was rewritten. A row with no
+record (spawned before this version) is not typed into either: `stop` and `shutdown`
+kill its window, with no exit command typed, and only a window of its project's fleet
+session, so its claims are released by the stop, not by its own `SessionEnd`.
+`shutdown` takes down the tmux sessions the project's records name, never
+`asq-<codename>` from the project's row; a scoped one leaves the session of a project
+spawned before this version to `--all`.
 What the fleet reads of a session to act on outside the sandbox, a Codex turn that
 failed on its limit with no hook (which parks the row and may hand it over), is read
 from the transcript the record holds, never the board session's, and only by a reader

@@ -8616,6 +8616,32 @@ def test_a_reap_inside_a_spawn_never_removes_the_tree_it_reused_before_its_row(
     assert fleet_service.reap(project).worktrees_removed == [], "a live agent's, from now on"
 
 
+def test_a_reap_or_a_spawn_asks_git_for_the_branch_locks_directory_once(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 18: every taking of the branch lock asked ``git rev-parse
+    --git-common-dir`` where the lock lives, and a reap takes it for each tree it removes,
+    so it paid one more git process a tree; a spawn asked again to add its exclude line.
+    Each asks once."""
+    for label in ("coder-a", "coder-b", "coder-c"):
+        fleet_service.spawn(project, "coder", label=label)
+        fleet_service.stop(project, label, force=True)
+    real = fleet_service._git
+    asked: list[tuple[str, ...]] = []
+
+    def counted(cwd: Path, *args: str) -> Any:
+        asked.append(args)
+        return real(cwd, *args)
+
+    monkeypatch.setattr(fleet_service, "_git", counted)
+
+    assert len(fleet_service.reap(project).worktrees_removed) == 3
+    assert asked.count(("rev-parse", "--git-common-dir")) == 1
+    asked.clear()
+    fleet_service.spawn(project, "coder", label="coder-d")
+    assert asked.count(("rev-parse", "--git-common-dir")) == 1
+
+
 def test_a_spawn_waits_through_a_queue_of_holders_of_the_branch_lock(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -8645,7 +8671,7 @@ def test_a_spawn_waits_through_a_queue_of_holders_of_the_branch_lock(
     queue.start()
     try:
         first_in.wait(5)
-        with fleet_service._branches_locked(repo, wait=fleet_service._BRANCHES_LOCK_WAIT):
+        with fleet_service._branches_locked(common, wait=fleet_service._BRANCHES_LOCK_WAIT):
             assert released.is_set(), "taken once the queue let go, 0.45 s on"
     finally:
         queue.join()
@@ -8661,13 +8687,13 @@ def test_a_holder_of_the_branch_lock_that_never_lets_go_is_called_stuck(
         started = time.monotonic()
         with (
             pytest.raises(FleetError, match=r"has held it for 0\.2 s without letting go"),
-            fleet_service._branches_locked(repo, wait=0.2),
+            fleet_service._branches_locked(common, wait=0.2),
         ):
             pytest.fail("taken while another held it")
         assert time.monotonic() - started >= 0.2
         with (
             pytest.raises(FleetError, match=r"holds .* — try again$"),
-            fleet_service._branches_locked(repo, wait=0),
+            fleet_service._branches_locked(common, wait=0),
         ):
             pytest.fail("taken while another held it")
 

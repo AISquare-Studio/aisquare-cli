@@ -1011,7 +1011,10 @@ def _git_ok(cwd: Path, *args: str) -> str:
 
 
 def _git_common_dir(root: Path) -> Path:
-    """The repository's own ``.git`` directory, which every worktree of it shares."""
+    """The repository's own ``.git`` directory, which every worktree of it shares: where the
+    branch lock lives (:func:`_branches_locked`). One git process, so a spawn or a reap asks
+    it once and passes it on: asked at each taking of the lock, a reap paid one for every
+    tree it removed (review of #259, round 18)."""
     common = Path(_git_ok(root, "rev-parse", "--git-common-dir").strip())
     return common if common.is_absolute() else root / common
 
@@ -1027,8 +1030,9 @@ _HOLDER_LOOK = 1.0
 
 
 @contextlib.contextmanager
-def _branches_locked(root: Path, *, wait: float) -> Iterator[None]:
-    """Hold the lock a spawn and a reap share over ``root``'s branches, for the block.
+def _branches_locked(common: Path, *, wait: float) -> Iterator[None]:
+    """Hold the lock a spawn and a reap share over a repository's branches, for the block:
+    the repository whose own ``.git`` is ``common`` (:func:`_git_common_dir`).
 
     ``git worktree add -b`` makes the branch and only then registers the tree that has it
     out, and a spawn that finds the branch there checks it out one git command after
@@ -1037,8 +1041,8 @@ def _branches_locked(root: Path, *, wait: float) -> Iterator[None]:
     of #259, round 16). So :func:`spawn` holds this from its first question about a branch
     until its agent's row is written, :func:`_sweep_fleet_branches` deletes only while it
     holds it, asking the trees again first, and :func:`_remove_unless_taken` removes a tree
-    only while it holds it, asking the live rows again first (round 17). A file in the
-    repository's own ``.git``, which every worktree of it shares.
+    only while it holds it, asking the live rows again first (round 17). A file in
+    ``common``, which every worktree of the repository shares.
 
     ``wait`` is the patience for one holder, not for the lock: each holder says who it is
     beside the lock (:func:`_announce_holder`), and a waiter that sees another holder than
@@ -1048,7 +1052,6 @@ def _branches_locked(root: Path, *, wait: float) -> Iterator[None]:
     round 17). Raises :class:`FleetError` when one holder keeps it past ``wait`` seconds
     (``0`` asks once), or it cannot be taken at all.
     """
-    common = _git_common_dir(root)
     path = common / "aisquare-fleet-branches.lock"
     taken = contextlib.ExitStack()
     seen = _lock_holder(common)
@@ -1100,15 +1103,16 @@ def _lock_holder(common: Path) -> str:
         return ""
 
 
-def _exclude_worktrees(root: Path, worktree_dir: str, notes: list[str]) -> None:
+def _exclude_worktrees(common: Path, worktree_dir: str, notes: list[str]) -> None:
     """Add ``<worktree_dir>/`` to ``.git/info/exclude`` once — never to a tracked file.
+    ``common`` is the repository's own ``.git`` (:func:`_git_common_dir`).
 
     Fail-open: a read-only ``.git`` costs a note and an untracked directory in
     ``git status``, never the spawn.
     """
     line = worktree_dir.rstrip("/") + "/"
     try:
-        exclude = _git_common_dir(root) / "info" / "exclude"
+        exclude = common / "info" / "exclude"
         existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
         if line in existing.splitlines():
             return
@@ -1117,7 +1121,7 @@ def _exclude_worktrees(root: Path, worktree_dir: str, notes: list[str]) -> None:
             if existing and not existing.endswith("\n"):
                 handle.write("\n")
             handle.write(f"# aisquare fleet worktrees (docs/plans/fleet-tui.md §3.5)\n{line}\n")
-    except (OSError, FleetError) as exc:
+    except OSError as exc:
         notes.append(
             f"could not add {line} to .git/info/exclude ({exc}) — "
             "git status will list the worktrees as untracked"
@@ -1196,6 +1200,7 @@ def _worktree_for(
     refuse_if_taken: Callable[[], None] | None,
     own: Path | None,
     own_branch: str | None,
+    common: Path,
 ) -> Path:
     """``<root>/<worktree_dir>/<label>`` on ``branch``, created or reused.
 
@@ -1227,7 +1232,8 @@ def _worktree_for(
 
     The caller holds the branch lock (:func:`_branches_locked`), which a reap deletes
     branches and removes trees under: :func:`spawn` from before the first question about a
-    branch until the agent's row is written.
+    branch until the agent's row is written. ``common`` is the repository's own ``.git``,
+    which it was taken in.
     """
     if own is not None and not own.exists():
         return _remake_worktree(root, own, own_branch, notes)
@@ -1252,7 +1258,7 @@ def _worktree_for(
         notes.append(f"branch {branch} already existed — checked it out")
     else:
         _add_worktree(root, path, branch, new=True)
-    _exclude_worktrees(root, worktree_dir, notes)
+    _exclude_worktrees(common, worktree_dir, notes)
     return path
 
 
@@ -1476,6 +1482,7 @@ def _remove_finished_worktrees(
         return
     try:
         default = _default_branch(root)
+        common = _git_common_dir(root)  # once: the branch lock is taken for each tree
     except FleetError:
         return  # no git here: nothing can be removed safely, so nothing is
     # The row whose tree a path is now: the NEWEST there, the one a restart of its label
@@ -1494,18 +1501,18 @@ def _remove_finished_worktrees(
         except FleetError as exc:
             kept = f"git could not be asked ({exc})"
         if kept is None:
-            removed, kept = _remove_unless_taken(store, project, agent.cwd)
+            removed, kept = _remove_unless_taken(store, project, agent.cwd, common)
             if removed:
                 report.worktrees_removed.append(agent.cwd)
                 continue
         if kept is not None:
             report.worktrees_kept.append((agent.cwd, kept))
     # Read again: the branches recorded just now are the ones the sweep asks about.
-    _sweep_fleet_branches(root, default, store.fleet_agents(project.id), report)
+    _sweep_fleet_branches(root, common, default, store.fleet_agents(project.id), report)
 
 
 def _remove_unless_taken(
-    store: ContextStore, project: ProjectInfo, tree: Path
+    store: ContextStore, project: ProjectInfo, tree: Path, common: Path
 ) -> tuple[bool, str | None]:
     """``git worktree remove`` of ``tree``, an ended agent's that holds nothing found only
     there, unless a live agent works in it now; whether it went, and when it did not, why
@@ -1520,7 +1527,7 @@ def _remove_unless_taken(
     and a window, and the next reap asks again.
     """
     try:
-        with _branches_locked(project.root, wait=0):
+        with _branches_locked(common, wait=0):
             here = tree.resolve()
             if any(
                 row.cwd.resolve() == here for row in store.fleet_agents(project.id, live_only=True)
@@ -1552,7 +1559,7 @@ def _fleet_branches(root: Path, *flags: str) -> dict[str, str] | None:
 
 
 def _sweep_fleet_branches(
-    root: Path, default: str, rows: Sequence[FleetAgent], report: ReapReport
+    root: Path, common: Path, default: str, rows: Sequence[FleetAgent], report: ReapReport
 ) -> None:
     """Delete each ``fleet/…`` branch an ENDED row of ``rows`` recorded
     (:attr:`FleetAgent.branch`) that no worktree has out, once the default branch has its
@@ -1603,7 +1610,7 @@ def _sweep_fleet_branches(
     try:
         # Never waited for: a spawn holds it through a whole `git worktree add`, and the
         # next reap deletes what this one could not.
-        with _branches_locked(root, wait=0):
+        with _branches_locked(common, wait=0):
             out = set(_worktree_branches(root).values())  # asked again, under the lock
             for branch in done:
                 if branch not in out and _git(root, "branch", "-D", branch).returncode == 0:
@@ -2604,14 +2611,15 @@ def spawn(
     # of the branch lock a reap removes trees under (`_remove_unless_taken`): a reap that
     # landed between a reuse and the row read the tree as an ended agent's, clean and
     # pushed, and removed it from under the agent starting in it (review of #259, round 17).
+    common = _git_common_dir(project.root) if use_worktree else None
     tree_lock = (
-        _branches_locked(project.root, wait=_BRANCHES_LOCK_WAIT)
-        if use_worktree
+        _branches_locked(common, wait=_BRANCHES_LOCK_WAIT)
+        if common is not None
         else contextlib.nullcontext()
     )
     with tree_lock:
         cwd = project.root
-        if use_worktree:
+        if common is not None:
             branch = branch_name(
                 codename,
                 task_id=resolved_task_id,
@@ -2626,6 +2634,7 @@ def spawn(
                 refuse_if_taken=refuse_if_taken,
                 own=own_worktree,
                 own_branch=own_branch,
+                common=common,
             )
         made: list[str] = []
         if choice.account is not None:

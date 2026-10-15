@@ -33,6 +33,7 @@ from aisquare.core.store import (
     damaged_store_recovery,
     is_corrupt_error,
     is_locked_error,
+    store_session,
 )
 from aisquare.models import ProjectInfo, TeamEvent, TeamSession, TeamTask
 from aisquare.services import claude_accounts as claude_accounts_service
@@ -303,6 +304,31 @@ def _parse_env(pairs: list[str]) -> dict[str, str]:
 _ENV_NAME_RULE = "letters, digits and _, not starting with a digit"
 
 
+def _joins_no_board() -> str | None:
+    """Why a session started from ``team spawn``'s printed line joins no board, or ``None``
+    when it joins one (or the board is off, which ``launch`` says itself).
+
+    With ``[projects] capture`` off a role session's hooks join only a project someone
+    added, and printing adds nothing: in a directory nobody added, the pasted line started a
+    planner with no board, no tasks and no protocol, and nothing said why (review of #259,
+    round 17). Read without a write, and fail-open: a store that cannot be read is the
+    session's own to report.
+    """
+    if not orchestrator.team_enabled():
+        return None
+    try:
+        with store_session() as store:
+            project = orchestrator.team_project(None)
+            if project_service.tracked(store, project, capture=False):
+                return None
+    except Exception:
+        return None
+    return (
+        f"{project_service.NotAdded(project)} — until then the session this line starts "
+        "joins no board (--exec adds it, as `aisquare team on` does)"
+    )
+
+
 @app.command("spawn")
 def spawn(
     role_name: Annotated[
@@ -522,6 +548,11 @@ def spawn(
             f'eval "$(aisquare explainability env {shlex.quote(role_name)} --post-root)"; '
             f"{command}"
         )
+    # A printed line adds nothing (below): say when the session it starts will join no board,
+    # under --json as `not_added`.
+    unjoined = None if execute else _joins_no_board()
+    if unjoined is not None and not get_state().json_output:
+        typer.echo(f"⚠ {unjoined}", err=True)
     if get_state().json_output:
         typer.echo(
             json.dumps(
@@ -539,6 +570,7 @@ def spawn(
                     "env_sources": launch_profile.env_sources,
                     "extra_args": launch_profile.args,
                     "command": command,
+                    "not_added": unjoined,
                 }
             )
         )

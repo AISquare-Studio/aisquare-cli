@@ -65,6 +65,11 @@ aisquare team spawn coder --exec       # or replace this terminal with the sessi
 aisquare team harness                  # the whole role→model matrix + how it resolves now
 ```
 
+With `[projects] capture` off (the default), a role session joins only the board of a
+project someone added. `--exec` adds it, as `aisquare team on` does; a printed line adds
+nothing, so in a directory nobody added the print says so on stderr (under `--json`, in
+`not_added`), naming `aisquare project onboard`.
+
 Availability is *probed*, never assumed — `claude --model` silently
 substitutes the default when a known model isn't available to the account,
 so the harness verifies the reply's `modelUsage` before trusting a rung, and

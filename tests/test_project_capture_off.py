@@ -141,6 +141,33 @@ def test_team_spawn_adds_its_project_when_it_starts_the_session_not_when_it_prin
         assert [p.id for p in store.list_projects()] == [team_project(work_dir).id]
 
 
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
+def test_team_spawn_says_when_the_line_it_prints_joins_no_board(
+    runner: CliRunner, work_dir: Path, json_output: bool
+) -> None:
+    """Review of #259, round 17: a role session's hooks join only a project someone added,
+    and a printed line adds nothing. Pasted in a directory nobody added, it started a
+    planner with no board, no tasks and no protocol, and nothing said why. The print says
+    so, with the command that adds it; once added, it says nothing."""
+    flags = ["--json"] if json_output else []
+    argv = [*flags, "team", "spawn", "planner", "--no-probe"]
+
+    printed = runner.invoke(app, argv)
+
+    assert printed.exit_code == 0, printed.output
+    said = json.loads(printed.stdout)["not_added"] if json_output else printed.stderr
+    said = " ".join(said.split())
+    onboard = f"aisquare project onboard {work_dir.resolve()}"
+    assert f"repo is not one of your projects — add it first: {onboard}" in said
+    assert "joins no board" in said
+    assert _rows() == [], "saying so adds nothing"
+    assert runner.invoke(app, ["team", "on"]).exit_code == 0
+    again = runner.invoke(app, argv)
+    assert again.exit_code == 0 and "joins no board" not in again.stderr
+    if json_output:
+        assert json.loads(again.stdout)["not_added"] is None
+
+
 # --- a destination ---------------------------------------------------------------------
 
 

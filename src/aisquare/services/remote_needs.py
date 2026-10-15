@@ -1011,22 +1011,7 @@ def needs_from_agent(
                     push_after=notice.created_at,
                 )
             ]
-        seen = session.last_seen_at if session is not None else now
-        seq = "-" if attention_event is None else str(attention_event.seq)
-        text = "" if notice is None else notice.text
-        return [
-            _needs_item(
-                "permission",
-                f"attention:{seq}:{seen.isoformat()}",
-                project=project,
-                agent=agent,
-                reason=f"{name} shows a dialog that needs you",
-                excerpt=text,
-                detail=_needs_fit({"text": text}, _DETAIL_TEXT_MAX),
-                since=seen,
-                push_after=seen,
-            )
-        ]
+        return [_needs_dialog_item(status, attention_event, notice, project=project, now=now)]
     said, said_at, said_key = ("none", None, None) if tail is None else _needs_settled(tail)
     if (
         status.state == "waiting"
@@ -1062,6 +1047,35 @@ def needs_from_agent(
     ):
         return [_needs_failed_item(failed_event, project=project, agent=agent, name=name)]
     return []
+
+
+def _needs_dialog_item(
+    status: FleetAgentStatus,
+    attention_event: TeamEvent | None,
+    notice: TeamEvent | None,
+    *,
+    project: ProjectInfo,
+    now: datetime,
+) -> NeedsItem:
+    """Rule 8's card: a dialog that needs the human, named by the session's newest
+    ``attention`` event and the notice ``last_seen_at`` says came last, its words ``notice``'s
+    while they still name it. No quick answers: the key pad beside the live pane answers what
+    it shows."""
+    session, agent = status.session, status.agent
+    seen = session.last_seen_at if session is not None else now
+    seq = "-" if attention_event is None else str(attention_event.seq)
+    text = "" if notice is None else notice.text
+    return _needs_item(
+        "permission",
+        f"attention:{seq}:{seen.isoformat()}",
+        project=project,
+        agent=agent,
+        reason=f"{needs_push_safe(agent.label)} shows a dialog that needs you",
+        excerpt=text,
+        detail=_needs_fit({"text": text}, _DETAIL_TEXT_MAX),
+        since=seen,
+        push_after=seen,
+    )
 
 
 def _needs_seq(event: TeamEvent) -> int:
@@ -2907,10 +2921,13 @@ def needs_item_current(snap: AgentNow, item_id: str) -> bool:
     return any(item.id == item_id for item in snap.items)
 
 
-def needs_prompt_still_up(snap: AgentNow, item: NeedsItem) -> bool | None:
-    """Whether the prompt on the agent's screen right now is still the call ``item`` names,
-    asked of tmux again: what a quick answer checks last, right before its keys. ``None``
-    when tmux could not show the screen: not known either way.
+def needs_prompt_now(
+    snap: AgentNow, item: NeedsItem, now: datetime
+) -> tuple[NeedsItem, ...] | None:
+    """What the prompt on the agent's screen right now is, of the card ``item`` and the calls
+    beside it, asked of tmux again: what a quick answer checks last, right before its keys.
+    ``(item,)`` while it is still the call ``item`` names; otherwise the items of what is up
+    instead; ``None`` when tmux could not show the screen: not known either way.
 
     With more than one call pending, the card was the call its screen named when it was
     derived (:func:`_needs_on_screen`), and the screen is read again here: a prompt answered
@@ -2922,16 +2939,30 @@ def needs_prompt_still_up(snap: AgentNow, item: NeedsItem) -> bool | None:
     ``stale`` with a sentence that said so, and the card left every phone until a scan
     brought it back and pushed it again, while its prompt may have been the one up (review
     of #259, round 9, 3/8).
+
+    What is up instead is derived from the same screen, as the scan derives it but without
+    the board (:func:`needs_single_agent_now` reads the agent so too): the call it names, or
+    rule 8's dialog card. The refusal carries it as ``current``, which the page says in the
+    card's place. It carried none, and the page said "nothing waits on <agent> now" while
+    the next call's prompt waited (review of #259, round 9, 2/8).
     """
     status = snap.status
     pending = () if status is None else _needs_pending(snap.tail, status.agent)
     named = {needs_item_id(snap.project.id, item.kind, tool.tool_use_id): tool for tool in pending}
     if len(pending) <= 1 or item.id not in named or status is None:
-        return True
+        return (item,)
     rows = _needs_screen_now(status.agent)
     if rows is None:
         return None
-    return _needs_on_screen(pending, rows) is named[item.id]
+    if _needs_on_screen(pending, rows) is named[item.id]:
+        return (item,)
+    instead = needs_from_agent(
+        status, snap.tail, project=snap.project, events=(), now=now, pane_screen=lambda: rows
+    )
+    # A prompt is up, as the check read it, whatever the board would say of it.
+    return tuple(instead) or (
+        _needs_dialog_item(status, None, None, project=snap.project, now=now),
+    )
 
 
 def _needs_screen_now(agent: FleetAgent) -> list[str] | None:
@@ -3771,7 +3802,7 @@ def _needs_answer_now(
     re-derived first (:func:`needs_agent_now`), and a card no longer current is a 409
     ``stale`` carrying what is current instead. The gates are asked again right before
     typing (:meth:`RemoteKit.kit_write_still_allowed`): the re-derivation came between
-    them and the keys. So is the screen, last (:func:`needs_prompt_still_up`): a card about
+    them and the keys. So is the screen, last (:func:`needs_prompt_now`): a card about
     one of several calls pending is answered only while the prompt up is still its call's,
     and otherwise is a 409 ``stale``, out of the feed until the next scan; a screen tmux
     could not show is a 503 ``fleet_unavailable``, and the card stays. A tmux that fails
@@ -3813,19 +3844,20 @@ def _needs_answer_now(
             f"text={len(text)}ch enter={enter}"
         )
         kit.kit_write_still_allowed(device)
-        up = needs_prompt_still_up(snap, item)
-        if up is None:
+        shown = needs_prompt_now(snap, item, _needs_now())
+        if shown is None:
             # Unknown, not another prompt: the card stays in the feed, and nothing is typed.
             said = (
                 f"tmux could not show {label}'s screen, to check that its prompt is still "
                 f"that {item.kind}'s — nothing was sent; try again"
             )
             raise RequestError(503, "fleet_unavailable", said)
-        if not up:
+        if item.id not in {one.id for one in shown}:
             # Out of the feed as an answered card is, until the scan after it says what is up.
             watcher.needs_answered(item.id)
             gone = f"{label} shows another prompt than that {item.kind} now — nothing was sent"
-            raise RequestError(409, "stale", gone, current=[])
+            current = [one.needs_item_json() for one in shown]
+            raise RequestError(409, "stale", gone, current=current)
         try:
             _needs_send(snap.status.agent, keys, text, enter)
         except TmuxTimedOut as exc:
@@ -4032,7 +4064,7 @@ __all__ = [
     "needs_from_board",
     "needs_item_current",
     "needs_item_id",
-    "needs_prompt_still_up",
+    "needs_prompt_now",
     "needs_push_safe",
     "needs_routes",
     "needs_scanned_iso",

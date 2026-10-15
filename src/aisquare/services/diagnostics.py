@@ -3277,7 +3277,7 @@ def _check_fleet(
     ``fleet reap`` with no project reaps them all. Each row is checked on the
     socket IT was spawned on — the socket is a default the user may change
     (§3.10), and a row must not read as lost because the config moved after it —
-    at the path its spawn recorded, where the fleet asks it (``fleet._address``):
+    at the path its launch record holds, where the fleet asks it (``fleet.resolve_place``):
     ``tmux -L`` by the name, from a shell under another ``TMUX_TMPDIR``, reaches
     another server, whose ``%N`` is another agent (round 28 of #257). ``server_for``
     builds the server for a socket; tests hand in fakes.
@@ -3312,13 +3312,21 @@ def _check_fleet(
         gone: list[FleetAgent] = []
         exited: list[FleetAgent] = []
         started: dict[fleet_service._Address, datetime | None] = {}
-        for agent in live:
-            address = fleet_service._address(agent, config)
+        # Where their launch records place them, as `reap` asks (`fleet.resolve_place`): a
+        # row no record places is judged by nothing, there or here.
+        placed = [
+            placement
+            for placement in (fleet_service.resolve_place(row, config=config) for row in live)
+            if isinstance(placement, fleet_service.Placed)
+        ]
+        addresses = {placement.row.id: placement.pane.address for placement in placed}
+        for placement in placed:
+            agent, address = placement.agent, placement.pane.address
             if address not in servers:
                 servers[address] = server_for(address.name).at(address.path)
             server = servers[address]
             try:
-                facts = server.pane_facts(agent.pane_id)
+                facts = server.pane_facts(placement.pane.pane_id)
             except tmux_core.TmuxError:
                 facts = None
             if facts is not None and address not in started:
@@ -3330,8 +3338,8 @@ def _check_fleet(
             # empty, so "gone" is "no facts OR facts about no pane", not only None.
             if (
                 facts is None
-                or facts.pane_id != agent.pane_id
-                or fleet_service._outlived(agent, started[address])
+                or facts.pane_id != placement.pane.pane_id
+                or fleet_service._outlived(placement.pane.created_at, started[address])
             ):
                 gone.append(agent)
             elif facts.dead:
@@ -3341,7 +3349,7 @@ def _check_fleet(
         unreached: list[FleetAgent] = []
         by_socket: dict[fleet_service._Address, list[FleetAgent]] = {}
         for agent in gone:
-            by_socket.setdefault(fleet_service._address(agent, config), []).append(agent)
+            by_socket.setdefault(addresses[agent.id], []).append(agent)
         this_boot = tmux_core.boot_id()
         for sock, agents in by_socket.items():
             listed = _fleet_labels(agents, names)

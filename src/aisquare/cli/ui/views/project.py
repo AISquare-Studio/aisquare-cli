@@ -202,8 +202,11 @@ class ManagerTab(Vertical):
             return
         try:
             status = fleet_service.status_of(manager)
-        except fleet_service.FleetError:
-            status = FleetAgentStatus(agent=manager, socket_at=fleet_service.socket_at(manager))
+        except fleet_service.FleetError as exc:
+            # No pane from the row itself: the store's word for where it is, which a
+            # sandboxed agent writes (`fleet.resolve_place`), is never shown or typed into.
+            self.show(None, unavailable=str(exc))
+            return
         self.show(status)
 
     def show(

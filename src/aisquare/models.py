@@ -1024,6 +1024,8 @@ class FleetAgentStatus(BaseModel):
     session: TeamSession | None = None
     tmux_session: str | None = None
     socket_at: Path | None = None
-    """Where the agent's server is asked (``tmux -S``), worked out once with the listing's
-    config (``services.fleet.socket_at``); ``None`` when it is asked by its socket's name
-    (``tmux -L``). Carried so the UI's panes and attach line read it off the frame."""
+    """Where the agent's server is asked (``tmux -S``), as its launch record places it
+    (``services.fleet.resolve_place``), worked out once with the listing's config; ``None``
+    when it is asked by its socket's name (``tmux -L``), and for a row no record places,
+    whose pane is not shown. Carried so the UI's panes and attach line read it off the
+    frame."""

@@ -30,15 +30,21 @@ open. So a fleet row's launch is ONE record (:class:`LaunchRecord`), written in
   queue read that record and nothing else from the store for what they run. A row
   with no record, or one that cannot be read, is refused with the reason, and so is a
   project whose directory in the store is not the record's.
-- What is typed into a row's pane or kills its window — ``fleet tell``, ``fleet stop``
-  and with it restart, switch, the hand-over and ``shutdown``, the manager's nudge —
-  goes to the pane its record places, by its record's agent's rules, never to the row's
-  ``pane_id`` at its ``socket_path`` or by its ``agent``: a sandbox that rewrote those
-  pointed them at any pane of the user's (review r5 of #113, finding 1), or skipped the
-  check that keeps an Enter out of Codex's dialogs (r6, finding 1). A rewritten row is
-  told nothing and stopped where its record places it; ``shutdown`` takes down the
-  sessions the records name (r6, findings 4 and 7). A row with no record is told
-  nothing, and stopped by killing its window in its project's fleet session (r6, 6).
+- Every tmux question or act about a row's window — ``fleet tell`` and a spawn's
+  prompt, ``fleet stop`` and with it restart, switch, the hand-over and ``shutdown``,
+  whether it runs, the listings and ``reap``, its lingering and late windows, the
+  sessions ``shutdown`` takes down, ``rename``, ``attach``, the manager's nudge — goes
+  through ONE resolver (``services.fleet.resolve_place``) to the pane and the session
+  (by tmux's own id, :attr:`WindowPlace.session_id`) its record places, by its
+  record's agent's rules, never to the row's ``pane_id`` at its ``socket_path``, by its
+  ``agent``, or by the project's codename: a sandbox that rewrote those pointed them at
+  any pane of the user's (review r5 of #113, finding 1), skipped the check that keeps
+  an Enter out of Codex's dialogs (r6, finding 1), or had another project's session
+  taken down (r6, finding 7; r7, finding 2). ``tests/test_fleet_placement.py``
+  enumerates every tmux call and holds it to that. A rewritten row is told nothing and
+  stopped where its record places it (r6, finding 4). A row with no record is told
+  nothing, and stopped by killing its window only where tmux lists it in a session a
+  record of its project names (r7, finding 1).
 - What the fleet reads of a session to act on outside the sandbox — a failed turn's
   limit, the hand-over it starts — is read from the transcript the record holds, never
   the board session's (r5, finding 2).
@@ -63,7 +69,7 @@ from __future__ import annotations
 import hashlib
 import re
 import tempfile
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import BaseModel, ValidationError
@@ -92,6 +98,13 @@ class SessionFacts(BaseModel):
     """Its transcript, by the path the agent gave (``claude --resume <path>``)."""
     home: str | None = None
     """The config dir it runs under, where its native queue is (``CODEX_HOME``)."""
+    started_at: datetime | None = None
+    """When the agent's own hook first said this session started under THIS launch (its
+    start, or a prompt): ``None`` while the agent has not come up, at a dialog of its own
+    that fires no hook. Written only by the hook (:func:`observe`, :func:`adopted`), never
+    carried from a predecessor's record, and never read from the board's session row,
+    whose ``last_seen_at`` an ``end_session`` stamps with its own time (review r7 of #113,
+    finding 5)."""
 
 
 class WindowPlace(BaseModel):
@@ -108,9 +121,16 @@ class WindowPlace(BaseModel):
     """The row's own: after the window existed, so a server started later holds none of
     its panes (``services.fleet._outlived``)."""
     session: str | None = None
-    """The tmux session the window was made in (``asq-<codename>``), which ``shutdown``
-    takes down, never by the project's codename in the store; renamed with it by ``fleet
-    rename``."""
+    """The name of the tmux session the window was made in, as tmux answered (``fleet
+    rename`` renames it with the session); for reports and ``fleet attach``'s line."""
+    session_id: str | None = None
+    """tmux's own id for that session (``$3``), as it answered the spawner: what a spawn
+    joins, ``shutdown`` takes down and ``fleet attach`` attaches to, never a session named
+    from the project's codename in the store, nor by a name another session can take after
+    a rename (review r6 of #113, finding 7; r7, finding 2). Asked only on the server whose
+    start is not later than :attr:`created_at`, where the id is still this session's.
+    ``None`` in a record written before it was kept: that session is not joined or taken
+    down as a whole, its windows only."""
 
 
 class LaunchRecord(BaseModel):
@@ -278,7 +298,12 @@ def observe(
     takes it (a Codex thread's id binds at its start). Never raises; written only from
     outside any sandbox."""
     facts = SessionFacts(
-        id=session_id, agent=agent, native_id=native, transcript=transcript, home=home
+        id=session_id,
+        agent=agent,
+        native_id=native,
+        transcript=transcript,
+        home=home,
+        started_at=datetime.now(tz=UTC),
     )
     _SEEN[session_id] = facts
     agent_id = orchestrator.env_fleet_agent()
@@ -314,6 +339,9 @@ def _with_session(record: LaunchRecord, facts: SessionFacts) -> None:
             native_id=facts.native_id or kept.native_id,
             transcript=facts.transcript or kept.transcript,
             home=facts.home or kept.home,
+            # The first hook of this launch's session says when it started; a later one
+            # does not move it.
+            started_at=kept.started_at or facts.started_at,
         )
     if facts == kept:
         return

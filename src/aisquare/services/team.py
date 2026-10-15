@@ -2535,16 +2535,21 @@ def _pane_holds(agent: FleetAgent, session_agent: str | None) -> bool | None:
     its claims as Codex's own process (review r2 of #113, finding 1).
 
     ``None`` when it cannot be told: neither (a binary that exports no pid), a tmux
-    that does not answer, or a pane that is already gone. Callers treat that as "not
-    proven" — a bound row is not adopted on a guess, because the guess that was wrong
-    here handed a parent's task to its child. The fleet's own server factory is used so
-    the row's socket is asked (``[fleet] tmux_socket`` may have changed since the
-    spawn), at the path its spawn recorded (another ``TMUX_TMPDIR`` reaches another
-    server on the name, whose ``%N`` is another agent), and so a test's fake tmux is
-    seen; imported here because ``services.fleet`` imports this module the same lazy
-    way.
+    that does not answer, a pane that is already gone, or a row no launch record places.
+    Callers treat that as "not proven" — a bound row is not adopted on a guess, because
+    the guess that was wrong here handed a parent's task to its child. The row's pane and
+    its agent are the ones its launch record holds (``services.fleet.resolve_place``, the
+    one resolver every tmux question about a row goes through), never the row's
+    ``pane_id``, ``socket_path`` or ``agent``, which an agent's sandbox writes; the
+    fleet's own server factory asks it, so a test's fake tmux is seen. Imported here
+    because ``services.fleet`` imports this module the same lazy way.
     """
-    if (session_agent or DEFAULT_AGENT) != (agent.agent or DEFAULT_AGENT):
+    from aisquare.services import fleet as fleet_service
+
+    placement = fleet_service.resolve_place(agent)
+    if not isinstance(placement, fleet_service.Placed):
+        return None
+    if (session_agent or DEFAULT_AGENT) != (placement.agent.agent or DEFAULT_AGENT):
         return False
     adapter = recorded_adapter(session_agent)
     if adapter is not None and adapter.capabilities.pid_env is None:
@@ -2552,10 +2557,8 @@ def _pane_holds(agent: FleetAgent, session_agent: str | None) -> bool | None:
     pid = orchestrator.env_agent_pid(adapter.capabilities.pid_env if adapter else None)
     if pid is None:
         return None
-    from aisquare.services import fleet as fleet_service
-
     try:
-        pane_pid = fleet_service.server_of(agent).pane_pid(agent.pane_id)
+        pane_pid = placement.pane.pid()
     except TmuxError:
         return None
     if pane_pid is None:

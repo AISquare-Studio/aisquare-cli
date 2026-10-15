@@ -67,6 +67,7 @@ from aisquare.core.store import AmbiguousIdError, ContextStore, store_session
 from aisquare.core.tmux import (
     DEFAULT_WINDOW_HEIGHT,
     DEFAULT_WINDOW_WIDTH,
+    PaneFacts,
     SocketAnswer,
     TmuxError,
     TmuxServer,
@@ -144,7 +145,7 @@ _POLL_INTERVAL = 0.25
 _PROMPT_SETTLE = 2.0
 """After the agent process appears, its UI needs a moment before it reads input."""
 _KEY_GAP = 0.2
-"""Between a typed line and its Enter (:func:`_type_line`). Codex reads keys that arrive
+"""Between a typed line and its Enter (:meth:`PlacedPane.type_line`). Codex reads keys that arrive
 in one burst as a paste, Enter included: ``/exit`` sent with its Enter stayed in the
 composer and the stop's grace ran out into a kill, with no ``SessionEnd``; the manager's
 nudge stayed there unsent, three of them by the end of a run (0.162.1 under tmux 3.7c:
@@ -510,7 +511,7 @@ def server_for(socket: str, config: FleetSettings | None = None) -> TmuxServer:
     UI's agent pane already address panes by the stored socket; the lifecycle
     here does too. Routed through :func:`server` so a caller that fakes that
     one factory sees every socket. This asks by the name alone (``tmux -L``); a
-    row's pane is asked of :func:`server_of`, at the path its spawn recorded.
+    row's pane is asked of its :class:`PlacedPane`, at the path its launch record holds.
     """
     config = config or settings()
     if socket and socket != config.tmux_socket:
@@ -561,23 +562,324 @@ def _server_at(address: _Address, config: FleetSettings | None = None) -> TmuxSe
     return server_for(address.name, config).at(address.path)
 
 
-def server_of(agent: FleetAgent, config: FleetSettings | None = None) -> TmuxServer:
-    """The server ``agent``'s row lives on, asked where it said it listened (:func:`_address`).
+# --- where the fleet acts: the ONE resolver ------------------------------------------
+#
+# The store is writable from an agent's sandbox (`core.launch_seal`), so no value read
+# from it — a row's pane, socket, socket path or agent, a project's codename — may say
+# where the fleet types, reads or kills. Every tmux question about a row's window, and
+# every act on it — typing (`tell`, the nudge, a spawn's prompt), `/exit` and the kill
+# (`stop`, and restart, switch, the hand-over and `shutdown` through it), liveness (the
+# listings, `reap`, a spawn's and a restart's reconcile), lingering and late panes,
+# `shutdown`'s sessions, `rename` and `attach` — is put to a `PlacedPane` or a
+# `PlacedSession`, and only `resolve_place` mints those from a launch record (the
+# recordless kill's `_recordless_pane` and `--all`'s `_listed_session` from what tmux
+# itself listed). A row no record places is a typed refusal, `Unplaced`. The places are
+# the only objects whose methods put a pane or a session to tmux:
+# tests/test_fleet_placement.py enumerates every tmux call in this module and in
+# `services.team`, and every place a place is minted, so a next path cannot take the
+# store's word without failing it. Rounds r5 to r7 of #113 found that word taken one path
+# at a time (r5, finding 1; r6, findings 1, 4, 6 and 7; r7, findings 1, 2, 3, 6 and 7).
 
-    What every question about one row's pane is put to, never :func:`server_for` by the
-    socket's name alone, which from another ``TMUX_TMPDIR`` is another server."""
+
+@dataclass(frozen=True)
+class PlacedPane:
+    """A row's pane where its launch record places it: what every keystroke, read and kill
+    of a row's window goes through (:func:`resolve_place`)."""
+
+    address: _Address
+    """The server the record places it on (:func:`_address` of the record's socket)."""
+    pane_id: str
+    created_at: datetime
+    """The record's: a server that started later holds none of its panes (:func:`_outlived`)."""
+    config: FleetSettings = field(repr=False, compare=False)
+
+    def server(self) -> TmuxServer:
+        return _server_at(self.address, self.config)
+
+    def outlived(self, started: datetime | None) -> bool:
+        """Whether a server that started at ``started`` is younger than this pane's record,
+        so the id names another agent's pane there (:func:`_outlived`)."""
+        return _outlived(self.created_at, started)
+
+    def facts(self) -> PaneFacts | None:
+        return self.server().pane_facts(self.pane_id)
+
+    def facts_or_raise(self) -> PaneFacts | None:
+        return self.server().pane_facts_or_raise(self.pane_id)
+
+    def pid(self) -> int | None:
+        return self.server().pane_pid(self.pane_id)
+
+    def screen(self) -> list[str]:
+        return self.server().screen_text(self.pane_id)
+
+    def kill(self) -> None:
+        self.server().kill_window(self.pane_id)
+
+    def type_line(self, text: str, *, command: bool = False) -> None:
+        """Type ``text`` at the agent's prompt and submit it: how the fleet types every line.
+
+        The text goes in as one bracketed paste, a line break in it part of the message — a
+        ``command`` (``/exit``) keyed in as typed instead — and its Enter :data:`_KEY_GAP`
+        later, a key of its own: Codex takes keys that arrive in one burst for a paste and
+        keeps the Enter in it as text. (A bracketed paste with its Enter right behind it did
+        submit on 0.162.1, which is why ``tell`` reached a waiting Codex and the nudge, typed
+        key by key, did not; one rule for both costs the paste 0.2 s.) Raises ``TmuxError``
+        as the tmux calls do.
+        """
+        srv = self.server()
+        if command:
+            srv.send_literal(self.pane_id, text)
+        else:
+            srv.paste(self.pane_id, text)
+        _sleep(_KEY_GAP)
+        srv.send_keys(self.pane_id, "Enter")
+
+
+@dataclass(frozen=True)
+class PlacedSession:
+    """A tmux session the fleet may join, list, rename, attach to or take down: by tmux's
+    own id (``$3``) a launch record holds, on the server the record places it, and only
+    while that server is the one the record was written on (``created_at``); or, for
+    ``shutdown --all``'s sweep, by the name tmux itself just listed (:func:`_listed_session`).
+    Never by a name built from the project's codename in the store."""
+
+    address: _Address
+    target: str
+    """``-t``: tmux's id for it, or the name tmux listed."""
+    name: str
+    """What reports call it: the record's name for it, or the listed one."""
+    created_at: datetime | None
+    """The record's; ``None`` for a session tmux listed just now."""
+    config: FleetSettings = field(repr=False, compare=False)
+
+    def server(self) -> TmuxServer:
+        return _server_at(self.address, self.config)
+
+    def _outlived(self, srv: TmuxServer) -> bool:
+        """Whether the server is younger than the record, so the id is another session's."""
+        return self.created_at is not None and _outlived(self.created_at, srv.started_at())
+
+    def present(self) -> bool:
+        """Whether it is there; ``False`` too when tmux cannot say."""
+        srv = self.server()
+        try:
+            return srv.has_session(self.target) and not self._outlived(srv)
+        except TmuxError:
+            return False
+
+    def present_or_raise(self) -> bool:
+        """Whether it is there, as tmux CONFIRMS it; a question that could not be put raises."""
+        srv = self.server()
+        return srv.has_session_or_raise(self.target) and not self._outlived(srv)
+
+    def panes(self) -> list[WindowInfo]:
+        """Its windows (one pane each), as ``list-panes -s`` lists them; empty when it is not
+        there or tmux will not say."""
+        return self.server().list_windows(self.target)
+
+    def panes_or_raise(self) -> list[WindowInfo]:
+        """:meth:`panes`, except a server that could not be ASKED raises."""
+        return self.server().windows_or_raise(self.target)
+
+    def kill(self) -> None:
+        self.server().kill_session(self.target)
+
+    def rename(self, new: str) -> None:
+        self.server().rename_session(self.target, new)
+
+    def attach_command(self) -> list[str]:
+        return self.server().attach_argv(self.target)
+
+    def new_window(self, **window: Any) -> WindowInfo:
+        """A new window in this session (``TmuxServer.spawn_window``): only by its id, so it
+        goes into this session or, should the session have gone meanwhile, nowhere."""
+        return self.server().spawn_window(self.target, **window)
+
+
+@dataclass(frozen=True)
+class Placed:
+    """A row its launch record places (:func:`resolve_place`)."""
+
+    row: FleetAgent
+    """The row as the store has it: who it is (id, label, project, session, task), never
+    where it is."""
+    agent: FleetAgent
+    """The row with its window and its agent where the record places them (socket, path,
+    pane, boot, time, agent): what a listing shows and derives from."""
+    record: launch_seal.LaunchRecord
+    pane: PlacedPane
+    session: PlacedSession | None
+    """The session the record names by tmux's id; ``None`` for a record that kept none."""
+    rewritten: str | None = None
+    """Every field the row was rewritten in, both sides; ``None`` when it is its record's."""
+
+
+@dataclass(frozen=True)
+class Unplaced:
+    """The typed refusal: a row no launch record places. Nothing is typed into, read of or
+    killed at a place it names; its one way out is :func:`_recordless_pane`."""
+
+    row: FleetAgent
+    why: str
+
+    @property
+    def agent(self) -> FleetAgent:
+        """The row as the store has it — for its id and label, never its place."""
+        return self.row
+
+
+Placement = Placed | Unplaced
+
+
+def resolve_place(
+    row: FleetAgent,
+    record: launch_seal.LaunchRecord | str | None = None,
+    config: FleetSettings | None = None,
+) -> Placement:
+    """Where the fleet may act on ``row``'s window: the server, the pane, the session, the
+    boot, the time and the agent its launch record holds (``launch_seal.WindowPlace``), as
+    tmux answered the spawner and as the spawner resolved the agent — or :class:`Unplaced`
+    with why. Never the row's ``pane_id``, ``tmux_socket``, ``socket_path`` or ``agent``, nor
+    the project's codename: an agent's sandbox writes those.
+
+    Pointed at any pane of the user's, ``tell`` typed there and ``stop`` typed ``/exit`` and
+    killed that window (review r5 of #113, finding 1); with its ``agent`` set to another's,
+    the readiness check that keeps an Enter out of Codex's dialogs was the other agent's
+    (r6, finding 1). A row rewritten to name another place is placed all the same, with
+    :attr:`Placed.rewritten` saying what differs: typing refuses it, a stop acts where the
+    record places it (r6, finding 4). ``record`` is one already read (r6, finding 11).
+    """
     config = config or settings()
-    return _server_at(_address(agent, config), config)
+    record = launch_seal.read(row.id) if record is None else record
+    if isinstance(record, str):
+        return Unplaced(row, record)
+    place = record.window
+    if place is None:
+        return Unplaced(
+            row,
+            "its launch record does not say which pane is its (it was spawned by an aisquare "
+            "that recorded none)",
+        )
+    if record.project_id != row.project_id:
+        return Unplaced(row, "its launch record is another project's")
+    row_path = str(row.socket_path) if row.socket_path is not None else None
+    differ = [
+        f"{name} {mine!r} where its launch record has {recorded!r}"
+        for name, mine, recorded in (
+            ("tmux socket", row.tmux_socket, place.tmux_socket),
+            ("socket path", row_path, place.socket_path),
+            ("pane", row.pane_id, place.pane_id),
+            ("agent", row.agent, record.agent),
+        )
+        if mine != recorded
+    ]
+    # Every field that differs, both sides: a socket name alone rewritten printed the
+    # same path twice (SMOKE4).
+    rewritten = f"its row was rewritten in the store: {'; '.join(differ)}" if differ else None
+    placed = row.model_copy(
+        update={
+            "tmux_socket": place.tmux_socket,
+            "pane_id": place.pane_id,
+            "socket_path": Path(place.socket_path) if place.socket_path is not None else None,
+            "boot_id": place.boot_id,
+            "created_at": place.created_at,
+            "agent": record.agent,
+        }
+    )
+    address = _address(placed, config)
+    pane = PlacedPane(address, place.pane_id, place.created_at, config)
+    session = (
+        PlacedSession(
+            address, place.session_id, place.session or place.session_id, place.created_at, config
+        )
+        if place.session_id
+        else None
+    )
+    return Placed(row, placed, record, pane, session, rewritten)
 
 
-def socket_at(agent: FleetAgent) -> Path | None:
-    """The path ``agent``'s server is asked at (``tmux -S``), or ``None`` when it is asked by
-    its socket's name (:func:`_address`): for a caller that builds the server itself, as the
-    UI's panes do (``TmuxServer(agent.tmux_socket).at(socket_at(agent))``). It reads the
-    config, so a caller holding a listed :class:`FleetAgentStatus` reads its ``socket_at``,
-    worked out with the listing's: asked on the UI thread, each frame reloaded config.toml
-    for every open project (round 29 of #257)."""
-    return _address(agent).path
+def _resolve_all(
+    rows: Sequence[FleetAgent],
+    config: FleetSettings,
+    records: Mapping[str, launch_seal.LaunchRecord | str] | None = None,
+) -> list[Placement]:
+    """:func:`resolve_place` for each row, each record read once (``records``, when the
+    caller read them already)."""
+    return [
+        resolve_place(row, records.get(row.id) if records is not None else None, config)
+        for row in rows
+    ]
+
+
+def _placed_only(placements: Sequence[Placement]) -> list[Placed]:
+    return [placement for placement in placements if isinstance(placement, Placed)]
+
+
+def _sessions_of(placements: Sequence[Placement]) -> list[PlacedSession]:
+    """The sessions the placed rows' records name, each once (by server and id), with the
+    newest record's time: a server that started after every one of them holds none."""
+    found: dict[tuple[_Address, str], PlacedSession] = {}
+    for placement in _placed_only(placements):
+        session = placement.session
+        if session is None:
+            continue
+        key = (session.address, session.target)
+        kept = found.get(key)
+        if kept is None or (
+            session.created_at is not None
+            and kept.created_at is not None
+            and session.created_at > kept.created_at
+        ):
+            found[key] = session
+    return list(found.values())
+
+
+def _listed_session(address: _Address, name: str, config: FleetSettings) -> PlacedSession:
+    """A session by the name tmux itself listed just now on ``address``: ``shutdown
+    --all``'s sweep of every ``asq-`` session, which no record needs to name."""
+    return PlacedSession(address, name, name, None, config)
+
+
+def _recordless_pane(
+    row: FleetAgent, placements: Sequence[Placement]
+) -> tuple[PlacedPane, Placed] | None:
+    """The window of ``row``, which no launch record places, found the one way the fleet
+    may: listed by tmux in a session a launch record of its project names (by tmux's id, on
+    the server that record places it), under the pane id the row names, where no record of
+    the project places an agent. With the placed row whose record named the session;
+    ``None`` when there is none such.
+
+    The row's pane id only picks among the windows tmux listed: it is never put to tmux,
+    and its socket and path are never asked. Asked of ``asq-<codename>``, a session named
+    from the store, a sandboxed agent's fake row and a swap of two projects' codenames had
+    another project's window killed (review r7 of #113, finding 1). ``placements`` are the
+    project's live rows, placed."""
+    mine = [
+        placement for placement in _placed_only(placements)
+        if placement.row.project_id == row.project_id
+    ]  # fmt: skip
+    claimed = {(placement.pane.address, placement.pane.pane_id) for placement in mine}
+    for session in _sessions_of(mine):
+        try:
+            if not session.present_or_raise():
+                continue
+            windows = session.panes_or_raise()
+        except TmuxError:
+            continue
+        for window in windows:
+            if window.pane_id != row.pane_id or (session.address, window.pane_id) in claimed:
+                continue
+            host = next(
+                placement for placement in mine
+                if placement.session is not None
+                and (placement.session.address, placement.session.target)
+                == (session.address, session.target)
+            )  # fmt: skip
+            return PlacedPane(
+                session.address, window.pane_id, host.pane.created_at, session.config
+            ), host
+    return None
 
 
 def _team() -> ModuleType:
@@ -1073,8 +1375,9 @@ def _server_answers(srv: TmuxServer) -> bool:
     return srv.answers()
 
 
-def _outlived(agent: FleetAgent, server_started: datetime | None) -> bool:
-    """Whether ``agent``'s row was written before its server started — so no pane there is its.
+def _outlived(created_at: datetime, server_started: datetime | None) -> bool:
+    """Whether a row written at ``created_at`` (its launch record's time) was written before
+    its server started — so no pane there is its.
 
     A pane id names a pane of one server's lifetime only: the next server on
     the socket numbers from ``%0`` again. A reboot or a hand-run ``tmux -L asq
@@ -1095,19 +1398,18 @@ def _outlived(agent: FleetAgent, server_started: datetime | None) -> bool:
     under another session's name. ``None`` — tmux did not say when it started —
     judges nothing, and the id alone decides as it did before.
     """
-    return server_started is not None and server_started > agent.created_at
+    return server_started is not None and server_started > created_at
 
 
-def _observe(
-    srv: TmuxServer, tmux_session: str | None, agents: Sequence[FleetAgent]
-) -> dict[str, _PaneView] | None:
+def _observe(placements: Sequence[Placed]) -> dict[str, _PaneView] | None:
     """Row id → the facts of that row's pane, or ``None`` when tmux cannot be asked at all.
+    ``placements`` are rows on ONE server, where their launch records place them.
 
-    One ``list-panes`` per project answers for every window in the session; a
-    pane missing there is asked about individually, because a codename rename
-    tmux never heard of leaves the panes alive under the old session name. The
-    ``activity`` flag those answers carry is not used (see :data:`ACTIVITY_WINDOW`);
-    the last-output time comes from one more ``list-panes`` over the server.
+    One ``list-panes`` per session their records name (by tmux's id) answers for every
+    window in it; a pane missing there is asked about individually, as is every pane of a
+    record that named no session. The ``activity`` flag those answers carry is not used
+    (see :data:`ACTIVITY_WINDOW`); the last-output time comes from one more
+    ``list-panes`` over the server.
 
     "Cannot be asked" is not only a :class:`TmuxError`: an unreachable server
     answers every one of those queries with an empty answer and no exception, so
@@ -1123,47 +1425,51 @@ def _observe(
     pane for the row's. The server is asked when it started only once some pane
     has answered: with nothing to judge, the question is not asked.
     """
+    if not placements:
+        return {}
+    srv = placements[0].pane.server()
     try:
-        windows = (
-            {window.pane_id: window for window in srv.list_windows(tmux_session)}
-            if tmux_session
-            else {}
-        )
-        live = [agent for agent in agents if agent.ended_at is None]
+        windows = {
+            window.pane_id: window
+            for session in _sessions_of(placements)
+            for window in session.panes()
+        }
+        live = [placement for placement in placements if placement.row.ended_at is None]
         output_at = _activity_times(srv) if live else {}
         seen: dict[str, _PaneView] = {}
-        for agent in agents:
-            window = windows.get(agent.pane_id)
+        for placement in placements:
+            pane_id = placement.pane.pane_id
+            window = windows.get(pane_id)
             if window is not None:
-                seen[agent.id] = _PaneView(
+                seen[placement.row.id] = _PaneView(
                     window.dead,
                     window.dead_status,
                     window.current_command,
-                    output_at.get(agent.pane_id),
+                    output_at.get(pane_id),
                 )
                 continue
-            if agent.ended_at is not None:
+            if placement.row.ended_at is not None:
                 # An ENDED row is looked for in the window list only (#138): its
                 # pane still being there — `remain-on-exit` keeps a dead agent's
                 # last screen — is what keeps it on the sidebar as 💤 exited;
                 # a pane that is gone costs no second tmux question.
                 continue
-            facts = srv.pane_facts(agent.pane_id)
+            facts = placement.pane.facts()
             if facts is not None:
-                seen[agent.id] = _PaneView(
+                seen[placement.row.id] = _PaneView(
                     facts.dead,
                     facts.dead_status,
                     facts.current_command,
-                    output_at.get(agent.pane_id),
+                    output_at.get(pane_id),
                 )
         if live and not seen and not _server_answers(srv):
             return None
         if seen:
             started = srv.started_at()
             seen = {
-                agent.id: seen[agent.id]
-                for agent in agents
-                if agent.id in seen and not _outlived(agent, started)
+                placement.row.id: seen[placement.row.id]
+                for placement in placements
+                if placement.row.id in seen and not placement.pane.outlived(started)
             }
         return seen
     except TmuxError:
@@ -1171,9 +1477,10 @@ def _observe(
 
 
 def _observe_sockets(
-    agents: Sequence[FleetAgent], tmux_session: str | None, config: FleetSettings | None = None
+    placements: Sequence[Placement],
 ) -> dict[_Address, dict[str, _PaneView] | None]:
-    """Server → what THAT server says about the live agents recorded on it.
+    """Server → what THAT server says about the rows its launch records place on it; a row
+    no record places is asked about nowhere (:func:`resolve_place`).
 
     Rows can span sockets — ``[fleet] tmux_socket`` may have changed since they
     were started — and each must be asked of the server it lives on, where its
@@ -1184,24 +1491,18 @@ def _observe_sockets(
     unreachable server must not make the agents on a reachable one read as
     gone, nor the reverse. Looked up with :func:`_view`.
     """
-    config = config or settings()
-    groups: dict[_Address, list[FleetAgent]] = {}
-    for agent in agents:
-        groups.setdefault(_address(agent, config), []).append(agent)
-    return {
-        address: _observe(_server_at(address, config), tmux_session, group)
-        for address, group in groups.items()
-    }
+    groups: dict[_Address, list[Placed]] = {}
+    for placement in _placed_only(placements):
+        groups.setdefault(placement.pane.address, []).append(placement)
+    return {address: _observe(group) for address, group in groups.items()}
 
 
 def _view(
-    agent: FleetAgent,
-    views: Mapping[_Address, dict[str, _PaneView] | None],
-    config: FleetSettings | None = None,
+    placement: Placement, views: Mapping[_Address, dict[str, _PaneView] | None]
 ) -> dict[str, _PaneView] | None:
-    """What ``agent``'s own server said (:func:`_observe_sockets`); ``None`` when it could
-    not be asked, or was not."""
-    return views.get(_address(agent, config))
+    """What ``placement``'s own server said (:func:`_observe_sockets`); ``None`` when it
+    could not be asked, or was not, as for a row no record places."""
+    return views.get(placement.pane.address) if isinstance(placement, Placed) else None
 
 
 def _exit_detail(status: int | None) -> str | None:
@@ -1250,7 +1551,7 @@ def _derive(
             parked = until is not None and now <= until + _LIMIT_GRACE
             if fresh or parked:
                 return "limited", _limit_detail(until, now)
-        elif board_state == "attention" and _redraws_while_asking(agent, session):
+        elif board_state == "attention" and _redraws_while_asking(agent):
             # Codex redraws its approval view every second, the screen unchanged, for
             # as long as it waits (0.162.1), so its pane's output answers nothing and
             # a wait past the stale window fires no hook either: the bell holds until
@@ -1258,7 +1559,7 @@ def _derive(
             # screen shows it working: the view gives way to its working line the
             # moment the human allows, and the first hook after that is the command's
             # PostToolUse, when it finishes (review r2 of #113, finding 7).
-            if _working_on_screen(agent, session, screen):
+            if _working_on_screen(agent, screen):
                 return "working", None
             return "attention", None
         elif fresh and board_state == "attention":
@@ -1300,22 +1601,23 @@ def _derive(
     return ("working" if busy else "waiting"), hooks
 
 
-def _redraws_while_asking(agent: FleetAgent, session: TeamSession) -> bool:
-    """Whether the agent whose hook wrote ``session`` keeps drawing while it waits on the
-    human (``AgentCapabilities.redraws_while_asking``)."""
-    adapter = recorded_adapter(_family(session) or agent.agent)
+def _redraws_while_asking(agent: FleetAgent) -> bool:
+    """Whether ``agent``'s agent keeps drawing while it waits on the human
+    (``AgentCapabilities.redraws_while_asking``). ``agent`` is the placed row, whose agent
+    is its launch record's (:func:`resolve_place`): the board session's, a store column,
+    always won over it, and a Codex row whose session read NULL there read its approval wait
+    as working, its bell gone (review r7 of #113, finding 7)."""
+    adapter = recorded_adapter(agent.agent)
     return adapter is not None and adapter.capabilities.redraws_while_asking
 
 
 def _working_on_screen(
-    agent: FleetAgent,
-    session: TeamSession,
-    screen: Callable[[], Sequence[str] | None] | None,
+    agent: FleetAgent, screen: Callable[[], Sequence[str] | None] | None
 ) -> bool:
-    """Whether ``screen`` shows the agent whose hook wrote ``session`` running a turn
-    unblocked (``AgentCapabilities.working_on_screen``); ``False`` when it cannot be
-    read."""
-    adapter = recorded_adapter(_family(session) or agent.agent)
+    """Whether ``screen`` shows ``agent``'s agent (its launch record's, as for
+    :func:`_redraws_while_asking`) running a turn unblocked
+    (``AgentCapabilities.working_on_screen``); ``False`` when it cannot be read."""
+    adapter = recorded_adapter(agent.agent)
     working = adapter.capabilities.working_on_screen if adapter is not None else None
     if working is None or screen is None:
         return False
@@ -1323,10 +1625,10 @@ def _working_on_screen(
     return rows is not None and working(rows)
 
 
-def _screen_of(agent: FleetAgent, config: FleetSettings) -> list[str] | None:
-    """The rows on ``agent``'s screen now; ``None`` when its server does not answer."""
+def _screen_of(pane: PlacedPane) -> list[str] | None:
+    """The rows on ``pane``'s screen now; ``None`` when its server does not answer."""
     try:
-        return server_of(agent, config).screen_text(agent.pane_id)
+        return pane.screen()
     except TmuxError:
         return None
 
@@ -1349,29 +1651,39 @@ def _limit_detail(until: datetime | None, now: datetime) -> str:
 
 
 def _status(
-    agent: FleetAgent,
+    placement: Placement,
     session: TeamSession | None,
-    observed: dict[str, _PaneView] | None,
-    tmux_session: str | None,
+    views: Mapping[_Address, dict[str, _PaneView] | None],
     now: datetime,
-    config: FleetSettings,
 ) -> FleetAgentStatus:
-    pane = observed.get(agent.id) if observed is not None else None
+    """``placement``'s derived state, as a listing shows it. A row no launch record places
+    reads ``lost``, saying why, with no pane to show: its pane is the store's word, which
+    asq's pane view would have shown and typed the human's keys into (review r5 of #113,
+    finding 1)."""
+    if isinstance(placement, Unplaced):
+        return FleetAgentStatus(
+            agent=placement.row,
+            state="lost",
+            detail=f"not placed: {placement.why}",
+            session=session,
+        )
+    observed = _view(placement, views)
+    pane = observed.get(placement.row.id) if observed is not None else None
     state, detail = _derive(
-        agent,
+        placement.agent,
         session,
         pane,
         observed=observed is not None,
         now=now,
-        screen=(lambda: _screen_of(agent, config)) if pane is not None else None,
+        screen=(lambda: _screen_of(placement.pane)) if pane is not None else None,
     )
     return FleetAgentStatus(
-        agent=agent,
+        agent=placement.agent,
         state=state,
         detail=detail,
         session=session,
-        tmux_session=tmux_session,
-        socket_at=_address(agent, config).path,
+        tmux_session=placement.session.name if placement.session is not None else None,
+        socket_at=placement.pane.address.path,
     )
 
 
@@ -1689,26 +2001,34 @@ def spawn(
     # forgotten one, for an agent that never started (review of #168, round 2).
     # The deliberate add is made with the agent's row (`_record`).
     with store_session() as store:
-        known = store.get_project(project.id)
         rows = store.fleet_agents(project.id, live_only=False)
-    # Observed, ended and superseded where their launch records place them.
-    rows = [_placement(row).agent for row in rows]
-    observed = project.codename or (known.codename if known is not None else None)
-    live = [agent for agent in rows if agent.ended_at is None]
+    # Observed, ended and superseded where their launch records place them, each record
+    # read once: the live rows and those ended within RECENTLY_ENDED, whose 💤 windows the
+    # listing shows and a replacement supersedes, never every row the project ever had
+    # (review r7 of #113, finding 10).
+    cutoff = _now() - RECENTLY_ENDED
+    placements = _resolve_all(
+        [row for row in rows if row.ended_at is None or row.ended_at >= cutoff], config
+    )
+    live = [placement for placement in placements if placement.row.ended_at is None]
     # A row whose pane has died is ended HERE, before the checks below read it
     # (#138): a manager killed with ctrl+c in its window left a "live" row that
     # refused `fleet spawn manager` with "already has a manager" until a hand-run
     # `reap`, while everyone could see the pane was dead. Absence is not
     # evidence and is left to `reap` (see `list_agents`). Every row is observed,
     # not only the live ones, because the ended rows' windows are read below.
-    views = _observe_sockets(rows, session_name(observed) if observed else None, config)
-    for ended in _end_dead_rows(live, views, config=config):
-        ended = _placement(ended).agent  # the store's row again: placed as the rest
-        live = [agent for agent in live if agent.id != ended.id]
-        rows = [ended if agent.id == ended.id else agent for agent in rows]
+    views = _observe_sockets(placements)
+    for ended in _end_dead_rows(live, views):
+        again = resolve_place(ended, config=config)  # the store's row again, placed
+        live = [placement for placement in live if placement.row.id != ended.id]
+        placements = [
+            again if placement.row.id == ended.id else placement for placement in placements
+        ]
     with store_session() as store:
         if role == "manager":
-            existing = next((agent for agent in live if agent.role == "manager"), None)
+            existing = next(
+                (placement.row for placement in live if placement.row.role == "manager"), None
+            )
             if existing is not None:
                 raise FleetError(
                     f"{_name(project)} already has a manager ({existing.id}) — one per "
@@ -1794,10 +2114,6 @@ def spawn(
     with store_session() as store:
         project = ensure_codename(project, store)
     codename = project.codename or codenames.codename_for(project.id)
-    if codename != observed:
-        # A forgotten project's ended rows keep their windows under the codename its
-        # tombstone kept, which the caller's registration did not carry.
-        views = _observe_sockets(rows, session_name(codename), config)
     cwd = project.root
     if use_worktree and own_worktree is not None:
         # A replay works in the tree its launch record names: one the row's label
@@ -1923,7 +2239,12 @@ def spawn(
     evidence = (
         auto_mode.spawn_evidence(native_mode) if selected.adapter.capabilities.model_proxy else None
     )
-    tmux_session = session_name(codename)
+    # The session the window joins is one a launch record of this project's names, by
+    # tmux's id, on this server; with none, a session of its own is made, never one found
+    # under `asq-<codename>`, a name read from the store: two projects' codenames swapped,
+    # the window went into the other's session, its record named it, and `shutdown` took
+    # that session down with the other project's agents in it (review r7 of #113, 2).
+    joined = _session_to_join(placements, config)
     width, height = size if size is not None else (DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
     # Before the window: a session start since this moment is this launch's (`_type_prompt`).
     launched = _now()
@@ -1936,7 +2257,10 @@ def spawn(
         command=list(command),
         recorded_by=__version__,
     )
-    if session is None and identity.session_id is not None:
+    if session is not None:
+        # The predecessor's start is not this launch's: its own hook says when it started.
+        session = session.model_copy(update={"started_at": None})
+    elif identity.session_id is not None:
         session = launch_seal.SessionFacts(id=identity.session_id, agent=selected.adapter.id)
     # Everything a replay starts this agent with, written before it runs, by this
     # process alone (`core.launch_seal`): the store is writable from an agent's
@@ -1964,17 +2288,25 @@ def spawn(
         # the session environment, so a later spawn — or a window opened by hand
         # — starts from the server's environment and sets its own (review of
         # #203, rounds 3 and 4; §7.6 for the opt-out).
-        window = srv.spawn_window(
-            tmux_session,
-            name=picked,
-            cwd=cwd,
-            command=command,
-            env=env,
-            width=width,
-            height=height,
+        window = (
+            joined.new_window(
+                name=picked, cwd=cwd, command=command, env=env, width=width, height=height
+            )
+            if joined is not None
+            else _new_session_window(
+                srv,
+                session_name(codename),
+                name=picked,
+                cwd=cwd,
+                command=command,
+                env=env,
+                width=width,
+                height=height,
+            )
         )
     except TmuxError as exc:
         raise FleetError(f"tmux could not start the window: {exc}") from exc
+    tmux_session = window.session
     if window.resize_refused is not None:
         # The agent runs either way; what it costs is #149 itself, so it is said
         # rather than left for the diff panel to explain (review of #162, round 1).
@@ -2005,6 +2337,7 @@ def spawn(
             boot_id=boot,
             created_at=created_at,
             session=tmux_session,
+            session_id=window.session_id,
         ),
     )
     if unplaced is not None:
@@ -2061,7 +2394,10 @@ def spawn(
     moved: list[str] = []
     if takes_over is not None and identity.session_id is not None:
         stored = _take_over(stored, takes_over, identity.session_id, moved)
-    _supersede(rows, views, stored, config)
+    # Where its record places it, as every other row: the pane tmux made and the agent
+    # resolved here, never the row as the store reads them back.
+    started = resolve_place(stored, config=config)
+    _supersede(placements, views, started)
     typing: list[str] = []
     # A prompt an agent takes on its command line went into the window's command: it
     # reaches the agent as its argument, and the restart or switch that passed it reads
@@ -2072,10 +2408,7 @@ def spawn(
         else True
         if selected.adapter.capabilities.positional_prompt
         else _type_prompt(
-            srv,
-            # The pane tmux made and the agent resolved here, not the row's as the store
-            # reads them back.
-            stored.model_copy(update={"pane_id": window.pane_id, "agent": selected.adapter.id}),
+            started,
             prompt,
             typing,
             project=project,
@@ -2356,10 +2689,9 @@ def _without_session_choice(
 
 
 def _supersede(
-    rows: Sequence[FleetAgent],
+    placements: Sequence[Placement],
     views: Mapping[_Address, dict[str, _PaneView] | None],
-    started: FleetAgent,
-    config: FleetSettings,
+    started: Placement,
 ) -> None:
     """Remove the dead windows of the ended rows ``started`` replaces — those under its label.
 
@@ -2375,10 +2707,57 @@ def _supersede(
     the pane is asked again at the kill (:func:`_kill_dead`). A window already
     gone, or a server that will not answer, costs nothing here.
     """
-    own = (_address(started, config), started.pane_id)
-    for (address, pane_id), row in _lingering_windows(rows, views, config).items():
-        if row.label == started.label and (address, pane_id) != own:
-            _kill_dead(_server_at(address, config), pane_id)
+    own = (started.pane.address, started.pane.pane_id) if isinstance(started, Placed) else None
+    for key, owner in _lingering_windows(placements, views).items():
+        if owner.row.label == started.row.label and key != own:
+            _kill_dead(owner.pane)
+    # One no record places: only a dead window tmux lists in a session a record of the
+    # project names (`_recordless_pane`), never where its row points (review r7 of #113).
+    live = [placement for placement in [*placements, started] if placement.row.ended_at is None]
+    for placement in placements:
+        row = placement.row
+        if (
+            isinstance(placement, Unplaced)
+            and row.ended_at is not None
+            and row.label == started.row.label
+            and (found := _recordless_pane(row, live))
+        ):
+            _kill_dead(found[0])
+
+
+def _session_to_join(
+    placements: Sequence[Placement], config: FleetSettings
+) -> PlacedSession | None:
+    """The session a new window of this project joins: one its rows' launch records name
+    (:attr:`Placed.session`, by tmux's id) on this server, and still there. ``None`` when
+    there is none: the window makes a session of its own (:func:`_new_session_window`).
+
+    By induction every such session is this project's: a spawn makes a new one or joins
+    one a record of the project names, so no name read from the store — the project's
+    codename — ever puts an agent into another project's session (review r7 of #113,
+    finding 2). Only on the server today's config names, where this spawn starts its
+    window: a record on another socket names a session there."""
+    here = _Address(config.tmux_socket)
+    for session in _sessions_of(placements):
+        if session.address == here and session.present():
+            return session
+    return None
+
+
+def _new_session_window(srv: TmuxServer, session: str, **window: Any) -> WindowInfo:
+    """A window in a NEW session named ``session`` — or, when tmux holds a session by that
+    name already, ``session-2``, ``session-3``…: a session found under a name is joined by
+    nothing, since the name is read from the store (:func:`_session_to_join`). One that a
+    spawn of this project made is joined by its id, which its record holds."""
+    for attempt in range(1, _CODENAME_RETRIES + 1):
+        candidate = session if attempt == 1 else f"{session}-{attempt}"
+        if srv.has_session(candidate):
+            continue
+        return srv.spawn_window(candidate, create=True, **window)
+    raise TmuxError(
+        f"tmux already holds sessions named {session} to {session}-{_CODENAME_RETRIES}, none "
+        "of them one a launch record of this project names — end them, or rename this project"
+    )
 
 
 def _take_over(agent: FleetAgent, previous: str, session_id: str, notes: list[str]) -> FleetAgent:
@@ -2597,8 +2976,7 @@ def _verify_cap(store: ContextStore, stored: FleetAgent, cap: int) -> None:
 
 
 def _type_prompt(
-    srv: TmuxServer,
-    agent: FleetAgent,
+    placement: Placement,
     prompt: str,
     notes: list[str],
     *,
@@ -2638,7 +3016,18 @@ def _type_prompt(
     announced its exit and woke the manager for a second worker (review of
     #203, final round, FLEET-4). So a poll tmux will not answer (a wedged
     server's timeout, an OS refusal) is a note, as a refused paste already was.
+
+    Typed into the pane its launch record places (:func:`resolve_place`), by its agent's
+    rules; a window whose record cannot be read back is typed nothing, as every row no
+    record places.
     """
+    if not isinstance(placement, Placed):
+        notes.append(
+            f"the prompt was NOT typed: {placement.why}. Send it once the agent is up: "
+            f"`aisquare fleet tell {placement.row.label} …`, or `aisquare fleet attach`"
+        )
+        return False
+    agent, pane = placement.agent, placement.pane
     adapter = recorded_adapter(agent.agent)
     if (
         adapter is not None
@@ -2646,13 +3035,14 @@ def _type_prompt(
         and orchestrator.team_enabled()
         and session_id is not None
     ):
-        return _type_at_its_start(srv, agent, adapter, prompt, notes, project, session_id, launched)
-    pane_id = agent.pane_id
+        return _type_at_its_start(
+            pane, agent, adapter, prompt, notes, project, session_id, launched
+        )
     deadline = _monotonic() + PROMPT_TIMEOUT
     ready = False
     while True:
         try:
-            facts = srv.pane_facts(pane_id)
+            facts = pane.facts()
         except TmuxError as exc:
             notes.append(
                 f"tmux could not be asked whether the agent is up ({exc}) — the prompt was "
@@ -2671,9 +3061,9 @@ def _type_prompt(
         _sleep(_POLL_INTERVAL)
     if ready:
         _sleep(_PROMPT_SETTLE)
-        if _at_a_start_dialog(srv, agent, adapter):
+        if _at_a_start_dialog(pane, adapter):
             # Up, and as quiet as at its prompt: the dialog's answer is the human's.
-            while _at_a_start_dialog(srv, agent, adapter):
+            while _at_a_start_dialog(pane, adapter):
                 if _monotonic() >= deadline:
                     notes.append(
                         f"the agent was still at a dialog of its own after {PROMPT_TIMEOUT:.0f} "
@@ -2698,7 +3088,7 @@ def _type_prompt(
             f"the agent did not come up within {PROMPT_TIMEOUT:.0f} s — prompt typed anyway"
         )
     try:
-        _type_line(srv, pane_id, prompt)
+        pane.type_line(prompt)
     except TmuxError as exc:
         notes.append(f"could not type the prompt: {exc}")
         return False
@@ -2706,7 +3096,7 @@ def _type_prompt(
 
 
 def _type_at_its_start(
-    srv: TmuxServer,
+    pane: PlacedPane,
     agent: FleetAgent,
     adapter: AgentAdapter,
     prompt: str,
@@ -2738,7 +3128,7 @@ def _type_at_its_start(
     deadline, ceiling = start + PROMPT_TIMEOUT, start + START_TIMEOUT
     while True:
         try:
-            facts = srv.pane_facts(agent.pane_id)
+            facts = pane.facts()
         except TmuxError as exc:
             notes.append(
                 f"tmux could not be asked whether the agent is up ({exc}) — the prompt was "
@@ -2752,7 +3142,7 @@ def _type_at_its_start(
         if _started_since(session_id, launched):
             break
         now = _monotonic()
-        at_a_dialog = now >= deadline and _at_a_start_dialog(srv, agent, adapter)
+        at_a_dialog = now >= deadline and _at_a_start_dialog(pane, adapter)
         if at_a_dialog or now >= ceiling:
             try:
                 how = _file_note(project, agent.label, prompt, None)
@@ -2774,7 +3164,7 @@ def _type_at_its_start(
             return False
         _sleep(_POLL_INTERVAL)
     try:
-        _type_line(srv, agent.pane_id, prompt)
+        pane.type_line(prompt)
     except TmuxError as exc:
         notes.append(f"could not type the prompt: {exc}")
         return False
@@ -2795,31 +3185,25 @@ def _started_since(session_id: str | None, launched: datetime) -> bool:
     return session is not None and session.ended_at is None and session.last_seen_at >= launched
 
 
-def _seen_since(session_id: str | None, launched: datetime) -> bool:
-    """Whether ``session_id``'s board row was seen at or after ``launched``, whatever ended
-    it since: ``tell``'s word for an agent whose ``SessionStart`` fires at rest at its
-    prompt having started. A resumed replacement's row is its predecessor's, last seen
-    before this launch (its ``SessionEnd`` came with the stop), so it is not started until
-    its own start (review r5 of #113, finding 4). One ended since it was seen is: ``team
-    prune`` ends a session idle half an hour, an agent at its prompt is idle, and asking
-    for an open row filed every ``tell`` to it as a note it would never read (r6, finding
-    2). A read that fails is no."""
-    if session_id is None:
-        return False
-    try:
-        with store_session() as store:
-            session = store.get_session(session_id)
-    except Exception:
-        return False
-    return session is not None and session.last_seen_at >= launched
+def _started_by_its_hook(record: launch_seal.LaunchRecord) -> bool:
+    """Whether the agent of THIS launch has started, as its own hook said in the launch
+    record (``SessionFacts.started_at``, :func:`~aisquare.core.launch_seal.observe`):
+    ``tell``'s word for an agent whose ``SessionStart`` fires at rest at its prompt. A
+    resumed replacement's record is its own, so its predecessor's start is not its start
+    (review r5 of #113, finding 4); a session that was pruned or cleared since stays
+    started (r6, finding 2). Never the board session's ``last_seen_at``: ``end_session``
+    stamps it with its own time, so a predecessor ended by ``team prune`` after the launch
+    read as this launch's start, and ``tell`` pasted into the replacement's folder-trust
+    dialog, whose Enter exits it (r7, finding 5)."""
+    return record.session is not None and record.session.started_at is not None
 
 
-def _at_a_start_dialog(srv: TmuxServer, agent: FleetAgent, adapter: AgentAdapter | None) -> bool:
-    """Whether ``agent``'s screen shows a dialog its agent puts up before its start, where
-    an Enter answers it for the human (``capabilities.start_dialog_mark``): the dialog's
-    own row, its last line on the screen, starts with the mark (Claude Code's ``Enter to
-    confirm · Esc to cancel``). Not the phrase anywhere on the screen: the agent's own
-    output shows it as soon as it opens a file or a conversation that does — this
+def _at_a_start_dialog(pane: PlacedPane, adapter: AgentAdapter | None) -> bool:
+    """Whether the screen of ``pane`` shows a dialog its agent puts up before its start,
+    where an Enter answers it for the human (``capabilities.start_dialog_mark``): the
+    dialog's own row, its last line on the screen, starts with the mark (Claude Code's
+    ``Enter to confirm · Esc to cancel``). Not the phrase anywhere on the screen: the agent's
+    own output shows it as soon as it opens a file or a conversation that does — this
     repository's tests and docs, a ``--continue`` — and every ``tell`` became a note, a
     spawn's prompt held back (review r5 of #113, finding 8). A screen tmux will not give
     shows none; never raises."""
@@ -2827,7 +3211,7 @@ def _at_a_start_dialog(srv: TmuxServer, agent: FleetAgent, adapter: AgentAdapter
     if not mark:
         return False
     try:
-        screen = srv.screen_text(agent.pane_id)
+        screen = pane.screen()
     except TmuxError:
         return False
     last = next((row.strip() for row in reversed(screen) if row.strip()), "")
@@ -2902,7 +3286,6 @@ def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAg
       ``fleet ls`` shows the same rows, so the two never disagree.
     """
     with store_session() as store:
-        current = store.get_project(project.id) or project
         agents = store.fleet_agents(project.id, live_only=False)
         sessions = {session.id: session for session in store.team_sessions(project.id)}
     now = _now()
@@ -2912,32 +3295,32 @@ def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAg
     # Each row's launch record, read once for this listing (review r6 of #113, finding 11),
     # places it: asq's pane view types the human's keys into the pane a listed row names
     # (`FleetAgentStatus.socket_at`), and a row the sandbox pointed at another pane showed
-    # that pane there, and was ended when that one was dead (r5, finding 1).
-    records = {agent.id: launch_seal.read(agent.id) for agent in agents}
-    agents = [_placement(agent, records[agent.id]).agent for agent in agents]
-    tmux_session = session_name(current.codename) if current.codename else None
+    # that pane there, and was ended when that one was dead (r5, finding 1). One no record
+    # places is asked about nowhere, and reads lost (`_status`).
     config = settings()
-    views = _observe_sockets(agents, tmux_session, config)
+    records = {agent.id: launch_seal.read(agent.id) for agent in agents}
+    placements = _resolve_all(agents, config, records)
+    views = _observe_sockets(placements)
     ended = {
-        row.id: _placement(row, records[row.id]).agent  # the store's row again (r6, finding 8)
-        for row in _end_dead_rows(agents, views, best_effort=True, config=config)
+        row.id: resolve_place(row, records[row.id], config)  # the store's row again (r6, 8)
+        for row in _end_dead_rows(placements, views, best_effort=True)
     }
     if ended:
-        agents = [ended.get(agent.id, agent) for agent in agents]
+        placements = [ended.get(placement.row.id, placement) for placement in placements]
     if live_only:
-        agents = _with_lingering_windows(agents, views, config)
-    reached = {agent.id for agent in agents if _view(agent, views, config) is not None}
-    sessions = _record_failed_turns(agents, sessions, reached, records)
+        placements = _with_lingering_windows(placements, views)
+    reached = {placement.row.id for placement in placements if _view(placement, views) is not None}
+    sessions = _record_failed_turns(
+        [placement.agent for placement in placements], sessions, reached, records
+    )
     return [
         _status(
-            agent,
-            sessions.get(agent.session_id) if agent.session_id else None,
-            _view(agent, views, config),
-            tmux_session,
+            placement,
+            sessions.get(placement.row.session_id) if placement.row.session_id else None,
+            views,
             now,
-            config,
         )
-        for agent in agents
+        for placement in placements
     ]
 
 
@@ -2986,12 +3369,11 @@ def _record_failed_turns(
 
 
 def _end_dead_rows(
-    agents: Sequence[FleetAgent],
+    placements: Sequence[Placement],
     views: Mapping[_Address, dict[str, _PaneView] | None],
     *,
     best_effort: bool = False,
     nudge: bool = True,
-    config: FleetSettings | None = None,
 ) -> list[FleetAgent]:
     """Record every LIVE row whose observed pane is dead as ended — reap's rule, on every read.
 
@@ -3033,14 +3415,15 @@ def _end_dead_rows(
     Each row's pane is read from ITS server's view (:func:`_view`), the one at the socket
     its spawn recorded: from a shell under another ``TMUX_TMPDIR`` the server ``tmux -L``
     reaches on the same name is another, and a dead ``%N`` there ended a live row under its
-    running agent (round 28 of #257).
+    running agent (round 28 of #257). Where its launch record places it: a row no record
+    places has no view, and is ended by nothing here.
     """
     dead = [
-        (agent, pane)
-        for agent in agents
-        if agent.ended_at is None
-        and (observed := _view(agent, views, config)) is not None
-        and (pane := observed.get(agent.id)) is not None
+        (placement.row, pane)
+        for placement in placements
+        if placement.row.ended_at is None
+        and (observed := _view(placement, views)) is not None
+        and (pane := observed.get(placement.row.id)) is not None
         and pane.dead
     ]
     if not dead:
@@ -3075,11 +3458,11 @@ def _end_dead_rows(
 
 
 def _lingering_windows(
-    agents: Sequence[FleetAgent],
+    placements: Sequence[Placement],
     views: Mapping[_Address, dict[str, _PaneView] | None],
-    config: FleetSettings | None = None,
-) -> dict[tuple[_Address, str], FleetAgent]:
-    """``(server, pane id)`` → the ENDED row whose window each dead pane still is.
+) -> dict[tuple[_Address, str], Placed]:
+    """``(server, pane id)`` → the ENDED row whose window each dead pane still is, as their
+    launch records place them.
 
     "Its window" means a DEAD pane under the row's id on the row's server. The
     id alone is not the window: pane ids are unique only per server lifetime —
@@ -3097,31 +3480,32 @@ def _lingering_windows(
     row's (review of #138: a reused id let ``stop`` kill another agent's
     window and report success).
     """
-    owners: dict[tuple[_Address, str], FleetAgent] = {}
-    for agent in agents:
-        address = _address(agent, config)
-        observed = views.get(address)
-        pane = observed.get(agent.id) if observed else None
+    owners: dict[tuple[_Address, str], Placed] = {}
+    for placement in _placed_only(placements):
+        observed = _view(placement, views)
+        pane = observed.get(placement.row.id) if observed else None
         if pane is None or not pane.dead:
             continue
-        key = (address, agent.pane_id)
+        key = (placement.pane.address, placement.pane.pane_id)
         held = owners.get(key)
-        if held is None or (
-            held.ended_at is not None and (agent.ended_at is None or agent.ended_at > held.ended_at)
+        row, kept = placement.row, held.row if held is not None else None
+        if kept is None or (
+            kept.ended_at is not None and (row.ended_at is None or row.ended_at > kept.ended_at)
         ):
-            owners[key] = agent
-    return {key: agent for key, agent in owners.items() if agent.ended_at is not None}
+            owners[key] = placement
+    return {key: owner for key, owner in owners.items() if owner.row.ended_at is not None}
 
 
 def _with_lingering_windows(
-    agents: Sequence[FleetAgent],
-    views: Mapping[_Address, dict[str, _PaneView] | None],
-    config: FleetSettings | None = None,
-) -> list[FleetAgent]:
+    placements: Sequence[Placement], views: Mapping[_Address, dict[str, _PaneView] | None]
+) -> list[Placement]:
     """Every live row, plus each ended row whose window still stands (see
     :func:`_lingering_windows`)."""
-    shown = {agent.id for agent in _lingering_windows(agents, views, config).values()}
-    return [agent for agent in agents if agent.ended_at is None or agent.id in shown]
+    shown = {owner.row.id for owner in _lingering_windows(placements, views).values()}
+    return [
+        placement for placement in placements
+        if placement.row.ended_at is None or placement.row.id in shown
+    ]  # fmt: skip
 
 
 def _kill_lingering_window(store: ContextStore, project: ProjectInfo, agent: FleetAgent) -> bool:
@@ -3131,36 +3515,47 @@ def _kill_lingering_window(store: ContextStore, project: ProjectInfo, agent: Fle
     rows observed together, :func:`_lingering_windows` — never by asking tmux
     about the id alone: after the server restarted, a dead pane under that id
     is another agent's last screen. Never raises: a server that will not
-    answer costs the tidy-up. Where its launch record places it (:func:`_placement`),
-    the rows beside it too; a dead pane only, so a row with no record (spawned before
-    this version) has its 💤 window removed as well, which a refusal left standing and
-    reported as no such agent (review r6 of #113, finding 9).
+    answer costs the tidy-up. Where its launch record places it (:func:`resolve_place`),
+    the rows beside it too, each record read once: the live rows and those ended within
+    :data:`RECENTLY_ENDED`, the ones whose window the listing shows (review r7 of #113,
+    finding 10). A row no record places has no window the fleet may name.
     """
-    agent = _placement(agent).agent
-    current = store.get_project(project.id) or project
-    rows = [_placement(row).agent for row in store.fleet_agents(project.id, live_only=False)]
-    tmux_session = session_name(current.codename) if current.codename else None
     config = settings()
-    views = _observe_sockets(rows, tmux_session, config)
-    address = _address(agent, config)
-    owner = _lingering_windows(rows, views, config).get((address, agent.pane_id))
-    if owner is None or owner.id != agent.id:
+    cutoff = _now() - RECENTLY_ENDED
+    rows = [
+        row for row in store.fleet_agents(project.id, live_only=False)
+        if row.id == agent.id or row.ended_at is None or row.ended_at >= cutoff
+    ]  # fmt: skip
+    placements = _resolve_all(rows, config)
+    views = _observe_sockets(placements)
+    mine = next((placement for placement in placements if placement.row.id == agent.id), None)
+    if isinstance(mine, Unplaced):
+        # No record places it: a dead window tmux lists in a session a record of the
+        # project names, under the pane its row names, is the one it may have (review r7
+        # of #113, finding 1; r6, finding 9).
+        live = [placement for placement in placements if placement.row.ended_at is None]
+        found = _recordless_pane(agent, live)
+        return found is not None and _kill_dead(found[0])
+    if mine is None:
         return False
-    return _kill_dead(_server_at(address, config), agent.pane_id)
+    owner = _lingering_windows(placements, views).get((mine.pane.address, mine.pane.pane_id))
+    if owner is None or owner.row.id != agent.id:
+        return False
+    return _kill_dead(mine.pane)
 
 
-def _kill_dead(srv: TmuxServer, pane_id: str) -> bool:
-    """Kill the window of ``pane_id`` only if that pane is DEAD now; never raises.
+def _kill_dead(pane: PlacedPane) -> bool:
+    """Kill the window of ``pane`` only if that pane is DEAD now; never raises.
 
     Asked again at the kill because what decided it was an earlier look: a
     window gone meanwhile — and with it perhaps the server, whose next pane may
     carry the same id — is left alone, and a live pane is never killed from here.
     """
     try:
-        facts = srv.pane_facts(pane_id)
+        facts = pane.facts()
         if facts is None or not facts.dead:
             return False
-        srv.kill_window(pane_id)
+        pane.kill()
     except TmuxError:
         return False
     return True
@@ -3170,23 +3565,20 @@ def status_of(
     agent: FleetAgent, *, record: launch_seal.LaunchRecord | str | None = None
 ) -> FleetAgentStatus:
     """One agent's derived state: board session first, tmux facts second. The row as its
-    launch record places it (:func:`_placement`); ``record`` is that record, when the
+    launch record places it (:func:`resolve_place`); ``record`` is that record, when the
     caller has read it."""
     with store_session() as store:
         agent = store.get_fleet_agent(agent.id) or agent
-        project = store.get_project(agent.project_id)
         session = store.get_session(agent.session_id) if agent.session_id else None
-    record = launch_seal.read(agent.id) if record is None else record
-    agent = _placement(agent, record).agent
-    tmux_session = session_name(project.codename) if project and project.codename else None
     config = settings()
-    observed = _observe(server_of(agent, config), tmux_session, [agent])
-    if session is not None:
-        reached = () if observed is None else (agent.id,)
-        session = _record_failed_turns([agent], {session.id: session}, reached, {agent.id: record})[
-            session.id
-        ]
-    return _status(agent, session, observed, tmux_session, _now(), config)
+    placement = resolve_place(agent, record, config)
+    views = _observe_sockets([placement])
+    if session is not None and isinstance(placement, Placed):
+        reached = () if _view(placement, views) is None else (agent.id,)
+        session = _record_failed_turns(
+            [placement.agent], {session.id: session}, reached, {agent.id: placement.record}
+        )[session.id]
+    return _status(placement, session, views, _now())
 
 
 def manager_of(project: ProjectInfo) -> FleetAgent | None:
@@ -3222,13 +3614,15 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
     rule above stands, provided no dialog of the agent's is on its screen
     (``capabilities.start_dialog_mark``). Every such ``tell`` had been a note, and with
     the board off a ``FleetError`` (review r4 of #113, finding 3). Started means seen
-    since THIS launch (:func:`_seen_since`): a resumed replacement keeps its session's id,
-    whose board row is its predecessor's, so a row that merely exists said started while
-    the replacement sat at the trust dialog of a slot that had not trusted the folder
-    (review r5 of #113, finding 4).
+    since THIS launch, as its own hook wrote it in the launch record
+    (:func:`_started_by_its_hook`): a resumed replacement keeps its session's id, whose
+    board row is its predecessor's, so a row that merely exists said started while the
+    replacement sat at the trust dialog of a slot that had not trusted the folder (review
+    r5 of #113, finding 4), and that row's ``last_seen_at`` is moved by whoever ends it
+    (r7, finding 5).
 
     Typed only into the pane its launch record places, by its record's agent's rules
-    (:func:`_placement`): a row rewritten in the store, or with no record to place it,
+    (:func:`resolve_place`): a row rewritten in the store, or with no record to place it,
     gets the board note, and the reason is said on the board (review r5 of #113,
     finding 1; r6, finding 1).
 
@@ -3246,17 +3640,17 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
     with store_session() as store:
         row = _live_agent(store, project, label)
     record = launch_seal.read(row.id)  # once, for every read below (r6, finding 11)
-    placement = _placement(row, record)
-    if placement.why is not None:
+    placement = resolve_place(row, record)
+    why = placement.why if isinstance(placement, Unplaced) else placement.rewritten
+    if not isinstance(placement, Placed) or why is not None:
         waits = "it waits on the board for the agent's next prompt"
-        _say_refused(project.id, row, "a message told to it is not typed", placement.why, waits)
+        _say_refused(project.id, row, "a message told to it is not typed", why or "", waits)
         how = _file_note(project, label, text, sender)
-        return TellResult(False, f"not typed: {placement.why} — {how}")
-    agent = placement.agent  # its pane, its server and its agent: the record's
-    status = status_of(agent, record=record)
+        return TellResult(False, f"not typed: {why} — {how}")
+    agent, pane = placement.agent, placement.pane  # its place and its agent: the record's
+    status = status_of(agent, record=placement.record)
     adapter = recorded_adapter(agent.agent)
-    srv = server_of(agent)
-    started = _seen_since(agent.session_id, agent.created_at)
+    started = _started_by_its_hook(placement.record)
     if (
         adapter is not None
         and adapter.capabilities.starts_at_its_prompt
@@ -3283,13 +3677,13 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
             and session.state == "working"
             and adapter is not None
         ):
-            queued = _queue_message(adapter, agent, session, text, record)
+            queued = _queue_message(adapter, agent, session, text, placement.record)
             if queued is True:
                 return TellResult(True, "queued for its next turn (it was working)")
             if queued is not None:
                 how = _file_note(project, label, text, sender)
                 return TellResult(False, f"{queued} — {how}")
-        if not _at_its_prompt(srv, agent, session, status.state, _now()):
+        if not _at_its_prompt(pane, agent, session, status.state, _now()):
             how = _file_note(project, label, text, sender)
             if adapter is None or not adapter.capabilities.idle_prompt_mark:
                 return TellResult(False, f"no confirmed waiting native session — {how}")
@@ -3308,14 +3702,14 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
                 f"{adapter.label}'s empty prompt — {how}",
             )
     if status.state == "waiting":
-        if not _pane_is_the_agent(srv, agent.pane_id):
+        if not _pane_is_the_agent(pane):
             how = _file_note(project, label, text, sender)
             return TellResult(
                 False,
                 "it reads as waiting, but its pane is not running the agent yet (the "
                 f"launcher or a shell is in the foreground) — {how}",
             )
-        if not started and _at_a_start_dialog(srv, agent, adapter):
+        if not started and _at_a_start_dialog(pane, adapter):
             # A start the board cannot see: as quiet at a dialog as at its prompt.
             why = (
                 "its pane shows a dialog of the agent's, where an Enter would answer it "
@@ -3327,7 +3721,7 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
                 raise FleetError(f"not typed: {why}; {exc}") from exc
             return TellResult(False, f"{why} — {how}")
         try:
-            _type_line(srv, agent.pane_id, text)
+            pane.type_line(text)
         except TmuxError as exc:
             how = _file_note(project, label, text, sender)
             return TellResult(False, f"tmux could not type it ({exc}) — {how}")
@@ -3411,14 +3805,14 @@ def _run_native(argv: list[str], *, env: dict[str, str]) -> subprocess.Completed
     )
 
 
-def _pane_is_the_agent(srv: TmuxServer, pane_id: str) -> bool:
+def _pane_is_the_agent(pane: PlacedPane) -> bool:
     """Whether the pane's foreground process is the agent right now.
 
     Never raises: tmux that cannot answer is not a pane to type into either
     (and :func:`_derive` has already called such an agent ``unknown``).
     """
     try:
-        facts = srv.pane_facts(pane_id)
+        facts = pane.facts()
     except TmuxError:
         return False
     return facts is not None and not facts.dead and _agent_running(facts.current_command)
@@ -3430,7 +3824,7 @@ def _hooks_fresh(session: TeamSession | None, now: datetime) -> bool:
 
 
 def _at_its_prompt(
-    srv: TmuxServer,
+    pane: PlacedPane,
     agent: FleetAgent,
     session: TeamSession | None,
     state: FleetAgentState,
@@ -3466,7 +3860,7 @@ def _at_its_prompt(
     if adapter is None or not mark:
         return True
     try:
-        screen = srv.screen_text(agent.pane_id)
+        screen = pane.screen()
     except TmuxError:
         return False
     return _idle_screen(adapter, screen)
@@ -3482,25 +3876,6 @@ def _idle_screen(adapter: AgentAdapter, screen: Sequence[str]) -> bool:
     mark = adapter.capabilities.idle_prompt_mark
     last = next((line.strip() for line in reversed(screen) if line.strip()), "")
     return bool(mark) and last.startswith(mark or "")
-
-
-def _type_line(srv: TmuxServer, pane_id: str, text: str, *, command: bool = False) -> None:
-    """Type ``text`` at an agent's prompt and submit it: how the fleet types every line.
-
-    The text goes in as one bracketed paste, a line break in it part of the message — a
-    ``command`` (``/exit``) keyed in as typed instead — and its Enter :data:`_KEY_GAP`
-    later, a key of its own: Codex takes keys that arrive in one burst for a paste and
-    keeps the Enter in it as text. (A bracketed paste with its Enter right behind it did
-    submit on 0.162.1, which is why ``tell`` reached a waiting Codex and the nudge, typed
-    key by key, did not; one rule for both costs the paste 0.2 s.) Raises ``TmuxError``
-    as the tmux calls do.
-    """
-    if command:
-        srv.send_literal(pane_id, text)
-    else:
-        srv.paste(pane_id, text)
-    _sleep(_KEY_GAP)
-    srv.send_keys(pane_id, "Enter")
 
 
 def _file_note(project: ProjectInfo, label: str, text: str, sender: str | None) -> str:
@@ -3557,6 +3932,13 @@ def stop(
                 else store.get_fleet_agent(agent_id)
             )
             if ended is None or not _kill_lingering_window(store, project, ended):
+                unplaced = resolve_place(ended) if ended is not None else None
+                if isinstance(unplaced, Unplaced):
+                    raise NoSuchAgent(
+                        f"{label!r} has ended, and {unplaced.why}: no window of its stands in "
+                        "a session a launch record of this project names, and the fleet "
+                        "closes no other — close it where it is (`aisquare fleet attach`)"
+                    ) from None
                 raise  # no such row, or no window of its own left (gone, or a reused id)
             return StopReceipt(ended, [])
     return _stop_row(project, agent, force=force, grace=grace, handover=handover, nudge=nudge)
@@ -3570,6 +3952,8 @@ def _stop_row(
     grace: float = 5.0,
     handover: bool = False,
     nudge: bool = True,
+    placement: Placement | None = None,
+    beside: Sequence[Placement] | None = None,
 ) -> StopReceipt:
     """``/exit`` the agent in ``agent``'s pane, wait ``grace`` seconds, then kill its window.
 
@@ -3621,28 +4005,43 @@ def _stop_row(
     tmux confirmed dead or gone, and raises otherwise.
 
     The pane typed into and killed is the one the row's launch record places
-    (:func:`_placement`), never one the row names (review r5 of #113, finding 1). A row
-    rewritten to name another is stopped there all the same, and the board says what was
-    rewritten: refused, one ``UPDATE`` of its own row made a sandboxed agent one no stop,
-    restart, switch, hand-over or ``shutdown`` could end (r6, finding 4). A row with no
-    record to place it (spawned before this version) has its window killed, no exit
-    command typed into a pane the fleet has no record of, and only in its project's fleet
-    session: refused, every agent spawned before this version was one ``stop`` and
-    ``shutdown`` left running (r6, finding 6). The receipt's ``killed`` says so.
+    (:func:`resolve_place`; ``placement``, when the caller placed the row already), never
+    one the row names (review r5 of #113, finding 1). A row rewritten to name another is
+    stopped there all the same, and the board says what was rewritten: refused, one
+    ``UPDATE`` of its own row made a sandboxed agent one no stop, restart, switch,
+    hand-over or ``shutdown`` could end (r6, finding 4). A row no record places (spawned
+    before this version) has its window killed, with no exit command typed into a pane
+    the fleet has no record of, only where tmux lists it in a session a launch record of
+    its project names and no record places another agent (:func:`_recordless_pane`;
+    ``beside`` is the project's live rows, placed, when the caller has them): killed
+    in ``asq-<codename>``, a name read from the store, a sandbox's fake row had another
+    project's window killed (r7, finding 1). Elsewhere it is refused, nothing typed or
+    killed, saying why and the way out. The receipt's ``killed`` says it had no exit.
     """
-    placement = _placement(agent)
-    if placement.record is not None and placement.why is not None:
-        _say_rewritten(agent, placement.why)
-    unrecorded = placement.why if placement.record is None else None
-    agent = placement.agent
-    srv = server_of(agent)
-    session = (
-        placement.record.window.session
-        if placement.record is not None
-        and placement.record.window is not None
-        and placement.record.window.session
-        else session_name(ensure_codename(project).codename or "")
-    )
+    placement = placement if placement is not None else resolve_place(agent)
+    unrecorded: str | None = None
+    if isinstance(placement, Placed):
+        if placement.rewritten is not None:
+            _say_rewritten(agent, placement.rewritten)
+        pane, session, place = placement.pane, placement.session, placement.agent
+    else:
+        unrecorded = placement.why
+        if beside is None:
+            with store_session() as store:
+                live = store.fleet_agents(project.id, live_only=True)
+            beside = _resolve_all([row for row in live if row.id != agent.id], settings())
+        found = _recordless_pane(agent, beside)
+        if found is None:
+            raise FleetError(
+                f"{agent.label!r} was not stopped: {unrecorded}, and no fleet session a "
+                "launch record of this project names holds a window under its pane "
+                f"{agent.pane_id} — nothing was typed into or killed where its row points. "
+                "End it in its own window; once it has exited, "
+                f"`aisquare fleet shutdown --forget` ends its row on your word"
+            )
+        pane, host = found
+        session, place = host.session, host.agent
+    srv = pane.server()
     exit_status: int | None = None
 
     def _window() -> WindowInfo | None:
@@ -3685,24 +4084,17 @@ def _stop_row(
         a socket file taken from under its server is one of those: that is not a
         pane that is gone (:func:`_refuse_unless_gone`).
         """
-        for window in srv.windows_or_raise(session):
-            if window.pane_id == agent.pane_id:
-                return None if _outlived(agent, srv.started_at()) else window
-        facts = srv.pane_facts_or_raise(agent.pane_id)
+        for window in session.panes_or_raise() if session is not None else ():
+            if window.pane_id == pane.pane_id:
+                return None if pane.outlived(srv.started_at()) else window
+        facts = pane.facts_or_raise()
         if facts is None:
-            _refuse_unless_gone(agent, srv)
+            _refuse_unless_gone(agent.label, place, srv)
             return None
-        if _outlived(agent, srv.started_at()):
+        if pane.outlived(srv.started_at()):
             return None
-        if unrecorded is not None:
-            # Only a window of its project's fleet session is a recordless row's to kill.
-            raise FleetError(
-                f"{agent.label!r} was not stopped: {unrecorded}, and its pane "
-                f"{agent.pane_id} is not in its project's fleet session ({session}); end "
-                "it in its own window"
-            )
         return WindowInfo(
-            session=session,
+            session=session.name if session is not None else "",
             window_id="",  # display-message was not asked for one; nothing here reads it
             name=agent.label,
             pane_id=facts.pane_id,
@@ -3722,9 +4114,9 @@ def _stop_row(
                 "pane the fleet has no record of"
             )
         if not force and killed is None and window is not None and not window.dead:
-            killed = _exit_withheld(srv, agent)
+            killed = _exit_withheld(pane, place)
         if not force and killed is None and window is not None and not window.dead:
-            _type_line(srv, agent.pane_id, _exit_command(agent), command=True)
+            pane.type_line(_exit_command(place), command=True)
             exited_here = True
             deadline = _monotonic() + grace
             dead_seen: float | None = None
@@ -3762,7 +4154,7 @@ def _stop_row(
         # wanted, and on a server younger than the row the id names ANOTHER agent's
         # pane (`_outlived`), whose window a `--force` stop or a shutdown killed.
         if window is not None:
-            srv.kill_window(agent.pane_id)
+            pane.kill()
     except TmuxError as exc:
         confirmed = _verify_gone(_window, agent.label, exc)
         # …but never at the cost of a status already READ: a pane seen dead with
@@ -3829,7 +4221,7 @@ def _stop_row(
     return StopReceipt(ended, released, release_failed, killed=killed, withheld=handover)
 
 
-def _exit_withheld(srv: TmuxServer, agent: FleetAgent) -> str | None:
+def _exit_withheld(pane: PlacedPane, agent: FleetAgent) -> str | None:
     """Why :func:`_stop_row` types no exit command into ``agent``'s pane, or ``None`` to
     type it.
 
@@ -3848,7 +4240,7 @@ def _exit_withheld(srv: TmuxServer, agent: FleetAgent) -> str | None:
     if adapter is None or not mark:
         return None
     try:
-        screen = srv.screen_text(agent.pane_id)
+        screen = pane.screen()
     except TmuxError:
         return None
     if _idle_screen(adapter, screen):
@@ -3860,8 +4252,10 @@ def _exit_withheld(srv: TmuxServer, agent: FleetAgent) -> str | None:
     )
 
 
-def _refuse_unless_gone(agent: FleetAgent, srv: TmuxServer) -> None:
-    """Raise unless ``agent``'s pane, which tmux did not find on ``srv``, is really gone.
+def _refuse_unless_gone(label: str, agent: FleetAgent, srv: TmuxServer) -> None:
+    """Raise unless the pane of ``label``, which tmux did not find on ``srv``, is really
+    gone. ``agent`` is the placed row whose launch record holds the server's socket path,
+    boot and time (:attr:`Placed.agent`).
 
     tmux's strict reads answer "no such pane" for a live server that does not hold it, and
     the same for no server at the socket, ``error connecting to <path> (No such file or
@@ -3885,14 +4279,14 @@ def _refuse_unless_gone(agent: FleetAgent, srv: TmuxServer) -> None:
         return  # no POSIX uid: no tmux server can exist here
     if answer == "gone":
         raise FleetError(
-            f"{agent.label!r} was not stopped: its server's socket {path} is gone, so no tmux "
+            f"{label!r} was not stopped: its server's socket {path} is gone, so no tmux "
             "client can reach the server, which may still be running, and its row is left "
             "live. If it is, send that server SIGUSR1, which makes tmux create its socket "
             "again, and run this again; if it is not, `aisquare fleet reap --server-down` "
             "ends its row on your word"
         )
     raise FleetError(
-        f"{agent.label!r} was not stopped: its server's socket {path} could not be asked, so "
+        f"{label!r} was not stopped: its server's socket {path} could not be asked, so "
         "it may still be running, and its row is left live; run this again where it can be "
         "asked"
     )
@@ -3912,8 +4306,9 @@ def _manager_first(agents: list[FleetAgent]) -> list[FleetAgent]:
 
 def _shutdown_targets(
     project: ProjectInfo | None, *, say: bool = False
-) -> list[tuple[ProjectInfo, list[FleetAgent]]]:
-    """Every project in scope with its live rows — FORGOTTEN registrations included.
+) -> list[tuple[ProjectInfo, list[Placement]]]:
+    """Every project in scope with its live rows — FORGOTTEN registrations included —
+    each where its launch record places it (:func:`resolve_place`).
 
     ``list_projects()`` hides a tombstoned registration (and, since #139, a
     captured one), and a forgotten project can still hold live rows: ``project
@@ -3925,6 +4320,13 @@ def _shutdown_targets(
     refuses a socket it cannot reach, and a second ``shutdown`` would not see the
     project either. That is precisely the permanently-wrong row this command
     exists to eliminate, so the scan reads past the tombstone.
+
+    The placements are everything the rest of the run acts on: the rows stopped, the
+    servers probed, the sessions taken down (:func:`_kill_fleet_sessions`), each record
+    read once, here, where the store is opened behind the run's handlers: opened again in
+    the kill phase, a store that failed after the rows were stopped raised out of the run
+    with the sessions up (review r7 of #113, findings 4 and 10). ``say``, the run itself
+    (not its plan), says on the board which row was rewritten to name another (r6, 4).
     """
     with store_session() as store:
         if project is not None:
@@ -3932,19 +4334,16 @@ def _shutdown_targets(
         else:
             projects = store.list_projects(include_forgotten=True)
         scanned = [(p, store.fleet_agents(p.id, live_only=True)) for p in projects]
-    # Where their launch records place them: asked, stopped and reported there; ``say``,
-    # the run itself (not its plan), says on the board which row was rewritten to name
-    # another (review r6 of #113, finding 4).
-    return [(p, _manager_first([_placed(row, say=say) for row in rows])) for p, rows in scanned]
-
-
-def _placed(row: FleetAgent, *, say: bool) -> FleetAgent:
-    """``row`` where its launch record places it (:func:`_placement`); its rewrite said on
-    the board when it was rewritten and ``say``."""
-    placement = _placement(row)
-    if say and placement.record is not None and placement.why is not None:
-        _say_rewritten(row, placement.why)
-    return placement.agent
+    config = settings()
+    targets: list[tuple[ProjectInfo, list[Placement]]] = []
+    for current, rows in scanned:
+        placements = _resolve_all(_manager_first(rows), config)
+        if say:
+            for placement in _placed_only(placements):
+                if placement.rewritten is not None:
+                    _say_rewritten(placement.row, placement.rewritten)
+        targets.append((current, placements))
+    return targets
 
 
 def _say_rewritten(row: FleetAgent, why: str) -> None:
@@ -3960,16 +4359,20 @@ def _say_rewritten(row: FleetAgent, why: str) -> None:
 
 
 def _shutdown_sockets(
-    targets: Sequence[tuple[ProjectInfo, list[FleetAgent]]], config: FleetSettings
+    targets: Sequence[tuple[ProjectInfo, list[Placement]]], config: FleetSettings
 ) -> list[_Address]:
-    """Every server in scope: where the rows' servers are asked (:func:`_address`), plus
-    today's socket.
+    """Every server in scope: where the rows' launch records place them, plus today's socket.
 
     Today's is included even with no rows on it, because a session can outlive
     every row that was recorded in it (``rename`` fails open, and the escape
-    hatch lets anyone rename a session by hand).
+    hatch lets anyone rename a session by hand). A server only a row's store columns
+    name is none of them (:func:`resolve_place`).
     """
-    addresses = {_address(agent, config) for _, agents in targets for agent in agents}
+    addresses = {
+        placement.pane.address
+        for _, placements in targets
+        for placement in _placed_only(placements)
+    }
     addresses.add(_Address(config.tmux_socket))
     return sorted(addresses, key=lambda address: (address.name, str(address.path or "")))
 
@@ -4110,7 +4513,7 @@ def _shutdown_probe(sockets: Sequence[_Address], config: FleetSettings) -> dict[
 
 
 def _unreached(
-    agent: FleetAgent, config: FleetSettings, this_boot: str | None, *, unusable: bool = False
+    placed: Placed, this_boot: str | None, *, unusable: bool = False
 ) -> tuple[SocketAnswer, str, str] | None:
     """``(what its socket said, why, what to do)`` for a row whose server did not answer
     through tmux, or could not be asked as tmux is ``unusable`` here, but whose agent may
@@ -4121,9 +4524,10 @@ def _unreached(
     stopped nothing, and the next ``uninstall`` went on under the running agents: a socket
     file taken from under its server (round 27 of #257). The socket asked is the one the
     row recorded, where tmux was asked too (:func:`_address`), else where this shell's tmux
-    looks; one that answers now came up after tmux was asked.
+    looks; one that answers now came up after tmux was asked. The socket, its path, the
+    boot and the time are the row's launch record's (:func:`resolve_place`).
     """
-    srv = server_of(agent, config)
+    agent, srv = placed.agent, placed.pane.server()
     answer = tmux_core.server_may_run(
         srv, agent.socket_path, agent.boot_id, this_boot, agent.created_at
     )
@@ -4158,107 +4562,64 @@ def _unreached(
 
 
 def _held_rows(
-    targets: Sequence[tuple[ProjectInfo, list[FleetAgent]]],
+    targets: Sequence[tuple[ProjectInfo, list[Placement]]],
     answering: Mapping[_Address, bool],
-    config: FleetSettings,
     *,
     unusable: bool = False,
 ) -> dict[str, tuple[SocketAnswer, str, str]]:
-    """:func:`_unreached` for each row on a socket that did not answer, or for every row
-    where tmux is ``unusable``, by id, where its agent may still run."""
+    """:func:`_unreached` for each placed row on a socket that did not answer, or for every
+    placed row where tmux is ``unusable``, by id, where its agent may still run. A row no
+    record places has no socket to ask: :func:`_stop_row` decides it."""
     this_boot = tmux_core.boot_id()
     held: dict[str, tuple[SocketAnswer, str, str]] = {}
-    for _, agents in targets:
-        for agent in agents:
-            if unusable or not answering.get(_address(agent, config)):
-                unreached = _unreached(agent, config, this_boot, unusable=unusable)
+    for _, placements in targets:
+        for placed in _placed_only(placements):
+            if unusable or not answering.get(placed.pane.address):
+                unreached = _unreached(placed, this_boot, unusable=unusable)
                 if unreached is not None:
-                    held[agent.id] = unreached
+                    held[placed.row.id] = unreached
     return held
 
 
-def _fleet_sessions(
-    srv: TmuxServer,
-    recorded: Sequence[tuple[str, str, bool]],
-    *,
-    every: bool,
-) -> list[tuple[str, str | None, bool]]:
-    """The fleet's own sessions on this server: ``(session, project id or None, expected)``.
-
-    A scoped shutdown targets exactly the sessions of the projects in scope. An
-    ``--all`` run also sweeps any other ``asq-`` session the socket holds, with
-    no project to attribute it to — that is the shape a ``rename`` which failed
-    open leaves behind (its docstring says so, and ``attach`` and ``reap`` both
-    know it exists), and it is the fleet's session either way.
-
-    Named per SOCKET, as ``(session, project id or None, expected)``: a project's
-    sessions are the ones its rows' launch records name on this socket (``recorded``,
-    :func:`_recorded_sessions`) — EXPECTED where a live row's does, asked just in case
-    where only an ended row's does, because a leftover session (dead
-    ``remain-on-exit`` panes of rows long ended) can stand there with no live row to
-    point at it, and a scoped shutdown that never asked left it up under "✓ fleet shut
-    down" (review of the fold). A session asked for just-in-case and found absent is
-    not worth a line: asked of every socket and reported, a project whose rows were all
-    on the old socket gained "``asq-a`` was already gone" for a socket it never lived
-    on (review of #203, round 4). The ``--all`` prefix sweep lists what exists, so its
-    entries are expected by construction.
-    """
-    sessions: list[tuple[str, str | None, bool]] = list(recorded)
-    named = {name for name, _, _ in sessions}
-    if every:
-        listed = [name for name in srv.sessions_or_raise() if name.startswith(SESSION_PREFIX)]
-        sessions += [(name, None, True) for name in sorted(listed) if name not in named]
-    return sessions
+def _swept_sessions(
+    srv: TmuxServer, address: _Address, config: FleetSettings, *, skip: Collection[str]
+) -> list[PlacedSession]:
+    """``--all``'s sweep: every ``asq-`` session tmux lists on this server, by the name it
+    listed, but those in ``skip`` (taken down by their records' ids already). A ``rename``
+    that failed open, a session renamed by hand, one of an agent spawned before this
+    version: the fleet's session either way, and the sweep needs no record to name it."""
+    listed = [name for name in srv.sessions_or_raise() if name.startswith(SESSION_PREFIX)]
+    return [_listed_session(address, name, config) for name in sorted(listed) if name not in skip]
 
 
-def _recorded_sessions(
-    targets: Sequence[tuple[ProjectInfo, list[FleetAgent]]], config: FleetSettings
-) -> dict[_Address, list[tuple[str, str, bool]]]:
-    """Server → the sessions the projects in scope hold there, ``(session, project id,
-    expected)``, as their rows' launch records name them (``launch_seal.WindowPlace``):
-    the session each window was made in, on the server the record places it, never
-    ``asq-<codename>`` from the project row, which an agent's sandbox writes: two
-    projects' codenames swapped, a scoped ``shutdown`` of one killed the other's session
-    and every agent in it (review r6 of #113, finding 7). An ended row's names the
-    session its dead window may still hold (``remain-on-exit``), expected only where a
-    live row's names it too. A project spawned before this version has none: its rows
-    are stopped one by one (:func:`_stop_row`), and ``--all`` sweeps every fleet session.
-    """
-    found: dict[_Address, dict[tuple[str, str], bool]] = {}
-    with store_session() as store:
-        rows = {
-            project.id: store.fleet_agents(project.id, live_only=False) for project, _ in targets
-        }
-    for project, live in targets:
-        live_ids = {agent.id for agent in live}
-        for row in rows[project.id]:
-            placement = _placement(row)
-            window = placement.record.window if placement.record is not None else None
-            if window is None or not window.session:
-                continue
-            address = _address(placement.agent, config)
-            here = found.setdefault(address, {})
-            key = (window.session, project.id)
-            here[key] = here.get(key, False) or row.id in live_ids
-    return {
-        address: [(name, project_id, expected) for (name, project_id), expected in named.items()]
-        for address, named in found.items()
-    }
+def _spared_panes(
+    report: ShutdownReport, placements: Mapping[str, Placement]
+) -> set[tuple[_Address, str]]:
+    """``(server, pane)`` of every row this run left LIVE, where its launch record places it
+    (``placements``, by row id): a session holding one is not taken down. A row no record
+    places has no pane the fleet may name, and spares nothing."""
+    spared: set[tuple[_Address, str]] = set()
+    for row in report.failed:
+        placement = placements.get(row.agent.id)
+        if isinstance(placement, Placed):
+            spared.add((placement.pane.address, placement.pane.pane_id))
+    return spared
 
 
 def _kill_fleet_sessions(
-    targets: Sequence[tuple[ProjectInfo, list[FleetAgent]]],
+    targets: Sequence[tuple[ProjectInfo, list[Placement]]],
     sockets: Sequence[_Address],
     answering: Mapping[_Address, bool],
     report: ShutdownReport,
     config: FleetSettings,
     *,
     every: bool,
+    lingering: Sequence[tuple[ProjectInfo, list[Placement]]] = (),
 ) -> None:
     """Kill the fleet's OWN sessions — never the server.
 
     ``tmux kill-server`` is server-scoped, but the fleet's claim is only ever to
-    ``asq-<codename>`` sessions. Reproduced while reviewing the first draft: a
+    its own sessions. Reproduced while reviewing the first draft: a
     socket holding one hand-made session and no fleet rows at all reported
     ``0 stopped, 0 recorded lost`` and destroyed that session unmentioned — and
     ``[fleet] tmux_socket`` is a free-form string with no validator, so an
@@ -4267,69 +4628,121 @@ def _kill_fleet_sessions(
     server down when the fleet is all it held: ``BUNDLED_CONF`` does not set
     ``exit-empty off``, so a server with no session exits on its own.
 
+    A project's sessions are the ones its LIVE rows' launch records name, by tmux's id on
+    the server each record places it (:attr:`Placed.session`), from the run's snapshot
+    (``targets``), so nothing here opens the store: never ``asq-<codename>``, a name read
+    from the store (review r6 of #113, finding 7), nor a name a record kept after a rename
+    another project's session then took (r7, finding 2). Every such session was made for
+    this project or joined by its id (:func:`_session_to_join`). The dead windows of its
+    rows that ended within :data:`RECENTLY_ENDED` (``lingering``, read with the snapshot,
+    :func:`_lately_ended`) are removed where their records place them
+    (:func:`_remove_lingering_windows`), which takes a session that only they held with
+    them. ``--all`` also sweeps every other ``asq-`` session tmux lists on a server in scope
+    (:func:`_swept_sessions`).
+
     A session holding a row this LEFT LIVE is spared. Killing it would end an
     agent whose pane ``_verify_gone`` had just confirmed alive, and leave its
     live row on a dead pane — the state this whole command exists to end.
     """
-    held = {row.agent.id: _panes_of(row.agent, config) for row in report.failed}
+    placements = {
+        placement.row.id: placement for _, rows in targets for placement in rows
+    }  # fmt: skip
+    spared_panes = _spared_panes(report, placements)
     spared = {
-        (address, row.agent.project_id)
+        (placement.pane.address, placement.row.project_id)
         for row in report.failed
-        for address, _ in held[row.agent.id]
+        if isinstance(placement := placements.get(row.agent.id), Placed)
     }
-    # The spare rule follows the PANE, not only the project's current session
-    # name: a `rename` that failed open (or a hand rename) leaves an agent in an
-    # `asq-*` session that `_fleet_sessions` returns with no project, and under
-    # `--all` the prefix sweep killed it over a row this had just marked LEFT
-    # LIVE (review of #121, round 2). So a session is also spared when one of
-    # its panes is a row left live — asked of tmux only when there is such a
-    # row, so the ordinary path costs nothing extra.
-    # Keyed by (socket, pane id): pane ids are unique only within ONE tmux
-    # server (every server starts at %0), so a failed `%1` on the old socket
-    # must not spare an unrelated session holding `%1` on the current one
-    # (review of #121, round 3).
-    spared_panes: set[tuple[_Address, str]] = set().union(*held.values())
-    # The sessions killed are the ones the rows' launch records name, on the servers they
-    # place them (`_recorded_sessions`); a server only a row's store columns name is not
-    # swept under `--all` either, today's socket aside.
-    recorded = _recorded_sessions(targets, config)
-    placed = {*recorded, _Address(config.tmux_socket)}
+    taken: dict[_Address, set[str]] = {}
+    for project, rows in targets:
+        for session in _sessions_of(rows):
+            if not answering.get(session.address):
+                continue
+            taken.setdefault(session.address, set()).add(session.name)
+            qualified = f"{session.address}:{session.name}"
+            if (session.address, project.id) in spared:
+                if qualified not in report.sessions_left_up:
+                    report.sessions_left_up.append(qualified)
+                _not_down(report, project.id)
+                continue
+            _take_down_session(session, project.id, spared_panes, report, expected=True)
+    _remove_lingering_windows(lingering, answering, report)
+    if not every:
+        return
     for socket in sockets:
-        if not answering.get(socket) or socket not in placed:
+        if not answering.get(socket):
             continue
         srv = _server_at(socket, config)
         try:
-            here = _fleet_sessions(srv, recorded.get(socket, []), every=every)
+            swept = _swept_sessions(srv, socket, config, skip=taken.get(socket, set()))
         except TmuxError as exc:
             # tmux stopped answering between the probe and here (it can leave
             # PATH mid-run): nothing on this socket can be reported killed, and
             # nothing may be CLAIMED killed either — INCLUDING by omission. An
             # empty report over a surviving session read as "✓ fleet shut down"
             # (review of #121, round 2), so the failure is recorded as a failed
-            # session kill and every project with a row on this socket is not
-            # confirmed down.
+            # session kill and every project in scope is not confirmed down.
             report.sessions_failed.append(f"{socket}:* (could not list sessions: {exc})")
-            for project, agents in targets:
-                if any(_address(agent, config) == socket for agent in agents) or (
-                    project.codename and every
-                ):
-                    _not_down(report, project.id)
+            for project, _ in targets:
+                _not_down(report, project.id)
             continue
-        for name, project_id, expected in here:
-            qualified = f"{socket}:{name}"
-            if project_id is not None and (socket, project_id) in spared:
-                report.sessions_left_up.append(qualified)
-                _not_down(report, project_id)
+        for session in swept:
+            _take_down_session(session, None, spared_panes, report, expected=True)
+
+
+def _lately_ended(
+    targets: Sequence[tuple[ProjectInfo, list[Placement]]],
+) -> list[tuple[ProjectInfo, list[Placement]]]:
+    """The rows of the projects in scope that ended within :data:`RECENTLY_ENDED`, where
+    their launch records place them, each record read once: whose dead windows
+    (``remain-on-exit``) the kill phase removes (:func:`_remove_lingering_windows`). Read
+    with the snapshot, before anything is stopped, so the kill phase opens no store: one
+    that failed after the rows were stopped raised out of the run with the sessions up
+    (review r7 of #113, finding 4), and nothing older is read (finding 10)."""
+    cutoff = _now() - RECENTLY_ENDED
+    with store_session() as store:
+        ended = [
+            (project, [
+                row for row in store.fleet_agents(project.id, live_only=False)
+                if row.ended_at is not None and row.ended_at >= cutoff
+            ])
+            for project, _ in targets
+        ]  # fmt: skip
+    config = settings()
+    return [(project, _resolve_all(rows, config)) for project, rows in ended]
+
+
+def _remove_lingering_windows(
+    lingering: Sequence[tuple[ProjectInfo, list[Placement]]],
+    answering: Mapping[_Address, bool],
+    report: ShutdownReport,
+) -> None:
+    """Remove the dead windows of ``lingering``'s rows (:func:`_lately_ended`) where their
+    launch records place them: a session only such windows held, which no live row's record
+    names, stood under "✓ fleet shut down" (review of the fold). A pane that is not dead,
+    or gone, or on a server younger than its record, is left alone; a dead one tmux would
+    not remove is reported, the project not confirmed down (review r7 of #113, finding 9)."""
+    for project, rows in lingering:
+        for placed in _placed_only(rows):
+            pane = placed.pane
+            if not answering.get(pane.address):
                 continue
-            _take_down_session(
-                srv, socket, name, project_id, spared_panes, report, expected=expected
-            )
+            try:
+                facts = pane.facts_or_raise()
+                if facts is None or not facts.dead or pane.outlived(pane.server().started_at()):
+                    continue
+                pane.kill()
+            except TmuxError as exc:
+                where = placed.session.name if placed.session is not None else "*"
+                report.sessions_failed.append(
+                    f"{pane.address}:{where} (the dead window {pane.pane_id} of "
+                    f"{placed.row.label} could not be removed: {exc})"
+                )
+                _not_down(report, project.id)
 
 
 def _take_down_session(
-    srv: TmuxServer,
-    socket: _Address,
-    name: str,
+    session: PlacedSession,
     project_id: str | None,
     spared_panes: set[tuple[_Address, str]],
     report: ShutdownReport,
@@ -4340,12 +4753,12 @@ def _take_down_session(
 ) -> None:
     """Take one of the fleet's sessions down, or say why it stands — the ONE sequence.
 
-    Presence first. A name asked for just-in-case (today's socket, no row of
-    this project on it; ``expected=False``) that cannot be asked is not a failed
-    kill and marks nothing not-confirmed-down: nothing was claimed to be there.
-    Round 4 silenced only the confirmed-absent answer while widening the probe to
-    every in-scope project, so a transient ``TmuxError`` on a socket the project
-    never lived on read as PARTLY shut down and exit 1 (round 5). A session that
+    Presence first, as tmux CONFIRMS it (and, for a session a record names, on the server
+    that record was written on). A name asked for just-in-case (``expected=False``) that
+    cannot be asked is not a failed kill and marks nothing not-confirmed-down: nothing was
+    claimed to be there. Round 4 silenced only the confirmed-absent answer while widening
+    the probe to every in-scope project, so a transient ``TmuxError`` on a socket the
+    project never lived on read as PARTLY shut down and exit 1 (round 5). A session that
     IS there is spared when one of its panes is a row this run left live —
     killing it would end an agent tmux had just confirmed alive — and otherwise
     killed; a refused kill is a failed one, never a killed one.
@@ -4360,9 +4773,10 @@ def _take_down_session(
     """
     if absent_is_news is None:
         absent_is_news = expected
-    qualified = f"{socket}:{name}"
+    socket = session.address
+    qualified = f"{socket}:{session.name}"
     try:
-        present = srv.has_session_or_raise(name)
+        present = session.present_or_raise()
     except TmuxError as exc:
         if not expected:
             return
@@ -4372,12 +4786,12 @@ def _take_down_session(
         _not_down(report, project_id)
         return
     if not present:
-        if absent_is_news:
+        if absent_is_news and qualified not in report.sessions_absent:
             report.sessions_absent.append(qualified)
         return
     if any(spared_socket == socket for spared_socket, _ in spared_panes):
         try:
-            hosted = {(socket, window.pane_id) for window in srv.windows_or_raise(name)}
+            hosted = {(socket, window.pane_id) for window in session.panes_or_raise()}
         except TmuxError as exc:
             # Cannot tell whether a left-live pane lives here: not killed, and
             # said so — never a kill on a guess. The session IS there, so this
@@ -4392,7 +4806,7 @@ def _take_down_session(
             _not_down(report, project_id)
             return
     try:
-        srv.kill_session(name)
+        session.kill()
     except TmuxError:
         # Tried and did not happen: a wedged server times out at 30 s, and tmux
         # can leave PATH between the probe and the kill.
@@ -4539,7 +4953,7 @@ def _row_that_went_away(agent: FleetAgent, reason: str, report: ShutdownReport) 
 
 def _shutdown_row(
     project: ProjectInfo,
-    agent: FleetAgent,
+    placement: Placement,
     answering: Mapping[_Address, bool],
     report: ShutdownReport,
     *,
@@ -4548,7 +4962,7 @@ def _shutdown_row(
     unusable: str | None = None,
     held: Mapping[str, tuple[SocketAnswer, str, str]] | None = None,
     forget: bool = False,
-    config: FleetSettings | None = None,
+    beside: Sequence[Placement] = (),
 ) -> None:
     """Stop one row where its server answers; record it lost where it does not, unless its
     agent may still run (``held``, :func:`_unreached`): left live then, saying why and what
@@ -4569,9 +4983,23 @@ def _shutdown_row(
     what actually became of the row instead of guessing. ``unusable`` is why tmux could
     not be used under ``--forget`` (:func:`_shutdown_tmux`): no pane was asked, and only a
     row whose socket answers is kept.
+
+    The row is stopped where its launch record places it (``placement``). One no record
+    places is stopped only in a session a record of its project names (:func:`_stop_row`,
+    ``beside`` being the project's rows in the snapshot); refused, it is left live with
+    the reason, or under ``forget`` ended on the operator's word, as a row the fleet
+    cannot reach is (review r7 of #113, finding 1).
     """
-    address = _address(agent, config or settings())
-    if unusable is not None or not answering.get(address):
+    agent = placement.row
+    if isinstance(placement, Unplaced):
+        if unusable is not None:
+            _record_lost(agent, f"ended on your word (--forget), unchecked: {unusable}", report)
+            return
+        if _cannot_run(agent):
+            _record_lost(agent, _from_before_this_boot(placement), report)
+            return
+    address = placement.pane.address if isinstance(placement, Placed) else None
+    if address is not None and (unusable is not None or not answering.get(address)):
         unreached = (held or {}).get(agent.id)
         if unreached is not None and (unreached[0] == "answers" or not forget):
             _, why, way = unreached
@@ -4590,10 +5018,15 @@ def _shutdown_row(
         # later spawn reused. Whether it ended meanwhile is judged inside the
         # store session that ends it (`_stop_row` raises `NoSuchAgent` there),
         # not in a connection of its own a window ahead of it (round 5).
-        receipt = _stop_row(project, agent, force=force, grace=grace)
+        receipt = _stop_row(
+            project, agent, force=force, grace=grace, placement=placement, beside=beside
+        )
     except NoSuchAgent as exc:
         _row_that_went_away(agent, str(exc), report)
     except FleetError as exc:
+        if isinstance(placement, Unplaced) and forget:
+            _record_lost(agent, f"ended on your word (--forget): {exc}", report)
+            return
         report.failed.append(ShutdownRow(agent, str(exc)))
         _not_down(report, agent.project_id)
     except Exception as exc:  # a store write, a codename race — the kill phase still runs
@@ -4606,10 +5039,30 @@ def _shutdown_row(
         _count_release(report, receipt.agent, receipt.released, receipt.release_failed)
 
 
+def _cannot_run(row: FleetAgent) -> bool:
+    """Whether the agent of ``row``, which no launch record places, cannot be running:
+    spawned in another boot, or, recording none, before this boot started with its socket
+    gone (``tmux.server_may_run``, the rule ``uninstall`` asks). Only ever a reason to END
+    the row, never to type into or kill anything: a sandbox that wrote these columns
+    could end its row itself."""
+    with suppress(TmuxError):
+        return (
+            tmux_core.server_may_run(
+                server(), row.socket_path, row.boot_id, tmux_core.boot_id(), row.created_at
+            )
+            is None
+        )
+    return False
+
+
+def _from_before_this_boot(placement: Unplaced) -> str:
+    return f"{placement.why}, and it cannot be running: it was spawned before this boot"
+
+
 def _retire_late_panes(
-    late: Sequence[tuple[ProjectInfo, FleetAgent]],
+    late: Sequence[tuple[ProjectInfo, Placed]],
     report: ShutdownReport,
-    config: FleetSettings,
+    spared_panes: set[tuple[_Address, str]],
 ) -> None:
     """Take down what a row that exited LATE left standing, or report what survives.
 
@@ -4624,53 +5077,35 @@ def _retire_late_panes(
     So the pane is removed and its session reconciled — with the kill phase's own
     spare rule, because a session can outlive the pane by holding a row this run
     LEFT LIVE, and killing it there would end an agent tmux had just confirmed
-    alive. Anything tmux will not confirm gone is reported, never assumed.
+    alive. Anything tmux will not confirm gone is reported, never assumed: a kill tmux
+    refused included (review r7 of #113, finding 9). Only rows their launch records place
+    come here, with the session the record names by tmux's id: a late row no record
+    places is left live and reported (:func:`_record_late_rows`), never taken down by
+    ``asq-<codename>``, a name read from the store (r7, finding 6).
     """
     if not late:
         return
-    spared_panes: set[tuple[_Address, str]] = set().union(
-        *(_panes_of(row.agent, config) for row in report.failed)
-    )
-    sessions: list[tuple[_Address, str, str]] = []  # (socket, session, project id)
-    for project, row in late:
-        # Where its launch record places it, and its session the record's; a row with no
-        # record (spawned before this version) by its row, its dead pane only.
-        placement = _placement(row)
-        agent = placement.agent
-        window = placement.record.window if placement.record is not None else None
-        if window is not None and window.session:
-            name = window.session
-        else:
-            name = session_name(project.codename) if project.codename else "*"
-        address = _address(agent, config)
-        srv = _server_at(address, config)
-        if placement.record is None:
-            if not _kill_dead(srv, agent.pane_id):
-                continue
-            entry = (address, name, project.id)
-            if project.codename and entry not in sessions:
-                sessions.append(entry)
-            continue
+    sessions: list[tuple[PlacedSession, str]] = []  # (session, project id)
+    for project, placed in late:
+        pane = placed.pane
+        name = placed.session.name if placed.session is not None else "*"
         try:
-            srv.kill_window(agent.pane_id)
+            pane.kill()
         except TmuxError as exc:
             report.sessions_failed.append(
-                f"{address}:{name} (the dead pane {agent.pane_id} of a row that "
+                f"{pane.address}:{name} (the dead pane {pane.pane_id} of a row that "
                 f"exited late could not be removed: {exc})"
             )
-            _not_down(report, agent.project_id)
+            _not_down(report, project.id)
             continue
-        entry = (address, name, project.id)
-        if project.codename and entry not in sessions:
-            sessions.append(entry)
-    for socket, name, project_id in sessions:
+        if placed.session is not None and (placed.session, project.id) not in sessions:
+            sessions.append((placed.session, project.id))
+    for session, project_id in sessions:
         # The one take-down sequence. The session IS expected — its pane was just
         # removed, so a refusal to re-check is a failed kill — but an absent one is
         # the ordinary shape here: the window took the session with it, as tmux does.
         _take_down_session(
-            _server_at(socket, config),
-            socket,
-            name,
+            session,
             project_id,
             spared_panes,
             report,
@@ -4686,7 +5121,7 @@ def _record_late_rows(
     report: ShutdownReport,
     config: FleetSettings,
     *,
-    snapshot: Sequence[tuple[ProjectInfo, list[FleetAgent]]] = (),
+    snapshot: Sequence[tuple[ProjectInfo, list[Placement]]] = (),
 ) -> None:
     """Rows that appeared DURING the run, re-read on EVERY socket in scope.
 
@@ -4704,6 +5139,10 @@ def _record_late_rows(
     DEAD is ended with its status AND removed (:func:`_retire_late_panes`) —
     otherwise the window it kept would hold its session, and the session the
     server, under a report claiming the fleet is down.
+
+    Asked where its launch record places it. A late row no record places is asked about
+    nowhere: it is left live and reported, as ``stop`` refuses it (review r7 of #113,
+    finding 6).
     """
     try:
         targets = _shutdown_targets(project)
@@ -4737,12 +5176,24 @@ def _record_late_rows(
             fresh[socket] = srv.reachable()
         except TmuxError:  # TmuxUnavailable included
             fresh[socket] = None
-    late_dead: list[tuple[ProjectInfo, FleetAgent]] = []
-    for current, agents in targets:
-        for agent in agents:
+    late_dead: list[tuple[ProjectInfo, Placed]] = []
+    for current, placements in targets:
+        for placement in placements:
+            agent = placement.row
             if agent.id in handled:
                 continue
-            address = _address(agent, config)
+            if isinstance(placement, Unplaced):
+                report.failed.append(
+                    ShutdownRow(
+                        agent,
+                        f"it was spawned during the shutdown and {placement.why}, so no pane "
+                        "of its may be asked about or killed — its row is left live; end it "
+                        "in its own window, then `aisquare fleet shutdown --forget` ends it",
+                    )
+                )
+                _not_down(report, agent.project_id)
+                continue
+            address = placement.pane.address
             reachable = fresh.get(address)
             if reachable is None:
                 report.failed.append(
@@ -4758,7 +5209,7 @@ def _record_late_rows(
             if reachable is False:
                 # The rule every other row is held to (`_unreached`); never forgotten, as no
                 # plan the operator saw named it.
-                unreached = _unreached(agent, config, tmux_core.boot_id())
+                unreached = _unreached(placement, tmux_core.boot_id())
                 if unreached is not None:
                     report.failed.append(
                         ShutdownRow(
@@ -4777,7 +5228,7 @@ def _record_late_rows(
                 )
                 continue
             try:
-                facts = _server_at(address, config).pane_facts_or_raise(agent.pane_id)
+                facts = placement.pane.facts_or_raise()
             except TmuxError as exc:
                 # "Could not query" is not "dead" (review of #121, round 2): a
                 # timeout on the pane of an agent another terminal just spawned
@@ -4793,7 +5244,7 @@ def _record_late_rows(
                 )
                 _not_down(report, agent.project_id)
                 continue
-            if facts is not None and facts.pane_id == agent.pane_id and not facts.dead:
+            if facts is not None and facts.pane_id == placement.pane.pane_id and not facts.dead:
                 report.failed.append(
                     ShutdownRow(
                         agent,
@@ -4814,16 +5265,22 @@ def _record_late_rows(
                 # …and the pane tmux is still HOLDING is not left standing under a
                 # report that says the fleet is down (round 9): see
                 # :func:`_retire_late_panes`, run once the left-live set is final.
-                late_dead.append((current, agent))
+                late_dead.append((current, placement))
                 continue
             _record_lost(
                 agent, "it was spawned during the shutdown; its session was killed under it", report
             )
-    _retire_late_panes(late_dead, report, config)
+    placed_by_id = {
+        placement.row.id: placement
+        for scan in (snapshot, targets)
+        for _, placements in scan
+        for placement in placements
+    }
+    _retire_late_panes(late_dead, report, _spared_panes(report, placed_by_id))
 
 
 def _clear_pause(
-    targets: Sequence[tuple[ProjectInfo, list[FleetAgent]]], report: ShutdownReport
+    targets: Sequence[tuple[ProjectInfo, list[Placement]]], report: ShutdownReport
 ) -> None:
     """Clear each project's ``fleet-paused`` signal: the fleet it paused is gone.
 
@@ -4878,7 +5335,7 @@ def _clear_pause(
 def _reconcile_pauses(
     store: ContextStore,
     team: Any,
-    targets: Sequence[tuple[ProjectInfo, list[FleetAgent]]],
+    targets: Sequence[tuple[ProjectInfo, list[Placement]]],
     visible: Collection[str],
     report: ShutdownReport,
 ) -> list[str]:
@@ -4942,83 +5399,97 @@ def shutdown_plan(project: ProjectInfo | None = None, *, forget: bool = False) -
     config = settings()
     unusable = _shutdown_tmux(config, forget=forget)
     targets = _shutdown_targets(project)
+    rows = [placement.agent for _, placements in targets for placement in placements]
     if unusable is not None:
-        rows = [agent for _, agents in targets for agent in agents]
         held_live = {
             agent_id: f"{why} — {way}"
-            for agent_id, (answer, why, way) in _held_rows(
-                targets, {}, config, unusable=True
-            ).items()
+            for agent_id, (answer, why, way) in _held_rows(targets, {}, unusable=True).items()
             if answer == "answers"  # what --forget may not end (_shutdown_row)
         }
         return ShutdownPlan(
-            projects=[current for current, agents in targets if agents],
+            projects=[current for current, placements in targets if placements],
             agents=rows,
             tmux_unusable=unusable,
             held=held_live,
             # Every other row is ended unchecked (`_record_lost`), so the plan says so: a
             # script reading `--json`'s `lost` saw nothing being ended (round 29 of #257).
             lost={
-                agent.id: str(_address(agent, config))
-                for agent in rows
-                if agent.id not in held_live
+                placement.row.id: _where(placement)
+                for _, placements in targets
+                for placement in placements
+                if placement.row.id not in held_live
             },
         )
     sockets = _shutdown_sockets(targets, config)
     _refuse_from_inside(sockets, config)
     answering = _shutdown_probe(sockets, config)
     sessions: list[str] = []
-    recorded = _recorded_sessions(targets, config)  # as `_kill_fleet_sessions` names them
-    placed = {*recorded, _Address(config.tmux_socket)}
-    for socket in sockets:
-        if not answering[socket] or socket not in placed:
-            continue
-        srv = _server_at(socket, config)
-        try:
-            # The STRICT check, and no suppression around the enumeration. The
-            # lenient `has_session` reads EVERY non-zero exit as "not there", and
-            # `suppress(TmuxError)` dropped a whole socket's listing: with two
-            # sessions and one transient failure the operator confirmed a plan
-            # naming one session and the run then killed both, and a scope holding
-            # only the inaccessible session read "nothing to shut down" (review of
-            # #121, round 9). A plan that cannot be completed is refused, not
-            # silently shortened — nothing has been touched at this point.
-            for name, _, expected in _fleet_sessions(
-                srv, recorded.get(socket, []), every=project is None
-            ):
-                try:
-                    present = srv.has_session_or_raise(name)
-                except TmuxError:
-                    if not expected:
-                        continue  # asked just in case; a plan is not refused over it (round 5)
-                    raise
-                if present:
-                    sessions.append(f"{socket}:{name}")
-        except TmuxError as exc:
-            raise FleetError(
-                f"could not list the fleet's sessions on socket '{socket}' ({exc}) — refusing "
-                "to show a plan that may be short of what a shutdown would kill; try again "
-                "once tmux answers"
-            ) from exc
+    try:
+        # The STRICT check, and no suppression around the enumeration. The
+        # lenient `has_session` reads EVERY non-zero exit as "not there", and
+        # `suppress(TmuxError)` dropped a whole socket's listing: with two
+        # sessions and one transient failure the operator confirmed a plan
+        # naming one session and the run then killed both, and a scope holding
+        # only the inaccessible session read "nothing to shut down" (review of
+        # #121, round 9). A plan that cannot be completed is refused, not
+        # silently shortened — nothing has been touched at this point. The sessions
+        # are the ones the run takes down (`_kill_fleet_sessions`): those the live
+        # rows' launch records name, by tmux's id, and under `--all` every `asq-`
+        # session tmux lists.
+        taken: dict[_Address, set[str]] = {}
+        for _, placements in targets:
+            for session in _sessions_of(placements):
+                if answering.get(session.address) and session.present_or_raise():
+                    sessions.append(f"{session.address}:{session.name}")
+                    taken.setdefault(session.address, set()).add(session.name)
+        if project is None:
+            for socket in sockets:
+                if not answering[socket]:
+                    continue
+                skip = taken.get(socket, set())
+                for swept in _swept_sessions(_server_at(socket, config), socket, config, skip=skip):
+                    sessions.append(f"{socket}:{swept.name}")
+    except TmuxError as exc:
+        raise FleetError(
+            f"could not list the fleet's sessions ({exc}) — refusing to show a plan that may "
+            "be short of what a shutdown would kill; try again once tmux answers"
+        ) from exc
     held = {
         agent_id: (why, way)
-        for agent_id, (answer, why, way) in _held_rows(targets, answering, config).items()
+        for agent_id, (answer, why, way) in _held_rows(targets, answering).items()
         if not forget or answer == "answers"  # what --forget may not end (_shutdown_row)
     }
-    rows = [agent for _, agents in targets for agent in agents]
-    addresses = {agent.id: _address(agent, config) for agent in rows}
+    # A row no record places whose agent cannot be running is recorded lost (`_shutdown_row`).
+    lost = {
+        placement.row.id: _where(placement)
+        for _, placements in targets
+        for placement in placements
+        if isinstance(placement, Unplaced) and _cannot_run(placement.row)
+    }
     return ShutdownPlan(
-        projects=[current for current, agents in targets if agents],
+        projects=[current for current, placements in targets if placements],
         agents=rows,
         sessions=sessions,
         absent_sockets=[str(socket) for socket in sockets if not answering[socket]],
         held={agent_id: f"{why} — {way}" for agent_id, (why, way) in held.items()},
         lost={
-            agent.id: str(addresses[agent.id])
-            for agent in rows
-            if not answering[addresses[agent.id]] and agent.id not in held
+            **lost,
+            **{
+                placement.row.id: str(placement.pane.address)
+                for _, placements in targets
+                for placement in _placed_only(placements)
+                if not answering[placement.pane.address] and placement.row.id not in held
+            },
         },
     )
+
+
+def _where(placement: Placement) -> str:
+    """Where a plan says a row is asked: its record's server, or, for a row no record
+    places, that none does."""
+    if isinstance(placement, Placed):
+        return str(placement.pane.address)
+    return f"nowhere: {placement.why}"
 
 
 def shutdown(
@@ -5093,35 +5564,44 @@ def shutdown(
     try:
         unusable = _shutdown_tmux(config, forget=forget)
         targets = _shutdown_targets(project, say=True)
+        lingering = _lately_ended(targets)
         sockets = _shutdown_sockets(targets, config)
         held: dict[str, tuple[SocketAnswer, str, str]] = {}
         if unusable is None:
             _refuse_from_inside(sockets, config)
             answering = _shutdown_probe(sockets, config)
             report.servers_absent.extend(str(socket) for socket in sockets if not answering[socket])
-            held = _held_rows(targets, answering, config)
+            held = _held_rows(targets, answering)
         else:
             answering = dict.fromkeys(sockets, False)  # none asked: nothing stopped or killed
-            held = _held_rows(targets, answering, config, unusable=True)
+            held = _held_rows(targets, answering, unusable=True)
         handled: set[str] = set()
 
         def finish() -> None:
             nonlocal phase
             phase = "during the kill phase"
-            _kill_fleet_sessions(targets, sockets, answering, report, config, every=project is None)
+            _kill_fleet_sessions(
+                targets,
+                sockets,
+                answering,
+                report,
+                config,
+                every=project is None,
+                lingering=lingering,
+            )
             phase = "during the final scan for rows spawned during the shutdown"
             _record_late_rows(project, handled, report, config, snapshot=targets)
             phase = "while reconciling the fleet-paused signals"
             _clear_pause(targets, report)
 
         try:
-            for current, agents in targets:
-                for agent in agents:
-                    phase = f"while stopping {agent.label}"
-                    handled.add(agent.id)
+            for current, placements in targets:
+                for placement in placements:
+                    phase = f"while stopping {placement.row.label}"
+                    handled.add(placement.row.id)
                     _shutdown_row(
                         current,
-                        agent,
+                        placement,
                         answering,
                         report,
                         force=force,
@@ -5129,7 +5609,7 @@ def shutdown(
                         unusable=unusable,
                         held=held,
                         forget=forget,
-                        config=config,
+                        beside=placements,
                     )
         except Exception:
             # The kill phase runs even if a row could not be recorded: "shutdown
@@ -5652,87 +6132,6 @@ def _unrecorded_refusal(why: str) -> str:
     )
 
 
-@dataclass(frozen=True)
-class _Placement:
-    """Where a row's window is, as its launch record places it (:func:`_placement`)."""
-
-    agent: FleetAgent
-    """The row with its window, and its agent, where its record places them; the row as
-    the store has it when no record places one (:attr:`record` ``None``)."""
-    record: launch_seal.LaunchRecord | None
-    """Its launch record, when that places the window."""
-    why: str | None = None
-    """Why the row is not its record's: no usable record (:attr:`record` ``None``), or the
-    fields the row was rewritten in; ``None`` when the row is its record's."""
-
-
-def _placement(row: FleetAgent, record: launch_seal.LaunchRecord | str | None = None) -> _Placement:
-    """``row`` as its launch record places it (``launch_seal.WindowPlace``): the server,
-    the pane, the boot, the time and the agent are the record's, as tmux answered the
-    spawner and as the spawner resolved the agent, never the row's ``pane_id``,
-    ``tmux_socket``, ``socket_path`` and ``agent``, which an agent's sandbox writes.
-
-    Pointed at any pane of the user's, ``tell`` typed there and ``stop`` typed ``/exit``
-    and killed that window (review r5 of #113, finding 1); with its ``agent`` set to
-    another's, the readiness check that keeps an Enter out of Codex's dialogs was the
-    other agent's, and skipped (r6, finding 1). What reads the result: typing (``tell``,
-    the nudge) only into a row that is its record's (``why`` ``None``); a stop, and the
-    replays and ``shutdown`` through it, into the record's place even for a rewritten
-    row, saying so (r6, finding 4); a row with no record to place it (spawned before
-    this version) is stopped by killing its window in its project's fleet session, no
-    command typed (r6, finding 6); the listings observe the record's place. ``record`` is
-    one already read (r6, finding 11).
-    """
-    record = launch_seal.read(row.id) if record is None else record
-    if isinstance(record, str):
-        return _Placement(row, None, record)
-    place = record.window
-    if place is None:
-        why = (
-            "its launch record does not say which pane is its (it was spawned by an aisquare "
-            "that recorded none)"
-        )
-        return _Placement(row, None, why)
-    if record.project_id != row.project_id:
-        return _Placement(row, None, "its launch record is another project's")
-    row_path = str(row.socket_path) if row.socket_path is not None else None
-    differ = [
-        f"{field} {mine!r} where its launch record has {recorded!r}"
-        for field, mine, recorded in (
-            ("tmux socket", row.tmux_socket, place.tmux_socket),
-            ("socket path", row_path, place.socket_path),
-            ("pane", row.pane_id, place.pane_id),
-            ("agent", row.agent, record.agent),
-        )
-        if mine != recorded
-    ]
-    # Every field that differs, both sides: a socket name alone rewritten printed the
-    # same path twice (SMOKE4).
-    rewritten = f"its row was rewritten in the store: {'; '.join(differ)}" if differ else None
-    placed = row.model_copy(
-        update={
-            "tmux_socket": place.tmux_socket,
-            "pane_id": place.pane_id,
-            "socket_path": Path(place.socket_path) if place.socket_path is not None else None,
-            "boot_id": place.boot_id,
-            "created_at": place.created_at,
-            "agent": record.agent,
-        }
-    )
-    return _Placement(placed, record, rewritten)
-
-
-def _panes_of(agent: FleetAgent, config: FleetSettings) -> set[tuple[_Address, str]]:
-    """Every ``(server, pane)`` a row ``shutdown`` leaves live may be in, for its spare
-    rule: the one its row names and the one its launch record places, which differ for a
-    rewritten row (:func:`_placement`), whose agent runs on in the second."""
-    placed = _placement(agent).agent
-    return {
-        (_address(agent, config), agent.pane_id),
-        (_address(placed, config), placed.pane_id),
-    }
-
-
 class LaunchRefused(FleetError):
     """A replay of a row, or a queue for it, refused for want of a launch record to take
     (``core.launch_seal``). Its reason is on the board already (:func:`_say_refused`)."""
@@ -5767,14 +6166,6 @@ def _same_dir(one: Path, other: Path) -> bool:
         return one.resolve() == other.resolve()
     except (OSError, RuntimeError):  # RuntimeError: a symlink loop, on 3.11/3.12
         return False
-
-
-def _family(session: TeamSession | None) -> str | None:
-    """The adapter id of the agent whose own hook wrote ``session``, the board session a
-    row was joined to (one recorded before adapters is :data:`DEFAULT_AGENT`'s, the one
-    agent with hooks then); ``None`` with no session. Evidence, unlike the row's
-    ``agent``, which is what a spawn ASSUMED of a binary it could not name."""
-    return (session.agent or DEFAULT_AGENT) if session is not None else None
 
 
 def _exit_command(agent: FleetAgent) -> str:
@@ -5860,7 +6251,6 @@ def restart(
     start (review of #169, round 1).
     """
     with store_session() as store:
-        current = store.get_project(project.id) or project
         agent = store.fleet_agent_by_label(project.id, label, live_only=False)
         if agent is None:
             raise NoSuchAgent(
@@ -5921,10 +6311,17 @@ def restart(
     # wake-up held back for the replacement (below): a replacement that then never
     # starts owes the manager that wake-up.
     held_back = False
+    # Where its launch record places it: whether it runs is asked there, and a dead pane is
+    # ended there. Asked of the row, a row rewritten to name a dead window read "not
+    # running", was ended unstopped, and its replacement resumed the session the agent
+    # still ran at its record's pane (review r7 of #113, finding 3).
+    placement = resolve_place(agent, record)
     if agent.ended_at is None:
         # Measured BEFORE anything is done, so the operator does not read
-        # "stopped and restarted" for an agent that was not running.
-        was_running = _pane_alive(agent)
+        # "stopped and restarted" for an agent that was not running. A row no record
+        # places cannot be asked: it is stopped as `fleet stop` stops it (below), or
+        # refused there.
+        was_running = isinstance(placement, Placed) and _pane_alive(placement.pane)
         if was_running:
             # A hand-over, as `switch` runs one (#205): the agent comes straight back
             # on the same task, so its claims wait for the replacement — the same id
@@ -5958,8 +6355,7 @@ def restart(
             # a pane that is gone — or a tmux that will not say — goes through
             # `stop`, which ends a vanished pane's row and refuses on a silent tmux,
             # and wakes no manager either: it is the same agent coming back.
-            tmux_session = session_name(current.codename) if current.codename else None
-            ended = _end_dead_rows([agent], _observe_sockets([agent], tmux_session), nudge=False)
+            ended = _end_dead_rows([placement], _observe_sockets([placement]), nudge=False)
             if ended:
                 agent = ended[0]
             else:
@@ -6058,10 +6454,11 @@ def _refuse_a_permission_the_agent_cannot_take(
         raise FleetError(f"cannot restart {label!r}: {why} — nothing was stopped")
 
 
-def _pane_alive(agent: FleetAgent) -> bool:
-    """Whether the row's pane exists and has not died — ``False`` when tmux cannot say.
+def _pane_alive(pane: PlacedPane) -> bool:
+    """Whether the pane its launch record places exists and has not died — ``False`` when
+    tmux cannot say.
 
-    A pane under the row's id on a server younger than the row is another
+    A pane under the record's id on a server younger than the record is another
     agent's (:func:`_outlived`), so it is not the row's pane alive. When the
     server started is a second question, put once the pane has answered alive,
     and a refusal of that one judges nothing, as a start tmux does not report
@@ -6070,18 +6467,17 @@ def _pane_alive(agent: FleetAgent) -> bool:
     and its exit announced, then replaced with no hand-over (review of the
     #203 final-round fixes, F5).
     """
-    srv = server_of(agent)
     try:
-        facts = srv.pane_facts(agent.pane_id)
+        facts = pane.facts()
     except TmuxError:
         return False
     if facts is None or facts.dead:
         return False
     try:
-        started = srv.started_at()
+        started = pane.server().started_at()
     except TmuxError:
         started = None
-    return not _outlived(agent, started)
+    return not pane.outlived(started)
 
 
 def project_of(agent: FleetAgent) -> ProjectInfo:
@@ -6290,11 +6686,13 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
         else:
             projects = store.list_projects(all=True)  # a captured directory can hold agents
         for current in projects:
-            # Observed and ended where their launch records place them (`_placement`).
-            live = [_placement(row).agent for row in store.fleet_agents(current.id, live_only=True)]
+            # Observed and ended where their launch records place them (`resolve_place`); a
+            # row no record places is asked about nowhere, and marked nothing.
+            live = _placed_only(
+                _resolve_all(store.fleet_agents(current.id, live_only=True), config)
+            )
             if live:
-                tmux_session = session_name(current.codename) if current.codename else None
-                views = _observe_sockets(live, tmux_session, config)
+                views = _observe_sockets(live)
                 if server_down:
                     for address, view in views.items():
                         if view is None:
@@ -6315,8 +6713,9 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
                                     absent[address] = False
                             if absent[address]:
                                 views[address] = {}  # no server: no panes
-                for agent in live:
-                    observed = _view(agent, views, config)
+                for placed in live:
+                    agent = placed.row
+                    observed = _view(placed, views)
                     if observed is None:
                         continue  # that server could not be asked: nothing is marked
                     pane = observed.get(agent.id)
@@ -6375,17 +6774,20 @@ def _emit_exit(store: ContextStore, agent: FleetAgent) -> None:
 
 
 def rename(project: ProjectInfo, codename: str, *, notes: list[str] | None = None) -> ProjectInfo:
-    """Set the fleet codename (validated, unique) and rename the tmux session with it.
+    """Set the fleet codename (validated, unique) and rename the tmux sessions with it.
 
-    The row is renamed even when tmux is unreachable — ``reap`` reconciles from
-    the panes themselves, which are addressed by id, not by session name — but
-    that fail-open is not free and no longer silent. A tmux session left under
-    the OLD name is what ``fleet attach`` (the plan's full-fidelity escape
-    hatch, §3.1) looks for and does not find, and a second ``rename`` cannot
-    repair it: it drives from the STORED codename, which is already the new
-    one. So ``notes`` collects what it cost, the way :class:`SpawnReceipt` does,
-    naming the session that still holds the old name and the one tmux command
-    that fixes it.
+    The sessions renamed are the ones the project's rows' launch records name, by tmux's
+    id (:attr:`Placed.session`), never ``asq-<old codename>``, a name read from the store
+    (review r7 of #113, finding 2): those are the project's (:func:`_session_to_join`),
+    and one taken down or joined later is found by its id, whatever it is called. The
+    records take the new name whether or not tmux could be told, so none names a session
+    by the old one (:func:`_rename_recorded_sessions`).
+
+    The row is renamed even when tmux is unreachable — the panes are addressed by
+    id, not by session name — but that fail-open is not free and no longer silent: a
+    session left under the OLD name is what ``tmux`` itself shows. So ``notes`` collects
+    what it cost, the way :class:`SpawnReceipt` does, naming the session that still holds
+    the old name and the one tmux command that fixes it.
     """
     if not codenames.is_codename(codename):
         raise FleetError(
@@ -6402,44 +6804,42 @@ def rename(project: ProjectInfo, codename: str, *, notes: list[str] | None = Non
             updated = store.set_codename(project.id, codename)
         except sqlite3.IntegrityError as exc:
             raise FleetError(f"codename {codename!r} is already taken by another project") from exc
+        rows = store.fleet_agents(project.id, live_only=False) if old else []
     if old:
-        srv = server()
+        config = settings()
         old_session, new_session = session_name(old), session_name(codename)
-        try:
-            if srv.has_session(old_session):
-                srv.rename_session(old_session, new_session)
-                _rename_recorded_session(project.id, srv.socket, old_session, new_session)
-        except TmuxError as exc:
-            if notes is not None:
-                notes.append(
-                    f"the codename is {codename}, but tmux could not be told ({exc}) — if a "
-                    f"session named {old_session} is still running this project's agents, "
-                    f"`aisquare fleet attach` looks for {new_session} and will refuse until "
-                    f"it is renamed: `tmux -L {srv.socket} rename-session -t ={old_session} "
-                    f"{new_session}` does that, and a second `aisquare fleet rename` will not "
-                    "(it renames from the stored codename, which is already the new one). "
-                    "`fleet ls`, `tell`, `stop` and `reap` are unaffected — they address "
-                    "panes by id"
-                )
+        placements = _placed_only(_resolve_all(rows, config))
+        for session in _sessions_of(placements):
+            try:
+                if session.present_or_raise():
+                    session.rename(new_session)
+            except TmuxError as exc:
+                if notes is not None:
+                    notes.append(
+                        f"the codename is {codename}, but tmux could not be told ({exc}) — its "
+                        f"session {session.name} on {session.address} keeps that name until it "
+                        f"is renamed: `tmux rename-session -t '{session.target}' {new_session}` "
+                        "does that, and a second `aisquare fleet rename` will not (it renames "
+                        "from the stored codename, which is already the new one). `fleet ls`, "
+                        "`tell`, `stop`, `shutdown` and `attach` are unaffected — they find "
+                        "panes and sessions by tmux's ids"
+                    )
+        _rename_recorded_sessions(placements, old_session, new_session)
     return updated
 
 
-def _rename_recorded_session(project_id: str, socket: str, old: str, new: str) -> None:
-    """The launch records of ``project_id``'s rows on the server ``socket`` names, whose
-    window tmux just moved from session ``old`` to ``new``, follow it: ``shutdown`` takes
-    down the session a record names (:func:`_recorded_sessions`). Written from here, outside
-    any sandbox; one that cannot be written keeps the old name, and ``shutdown`` leaves
-    that session up rather than kill another. Never raises."""
-    with contextlib.suppress(Exception):
-        with store_session() as store:
-            rows = store.fleet_agents(project_id, live_only=False)
-        for row in rows:
-            record = launch_seal.read(row.id)
-            if not isinstance(record, launch_seal.LaunchRecord) or record.window is None:
-                continue
-            window = record.window
-            if window.session == old and window.tmux_socket == socket:
-                launch_seal.placed(row.id, window.model_copy(update={"session": new}))
+def _rename_recorded_sessions(placements: Sequence[Placed], old: str, new: str) -> None:
+    """The launch records of ``placements`` that name their session ``old`` name it ``new``,
+    whether or not tmux renamed it: a record left on an old name named, once another project
+    took that codename, the other project's session (review r7 of #113, finding 2). The
+    session itself is found by tmux's id (``WindowPlace.session_id``), so the name is what
+    a report and ``attach`` call it. Written from here, outside any sandbox; one that
+    cannot be written keeps the old name. Never raises."""
+    for placed in placements:
+        window = placed.record.window
+        if window is not None and window.session == old:
+            with contextlib.suppress(Exception):
+                launch_seal.placed(placed.row.id, window.model_copy(update={"session": new}))
 
 
 def pause(project: ProjectInfo, *, session_ref: str | None = None) -> None:
@@ -6503,7 +6903,7 @@ def nudge_manager(project_id: str, *, reason: str) -> bool:
     ``list-panes`` for the pane's last-output time, on a path the debounce
     already bounds to one pass per :data:`NUDGE_DEBOUNCE`. And ``waiting`` must be
     at its prompt as ``tell`` decides it (:func:`_at_its_prompt`), the line typed as
-    ``tell`` types one (:func:`_type_line`): a Codex manager kept every nudge sent with
+    ``tell`` types one (:meth:`PlacedPane.type_line`): a Codex manager kept every nudge sent with
     its Enter in one burst unsent in its composer, and woke for none of them.
 
     A tmux that refuses to be asked is a writer that may not reach it: a command in
@@ -6542,7 +6942,7 @@ def deliver_owed_nudge(project_id: str) -> bool:
 def _nudge(project_id: str, *, owe: bool) -> bool:
     """:func:`nudge_manager`, leaving the nudge owed where tmux refused it when ``owe``;
     otherwise :func:`deliver_owed_nudge`'s, due only for unread news. Typed into the pane
-    the manager's launch record places, by its record's agent's rules (:func:`_placement`),
+    the manager's launch record places, by its record's agent's rules (:func:`resolve_place`),
     never its row's: a delivery runs from a sandboxed agent's own hooks, outside its
     sandbox, and the row is the sandbox's to write (review r5 of #113, finding 1; r6,
     finding 1)."""
@@ -6551,17 +6951,18 @@ def _nudge(project_id: str, *, owe: bool) -> bool:
             row = store.fleet_agent_by_label(project_id, MANAGER_LABEL, live_only=True)
             if row is None or row.session_id is None:
                 return False
-            placement = _placement(row)
-            if placement.why is not None:
+            placement = resolve_place(row)
+            why = placement.why if isinstance(placement, Unplaced) else placement.rewritten
+            if not isinstance(placement, Placed) or why is not None:
                 _say_refused(
                     project_id,
                     row,
                     "it is not woken",
-                    placement.why,
+                    why or "",
                     "it reads the board when prompted",
                 )
                 return False
-            manager = placement.agent  # its pane, its server and its agent: the record's
+            manager, pane = placement.agent, placement.pane  # its place and agent: the record's
             session = store.get_session(row.session_id)
             if session is None or session.ended_at is not None:
                 return False
@@ -6572,28 +6973,28 @@ def _nudge(project_id: str, *, owe: bool) -> bool:
             last = store.get_meta(key)
             if last is not None and now - datetime.fromisoformat(last) < NUDGE_DEBOUNCE:
                 return False
-            srv = server_of(manager)
+            srv = pane.server()
             try:
-                facts = srv.pane_facts_or_raise(manager.pane_id)
+                facts = pane.facts_or_raise()
             except TmuxError:
                 if owe:
                     store.set_meta(NUDGE_OWED + project_id, now.isoformat())
                 return False
             if facts is None or facts.dead or not _agent_running(facts.current_command):
                 return False
-            if _outlived(manager, srv.started_at()):
+            if pane.outlived(srv.started_at()):
                 return False  # the id is another agent's on a newer server
-            pane = _PaneView(
+            view = _PaneView(
                 facts.dead,
                 facts.dead_status,
                 facts.current_command,
-                _activity_times(srv).get(manager.pane_id),
+                _activity_times(srv).get(pane.pane_id),
             )
-            state, _ = _derive(manager, session, pane, observed=True, now=now)
-            if not _at_its_prompt(srv, manager, session, state, now):
+            state, _ = _derive(manager, session, view, observed=True, now=now)
+            if not _at_its_prompt(pane, manager, session, state, now):
                 return False
             store.set_meta(key, now.isoformat())
-            _type_line(srv, manager.pane_id, NUDGE_TEXT)
+            pane.type_line(NUDGE_TEXT)
             return True
     except Exception:
         return False
@@ -6606,26 +7007,28 @@ def attach_argv(project: ProjectInfo) -> list[str]:
     with its own "can't find session" — and the CLI ``exec``s this argv, so
     nothing here may hand over an attach that has nothing to attach to.
 
-    Asked of the servers the project's live agents are on, the manager's first, where their
-    spawns said they listened (:func:`_address`), as the Manager tab's attach line names
-    them. By the socket's name alone (``tmux -L``), a shell under another ``TMUX_TMPDIR``
-    asks another server: one with no such session refused with "spawn manager starts
-    one", which then refused for the live manager, and one with a session of that name was
-    attached to (round 29 of #257). A project with no live agent is asked where this
-    shell's tmux looks.
+    The session is one the project's live agents' launch records name, the manager's
+    first, by tmux's id on the server each record places it (:func:`resolve_place`): by
+    ``asq-<codename>``, a name read from the store, a swap of two projects' codenames
+    attached the human to the other project's agents, and typed their keys there (review
+    r7 of #113). By the socket's name alone (``tmux -L``), a shell under another
+    ``TMUX_TMPDIR`` asks another server (round 29 of #257). A project whose agents were
+    spawned before this version has no record to name its session: the refusal names the
+    tmux command that attaches to it by hand.
     """
     config = settings()
     srv = server(config)
     _require_tmux(srv)
     project = ensure_codename(project)
-    name = session_name(project.codename or codenames.codename_for(project.id))
     with store_session() as store:
         live = store.fleet_agents(project.id, live_only=True)
-    addresses = dict.fromkeys(_address(agent, config) for agent in _manager_first(live))
-    for candidate in [_server_at(address, config) for address in addresses] or [srv]:
-        if candidate.has_session(name):
-            return candidate.attach_argv(name)
+    for session in _sessions_of(_resolve_all(_manager_first(live), config)):
+        if session.present():
+            return session.attach_command()
+    name = session_name(project.codename or codenames.codename_for(project.id))
     raise FleetError(
-        f"no fleet session {name} for {_name(project)} — nothing to attach to; "
-        "`aisquare fleet spawn manager` starts one"
+        f"no fleet session a launch record of {_name(project)} names is running — nothing to "
+        "attach to; `aisquare fleet spawn manager` starts one. Agents spawned before this "
+        f"version run in a session no record names: `tmux -L {config.tmux_socket} attach -t "
+        f"={name}` attaches to it by hand"
     )

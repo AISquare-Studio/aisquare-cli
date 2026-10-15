@@ -1235,6 +1235,7 @@ class ContextStore(Protocol):
         since_seq: int | None = None,
         kind: str | None = None,
         task_id: str | None = None,
+        to_role: str | None = None,
         limit: int = 30,
     ) -> list[TeamEvent]: ...
     def latest_seq(self, project_id: str) -> int: ...
@@ -3166,6 +3167,7 @@ class SqliteStore:
         since_seq: int | None = None,
         kind: str | None = None,
         task_id: str | None = None,
+        to_role: str | None = None,
         limit: int = 30,
     ) -> list[TeamEvent]:
         """Matching events for ``team log``'s filters, oldest-first.
@@ -3175,8 +3177,9 @@ class SqliteStore:
         past that seq, so a client tracking the last seq it saw never skips
         events (the MCP ``team_log`` contract). Rides the ``(project_id,
         seq)`` index; ``since_iso`` compares stored ISO-8601 UTC strings
-        lexicographically (uniform format by construction). ``session_id`` is
-        exact — prefix resolution is the service layer's job.
+        lexicographically (uniform format by construction). ``session_id`` and
+        ``to_role`` (the role or label a note is addressed to) are exact — prefix
+        resolution is the service layer's job.
         """
         clauses = ["project_id = ?"]
         params: list[str | int] = [project_id]
@@ -3195,6 +3198,9 @@ class SqliteStore:
         if task_id is not None:
             clauses.append("task_id = ?")
             params.append(task_id)
+        if to_role is not None:
+            clauses.append("to_role = ?")
+            params.append(to_role)
         paging = since_seq is not None
         rows = self._conn.execute(
             f"SELECT {_EVENT_COLUMNS} FROM team_event "

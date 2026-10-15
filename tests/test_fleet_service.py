@@ -1520,6 +1520,28 @@ def test_a_claude_spawn_whose_session_never_starts_types_nothing_and_files_the_n
     assert "start on tsk_1" in team_service.hook_prompt_heartbeat(session, project.root)
 
 
+def test_the_first_note_to_a_new_agent_reaches_it_however_busy_the_board_was(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r4 of #113, finding 11: the notes a new session's cursor is kept before were
+    read as the NEWEST 200 notes since its row was spawned. An agent left at its dialog
+    on a busy board lost its earliest notes, the spawn's own prompt among them, which is
+    the loss the cursor exists to prevent. The first is read oldest-first now."""
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    agent = _coder(project)
+    session_id = agent.session_id
+    assert session_id is not None
+    team_service.add_note("start on tsk_1", to_role=agent.label, cwd=project.root)
+    for i in range(201):
+        team_service.add_note(f"unrelated {i}", cwd=project.root)
+    team_service.add_note("and rebase first", to_role=agent.label, cwd=project.root)
+
+    team_service.hook_session_start(session_id, project.root, "startup")
+
+    first = team_service.hook_prompt_heartbeat(session_id, project.root)
+    assert "start on tsk_1" in first, "its earliest note, before the 201 others"
+
+
 @pytest.mark.parametrize("starts_at", [PROMPT_TIMEOUT + 25, None])
 def test_a_claude_spawn_slow_to_start_with_no_dialog_waits_on_for_it(
     tmux: FakeTmux,

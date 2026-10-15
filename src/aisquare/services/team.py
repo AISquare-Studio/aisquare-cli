@@ -2645,17 +2645,25 @@ def _behind_notes_to_its_row(store: ContextStore, session: TeamSession) -> TeamS
     not started, a ``fleet spawn`` prompt its folder-trust dialog kept from being typed.
     No delta carried it, and the start's board showed it only while it was one of the
     last few events. Only this row's: a label is reused once its agent ends, and a
-    ``/clear``'s session (not a new start) read what came before. Fail-open: the cursor
-    stays where it was.
+    ``/clear``'s session (not a new start) read what came before. The first is read
+    oldest-first from the board's start, addressed to the label in the query: a window
+    of the newest notes since the spawn lost the earliest on a busy board, the spawn's
+    own prompt among them (review r4 of #113, finding 11). Fail-open: the cursor stays
+    where it was.
     """
     try:
         row = store.fleet_agent_for_session(session.project_id, session.id)
         if row is None:
             return session
         notes = store.filtered_events(
-            session.project_id, since_iso=row.created_at.isoformat(), kind="note", limit=200
+            session.project_id,
+            since_iso=row.created_at.isoformat(),
+            since_seq=0,
+            kind="note",
+            to_role=row.label,
+            limit=1,
         )
-        first = min((event.seq for event in notes if event.to_role == row.label), default=None)
+        first = notes[0].seq if notes else None
         if first is None or first > session.cursor:
             return session
         store.touch_session(session.id, cursor=first - 1)

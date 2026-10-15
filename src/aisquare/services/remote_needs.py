@@ -450,7 +450,8 @@ class NeedsSources:
     say. Asked only of an agent whose sub-agent waits on a prompt, or whose question or plan
     waits beside a call the screen cannot name (:func:`needs_from_agent`)."""
     pane_screen: Callable[[FleetAgentStatus], list[str] | None] = _needs_no_screen
-    """The rows the row's pane shows now (``capture-pane``); ``None``: tmux would not say.
+    """The rows the row's pane shows now (``capture-pane``); ``None``: a source with no screen
+    to show. One tmux could not show raises, a failed read (:func:`_needs_screen_read`).
     Asked only of an agent with more than one call pending, whose prompt on screen may be
     any of them (:func:`_needs_on_screen`)."""
     board_project: Callable[[ProjectInfo], str] = _needs_own_board
@@ -3054,14 +3055,28 @@ def needs_prompt_now(
 
 
 def _needs_screen_now(status: FleetAgentStatus) -> list[str] | None:
-    """The rows the pane of ``status``'s row shows now, on the server the row lives on;
-    ``None`` when tmux cannot say (a pane gone, a server not answering)."""
+    """The rows the pane of ``status``'s row shows now (:func:`_needs_screen_read`); ``None``
+    when tmux cannot say (a pane gone, a server not answering)."""
     from aisquare.core.tmux import TmuxError
 
     try:
-        return _needs_pane_server(status).capture(status.agent.pane_id).lines
+        return _needs_screen_read(status)
     except TmuxError:
         return None
+
+
+def _needs_screen_read(status: FleetAgentStatus) -> list[str]:
+    """The rows the pane of ``status``'s row shows now, on the server the row lives on; raises
+    ``TmuxError`` when tmux cannot say: the live sources' ``pane_screen``, whose failure is a
+    failed read of the scan (:class:`_NeedsReads`).
+
+    It answered ``None`` there, a screen that names no call, and a quick answer's
+    re-derivation (:func:`needs_agent_now`) no longer had the card about one of several
+    calls: a 409 ``stale`` "no longer shows that question", the card dropped from the page,
+    before :func:`needs_prompt_now` could answer the 503 that keeps it (review of #259,
+    round 11, 3/13). Unknown is not absent: the scan's last items stand, and an action's
+    check is a 503."""
+    return _needs_pane_server(status).capture(status.agent.pane_id).lines
 
 
 def _needs_pane_server(status: FleetAgentStatus) -> TmuxServer:
@@ -3162,7 +3177,7 @@ def live_needs_sources() -> NeedsSources:
         tmux_answers=needs_tmux_answers,
         session_event=needs_session_event,
         pane_output=needs_pane_output,
-        pane_screen=_needs_screen_now,
+        pane_screen=_needs_screen_read,
         board_project=needs_board_project,
     )
 

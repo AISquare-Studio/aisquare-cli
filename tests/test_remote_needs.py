@@ -80,6 +80,9 @@ from aisquare.services.transcript import (
 )
 from tests.remote_kit_helpers import base, make_client, make_runtime, receive_within, unlock
 
+_LIVE_NEEDS_SOURCES = remote_needs.live_needs_sources
+"""The live sources as the module defines them, which the ``live`` fixture replaces."""
+
 NOW = datetime(2026, 10, 7, 12, 0, tzinfo=UTC)
 BORN = NOW - timedelta(hours=1)
 PROJECT = ProjectInfo(id="prj_alpha", root=Path("/work/alpha"))
@@ -6056,6 +6059,53 @@ def test_an_answer_whose_screen_cannot_be_read_is_unknown_not_another_prompt(
     assert live.tmux.typed == []
     assert live.app.kit.lane_state["needs"].needs_lookup(card["id"]) is not None
     assert not any(" needs/answer " in line for line in live.audit())
+
+
+def test_an_answer_whose_rederivation_cannot_read_the_screen_keeps_its_card(
+    live: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 11, 3/13: the re-derivation before the screen check
+    (``needs_agent_now``) read the screen through the live sources, which turned a failed
+    capture into ``None``, a screen that names no call: the card about one of two calls was
+    not among the items, and the tap a 409 ``stale``, the card off the page, before
+    ``needs_prompt_now``'s 503 could keep it. A capture that fails is a failed read: 503,
+    nothing typed, the card kept."""
+    monkeypatch.setattr(remote_needs, "NEEDS_RESCAN_AFTER_ANSWER", 30.0)
+    live.runtime.set_allow_write(True)
+    called = datetime.now(UTC) - timedelta(minutes=1)
+    push, rm = replace(_PUSH, at=called), replace(_RM, at=called)
+    live.fleet.tails["/transcripts/coder-1.jsonl"] = _tail(push, rm, at=called)
+    live.fleet.screen = _screen_of(push, (push, rm))
+    card = live.card("permission")
+    assert card["id"] == needs_item_id(PROJECT.id, "permission", push.tool_use_id)
+
+    # The live sources' own screen reader, on the fake tmux, whose capture-pane now fails.
+    sources = replace(_sources(live.fleet), pane_screen=_LIVE_NEEDS_SOURCES().pane_screen)
+    monkeypatch.setattr(remote_needs, "live_needs_sources", lambda: sources)
+    live.tmux.screen = None
+    response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
+    assert (response.status_code, response.json()["error"]) == (503, "unavailable"), response.text
+    assert "can't find pane" in response.json()["message"]
+    assert live.tmux.typed == []
+    assert live.app.kit.lane_state["needs"].needs_lookup(card["id"]) is not None
+
+
+def test_the_live_screen_tmux_cannot_show_is_a_failed_read_not_an_empty_screen(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review of #259, round 11, 3/13: the live sources' ``pane_screen`` answered a capture
+    that failed with ``None``, which the scan took for a screen naming nothing. It raises, so
+    the scan's read fails (its last items stand, an action's check is a 503); the check
+    right before a quick answer's keys still reads it as unknown (``None``)."""
+    from aisquare.core.tmux import TmuxError
+
+    tmux = FakeTmux(reference=NOW)  # its screen is None: capture-pane fails
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: tmux)
+    row = _row()
+    status = _status(row, "attention", _session(row), socket_at=tmp_path / "asq")
+    with pytest.raises(TmuxError, match="can't find pane"):
+        remote_needs.live_needs_sources().pane_screen(status)
+    assert remote_needs._needs_screen_now(status) is None
 
 
 def test_an_answered_card_leaves_the_feed_at_once_as_a_dismissed_one_does(

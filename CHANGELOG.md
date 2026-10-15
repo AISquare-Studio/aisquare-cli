@@ -229,6 +229,13 @@ adapter.**
   a board note to the agent instead, and the receipt says how to go on; a new
   session's first prompt now carries the notes left for its agent before it
   started, which it missed once the board had moved on.
+- A Codex account at its limit shows its usage and its reset. At the limit
+  Codex records a reading with no windows after the account's own, which the
+  account then showed as "no rate-limit window", and the limit named no reset.
+  Usage now comes from the newest reading that has a window, and the limit
+  names the full window and when it resets. The newest reading is looked for in
+  more of the account's sessions, because `/clear` and quick limits leave
+  sessions without one.
 
 ## [0.8.0] - 2026-10-12
 

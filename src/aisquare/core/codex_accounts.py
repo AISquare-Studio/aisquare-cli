@@ -18,16 +18,20 @@ again on 0.162.1:
   ``event_msg`` records of type ``token_count`` carry ``rate_limits`` —
   ``{limit_id, primary: {used_percent, window_minutes, resets_at}, secondary:
   {…} | null, credits, plan_type, rate_limit_reached_type}``. The newest such
-  record under a home is that account's usage. There is no public usage
-  endpoint and none is invented: nothing here leaves the machine, so a reading
-  is as fresh as the account's last turn. A plan can have one window (a
+  record under a home that carries a window is that account's usage: at the
+  limit 0.162.1 records one more after it, ``limit_id`` ``premium`` with both
+  windows ``null``, which only says the limit was reached. There is no public
+  usage endpoint and none is invented: nothing here leaves the machine, so a
+  reading is as fresh as the account's last turn. A plan can have one window (a
   weekly ``primary`` and no ``secondary``) or two (five hours and a week).
 - **A limit** has no hook of its own (Claude Code's ``StopFailure``): it is
-  read from the end of the session's own rollout when a turn stops — a
-  ``rate_limit_reached_type`` on its newest ``token_count``, or an ``error``
-  event of this turn whose ``codex_error_info`` is ``usage_limit_reached`` or
-  whose message says the usage limit was hit (``You've hit your usage limit…``,
-  the text the 0.162.1 binary carries).
+  read from the end of the session's own rollout — a ``rate_limit_reached_type``
+  on its newest ``token_count``, or this turn's error saying so: an ``error``
+  event whose ``codex_error_info`` is ``usage_limit_reached`` (0.154.0), or the
+  turn's ``task_complete`` ``error`` whose ``codex_error_info`` is
+  ``usage_limit_exceeded`` (0.162.1), or either's message (``You've hit your
+  usage limit…``, the text the binary carries; ``You hit your spend cap set in
+  your workspace…``, the server's own).
 """
 
 from __future__ import annotations
@@ -64,11 +68,18 @@ TAIL_BYTES = 256 * 1024
 """How much of a rollout's end one read takes; doubled until a reading is found."""
 MAX_SCAN_BYTES = 32 * 1024 * 1024
 """A rollout read no further back than this: a long session records a reading per turn."""
-NEWEST_ROLLOUTS = 5
-"""How many of a home's newest rollouts are tried for a reading (an API-key session has none)."""
+NEWEST_ROLLOUTS = 20
+"""How many of a home's newest rollouts are tried for a reading. An API-key session has
+none, nor has a session that only ran ``/clear`` or hit its limit at once: in SMOKE3 the
+account's newest window was in the seventh rollout written last. Past the first reading,
+a rollout written before it was recorded is not read (:func:`newest_rate_limits`)."""
 
-LIMIT_ERROR_INFO = "usage_limit_reached"
-LIMIT_MESSAGE = "hit your usage limit"
+LIMIT_ERROR_INFOS = frozenset({"usage_limit_reached", "usage_limit_exceeded"})
+"""A limit error's ``codex_error_info``: an ``error`` event's on 0.154.0, the turn's
+``task_complete`` ``error``'s on 0.162.1 (measured at a team plan's spend cap)."""
+LIMIT_MESSAGES = ("hit your usage limit", "spend cap")
+"""What a limit error's message says (lowercased): ``You've hit your usage limit…``, the
+binary's own, and ``You hit your spend cap set in your workspace…``, the server's (0.162.1)."""
 CREDIT_LIMITS = frozenset({"workspace_owner_credits_depleted", "workspace_member_credits_depleted"})
 
 
@@ -271,8 +282,20 @@ def _session_and_week(windows: list[_Window]) -> tuple[_Window | None, _Window |
     return first, second
 
 
-def _rollouts(home: Path) -> list[Path]:
-    """The home's rollouts, most recently WRITTEN first — a resumed session appends to its own."""
+def _full(limits: Mapping[str, Any] | None) -> list[_Window]:
+    """The reading's windows at 100 %."""
+    windows = _windows(limits) if limits is not None else []
+    return [w for w in windows if w.percent is not None and w.percent >= 100]
+
+
+def _later(when: datetime | None, than: datetime | None) -> bool:
+    """``when`` is after ``than``, a reading with no time being older than any."""
+    return when is not None and (than is None or when > than)
+
+
+def _rollouts(home: Path) -> list[tuple[float, Path]]:
+    """The home's rollouts with their mtimes, most recently WRITTEN first — a resumed
+    session appends to its own."""
     root = home / "sessions"
     found: list[tuple[float, Path]] = []
     stack = [root]
@@ -290,21 +313,51 @@ def _rollouts(home: Path) -> list[Path]:
                     found.append((entry.stat().st_mtime, Path(entry.path)))
             except OSError:
                 continue
-    return [path for _mtime, path in sorted(found, key=lambda pair: pair[0], reverse=True)]
+    return sorted(found, key=lambda pair: pair[0], reverse=True)
 
 
-def newest_rate_limits(home: Path) -> tuple[Mapping[str, Any], datetime | None] | None:
-    """The newest ``rate_limits`` any session under ``home`` recorded, and when."""
-    for rollout in _rollouts(home)[:NEWEST_ROLLOUTS]:
-        for record in _records_from_end(rollout):
-            limits = _rate_limits(record)
-            if limits is not None:
-                return limits, _stamp(record)
+def _home_of(rollout: Path) -> Path | None:
+    """The ``CODEX_HOME`` a rollout was written in (``<home>/sessions/YYYY/MM/DD/``)."""
+    parents = rollout.parents
+    return parents[4] if len(parents) > 4 and parents[3].name == "sessions" else None
+
+
+def _newest_windowed(rollout: Path) -> tuple[Mapping[str, Any], datetime | None] | None:
+    """The newest ``rate_limits`` in the rollout that carries a window, and when.
+
+    Not simply the newest: at the limit Codex 0.162.1 records a second reading after the
+    account's, ``limit_id`` ``premium`` with both windows ``null`` and only its credits
+    and ``rate_limit_reached_type`` (measured at a team plan's spend cap), so the newest
+    reading of a full account said nothing of its windows (SMOKE3).
+    """
+    for record in _records_from_end(rollout):
+        limits = _rate_limits(record)
+        if limits is not None and _windows(limits):
+            return limits, _stamp(record)
     return None
 
 
+def newest_rate_limits(home: Path) -> tuple[Mapping[str, Any], datetime | None] | None:
+    """The newest ``rate_limits`` carrying a window any session under ``home`` recorded,
+    and when (:func:`_newest_windowed`).
+
+    Newest by when it was recorded, among the :data:`NEWEST_ROLLOUTS` rollouts written
+    last: the one written last may have recorded only the limit's windowless reading
+    since its own last window, older than another session's.
+    """
+    best: tuple[Mapping[str, Any], datetime | None] | None = None
+    for mtime, rollout in _rollouts(home)[:NEWEST_ROLLOUTS]:
+        if best is not None and best[1] is not None and mtime < best[1].timestamp():
+            break  # written last before that reading was recorded: nothing in it is newer
+        found = _newest_windowed(rollout)
+        if found is not None and (best is None or _later(found[1], best[1])):
+            best = found
+    return best
+
+
 def usage(account: ClaudeAccount, *, now: datetime | None = None) -> ClaudeUsage:
-    """The account's windows as its newest session recorded them — offline, no request.
+    """The account's windows as its sessions last recorded them (:func:`newest_rate_limits`)
+    — offline, no request.
 
     A window whose reset has passed since that reading has started again, and
     nobody has used this home since (the reading is the newest), so it reads 0 %
@@ -314,15 +367,11 @@ def usage(account: ClaudeAccount, *, now: datetime | None = None) -> ClaudeUsage
     if found is None:
         return ClaudeUsage(
             available=False,
-            reason="no Codex session on this account has recorded its limits yet",
+            reason="no Codex session on this account has recorded a rate-limit window yet",
         )
     limits, recorded_at = found
     moment = now or datetime.now(tz=UTC)
     session, week = _session_and_week(_windows(limits))
-    if session is None and week is None:
-        return ClaudeUsage(
-            available=False, reason="the newest Codex session recorded no rate-limit window"
-        )
 
     def read(window: _Window | None) -> tuple[float | None, datetime | None]:
         if window is None:
@@ -346,14 +395,32 @@ def usage(account: ClaudeAccount, *, now: datetime | None = None) -> ClaudeUsage
 # --- a limit, from the end of the session's rollout --------------------------------------------
 
 
+def _turn_error(record: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """The error a record says its turn ended on: an ``error`` event's payload (0.154.0),
+    or its ``task_complete``'s ``error`` (0.162.1); else ``None``."""
+    if _is_event(record, "error"):
+        return _payload(record)
+    if _is_event(record, "task_complete"):
+        error = _payload(record).get("error")
+        return error if isinstance(error, dict) else None
+    return None
+
+
+def _error_kind(error: Mapping[str, Any]) -> str | None:
+    """The error's ``codex_error_info``: a name, or an object of one name and its details."""
+    info = error.get("codex_error_info")
+    if isinstance(info, dict) and len(info) == 1:
+        info = next(iter(info))
+    return info if _has(info) else None
+
+
 def _limit_error(record: Mapping[str, Any]) -> bool:
-    if not _is_event(record, "error"):
+    error = _turn_error(record)
+    if error is None:
         return False
-    payload = _payload(record)
-    info = payload.get("codex_error_info")
-    message = payload.get("message")
-    return info == LIMIT_ERROR_INFO or (
-        isinstance(message, str) and LIMIT_MESSAGE in message.lower()
+    message = error.get("message")
+    return _error_kind(error) in LIMIT_ERROR_INFOS or (
+        isinstance(message, str) and any(said in message.lower() for said in LIMIT_MESSAGES)
     )
 
 
@@ -361,15 +428,20 @@ def limit_from_transcript(path: Path, *, now: datetime | None = None) -> LimitNo
     """The usage limit the rollout's end records, or ``None`` when its newest turn hit none.
 
     Limited when the newest ``token_count`` names a ``rate_limit_reached_type``,
-    or when an ``error`` event since the newest turn began (``task_started``)
-    says the usage limit was reached. The window and its reset come from the
-    newest ``rate_limits``: of the windows at 100 %, the one that lifts LAST
-    (``session`` for a window under a day, ``weekly`` for longer); depleted
-    credits are the ``credits`` window; ``usage`` with no reset when no window
-    reads full. A recorded limit whose every full window has since reset — with
-    no limit error in the newest turn — is over, and reads ``None``.
+    or when the newest turn (since its ``task_started``) ended on the limit's error
+    (:func:`_limit_error`). The window and its reset come from the newest reading that
+    carries windows (:func:`_newest_windowed`): of its windows at 100 %, the one that
+    lifts LAST (``session`` for a window under a day, ``weekly`` for longer). Where none
+    of the rollout's own reads full, a newer reading of the same home's (another of the
+    account's sessions, :func:`newest_rate_limits`) is asked too: the session that hit
+    the limit may not have recorded the window's last climb. Depleted credits are the
+    ``credits`` window; ``usage`` with no reset when no window reads full. A recorded
+    limit whose every full window has since reset — with no limit error in the newest
+    turn — is over, and reads ``None``.
     """
-    limits: Mapping[str, Any] | None = None
+    reached: Any = None
+    newest = False  # the newest reading was seen; it alone says whether one was reached
+    windowed: tuple[Mapping[str, Any], datetime | None] | None = None
     errored = False
     turn_open = True  # still reading records of the newest turn
     for record in _records_from_end(path):
@@ -377,16 +449,22 @@ def limit_from_transcript(path: Path, *, now: datetime | None = None) -> LimitNo
             errored = True
         if _is_event(record, "task_started"):
             turn_open = False
-        if limits is None:
-            limits = _rate_limits(record)
-        if limits is not None and not turn_open:
+        limits = _rate_limits(record)
+        if limits is not None and not newest:
+            newest = True
+            reached = limits.get("rate_limit_reached_type")
+        if limits is not None and windowed is None and _windows(limits):
+            windowed = (limits, _stamp(record))
+        if not turn_open and newest and (windowed is not None or not (_has(reached) or errored)):
             break
-    reached = limits.get("rate_limit_reached_type") if limits is not None else None
     if not _has(reached) and not errored:
         return None
     moment = now or datetime.now(tz=UTC)
-    windows = _windows(limits) if limits is not None else []
-    full = [w for w in windows if w.percent is not None and w.percent >= 100]
+    full = _full(windowed[0]) if windowed is not None else []
+    home = _home_of(path) if not full else None
+    account = newest_rate_limits(home) if home is not None else None
+    if account is not None and _later(account[1], windowed[1] if windowed else None):
+        full = _full(account[0])
     timed = [w for w in full if w.resets_at is not None]
     if timed:
         last = max(timed, key=lambda w: w.resets_at or moment)

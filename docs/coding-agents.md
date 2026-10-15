@@ -290,8 +290,10 @@ on a usage limit.
 - **Usage, offline.** There is no public usage endpoint and AISquare makes no
   request for Codex: each session writes a rollout
   (`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl`) whose `token_count`
-  events carry `rate_limits`, and the newest one under a home is that account's
-  usage. The shorter window is shown as the session window and the longer one
+  events carry `rate_limits`, and the newest one under a home that carries a
+  window is that account's usage: at its limit 0.162.1 records one more, `limit_id`
+  `premium` with both windows `null`, which only says the limit was reached. The
+  shorter window is shown as the session window and the longer one
   as the week; some plans have only a weekly window. A window whose reset has
   passed since that reading reads 0 %, and the reading is labelled with its
   age (`as of 3h ago`) because it is only as fresh as the account's last turn.

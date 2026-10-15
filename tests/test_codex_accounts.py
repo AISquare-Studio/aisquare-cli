@@ -449,6 +449,97 @@ def test_no_limit_without_one_this_turn_or_once_it_has_lifted(home: Path) -> Non
     assert codex.limit_from_transcript(home / "missing.jsonl", now=NOW) is None
 
 
+SPEND_CAP = "You hit your spend cap set in your workspace. Increase your spend cap to continue."
+"""The server's text for a team plan's limit, as 0.162.1 recorded it (SMOKE3)."""
+
+
+def _at(when: datetime) -> datetime:
+    """``when`` as a reading carries it: whole epoch seconds."""
+    return datetime.fromtimestamp(int(when.timestamp()), tz=UTC)
+
+
+def _premium(when: datetime) -> dict[str, Any]:
+    """The reading 0.162.1 records at the limit after the account's own: ``limit_id``
+    ``premium``, both windows ``null`` (SMOKE3, a team plan at its spend cap)."""
+    record = _token_count(when, None, reached="workspace_owner_usage_limit_reached")
+    record["payload"]["rate_limits"]["limit_id"] = "premium"
+    return record
+
+
+def _failed(
+    info: Any, message: str = SPEND_CAP, when: datetime = NOW, **more: Any
+) -> dict[str, Any]:
+    """A turn's end as 0.162.1 records a failed one: its ``task_complete`` carries the error."""
+    error = {"message": message, "codex_error_info": info}
+    return _event("task_complete", when, last_agent_message=None, error=error, **more)
+
+
+def test_at_the_limit_the_account_reads_the_window_before_the_windowless_premium_record(
+    home: Path,
+) -> None:
+    slot = _codex_slot("full@example.com")
+    resets, week = NOW + timedelta(hours=2), NOW + timedelta(days=5)
+    path = _rollout(
+        slot.config_dir,
+        [
+            _event("task_started"),
+            _token_count(NOW, _window(100, 300, resets), _window(24, 10080, week)),
+            _premium(NOW),
+            _failed("usage_limit_exceeded", turn_id="turn-9"),
+        ],
+    )
+
+    reading = service.usage(slot, now=NOW)
+    assert reading.available and (reading.session_percent, reading.week_percent) == (100.0, 24.0)
+    assert reading.session_resets_at == _at(resets)
+    assert codex.limit_from_transcript(path, now=NOW) == core.LimitNotice("session", _at(resets))
+
+
+def test_a_session_that_hit_the_limit_at_once_takes_the_window_another_session_recorded(
+    home: Path,
+) -> None:
+    """The coder whose own last reading was 92 % (SMOKE3, account 2): the window's climb to
+    100 % is another session's, written before it and before short sessions with none."""
+    slot = _codex_slot("full@example.com")
+    resets = NOW + timedelta(hours=2)
+    drove = NOW - timedelta(minutes=8)
+    _rollout(
+        slot.config_dir,
+        [_event("task_started", drove), _token_count(drove, _window(100, 300, resets))],
+        name="drove",
+        age=timedelta(minutes=8),
+    )
+    for n in range(codex.NEWEST_ROLLOUTS // 4):  # a /clear's, with no reading at all
+        _rollout(
+            slot.config_dir, [_event("task_started")], name=f"clear-{n}", age=timedelta(minutes=5)
+        )
+    earlier = NOW - timedelta(minutes=14)
+    hit = _rollout(
+        slot.config_dir,
+        [
+            _token_count(earlier, _window(92, 300, resets)),
+            _event("task_complete", earlier),
+            _event("task_started"),
+            _premium(NOW),
+            _failed("usage_limit_exceeded"),
+        ],
+        name="hit",
+    )
+
+    assert service.usage(slot, now=NOW).session_percent == 100.0
+    assert codex.limit_from_transcript(hit, now=NOW) == core.LimitNotice("session", _at(resets))
+    # No reading shows a full window: the limit is named, its window and reset are not known.
+    third = _codex_slot("copy@example.com")
+    alone = _rollout(third.config_dir, [*_records_of(hit)])
+    assert codex.limit_from_transcript(alone, now=NOW) == core.LimitNotice("usage", None)
+    assert service.usage(third, now=NOW).session_percent == 92.0
+
+
+def _records_of(path: Path) -> list[dict[str, Any]]:
+    """A rollout's records past its ``session_meta``, as :func:`_rollout` took them."""
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()[1:]]
+
+
 def _turn_context(reviewer: str | None) -> dict[str, Any]:
     payload = {"approval_policy": "on-request", "sandbox_policy": {"type": "workspace-write"}}
     if reviewer is not None:

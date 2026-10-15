@@ -839,11 +839,13 @@ fleet's own Codex permission profile: Codex's built-in `:workspace` or `:read-on
 with the aisquare home writable and, within it, the account homes, the credentials,
 the keys, the config, the fleet's tmux conf and the agent registry read-only, since
 what is written there runs, or chooses what runs, outside any sandbox. The rows a
-restart, switch or hand-over replays stay in the writable store, so `fleet spawn`
-seals each one's whole launch (spec, binary, agent, role, worktree, account) in
-`launch-seals/`, which is read-only to the sandbox, and a row whose seal does not
-match is refused with the reason, never replayed; the native id a resume or a queue
-puts on Codex's command line is taken only as a UUID. So a
+restart, switch or hand-over replays stay in the writable store, so none of them is
+replayed from there: `fleet spawn` writes each agent's launch record in
+`launch-seals/`, which is read-only to the sandbox (binary, arguments, permission,
+role, agent, directory, account), the agent's own hook adds its session (transcript,
+thread, home), and a replay and `fleet tell`'s queue read that record and nothing
+else. A row without one, or a project whose directory in the store is not the
+record's, is refused with the reason. So a
 Codex agent's board calls succeed on their first, sandboxed attempt, a reviewer's
 verdict included, while its worktree stays read-only
 ([the sandbox and the store](coding-agents.md#the-sandbox-and-the-aisquare-store)).

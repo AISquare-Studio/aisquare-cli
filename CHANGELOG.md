@@ -136,8 +136,13 @@ adapter.**
   is logged, and a forged identity, another board's task or a fleet operation is
   put on its board once. The sandbox writes one path in the store, its launch's
   broker inbox. So nothing that a replay, a kill, a typed line or paste, a launch,
-  a model or account choice or a worktree removal reads can have been written
-  from inside a sandbox. The transport is a spool directory and a FIFO, not a socket: Codex
+  a model or account choice or a worktree removal the fleet makes reads can have
+  been written from inside a sandbox: a sandboxed agent is trusted to the extent of
+  the tree it may write, as a Claude Code agent is (git hooks in the tree, a
+  project venv, a subdirectory's settings and `CLAUDE.md` stay its to write), and
+  what aisquare itself runs outside the sandbox never comes from that tree: a
+  sandboxed launch is refused where its sandbox may write the aisquare its hooks
+  and broker run, and the fleet's own git runs no hook of the repository's. The transport is a spool directory and a FIFO, not a socket: Codex
   0.162.1's sandbox refuses `connect` on every unix socket (measured). The launch
   records stay as defence in depth: restart, switch, the hand-over and `fleet
   tell`'s queue read an agent's launch record in `launch-seals/`, written by its

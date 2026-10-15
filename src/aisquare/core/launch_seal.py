@@ -1,11 +1,18 @@
-"""Nothing a sandboxed agent writes chooses what runs outside its sandbox.
+"""Nothing a sandboxed agent writes chooses what aisquare itself runs outside its sandbox.
 
-The rule. The store is read-only inside an agent's sandbox, all of it
-(:func:`~aisquare.core.agent_adapters.types.store_read_only`), and so are the project's
-trees' launch inputs, the other agents' worktrees and the tmux sockets' directories
-(``services.store_broker.launch_paths``); its board calls go through its launch's broker,
-outside it (``services.store_broker``): nothing in a sandbox writes the store or what a
-launch outside it reads. Before the broker every board call opened it for writing,
+The boundary. A sandboxed agent is trusted to the extent of the tree it may write, as a
+Claude Code agent (no OS sandbox) and a human contributor are: what the user's own tools
+later run from that tree (git hooks that live in it, a project's own venv, a
+subdirectory's settings, ``CLAUDE.md``/``AGENTS.md``) is inside that trust, documented,
+not sealed. What aisquare ITSELF runs or reads outside the sandbox on the agent's behalf
+never comes from that tree: the store and these launch records are read-only in the
+sandbox, all of it (:func:`~aisquare.core.agent_adapters.types.store_read_only`), and so
+are the tree tops' launch inputs, the other agents' worktrees and the tmux sockets'
+directories (``services.store_broker.launch_paths``); a launch is refused where the
+sandbox may write the aisquare its hooks and broker run
+(``services.store_broker.refuse_inside``); the fleet's own git runs no hook of the
+repository's; and the agent's board calls go through its launch's broker, outside it
+(``services.store_broker``). Before the broker every board call opened the store for writing,
 and a prompt-injected Codex coder could rewrite any row in it, its own and every
 other agent's; what follows was the defence then, and stays as defence in depth. No
 value read from the store may choose what runs outside the sandbox: an executable, a

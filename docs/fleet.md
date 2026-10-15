@@ -885,7 +885,12 @@ only in its own tree, on its own board's tasks and in its own project's memory p
 never a fleet operation (`spawn`, `stop`, `restart`, `switch`, `tell`, `shutdown` …), a
 launch, a hook, the config or an account. So nothing that a restart, a switch, a
 hand-over, `tell`, `stop`, `shutdown`, the manager's nudge, `reap` or a spawn reads can
-have been written from inside a sandbox. The launch records stay as defence
+have been written from inside a sandbox, and the fleet's own git runs no hook of the
+repository's. The boundary is the tree the agent may write: what the user's own tools run
+from it (git hooks in the tree, a project venv, a subdirectory's settings, `CLAUDE.md`) is
+the agent's to write, as on Claude Code, and a sandboxed launch is refused where its
+sandbox may write the aisquare its hooks and broker run
+([the trust boundary](coding-agents.md#the-sandbox-and-the-aisquare-store)). The launch records stay as defence
 in depth: `fleet spawn` writes each agent's launch record in `launch-seals/` (binary,
 arguments, permission, role, agent, directory, account, and the tmux socket and pane
 its window is in), the agent's own hook adds its session (transcript, thread, home), and

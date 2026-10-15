@@ -458,16 +458,33 @@ Native subagents are disabled in fleet sessions when
 
 ### The sandbox and the aisquare store
 
+**The trust boundary.** A sandboxed Codex fleet agent is trusted to the extent of the
+tree it may write, exactly as a Claude Code agent (no OS sandbox) and a human contributor
+are. What the user's own tools later run from that tree is inside that trust, documented
+here rather than sealed: git hooks that live in the tree (`core.hooksPath` into
+`.husky/`, `.githooks/`, what `lefthook.yml` or `.pre-commit-config.yaml` generate), which
+the user's own `git commit` runs; a project's own virtualenv; a subdirectory's
+`.claude/`, `.mcp.json` or `.codex/`, which a `claude` started there reads; and
+`CLAUDE.md` and `AGENTS.md`, which agents read (a prompt-injection path, as on Claude
+Code). What aisquare ITSELF runs or reads outside the sandbox on the agent's behalf never
+comes from that tree:
+
+- the aisquare store, its launch records first (read-only in the sandbox, all of it);
+- the aisquare install its hooks and its broker run: a sandboxed launch is refused where
+  its sandbox may write it (a project `.venv`, an editable `src/` in the tree, `/tmp`:
+  `store_broker.refuse_inside`), naming the remedy, and `aisquare doctor` warns;
+- the fleet's tmux socket directories;
+- the launch inputs at the top of the launch's trees (below), which the fleet's own
+  launches there read;
+- the hooks of the repository's, for the fleet's own git (`git worktree add` and the
+  rest): it runs none of them (`core.hooksPath` pointed at nothing).
+
 The aisquare store (the aisquare home: `context.db`, the launch records, the config,
 the account homes, the caches) is **read-only in a Codex agent's sandbox, all of it**,
 and the board calls its role protocol makes there go through a broker that its launch
-runs outside the sandbox. So are what the project's trees hold that a launch outside
-any sandbox reads, and the tmux sockets' directory (below). A process in the sandbox
-writes none of them, so nothing there that chooses what runs outside the sandbox (a
-replay, a kill, a typed line or paste, a launch, a model or an account, a worktree
-removal) can have been written from inside one: by construction, not by checking each
-value that is read. Claude Code runs its tools unsandboxed and is unchanged: its board
-calls write the store themselves.
+runs outside the sandbox. So are the launch inputs at the tops of the project's trees
+and the tmux sockets' directories (below). Claude Code runs its tools unsandboxed and is
+unchanged: its board calls write the store themselves.
 
 The profile, `aisquare`, is defined by the launch (`CodexAdapter.store_access`, then
 `broker_access`, which each launch applies over whatever its launch spec recorded):
@@ -487,8 +504,8 @@ This is Codex's built-in profile for the write scope with, read-only within it (
 more specific path wins over a writable one around it: the workspace, `/tmp`):
 
 - the aisquare home, all of it;
-- in every tree the launch touches (its own checkout, its project's principal one, its
-  launch record's), what a launch outside any sandbox reads there
+- in every tree the launch touches (its own directory and checkout, its project's
+  principal one, its launch record's), what a launch outside any sandbox reads there
   (`store_broker.LAUNCH_INPUTS`): Claude Code's project settings, hooks and MCP servers
   (`.claude/`, `.mcp.json`), Codex's project config and agents (`.codex/`, `.agents/`),
   aisquare's root marker (`.aisquare`) and the repository (`.git`, whose hooks and
@@ -500,12 +517,15 @@ more specific path wins over a writable one around it: the workspace, `/tmp`):
 - every worktree of the project (the fleet's `worktree_dir`) but the agent's own, which
   stays writable, its own launch inputs read-only within it;
 - the directories tmux keeps sockets in: the one its window's server listens in
-  (`$TMUX`), `$TMUX_TMPDIR` or `/tmp`'s `tmux-<uid>`, and a configured socket path's.
+  (`$TMUX`), `$TMUX_TMPDIR` or `/tmp`'s `tmux-<uid>`, and a configured socket path's;
+  never a shared directory itself (`/tmp`, `$TMPDIR`), where `tmux -S /tmp/x` puts one.
   From `/tmp`, which every sandbox may write, the fleet's socket could be moved away,
   and the fleet cut off its agents (finding 4; SMOKE5).
 
-Each path is named whether or not it exists yet: then it cannot be made, and nothing
-is left on the host where it was absent (measured). One path is writable: this launch's
+Each path is named whether or not it exists yet: then it cannot be made. Measured on
+0.162.1 in a real turn, in the worktree layout (a path inside the workspace, outside
+every writable root in the principal checkout, under an absent parent): the sandbox shows
+an absent path as an empty read-only mount point, and leaves nothing on the host. One path is writable: this launch's
 broker inbox, which no other launch's profile names. Measured on 0.162.1 (store outside
 `/tmp`), from a sandboxed command: the store's database reads and does not write
 ("attempt to write a readonly database"), no file in the store can be made or changed
@@ -551,9 +571,11 @@ request as `aisquare <argv>` in the launch's environment, never the caller's, an
   server serving an agent that sandboxes its tools names only its board's tasks.
 
 A refusal leaves a record outside the caller's stderr: one line in
-`<aisquare home>/logs/store-broker.log`, and, for a session that is not its own, another
-board's task or project, a fleet operation or a request not signed by its launch, one
-note on its board for its manager and the human, once per launch and kind (SMOKE5).
+`<aisquare home>/log/store-broker.log` for every one, and, for a session that is not its
+own, another board's task or another project's pool, a fleet operation (its signals
+included) or a request not signed by its launch, one note on its board for its manager
+and the human, once per launch and kind (SMOKE5). A read asked from outside its tree
+(`cd /tmp && aisquare board`) is refused and logged, never noted.
 
 The transport is files, not a socket, by measurement: on 0.162.1 the sandbox's seccomp
 filter refuses `connect` on every unix socket (a path one, on a read-only or a writable

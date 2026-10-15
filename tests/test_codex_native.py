@@ -1720,3 +1720,143 @@ def test_real_codex_fleet_from_before_launch_records_and_rows_its_sandbox_rewrot
             server.shutdown()
             thread.join(timeout=2)
             shutil.rmtree(outside, ignore_errors=True)
+
+
+@pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
+def test_real_codex_under_a_hub_in_a_worktree_reaches_its_board_and_leaves_no_placeholder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r11 of #113, findings 1, 2 and 3, on the real Codex with only loopback.
+
+    Under ``AISQUARE_TEAM_HUB`` a sandboxed coder in its worktree posts a note through its
+    broker, and it lands on the hub's board (the broker took its board from spawn's
+    project, which is not the hub's, and refused every call). The profile names the
+    principal checkout's absent launch inputs, outside every writable root: after a real
+    session nothing is left on the host there. A sandboxed launch from inside the aisquare
+    install it would run outside its sandbox is refused, naming the remedy.
+    """
+    import aisquare
+
+    binary = shutil.which("codex")
+    assert binary, "AISQUARE_TEST_CODEX requires an installed Codex"
+    refused = _sandbox_refused(binary, tmp_path)
+    if refused is not None:
+        pytest.skip(f"Codex's sandbox cannot start a command on this host: {refused}")
+    outside = Path(tempfile.mkdtemp(prefix="asq-", dir="/var/tmp"))
+    store, native_home, hub = outside / "h", outside / "c", outside / "hub"
+    native_home.mkdir()
+    hub.mkdir()
+    workspace = outside / "w"
+    workspace.mkdir()
+    git = ["git", "-C", str(workspace), "-c", "user.email=a@b", "-c", "user.name=t"]
+    subprocess.run([*git, "init", "-q"], check=True)
+    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+    label = "coder-hub"
+    worktree = workspace / ".aisquare-worktrees" / label
+    cli = shlex.join(selfcli.argv_for([]))
+    socket = f"asq-codex-hub-{os.getpid()}"
+    with ThreadingHTTPServer(("127.0.0.1", 0), _Scripted) as server:
+        server.requests = []  # type: ignore[attr-defined]
+        requests: list[dict[str, Any]] = server.requests  # type: ignore[attr-defined]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        trusted = "".join(
+            f'[projects.{json.dumps(str(place))}]\ntrust_level = "trusted"\n'
+            for place in (workspace, worktree)
+        )
+        (native_home / "config.toml").write_text(
+            'model = "local-fixture"\nmodel_provider = "local"\n'
+            '[model_providers.local]\nname = "Local fixture"\nwire_api = "responses"\n'
+            f'base_url = "http://127.0.0.1:{server.server_port}/v1"\n'
+            "requires_openai_auth = false\n" + trusted,
+            encoding="utf-8",
+        )
+        for key in tuple(os.environ):
+            if key.startswith(("OPENAI_", "ANTHROPIC_", "CODEX_")):
+                monkeypatch.delenv(key)
+        monkeypatch.delenv("TMPDIR", raising=False)
+        monkeypatch.setenv("AISQUARE_HOME", str(store))
+        monkeypatch.setenv("CODEX_HOME", str(native_home))
+        monkeypatch.setattr(agents, "_aisquare_command", lambda: shlex.join(selfcli.argv_for([])))
+        agents.install_hooks("codex", native_home)
+        config = load_config()
+        config.fleet.tmux_socket = socket
+        save_config(config)
+        project = team.activate(workspace)
+        before = {path.name for path in workspace.iterdir()}
+
+        def outputs() -> list[str]:
+            found: dict[str, str] = {}
+            for request in list(requests):
+                for item in request.get("input", []):
+                    if item.get("type") == "function_call_output":
+                        found.setdefault(str(item.get("call_id")), str(item.get("output")))
+            return list(found.values())
+
+        def until(check: Any, seconds: float, what: str) -> None:
+            deadline = time.monotonic() + seconds
+            while not check():
+                if time.monotonic() >= deadline:
+                    raise AssertionError(f"{what}: {outputs()[-2:]}")
+                time.sleep(0.2)
+
+        def noted(board: str, text: str) -> bool:
+            with store_session() as handle:
+                return text in [event.text for event in handle.recent_events(board, limit=80)]
+
+        try:
+            # In its worktree: the note lands, and the principal checkout, outside every
+            # writable root, keeps nothing the profile named and it lacked (finding 3).
+            seen = len(outputs())
+            coder = fleet.spawn(
+                project, "coder", label=label, agent="codex", worktree=True,
+                prompt=f"RUN {cli} note 'note from the worktree'",
+                agent_args=["--dangerously-bypass-hook-trust", "--no-alt-screen"],
+            ).agent  # fmt: skip
+            assert Path(coder.cwd).resolve() == worktree.resolve()
+            until(lambda: len(outputs()) > seen, 60, "the worktree's note ran")
+            assert "shared (note): note from the worktree" in outputs()[-1], outputs()[-1]
+            assert noted(project.id, "note from the worktree")
+            after = {path.name for path in workspace.iterdir()}
+            assert after - before <= {".aisquare-worktrees"}, after - before
+            for name in (".mcp.json", ".claude", ".codex", ".agents", ".aisquare"):
+                assert not (workspace / name).exists(), name
+                assert not (worktree / name).exists(), name
+            # Under a hub, as `launch` gives every window one: spawn's project is the
+            # repository's, every board call the hub's, and the note lands there (finding 1).
+            from aisquare.core.orchestrator import team_project
+
+            monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))
+            hub_board = team.activate(hub).id
+            assert hub_board == team_project(workspace).id != project.id
+            seen = len(outputs())
+            fleet.spawn(
+                project, "coder", label="coder-hub2", agent="codex", worktree=False,
+                prompt=f"RUN {cli} note 'note under the hub'",
+                agent_args=["--dangerously-bypass-hook-trust", "--no-alt-screen"],
+            )  # fmt: skip
+            until(lambda: len(outputs()) > seen, 60, "the hub's note ran")
+            assert "shared (note): note under the hub" in outputs()[-1], outputs()[-1]
+            assert noted(hub_board, "note under the hub")
+            monkeypatch.delenv("AISQUARE_TEAM_HUB")
+            # A sandboxed launch from inside the aisquare it would run unsandboxed (finding 2).
+            inside = Path(aisquare.__file__).parent
+            from aisquare.core.agent_adapters import get_adapter
+
+            profile = get_adapter("codex").store_access("workspace", store_dir())
+            launched = subprocess.run(
+                [*selfcli.argv_for(["launch", "tester", "--agent", "codex", "--", *profile])],
+                cwd=inside,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                stdin=subprocess.DEVNULL,
+                check=False,
+            )
+            assert launched.returncode != 0, launched.stdout + launched.stderr
+            assert "uv tool install aisquare" in launched.stdout + launched.stderr
+        finally:
+            subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True, check=False)
+            server.shutdown()
+            thread.join(timeout=2)
+            shutil.rmtree(outside, ignore_errors=True)

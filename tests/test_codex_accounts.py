@@ -942,6 +942,7 @@ def _codex_fleet_row(
     agent_events.handle(CODEX, payload, directory)
     session_id = agent_events.session_key(CODEX, directory, "native-one")
     project = team_project(tmp_path)
+    created_at = datetime.now(UTC) - timedelta(hours=1)
     with store_session() as store:
         store.upsert_fleet_agent(
             FleetAgent(
@@ -954,12 +955,14 @@ def _codex_fleet_row(
                 tmux_socket="test",
                 pane_id="%1",
                 cwd=tmp_path,
-                created_at=datetime.now(UTC) - timedelta(hours=1),
+                created_at=created_at,
                 account_slot=core.managed_slot(directory, "codex"),
                 session_id=session_id,
             )
         )
     # What its spawn and its own start hook would have written (`core.launch_seal`).
+    window = launch_seal.WindowPlace(tmux_socket="test", pane_id="%1", created_at=created_at)
+    assert launch_seal.placed("fleet-one", window) is None
     launch_seal.write(
         launch_seal.LaunchRecord(
             id="fleet-one",
@@ -1123,13 +1126,14 @@ def test_a_codex_turn_that_failed_with_no_stop_reaches_the_board_on_the_fleets_r
     monkeypatch.setenv("AISQUARE_FLEET_AGENT", "fleet-one")
     slot = _codex_slot("full@example.com")
     resets = datetime.now(tz=UTC) + timedelta(hours=3)
+    ended = datetime.now(tz=UTC) + timedelta(minutes=1)  # a minute after its prompt, below
     transcript = _rollout(
         slot.config_dir,
         [
             _event("task_started", turn_id="turn-1"),
             _token_count(datetime.now(tz=UTC), _window(100, 300, resets)),
             _premium(datetime.now(tz=UTC)),
-            _failed(info, message, turn_id="turn-1"),
+            _failed(info, message, ended, turn_id="turn-1"),
         ],
     )
     session_id, project = _codex_fleet_row(tmp_path, slot.config_dir, transcript)
@@ -1147,7 +1151,7 @@ def test_a_codex_turn_that_failed_with_no_stop_reaches_the_board_on_the_fleets_r
     save_config(config)
     detached: list[list[str]] = []
     monkeypatch.setattr(hooks, "_detach", detached.append)
-    monkeypatch.setattr(fleet, "_observe", lambda *a, **k: None)  # tmux is not asked
+    _running_on_screen(monkeypatch)
     with store_session() as store:
         assert (row := store.get_session(session_id)) is not None and row.state == "working"
         agent = store.get_fleet_agent("fleet-one")
@@ -1168,7 +1172,18 @@ def test_a_codex_turn_that_failed_with_no_stop_reaches_the_board_on_the_fleets_r
         assert detached == []
     # A reader holding the row as it was before (another listing at the same moment)
     # claims the turn too late and records nothing.
-    assert row is not None and not agent_events.failed_turn(CODEX, row)
+    assert row is not None and not agent_events.failed_turn("fleet-one", row)
+
+
+def _running_on_screen(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fleet's tmux answers for every row, its agent running in its pane: the reader is
+    outside any sandbox (a sandboxed one is refused tmux)."""
+    from aisquare.services import fleet
+
+    def observe(srv: object, session: object, agents: Any) -> dict[str, Any]:
+        return {agent.id: fleet._PaneView(False, None, "codex", None) for agent in agents}
+
+    monkeypatch.setattr(fleet, "_observe", observe)
 
 
 def test_a_codex_turn_still_running_is_not_read_as_failed(
@@ -1195,12 +1210,187 @@ def test_a_codex_turn_still_running_is_not_read_as_failed(
     agent_events.handle(CODEX, prompt, slot.config_dir)
     failed = Mock()
     monkeypatch.setattr(hooks, "turn_failed", failed)
-    monkeypatch.setattr(fleet, "_observe", lambda *a, **k: None)
+    _running_on_screen(monkeypatch)
 
     [status] = fleet.list_agents(project)
 
     failed.assert_not_called()
     assert status.session is not None and status.session.state == "working"
+
+
+def _working_codex_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, records: list[dict[str, Any]]
+) -> tuple[str, ProjectInfo, Path, list[list[str]]]:
+    """A fleet Codex row whose prompt began a turn, its rollout holding ``records`` after
+    that turn's start; ``on_limit = "switch"``, the hand-overs it detaches collected."""
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", "fleet-one")
+    slot = _codex_slot("full@example.com")
+    transcript = _rollout(slot.config_dir, [_event("task_started", turn_id="turn-1"), *records])
+    session_id, project = _codex_fleet_row(tmp_path, slot.config_dir, transcript)
+    prompt = {
+        "session_id": "native-one",
+        "cwd": str(tmp_path),
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "carry on",
+        "transcript_path": str(transcript),
+        "turn_id": "turn-1",
+    }
+    agent_events.handle(CODEX, prompt, slot.config_dir)
+    config = load_config()
+    config.accounts = AccountsSettings(on_limit="switch")
+    save_config(config)
+    detached: list[list[str]] = []
+    monkeypatch.setattr(hooks, "_detach", detached.append)
+    return session_id, project, transcript, detached
+
+
+def _planted_limit(tmp_path: Path) -> Path:
+    """A rollout a sandboxed agent wrote: its last turn failed on the usage limit."""
+    planted = tmp_path / "planted" / "rollout-planted.jsonl"
+    planted.parent.mkdir()
+    ended = datetime.now(tz=UTC) + timedelta(minutes=1)
+    records = [_event("task_started"), _failed("usage_limit_exceeded", when=ended)]
+    planted.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+    return planted
+
+
+def test_a_transcript_the_store_names_never_parks_a_row_limited(
+    home: Path, team_on: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r5 of #113, finding 2: the fleet's read took the transcript it acts on from
+    the board session's row, which a sandbox writes: pointed at a rollout of its making
+    that ends in a limit, the next listing parked the row limited, told the manager and
+    detached a hand-over. It reads the transcript the agent's own hook reported."""
+    from aisquare.services import fleet
+
+    session_id, project, _, detached = _working_codex_row(tmp_path, monkeypatch, [])
+    with store_session() as store:
+        store._conn.execute(  # type: ignore[attr-defined]
+            "UPDATE team_session SET transcript_path = ?, agent = 'codex' WHERE id = ?",
+            (str(_planted_limit(tmp_path)), session_id),
+        )
+        store._conn.commit()  # type: ignore[attr-defined]
+    _running_on_screen(monkeypatch)
+
+    assert [status.state for status in fleet.list_agents(project)] == ["working"]
+
+    with store_session() as store:
+        kinds = [e.kind for e in store.recent_events(project.id, limit=10)]
+    assert "limited" not in kinds and "turn_failed" not in kinds and detached == []
+
+
+def test_a_hooks_limit_reads_the_records_transcript_not_the_stores(
+    home: Path, team_on: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """r5 finding 2's other half: a stop whose payload names no transcript read the board
+    session's ``transcript_path`` for its limit. It reads the launch record's."""
+    session_id, _project, transcript, detached = _working_codex_row(tmp_path, monkeypatch, [])
+    planted = _planted_limit(tmp_path)
+    with store_session() as store:
+        store._conn.execute(  # type: ignore[attr-defined]
+            "UPDATE team_session SET transcript_path = ? WHERE id = ?", (str(planted), session_id)
+        )
+        store._conn.commit()  # type: ignore[attr-defined]
+    record = launch_seal.read("fleet-one")
+    assert isinstance(record, launch_seal.LaunchRecord) and record.session is not None
+    assert record.session.transcript == str(transcript)
+    slot_home = transcript.parents[4]
+    stop = {"session_id": "native-one", "cwd": str(tmp_path), "hook_event_name": "Stop"}
+
+    agent_events.handle(CODEX, stop, slot_home)
+
+    with store_session() as store:
+        session = store.get_session(session_id)
+    assert session is not None and session.state == "waiting" and detached == []
+    # The record's own transcript is still read: one that ends in a limit parks the row.
+    transcript.write_text(planted.read_text(encoding="utf-8"), encoding="utf-8")
+    agent_events.handle(CODEX, {**stop, "turn_id": "turn-2"}, slot_home)
+    with store_session() as store:
+        session = store.get_session(session_id)
+    assert session is not None and session.state == "limited"
+
+
+def test_a_failed_turn_is_left_to_a_reader_outside_the_sandbox(
+    home: Path, team_on: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r5 of #113, finding 3: a Codex manager's ``fleet ls`` or ``tell`` runs in its
+    sandbox, where tmux is refused, and the first reader claimed the failed turn: its
+    hand-over ran in that sandbox, ended "not switched", and nothing retried it. A reader
+    tmux did not answer records nothing; the next one outside a sandbox does, once."""
+    from aisquare.services import fleet
+
+    ended = datetime.now(tz=UTC) + timedelta(minutes=1)
+    failed = [_failed("usage_limit_exceeded", when=ended, turn_id="turn-1")]
+    session_id, project, _, detached = _working_codex_row(tmp_path, monkeypatch, failed)
+    monkeypatch.setattr(fleet, "_observe", lambda *a, **k: None)  # tmux refused: a sandbox
+    with store_session() as store:
+        agent = store.get_fleet_agent("fleet-one")
+    assert agent is not None
+
+    assert fleet.status_of(agent).state != "limited"
+    assert [status.state for status in fleet.list_agents(project)] != ["limited"]
+    with store_session() as store:
+        session = store.get_session(session_id)
+        claimed = store.get_meta(f"agent-event:{session_id}:turn_failed:turn-1")
+    assert session is not None and session.state == "working" and claimed is None
+    assert detached == []
+
+    _running_on_screen(monkeypatch)  # the app's tick, a human's `fleet ls`
+    assert [status.state for status in fleet.list_agents(project)] == ["limited"]
+    [argv] = detached
+    assert argv[-4:-2] == ["hand-over", session_id]
+
+
+def test_a_failure_recorded_before_the_running_turns_prompt_is_not_its_end(
+    home: Path, team_on: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r5 of #113, finding 7: until Codex writes the new turn's ``task_started``,
+    the rollout ends in the previous turn's failure; a listing in that gap recorded it
+    against the turn now running, flipped the working row, and on a limit handed a
+    working agent over. A failure older than the session's last hook is not recorded."""
+    from aisquare.services import fleet
+
+    before = datetime.now(tz=UTC) - timedelta(minutes=5)  # the previous turn's end
+    failed = [_failed("usage_limit_exceeded", when=before, turn_id="turn-0")]
+    _, project, _, detached = _working_codex_row(tmp_path, monkeypatch, failed)
+    _running_on_screen(monkeypatch)
+
+    assert [status.state for status in fleet.list_agents(project)] == ["working"]
+
+    with store_session() as store:
+        kinds = [e.kind for e in store.recent_events(project.id, limit=10)]
+    assert "limited" not in kinds and detached == []
+
+
+def test_the_homes_search_reads_each_rollouts_end_and_only_once_until_one_is_written(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r5 of #113, finding 6: an account with no windowed reading (an API key, the
+    limit's windowless reading alone) read twenty rollouts back to 32 MB each on every
+    ``usage()``: the Accounts page, Welcome's look, the hand-over's headroom, and the
+    app's tick through a failed turn's limit. Each is read back a bounded span, and the
+    home is not read again until one of its rollouts is written."""
+    slot = _codex_slot("key@example.com")
+    for n in range(codex.NEWEST_ROLLOUTS + 5):
+        _rollout(slot.config_dir, [_premium(NOW)], name=f"r{n}", age=timedelta(minutes=n))
+    spans: list[int] = []
+    real = codex._records_from_end
+
+    def reading(path: Path, *, limit: int = codex.MAX_SCAN_BYTES) -> Any:
+        spans.append(limit)
+        return real(path, limit=limit)
+
+    monkeypatch.setattr(codex, "_records_from_end", reading)
+
+    assert codex.usage(slot).available is False
+    assert len(spans) == codex.NEWEST_ROLLOUTS and set(spans) == {codex.HOME_SCAN_BYTES}
+    assert codex.HOME_SCAN_BYTES < codex.MAX_SCAN_BYTES
+    spans.clear()
+    assert codex.usage(slot).available is False
+    assert spans == [], "nothing under the home was written since"
+    _rollout(slot.config_dir, [_premium(NOW), _token_count(NOW, _window(40, 300, NOW))], name="r0")
+    assert codex.usage(slot).available is True
+    assert spans, "a rollout written since is read"
 
 
 # --------------------------------------------------------------------------- the hand-over

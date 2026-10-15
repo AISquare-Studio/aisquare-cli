@@ -23,10 +23,22 @@ open. So a fleet row's launch is ONE record (:class:`LaunchRecord`), written in
   outside any sandbox (:func:`observe`, :func:`adopted`): Claude Code has none, and
   Codex runs its hooks outside the one it gives its tools (measured on 0.162.1). A
   tool in the sandbox that runs a hook itself cannot write here.
+- Once tmux has made the window, the spawner adds where it is (:class:`WindowPlace`:
+  the server's socket, its name and path, and the pane), in a file of its own beside
+  the record (:func:`placed`), so it and the agent's hook never write over each other.
 - ``fleet restart``, ``fleet switch``, the usage-limit hand-over and ``fleet tell``'s
   queue read that record and nothing else from the store for what they run. A row
   with no record, or one that cannot be read, is refused with the reason, and so is a
   project whose directory in the store is not the record's.
+- What is typed into a row's pane or kills its window — ``fleet tell``, ``fleet stop``
+  and with it restart, switch, the hand-over and ``shutdown``, the manager's nudge —
+  goes to the pane its record places, never to the row's ``pane_id`` at its
+  ``socket_path``: a sandbox that rewrote those pointed them at any pane of the user's
+  (review r5 of #113, finding 1). A row that names another pane than its record, or
+  whose record places none, is not typed into or killed, and says why.
+- What the fleet reads of a session to act on outside the sandbox — a failed turn's
+  limit, the hand-over it starts — is read from the transcript the record holds, never
+  the board session's (r5, finding 2).
 
 Nothing scans the store to mint a record: a row spawned before this version has none,
 and its replay is refused, naming the way out (stop it, spawn it again). What a record
@@ -47,6 +59,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from datetime import datetime
 from pathlib import Path
 
 from pydantic import BaseModel, ValidationError
@@ -77,6 +90,21 @@ class SessionFacts(BaseModel):
     """The config dir it runs under, where its native queue is (``CODEX_HOME``)."""
 
 
+class WindowPlace(BaseModel):
+    """Where a spawn's window is, as tmux answered the spawner: what every keystroke the
+    fleet types into the row's pane, and every kill of its window, is aimed at."""
+
+    tmux_socket: str
+    """The socket's name (``tmux -L``), as the fleet's config named it."""
+    pane_id: str
+    socket_path: str | None = None
+    """Where the server said it listened (``tmux -S``), when it said."""
+    boot_id: str | None = None
+    created_at: datetime
+    """The row's own: after the window existed, so a server started later holds none of
+    its panes (``services.fleet._outlived``)."""
+
+
 class LaunchRecord(BaseModel):
     """Everything a replay of one fleet row starts outside any sandbox with."""
 
@@ -94,6 +122,9 @@ class LaunchRecord(BaseModel):
     """The config dir the launch resolved for the account, when it resolved one."""
     spec: LaunchSpec
     session: SessionFacts | None = None
+    window: WindowPlace | None = None
+    """Where its window is (:func:`placed`); ``None`` until tmux made it, and for a record
+    written by an aisquare that kept no such thing."""
 
 
 #: The session facts this process's hooks were handed, by the board's session id: what
@@ -112,6 +143,12 @@ def _path(agent_id: str) -> Path:
     separator, an absolute path)."""
     name = hashlib.sha256(agent_id.encode("utf-8", "surrogatepass")).hexdigest()
     return seals_dir() / f"{name}.json"
+
+
+def _window_path(agent_id: str) -> Path:
+    """Where the row ``agent_id``'s window is recorded (:func:`placed`), beside its record."""
+    record = _path(agent_id)
+    return record.with_name(f"{record.stem}.window.json")
 
 
 def ensure_dir() -> str | None:
@@ -135,11 +172,38 @@ def write(record: LaunchRecord) -> str | None:
     why = ensure_dir()
     if why is not None:
         return why
+    body = record.model_dump_json(indent=1, exclude={"window"}) + "\n"
     try:
-        write_replacing(_path(record.id), record.model_dump_json(indent=1) + "\n", keep_mode=False)
+        write_replacing(_path(record.id), body, keep_mode=False)
     except OSError as exc:
         return f"{_path(record.id)} could not be written ({exc.strerror or exc})"
     return None
+
+
+def placed(agent_id: str, window: WindowPlace) -> str | None:
+    """Record where the row ``agent_id``'s window is: ``None`` when written, otherwise why
+    it could not be. Written by the spawner alone, once tmux made the window and before
+    the row is in the store, in a file of its own: the agent starts in that window and
+    its hook adds its session to the record (:func:`observe`), so one file written by
+    both could lose either's write to the other's."""
+    why = ensure_dir()
+    if why is not None:
+        return why
+    path = _window_path(agent_id)
+    try:
+        write_replacing(path, window.model_dump_json(indent=1) + "\n", keep_mode=False)
+    except OSError as exc:
+        return f"{path} could not be written ({exc.strerror or exc})"
+    return None
+
+
+def _window(agent_id: str) -> WindowPlace | None:
+    """Where :func:`placed` recorded the row's window; ``None`` when it did not, or what
+    it wrote cannot be read (so nothing is typed into or killed on its word)."""
+    try:
+        return WindowPlace.model_validate_json(_window_path(agent_id).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValidationError):
+        return None
 
 
 def read(agent_id: str) -> LaunchRecord | str:
@@ -165,7 +229,7 @@ def read(agent_id: str) -> LaunchRecord | str:
         )
     if record.id != agent_id:
         return "its launch record names another row"
-    return record
+    return record.model_copy(update={"window": _window(agent_id)})
 
 
 def observe(

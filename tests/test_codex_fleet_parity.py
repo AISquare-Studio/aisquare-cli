@@ -1764,6 +1764,73 @@ def test_a_refusal_is_said_on_the_board_once_per_row_and_reason(
     assert len([text for text in _events(codex.project, "note") if "cannot restart" in text]) == 2
 
 
+def test_a_refusal_whose_note_was_not_written_is_said_by_the_next(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review r5 of #113, finding 5: the reason was marked said before its note was
+    written, so a note the store refused (busy past its timeout) silenced that reason for
+    the row for good, the unattended hand-over's included."""
+    agent = fleet_service.spawn(project, "coder", agent="codex", worktree=False).agent
+    launch_seal._path(agent.id).unlink()
+    emit = team_service._emit
+
+    def busy(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(team_service, "_emit", busy)
+    with pytest.raises(fleet_service.LaunchRefused):
+        fleet_service.restart(project, agent.label)
+    monkeypatch.setattr(team_service, "_emit", emit)
+    with pytest.raises(fleet_service.LaunchRefused):
+        fleet_service.restart(project, agent.label)
+
+    said = [text for text in _events(project, "note") if UNRECORDED in text]
+    assert len(said) == 1 and said[0].startswith(f"{agent.label}: cannot restart it")
+
+
+@pytest.mark.parametrize("kind", ["codex", "claude-code"])
+def test_a_spawn_refused_for_its_record_makes_no_worktree_and_captures_no_project(
+    kind: str,
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """Review r5 of #113, finding 9: refused once the codename and the worktree were made,
+    a spawn whose record could not be written left a captured project and a new worktree
+    and branch for an agent that never started. Asked first, as spawn's #139 order asks
+    every refusal that needs no window. No agent starts without its record: it holds the
+    pane every ``tell`` and ``stop`` is aimed at."""
+    shutil.rmtree(launch_seal.seals_dir(), ignore_errors=True)
+    launch_seal.seals_dir().write_text("not a directory", encoding="utf-8")
+    with store_session() as store:
+        before = store.get_project(project.id)
+    branches = subprocess.run(
+        ["git", "branch", "--list"], cwd=project.root, capture_output=True, text=True, check=True
+    ).stdout
+
+    with pytest.raises(fleet_service.FleetError, match="no agent is started without one"):
+        fleet_service.spawn(project, "coder", agent=kind, worktree=True)
+
+    with store_session() as store:
+        assert store.get_project(project.id) == before, "not captured, no codename"
+    assert not (project.root / fleet_service.settings().worktree_dir).exists()
+    assert (
+        subprocess.run(
+            ["git", "branch", "--list"],
+            cwd=project.root,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        == branches
+    )
+    assert tmux.spawned == []
+
+
 @pytest.mark.parametrize(
     ("body", "why"),
     [
@@ -1817,7 +1884,9 @@ def test_an_agent_that_sandboxes_its_tools_is_not_started_without_its_record(
     launch_seal.seals_dir().write_text("not a directory", encoding="utf-8")
     spawned = len(tmux.spawned)
 
-    with pytest.raises(fleet_service.FleetError, match="is not started without one") as refused:
+    with pytest.raises(
+        fleet_service.FleetError, match="no agent is started without one"
+    ) as refused:
         fleet_service.spawn(project, "coder", agent="codex", worktree=False)
 
     assert "could not be made" in str(refused.value) and len(tmux.spawned) == spawned

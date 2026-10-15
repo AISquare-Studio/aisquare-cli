@@ -117,10 +117,11 @@ class AgentCapabilities:
     for lower credit usage?`` dialog, opened past a turn near the five-hour limit while
     its hooks say waiting, out of a pane the fleet types into (measured on 0.162.1)."""
     start_dialog_mark: str | None = None
-    """What the agent's screen shows while a dialog it puts up before its start holds it
-    for the human, where an Enter answers it: Claude Code's ``Enter to confirm``, under its
-    folder-trust and MCP-server dialogs alike, the folder's defaulting to ``No, exit``
-    (measured on 2.1.300). A spawn's prompt for an agent whose start the board sees
+    """What starts the last line of the agent's screen while a dialog it puts up before its
+    start holds it for the human, where an Enter answers it: Claude Code's ``Enter to
+    confirm``, the row under its folder-trust and MCP-server dialogs alike, the folder's
+    defaulting to ``No, exit`` (measured on 2.1.300); the phrase elsewhere on the screen is
+    the agent's output. A spawn's prompt for an agent whose start the board sees
     (:attr:`starts_at_its_prompt`) waits past ``PROMPT_TIMEOUT`` while none is on screen;
     one the board cannot see start (``--continue``, the board off) is not typed while one
     is, nor is ``fleet tell``."""

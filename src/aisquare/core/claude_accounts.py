@@ -75,7 +75,7 @@ import re
 import shutil
 import sys
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -622,12 +622,13 @@ class FailedTurn:
     """A turn the session's transcript records as ended on an error the agent fired no hook
     for (``AgentAccounts.failed_turn``): the agent's id for the turn, the error as a
     ``turn_failed`` event names it (``rate_limit`` for a usage limit, as Claude Code's
-    ``StopFailure`` does; its window and reset are ``limit_from_transcript``'s), and its
-    text."""
+    ``StopFailure`` does; its window and reset are ``limit_from_transcript``'s), its
+    text, and when the transcript recorded its end."""
 
     turn_id: str | None
     error: str
     message: str
+    at: datetime | None = field(default=None, compare=False)
 
 
 def parse_limit_notice(text: str | None, *, now: datetime | None = None) -> LimitNotice | None:

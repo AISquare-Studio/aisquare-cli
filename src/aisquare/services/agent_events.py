@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
-from aisquare.core import agents
+from aisquare.core import agents, launch_seal, orchestrator
+from aisquare.core.agent_adapters import recorded_adapter
 from aisquare.core.agent_adapters.types import AgentAdapter, AgentEvent
 from aisquare.core.claude_accounts import LimitNotice
 from aisquare.core.store import ContextStore, store_session
@@ -285,18 +286,17 @@ def _usage_limit(
 ) -> LimitNotice | None:
     """The usage limit the session's transcript records at its end, or ``None``.
 
-    The transcript is the event's ``transcript_path``, else the one the session's
-    start recorded. Fails open: a transcript that cannot be read is no limit, and
-    the event is handled as it always was.
+    The transcript is the event's ``transcript_path``, handed to this hook by the agent,
+    else the one this window's launch record holds for the session (``core.launch_seal``),
+    as the agent's own hook reported it: never the board session's ``transcript_path``,
+    which an agent's sandbox writes, so a transcript of its making parked the row
+    ``limited`` and handed it over (review r5 of #113, finding 2). Fails open: a
+    transcript that cannot be read is no limit, and the event is handled as it always was.
     """
     try:
         if adapter.accounts is None or session_id is None:
             return None
-        transcript = event.transcript_path
-        if transcript is None:
-            with store_session() as store:
-                session = store.get_session(session_id)
-            transcript = session.transcript_path if session is not None else None
+        transcript = event.transcript_path or _recorded_transcript(session_id)
         if not transcript:
             return None
         return adapter.accounts.limit_from_transcript(Path(transcript))
@@ -304,10 +304,29 @@ def _usage_limit(
         return None
 
 
-def failed_turn(adapter: AgentAdapter, session: TeamSession) -> bool:
+def _recorded_transcript(session_id: str) -> str | None:
+    """The transcript the launch record of this hook's window (``AISQUARE_FLEET_AGENT``)
+    holds for ``session_id``; ``None`` outside the fleet, or for another session."""
+    agent_id = orchestrator.env_fleet_agent()
+    record = launch_seal.read(agent_id) if agent_id is not None else None
+    facts = record.session if isinstance(record, launch_seal.LaunchRecord) else None
+    return facts.transcript if facts is not None and facts.id == session_id else None
+
+
+def failed_turn(agent_id: str, session: TeamSession) -> bool:
     """Record the turn ``session``'s transcript says ended on an error that fired no hook
     (``AgentAccounts.failed_turn``: Codex 0.162.1 fires no ``Stop`` for a failed turn);
-    ``True`` when this call recorded it.
+    ``True`` when this call recorded it. ``session`` is the board's session of the fleet
+    row ``agent_id``.
+
+    The transcript read, and the agent whose reader reads it, are the row's launch
+    record's (``core.launch_seal``): the session the agent's own hook reported, never
+    ``session``'s ``transcript_path`` or ``agent``, which an agent's sandbox writes for any
+    row — a transcript of its making ending in a usage limit parked the row ``limited``
+    and detached a hand-over (review r5 of #113, finding 2). A record that holds no
+    session, or another, reads nothing. A failure the transcript recorded before the
+    session's last hook is an earlier turn's, read before the turn that hook's prompt
+    began wrote its start: it is not this turn's to end (r5, finding 7).
 
     As Claude Code's ``StopFailure`` is recorded (``hooks.turn_failed``): a usage limit
     parks the session ``limited`` with the reset ``limit_from_transcript`` reads, tells the
@@ -319,15 +338,20 @@ def failed_turn(adapter: AgentAdapter, session: TeamSession) -> bool:
     that records it. Never raises: a transcript that cannot be read is no failure, and a
     record that could not be written gives the turn back to the next read.
     """
-    accounts = adapter.accounts
-    transcript = session.transcript_path
-    if accounts is None or not adapter.capabilities.limits_in_transcript or not transcript:
+    record = launch_seal.read(agent_id)
+    facts = record.session if isinstance(record, launch_seal.LaunchRecord) else None
+    if facts is None or facts.id != session.id or not facts.transcript:
         return False
+    adapter = recorded_adapter(facts.agent)
+    accounts = adapter.accounts if adapter is not None else None
+    if accounts is None or adapter is None or not adapter.capabilities.limits_in_transcript:
+        return False
+    transcript = facts.transcript
     try:
         failure = accounts.failed_turn(Path(transcript))
     except Exception:
         return False
-    if failure is None:
+    if failure is None or (failure.at is not None and failure.at < session.last_seen_at):
         return False
     # A turn with no id of its own is the one the prompt that stamped `last_seen_at` began.
     turn = failure.turn_id or session.last_seen_at.isoformat()

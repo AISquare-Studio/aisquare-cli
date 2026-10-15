@@ -75,6 +75,11 @@ NEWEST_ROLLOUTS = 20
 none, nor has a session that only ran ``/clear`` or hit its limit at once: in SMOKE3 the
 account's newest window was in the seventh rollout written last. Past the first reading,
 a rollout written before it was recorded is not read (:func:`newest_rate_limits`)."""
+HOME_SCAN_BYTES = 1024 * 1024
+"""How much of each of those rollouts' end the home's search reads: a session records a
+reading with each response, so its newest is near its end, and an account with none (an
+API key, the limit's windowless reading alone) read twenty rollouts to
+:data:`MAX_SCAN_BYTES` each on every ``usage()`` (review r5 of #113, finding 6)."""
 
 TURN_END_BYTES = 64 * 1024
 """How much of a rollout's end :func:`failed_turn` reads: a failed turn's ``task_complete`` is
@@ -299,11 +304,11 @@ def _later(when: datetime | None, than: datetime | None) -> bool:
     return when is not None and (than is None or when > than)
 
 
-def _rollouts(home: Path) -> list[tuple[float, Path]]:
+def _rollouts(home: Path) -> list[tuple[float, Path, int]]:
     """The home's rollouts with their mtimes, most recently WRITTEN first — a resumed
-    session appends to its own."""
+    session appends to its own — and their sizes."""
     root = home / "sessions"
-    found: list[tuple[float, Path]] = []
+    found: list[tuple[float, Path, int]] = []
     stack = [root]
     while stack:
         current = stack.pop()
@@ -316,10 +321,11 @@ def _rollouts(home: Path) -> list[tuple[float, Path]]:
                 if entry.is_dir(follow_symlinks=False):
                     stack.append(Path(entry.path))
                 elif entry.name.startswith("rollout-") and entry.name.endswith(".jsonl"):
-                    found.append((entry.stat().st_mtime, Path(entry.path)))
+                    stat = entry.stat()
+                    found.append((stat.st_mtime, Path(entry.path), stat.st_size))
             except OSError:
                 continue
-    return sorted(found, key=lambda pair: pair[0], reverse=True)
+    return sorted(found, key=lambda item: item[0], reverse=True)
 
 
 def _home_of(rollout: Path) -> Path | None:
@@ -336,28 +342,44 @@ def _newest_windowed(rollout: Path) -> tuple[Mapping[str, Any], datetime | None]
     and ``rate_limit_reached_type`` (measured at a team plan's spend cap), so the newest
     reading of a full account said nothing of its windows (SMOKE3).
     """
-    for record in _records_from_end(rollout):
+    for record in _records_from_end(rollout, limit=HOME_SCAN_BYTES):
         limits = _rate_limits(record)
         if limits is not None and _windows(limits):
             return limits, _stamp(record)
     return None
 
 
-def newest_rate_limits(home: Path) -> tuple[Mapping[str, Any], datetime | None] | None:
+_Reading = tuple[Mapping[str, Any], datetime | None]
+
+#: The newest reading found under each home, by the home, with the rollouts it was found
+#: among (their paths, mtimes and sizes): read again only once one of them is written.
+_READINGS: dict[str, tuple[tuple[tuple[float, str, int], ...], _Reading | None]] = {}
+
+
+def newest_rate_limits(home: Path) -> _Reading | None:
     """The newest ``rate_limits`` carrying a window any session under ``home`` recorded,
     and when (:func:`_newest_windowed`).
 
     Newest by when it was recorded, among the :data:`NEWEST_ROLLOUTS` rollouts written
     last: the one written last may have recorded only the limit's windowless reading
-    since its own last window, older than another session's.
+    since its own last window, older than another session's. Each is read back
+    :data:`HOME_SCAN_BYTES` at most, and none again until one of them is written: the
+    Accounts page, Welcome's look and the hand-over's headroom ask on every ``usage()``,
+    and the app's tick through a failed turn's limit (review r5 of #113, finding 6).
     """
-    best: tuple[Mapping[str, Any], datetime | None] | None = None
-    for mtime, rollout in _rollouts(home)[:NEWEST_ROLLOUTS]:
+    newest = _rollouts(home)[:NEWEST_ROLLOUTS]
+    seen = tuple((mtime, str(rollout), size) for mtime, rollout, size in newest)
+    cached = _READINGS.get(str(home))
+    if cached is not None and cached[0] == seen:
+        return cached[1]
+    best: _Reading | None = None
+    for mtime, rollout, _ in newest:
         if best is not None and best[1] is not None and mtime < best[1].timestamp():
             break  # written last before that reading was recorded: nothing in it is newer
         found = _newest_windowed(rollout)
         if found is not None and (best is None or _later(found[1], best[1])):
             best = found
+    _READINGS[str(home)] = (seen, best)
     return best
 
 
@@ -510,7 +532,7 @@ def failed_turn(path: Path) -> FailedTurn | None:
         said = error.get("message")
         message = said.strip() if isinstance(said, str) and said.strip() else "the turn failed"
         kind = "rate_limit" if _limit_error(record) else _error_kind(error) or "unknown"
-        return FailedTurn(turn if _has(turn) else None, kind, message)
+        return FailedTurn(turn if _has(turn) else None, kind, message, _stamp(record))
     return None
 
 

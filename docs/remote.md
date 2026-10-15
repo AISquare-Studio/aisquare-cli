@@ -270,7 +270,10 @@ free-form instructions. A write refused after part of it already reached the
 agent is on the trail too, with how it ended: keys typed before tmux failed
 (`failed`), an Esc sent before the action stopped short (`refused=<error>`), a
 restart that stopped the agent and could not start its replacement
-(`failed=<error>`). A write that went through still answers when its line will
+(`failed=<error>`). A write tmux did not answer in time may still land, as a
+wedged server runs what it was asked once it recovers: its answer says so, and to
+read the live screen before sending it again, and its line says `maybe`
+(`delivered=maybe`, or `escape=maybe` and `dismissed=maybe` for an Esc). A write that went through still answers when its line will
 not write (a full disk, a home that is not writable), so that the phone does
 not send it again: the server's log then warns, with the line that is missing.
 

@@ -1035,10 +1035,11 @@ def _branches_locked(root: Path, *, wait: float) -> Iterator[None]:
     out, and a spawn that finds the branch there checks it out one git command after
     asking: a reap's sweep between the two read the branch as out of every tree and
     deleted it, and the spawn failed, or made its tree on a branch that was gone (review
-    of #259, round 16). So :func:`_ensure_worktree` holds this from its first question
-    about a branch until the tree is registered, and :func:`_sweep_fleet_branches` deletes
-    only while it holds it, asking the trees again first. A file in the repository's own
-    ``.git``, which every worktree of it shares.
+    of #259, round 16). So :func:`spawn` holds this from its first question about a branch
+    until its agent's row is written, :func:`_sweep_fleet_branches` deletes only while it
+    holds it, asking the trees again first, and :func:`_remove_unless_taken` removes a tree
+    only while it holds it, asking the live rows again first (round 17). A file in the
+    repository's own ``.git``, which every worktree of it shares.
 
     ``wait`` is the patience for one holder, not for the lock: each holder says who it is
     beside the lock (:func:`_announce_holder`), and a waiter that sees another holder than
@@ -1186,16 +1187,16 @@ def _reuse_worktree(
     notes.append(f"reusing the existing worktree at {path} — it was {where}, now on {branch}")
 
 
-def _ensure_worktree(
+def _worktree_for(
     root: Path,
     worktree_dir: str,
     label: str,
     branch: str,
     notes: list[str],
     *,
-    refuse_if_taken: Callable[[], None] | None = None,
-    own: Path | None = None,
-    own_branch: str | None = None,
+    refuse_if_taken: Callable[[], None] | None,
+    own: Path | None,
+    own_branch: str | None,
 ) -> Path:
     """``<root>/<worktree_dir>/<label>`` on ``branch``, created or reused.
 
@@ -1225,33 +1226,10 @@ def _ensure_worktree(
     before switching branches; a tree this call CREATES cannot be another
     agent's, because ``git worktree add`` refuses an existing directory.
 
-    All of it under the branch lock a reap deletes under (:func:`_branches_locked`).
+    The caller holds the branch lock (:func:`_branches_locked`), which a reap deletes
+    branches and removes trees under: :func:`spawn` from before the first question about a
+    branch until the agent's row is written.
     """
-    with _branches_locked(root, wait=_BRANCHES_LOCK_WAIT):
-        return _worktree_for(
-            root,
-            worktree_dir,
-            label,
-            branch,
-            notes,
-            refuse_if_taken=refuse_if_taken,
-            own=own,
-            own_branch=own_branch,
-        )
-
-
-def _worktree_for(
-    root: Path,
-    worktree_dir: str,
-    label: str,
-    branch: str,
-    notes: list[str],
-    *,
-    refuse_if_taken: Callable[[], None] | None,
-    own: Path | None,
-    own_branch: str | None,
-) -> Path:
-    """:func:`_ensure_worktree`'s work, under its lock."""
     if own is not None and not own.exists():
         return _remake_worktree(root, own, own_branch, notes)
     path = root / worktree_dir / label
@@ -1479,7 +1457,7 @@ def _remove_finished_worktrees(
 
     The tree goes, and its branch stays, recorded on the newest row at its path just before
     the tree went (:func:`_record_the_branch`), whatever its name: a spawn for the task checks
-    it out (:func:`_ensure_worktree`), and a restart of the agent makes its tree again there
+    it out (:func:`_worktree_for`), and a restart of the agent makes its tree again there
     (:func:`_remake_worktree`). Deleted when pushed anywhere, as the tree is, it took the
     task's commits with it: a coder spawned again for the task, after a reviewer reopened
     it, asks for the same branch (:func:`branch_name`), found none, and started a new one
@@ -1517,15 +1495,44 @@ def _remove_finished_worktrees(
         except FleetError as exc:
             kept = f"git could not be asked ({exc})"
         if kept is None:
-            removal = _git(root, "worktree", "remove", str(agent.cwd))
-            if removal.returncode != 0:
-                kept = f"git worktree remove refused: {removal.stderr.strip() or 'no reason'}"
+            removed, kept = _remove_unless_taken(store, project, agent.cwd)
+            if removed:
+                report.worktrees_removed.append(agent.cwd)
+                continue
         if kept is not None:
             report.worktrees_kept.append((agent.cwd, kept))
-            continue
-        report.worktrees_removed.append(agent.cwd)
     # Read again: the branches recorded just now are the ones the sweep asks about.
     _sweep_fleet_branches(root, default, store.fleet_agents(project.id), report)
+
+
+def _remove_unless_taken(
+    store: ContextStore, project: ProjectInfo, tree: Path
+) -> tuple[bool, str | None]:
+    """``git worktree remove`` of ``tree``, an ended agent's that holds nothing found only
+    there, unless a live agent works in it now; whether it went, and when it did not, why
+    (``None`` for one a live agent took, left unsaid, as a tree in use always was).
+
+    Under the branch lock :func:`spawn` makes or reuses a tree under and holds until its
+    agent's row is written, and with the live rows read again there. :func:`reap` decided
+    from the rows it read before its loop, and each tree costs it a few git calls: a spawn
+    or restart for a label whose ended tree was in that snapshot reused it meanwhile, and
+    the tree, read as ended, clean and pushed, was removed under the new agent (review of
+    #259, round 17). Never waited for: a spawn holds the lock through a ``git worktree add``
+    and a window, and the next reap asks again.
+    """
+    try:
+        with _branches_locked(project.root, wait=0):
+            here = tree.resolve()
+            if any(
+                row.cwd.resolve() == here for row in store.fleet_agents(project.id, live_only=True)
+            ):
+                return False, None
+            removal = _git(project.root, "worktree", "remove", str(tree))
+    except FleetError as exc:
+        return False, f"not removed now: {exc}"
+    if removal.returncode != 0:
+        return False, f"git worktree remove refused: {removal.stderr.strip() or 'no reason'}"
+    return True, None
 
 
 def _fleet_branches(root: Path, *flags: str) -> dict[str, str] | None:
@@ -2307,7 +2314,7 @@ def spawn(
     ways out those commands have (:func:`_launch_binary`). ``own_worktree`` is
     such a replacement's too: the tree the agent it replaces worked in, which
     is taken as it stands — branch, uncommitted work and all — when it is the
-    tree this spawn lands in (:func:`_ensure_worktree`), never put on the
+    tree this spawn lands in (:func:`_worktree_for`), never put on the
     branch today's task and codename would name; gone, it is made again on
     ``own_branch``, the branch the replaced row recorded it on.
 
@@ -2497,37 +2504,7 @@ def spawn(
         # A forgotten project's ended rows keep their windows under the codename its
         # tombstone kept, which the caller's registration did not carry.
         views = _observe_sockets(rows, session_name(codename), config)
-    cwd = project.root
-    if use_worktree:
-        branch = branch_name(
-            codename,
-            task_id=resolved_task_id,
-            title=task.title if task is not None else picked,
-        )
-        cwd = _ensure_worktree(
-            project.root,
-            config.worktree_dir,
-            picked,
-            branch,
-            notes,
-            refuse_if_taken=refuse_if_taken,
-            own=own_worktree,
-            own_branch=own_branch,
-        )
     notes.extend(f"accounts: {note}" for note in choice.notes)
-    made: list[str] = []
-    if choice.account is not None:
-        # Here as well as in the window's `aisquare launch`, so the receipt — the
-        # manager's one view of the spawn — says when the folder's trust could not be
-        # shared and the agent will stop at Claude Code's question. The launch finds it
-        # done; with no account chosen, only the window knows its environment.
-        shared = claude_accounts_service.share_for_launch(cwd, account=choice.account)
-        notes.extend(f"accounts: {note}" for note in shared)
-        made = [
-            f"accounts: {note}"
-            for note in shared
-            if isinstance(note, claude_accounts_service.SharedNote)
-        ]
     # A replayed spec already holds the role's arguments as they were at spawn;
     # adding today's would double them (or add ones the agent never had).
     role_args = [] if spec is not None else list(role_config.extra_args)
@@ -2624,91 +2601,131 @@ def spawn(
     evidence = auto_mode.spawn_evidence(mode)
     tmux_session = session_name(codename)
     width, height = size if size is not None else (DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
-    try:
-        # Every pair is this window's alone: `spawn_window` keeps them out of
-        # the session environment, so a later spawn — or a window opened by hand
-        # — starts from the server's environment and sets its own (review of
-        # #203, rounds 3 and 4; §7.6 for the opt-out).
-        window = open_window(
-            srv,
-            tmux_session,
-            name=picked,
-            cwd=cwd,
-            command=command,
-            env=env,
-            width=width,
-            height=height,
-            config=config,
-            notes=notes,
-        )
-    except TmuxError as exc:
-        raise FleetError(f"tmux could not start the window: {exc}") from exc
-    if window.resize_refused is not None:
-        # The agent runs either way; what it costs is #149 itself, so it is said
-        # rather than left for the diff panel to explain (review of #162, round 1).
-        notes.append(
-            f"tmux would not size the window {width}x{height} ({window.resize_refused}) — "
-            "it runs at its session's size until a pane shows it, and at 144 columns or "
-            "wider Claude Code opens its diff panel on its own"
-        )
-    # Where this server listens and in which boot, as the window exists: what uninstall
-    # and upgrade ask whether the row may still run, rather than inferring it from the
-    # shell they run in (round 25 of #257). Not saying is not failing the spawn.
-    try:
-        socket_path = srv.server_socket_path()
-    except TmuxError:
-        socket_path = None
-    # And when it started: the identity of the server the pane id names, since every server
-    # numbers from %0. A server at that socket started at another time is not this one
-    # (`_outlived`, `server_may_run`): it took the path from this one, which lost its socket
-    # file and runs on (follow-up of #257). Not saying is not failing the spawn either.
-    try:
-        server_started = srv.started_at()
-    except TmuxError:
-        server_started = None
+    # The tree, made or reused, and the row that says an agent works in it, under one hold
+    # of the branch lock a reap removes trees under (`_remove_unless_taken`): a reap that
+    # landed between a reuse and the row read the tree as an ended agent's, clean and
+    # pushed, and removed it from under the agent starting in it (review of #259, round 17).
+    tree_lock = (
+        _branches_locked(project.root, wait=_BRANCHES_LOCK_WAIT)
+        if use_worktree
+        else contextlib.nullcontext()
+    )
+    with tree_lock:
+        cwd = project.root
+        if use_worktree:
+            branch = branch_name(
+                codename,
+                task_id=resolved_task_id,
+                title=task.title if task is not None else picked,
+            )
+            cwd = _worktree_for(
+                project.root,
+                config.worktree_dir,
+                picked,
+                branch,
+                notes,
+                refuse_if_taken=refuse_if_taken,
+                own=own_worktree,
+                own_branch=own_branch,
+            )
+        made: list[str] = []
+        if choice.account is not None:
+            # Here as well as in the window's `aisquare launch`, so the receipt — the
+            # manager's one view of the spawn — says when the folder's trust could not be
+            # shared and the agent will stop at Claude Code's question. The launch finds it
+            # done; with no account chosen, only the window knows its environment.
+            shared = claude_accounts_service.share_for_launch(cwd, account=choice.account)
+            notes.extend(f"accounts: {note}" for note in shared)
+            made = [
+                f"accounts: {note}"
+                for note in shared
+                if isinstance(note, claude_accounts_service.SharedNote)
+            ]
+        try:
+            # Every pair is this window's alone: `spawn_window` keeps them out of
+            # the session environment, so a later spawn — or a window opened by hand
+            # — starts from the server's environment and sets its own (review of
+            # #203, rounds 3 and 4; §7.6 for the opt-out).
+            window = open_window(
+                srv,
+                tmux_session,
+                name=picked,
+                cwd=cwd,
+                command=command,
+                env=env,
+                width=width,
+                height=height,
+                config=config,
+                notes=notes,
+            )
+        except TmuxError as exc:
+            raise FleetError(f"tmux could not start the window: {exc}") from exc
+        if window.resize_refused is not None:
+            # The agent runs either way; what it costs is #149 itself, so it is said
+            # rather than left for the diff panel to explain (review of #162, round 1).
+            notes.append(
+                f"tmux would not size the window {width}x{height} ({window.resize_refused}) — "
+                "it runs at its session's size until a pane shows it, and at 144 columns or "
+                "wider Claude Code opens its diff panel on its own"
+            )
+        # Where this server listens and in which boot, as the window exists: what uninstall
+        # and upgrade ask whether the row may still run, rather than inferring it from the
+        # shell they run in (round 25 of #257). Not saying is not failing the spawn.
+        try:
+            socket_path = srv.server_socket_path()
+        except TmuxError:
+            socket_path = None
+        # And when it started: the identity of the server the pane id names, since every server
+        # numbers from %0. A server at that socket started at another time is not this one
+        # (`_outlived`, `server_may_run`): it took the path from this one, which lost its socket
+        # file and runs on (follow-up of #257). Not saying is not failing the spawn either.
+        try:
+            server_started = srv.started_at()
+        except TmuxError:
+            server_started = None
 
-    agent = FleetAgent(
-        id=agent_id,
-        project_id=project.id,
-        label=picked,
-        role=role,
-        binary=resolution.binary,
-        tmux_socket=config.tmux_socket,
-        pane_id=window.pane_id,
-        # A fresh hand-over's row starts on the session whose claims it inherits,
-        # the state `_take_over` moves it out of (and the agent's own start hook
-        # would, should that move not happen).
-        session_id=takes_over if takes_over is not None else identity.session_id,
-        cwd=cwd,
-        worktree=use_worktree,
-        task_id=resolved_task_id,
-        spawned_by=spawned_by,
-        account_slot=choice.account.slot if choice.account is not None else None,
-        launch_spec=LaunchSpec(
+        agent = FleetAgent(
+            id=agent_id,
+            project_id=project.id,
+            label=picked,
+            role=role,
             binary=resolution.binary,
-            permission_mode=mode,
-            extra_args=recorded_args,
-            account_slot=choice.account.slot if choice.account is not None else None,
+            tmux_socket=config.tmux_socket,
+            pane_id=window.pane_id,
+            # A fresh hand-over's row starts on the session whose claims it inherits,
+            # the state `_take_over` moves it out of (and the agent's own start hook
+            # would, should that move not happen).
+            session_id=takes_over if takes_over is not None else identity.session_id,
+            cwd=cwd,
             worktree=use_worktree,
-            command=list(command),
-            recorded_by=__version__,
-        ),
-        socket_path=socket_path,
-        boot_id=tmux_core.boot_id(),
-        server_started_at=server_started,
-        branch=_spawned_on(cwd) if use_worktree else None,
-        created_at=_now(),
-    )
-    stored = _record(
-        agent,
-        project,
-        srv,
-        wanted=label,
-        notes=notes,
-        cap=config.max_agents_per_project,
-        onboard=onboard,
-        codename=codename,
-    )
+            task_id=resolved_task_id,
+            spawned_by=spawned_by,
+            account_slot=choice.account.slot if choice.account is not None else None,
+            launch_spec=LaunchSpec(
+                binary=resolution.binary,
+                permission_mode=mode,
+                extra_args=recorded_args,
+                account_slot=choice.account.slot if choice.account is not None else None,
+                worktree=use_worktree,
+                command=list(command),
+                recorded_by=__version__,
+            ),
+            socket_path=socket_path,
+            boot_id=tmux_core.boot_id(),
+            server_started_at=server_started,
+            branch=_spawned_on(cwd) if use_worktree else None,
+            created_at=_now(),
+        )
+        stored = _record(
+            agent,
+            project,
+            srv,
+            wanted=label,
+            notes=notes,
+            cap=config.max_agents_per_project,
+            onboard=onboard,
+            codename=codename,
+        )
     # The auto-mode note (#150), from the evidence read before the window: on the
     # receipt when this machine's transcripts say so, a warning, never a reason
     # not to spawn. Worded once the row is written, so the restart it names is

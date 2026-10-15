@@ -8496,6 +8496,72 @@ def test_a_reap_inside_a_spawn_never_deletes_the_branch_the_spawn_is_making_its_
     )
 
 
+@pytest.mark.parametrize("via", ["spawn", "restart"])
+def test_a_reap_never_removes_a_tree_a_spawn_reused_after_it_read_the_rows(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    via: str,
+) -> None:
+    """Review of #259, round 17: reap decided a tree was unused from the rows it read before
+    its loop, and asks each tree a few git questions first. A spawn for the label — or a
+    restart of the agent, which carries on in its tree as it stands — reused the tree
+    meanwhile and wrote its live row; the reap then read the tree as an ended agent's, clean
+    and pushed, and removed it under the new agent. It reads the live rows again, under the
+    lock a spawn reuses trees under, before it removes one."""
+    first = fleet_service.spawn(project, "coder", label="coder-auth").agent
+    fleet_service.stop(project, "coder-auth", force=True)
+    real = fleet_service._why_kept
+    started: list[FleetAgent] = []
+
+    def a_spawn_meanwhile(root: Path, tree: Path, default: str) -> str | None:
+        if not started:
+            if via == "spawn":
+                started.append(fleet_service.spawn(project, "coder", label="coder-auth").agent)
+            else:
+                started.append(fleet_service.restart(project, "coder-auth").started)
+        return real(root, tree, default)
+
+    monkeypatch.setattr(fleet_service, "_why_kept", a_spawn_meanwhile)
+
+    report = fleet_service.reap(project)
+
+    [again] = started
+    assert again.cwd == first.cwd and again.ended_at is None
+    assert first.cwd.is_dir(), "the new agent's tree is still there"
+    assert report.worktrees_removed == [] and report.worktrees_kept == []
+
+
+def test_a_reap_inside_a_spawn_never_removes_the_tree_it_reused_before_its_row(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the race above: a reap between a spawn's reuse of a tree and the row
+    that says an agent works there — the window opening, say — found no live row at the path
+    and removed the tree. A spawn holds the branch lock from the tree until its row, and a
+    reap that meets the lock removes nothing, saying why; the next one asks again."""
+    first = fleet_service.spawn(project, "coder", label="coder-auth").agent
+    fleet_service.stop(project, "coder-auth", force=True)
+    real = fleet_service.open_window
+    meanwhile: list[fleet_service.ReapReport] = []
+
+    def a_reap_first(*args: Any, **kwargs: Any) -> WindowInfo:
+        meanwhile.append(fleet_service.reap(project))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(fleet_service, "open_window", a_reap_first)
+
+    again = fleet_service.spawn(project, "coder", label="coder-auth").agent
+
+    [during] = meanwhile
+    assert during.worktrees_removed == []
+    assert [path for path, _why in during.worktrees_kept] == [first.cwd]
+    assert "holds" in during.worktrees_kept[0][1]
+    assert again.cwd == first.cwd and first.cwd.is_dir()
+    monkeypatch.setattr(fleet_service, "open_window", real)
+    assert fleet_service.reap(project).worktrees_removed == [], "a live agent's, from now on"
+
+
 def test_a_spawn_waits_through_a_queue_of_holders_of_the_branch_lock(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

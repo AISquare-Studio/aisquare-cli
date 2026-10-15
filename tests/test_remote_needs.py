@@ -701,32 +701,35 @@ def test_a_question_or_plan_beside_a_call_it_cannot_name_has_a_card_before_any_n
 ) -> None:
     """Review of #259, round 9, 5/8: beside a call with no mark, the screen names no call,
     and with no ``attention`` there was no card at all, where rules 3 and 4 make one with no
-    notice. Its dialog drawn, it is rule 8's card, without answers; not while a notice may
-    still land and rename it, and not while nothing is drawn (a question behind a call at
-    work)."""
+    notice. Its dialog drawn, it is rule 8's card, without answers; not while nothing is
+    drawn (a question behind a call at work).
+
+    Round 10, 2/9: it was named after the notices before it, and one that landed later (the
+    idle notice Claude Code sends after a minute) named the same dialog anew, a second push
+    whose first link was a card gone. It is named after the question or the plan, at once
+    and after any notice."""
     row = _row()
     session = _session(row, state="working", seen=NOW - timedelta(minutes=2))
     status, tail = _status(row, "working", session), _tail(beside, asking)
     drawn = _question_screen(above=(f"● {beside.summary}",))
-    card = _one(
-        _classify(
-            status,
-            tail,
-            pane_screen=lambda: drawn,
-            pane_output=lambda: NOW - timedelta(seconds=40),
-        )
-    )
+    card = _one(_classify(status, tail, pane_screen=lambda: drawn))
     assert (card.kind, card.answers) == ("permission", ())
     assert card.reason == "coder-1 shows a dialog that needs you"
-    assert card.id == needs_item_id(
-        PROJECT.id, "permission", f"attention:-:{session.last_seen_at.isoformat()}"
-    )
-    unread = _classify(status, tail, pane_screen=lambda: None, pane_output=lambda: None)
+    assert card.id == needs_item_id(PROJECT.id, "permission", f"dialog:{asking.tool_use_id}")
+    unread = _classify(status, tail, pane_screen=lambda: None)
     assert [item.id for item in unread] == [card.id], "a screen nobody could read may show it"
     just = _classify(
         status, tail, pane_screen=lambda: drawn, pane_output=lambda: NOW - timedelta(seconds=3)
     )
-    assert just == [], "its notice may land in a moment and name it anew"
+    assert [item.id for item in just] == [card.id], "drawn a moment ago: no notice to wait for"
+    for late in (timedelta(seconds=30), timedelta(minutes=1, seconds=2)):
+        noticed = _session(row, state="attention", seen=NOW - timedelta(minutes=2) + late)
+        said = "Claude is waiting for your input"
+        events = [_event(9, "attention", said, session=noticed, at=noticed.last_seen_at)]
+        landed = _one(
+            _classify(_status(row, "attention", noticed), tail, events, pane_screen=lambda: drawn)
+        )
+        assert landed.id == card.id, f"a notice {late} later names the same dialog: one push"
     at_work = _at_work(f"● {beside.summary}")
     behind = _classify(status, tail, pane_screen=lambda: at_work, pane_output=lambda: None)
     assert behind == [], "nothing is drawn yet"

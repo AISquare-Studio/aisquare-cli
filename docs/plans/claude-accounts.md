@@ -207,8 +207,8 @@ launching module decides an account any other way, with positive and negative
 controls (CONTRIBUTING, "Writing a guard that still guards").
 
 **References.** `--account` takes a slot number, an alias or a signed-in email
-everywhere. The three cannot collide: an alias must start with a letter and
-cannot contain `@` (`core.normalise_alias`, lowercase, ≤ 32). The project
+everywhere. The three cannot collide: an alias is never all digits and
+cannot contain `@` (`core.normalise_alias`, free text, case kept, ≤ 64). The project
 default is stored as the resolved slot number; the role binding is stored as
 typed, so renaming an alias changes what it means the way the operator expects.
 

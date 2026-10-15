@@ -35,7 +35,12 @@ from textual.widgets import Button, Input, Static
 
 from aisquare.cli.ui import app as app_mod
 from aisquare.cli.ui.app import FleetApp
-from aisquare.cli.ui.sidebar import AccountsSelected, AgentSelected, DoctorSection, ProjectSelected
+from aisquare.cli.ui.sidebar import (
+    AccountsSelected,
+    AgentSelected,
+    DoctorSelected,
+    ProjectSelected,
+)
 from aisquare.cli.ui.views import welcome
 from aisquare.cli.ui.views.doctor import DoctorView
 from aisquare.cli.ui.views.onboard import ProjectOnboarded
@@ -1499,12 +1504,15 @@ def test_what_the_page_adds_shows_in_the_sidebar_and_the_page_stays(
 
 
 def doctor_lines(app: FleetApp) -> list[str]:
-    """The ⚠/✗ lines the sidebar's Doctor section shows under its counts."""
-    section = app.query_one(DoctorSection)
-    return [shown(line) for line in section.query(".doctor-line").results(Static) if line.display]
+    """The ⚠/✗ findings of the report the shell holds — what its Doctor page shows."""
+    return [
+        f"{'✗' if check.status is CheckStatus.fail else '⚠'} {check.name}: {check.detail}"
+        for check in app.doctor_checks
+        if check.status is not CheckStatus.ok
+    ]
 
 
-def test_connect_brings_the_sidebars_doctor_section_up_to_date(
+def test_connect_brings_the_shells_doctor_report_up_to_date(
     captain: str | None,
     fleet_rows: dict[str, list[FleetAgentStatus]],
     scripted: Callable[[Machine], None],
@@ -1512,9 +1520,9 @@ def test_connect_brings_the_sidebars_doctor_section_up_to_date(
 ) -> None:
     """Connect is the doctor's own fix, run from Welcome, and the shell's report follows it.
 
-    It never told the shell, so the sidebar kept "⚠ claude-code: … hooks are missing"
+    It never told the shell, so the report kept "⚠ claude-code: … hooks are missing"
     under a step 2 that said connected, until ``r`` or a selection ran the checks again
-    (review of #257). A fix in the Doctor view has always refreshed the section.
+    (review of #257). A fix in the Doctor view has always refreshed it.
     """
     machine, _ = _ready_machine(tmp_path, claude=[UNHOOKED])
     scripted(machine)
@@ -1544,22 +1552,23 @@ def test_connect_brings_the_sidebars_doctor_section_up_to_date(
     # Runs before Connect (at start, and for the project step 1 chose) all warned; the
     # run Connect asked for is the last.
     assert machine.connects == 1 and runs[-1] and not any(runs[:-1]), runs
-    assert after == [], "the section dropped the warning Connect answered"
+    assert after == [], "the report dropped the warning Connect answered"
 
 
-def test_the_sidebars_doctor_answers_for_the_project_step_one_chose(
+def test_the_doctor_answers_for_the_project_step_one_chose(
     captain: str | None,
     fleet_rows: dict[str, list[FleetAgentStatus]],
     scripted: Callable[[Machine], None],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Step 2 answers for the project step 1 chose, and the sidebar's Doctor answered for the
-    folder asq started in. With a project-scope plugin in one and not the other, the sidebar
-    warned "hooks are missing" under a step 2 that said connected, and its Connect would
-    have installed them for every repository (review of #257). While Welcome is shown the
-    Doctor answers for its project; once Choose another clears it, for the folder asq
-    started in; on another page, for the project that page shows."""
+    """Step 2 answers for the project step 1 chose, and the Doctor answered for the folder
+    asq started in. With a project-scope plugin in one and not the other, the Doctor warned
+    "hooks are missing" under a step 2 that said connected, and its Connect would have
+    installed them for every repository (review of #257). While Welcome is shown the
+    Doctor's scope is its project; once Choose another clears it, the folder asq started
+    in; on another page, the project that page shows. None of those runs the checks —
+    only start-up did — and the Doctor page opened afterwards runs them for that scope."""
     alpha = ProjectInfo(id="prj_alpha", root=tmp_path / "alpha", onboarded_at=T0)
     beta = ProjectInfo(id="prj_beta", root=tmp_path / "beta", onboarded_at=T0)
     with store_session() as store:
@@ -1578,26 +1587,70 @@ def test_the_sidebars_doctor_answers_for_the_project_step_one_chose(
     monkeypatch.setattr(diagnostics, "doctor", doctor)
 
     async def go(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> list[Any]:
-        seen: list[Any] = [(app.doctor_scope, asked[-1])]
+        seen: list[Any] = [(app.doctor_scope, list(asked))]
         first_candidate(page).press()  # Use alpha
         await settle_page(app)
-        seen.append((app.doctor_scope, asked[-1]))
+        seen.append((app.doctor_scope, list(asked)))
         app.post_message(ProjectSelected(beta.id))  # beta, clicked in the sidebar
         await settle_page(app)
-        seen.append((app.doctor_scope, asked[-1]))
+        seen.append((app.doctor_scope, list(asked)))
         await app.action_welcome()  # `w`
         await settle_page(app)
-        seen.append((app.doctor_scope, asked[-1]))
+        seen.append((app.doctor_scope, list(asked)))
         await press(pilot, page, "welcome-change")
-        seen.append((app.doctor_scope, asked[-1]))
+        seen.append((app.doctor_scope, list(asked)))
+        first_candidate(page).press()  # Use alpha again, then open the Doctor page
+        await settle_page(app)
+        app.post_message(DoctorSelected(None))
+        await settle_page(app)
+        seen.append((app.doctor_scope, list(asked)))
         return seen
 
-    start, chosen, elsewhere, back, cleared = in_shell(machine, go, doctor=diagnostics.doctor)
-    assert start == (None, None), "control: nothing chosen, the folder asq started in"
-    assert chosen == (alpha.id, alpha.root)
-    assert elsewhere == (beta.id, beta.root), "another page's project, as before"
-    assert back == (alpha.id, alpha.root), "back on Welcome, the project step 2 is about"
-    assert cleared == (None, None)
+    start, chosen, elsewhere, back, cleared, opened = in_shell(
+        machine, go, doctor=diagnostics.doctor
+    )
+    assert start == (None, [None]), "control: nothing chosen, the folder asq started in"
+    assert chosen == (alpha.id, [None]), "the scope follows step 1; the checks do not run"
+    assert elsewhere == (beta.id, [None]), "another page's project, as before"
+    assert back == (alpha.id, [None]), "back on Welcome, the project step 2 is about"
+    assert cleared == (None, [None])
+    assert opened == (alpha.id, [None, alpha.root]), "the page runs them, for that project"
+
+
+def test_back_on_welcome_in_the_same_frame_the_doctor_still_takes_its_project(
+    captain: str | None,
+    fleet_rows: dict[str, list[FleetAgentStatus]],
+    scripted: Callable[[Machine], None],
+    tmp_path: Path,
+) -> None:
+    """The page said which project step 1 is on only from its ``on_show``, and Textual
+    sends ``Show`` by comparing one layout with the next: hidden and shown again before
+    the screen's next layout pass, the page got none, and the doctor kept the scope of
+    the page just left — for good, not for a frame (~1 in 6 runs of this file, at the
+    test above's "back on Welcome"). Here every time: the switch away and back is made
+    before any layout pass runs."""
+    alpha = ProjectInfo(id="prj_alpha", root=tmp_path / "alpha", onboarded_at=T0)
+    beta = ProjectInfo(id="prj_beta", root=tmp_path / "beta", onboarded_at=T0)
+    with store_session() as store:
+        for project in (alpha, beta):
+            project.root.mkdir()
+            store.onboard_project(ProjectInfo(id=project.id, root=project.root))
+    listed = tuple(Candidate(root=p.root, is_git=True, project=p) for p in (alpha, beta))
+    machine = Machine(claude=[READY], found=Candidates(items=listed))
+    scripted(machine)
+
+    async def go(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> list[str | None]:
+        first_candidate(page).press()  # Use alpha
+        await settle_page(app)
+        await app.on_project_selected(ProjectSelected(beta.id))  # handled: no layout yet
+        away = app.doctor_scope
+        await app.action_welcome()  # `w`, in the same frame
+        await settle_page(app)
+        return [away, app.doctor_scope]
+
+    away, back = in_shell(machine, go)
+    assert away == beta.id, "control: the other page's project"
+    assert back == alpha.id, "back on Welcome, the project step 2 is about"
 
 
 def test_step_one_reads_the_shells_frame_not_a_second_store_open(

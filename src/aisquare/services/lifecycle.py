@@ -33,6 +33,7 @@ from aisquare.core import snapshot as snapshot_core
 from aisquare.core.config import (
     AppConfig,
     ExplainabilitySettings,
+    defaults_a_whole_file_reader_lacks,
     load_config,
     save_config,
 )
@@ -339,6 +340,10 @@ class UpgradePlan:
     reinstall's Python, or the uv cutoff, excludes it, or PyPI does not list it. The first
     two are :attr:`reason` too when the route is otherwise one ``aisquare upgrade`` runs;
     an index set up for it may list what PyPI does not."""
+    config_defaults_lost: tuple[str, ...] = ()
+    """The settings a move back to a release that reads config.toml whole
+    (:data:`LAST_WHOLE_CONFIG` and earlier) takes from that release's defaults, not this
+    one's, as the file says nothing of them: ``accounts.pick default (here headroom)``."""
     env_files_dropped: tuple[str, ...] = ()
     """The roles bound to a file (``RoleLaunchProfile.env_files``) that a move back to a
     release before :data:`FIRST_ENV_FILES` ignores, each with its variables:
@@ -388,6 +393,27 @@ class UpgradePlan:
             f"what phones ask of it can fail, and after that it runs {self.current} over the new "
             f"install's files until it is started again. To be safe, turn it off first: "
             f"{REMOTE_OFF}"
+        )
+
+    @property
+    def config_warning(self) -> str | None:
+        """What a move back reads differently in config.toml, or ``None`` when nothing.
+
+        This release's file holds only what the user changed, over defaults built in; a
+        release up to :data:`LAST_WHOLE_CONFIG` reads it with its own defaults instead, so
+        the settings the file leaves to today's defaults change with the move (review of
+        #261, M2). Said, as :attr:`fleet_warning` is, rather than refused: nothing is lost,
+        and the way forward again reads the file as before.
+        """
+        if not self.config_defaults_lost:
+            return None
+        first = self.config_defaults_lost[0].split()[0]
+        return (
+            f"{self.target} reads config.toml without this release's defaults under it, so "
+            f"what your file leaves to them takes {self.target}'s there: "
+            f"{', '.join(self.config_defaults_lost)}. Your own settings read the same in "
+            f"both; to keep one of these there, set it after the move (`aisquare config set "
+            f"{first} …`)"
         )
 
     @property
@@ -525,6 +551,7 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
     live: tuple[str, ...] = ()
     fleet_error: str | None = None
     remote: str | None = None
+    lost: tuple[str, ...] = ()
     if reason is None:
         refresh, left = refresh_sites(route.facts)
         if target is not None and lacks_refresh_hooks(target):
@@ -534,6 +561,8 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
             # here, with the remedy: a note in the report said it again.
             left = (*left, *(_left_by_move_back(site, target) for site in refresh))
             refresh = ()
+        if target is not None and reads_config_whole(target):
+            lost = _config_defaults_lost()
         if target is not None and lacks_env_files(target):
             dropped = _env_file_bindings()
         live, _unlistened, fleet_error = running_fleet()
@@ -553,6 +582,7 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
         live_agents=live,
         fleet_error=fleet_error,
         remote=remote,
+        config_defaults_lost=lost,
         env_files_dropped=dropped,
     )
 
@@ -583,6 +613,26 @@ def lacks_refresh_hooks(release: str) -> bool:
     release, not on the direction: from 0.8.1, a move back to 0.8.0 left every site and
     advised `agents connect` (review of #257)."""
     return install_route.is_newer(FIRST_REFRESH_HOOKS, release) is True
+
+
+def reads_config_whole(release: str) -> bool:
+    """Whether ``release`` reads config.toml as it stands, without the system defaults under
+    it: :data:`LAST_WHOLE_CONFIG` and earlier."""
+    return install_route.is_newer(release, LAST_WHOLE_CONFIG) is False
+
+
+def _config_defaults_lost() -> tuple[str, ...]:
+    """Each setting a release that :func:`reads_config_whole` reads otherwise
+    (:attr:`UpgradePlan.config_defaults_lost`); none when the config cannot be read, which
+    says nothing either way."""
+    try:
+        config = load_config()
+    except Exception:
+        return ()
+    return tuple(
+        f"{key} {theirs} (here {ours})"
+        for key, ours, theirs in defaults_a_whole_file_reader_lacks(config)
+    )
 
 
 def lacks_env_files(release: str) -> bool:
@@ -1030,6 +1080,8 @@ def _verify(plan: UpgradePlan, ran: install_route.InstallRoute) -> tuple[str | N
 REFRESH_HOOKS = ("agents", "refresh-hooks", HOOK_AGENT)
 #: The first release with ``agents refresh-hooks``: 0.7.0, on PyPI, has none.
 FIRST_REFRESH_HOOKS = "0.8.0"
+#: The last release that reads config.toml as it stands: those after lay it over defaults.
+LAST_WHOLE_CONFIG = "0.8.1"
 #: The first release that reads ``env_files`` (``team bind --env-file``): 0.8.0 ignores it.
 FIRST_ENV_FILES = "0.8.1"
 

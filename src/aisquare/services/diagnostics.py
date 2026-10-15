@@ -155,10 +155,10 @@ def doctor(
         *_check_resumable_agents(),
         *_check_captured_projects(),
         # After the actionable machine checks on purpose. The fleet UI's sidebar
-        # shows the first three not-ok rows (`DOCTOR_LINES == 3`, a stable sort
-        # within the warn group), so a row inserted at position 12 evicted one
-        # of `brain` / `snapshot` / a logged-out `gh` — the ones an operator can
-        # act on — from the only doctor surface visible without a click. The
+        # showed the first three not-ok rows (a stable sort within the warn
+        # group), so a row inserted at position 12 evicted one of `brain` /
+        # `snapshot` / a logged-out `gh` — the ones an operator can act on — from
+        # what was seen first; the Doctor page still lists them in this order. The
         # fleet terminal row (#147) can warn too, about a running server's kept
         # prefix, so it waits here with them rather than beside tmux.
         _check_browser_tools(cwd),
@@ -1287,8 +1287,8 @@ def _planned_agent_checks() -> list[DoctorCheck]:
     Codex and Cursor today (``core.agents``; Claude Code is the row above). One
     row per registry entry, so an agent added there gets its row here, and one
     that gains hooks moves to a check of its own. Always ``ok``, detected or
-    not: there is nothing to fix, and a warning would take one of the sidebar's
-    three not-ok lines (``DOCTOR_LINES``) from a row an operator can act on. No
+    not: there is nothing to fix, and a warning would sit among the first not-ok
+    lines the Doctor page lists, above a row an operator can act on. No
     ``fix``, so no button: ``agents connect`` refuses these agents rather than
     record a connection that installs nothing. A release is named only where
     the registry plans one.
@@ -1594,7 +1594,7 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
     if measured and all(pct >= settings.switch_at for _, pct in measured):
         return _warn(
             "claude-account-headroom",
-            f"every account is at or over {settings.switch_at}% of its five-hour or weekly "
+            f"every account has used {settings.switch_at}% or more of its five-hour or weekly "
             f"window: {summary}",
             "Add or sign in another account (aisquare accounts add), or wait for a reset — "
             "a fleet spawned now has nowhere to switch to",
@@ -1607,7 +1607,8 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
         )
     return _ok(
         "claude-account-headroom",
-        f"five-hour and weekly windows ({settings.switch_at}% is the line): {summary}",
+        f"five-hour and weekly windows, percent USED ({settings.switch_at}% used is the line): "
+        f"{summary}",
     )
 
 

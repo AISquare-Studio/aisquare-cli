@@ -867,6 +867,18 @@ def _lane_rule(role: str, sid: str, *, merge_said: bool) -> list[str]:
     ]
 
 
+#: Said to every role that works in a checkout: what it made, it removes. Agents add
+#: scratch trees (``git worktree add --detach``) to test or review a branch, and left
+#: them, with their temp dirs, for the human to find. Its own fleet worktree is
+#: ``fleet reap``'s, which knows when nothing in it is only there.
+_CLEANUP = (
+    "Before you finish or go idle, remove every scratch worktree you added",
+    "(`git worktree remove <path>`, then `git worktree prune`) and every temp dir you",
+    "made — never the worktree you were spawned in: `aisquare fleet reap` removes that.",
+)
+_CLEANS_UP = frozenset({"coder", "runner", "tester", "reviewer", "validator", "ui-tester"})
+
+
 def role_cycle(role: str, session_short_id: str) -> list[str]:
     """The standing work cycle injected for ``role`` (empty for unknown roles).
 
@@ -879,6 +891,8 @@ def role_cycle(role: str, session_short_id: str) -> list[str]:
     core = _role_cycle_core(role, session_short_id)
     if not core:
         return []
+    if role in _CLEANS_UP:
+        core = [*core, *_CLEANUP]
     merge_said = any("merge" in line.lower() for line in core)
     return [*core, *_lane_rule(role, session_short_id, merge_said=merge_said)]
 
@@ -965,7 +979,11 @@ def _role_cycle_core(role: str, session_short_id: str) -> list[str]:
             "limit shows `limited` on the board and wakes you: `aisquare fleet switch <label>",
             f"--as {sid}` moves it to the account with the most headroom and resumes its session;",
             "if nothing has headroom, leave it — it continues by itself at the reset the event",
-            "names. When the validator's gate is PASS:",
+            "names. Usage figures are the share USED (40% used = 60% left); headroom is what",
+            "is left. An agent whose task is done, with no queued task that fits it:",
+            "`aisquare fleet stop <label>`, then `aisquare fleet reap` — it records the exit",
+            "and removes the agent's worktree once its work is pushed. When the validator's",
+            "gate is PASS: `aisquare fleet reap` again, then",
             f'`aisquare note "READY: <PRs + evidence>" --kind result --as {sid}` and stop.',
             "Never write code. Never merge. Blocked twice on one task? Ask the human:",
             f'`aisquare note "…" --kind question --as {sid}`. Labels are unique and descriptive',

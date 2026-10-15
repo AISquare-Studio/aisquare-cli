@@ -10,7 +10,7 @@ and, in the CONTRIBUTING tradition, a control beside every claim: the rung that
 must NOT win, the launch that must stay byte-identical, the slot that must not
 inherit a default it was never given.
 
-Every test runs in a redirected home (``fake_home`` from the sibling file), so
+Every test runs in a redirected home (``fake_home``, tests/conftest.py), so
 nothing here reads the developer's ``~/.claude.json`` or writes their registry.
 """
 
@@ -38,11 +38,6 @@ from aisquare.services import claude_accounts as service
 from aisquare.services import diagnostics
 from aisquare.services import settings as settings_service
 from tests.test_claude_accounts import _installed, _sign_in
-from tests.test_claude_accounts import fake_home as _redirected_home
-
-#: The sibling file's redirected home, re-exported so pytest collects it here too: every
-#: test below reads and writes Claude Code's files, and none may touch the developer's.
-fake_home = _redirected_home
 
 CORRUPT = b"this is not a sqlite database, and the accounts surface must say so in words"
 
@@ -168,20 +163,81 @@ def test_an_alias_resolves_case_insensitively_and_a_bad_or_taken_one_is_refused(
     second = core.create_account()
     third = core.create_account()
 
-    named = service.set_alias("2", "Work")
-    assert named.alias == "work" and core.label(named) == "work"  # stored lowercase
+    named = service.set_alias("2", "  Work ")
+    assert named.alias == "Work" and core.label(named) == "Work"  # trimmed, its case kept
     assert service.resolve("WORK").slot == second.slot
     assert service.resolve("work").config_dir == second.config_dir
-    with pytest.raises(service.AccountsError, match="already taken"):
-        service.set_alias("3", "work")
+    for taken in ("work", "WORK", " wOrK "):  # taken in any case: --account could not tell
+        with pytest.raises(service.AccountsError, match="already taken"):
+            service.set_alias("3", taken)
     assert service.resolve("3").alias is None  # the refused write changed nothing
-    for bad in ("", "  ", "123", "me@example.com", "-x", "Has Space", "a" * 33):
+    for bad in ("", "  ", "123", " 4 ", "me@example.com", "a" * 65, "two\nlines", "tab\there"):
         with pytest.raises(ValueError):
             service.set_alias("3", bad)
+    assert service.set_alias("2", "work").alias == "work"  # its own name in another case
     assert service.set_alias("2", None).alias is None
     with pytest.raises(service.NoSuchAccount, match="not a slot, an alias or a signed-in email"):
         service.resolve("work")
     assert third.slot == 3  # nothing above touched the other slot
+
+
+def test_an_alias_is_free_text_up_to_64_characters(fake_home: Path) -> None:
+    """The human: "rename them in place into anything I want" — spaces, capitals,
+    punctuation and letters beyond ASCII; the only refusals are a name that would
+    read as a slot or an email, an empty one, and one past 64 characters."""
+    core.create_account()
+    core.create_account()
+    for name in ("Work laptop", "-x", "2nd account", "Ana's Max 5x", "仕事", "a" * 64):
+        assert service.set_alias("2", name).alias == name
+        assert service.resolve(name.upper()).slot == 2
+        assert core.label(service.resolve("2")) == name
+    service.set_alias("3", "Personal (home)")
+    assert service.slot_labels() == {1: "plain claude", 2: "a" * 64, 3: "Personal (home)"}
+    assert service.resolve("personal (HOME)").slot == 3
+    with pytest.raises(ValueError, match="at most 64"):
+        core.normalise_alias("a" * 65)
+    with pytest.raises(ValueError, match="only digits"):
+        core.normalise_alias("42")
+    with pytest.raises(ValueError, match="'@'"):
+        core.normalise_alias("me@home")
+
+
+def test_a_name_is_never_another_accounts_own_name(fake_home: Path, runner: CliRunner) -> None:
+    """``account 3`` on slot 2 was accepted (reopen of the Accounts page task): two accounts
+    went by ``account 3`` on the board, in headroom notes and in ``fleet switch``, and a
+    manager's ``--to "account 3"`` landed on slot 2. Another slot's label is refused in any
+    case or spacing, whether that slot exists yet or not (``accounts add`` reuses a removed
+    slot's number); a slot's own label is its own, and a name that only starts like one
+    is a name."""
+    core.create_account()
+    core.create_account()
+    for taken, slot in (
+        ("account 3", 3),
+        ("Account  3", 3),
+        ("ACCOUNT 03", 3),
+        ("plain claude", 1),
+        ("Plain Claude", 1),
+        ("account 9", 9),
+    ):
+        with pytest.raises(ValueError, match=f"what slot {slot} is called"):
+            service.set_alias("2", taken)
+    assert service.slot_labels() == {1: "plain claude", 2: "account 2", 3: "account 3"}
+    refused = runner.invoke(app, ["accounts", "alias", "2", "account 3"])
+    assert refused.exit_code != 0 and "slot 3" in refused.output
+    assert service.resolve("2").alias is None
+
+    assert service.set_alias("2", "Account 2").alias == "Account 2"
+    assert service.set_alias("1", "Plain Claude").alias == "Plain Claude"
+    assert service.set_alias("3", "account 3 laptop").alias == "account 3 laptop"
+    assert service.slot_labels() == {1: "Plain Claude", 2: "Account 2", 3: "account 3 laptop"}
+
+
+@pytest.mark.parametrize("name", ["a\u200bb", "evil\u202eexe", "\ufeffwork"])
+def test_a_name_has_no_invisible_formatting_character(name: str) -> None:
+    """A zero-width space or a right-to-left override prints a name the same as another
+    (``a\u200bb`` beside ``ab``) or as something it is not."""
+    with pytest.raises(ValueError, match="invisible"):
+        core.normalise_alias(name)
 
 
 def test_order_and_move_rewrite_positions_densely(fake_home: Path) -> None:
@@ -402,6 +458,14 @@ def test_launch_runs_on_the_machine_default_and_stays_byte_identical_without_one
     assert aliased.exit_code == 0, aliased.output
     assert handover["env"][core.CONFIG_DIR_VAR] == str(second.config_dir)
     assert "[work]" in aliased.stderr
+
+    # A free-text name with a space, quoted, in another case: the same account.
+    service.set_alias("2", "Work laptop")
+    handover.clear()
+    spaced = runner.invoke(app, ["launch", "coder", "--account", "work LAPTOP"])
+    assert spaced.exit_code == 0, spaced.output
+    assert handover["env"][core.CONFIG_DIR_VAR] == str(second.config_dir)
+    assert "[Work laptop]" in spaced.stderr
 
 
 def test_launch_says_why_a_rung_was_skipped_and_refuses_a_dangling_one(
@@ -665,11 +729,20 @@ def test_accounts_alias_order_move_disable_and_enable_commands(
     core.create_account()
 
     alias = runner.invoke(app, ["accounts", "alias", "2", "Work"])
-    assert alias.exit_code == 0 and "slot 2 is now called work" in alias.stdout
+    assert alias.exit_code == 0 and "slot 2 is now called Work" in alias.stdout
     bad = runner.invoke(app, ["--json", "accounts", "alias", "3", "42"])
     assert bad.exit_code == 1 and json.loads(bad.stdout)["error"] == "bad_alias"
     taken = runner.invoke(app, ["accounts", "alias", "3", "work"])
     assert taken.exit_code == 1 and "already taken" in taken.stderr
+    spaced = runner.invoke(app, ["--json", "accounts", "alias", "3", "Side project"])
+    assert spaced.exit_code == 0, spaced.output
+    assert json.loads(spaced.stdout)["account"]["alias"] == "Side project"
+    long = runner.invoke(app, ["--json", "accounts", "alias", "3", "x" * 65])
+    assert long.exit_code == 1 and json.loads(long.stdout)["error"] == "bad_alias"
+    emailish = runner.invoke(app, ["--json", "accounts", "alias", "3", "me@home"])
+    assert emailish.exit_code == 1 and json.loads(emailish.stdout)["error"] == "bad_alias"
+    by_name = runner.invoke(app, ["--json", "accounts", "alias", "side PROJECT", "--clear"])
+    assert by_name.exit_code == 0 and json.loads(by_name.stdout)["account"]["slot"] == 3
 
     ordered = runner.invoke(app, ["--json", "accounts", "order", "work", "3"])
     assert ordered.exit_code == 0, ordered.output

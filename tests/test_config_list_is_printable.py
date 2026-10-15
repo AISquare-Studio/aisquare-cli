@@ -147,15 +147,31 @@ def _excludes_none(source: str, lineno: int) -> bool:
     return False
 
 
-#: Call sites whose argument is built somewhere other than the call itself.
-#: Listed with the reason, because "the guard cannot see it" and "the guard
-#: was told to look away" have to be different things in the file.
+#: Call sites whose argument is built somewhere other than the call itself, by
+#: ``file:function``. Listed with the reason, because "the guard cannot see it" and
+#: "the guard was told to look away" have to be different things in the file — and
+#: by function, so a second call site in the same file is still looked at.
 _RESOLVED_ELSEWHERE = {
-    "core/config.py": (
-        "save_config builds `dumped` with exclude_none=True eleven lines up "
-        "and merges unknown keys into it; its docstring states the invariant"
+    "core/config.py:save_config": (
+        "save_config builds `dumped` with `_dumped` (exclude_none=True) and merges "
+        "unknown keys into it; its docstring states the invariant"
+    ),
+    "cli/common.py:emit_config_overrides": (
+        "its mapping is `core.config.overrides`, a diff of two `_dumped` "
+        "(exclude_none=True) dumps, which adds no value of its own"
     ),
 }
+
+
+def _enclosing_function(source: str, lineno: int) -> str:
+    """The name of the innermost function whose body holds ``lineno``, or ``""``."""
+    name, start = "", 0
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            end = node.end_lineno or node.lineno
+            if node.lineno <= lineno <= end and node.lineno > start:
+                name, start = node.name, node.lineno
+    return name
 
 
 def test_every_toml_dump_in_the_cli_is_none_free() -> None:
@@ -167,7 +183,8 @@ def test_every_toml_dump_in_the_cli_is_none_free() -> None:
         source = path.read_text(encoding="utf-8")
         for _, lineno in _dumps_calls(source, where):
             seen.append((where, lineno))
-            if where in _RESOLVED_ELSEWHERE or _excludes_none(source, lineno):
+            site = f"{where}:{_enclosing_function(source, lineno)}"
+            if site in _RESOLVED_ELSEWHERE or _excludes_none(source, lineno):
                 continue
             offenders.append(f"{where}:{lineno}")
 

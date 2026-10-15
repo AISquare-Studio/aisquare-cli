@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import socket
 import sqlite3
@@ -34,7 +35,8 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import codenames, paths, selfcli
+from aisquare.core import claude_accounts as accounts_core
+from aisquare.core import claude_sharing, codenames, paths, selfcli
 from aisquare.core import store as core_store
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import (
@@ -78,6 +80,7 @@ from aisquare.services.fleet import (
     ACTIVITY_WINDOW,
     NUDGE_TEXT,
     PROMPT_TIMEOUT,
+    TRUST_PROMPT,
     FleetError,
     FleetUnavailable,
     NoSuchAgent,
@@ -190,6 +193,10 @@ class FakeTmux(TmuxServer):
         words in ``WindowInfo.resize_refused`` (#149; review of #162, round 1)."""
         self.typed: list[tuple[str, str, str]] = []
         """``(pane_id, kind, text)`` with kind ``literal`` / ``paste`` / ``key``."""
+        self.screens: dict[str, list[str]] = {}
+        """What each pane shows — what ``capture`` answers; blank until a test draws one."""
+        self.captured: list[str] = []
+        """Every pane whose screen was asked for, in order."""
         self.killed: list[str] = []
         self.renamed: list[tuple[str, str]] = []
         self._counter = 0
@@ -386,6 +393,23 @@ class FakeTmux(TmuxServer):
         printed = self.output_at.get(pane_id)
         last = None if printed is None else datetime.fromtimestamp(int(printed.timestamp()), UTC)
         return replace(facts, server_started=self.started, last_output=last)
+
+    def capture(
+        self,
+        pane_id: str,
+        *,
+        scrollback: int = 0,
+        height: int | None = None,
+        flags: bool = False,
+    ) -> Capture:
+        """The pane's screen as a test drew it (:attr:`screens`); a gone pane is an error."""
+        self.binary()
+        self._require_server()
+        facts = self.facts.get(pane_id)
+        if facts is None:
+            raise TmuxError(f"can't find pane: {pane_id}")
+        self.captured.append(pane_id)
+        return Capture(list(self.screens.get(pane_id, [])), facts, 0)
 
     # The strict twins the shutdown paths use: each is the lenient answer UNLESS
     # the server could not be asked, and that single distinction is `reachable()`
@@ -1906,7 +1930,7 @@ def test_an_unreachable_tmux_server_is_not_read_as_every_pane_gone(
     unreachable server is exactly that — though nothing raises: its non-zero exit
     reaches ``_observe`` as an empty answer, which used to read as "every pane is
     gone". ``reap`` then ended every live row as ``lost`` for processes that are
-    still running, and ``_remove_merged_worktrees`` — the same pass, now seeing
+    still running, and ``_remove_finished_worktrees`` — the same pass, now seeing
     ``ended_at`` set — removed their clean worktrees out from under them. A stale
     socket path is all it takes (a /tmp sweep, or a ``TMUX_TMPDIR`` that differs
     between the spawning shell and the reaping one).
@@ -7704,6 +7728,136 @@ def test_reap_removes_a_merged_worktree_and_keeps_an_unmerged_one(
     assert fleet_service.reap(project).worktrees_removed == []
 
 
+def _remote(project: ProjectInfo, tmp_path: Path) -> Path:
+    """A bare remote for the project's repo, ``origin``, with ``main`` pushed to it."""
+    bare = tmp_path / "remote.git"
+    _git("init", "-q", "--bare", str(bare), cwd=tmp_path)
+    _git("remote", "add", "origin", str(bare), cwd=project.root)
+    _git("push", "-q", "origin", "main", cwd=project.root)
+    return bare
+
+
+def _commit(tree: Path, name: str) -> None:
+    (tree / name).write_text(f"{name}\n", encoding="utf-8")
+    _git("add", name, cwd=tree)
+    _git("commit", "-q", "-m", name, cwd=tree)
+
+
+def test_reap_removes_a_worktree_pushed_to_any_remote_branch_and_its_fleet_branch(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """A coder that pushes onto an integration branch (``push HEAD:feat/…``) never merges
+    into the default branch, and reap kept every such tree: 15 worktrees and 1.2 GB on one
+    night. Pushed anywhere, with nothing uncommitted, the tree holds nothing found only
+    there — it goes, and its ``fleet/…`` branch with it."""
+    _remote(project, tmp_path)
+    pushed = fleet_service.spawn(project, "coder", label="coder-pushed").agent
+    _commit(pushed.cwd, "feature.txt")
+    _git("push", "-q", "origin", "HEAD:feat/integration", cwd=pushed.cwd)
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=pushed.cwd)
+    assert branch.startswith("fleet/"), branch
+    fleet_service.stop(project, "coder-pushed", force=True)
+    on_main = _git("branch", "--list", "--merged", "main", branch, cwd=project.root)
+    assert on_main == "", "the premise: the commit is not on main"
+
+    report = fleet_service.reap(project)
+
+    assert report.worktrees_removed == [pushed.cwd] and not pushed.cwd.exists()
+    assert report.branches_deleted == [branch]
+    assert _git("branch", "--list", branch, cwd=project.root) == ""
+    assert report.worktrees_kept == []
+    assert _git("rev-parse", "origin/feat/integration", cwd=project.root), "the work is safe"
+
+
+def test_reap_keeps_a_worktree_with_unpushed_commits_or_uncommitted_changes_and_says_why(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    _remote(project, tmp_path)
+    unpushed = fleet_service.spawn(project, "coder", label="coder-unpushed").agent
+    _commit(unpushed.cwd, "local.txt")
+    dirty = fleet_service.spawn(project, "coder", label="coder-dirty").agent
+    (dirty.cwd / "scratch.txt").write_text("wip\n", encoding="utf-8")  # untracked, not ignored
+    branches = {
+        agent.label: _git("rev-parse", "--abbrev-ref", "HEAD", cwd=agent.cwd)
+        for agent in (unpushed, dirty)
+    }
+    for label in branches:
+        fleet_service.stop(project, label, force=True)
+
+    report = fleet_service.reap(project)
+
+    assert report.worktrees_removed == [] and report.branches_deleted == []
+    kept = dict(report.worktrees_kept)
+    assert kept[unpushed.cwd] == "commits on no remote branch yet — push them, then reap again"
+    assert kept[dirty.cwd] == "uncommitted changes"
+    assert unpushed.cwd.exists() and dirty.cwd.exists()
+    for branch in branches.values():
+        assert _git("branch", "--list", branch, cwd=project.root), f"{branch} kept"
+
+    # Pushed, the next reap takes it; the dirty one is still kept.
+    _git("push", "-q", "origin", "HEAD:feat/later", cwd=unpushed.cwd)
+    again = fleet_service.reap(project)
+    assert again.worktrees_removed == [unpushed.cwd]
+    assert again.branches_deleted == [branches["coder-unpushed"]]
+    assert dict(again.worktrees_kept) == {dirty.cwd: "uncommitted changes"}
+
+
+@pytest.mark.parametrize("where", ["repo config", "global config"])
+def test_reap_keeps_an_untracked_file_that_status_show_untracked_files_hides(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    where: str,
+) -> None:
+    """``status.showUntrackedFiles=no`` (common in big repos and dotfile setups) hides an
+    untracked file from a plain ``git status --porcelain``, and ``git worktree remove``
+    honours it too: the tree read clean, was pushed, and reap deleted the file. Reap asks
+    for untracked files whatever the config says."""
+    _remote(project, tmp_path)
+    if where == "repo config":
+        _git("config", "status.showUntrackedFiles", "no", cwd=project.root)
+    else:
+        config = tmp_path / "gitconfig"
+        config.write_text("[status]\n\tshowUntrackedFiles = no\n", encoding="utf-8")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    agent = fleet_service.spawn(project, "coder", label="coder-hidden").agent
+    _commit(agent.cwd, "f.txt")
+    _git("push", "-q", "origin", "HEAD:feat/x", cwd=agent.cwd)
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=agent.cwd)
+    precious = agent.cwd / "precious.txt"
+    precious.write_text("only here\n", encoding="utf-8")  # untracked, not ignored
+    assert _git("status", "--porcelain", cwd=agent.cwd) == "", "the premise: git hides it"
+    fleet_service.stop(project, "coder-hidden", force=True)
+
+    report = fleet_service.reap(project)
+
+    assert report.worktrees_removed == [] and report.branches_deleted == []
+    assert dict(report.worktrees_kept) == {agent.cwd: "uncommitted changes"}
+    assert precious.read_text(encoding="utf-8") == "only here\n"
+    assert _git("branch", "--list", branch, cwd=project.root), f"{branch} kept"
+
+
+def test_reap_deletes_only_a_fleet_branch(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """An agent that switched its tree to a branch of its own and pushed it: the tree goes,
+    as nothing is only there, and the branch stays — reap deletes the ``fleet/…`` branches
+    it made, never another."""
+    _remote(project, tmp_path)
+    agent = fleet_service.spawn(project, "coder", label="coder-own").agent
+    _git("switch", "-q", "-c", "my-own", cwd=agent.cwd)
+    _commit(agent.cwd, "mine.txt")
+    _git("push", "-q", "origin", "HEAD:my-own", cwd=agent.cwd)
+    fleet_service.stop(project, "coder-own", force=True)
+
+    report = fleet_service.reap(project)
+
+    assert report.worktrees_removed == [agent.cwd] and report.branches_deleted == []
+    assert _git("branch", "--list", "my-own", cwd=project.root)
+
+
 def test_reap_never_removes_a_live_agents_worktree(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:
@@ -8430,7 +8584,7 @@ def test_switch_moves_a_limited_agent_to_the_account_with_headroom_and_resumes_i
         kept = store.get_task(task.id)
         ended = store.get_session(agent.session_id or "")
     [switched] = [text for kind, text in kinds if kind == "switched"]
-    assert "moved from slot 2 to account 3 (slot 3) (session limit)" in switched
+    assert "moved from account 2 (slot 2) to account 3 (slot 3) (session limit)" in switched
     assert switched.endswith("— resumed its session")
     assert any("headroom:" in note for note in receipt.notes)  # the pick is explained
     # A hand-over is not an exit (finding 6): the claim stays with the session that resumes,
@@ -8500,7 +8654,8 @@ def test_a_switch_picks_by_headroom_before_the_binding_and_the_automatic_one_ref
 
     assert receipt.to_slot == 4  # headroom, not the binding
     assert any(
-        "headroom:" in note and "account 4 is first under 85%" in note for note in receipt.notes
+        "headroom:" in note and "account 4 is first under the 85%-used line" in note
+        for note in receipt.notes
     )
     assert "--to" not in _command(tmux) and _flag(_command(tmux), "--account") == "4"
 
@@ -8515,7 +8670,7 @@ def test_a_switch_picks_by_headroom_before_the_binding_and_the_automatic_one_ref
     )
     manual = fleet_service.switch(project, agent.label, to=None)
     assert manual.to_slot in {2, 3}  # it was on 4; the least-bad of the rest
-    assert any("every account is over 85%" in note for note in manual.notes)
+    assert any("every account is over the 85%-used line" in note for note in manual.notes)
     # …but the automatic hand-over refuses, stops nothing, and says why.
     killed_before = list(tmux.killed)
     with pytest.raises(FleetError, match="no account under the line") as refused:
@@ -9199,7 +9354,7 @@ def test_switch_refuses_without_headroom_the_same_account_or_a_dead_label(
     # the agent is ON 95; the only other one is 99, and that is what it gets, with a note).
     receipt = fleet_service.switch(project, agent.label)
     assert receipt.to_slot == 3
-    assert any("every account is over 85%" in note for note in receipt.notes)
+    assert any("every account is over the 85%-used line" in note for note in receipt.notes)
 
 
 def test_fleet_switch_command_reports_the_move_and_its_json(
@@ -9217,7 +9372,10 @@ def test_fleet_switch_command_reports_the_move_and_its_json(
         app, ["fleet", "switch", agent.label, "--project", project.id, "--reason", "limit"]
     )
     assert result.exit_code == 0, result.output
-    assert f"✓ {agent.label}: moved from slot 2 to slot 3 — started fresh" in result.stdout
+    assert (
+        f"✓ {agent.label}: moved from account 2 (slot 2) to account 3 (slot 3) — started fresh"
+        in result.stdout
+    )
 
     second = runner.invoke(
         app, ["--json", "fleet", "switch", agent.label, "--project", project.id, "--to", "2"]
@@ -9227,6 +9385,16 @@ def test_fleet_switch_command_reports_the_move_and_its_json(
     assert (payload["from_slot"], payload["to_slot"], payload["resumed"]) == (3, 2, False)
     assert payload["started"]["label"] == agent.label and payload["started"]["account_slot"] == 2
     assert payload["stopped"]["ended_at"] is not None
+
+    # A renamed account is that name in the line, as on the board and in `fleet ls`.
+    from aisquare.services import claude_accounts as accounts_service
+
+    accounts_service.set_alias("3", "Side project")
+    third = runner.invoke(
+        app, ["fleet", "switch", agent.label, "--project", project.id, "--to", "side project"]
+    )
+    assert third.exit_code == 0, third.output
+    assert "moved from account 2 (slot 2) to Side project (slot 3)" in third.stdout
 
     refused = runner.invoke(app, ["--json", "fleet", "switch", "ghost", "--project", project.id])
     assert refused.exit_code == 1
@@ -12804,3 +12972,140 @@ def test_a_role_whose_env_file_cannot_be_read_is_refused_before_a_window_or_a_st
     with store_session() as store:
         live = store.fleet_agent_by_label(project.id, reviewer.label, live_only=True)
     assert live is not None and live.id == reviewer.id
+
+
+# --- Claude Code's folder-trust question (core.claude_sharing) ------------------------
+
+TRUST_SCREEN = (
+    (Path(__file__).parent / "fixtures" / "claude_code" / "trust_prompt_2.1.299.txt")
+    .read_text(encoding="utf-8")
+    .splitlines()
+)
+"""The question as ``capture-pane -e`` showed it on Claude Code 2.1.299, escapes and all."""
+
+
+def _signed_in(account: Any, email: str, *, trusted: tuple[str, ...] = ()) -> Path:
+    path = accounts_core.claude_json_path(account)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    projects = {key: {"hasTrustDialogAccepted": True} for key in trusted}
+    body = {"oauthAccount": {"emailAddress": email}, "userID": email, "projects": projects}
+    path.write_text(json.dumps(body, indent=2), encoding="utf-8")
+    return path
+
+
+def test_a_spawn_shares_the_folder_trust_into_the_account_it_picks_and_says_so(
+    fake_home: Path, tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Account 2 said yes to the repository; a coder spawned on account 3 in a worktree of it
+    starts without the question, and the receipt — the manager's view — says why."""
+    root = claude_sharing.project_key(Path(os.path.realpath(project.root)))
+    _signed_in(accounts_core.default_account(), "one@x.dev")
+    second, third = accounts_core.create_account(), accounts_core.create_account()
+    _signed_in(second, "two@x.dev", trusted=(root,))
+    _signed_in(third, "three@x.dev")
+
+    receipt = fleet_service.spawn(project, "coder", worktree=True, account="3")
+
+    assert receipt.agent.cwd != project.root  # its own worktree, covered by the repository
+    data = json.loads(accounts_core.claude_json_path(third).read_text())
+    assert data["projects"] == {root: {"hasTrustDialogAccepted": True}}
+    assert data["oauthAccount"] == {"emailAddress": "three@x.dev"}
+    shared = f"accounts: {root} is trusted on account 2 — now on account 3 too"
+    assert shared in receipt.notes
+    assert receipt.shared == [shared]  # done, not a warning: the receipt says it with a ✓
+    # The plain claude was not the one launched: nothing written there.
+    plain = json.loads(accounts_core.claude_json_path(accounts_core.default_account()).read_text())
+    assert plain["projects"] == {}
+
+
+def test_an_agent_at_the_trust_question_needs_the_human_until_it_is_answered(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    agent = _coder(project)
+    tmux.set_command(agent.pane_id, "claude")
+    tmux.screens[agent.pane_id] = TRUST_SCREEN
+
+    (status,) = fleet_service.list_agents(project)
+
+    assert status.state == "attention"
+    assert status.detail is not None and status.detail.startswith(TRUST_PROMPT)
+    assert f"aisquare accounts trust {shlex.quote(str(agent.cwd))}" in status.detail
+    assert fleet_service.status_of(agent).detail == status.detail
+    # `fleet tell` files a board note instead of typing: Enter there picks "No, exit".
+    told = fleet_service.tell(project, agent.label, "start on the task")
+    assert not told.delivered and told.how.startswith("it is attention") and tmux.typed == []
+    # Answered, the screen moves on and so does the state.
+    tmux.screens[agent.pane_id] = ["╭─ Claude Code ─╮", "\u276f "]
+    assert fleet_service.list_agents(project)[0].state == "waiting"
+
+
+def test_an_agent_whose_hooks_have_run_is_never_asked_for_its_screen(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Claude Code runs no hook in a folder nobody trusted: one that has is past the
+    question, and a healthy fleet pays no capture per agent per tick."""
+    agent = _coder(project)
+    tmux.set_command(agent.pane_id, "claude")
+    tmux.screens[agent.pane_id] = TRUST_SCREEN  # what it showed before the yes
+    _board_session(agent, "waiting")
+    tmux.captured.clear()
+    assert fleet_service.list_agents(project)[0].state == "waiting"
+    assert tmux.captured == []
+    # Control: a row no hook has spoken for yet is asked, and only it.
+    fresh = _coder(project)
+    tmux.set_command(fresh.pane_id, "claude")
+    fleet_service.list_agents(project)
+    assert tmux.captured == [fresh.pane_id]
+
+
+def test_spawn_never_types_its_prompt_into_the_trust_question(
+    tmux: FakeTmux,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = tmux.pane_facts
+
+    def up_at_the_question(pane_id: str) -> PaneFacts | None:
+        tmux.set_command(pane_id, "claude")
+        tmux.screens[pane_id] = TRUST_SCREEN
+        return original(pane_id)
+
+    monkeypatch.setattr(tmux, "pane_facts", up_at_the_question)
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="start on tsk_1")
+    assert tmux.typed == []
+    assert receipt.prompt_typed == "no"  # `Typed`: NOT typed, never "maybe" or "unsent"
+    note = next(n for n in receipt.notes if "folder-trust question" in n)
+    assert "NOT typed" in note
+    assert f"aisquare accounts trust {shlex.quote(str(receipt.agent.cwd))}" in note
+    assert clock.now >= PROMPT_TIMEOUT, "waited for a human to answer it first"
+
+
+def test_spawn_types_its_prompt_once_the_trust_question_is_answered(
+    tmux: FakeTmux,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_facts, original_capture = tmux.pane_facts, tmux.capture
+    asked = 0
+
+    def up_at_the_question(pane_id: str) -> PaneFacts | None:
+        tmux.set_command(pane_id, "claude")
+        return original_facts(pane_id)
+
+    def answered_on_the_third_look(pane_id: str, **kwargs: Any) -> Capture:
+        nonlocal asked
+        asked += 1
+        tmux.screens[pane_id] = TRUST_SCREEN if asked < 3 else ["\u276f "]
+        return original_capture(pane_id, **kwargs)
+
+    monkeypatch.setattr(tmux, "pane_facts", up_at_the_question)
+    monkeypatch.setattr(tmux, "capture", answered_on_the_third_look)
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="start on tsk_1")
+    pane = receipt.agent.pane_id
+    assert tmux.typed == [(pane, "paste", "start on tsk_1"), (pane, "key", "Enter")]
+    assert receipt.notes == [] and clock.now < PROMPT_TIMEOUT
+    assert claude_sharing.shows_trust_prompt(TRUST_SCREEN)  # the fixture is the question

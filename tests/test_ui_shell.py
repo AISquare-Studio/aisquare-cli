@@ -37,11 +37,12 @@ from textual.content import Content
 from textual.geometry import Region
 from textual.pilot import Pilot
 from textual.widget import Widget
-from textual.widgets import Button, Checkbox, Input, OptionList, Static, Switch
+from textual.widgets import Button, Checkbox, Input, OptionList, Static, Switch, Tabs
 from textual.widgets._toast import Toast
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui import app as app_mod
+from aisquare.cli.ui import app as ui_app
 from aisquare.cli.ui.app import SIDEBAR_WIDTH_KEY, FleetApp, HelpScreen, Panes
 from aisquare.cli.ui.autosave import Autosave
 from aisquare.cli.ui.divider import WIDEST_ASK, Divider, cells
@@ -51,13 +52,13 @@ from aisquare.cli.ui.sidebar import (
     RESIZE_STEP,
     Activatable,
     AgentRow,
+    CardChips,
     Disclosure,
-    DoctorSection,
-    DoctorTitle,
     GroupHeader,
     ProjectCard,
     ProjectTitle,
     SectionLabel,
+    SettingsRow,
     ordered_agents,
     short_path,
 )
@@ -271,6 +272,15 @@ async def _toasts(app: FleetApp) -> str:
     return " | ".join(await _toast_list(app))
 
 
+async def open_doctor(pilot: Pilot[None]) -> None:
+    """Open the Doctor page as a person now does: *⚙ Settings*, then the hub's *Doctor*."""
+    app = fleet_app(pilot)
+    await pilot.click(app.query_one(SettingsRow))
+    await settle(app)
+    await pilot.click("#hub-doctor")
+    await settle(app)
+
+
 def fleet_app(pilot: Pilot[None]) -> FleetApp:
     app = pilot.app
     assert isinstance(app, FleetApp)
@@ -390,9 +400,9 @@ def test_agent_rows_show_role_icon_state_chip_and_exit_status(
     async def go(pilot: Pilot[None]) -> tuple[list[str], str]:
         app = fleet_app(pilot)
         rows = [shown(row) for row in card_for(app, "prj_a").query(AgentRow)]
-        return rows, shown(card_for(app, "prj_a").query_one(ProjectTitle))
+        return rows, shown(card_for(app, "prj_a").query_one(CardChips))
 
-    rows, title = drive(go)
+    rows, chips = drive(go)
     assert [r.split()[1] for r in rows] == ["manager", "coder-auth", "tester-1", "scout-1"]
     manager, coder, tester, scout = rows
     assert manager.startswith("🧭") and manager.rstrip().endswith("⏸")
@@ -402,10 +412,14 @@ def test_agent_rows_show_role_icon_state_chip_and_exit_status(
     assert "(3)" not in coder and "💤" not in coder and "exited" not in coder  # only on that row
     assert "🔔" not in manager and "▶" not in manager
     # The card's chips: three alive (the exited one is not), one needing the user.
-    assert title.rstrip().endswith("3 · 🔔1")
+    assert chips.rstrip().endswith("3 · 🔔1")
 
 
-def test_codename_badge_and_duplicate_basename_subtitle(tmp_path: Path, script: Script) -> None:
+def test_the_card_names_the_project_not_its_codename_and_a_path_tells_twins_apart(
+    tmp_path: Path, script: Script
+) -> None:
+    """The codename names the tmux session and the branches; the card says the name a
+    person knows the project by (its nickname, else its folder), and nothing else."""
     seed(
         tmp_path,
         ("prj_w", "work/api", "amber-otter"),
@@ -426,9 +440,11 @@ def test_codename_badge_and_duplicate_basename_subtitle(tmp_path: Path, script: 
         return out
 
     cards = drive(go)
-    assert "amber-otter" in cards["prj_w"][0] and "ruby-fox" in cards["prj_o"][0]
-    assert "amber-otter" not in cards["prj_o"][0]  # each card its own badge
-    assert "-" not in cards["prj_u"][0].replace("🗂 unique", "")  # no badge without a codename
+    assert [cards[pid][0] for pid in ("prj_w", "prj_o", "prj_u")] == [
+        "🗂 api",
+        "🗂 api",
+        "🗂 unique",
+    ]
     # The two `api` projects are told apart by their path; the unique one is not decorated.
     assert cards["prj_w"][1] and cards["prj_w"][2].endswith("work/api")
     assert cards["prj_o"][1] and cards["prj_o"][2].endswith("oss/api")
@@ -462,7 +478,7 @@ def test_a_long_project_name_is_cut_with_an_ellipsis_not_wrapped_out_of_sight(
     )
     script["prj_l"] = [status("prj_l", "manager", "manager", "waiting")]
 
-    async def go(pilot: Pilot[None]) -> tuple[str, str, str, bool, str]:
+    async def go(pilot: Pilot[None]) -> tuple[str, str, str, bool, str, str]:
         app = fleet_app(pilot)
         title = card_for(app, "prj_l").query_one(ProjectTitle)
         await pilot.click(title)  # the selected, highlighted row the report was about
@@ -473,15 +489,17 @@ def test_a_long_project_name_is_cut_with_an_ellipsis_not_wrapped_out_of_sight(
             composited(card_for(app, "prj_s").query_one(ProjectTitle)),
             title.has_class("selected"),
             composited(row_for(app, "agt_l_manager")),
+            composited(card_for(app, "prj_l").query_one(CardChips)),
         )
 
-    held, long_row, short_row, selected, manager_row = drive(go)
+    held, long_row, short_row, selected, manager_row, chips = drive(go)
     assert selected
-    assert held.startswith("🗂 AISquare-Explainability-SDK  cosmic-narwhal")  # the data, intact
-    assert long_row.startswith("🗂 AISquare-Explainabilit")  # the NAME reaches the row
+    assert held == "🗂 AISquare-Explainability-SDK"  # the data, intact
+    assert long_row.startswith("🗂 AISquare-Explainab")  # the NAME reaches the row
     assert long_row.rstrip().endswith("…")  # and the cut is declared, not silent
+    assert chips.strip() == "1", "the name is what is cut, never the chips after it"
     # Controls: a name that fits is shown whole and uncut; the agent row still renders.
-    assert short_row.rstrip() == "🗂 api  amber-otter"
+    assert short_row.rstrip() == "🗂 api"
     assert manager_row.split()[:2] == ["🧭", "manager"]
 
 
@@ -878,7 +896,7 @@ def test_plus_opens_onboarding(tmp_path: Path, script: Script) -> None:
     assert drive(go) == ("welcome", "onboard")
 
 
-def test_doctor_section_opens_the_doctor_view_and_paints_the_summary(
+def test_the_hubs_doctor_link_opens_the_doctor_page_and_runs_the_checks(
     tmp_path: Path, script: Script
 ) -> None:
     seed(tmp_path, ("prj_a", "alpha", None))
@@ -899,35 +917,33 @@ def test_doctor_section_opens_the_doctor_view_and_paints_the_summary(
             ),
         ]
 
-    async def go(pilot: Pilot[None]) -> tuple[int, str | None, str, str, list[str], int]:
+    async def go(pilot: Pilot[None]) -> tuple[int, str | None, str, str | None, str | None, int]:
         app = fleet_app(pilot)
         await settle(app)
         await pilot.pause()
         calls_after_mount = len(calls)
         before = app.content.current
-        await pilot.click(app.query_one(DoctorSection))
+        await open_doctor(pilot)
         await pilot.pause()
         await settle(app)
         await pilot.pause()
         report = shown(app.query_one("#doctor", DoctorView).query_one("#doctor-report", Static))
-        summary = shown(app.query_one(DoctorTitle))
-        lines = [
-            shown(line)
-            for line in app.query_one(DoctorSection).query(".doctor-line").results(Static)
-            if line.display
-        ]
-        return calls_after_mount, before, report, summary, lines, len(calls)
+        return (
+            calls_after_mount,
+            before,
+            report,
+            app.content.current,
+            app.sidebar.selected_key,
+            len(calls),
+        )
 
-    at_mount, before, report, summary, lines, total = drive(go, doctor=doctor)
-    assert at_mount == 1  # the counts are painted at start-up…
+    at_mount, before, report, current, selected, total = drive(go, doctor=doctor)
+    assert at_mount == 1  # the checks run at start-up…
     assert before == "welcome"
-    assert total == 2  # …and the click runs the checks again
+    assert total == 2  # …and opening the page runs them again
+    assert current == "doctor" and selected == "settings"  # a page of Settings'
     assert "repomix not found" in report and "→ npm install -g repomix" in report
-    assert "Python 3.14" in report
-    assert summary.startswith("Doctor") and "✓ 1" in summary and "⚠ 1" in summary
-    assert "✗ 1" in summary
-    assert len(lines) == 2 and lines[0].startswith("✗ home") and lines[1].startswith("⚠ repomix")
-    assert not any("python" in line for line in lines)  # only the findings, never the ✓ rows
+    assert "Python 3.14" in report and "~/.aisquare is missing" in report
 
 
 def test_a_crashing_doctor_is_reported_not_raised(tmp_path: Path, script: Script) -> None:
@@ -936,26 +952,24 @@ def test_a_crashing_doctor_is_reported_not_raised(tmp_path: Path, script: Script
     def broken() -> list[DoctorCheck]:
         raise RuntimeError("boom")
 
-    async def go(pilot: Pilot[None]) -> tuple[bool, str, str, int | None]:
+    async def go(pilot: Pilot[None]) -> tuple[str, int | None]:
         app = fleet_app(pilot)
         await settle(app)
         await pilot.pause()
-        notice = app.query_one(DoctorSection).query_one(".doctor-notice", Static)
         report = shown(app.query_one("#doctor", DoctorView).query_one("#doctor-report", Static))
-        return notice.display, shown(notice), report, app.return_code
+        return report, app.return_code
 
-    displayed, notice, report, return_code = drive(go, doctor=broken)
-    assert displayed and "doctor could not run" in notice and "boom" in notice
-    assert "the checks crashed: RuntimeError: boom" in report
+    report, return_code = drive(go, doctor=broken)
+    assert "the checks crashed: RuntimeError: boom" in report  # on the Doctor page
     assert return_code is None  # the app kept running
 
-    async def healthy(pilot: Pilot[None]) -> bool:
+    async def healthy(pilot: Pilot[None]) -> str:
         app = fleet_app(pilot)
         await settle(app)
         await pilot.pause()
-        return app.query_one(DoctorSection).query_one(".doctor-notice", Static).display
+        return shown(app.query_one("#doctor", DoctorView).query_one("#doctor-report", Static))
 
-    assert drive(healthy) is False  # a working doctor leaves no such notice
+    assert "crashed" not in drive(healthy)  # a working doctor reports no such thing
 
 
 SNAPSHOT_WARN = DoctorCheck(
@@ -977,20 +991,22 @@ def _fix_buttons(view: DoctorView) -> list[tuple[str, bool]]:
     return [(str(b.label), b.disabled) for b in view.query("#doctor-fixes Button").results(Button)]
 
 
-def test_the_selected_projects_root_arms_its_project_scoped_fixes(
+def test_the_doctor_page_arms_project_fixes_for_the_project_it_ran_for(
     tmp_path: Path, script: Script
 ) -> None:
     """§0 item 4: a project fix is one click. Without a cwd every one renders disabled.
 
-    ``DoctorView`` disables ``scope == "project"`` fixes when ``cwd is None``,
-    so the shell must hand it the scoped project's root — and the project's own
-    Doctor tab the same report and the same root.
+    ``DoctorView`` disables ``scope == "project"`` fixes when ``cwd is None``, so
+    the shell hands it the root its report was run in. Selecting a project runs
+    nothing and arms nothing — the report on the page is still the machine's —
+    and opening the page runs the checks for that project, armed in its root.
     """
     projects = seed(tmp_path, ("prj_a", "alpha", None))
+    Buttons = list[tuple[str, bool]]
 
     async def go(
         pilot: Pilot[None],
-    ) -> tuple[list[tuple[str, bool]], Path | None, list[tuple[str, bool]], Path | None, str]:
+    ) -> tuple[Buttons, Path | None, Buttons, Path | None, Buttons, Path | None, int]:
         app = fleet_app(pilot)
         await settle(app)
         await pilot.pause()
@@ -1000,34 +1016,40 @@ def test_the_selected_projects_root_arms_its_project_scoped_fixes(
         await pilot.pause()
         await settle(app)
         await pilot.pause()
-        view = app.current_view()
-        assert isinstance(view, ProjectView)
-        tab = view.query_one(DoctorView)
+        selected = (_fix_buttons(shell_doctor), shell_doctor.cwd)
+        await open_doctor(pilot)
+        await pilot.pause()
+        await settle(app)
+        await pilot.pause()
         return (
             *globally,
+            *selected,
             _fix_buttons(shell_doctor),
             shell_doctor.cwd,
-            shown(tab.query_one("#doctor-report", Static)),
+            len(app.query(DoctorView)),
         )
 
     checks = [SNAPSHOT_WARN, CONNECT_WARN]
-    global_buttons, global_cwd, scoped_buttons, scoped_cwd, tab_report = drive(
-        go, doctor=lambda: list(checks)
+    global_buttons, global_cwd, selected_buttons, selected_cwd, page_buttons, page_cwd, views = (
+        drive(go, doctor=lambda: list(checks))
     )
-    assert global_cwd is None
-    assert global_buttons == [
+    refused = [
         ("aisquare project onboard --refresh", True),  # no project: correctly refused
         ("aisquare agents connect claude-code", False),
     ]
-    assert scoped_cwd == projects[0].root
-    assert scoped_buttons == [
-        ("aisquare project onboard --refresh", False),  # a project IS selected: armed
+    assert global_cwd is None and global_buttons == refused
+    assert selected_cwd is None and selected_buttons == refused, (
+        "selecting a project leaves the machine's report — and its refusals — as they were"
+    )
+    assert page_cwd == projects[0].root
+    assert page_buttons == [
+        ("aisquare project onboard --refresh", False),  # run for the project: armed
         ("aisquare agents connect claude-code", False),
     ]
-    assert "⚠ snapshot: no codebase snapshot" in tab_report  # the project's own tab is fed
+    assert views == 1, "the project page has no Doctor tab of its own"
 
 
-def test_a_doctor_refreshed_message_updates_the_sidebar_counts(
+def test_a_doctor_refreshed_message_updates_the_shells_report(
     tmp_path: Path, script: Script
 ) -> None:
     """A one-click fix re-runs the doctor inside the view; the shell must follow it."""
@@ -1038,12 +1060,17 @@ def test_a_doctor_refreshed_message_updates_the_sidebar_counts(
         calls.append(1)
         return [SNAPSHOT_WARN]
 
+    def counts(app: FleetApp) -> str:
+        """The report the shell holds (its Doctor page shows it), as ``✓ n  ⚠ n``."""
+        ok = sum(check.status is CheckStatus.ok for check in app.doctor_checks)
+        warn = sum(check.status is CheckStatus.warn for check in app.doctor_checks)
+        return f"✓ {ok}  ⚠ {warn}"
+
     async def go(pilot: Pilot[None]) -> tuple[str, int, str, int, str, int]:
         app = fleet_app(pilot)
         await settle(app)
         await pilot.pause()
-        summary = app.query_one(DoctorTitle)
-        before = (shown(summary), len(calls))
+        before = (counts(app), len(calls))
         # The report the view was handed is about the scope on screen: adopt it.
         app.post_message(
             DoctorRefreshed(
@@ -1058,13 +1085,13 @@ def test_a_doctor_refreshed_message_updates_the_sidebar_counts(
         await pilot.pause()
         await settle(app)
         await pilot.pause()
-        adopted = (shown(summary), len(calls))
+        adopted = (counts(app), len(calls))
         # A report about another root (the Onboard view's) says ours is stale.
         app.post_message(DoctorRefreshed([], tmp_path / "elsewhere"))
         await pilot.pause()
         await settle(app)
         await pilot.pause()
-        return (*before, *adopted, shown(summary), len(calls))
+        return (*before, *adopted, counts(app), len(calls))
 
     before, calls_before, adopted, calls_adopted, rerun, calls_rerun = drive(go, doctor=doctor)
     assert "⚠ 1" in before and "✓ 0" in before and calls_before == 1
@@ -1072,6 +1099,82 @@ def test_a_doctor_refreshed_message_updates_the_sidebar_counts(
     assert calls_adopted == 1, "the matching report was adopted — the checks did not run again"
     assert calls_rerun == 2, "a report about another root re-runs ours instead"
     assert "⚠ 1" in rerun  # …and shows what OUR doctor says, not the foreign report's ✓ 0
+
+
+def test_the_doctor_runs_at_start_and_then_only_when_asked(tmp_path: Path, script: Script) -> None:
+    """The human: the doctor "is not continuously running but runs just once when the app
+    starts and then again when someone opens it". Selecting projects, switching a project's
+    tabs and the refresh tick never run it; opening its page, its Re-run button and a fix
+    reported from another root each run it once."""
+    seed(tmp_path, ("prj_a", "alpha", None), ("prj_b", "beta", None))
+    calls: list[int] = []
+
+    def doctor() -> list[DoctorCheck]:
+        calls.append(1)
+        return []
+
+    async def go(pilot: Pilot[None]) -> dict[str, int]:
+        app = fleet_app(pilot)
+        await settle(app)
+        seen = {"start": len(calls)}
+        for card in ("prj_a", "prj_b", "prj_a"):
+            await pilot.click(card_for(app, card).query_one(ProjectTitle))
+            await settle(app)
+            view = app.current_view()
+            assert isinstance(view, ProjectView)
+            for tab in (*ProjectView.TAB_IDS, "tab-manager"):
+                view.active = tab
+                await settle(app)
+        app.refresh_data()  # what the refresh tick runs
+        app.refresh_data()
+        await settle(app)
+        seen["selecting"] = len(calls)
+        await open_doctor(pilot)
+        await settle(app)
+        seen["opened"] = len(calls)
+        await pilot.click("#doctor-rerun")
+        await settle(app)
+        seen["rerun"] = len(calls)
+        app.post_message(DoctorRefreshed([], tmp_path / "elsewhere"))  # a fix in another root
+        await settle(app)
+        seen["fixed"] = len(calls)
+        return seen
+
+    assert drive(go, doctor=doctor) == {
+        "start": 1,
+        "selecting": 1,
+        "opened": 2,
+        "rerun": 3,
+        "fixed": 4,
+    }
+
+
+@pytest.mark.parametrize("remembered", ["project:prj_a", "doctor:prj_a"])
+def test_the_one_run_at_start_is_about_the_project_asq_reopens(
+    tmp_path: Path, script: Script, remembered: str
+) -> None:
+    """At start the doctor ran for the machine, then again for the project the restored view
+    selected: two runs, the first thrown away. Now one, about that project — and a reopened
+    Doctor page's own run is that one."""
+    projects = seed(tmp_path, ("prj_a", "alpha", None))
+    ui_app._remember_ui_state(ui_app.SELECTED_KEY, remembered)
+    calls: list[int] = []
+
+    def doctor() -> list[DoctorCheck]:
+        calls.append(1)
+        return []
+
+    async def go(pilot: Pilot[None]) -> tuple[str | None, int, Path | None]:
+        app = fleet_app(pilot)
+        await settle(app)
+        await pilot.pause()
+        await settle(app)
+        return app.content.current, len(calls), app.query_one("#doctor", DoctorView).cwd
+
+    current, count, cwd = drive(go, doctor=doctor)
+    assert current == ("project-prj_a" if remembered.startswith("project") else "doctor")
+    assert count == 1
+    assert cwd == projects[0].root
 
 
 class SpyApp(FleetApp):
@@ -1097,14 +1200,12 @@ def test_a_doctor_report_is_painted_only_in_the_scope_it_ran_for(
 ) -> None:
     """A report finished in project A must never be painted with project B's root.
 
-    ``show_doctor`` re-reads the scope at PAINT time and the worker filter was
-    the name alone, so a SUCCESS queued across a selection change (reachable:
-    ``on_project_selected`` awaits ``add_content`` before ``_set_doctor_scope``,
-    and a worker past RUNNING is past cancelling) handed the old project's
-    findings to the new project's ``DoctorView.cwd`` — a one-click project fix
-    would then have run in the wrong root, the hazard ``show_doctor``'s own
-    comment warns about. Replaying that queued message IS the race, without
-    racing.
+    ``show_doctor`` re-read the scope at PAINT time and the worker filter was
+    the name alone, so a SUCCESS queued across a change of scope handed the old
+    project's findings to the new project's ``DoctorView.cwd`` — a one-click
+    project fix would then have run in the wrong root. The scope changes when
+    the Doctor page opens for another project, and a worker past RUNNING is
+    past cancelling. Replaying that queued message IS the race, without racing.
     """
     projects = seed(tmp_path, ("prj_a", "alpha", None), ("prj_b", "beta", None))
     alpha, beta = projects
@@ -1120,13 +1221,14 @@ def test_a_doctor_report_is_painted_only_in_the_scope_it_ran_for(
             await pilot.pause()
             await settle(app)
             await pilot.pause()
-            await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
-            await settle(app)
-            await pilot.pause()
-            stale = app.doctor_runs[-1]  # the run whose scope is alpha
-            await pilot.click(card_for(app, "prj_b").query_one(ProjectTitle))
-            await settle(app)
-            await pilot.pause()
+            for card in ("prj_a", "prj_b"):
+                await pilot.click(card_for(app, card).query_one(ProjectTitle))
+                await settle(app)
+                await open_doctor(pilot)  # the page, for that project
+                await settle(app)
+                await pilot.pause()
+                if card == "prj_a":
+                    stale = app.doctor_runs[-1]  # the run whose scope is alpha
             view = app.query_one("#doctor", DoctorView)
             report = view.query_one("#doctor-report", Static)
             painted = shown(report)
@@ -1146,7 +1248,7 @@ def test_a_doctor_report_is_painted_only_in_the_scope_it_ran_for(
             return stale.result, painted, after_replay, wiped, shown(report), view.cwd
 
     tagged, painted, after_replay, wiped, repainted, cwd = asyncio.run(run())
-    assert runs == ["run-1", "run-2", "run-3"]  # mount (global), alpha, beta
+    assert runs == ["run-1", "run-2", "run-3"]  # mount (global), alpha's page, beta's page
     assert isinstance(tagged, tuple), "the result must carry the scope it ran for"
     assert tagged[0] == alpha.root and [c.name for c in tagged[1]] == ["run-2"]
     assert "run-3" in painted and "run-2" not in painted  # beta's report is on screen
@@ -1822,11 +1924,16 @@ def test_the_app_keys_are_refused_while_focus_is_in_a_view(tmp_path: Path, scrip
     reached the app's binding and exited the fleet UI — taking the unsaved form
     with it (measured against the running app: ``q`` with the Settings tab's
     permission-mode ``Select`` focused set ``_exit``). The sidebar is the
-    control: there the very same keys still quit, theme and help.
+    control: there the very same keys still quit, theme and help. ``?`` is the one
+    exception: help opens from a form too — it neither quits nor changes anything,
+    and it is how the board's icons are explained (an agent's pane still gets it:
+    ``test_q_quits_from_the_sidebar_but_reaches_a_focused_terminal_pane``).
     """
     seed(tmp_path, ("prj_a", "alpha", None))
 
-    async def go(pilot: Pilot[None]) -> tuple[list[str], list[int | None], list[str], int | None]:
+    async def go(
+        pilot: Pilot[None],
+    ) -> tuple[list[str], list[int | None], list[str], list[str], int | None]:
         app = fleet_app(pilot)
         button, switch = Button("save", id="probe-button"), Switch(id="probe-switch")
         await app.content.add_content(Vertical(button, switch, id="probe-form"), set_current=True)
@@ -1834,14 +1941,20 @@ def test_the_app_keys_are_refused_while_focus_is_in_a_view(tmp_path: Path, scrip
         focused: list[str] = []
         codes: list[int | None] = []
         screens: list[str] = []
+        helps: list[str] = []
         for widget in (button, switch):
             widget.focus()
             await pilot.pause()
             focused.append(type(app.focused).__name__)
-            await pilot.press("q", "t", "question_mark", "f1")
+            await pilot.press("q", "t", "f1")
             await settle(app)  # a refused key has bubbled all the way up and been refused
             codes.append(app.return_code)
             screens.append(type(app.screen).__name__)
+            await pilot.press("question_mark")
+            await settle(app)
+            helps.append(type(app.screen).__name__)
+            await pilot.press("escape")
+            await settle(app)
         # The rule is "focus is IN the sidebar", not "focus IS the sidebar": a
         # focusable row would keep the keys live. The sidebar has none today, so
         # the probe is synthetic on purpose — it exercises the rule, not a widget.
@@ -1865,14 +1978,15 @@ def test_the_app_keys_are_refused_while_focus_is_in_a_view(tmp_path: Path, scrip
         await settle(app)
         await pilot.press("q")
         await settle(app)
-        return focused, codes, screens, app.return_code
+        return focused, codes, screens, helps, app.return_code
 
-    focused, codes, screens, quit_code = drive(go)
+    focused, codes, screens, helps, quit_code = drive(go)
     # The claim first: a quit here also stops the rest of the probe, and the
     # reader should read "q quit from a form", not "the second probe lost focus".
     assert codes == [None, None], "q in a form must not quit the fleet UI"
     assert focused == ["Button", "Switch", "Button"]  # the probes really had focus
     assert screens == ["PaneScreen", "PaneScreen", "HelpScreen", "HelpScreen"]
+    assert helps == ["HelpScreen", "HelpScreen"], "? opens help from a form as well"
     assert quit_code == 0  # …and the sidebar still quits
 
 
@@ -1913,6 +2027,91 @@ def test_help_opens_from_the_sidebar_and_closes(tmp_path: Path, script: Script) 
     # the one place they are found (review of #171, round 1).
     for key in ("shift+↑ ↓", "g p space", "shift+click", "drag title"):
         assert key in keys, key
+    # What sits beside and under ⚙ Settings is explained here too (review of #261, m2/m9).
+    assert "✗ 1  ⚠ 2" in keys and "what the doctor's last run found" in keys
+    assert "usage could not be read" in keys and "accounts that need a login" in keys
+
+
+def test_help_opens_from_the_board_and_explains_every_task_icon(
+    tmp_path: Path, script: Script
+) -> None:
+    """``?`` was live only from the sidebar, so the board's icons had nowhere to be explained
+    from where they are seen. From the tasks table it opens the help, whose Board section
+    lists the board's keys and one line per icon — the mapping the table draws from."""
+    from aisquare.cli.ui.board import STATUS_ICONS
+
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> tuple[str, bool, str]:
+        app = fleet_app(pilot)
+        await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
+        await settle(app)
+        view = app.current_view()
+        assert isinstance(view, ProjectView)
+        view.active = "tab-board"
+        await settle(app)
+        view.query_one("#tasks").focus()
+        await pilot.pause()
+        focused = type(app.focused).__name__
+        await pilot.press("question_mark")
+        await settle(app)
+        opened = isinstance(app.screen, HelpScreen)
+        text = shown(app.screen.query_one("#helpbox Static", Static)) if opened else ""
+        return focused, opened, text
+
+    focused, opened, text = drive(go)
+    assert focused == "PickableTable", "the premise: the keyboard is on the board's tasks"
+    assert opened
+    board = text[text.index("Board") :]
+    for glyph, _style, meaning in STATUS_ICONS.values():
+        assert glyph in board and meaning in board, meaning
+    assert "done archive" in board and "drag a line to resize" in board
+
+
+def test_help_from_the_board_opens_at_its_section_with_every_icon_in_view(
+    tmp_path: Path, script: Script
+) -> None:
+    """At 160x45 the help's top and the board's icon legend do not fit on one screen, and
+    from the board the legend sat ~45 lines down, below the fold (validator of PR #261,
+    NIT 2). From the board — its tasks, or the tab row on it — the help opens with the
+    Board section at its top, every icon painted; from the sidebar it opens at its top."""
+    from aisquare.cli.ui.board import STATUS_ICONS
+    from tests.test_ui_remote import painted
+
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> list[str]:
+        app = fleet_app(pilot)
+        await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
+        await settle(app)
+        view = app.current_view()
+        assert isinstance(view, ProjectView)
+        view.active = "tab-board"
+        await settle(app)
+        seen: list[str] = []
+        for widget in (view.query_one("#tasks"), view.query_one(Tabs), app.sidebar):
+            widget.focus()
+            await pilot.pause()
+            await pilot.press("question_mark")
+            await settle(app)
+            assert isinstance(app.screen, HelpScreen)
+            seen.append("\n".join(painted(app)))
+            await pilot.press("escape")
+            await settle(app)
+        return seen
+
+    *from_the_board, from_the_sidebar = drive(go, size=(160, 45))
+    meanings = [meaning for _glyph, _style, meaning in STATUS_ICONS.values()]
+    for screen in from_the_board:
+        assert "Board (a project's Board tab" in screen
+        assert all(meaning in screen for meaning in meanings), screen
+        # The heading is the box's first row: the key line right above it is scrolled off.
+        # Its line in the text was not its row on screen — keys above it wrap (8 at 160x45).
+        assert "this help — from anywhere" not in screen, screen
+    assert "aisquare fleet — keys" in from_the_sidebar
+    assert not all(meaning in from_the_sidebar for meaning in meanings), (
+        "the premise: from the top, the legend is below the fold"
+    )
 
 
 def test_keyboard_cursor_walks_the_rows_and_enter_activates(tmp_path: Path, script: Script) -> None:
@@ -2388,10 +2587,12 @@ def test_r_refreshes_from_the_sidebar_but_is_forwarded_from_a_pane(
     assert keys == ["r"]
 
 
-def test_r_re_runs_the_doctor_and_a_only_re_reads_the_list(tmp_path: Path, script: Script) -> None:
-    """`r` is "refresh now" — the fleet AND the doctor. #139's `a` action was first
-    inserted between the two calls and took the doctor run with it, so `r` re-read
-    the store only and `a`, which changes nothing the doctor looks at, re-ran it."""
+def test_r_refreshes_the_fleet_and_neither_r_nor_a_runs_the_doctor(
+    tmp_path: Path, script: Script
+) -> None:
+    """`r` is "refresh now" — the fleet. The doctor runs at start, when its page opens,
+    after a fix and from its Re-run button: seconds of probing a key press must not cost.
+    `a` changes which cards are shown, not what the doctor finds."""
     seed(tmp_path, ("prj_a", "alpha", None))
     calls: list[int] = []
 
@@ -2399,24 +2600,33 @@ def test_r_re_runs_the_doctor_and_a_only_re_reads_the_list(tmp_path: Path, scrip
         calls.append(1)
         return []
 
-    async def go(pilot: Pilot[None]) -> tuple[int, int, int]:
+    async def go(pilot: Pilot[None]) -> tuple[int, int, int, int]:
         app = fleet_app(pilot)
         await settle(app)
+        reads: list[int] = []
+        read = app.refresh_data
+
+        def counted() -> None:
+            reads.append(1)
+            read()
+
+        app.refresh_data = counted  # type: ignore[method-assign]
         app.sidebar.focus()
         at_mount = len(calls)
         await pilot.press("r")
         await pilot.pause()
         await settle(app)
-        after_r = len(calls)
+        after_r, reads_after_r = len(calls), len(reads)
         await pilot.press("a")
         await pilot.pause()
         await settle(app)
-        return at_mount, after_r, len(calls)
+        return at_mount, reads_after_r, after_r, len(calls)
 
-    at_mount, after_r, after_a = drive(go, doctor=doctor)
+    at_mount, fleet_reads, after_r, after_a = drive(go, doctor=doctor)
     assert at_mount == 1
-    assert after_r == 2, "r re-runs the doctor"
-    assert after_a == 2, "a changes which cards are shown, not what the doctor finds"
+    assert fleet_reads >= 1, "r re-read the fleet"
+    assert after_r == 1, "r does not run the doctor"
+    assert after_a == 1, "nor does a"
 
 
 # --- theme -------------------------------------------------------------------------
@@ -3438,7 +3648,7 @@ def test_the_ceiling_rule_reads_what_the_saver_was_last_asked_not_the_last_confi
         await _settled(pilot)
         return (
             app.sidebar.outer_size.width,
-            app.query_one(Divider)._width,
+            app.query_one(Divider)._ask,
             _state(isolated_home)[SIDEBAR_WIDTH_KEY],
         )
 
@@ -3684,7 +3894,7 @@ def test_the_sidebar_hides_captured_directories_until_a_shows_them(
         return before, with_captured, title, after, shown(app.screen.query_one(Static))
 
     def shown_text(app: FleetApp, project_id: str) -> str:
-        return shown(card_for(app, project_id).query_one(ProjectTitle))
+        return shown(card_for(app, project_id).query_one(CardChips))
 
     before, with_captured, title, after, keys = drive(go)
     assert before == ["prj_a"], "a captured directory is not a card"
@@ -3737,7 +3947,7 @@ def test_the_shell_remembers_the_captured_toggle_and_reopens_a_page(
     tmp_path: Path, script: Script
 ) -> None:
     """Review of #169: what the shell remembers beyond a row came back untested —
-    the captured directories shown with `a`, the Accounts page, the Doctor."""
+    the captured directories shown with `a`, and every page under ⚙ Settings."""
     seed(tmp_path, ("prj_a", "alpha", None))
     with store_session() as store:
         store.ensure_project(ProjectInfo(id="prj_scratch", root=tmp_path / "scratch"))  # a hook
@@ -3764,12 +3974,17 @@ def test_the_shell_remembers_the_captured_toggle_and_reopens_a_page(
         assert store.ui_state("fleet.show_captured") is None, "hiding them again is remembered"
     assert drive(relaunch)[0] == ["prj_a"]
 
-    with store_session() as store:
-        store.set_ui_state("fleet.selected", "accounts")
-    assert drive(relaunch)[1:] == ("accounts", "accounts")
-    with store_session() as store:
-        store.set_ui_state("fleet.selected", "doctor:")
-    assert drive(relaunch)[1:] == ("doctor", "doctor")
+    # Every page under ⚙ Settings reopens with Settings the highlighted row — the two
+    # remembered before the hub existed (`accounts`, `doctor:`) as much as the new ones.
+    for remembered, page in (
+        ("settings", "settings-hub"),
+        ("app-settings", "app-settings"),
+        ("accounts", "accounts"),
+        ("doctor:", "doctor"),
+    ):
+        with store_session() as store:
+            store.set_ui_state("fleet.selected", remembered)
+        assert drive(relaunch)[1:] == (page, "settings"), remembered
 
 
 # --- groups, pins and manual order (#140) ---------------------------------------------------
@@ -4660,3 +4875,73 @@ def test_a_handle_removed_mid_press_lets_the_mouse_go(
     assert marked, "the drag was running over api's card"
     assert captured is None
     assert not still_marked and closed, "the drag went with its handle"
+
+
+# --- the project's Settings tab follows a rename made elsewhere -----------------------------
+
+
+def test_the_settings_tab_follows_a_rename_made_on_the_card_or_in_a_shell(
+    tmp_path: Path, script: Script
+) -> None:
+    """The tab kept the project it was built with: after a card rename it still showed the
+    folder name, and Save with a blank field was refused as "already that" against its stale
+    copy — so the nickname could not be cleared from there. Each frame now hands the view
+    the stored row; the field follows unless the operator is typing in it; Save always writes.
+    """
+    from aisquare.cli.ui.sidebar import RenameProject
+    from aisquare.cli.ui.views.settings import SettingsView
+    from aisquare.core.store import store_session
+    from aisquare.services import project as project_service
+
+    projects = seed(tmp_path, ("prj_a", "alpha", None))
+
+    def stored() -> str | None:
+        with store_session() as store:
+            row = store.get_project("prj_a")
+        assert row is not None
+        return row.nickname
+
+    async def go(pilot: Pilot[None]) -> dict[str, object]:
+        app = fleet_app(pilot)
+        await settle(app)
+        await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
+        await settle(app)
+        view = app.current_view()
+        assert isinstance(view, ProjectView)
+        view.active = "tab-settings"
+        await settle(app)
+        tab = view.query_one(SettingsView)
+        field = tab.query_one("#nickname", Input)
+
+        def seen() -> tuple[str, str]:
+            return field.value, shown(tab.query_one("#settings-title", Static))
+
+        out: dict[str, object] = {"opened": seen()}
+        app.post_message(RenameProject("prj_a", "Card name"))  # what the card's field posts
+        await settle(app)
+        out["card"] = seen()
+        project_service.set_nickname(projects[0], "Shell name")  # `aisquare project rename`
+        app.refresh_data()  # the next tick
+        await settle(app)
+        out["shell"] = seen()
+        field.value = "half typed"
+        project_service.set_nickname(projects[0], "Elsewhere again")
+        app.refresh_data()
+        await settle(app)
+        out["typing"] = seen()
+        field.value = ""
+        tab.query_one("#save-nickname", Button).press()
+        await settle(app)
+        out["cleared"] = (seen(), stored())
+        return out
+
+    out = drive(go)
+    assert out["opened"] == ("", "project settings — alpha")
+    assert out["card"] == ("Card name", "project settings — Card name")
+    assert out["shell"] == ("Shell name", "project settings — Shell name")
+    assert out["typing"] == ("half typed", "project settings — Elsewhere again"), (
+        "what the operator is typing stays; the title says the stored name"
+    )
+    assert out["cleared"] == (("", "project settings — alpha"), None), (
+        "a blank Save clears a nickname set elsewhere"
+    )

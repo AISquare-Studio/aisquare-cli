@@ -49,10 +49,6 @@ from aisquare.services import hooks as hooks_service
 from aisquare.services import metrics as metrics_service
 from aisquare.services import team as team_service
 from tests.test_claude_accounts import LIVE_USAGE, NOW, _sign_in
-from tests.test_claude_accounts import fake_home as _redirected_home
-
-#: Re-exported so pytest collects it here (see tests/test_account_defaults.py).
-fake_home = _redirected_home
 
 #: ``NOW`` is the sibling file's clock (the credentials its ``_sign_in`` writes expire
 #: relative to it); the parser tests use a SUNDAY so the weekday arithmetic is visible.
@@ -512,12 +508,13 @@ def test_the_hook_starts_a_detached_hand_over_only_when_configured_and_the_reset
         with store_session() as store:
             store.touch_session("sess-fleet", state="working")
 
-    # The default: wait. Nothing is started however far the reset is.
+    # Set to wait: nothing is started however far the reset is.
+    _settings(on_limit="wait")
     _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
     assert started == []
 
-    # Configured to switch: a limit whose reset is far away starts the worker…
-    _settings(on_limit="switch", wait_if_reset_within_minutes=15)
+    # Switch, the default since 0.8.2: a limit whose reset is far away starts the worker…
+    _settings(wait_if_reset_within_minutes=15)
     unpark()
     _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
     assert len(started) == 1
@@ -863,7 +860,13 @@ def test_headroom_picks_the_first_account_under_the_line_in_priority_order(
     assert (
         picked is not None and picked.slot == work_slot.slot
     )  # first UNDER 85 in order, not lowest
-    assert any("first under 85%" in note for note in notes)
+    # Every figure says USED, with what is left beside it (an agent read a bare 40% as left).
+    assert any(
+        "account 2 20% used (80% left)" in note
+        and "account 3 90% used (10% left)" in note
+        and "account 2 is first under the 85%-used line" in note
+        for note in notes
+    ), notes
     assert sorted(fetch.calls) == ["tok-personal", "tok-spare", "tok-work"]  # one read each
     # The control: slot 1 (no credentials in this home) was never a candidate.
     assert "tok" not in "".join(n for n in notes if "plain claude" in n)
@@ -880,7 +883,11 @@ def test_headroom_takes_the_most_room_when_every_account_is_over_the_line(
     picked, notes = service.headroom_choice(service.list_accounts(), switch_at=85, fetch=fetch)
 
     assert picked is not None and picked.slot == 3  # 12 % left beats 4 % left
-    assert any("every account is over 85%" in note and "12% left" in note for note in notes)
+    assert any(
+        "every account is over the 85%-used line" in note
+        and "account 3 has the most room (12% left)" in note
+        for note in notes
+    ), notes
 
 
 def test_an_account_that_has_spent_its_week_has_no_headroom_however_empty_its_five_hours(
@@ -911,7 +918,8 @@ def test_an_account_that_has_spent_its_week_has_no_headroom_however_empty_its_fi
     )
     assert picked is not None and picked.slot == 4
     assert any(
-        "account 3 0% (week 100%)" in note and "account 4 is first under 85%" in note
+        "account 3 0% used (week 100% used, 0% left)" in note
+        and "account 4 is first under the 85%-used line" in note
         for note in notes
     ), notes
 
@@ -965,18 +973,19 @@ def test_headroom_skips_what_it_cannot_read_and_honours_disabled_and_exclude(
 
 
 def test_choose_uses_headroom_only_when_configured_and_falls_back_to_the_default(
-    fake_home: Path, work: ProjectInfo
+    fake_home: Path, work: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _slot("work@example.com", "tok-work")
     _slot("personal@example.com", "tok-personal")
     service.set_default("2")
     fetch = _Usage({"tok-work": _payload(95), "tok-personal": _payload(10)})
 
+    _settings(pick="default")
     plain = service.choose(role="coder", project=work, fetch=fetch)
     assert plain.source == "machine default" and plain.account is not None
     assert plain.account.slot == 2 and fetch.calls == []  # pick=default: no request at all
 
-    _settings(pick="headroom", switch_at=85)
+    _settings(switch_at=85)  # pick=headroom, the default since 0.8.2
     spread = service.choose(role="coder", project=work, fetch=fetch)
     assert spread.source == "headroom" and spread.account is not None
     assert spread.account.slot == 3
@@ -988,11 +997,47 @@ def test_choose_uses_headroom_only_when_configured_and_falls_back_to_the_default
     settings_service.bind_role("coder", account="2")
     assert service.choose(role="coder", project=work, fetch=fetch).source == "role binding"
 
-    # Nothing readable: the default decides, with the notes saying why.
+    # Nothing readable (a minute on, past what a launch serves): the default decides, with
+    # the notes saying why.
+    later = NOW + timedelta(seconds=service.PICK_MAX_AGE_SECONDS + 1)
+    monkeypatch.setattr(service, "_now", lambda: later)
     offline = service.choose(role="tester", project=work, fetch=_Usage({}))
     assert offline.source == "machine default" and offline.account is not None
     assert offline.account.slot == 2
     assert any("no account's usage could be read" in note for note in offline.notes)
+
+
+def test_a_launch_on_one_account_says_it_is_over_the_line_from_the_cache_and_asks_nothing(
+    fake_home: Path, work: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One candidate is the answer whatever it reads, so its pick asks nothing (m1) — and so
+    lost the only word at launch that the one account is nearly full (review of #261, N4).
+    The cache still says it: a reading recorded in the last five minutes, no request."""
+    only = _slot("work@example.com", "tok-work")
+    _settings(switch_at=85)  # pick=headroom
+    service.cached_usage([only], fetch=_Usage({"tok-work": _payload(97)}))  # recorded at NOW
+
+    def never(url: str, headers: Mapping[str, str], timeout: float) -> tuple[int, bytes]:
+        raise AssertionError("a one-account launch must not ask the endpoint")
+
+    later = NOW + timedelta(minutes=2)  # past a launch's minute, inside the five
+    monkeypatch.setattr(service, "_now", lambda: later)
+    full = service.choose(role="coder", project=work, fetch=never)
+    assert full.account is not None and full.account.slot == only.slot
+    assert any(
+        "every account is over the 85%-used line" in note and "3% left" in note
+        for note in full.notes
+    ), full.notes
+
+    _settings(switch_at=99)  # the same reading, under the line now: nothing to say
+    assert not any(
+        "over the" in note for note in service.choose(role="coder", project=work, fetch=never).notes
+    )
+
+    monkeypatch.setattr(service, "_now", lambda: NOW + timedelta(minutes=6))  # nothing cached
+    quiet = service.choose(role="coder", project=work, fetch=never)
+    assert quiet.account is not None and quiet.account.slot == only.slot
+    assert not any("over the" in note for note in quiet.notes)
 
 
 def test_a_hand_over_never_re_picks_the_account_it_is_leaving_on_an_arranged_machine(
@@ -1042,7 +1087,10 @@ def test_choose_for_handover_asks_headroom_before_the_binding_and_refuses_when_a
         role="coder", project=work, exclude=(2,), automatic=True, fetch=full
     )
     assert automatic.account is None
-    assert any("every account is over 85%; nothing to switch to" in n for n in automatic.notes)
+    assert any(
+        "every account is over the 85%-used line; nothing to switch to" in n
+        for n in automatic.notes
+    )
 
     # An iterator as `exclude` is spent by its first reader: normalised once (third round).
     lazy = service.choose_for_handover(
@@ -1068,6 +1116,46 @@ def test_choose_for_handover_asks_headroom_before_the_binding_and_refuses_when_a
         ).account
         is None
     )
+
+
+def test_a_launch_picks_from_a_reading_a_minute_old_and_a_hand_over_reads_live(
+    fake_home: Path, work: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #261, m1: ``pick = "headroom"`` is the default, and its pick read live, so
+    the sidebar's read then three launches sent four rounds. A launch now picks from the
+    cache, a minute deep; a hand-over still reads every candidate now."""
+    work_slot = _slot("work@example.com", "tok-work")
+    personal = _slot("personal@example.com", "tok-personal")
+    fetch = _Usage({"tok-work": _payload(95), "tok-personal": _payload(10)})
+    _settings(switch_at=85)
+
+    service.cached_usage([work_slot, personal], fetch=fetch)  # the sidebar's read
+    assert len(fetch.calls) == 2
+    for _ in range(3):
+        launched = service.choose(role="tester", project=work, fetch=fetch)
+        assert launched.source == "headroom" and launched.account is not None
+        assert launched.account.slot == personal.slot
+    assert len(fetch.calls) == 2  # three launches, no request
+
+    later = NOW + timedelta(seconds=service.PICK_MAX_AGE_SECONDS + 1)
+    monkeypatch.setattr(service, "_now", lambda: later)
+    service.choose(role="tester", project=work, fetch=fetch)
+    assert len(fetch.calls) == 4  # a minute on: one round, every candidate
+    handed = service.choose_for_handover(role="coder", project=work, exclude=(2,), fetch=fetch)
+    assert handed.account is not None and handed.account.slot == personal.slot
+    assert len(fetch.calls) == 5  # live, though the launch just read it
+
+    # One candidate is the answer whatever it reads: no request at all. The cache's
+    # reading of it, 95% used, still says it is over the line (N4).
+    service.set_disabled(str(personal.slot), True)
+    lone_fetch = _Usage({})
+    alone = service.choose(role="tester", project=work, fetch=lone_fetch)
+    assert alone.account is not None and alone.account.slot == work_slot.slot
+    assert alone.source == "headroom"
+    assert [note.split(" — ")[1] for note in alone.notes] == [
+        "every account is over the 85%-used line; account 2 has the most room (5% left)"
+    ]
+    assert len(fetch.calls) == 5 and lone_fetch.calls == []
 
 
 def test_a_hand_over_picks_nothing_from_a_registry_it_cannot_read(
@@ -1255,7 +1343,8 @@ def test_accounts_usage_and_list_usage_read_every_account_in_one_round_with_labe
     fake_home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The two CLI usage surfaces go through ``read_usage`` (one round trip) and the arranged
-    list — priority order, the alias, ``(disabled)`` — like every other surface (third round)."""
+    list — priority order, the alias, ``(disabled)`` — like every other surface (third round).
+    Both read through the shared five-minute cache, so the second is served without a round."""
     _slot("work@example.com", "tok-work")
     _slot("personal@example.com", "tok-personal")
     service.set_alias("2", "work")
@@ -1280,9 +1369,17 @@ def test_accounts_usage_and_list_usage_read_every_account_in_one_round_with_labe
     assert lines[1].startswith("3") and "(disabled)" in lines[1] and "60%" in lines[1]
     assert lines[2].startswith("2") and "work" in lines[2] and "40%" in lines[2]
 
+    assert "session used" in lines[0] and "week used" in lines[0]
+
+    # The readings `usage` just recorded serve `list --usage`: no request within five minutes…
     rounds.clear()
     listing = runner.invoke(app, ["accounts", "list", "--usage"])
     assert listing.exit_code == 0, listing.output
+    assert rounds == []
+    assert "usage as of just now" in listing.stdout
+    # …unless asked to fetch now, which is one round again.
+    refreshed = runner.invoke(app, ["accounts", "list", "--usage", "--refresh"])
+    assert refreshed.exit_code == 0, refreshed.output
     assert rounds == [[3, 2]]
 
 
@@ -1307,10 +1404,12 @@ def test_reorder_and_move_read_the_registry_once(
     assert len(reads) == 1
 
 
-def test_the_pages_tick_opens_the_store_once_for_every_sample_and_trend(
+def test_the_pages_read_opens_the_store_three_times_however_many_accounts(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Eight opens a minute for four accounts before: one now (third round)."""
+    """Eight opens a minute for four accounts before (third round). The page's read
+    (``cached_usage_with_trends``) opens it once to look in the cache, once to record what
+    it fetched and once for every trend, whatever the number of accounts."""
     import contextlib
 
     a = _slot("work@example.com", "tok-work")
@@ -1329,9 +1428,9 @@ def test_the_pages_tick_opens_the_store_once_for_every_sample_and_trend(
             yield store
 
     monkeypatch.setattr("aisquare.services.claude_accounts.store_session", counted_session)
-    fetched = service.read_usage_with_trends([a, b], now=NOW, fetch=fetch)
+    fetched = service.cached_usage_with_trends([a, b], now=NOW, fetch=fetch)
 
-    assert opens == [1]
+    assert opens == [1, 1, 1]
     assert fetched[a.slot][0].session_percent == 40 and fetched[b.slot][0].session_percent == 60
     trend = fetched[a.slot][1]
     assert trend is not None and trend.per_hour == pytest.approx(40.0)  # 20 → 40 in 30 min
@@ -1374,9 +1473,6 @@ def test_a_recording_usage_round_opens_the_store_once_on_the_callers_thread(
         assert len(store.usage_samples(a.slot, since=since)) == 1
         assert len(store.usage_samples(b.slot, since=since)) == 1
         assert store.usage_samples(c.slot, since=since) == []
-    opens.clear()
-    service.read_usage([a], now=NOW, fetch=fetch, record=False)
-    assert opens == []  # the page's path records in a session of its own
 
 
 def test_the_board_and_watch_name_an_aliased_slot_1_as_the_rest_does(
@@ -1389,7 +1485,7 @@ def test_the_board_and_watch_name_an_aliased_slot_1_as_the_rest_does(
     from aisquare.cli.watch import _session_lines
 
     two = _slot("work@example.com", "tok-work")
-    service.set_alias("1", "personal")
+    service.set_alias("1", "Personal laptop")  # a free-text name, as the Accounts page sets it
     plain_dir = str(core.default_config_dir())
     now = datetime.now(tz=UTC)
     sessions = [
@@ -1405,12 +1501,12 @@ def test_the_board_and_watch_name_an_aliased_slot_1_as_the_rest_does(
     ]
     labels = service.slot_labels()
 
-    assert team_service.account_label(plain_dir, labels) == "personal"
+    assert team_service.account_label(plain_dir, labels) == "Personal laptop"
     assert team_service.account_label(plain_dir) == "plain claude"  # the built-in name, unlabelled
     rendered = _session_lines(sessions, labels).plain
-    assert "personal" in rendered and ".claude" not in rendered
+    assert "Personal laptop" in rendered and ".claude" not in rendered
     block = team_service._render_board(work, sessions, [], [], me=None, labels=labels)
-    assert "[personal]" in block and "[.claude]" not in block
+    assert "[Personal laptop]" in block and "[.claude]" not in block
 
 
 def test_the_board_a_hook_renders_under_a_managed_slot_names_the_aliased_slot_1_too(
@@ -1578,14 +1674,15 @@ def test_doctor_live_headroom_warns_only_when_every_account_is_over_the_line(
     service.list_accounts()  # the registry exists from here on
     check = diagnostics._claude_account_headroom_check()
     assert check is not None and check.status.value == "ok"
-    assert "work@" not in check.detail and "account 2 90%" in check.detail
+    assert "work@" not in check.detail and "account 2 90% used (10% left)" in check.detail
+    assert "percent USED (85% used is the line)" in check.detail
 
     monkeypatch.setattr(
         service, "_http_get", _Usage({"tok-work": _payload(90), "tok-personal": _payload(86)})
     )
     check = diagnostics._claude_account_headroom_check()
     assert check is not None and check.status.value == "warn"
-    assert "every account is at or over 85%" in check.detail
+    assert "every account has used 85% or more" in check.detail
 
     monkeypatch.setattr(service, "_http_get", _Usage({}))
     check = diagnostics._claude_account_headroom_check()
@@ -1614,14 +1711,15 @@ def test_doctor_live_headroom_counts_a_spent_week_as_over_the_line(
     check = diagnostics._claude_account_headroom_check()
 
     assert check is not None and check.status.value == "warn", check
-    assert "every account is at or over 85%" in check.detail
-    assert "account 3 0% (week 100%)" in check.detail
+    assert "every account has used 85% or more" in check.detail
+    assert "account 3 0% used (week 100% used, 0% left)" in check.detail
 
 
 def test_doctor_live_and_the_page_read_every_account_in_one_round(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Both go through ``read_usage``, once, with every account (review of #205, finding 11)."""
+    """Both go through ``read_usage``, once, with every account (review of #205, finding 11);
+    the page through the shared cache, which doctor's live round has just filled."""
     _slot("work@example.com", "tok-work")
     _slot("personal@example.com", "tok-personal")
     monkeypatch.setattr(
@@ -1642,27 +1740,29 @@ def test_doctor_live_and_the_page_read_every_account_in_one_round(
 
     rounds.clear()
     accounts = [a for a in service.list_accounts() if a.slot != 1]
-    fetched = service.read_usage_with_trends(accounts)  # what the page's usage worker runs
-    assert rounds == [[2, 3]]
+    fetched = service.cached_usage_with_trends(accounts)  # what the page's usage worker runs
+    assert rounds == []  # doctor's round was recorded: the page is served it
     assert fetched[2][0].session_percent == 10 and fetched[3][0].session_percent == 20
     assert fetched[2][1] is not None  # the reading was recorded, so a trend object exists
+    service.cached_usage_with_trends(accounts, force=True)  # ↻ Refresh usage
+    assert rounds == [[2, 3]]
 
 
 def test_the_accounts_section_defaults_and_round_trips_through_config_set(
     runner: CliRunner,
 ) -> None:
     assert AppConfig().accounts == AccountsSettings(
-        pick="default", switch_at=85, on_limit="wait", wait_if_reset_within_minutes=15
+        pick="headroom", switch_at=85, on_limit="switch", wait_if_reset_within_minutes=15
     )
-    assert service.accounts_settings().pick == "default"  # no file: the defaults
+    assert service.accounts_settings().pick == "headroom"  # no file: the defaults
 
-    result = runner.invoke(app, ["config", "set", "accounts.pick", "headroom"])
+    result = runner.invoke(app, ["config", "set", "accounts.pick", "default"])
     assert result.exit_code == 0, result.output
-    assert load_config().accounts.pick == "headroom"
-    assert service.accounts_settings().pick == "headroom"
+    assert load_config().accounts.pick == "default"
+    assert service.accounts_settings().pick == "default"
     bad = runner.invoke(app, ["config", "set", "accounts.pick", "sometimes"])
-    assert bad.exit_code != 0 and load_config().accounts.pick == "headroom"
-    limit = runner.invoke(app, ["config", "set", "accounts.on_limit", "switch"])
-    assert limit.exit_code == 0 and load_config().accounts.on_limit == "switch"
+    assert bad.exit_code != 0 and load_config().accounts.pick == "default"
+    limit = runner.invoke(app, ["config", "set", "accounts.on_limit", "wait"])
+    assert limit.exit_code == 0 and load_config().accounts.on_limit == "wait"
     shown = runner.invoke(app, ["config", "get", "accounts.switch_at"])
     assert shown.stdout.strip() == "accounts.switch_at = 85"

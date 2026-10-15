@@ -207,6 +207,19 @@ class DeliveryUnconfirmedError(RuntimeError):
         self.board_name = board_name
 
 
+class NoSuchTaskNumber(KeyError):
+    """``12`` / ``#12`` names no task on the caller's board — said so, never looked for
+    elsewhere."""
+
+    def __init__(self, number: int, board: str) -> None:
+        super().__init__(f"#{number}")
+        self.number = number
+        self.board = board
+
+    def __str__(self) -> str:
+        return f"no task #{self.number} on this board ({self.board})"
+
+
 class ManagerWakeupError(RuntimeError):
     """The manager's wake-up branch failed; the row still says ``waiting``, as before.
 
@@ -379,6 +392,50 @@ class _Board:
     name: str
     root: Path | None
     warning: str | None = None
+
+
+TASK_NUMBER_REF = re.compile(r"^#?([0-9]{1,6})$")
+"""A task ref that is a board number: ``12`` or ``#12`` (:func:`find_task`)."""
+
+
+def task_number_of(ref: str) -> int | None:
+    """The board number ``ref`` spells (``12``, ``#12``), or ``None`` when it is not one."""
+    match = TASK_NUMBER_REF.match(ref.strip())
+    return int(match.group(1)) if match else None
+
+
+def task_label(task: TeamTask) -> str:
+    """``#12 tsk_01m4…`` — the number people read, then the id agents keep working with."""
+    return f"#{task.number} {task.id}" if task.number is not None else task.id
+
+
+def find_task(store: ContextStore, ref: str, board_id: str) -> TeamTask | None:
+    """The task ``ref`` names, a board number first: ``12`` or ``#12`` on ``board_id``.
+
+    ``board_id`` is the CALLER's board (:func:`_caller_board_id`): numbers are per
+    project, so ``7`` means this board's seventh task, never another's. A number the
+    board does not have, ``12`` or ``#12``, raises :class:`NoSuchTaskNumber` and is never
+    looked for as an id: the tail lookup (``get_task``) spans every board, so ``12``
+    would close whichever task's id happens to end in ``12``, here or on another
+    project's board (review of #261, M1). No real ref needs it: old board lines showed
+    eight-character tails, which :data:`TASK_NUMBER_REF` never matches. Anything else is
+    the id lookup it always was: a full id, a prefix, a tail.
+    """
+    number = task_number_of(ref)
+    if number is None:
+        return store.get_task(ref)
+    task = store.task_by_number(board_id, number)
+    if task is None:
+        raise NoSuchTaskNumber(number, _board_of(store, board_id).name)
+    return task
+
+
+def _caller_board_id(store: ContextStore, session: TeamSession | None, cwd: Path | None) -> str:
+    """The board a task ref is read on: the session's (``--as``), else the directory's —
+    as :func:`_board` delivers, but without registering anything for a read."""
+    if session is not None:
+        return session.project_id
+    return orchestrator.team_project(cwd).id
 
 
 def _board_of(store: ContextStore, project_id: str) -> _Board:
@@ -661,7 +718,7 @@ def log_events(
         author = _resolve_session(store, by)
         task_id: str | None = None
         if task_ref is not None:
-            task = store.get_task(task_ref)
+            task = find_task(store, task_ref, board.id)
             if task is None:
                 raise KeyError(task_ref)
             task_id = task.id
@@ -722,9 +779,8 @@ def verify_receipt(
                 event=None, board_id=board.id, board_name=board.name, elsewhere=elsewhere
             )
         roles = {s.id: s.role for s in store.team_sessions(board.id)}
-        return VerifyResult(
-            event=event, board_id=board.id, board_name=board.name, line=event_line(event, roles)
-        )
+        line = event_line(event, roles, store.task_numbers(board.id))
+        return VerifyResult(event=event, board_id=board.id, board_name=board.name, line=line)
 
 
 _SIGNAL_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
@@ -956,7 +1012,7 @@ def add_note(
         board = _board(store, session, cwd)
         task_id: str | None = None
         if task_ref is not None:
-            task = store.get_task(task_ref)
+            task = find_task(store, task_ref, board.id)
             if task is None:
                 raise KeyError(task_ref)
             if task.project_id != board.id:
@@ -1011,7 +1067,7 @@ def add_task(
         board = _board(store, session, cwd)
         resolved_needs: list[str] = []
         for ref in needs or []:
-            needed = store.get_task(ref)
+            needed = find_task(store, ref, board.id)
             if needed is None:
                 raise KeyError(ref)
             if needed.project_id != board.id:
@@ -1068,11 +1124,12 @@ def list_tasks(status: TaskStatus | None = None, cwd: Path | None = None) -> lis
         return store.team_tasks(_project(store, cwd).id, status=status)
 
 
-def show_task(ref: str) -> TeamTask:
+def show_task(ref: str, *, session_ref: str | None = None, cwd: Path | None = None) -> TeamTask:
     """One task in full. Raises ``KeyError`` if nothing matches."""
     _require_enabled()
     with store_session() as store:
-        task = store.get_task(ref)
+        session = _resolve_session(store, session_ref)
+        task = find_task(store, ref, _caller_board_id(store, session, cwd))
         if task is None:
             raise KeyError(ref)
         return task
@@ -1135,10 +1192,10 @@ def claim_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
     _require_enabled()
     _DELIVERY.set(None)
     with store_session() as store:
-        task = store.get_task(ref)
+        session = _resolve_session(store, session_ref)
+        task = find_task(store, ref, _caller_board_id(store, session, None))
         if task is None:
             raise KeyError(ref)
-        session = _resolve_session(store, session_ref)
         claimant = session.id if session else "cli"
         lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
         if not store.claim_task(task.id, claimant, lease):
@@ -1170,10 +1227,10 @@ def _finish_task(
 ) -> tuple[TeamTask, _Board]:
     _DELIVERY.set(None)
     with store_session() as store:
-        task = store.get_task(ref)
+        session = _resolve_session(store, session_ref)
+        task = find_task(store, ref, _caller_board_id(store, session, None))
         if task is None:
             raise KeyError(ref)
-        session = _resolve_session(store, session_ref)
         updated = store.set_task_status(task.id, status)
         if status in CLOSED_STATUSES:
             # Rule 3 of the fleet-row section: the rows spawned for this task
@@ -1220,10 +1277,10 @@ def reopen_task(ref: str, *, reason: str, session_ref: str | None = None) -> Tea
     _require_enabled()
     _DELIVERY.set(None)
     with store_session() as store:
-        task = store.get_task(ref)
+        session = _resolve_session(store, session_ref)
+        task = find_task(store, ref, _caller_board_id(store, session, None))
         if task is None:
             raise KeyError(ref)
-        session = _resolve_session(store, session_ref)
         reopened = store.reopen_task(task.id)
         event = _emit(
             store,
@@ -1317,10 +1374,10 @@ def release_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
     _require_enabled()
     _DELIVERY.set(None)
     with store_session() as store:
-        task = store.get_task(ref)
+        session = _resolve_session(store, session_ref)
+        task = find_task(store, ref, _caller_board_id(store, session, None))
         if task is None:
             raise KeyError(ref)
-        session = _resolve_session(store, session_ref)
         released = store.release_task(task.id)
         event = _emit(
             store,
@@ -1557,7 +1614,11 @@ def hook_prompt_heartbeat(
         shown = events[:_DELTA_LIMIT]
         store.touch_session(session.id, cursor=shown[-1].seq, state="working")
         roles = {s.id: s.role for s in store.team_sessions(session.project_id)}
-        return collision + briefing + _render_delta(shown, roles, truncated=truncated)
+        # One read, and only when a line names a task: this runs on every prompt.
+        numbers = store.task_numbers(session.project_id) if any(e.task_id for e in shown) else {}
+        return (
+            collision + briefing + _render_delta(shown, roles, truncated=truncated, numbers=numbers)
+        )
 
 
 def hook_stop(
@@ -1722,10 +1783,12 @@ def _manager_wakeup(
     truncated = len(events) > _DELTA_LIMIT
     shown = events[:_DELTA_LIMIT]
     roles = {s.id: s.role for s in store.team_sessions(me.project_id)}
+    numbers = store.task_numbers(me.project_id) if any(e.task_id for e in shown) else {}
     store.set_meta(key, str(used + 1))
     store.touch_session(me.id, cursor=shown[-1].seq, state="working")
     return StopDecision(
-        reason=_render_wakeup(shown, roles, truncated=truncated), cursor=shown[-1].seq
+        reason=_render_wakeup(shown, roles, truncated=truncated, numbers=numbers),
+        cursor=shown[-1].seq,
     )
 
 
@@ -2244,6 +2307,7 @@ def _render_board(
     labels: Mapping[int, str] | Callable[[], Mapping[int, str]] | None = None,
 ) -> str:
     now = _now()
+    numbers = {t.id: t.number for t in tasks if t.number is not None}
     lines = ["<aisquare-team>"]
     if me is not None:
         lines.append(
@@ -2295,14 +2359,21 @@ def _render_board(
         for task in open_tasks[:_BOARD_TASKS]:
             claim = f" @{short_id(task.claimed_by)}" if task.claimed_by else ""
             waiting = unmet_needs(task, statuses)
-            waits = " ⧗ waits on " + ", ".join(need[-8:] for need in waiting) if waiting else ""
-            lines.append(f"  - {task.id} [{task.status}{claim}] {task.title}{waits}")
+            waits = (
+                " ⧗ waits on "
+                + ", ".join(
+                    f"#{numbers[need]}" if need in numbers else need[-8:] for need in waiting
+                )
+                if waiting
+                else ""
+            )
+            lines.append(f"  - {task_label(task)} [{task.status}{claim}] {task.title}{waits}")
         if len(open_tasks) > _BOARD_TASKS:
             lines.append(f"  … {len(open_tasks) - _BOARD_TASKS} more — `aisquare task list`")
     if events:
         roles = {s.id: s.role for s in sessions}
         lines.append("recent updates:")
-        lines.extend(f"  - {event_line(event, roles)}" for event in events)
+        lines.extend(f"  - {event_line(event, roles, numbers)}" for event in events)
     if me is not None:
         lines += [
             "Protocol: check this board before starting work; teammate updates",
@@ -2789,24 +2860,37 @@ def _role_cycle(me: TeamSession) -> list[str]:
     return harness.role_cycle(base_role(me.role), short_id(me.id))
 
 
-def event_line(event: TeamEvent, roles: dict[str, str]) -> str:
+def event_line(
+    event: TeamEvent, roles: dict[str, str], numbers: Mapping[str, int] | None = None
+) -> str:
+    """``583dc9a8 (manager) added → coder: [#12 tsk_…] title``; ``numbers`` is the board's
+    task id → number (``store.task_numbers``), so the task reads as the board shows it."""
     who = (
         f"{short_id(event.session_id)} ({roles.get(event.session_id, '?')})"
         if event.session_id
         else "cli"
     )
     target = f" → {event.to_role}" if event.to_role else ""
-    task = f" [{event.task_id}]" if event.task_id else ""
+    number = (numbers or {}).get(event.task_id) if event.task_id else None
+    task = ""
+    if event.task_id:
+        task = f" [#{number} {event.task_id}]" if number is not None else f" [{event.task_id}]"
     kind = event.kind.replace("task_", "")
     return f"{who} {kind}{target}:{task} {event.text}"
 
 
-def _render_delta(events: list[TeamEvent], roles: dict[str, str], *, truncated: bool) -> str:
+def _render_delta(
+    events: list[TeamEvent],
+    roles: dict[str, str],
+    *,
+    truncated: bool,
+    numbers: Mapping[str, int] | None = None,
+) -> str:
     count = f"{len(events)}{'+' if truncated else ''}"
     lines = [
         "<aisquare-team-delta>",
         f"{count} teammate update(s) since your last prompt:",
-        *(f"- {event_line(event, roles)}" for event in events),
+        *(f"- {event_line(event, roles, numbers)}" for event in events),
     ]
     if truncated:
         lines.append("… more waiting — run `aisquare board` for the full picture.")
@@ -2873,7 +2957,13 @@ def _shorten(text: str, keep: int) -> str:
 _ELLIPSIS_COST = _output_cost("…")
 
 
-def _render_wakeup(events: list[TeamEvent], roles: dict[str, str], *, truncated: bool) -> str:
+def _render_wakeup(
+    events: list[TeamEvent],
+    roles: dict[str, str],
+    *,
+    truncated: bool,
+    numbers: Mapping[str, int] | None = None,
+) -> str:
     """The Stop reason: the delta in the same lines the prompt hook would have used,
     framed as the instruction Claude Code continues the turn with.
 
@@ -2901,5 +2991,9 @@ def _render_wakeup(events: list[TeamEvent], roles: dict[str, str], *, truncated:
     spent = _output_cost(head) + sum(_output_cost(line) + 2 for line in frame)
     share = max((_WAKEUP_REASON_BUDGET - spent) // max(len(events), 1) - 4, _ELLIPSIS_COST)
     per_line = min(_WAKEUP_LINE_BUDGET, share)
-    lines = [head, *(f"- {_clip(event_line(event, roles), per_line)}" for event in events), *frame]
+    lines = [
+        head,
+        *(f"- {_clip(event_line(event, roles, numbers), per_line)}" for event in events),
+        *frame,
+    ]
     return "\n".join(lines)

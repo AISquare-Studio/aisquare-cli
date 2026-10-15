@@ -128,6 +128,7 @@ from textual import events
 from textual.actions import SkipAction
 from textual.app import App
 from textual.dom import NoScreen
+from textual.errors import NoWidget
 from textual.geometry import Offset, Region
 from textual.message import Message
 from textual.notifications import SeverityLevel
@@ -531,6 +532,17 @@ def copy_pane_selection(app: App[Any]) -> bool:
     return False
 
 
+class InPlaceField:
+    """A field opened in place over a name, which a press anywhere outside it leaves.
+
+    Leaving it saves, as Enter does: its blur is the save. But Textual moves the
+    focus on a press only to a FOCUSABLE widget under it, and a page body that takes
+    none — a project with no manager yet, the Settings hub — left the field open,
+    unsaved and focused (validator of PR #261, MINOR 1). :class:`PaneScreen` hands the
+    focus on for such a press.
+    """
+
+
 class PaneScreen(Screen[None]):
     """The default screen of a :class:`SelectionHost`: one copy key for the whole app.
 
@@ -545,8 +557,35 @@ class PaneScreen(Screen[None]):
     from anywhere; only when no pane has one does Textual's copy run, and it
     never copies nothing.
 
-    It also keeps the clock the panes are ordered by (:meth:`watch_selections`).
+    It also keeps the clock the panes are ordered by (:meth:`watch_selections`), and a
+    press away from an :class:`InPlaceField` closes it (:meth:`_forward_event`).
     """
+
+    def _forward_event(self, event: events.Event) -> None:
+        """Textual's, then: a press outside the focused :class:`InPlaceField` that left it
+        focused — nothing focusable was under it — hands the focus to the field's holder,
+        its nearest focusable ancestor (the sidebar, the account's row), as Enter does.
+
+        ``Screen._forward_event`` is Textual's (8.2) one way in for every mouse event
+        — the driver's, from ``App.on_event``, and ``Pilot``'s, which skips the app —
+        and it focuses what a press lands on before any handler can stop the press.
+        """
+        press = event if isinstance(event, events.MouseDown) and not event.is_forwarded else None
+        super()._forward_event(event)
+        field = self.focused
+        if press is None or not isinstance(field, InPlaceField):
+            return
+        try:
+            under, _ = self.get_widget_at(press.x, press.y)
+        except NoWidget:
+            under = None
+        if under is field:
+            return
+        holder = next(
+            (node for node in field.ancestors if isinstance(node, Widget) and node.focusable),
+            None,
+        )
+        self.set_focus(holder, scroll_visible=False)
 
     def watch_selections(self, old: dict[Widget, Selection], new: dict[Widget, Selection]) -> None:
         """Stamp every pane whose highlight this write changed, as the write happens.

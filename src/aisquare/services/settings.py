@@ -8,6 +8,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from aisquare.core import config as core_config
 from aisquare.core import paths
 from aisquare.core.config import AppConfig, RoleLaunchProfile, load_config, save_config
 from aisquare.models import RedactionLevel
@@ -16,6 +17,29 @@ from aisquare.models import RedactionLevel
 def list_values() -> AppConfig:
     """Return the fully-resolved configuration."""
     return load_config()
+
+
+def overrides() -> dict[str, Any]:
+    """The settings the user's file changes from the system defaults, nested as it holds them."""
+    return core_config.overrides(load_config())
+
+
+def reset_settings() -> Path | None:
+    """Every setting back to its system default; returns where the user's file was moved.
+
+    ``None`` when there was nothing to reset — no file, or one that holds no setting —
+    and nothing moved: every setting is at its default already. See
+    ``core.config.reset_config``.
+    """
+    return core_config.reset_config()
+
+
+def anything_to_reset() -> bool:
+    """Whether the user's file holds a setting a reset would undo.
+
+    See ``core.config.holds_a_setting``.
+    """
+    return core_config.holds_a_setting()
 
 
 def get_value(key: str) -> str:
@@ -122,7 +146,7 @@ def role_account_bindings(config: AppConfig | None = None) -> dict[str, str]:
     """Role → the account reference its binding names, for every role that names one.
 
     ``config`` is a caller's own read of the file, so a surface that needs other
-    sections too — the Settings tab — reads it once.
+    sections too — App settings — reads it once.
     """
     return {
         role: profile.account

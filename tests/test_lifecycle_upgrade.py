@@ -44,6 +44,7 @@ from aisquare.core.version import DISTRIBUTION
 from aisquare.models import FleetAgent
 from aisquare.services import agents as agents_service
 from aisquare.services import install_route, lifecycle
+from aisquare.services import settings as settings_service
 from aisquare.services.install_route import Captured, Facts, LatestRelease
 from tests import installer_seams
 from tests.fsperms import can_deny_reads
@@ -1967,6 +1968,31 @@ def test_a_move_back_plans_no_reconnect_and_asks_to_move_back(
     assert back["hooks_left"][0]["reason"].startswith("0.7.0 predates"), back
     assert forward["refresh_hooks"] == [str(site)], "control: a move forward re-connects"
     assert asked == ["Move aisquare 0.9.0 back to 0.7.0?", "Upgrade aisquare 0.9.0 → 0.9.1?"]
+
+
+def test_a_move_back_to_a_release_that_reads_config_whole_names_what_it_reads_otherwise(
+    runner: CliRunner, tool: Tool, machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #261, M2: 0.8.1 and earlier read config.toml as it stands, without this
+    release's defaults under it, so what the file leaves to them takes that release's
+    defaults there. Named in the plan, as the live fleet is, and not refused; a setting
+    the user set is in the file and reads the same in both."""
+    monkeypatch.setattr(install_cli, "_stdin_is_a_terminal", lambda: True)
+    monkeypatch.setattr("aisquare.cli.install.typer.confirm", lambda text, **_: False)
+    back = _one_object(runner.invoke(app, ["--json", "upgrade", "--version", "0.8.1"]).stdout)
+    forward = _one_object(runner.invoke(app, ["--json", "upgrade", "--version", "0.9.1"]).stdout)
+    said = runner.invoke(app, ["upgrade", "--version", "0.8.1"]).stdout
+    settings_service.set_value("accounts.pick", "default")
+    chosen = _one_object(runner.invoke(app, ["--json", "upgrade", "--version", "0.8.0"]).stdout)
+
+    assert back["config_defaults_lost"] == [
+        "accounts.pick default (here headroom)",
+        "accounts.on_limit wait (here switch)",
+    ], back
+    assert forward["config_defaults_lost"] == [], "control: a move forward reads it the same"
+    assert "⚠ 0.8.1 reads config.toml without this release's defaults under it" in said, said
+    assert "`aisquare config set accounts.pick …`" in said.replace("\n", " "), said
+    assert chosen["config_defaults_lost"] == ["accounts.on_limit wait (here switch)"], chosen
 
 
 def test_a_move_back_before_env_files_names_the_roles_whose_file_bindings_it_ignores(

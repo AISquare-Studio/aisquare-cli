@@ -31,6 +31,7 @@ from aisquare.core.state import get_state
 from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
+from aisquare.services import project as project_service
 
 app = typer.Typer(
     help="The fleet: this project's manager and the agents it spawns, each a tmux pane.",
@@ -87,8 +88,9 @@ def _project(ref: str | None) -> ProjectInfo:
 
 
 def _display_name(project: ProjectInfo) -> str:
-    """Basename primary, ``project.id`` when the basename is empty (§5.7)."""
-    return project.root.name or project.id
+    """``services.project.display_name``: the nickname, the basename, else ``project.id``
+    (§5.7). Free text: a line that prints it passes ``markup=False``."""
+    return project_service.display_name(project)
 
 
 def _project_json(project: ProjectInfo) -> dict[str, object]:
@@ -138,7 +140,7 @@ def _emit_agents(project: ProjectInfo, agents: list[FleetAgentStatus]) -> None:
     title = _display_name(project)
     if project.codename:
         title = f"{title} · {project.codename} · {fleet_service.session_name(project.codename)}"
-    console.print(title)
+    console.print(title, markup=False)
     if not agents:
         console.print("  (no agents) — start one: aisquare fleet spawn manager")
         return
@@ -164,7 +166,8 @@ def spawn(
         typer.Option("--label", "-l", help="Agent label (default: <role>-<task> or <role>-<n>)."),
     ] = None,
     task: Annotated[
-        str | None, typer.Option("--task", help="Board task this agent is for (id or prefix).")
+        str | None,
+        typer.Option("--task", help="Board task this agent is for (#12, 12, or id prefix)."),
     ] = None,
     worktree: Annotated[
         bool | None,
@@ -244,7 +247,7 @@ def spawn(
         f"{receipt.tmux_session} {receipt.agent.pane_id}"
     )
     for note in receipt.notes:
-        console.print(f"  ⚠ {note}")
+        console.print(f"  {'✓' if note in receipt.shared else '⚠'} {note}")
 
 
 @app.command("ls")
@@ -413,9 +416,16 @@ def switch(
         )
         return
     console = stdout_console()
-    origin = f"slot {receipt.from_slot}" if receipt.from_slot is not None else "its shell's claude"
+    # By name, as the feed's `switched` line and `fleet ls` say it, with the slot beside it.
+    labels = accounts_service.slot_labels()
+    origin = (
+        f"{slot_label(receipt.from_slot, labels)} (slot {receipt.from_slot})"
+        if receipt.from_slot is not None
+        else "its shell's claude"
+    )
+    target_name = f"{slot_label(receipt.to_slot, labels)} (slot {receipt.to_slot})"
     console.print(
-        f"✓ {label}: moved from {origin} to slot {receipt.to_slot} — {receipt.how} "
+        f"✓ {label}: moved from {origin} to {target_name} — {receipt.how} "
         f"({receipt.started.pane_id} in {receipt.tmux_session})",
         markup=False,
     )
@@ -479,6 +489,10 @@ def stop(
     else:
         console = stdout_console()
         console.print(f"✓ stopped {agent.label} ({agent.id})")
+        if agent.worktree:
+            console.print(
+                "  · run `aisquare fleet reap` to remove its worktree once its work is pushed"
+            )
         _say_released(console, len(released))
         # The work the stop returned to the pool is the one thing the next agent
         # inherits from this one; here the receipt carries the tasks, so they are
@@ -847,10 +861,13 @@ def reap(
         ),
     ] = False,
 ) -> None:
-    """Record exited agents, mark vanished panes lost, remove merged worktrees.
+    """Record exited agents, mark vanished panes lost, remove finished worktrees.
 
-    This project by default, `--all` for every project — never both. Exits 1
-    when a released claim could not be given back to the board.
+    A finished worktree is an ended agent's tree that is clean and whose commits
+    are on the default branch or pushed to any remote branch; its `fleet/…` branch
+    goes with it. A tree with uncommitted changes or unpushed commits is kept, and
+    named with why. This project by default, `--all` for every project — never
+    both. Exits 1 when a released claim could not be given back to the board.
     """
     refuse_conflicting_scope(every, project)
     target = None if every else _project(project)
@@ -865,6 +882,11 @@ def reap(
                     "ended": [a.model_dump(mode="json") for a in report.ended],
                     "lost": [a.model_dump(mode="json") for a in report.lost],
                     "worktrees_removed": [str(p) for p in report.worktrees_removed],
+                    "worktrees_kept": [
+                        {"path": str(path), "reason": reason}
+                        for path, reason in report.worktrees_kept
+                    ],
+                    "branches_deleted": list(report.branches_deleted),
                     "claims_released": list(report.claims_released),
                     "release_failures": list(report.release_failures),
                     "held": [_row_json(row) for row in report.held],
@@ -894,6 +916,10 @@ def reap(
         console.print(f"  ⚠ {row.agent.label}  LEFT LIVE — {row.reason}")
     for path in report.worktrees_removed:
         console.print(f"  🗑 {path}")
+    for branch in report.branches_deleted:
+        console.print(f"  🗑 branch {branch}")
+    for path, reason in report.worktrees_kept:
+        console.print(f"  ⚠ kept {path} — {reason}")
     _say_released(console, len(report.claims_released))
     for failure in report.release_failures:
         console.print(f"  ⚠ claims of {failure}")
@@ -918,7 +944,8 @@ def rename(
         return
     stdout_console().print(
         f"✓ {_display_name(updated)} is now {updated.codename} "
-        f"({fleet_service.session_name(updated.codename or '')})"
+        f"({fleet_service.session_name(updated.codename or '')})",
+        markup=False,
     )
     # The rename fails OPEN on the tmux half (the row is what everything else
     # reads), and a swallowed one costs `fleet attach` — so say it here rather
@@ -938,7 +965,7 @@ def pause(project: ProjectRef = None, as_session: SessionRef = None) -> None:
     if get_state().json_output:
         typer.echo(json.dumps({"paused": True, **_project_json(target)}))
         return
-    stdout_console().print(f"⏸ fleet paused for {_display_name(target)}")
+    stdout_console().print(f"⏸ fleet paused for {_display_name(target)}", markup=False)
 
 
 @app.command("resume")
@@ -952,7 +979,7 @@ def resume(project: ProjectRef = None, as_session: SessionRef = None) -> None:
     if get_state().json_output:
         typer.echo(json.dumps({"paused": False, **_project_json(target)}))
         return
-    stdout_console().print(f"▶ fleet resumed for {_display_name(target)}")
+    stdout_console().print(f"▶ fleet resumed for {_display_name(target)}", markup=False)
 
 
 def not_interactive_reason() -> str | None:

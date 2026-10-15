@@ -155,9 +155,11 @@ def test_both_surfaces_render_the_same_string() -> None:
     assert week == "35% · resets in 6d 12h (Tue 02:00)"
     from tests.test_ui_accounts import _status
 
-    line = accounts_view.account_line_text(_status(2, "two@example.com"), usage, now=NOW).plain
-    assert "session ▮▮▮▯▯ 68% · resets in 3h 10m (17:10)" in line  # 68 % rounds to three cells
-    assert "week ▮▮▯▯▯ 35% · resets in 6d 12h (Tue 02:00)" in line
+    cells = accounts_view.account_cells(_status(2, "two@example.com"), usage, now=NOW)
+    assert cells["session"].plain == "▮▮▮▯▯ 68%"  # 68 % rounds to three cells
+    assert cells["session-resets"].plain == "in 3h 10m (17:10)"
+    assert cells["week"].plain == "▮▮▯▯▯ 35%"
+    assert cells["week-resets"].plain == "in 6d 12h (Tue 02:00)"
 
 
 def _formats_a_reset_itself(node: ast.FunctionDef) -> bool:

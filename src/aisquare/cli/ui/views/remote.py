@@ -33,6 +33,7 @@ from aisquare.cli.ui.remote_control import (
     READ_ONLY_REASON,
     RemoteController,
 )
+from aisquare.cli.ui.ticks import while_running
 from aisquare.services.remote_server import _remote_instant
 
 QR_UNAVAILABLE = "QR unavailable — pip install segno"
@@ -170,6 +171,7 @@ class RemotePanel(ModalScreen[None]):
 
     # --- paint from the controller -------------------------------------------------------------
 
+    @while_running
     def repaint(self, *, heard: str | None = None) -> None:
         """Paint everything from the controller; the one-second tick runs it too.
 

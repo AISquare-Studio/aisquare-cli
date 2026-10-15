@@ -6,6 +6,267 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+**A quieter `asq`: projects you can name, one ⚙ Settings, and an Accounts page
+that reads at a glance. A folder trusted on one Claude account is trusted on
+all of them, and the fleet cleans up the worktrees it made.**
+- A project has a nickname, which you rename in place on its card. The card's
+  **⋯** menu holds *Rename*, *Pin*, *Open settings* and *Remove from fleet…*.
+- The sidebar is your projects, then **⚙ Settings** (App settings, Accounts,
+  Doctor) and a status line with two dots: your AISquare sign-in, and the room
+  left across your Claude accounts.
+- The Accounts page is an aligned table with the usage **used** per window.
+  You rename an account in place, **Log in** shows where a login is due, and
+  usage is read at most every five minutes, with **↻ Refresh usage** and how old
+  the readings are.
+- Tasks are numbered on their board, `#1`, `#2`, …, and every task command takes
+  the number. The board's tasks table is the number, a status icon and the
+  title, `?` explains the icons, and every line in the board drags to resize.
+- Your `config.toml` holds only what you changed. New launches go where there
+  is room (`pick = "headroom"`), and an agent that hits its limit moves
+  (`on_limit = "switch"`). `aisquare config reset` puts every setting back.
+- A launch copies a folder's trust from the Claude account that gave it, so an
+  agent on another account no longer stops at "trust this folder?".
+- `fleet reap` removes a finished agent's worktree, and its `fleet/…` branch,
+  once its work is pushed to any branch, and keeps and names one that holds
+  work found nowhere else. The manager stops and reaps agents whose work is
+  done.
+
+**Upgrading:**
+- From 0.8.1, run `aisquare upgrade`.
+- **`config.toml` is now only your changes** (`config_version = 2`), apart from
+  each `[fleet.roles.<role>]` table, which is written whole. On first load, a
+  value equal to 0.8's default for that key is dropped and follows today's
+  default; every other value stays yours. The next save writes the file down to
+  those. 0.8 wrote every setting into the file, so a value you chose that
+  happens to be 0.8's default cannot be told apart from one it wrote for you.
+  **An explicit `pick = "default"` or `on_limit = "wait"` therefore moves to
+  the new defaults, `headroom` and `switch`.** To keep the old behaviour, set
+  them again after upgrading: `aisquare config set accounts.pick default` and
+  `aisquare config set accounts.on_limit wait`.
+- **Moving back to 0.8.1 or earlier**: that release reads `config.toml`
+  without today's defaults under it. Your own settings read the same there, and
+  so do the fleet roles, as their tables are written whole. A setting the file
+  leaves to today's default takes that release's instead: `pick` reads
+  `default` and `on_limit` reads `wait`. `aisquare upgrade --version 0.8.1`
+  names those settings before it moves; to keep one there, set it after the
+  move. When that release saves the file whole again, this release reads it as
+  it did the first time: values equal to 0.8's defaults follow today's.
+- The store migrates to schema v30 on first open, from 0.8.1's v26, in four
+  steps:
+  - v27: a project nickname column.
+  - v28: `claude_usage.token_fingerprint`, a digest of the login a reading was
+    taken with, never the token. A reading recorded before it is served to no
+    login, so each account is asked once after the upgrade.
+  - v29: `team_task.number`, backfilled per board in creation order.
+  - v30: a unique index on (project, number).
+
+  0.8.1 opens a v30 store as it is. A task it adds has no number there and
+  shows its id. The next open by this release numbers it after the last number
+  on its board, in the order such tasks were added.
+- **`"name"` in `project list --json` is now the project's nickname** when it
+  has one, where it was always the folder's name; so is `name` in `fleet ls
+  --json` and Remote's project list. A script that wants the folder reads `root`.
+  Each project also carries `nickname` (`null` when unset). Task JSON carries
+  `number`. Usage JSON adds `session_used_percent`,
+  `week_used_percent`, `session_left_percent`, `week_left_percent`,
+  `needs_login` and `last_failed_at` (when a try after the reading failed,
+  else `null`). `session_percent` and `week_percent` stay, and mean percent
+  used, as they always did.
+
+### Added
+- **Project nicknames.** Free text on one line, up to 255 characters:
+  `aisquare project rename "API: auth rewrite"` (`--clear` drops it), or
+  double-click a card's title (or `F2`) and type, where Enter or a click away
+  saves and Esc cancels. Emoji are fine, joined ones (👩‍💻, 🏳️‍🌈) included. A
+  name with an invisible formatting character (a bidi control, a zero-width
+  space) is refused, as are bytes the terminal could not decode. The project's *Settings* tab sets it too. The sidebar,
+  `project list`, `fleet ls` and `project info` show it, and `--project`
+  accepts it when no id prefix, folder name or codename matches first. Cards no
+  longer show the codename; the *Settings* tab names it, beside the tmux session
+  and branch prefix it gives.
+- **A card's menu**: **⋯** on hover or on the selected card, `.`, or a
+  right-click. It holds *Rename*, *Pin* / *Unpin*, *Open settings* and *Remove
+  from fleet…*, which asks first and then forgets the project as `project
+  forget` does. Its folder and history are kept, and `aisquare project onboard
+  <root>` brings it back. A project with live agents is refused, naming them.
+- **⚙ Settings in the sidebar** opens a hub with **App settings**,
+  **Accounts** and **Doctor**. Under it is a dim status line,
+  `● aisquare  ● 2× claude ⚠`:
+  - The aisquare dot is green when signed in, red when signed out, grey when
+    not known.
+  - The claude dot is the room **left** across your usable accounts. Each
+    account is `100 − max(session % used, week % used)`, and the dot shows the
+    average: green over 50 %, yellow 25–50 %, orange-red 5–25 %, red under 5 %,
+    💀 none left. Grey means usage could not be read: offline, a login only in
+    the macOS Keychain, or no usable account.
+  - `N×` counts the usable accounts. ⚠ says an enabled account needs a login:
+    signed out, or its token expired or was refused. These are the Accounts
+    page's *Log in* rows. The dot is red when no account is usable for want of
+    one.
+
+  It reads through the usage cache every minute, never on the UI's two-second
+  tick, and follows the Accounts page as soon as the page reads. A click on it
+  opens Accounts, and `?` explains it.
+- **App settings**: the machine-wide settings that were on every project's
+  *Settings* tab (each role's permission mode, worktree and account, the escape
+  key, the agent cap, the worktree directory, native agent teams, and the
+  `[accounts]` settings). *Save* writes only the settings changed on the page,
+  so one changed in a shell while it was open is kept. It also has **Reset all
+  settings to default**, which asks first.
+- **`aisquare config reset [--yes]`** moves `config.toml` aside to
+  `config.toml.bak-<stamp>` beside it, so moving it back undoes the reset, and
+  every setting is its default again. Through a symlink, the file it points at
+  is copied aside and emptied. It asks at a terminal, does a dry run off one,
+  and never prunes earlier backups. With no file, or one that holds no setting,
+  it says `nothing to reset: <path> holds no setting…`, asks nothing and moves
+  nothing. **`config list --overrides`** shows what you changed, and nothing
+  else.
+- **Rename a Claude account in place** on the Accounts page: double-click its
+  name, or press Enter or F2 on its row. An account's name is free text up to 64
+  characters (`Work laptop`), with case kept and matched ignoring case. A name
+  is refused if it is only digits, has an `@`, has an invisible formatting
+  character, or is another slot's own name (`account 3`, `plain claude`).
+  Emoji are fine, joined ones included, as in nicknames. `aisquare accounts
+  alias 2 "Work laptop"` sets the same name, and `--account "work laptop"`
+  takes it.
+- **Log in** on an account's row whose login is missing, expired or rejected.
+  The status beside it says which. The sign-in pane waits for a fresh login,
+  not the stale one on disk, then the row reads its usage again.
+- **↻ Refresh usage** on the Accounts page asks every account now. Beside it, a
+  dim line says how old the readings are:
+  - `last refreshed 3m ago`, from the oldest reading actually read.
+  - `· last try failed 2m ago` when the endpoint did not answer.
+  - An account that needs a login counts in neither part.
+
+  A try that fails with nothing to say about the login (the endpoint
+  unreachable, an HTTP 5xx) keeps the account's figure on its row while that
+  figure is under five minutes old, and the line says the try failed. A
+  refused token shows at once.
+- **`--refresh`** on `aisquare accounts usage` and `accounts list --usage`
+  fetches now. Otherwise both share a five-minute cache with the Accounts page
+  and say how old their figures are (`usage as of 3m ago (percent USED;
+  refreshed at most every 5 min)`). A failed try is said as on the page
+  (`usage as of 3m ago · last try failed 1m ago`), and `no usage read · last
+  try failed just now` when no account could be read.
+- **Task numbers.** Every task has a number on its board, `#1`, `#2`, … in the
+  order tasks were added there. It shows on the board, in `task list` and
+  `task show`, in every receipt (`✓ claimed: #12 tsk_… [doing] …`), and in the
+  briefing and the wake-ups. Any task command, `--needs`, `--task` and the MCP
+  task tools take `12` or `#12` for the caller's board, or the id as before.
+  `12` and `#12` are only ever a number on the caller's board: a board with no
+  task #12 says `no task #12 on this board (<name>)`, and never takes another
+  board's task whose id ends in `12`.
+- **The board explains itself.** The tasks table is `#`, a status icon and the
+  title, cut to the width there is, so it never scrolls sideways:
+  - ○ to do
+  - ⧗ waiting on a task it needs
+  - ▶ doing
+  - 👀 in review
+  - ⛔ blocked
+  - ✓ done
+  - ✗ dropped
+
+  The detail opens with `#12 · doing · tsk_… · claimed by <who> (lease until
+  14:05) · for <role>`. `?` lists the board's keys and the icons, in `board -w` and in
+  `asq`, where it now opens from the board too.
+- **Every line in the board drags to resize**: beside the tasks column, above
+  the detail, and between the sessions and the tasks. A double-click puts a
+  line back. The sizes are kept in `state.json`, one for every project's board.
+- **The Doctor page** has **Re-run checks**, and a header that names what it
+  checked: `checks for <project>` or `checks for this machine`. What the last
+  run found shows beside the sidebar's settings row (`⚙︎ Settings  ✗ 1  ⚠ 2`,
+  nothing when all is clear) and on the hub's Doctor link, so the run at start
+  is seen without opening the page. Opening the page shows that report while
+  it runs the checks again (`… running the checks again`).
+- **A folder trusted on one Claude account is trusted on all of them.** Claude
+  Code asks "trust this folder?" once per account, and its highlighted answer is
+  *No, exit*, so agents on the other accounts sat at the question and the first
+  prompt typed into it ended them. A launch (`fleet spawn`, `restart`, `switch`,
+  `aisquare launch`, `accounts run`) now copies the folder's trust from any
+  account that has it into the one it runs on, and the receipt says so. Only
+  that entry of the account's `.claude.json` is written, under Claude Code's own
+  lock, and never a trust nobody gave. `aisquare accounts trust [<dir>]` trusts
+  a folder on every account at once; `--sync` shares every trusted folder. An
+  agent still at the question reads **🔔 NEEDS YOU** (*waiting for folder
+  trust*) in `fleet ls`, `asq` and the Remote, and a spawn never types its
+  prompt into it. On by default: *share folder trust* in App settings
+  (`accounts.share_trust`).
+- **One settings.json for every account, if you want it.** *share settings.json*
+  in App settings (`accounts.share_settings`, off by default) links each
+  managed account's `settings.json` to the plain claude's at launch, keeping its
+  own beside it; `aisquare accounts settings --sync` does it now and
+  `--unshare` undoes it. Logins are never shared: `.claude.json` and
+  `.credentials.json` stay per account, and a `settings.json` that sets an API
+  key, a token, a cloud provider or a forced login is left as it is.
+
+### Changed
+- **The defaults**: `[accounts] pick = "headroom"` (a launch takes the first
+  account in priority order with room) and `on_limit = "switch"` (an agent
+  that hits its limit is moved to one with room). See Upgrading.
+- **A launch's headroom pick reads the usage cache**, where it asked every
+  account on every launch. It uses a reading up to a minute old, so a burst of
+  spawns asks once, and reads nothing when only one account could be picked. A
+  hand-over (`fleet switch`, or an agent moved off its limit) and `doctor
+  --live` still ask the endpoint now.
+- **The sidebar** is your projects, then ⚙ Settings and its status line. The
+  Accounts and Doctor sections and the doctor summary at the bottom are gone;
+  both pages live under ⚙ Settings. A page you had open under them comes back
+  there at the next launch.
+- **A project's *Settings* tab** holds only that project: its nickname, and
+  its fleet id. The machine-wide settings moved to App settings.
+- **The doctor runs** once when `asq` starts, about the project it reopens, and
+  when its page opens, about the project selected last. It also runs on *Re-run
+  checks*, after one of its fixes, and when Welcome connects Claude Code. It
+  never runs on a selection, a tab or `r`, which now refreshes the fleet only.
+  A project page has no Doctor tab.
+- **A project's Explainability tab is *AISquare*.** It opens on an
+  *Explainability* heading; nothing in it changed.
+- **The Accounts page is an aligned table**, one row per account:
+  - its columns are ★, the slot, the name, who is signed in, the plan, the
+    session and week windows (a bar and the percent **used**), the status with
+    *Log in* beside it, then when each window resets.
+  - a value too long for its column ends in `…`, and hovering shows the rest.
+  - on a narrow page, the table scrolls sideways as one, header included.
+  - every button can be reached at any width.
+
+  The page reads usage through the shared five-minute cache, where it used to
+  ask once a minute.
+- **Usage says "used".** Every figure is percent USED (40 % used is 60 % left),
+  and says so:
+  - `accounts usage` and `list --usage` head their columns `session used` and
+    `week used`.
+  - the headroom notes read `account 2 20% used (80% left)`.
+  - `doctor --live` says `85% used is the line`.
+  - the manager's cycle says it too.
+- `fleet switch` names both accounts as the board does, a renamed one by its
+  name.
+- A launch on a machine with no signed-in account no longer prints `headroom:
+  no enabled, signed-in account to pick from` every time. A hand-over still
+  says it.
+- **`fleet reap` removes an ended agent's worktree once nothing in it is found
+  only there.** The rule was "its branch is merged into the default branch", so
+  a tree pushed to an integration branch (`push HEAD:feat/…`) was never
+  removed. A tree now goes when it is clean and its commits are on the default
+  branch or pushed to **any** remote branch. Its `fleet/…` branch is then
+  deleted, once its tip is pushed the same way; reap never deleted a branch
+  before, and deletes no other. A tree with uncommitted changes, an untracked
+  file that is not ignored, or unpushed commits is kept and named with why;
+  push it, and the next `reap` removes it. `--json` adds `worktrees_kept` and
+  `branches_deleted` beside `worktrees_removed`. A live agent's tree is never
+  touched, as before.
+- **`fleet stop` says** that `fleet reap` removes the agent's worktree once its
+  work is pushed, for an agent that had one.
+- **The role cycles clean up.** The manager's cycle says to stop (`fleet stop`)
+  and reap (`fleet reap`) an agent whose task is done with no queued task that
+  fits it, and to reap again when the validator's gate is PASS. Coder, tester,
+  runner, reviewer, validator and ui-tester are told to remove the scratch
+  worktrees and temp dirs they made before they finish or go idle, never the
+  worktree they were spawned in, which is reap's.
+
+### Fixed
+- `b` on the board brings the tasks column back however often it is pressed.
+  Hiding the column took the keyboard with it, so the next `b` went nowhere.
+
 ## [0.8.1] - 2026-10-13
 
 **The fleet on your phone: `aisquare remote`, through your own ngrok tunnel.**

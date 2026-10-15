@@ -251,10 +251,11 @@ _RESTART_OFF_AUTO = "--permission-mode acceptEdits"
 def _mode_step(role: str, config: FleetSettings) -> str:
     """The step that takes ``role`` off ``auto`` — one that works on THIS config.
 
-    ``aisquare config set`` only writes a key the loaded config already has,
-    and a config file with its own ``[fleet.roles]`` holds only the roles it
-    lists; the others run on the built-in ``auto`` with no table to set. For
-    those the step is the table itself, because the command would answer
+    ``aisquare config set`` only writes a key the loaded config already has.
+    The fleet's own roles always have one (the system defaults are laid under
+    the file), but a role outside them — a harness role spawned into the fleet
+    — has no table unless the file adds one, and runs on the built-in ``auto``.
+    For those the step is the table itself, because the command would answer
     "unknown config key" — named as a header and a key, never as one line:
     TOML ends a table header at its line, so ``[fleet.roles.x] permission_mode
     = …`` pasted as printed does not parse, and a config that does not parse

@@ -30,6 +30,7 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -44,7 +45,7 @@ from typing import Any, Literal
 
 from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import codenames, harness, orchestrator, selfcli
+from aisquare.core import claude_sharing, codenames, harness, orchestrator, selfcli
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import (
     CLAUDE_PERMISSION_MODES,
@@ -262,6 +263,9 @@ class SpawnReceipt:
     """The notes about what did NOT happen once the agent was up: the prompt not typed,
     the claims of a hand-over not moved, the previous session not marked ended. Each
     is in ``notes`` too; a prompt typed past the wait is typed, and is not here."""
+    shared: list[str] = field(default_factory=list)
+    """The notes that say a share was made into the agent's account (a folder's trust
+    copied, its settings.json linked): done, not a warning. Each is in ``notes`` too."""
 
 
 @dataclass(frozen=True)
@@ -432,6 +436,12 @@ class ReapReport:
     ended: list[FleetAgent] = field(default_factory=list)
     lost: list[FleetAgent] = field(default_factory=list)
     worktrees_removed: list[Path] = field(default_factory=list)
+    worktrees_kept: list[tuple[Path, str]] = field(default_factory=list)
+    """An ended agent's worktree left in place, with why: uncommitted changes, or commits
+    found nowhere but there (:func:`_remove_finished_worktrees`)."""
+    branches_deleted: list[str] = field(default_factory=list)
+    """The ``fleet/…`` branches of removed worktrees, deleted once their tip was found on
+    the default branch or a remote-tracking one."""
     claims_released: list[str] = field(default_factory=list)
     """Task ids the ended and lost rows' board sessions still held, returned to
     the pool — the same count ``shutdown`` reports, where ``reap`` used to
@@ -1135,20 +1145,51 @@ def _default_branch(root: Path) -> str:
     return "HEAD"
 
 
-def _merged_branches(root: Path) -> set[str]:
-    """Branch names already merged into the default branch."""
-    merged = _git(root, "branch", "--merged", _default_branch(root), "--format=%(refname:short)")
-    if merged.returncode != 0:
-        return set()
-    return {line.strip() for line in merged.stdout.splitlines() if line.strip()}
+#: The prefix of every branch :func:`branch_name` makes: the only branches reap deletes.
+_FLEET_BRANCH_PREFIX = "fleet/"
 
 
-def _remove_merged_worktrees(store: ContextStore, project: ProjectInfo, report: ReapReport) -> None:
-    """Remove the worktrees of ENDED agents whose branch is merged — never unmerged work.
+def _pushed(root: Path, rev: str, default: str) -> bool:
+    """Whether commit ``rev`` is on the default branch or on any remote-tracking branch:
+    pushed somewhere, so the worktree is not where it lives alone."""
+    if _git(root, "merge-base", "--is-ancestor", rev, default).returncode == 0:
+        return True
+    remote = _git(root, "for-each-ref", "--contains", rev, "--format=%(refname)", "refs/remotes")
+    return remote.returncode == 0 and bool(remote.stdout.strip())
 
-    A dirty worktree makes ``git worktree remove`` refuse, and that refusal is
-    honoured: uncommitted changes are unmerged work too. A tree a live agent
-    still sits in (a respawn reused it) is never touched.
+
+def _why_kept(root: Path, tree: Path, default: str) -> str | None:
+    """Why ``tree`` must stay — what in it exists only there — or ``None`` when nothing does.
+
+    Untracked files are asked for by name: ``status.showUntrackedFiles=no`` hides them
+    from a plain ``status``, and ``git worktree remove`` honours it too, so the tree read
+    clean and the file went with it."""
+    status = _git(tree, "status", "--porcelain", "--untracked-files=normal")
+    if status.returncode != 0:
+        return f"git status failed there ({status.stderr.strip() or status.returncode})"
+    if status.stdout.strip():
+        return "uncommitted changes"
+    head = _git(tree, "rev-parse", "--verify", "--quiet", "HEAD")
+    if head.returncode != 0 or not head.stdout.strip():
+        return "no commit to check"
+    if not _pushed(root, head.stdout.strip(), default):
+        return "commits on no remote branch yet — push them, then reap again"
+    return None
+
+
+def _remove_finished_worktrees(
+    store: ContextStore, project: ProjectInfo, report: ReapReport
+) -> None:
+    """Remove the worktree of each ENDED agent that holds nothing found only there.
+
+    Nothing only there: the tree is clean (no uncommitted change, no untracked file that
+    is not ignored) and its HEAD is on the default branch or on ANY remote-tracking
+    branch — pushed somewhere. Merged into the default branch was the rule, and a
+    coder that pushes onto an integration branch (``push HEAD:feat/…``) never was:
+    its worktrees stayed for good, 15 of them and 1.2 GB on one night. Each tree kept
+    is on the report with why. Then its ``fleet/…`` branch is deleted when its tip is
+    pushed the same way; no other branch is. A tree a live agent still sits in (a
+    respawn reused it) is never touched.
     """
     root = project.root
     if not is_git_project(root):
@@ -1165,20 +1206,35 @@ def _remove_merged_worktrees(store: ContextStore, project: ProjectInfo, report: 
     }
     try:
         branches = _worktree_branches(root)
-        merged = _merged_branches(root)
+        default = _default_branch(root)
     except FleetError:
         return  # no git here: nothing can be removed safely, so nothing is
-    removed: set[Path] = set()
+    seen: set[Path] = set()
     for agent in candidates:
         path = agent.cwd.resolve()
-        if path in in_use or path in removed:
+        if path in in_use or path in seen:
             continue
+        seen.add(path)
+        try:
+            kept = _why_kept(root, agent.cwd, default)
+        except FleetError as exc:
+            kept = f"git could not be asked ({exc})"
+        if kept is None:
+            removal = _git(root, "worktree", "remove", str(agent.cwd))
+            if removal.returncode != 0:
+                kept = f"git worktree remove refused: {removal.stderr.strip() or 'no reason'}"
+        if kept is not None:
+            report.worktrees_kept.append((agent.cwd, kept))
+            continue
+        report.worktrees_removed.append(agent.cwd)
         branch = branches.get(path)
-        if branch is None or branch not in merged:
-            continue
-        if _git(root, "worktree", "remove", str(agent.cwd)).returncode == 0:
-            removed.add(path)
-            report.worktrees_removed.append(agent.cwd)
+        if (
+            branch is not None
+            and branch.startswith(_FLEET_BRANCH_PREFIX)
+            and _pushed(root, f"refs/heads/{branch}", default)
+            and _git(root, "branch", "-D", branch).returncode == 0
+        ):
+            report.branches_deleted.append(branch)
 
 
 # --- what tmux knows about a pane -----------------------------------------------------
@@ -1618,6 +1674,56 @@ ANOTHER_SERVER = "another tmux server on its socket"
 says (:func:`_derive`): a server answers at its socket, and it is not the one the row was
 started on, which may run on where no client reaches it."""
 
+TRUST_PROMPT = "waiting for folder trust"
+"""How an agent at Claude Code's folder-trust question reads (:func:`_with_trust_prompts`):
+``attention``, its detail starting with this. ``remote_needs`` keys its card on it."""
+
+
+def trust_prompt_detail(folder: Path) -> str:
+    """The detail of an agent at the folder-trust question in ``folder``: what unblocks it."""
+    return (
+        f"{TRUST_PROMPT} — approve it once, or `aisquare accounts trust {shlex.quote(str(folder))}`"
+    )
+
+
+def _with_trust_prompts(
+    statuses: list[FleetAgentStatus],
+    config: FleetSettings,
+    addresses: Mapping[str, _Address] | None = None,
+) -> list[FleetAgentStatus]:
+    """``statuses``, every agent at Claude Code's folder-trust question read ``attention``.
+
+    An agent there fires no hook — Claude Code runs none in a folder nobody trusted — so
+    it read a healthy ``waiting`` (or ``working``, while the dialog drew) with no reason,
+    for as long as nobody looked: the board, the sidebar and the Remote never said it
+    needed the human, and ``fleet tell`` typed into it, where Enter picks "No, exit".
+    Asked only of a live row that tmux reports and whose session has fired no hook since
+    the row began (:func:`_maybe_at_trust_prompt`): one capture each, which an agent
+    whose hooks run never costs. A screen that cannot be read is no question.
+    """
+    shown: list[FleetAgentStatus] = []
+    for status in statuses:
+        if _maybe_at_trust_prompt(status):
+            agent = status.agent
+            try:
+                server = _server_at(_where(agent, config, addresses), config)
+                lines = server.capture(agent.pane_id).lines
+            except TmuxError:
+                lines = []
+            if claude_sharing.shows_trust_prompt(lines):
+                detail = trust_prompt_detail(agent.cwd)
+                status = status.model_copy(update={"state": "attention", "detail": detail})
+        shown.append(status)
+    return shown
+
+
+def _maybe_at_trust_prompt(status: FleetAgentStatus) -> bool:
+    """A live row tmux reports, whose session has said nothing since the row began."""
+    agent, session = status.agent, status.session
+    if agent.ended_at is not None or status.held or status.state not in ("waiting", "working"):
+        return False
+    return session is None or session.last_seen_at < agent.created_at
+
 
 def _status(
     agent: FleetAgent,
@@ -1678,9 +1784,11 @@ def _task_for(store: ContextStore, project: ProjectInfo, task_id: str | None) ->
     if task_id is None:
         return None
     try:
-        task = store.get_task(task_id)
+        task: TeamTask | None = _team().find_task(store, task_id, project.id)  # `12`, `#12`
     except AmbiguousIdError as exc:
         raise FleetError(f"task {task_id!r} is ambiguous — use more of the id") from exc
+    except _team().NoSuchTaskNumber as exc:
+        raise FleetError(str(exc)) from exc
     if task is None:
         raise FleetError(f"no task matches {task_id!r}")
     if task.project_id != project.id:
@@ -1977,6 +2085,19 @@ def spawn(
             own=own_worktree,
         )
     notes.extend(f"accounts: {note}" for note in choice.notes)
+    made: list[str] = []
+    if choice.account is not None:
+        # Here as well as in the window's `aisquare launch`, so the receipt — the
+        # manager's one view of the spawn — says when the folder's trust could not be
+        # shared and the agent will stop at Claude Code's question. The launch finds it
+        # done; with no account chosen, only the window knows its environment.
+        shared = claude_accounts_service.share_for_launch(cwd, account=choice.account)
+        notes.extend(f"accounts: {note}" for note in shared)
+        made = [
+            f"accounts: {note}"
+            for note in shared
+            if isinstance(note, claude_accounts_service.SharedNote)
+        ]
     # A replayed spec already holds the role's arguments as they were at spawn;
     # adding today's would double them (or add ones the agent never had).
     role_args = [] if spec is not None else list(role_config.extra_args)
@@ -2172,7 +2293,7 @@ def spawn(
         stored = _take_over(stored, takes_over, identity.session_id, moved)
     _supersede(rows, views, stored, config)
     typing: list[str] = []
-    typed = _type_prompt(srv, stored.pane_id, prompt, typing) if prompt else None
+    typed = _type_prompt(srv, stored.pane_id, prompt, typing, folder=cwd) if prompt else None
     return SpawnReceipt(
         agent=stored,
         asked_label=label,
@@ -2180,6 +2301,7 @@ def spawn(
         notes=[*notes, *moved, *typing],
         prompt_typed=typed,
         failures=[*moved, *(typing if typed not in (None, "yes") else [])],
+        shared=made,
     )
 
 
@@ -2793,7 +2915,9 @@ def _verify_cap(store: ContextStore, stored: FleetAgent, cap: int) -> None:
     )
 
 
-def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -> Typed:
+def _type_prompt(
+    srv: TmuxServer, pane_id: str, prompt: str, notes: list[str], *, folder: Path | None = None
+) -> Typed:
     """Wait (bounded) for the agent to come up, then paste the prompt and press Enter.
 
     Returns whether it was typed (:data:`Typed`); when it was not, a note says why.
@@ -2810,6 +2934,9 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
     has requested nothing — so tmux replaces every LF with a CR and the agent
     reads N submitted messages instead of one. That is not a slow start's cost
     to pay silently, so it is not typed; the note says what to do instead.
+
+    Nor into Claude Code's folder-trust question (:func:`_past_trust_prompt`), whose
+    highlighted answer is "No, exit": the prompt's Enter ended the agent there.
 
     Never raises: it runs after the row is recorded, and ``restart`` and
     ``switch`` read a raise out of ``spawn`` as "no replacement started" — they
@@ -2849,6 +2976,8 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
         _sleep(_POLL_INTERVAL)
     if ready:
         _sleep(_PROMPT_SETTLE)
+        if not _past_trust_prompt(srv, pane_id, notes, folder=folder):
+            return "no"
     elif "\n" in prompt:
         notes.append(
             f"the agent did not come up within {PROMPT_TIMEOUT:.0f} s and the prompt has "
@@ -2874,6 +3003,41 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
     if told.typed != "yes":
         notes.append(f"the prompt: {told.how}")
     return told.typed
+
+
+def _past_trust_prompt(
+    srv: TmuxServer, pane_id: str, notes: list[str], *, folder: Path | None = None
+) -> bool:
+    """Whether the agent is past Claude Code's folder-trust question, waited for (bounded).
+
+    The question shows when no account trusts the folder (``share_for_launch`` copied
+    nothing). A human at the window may answer it within :data:`PROMPT_TIMEOUT`; after
+    that the prompt is left untyped, with a note — typed, its Enter picks the highlighted
+    "No, exit". A screen tmux will not show is no question: typed as before.
+    """
+    deadline = _monotonic() + PROMPT_TIMEOUT
+    asked = False
+    while True:
+        try:
+            lines = srv.capture(pane_id).lines
+        except TmuxError:
+            return True
+        if not claude_sharing.shows_trust_prompt(lines):
+            if asked:
+                _sleep(_PROMPT_SETTLE)  # answered: the session draws itself first
+            return True
+        asked = True
+        if _monotonic() >= deadline:
+            where = shlex.quote(str(folder)) if folder is not None else "<dir>"
+            notes.append(
+                "the agent is waiting at Claude Code's folder-trust question, which no "
+                "account has said yes to for this folder — the prompt was NOT typed (Enter "
+                'there picks "No, exit"). Approve it once in the agent\'s window '
+                f"(`aisquare fleet attach`), or run `aisquare accounts trust {where}` and "
+                "restart it; then send the prompt: `aisquare fleet tell <label> …`"
+            )
+            return False
+        _sleep(_POLL_INTERVAL)
 
 
 #: How long after its end an agent whose window is still on the tmux server stays in
@@ -2967,7 +3131,7 @@ def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAg
         agents = [ended.get(agent.id, agent) for agent in agents]
     if live_only:
         agents = _with_lingering_windows(agents, views, config, addresses)
-    return [
+    statuses = [
         _status(
             agent,
             sessions.get(agent.session_id) if agent.session_id else None,
@@ -2979,6 +3143,7 @@ def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAg
         )
         for agent in agents
     ]
+    return _with_trust_prompts(statuses, config, addresses)
 
 
 def _end_dead_rows(
@@ -3169,7 +3334,8 @@ def status_of(agent: FleetAgent) -> FleetAgentStatus:
     tmux_session = session_name(project.codename) if project and project.codename else None
     config = settings()
     observed = _observe(server_of(agent, config), tmux_session, [agent])
-    return _status(agent, session, observed, tmux_session, _now(), config)
+    status = _status(agent, session, observed, tmux_session, _now(), config)
+    return _with_trust_prompts([status], config)[0]
 
 
 def manager_of(project: ProjectInfo) -> FleetAgent | None:
@@ -4824,7 +4990,7 @@ def shutdown(
     The one place a row may be ended without tmux confirming its pane died. Every
     other path — ``stop``, ``reap`` — refuses that: a server that cannot be reached
     is not evidence of a dead pane, and ending a live agent's row hides it from
-    every listing and hands its worktree to ``_remove_merged_worktrees``. Here the
+    every listing and hands its worktree to ``_remove_finished_worktrees``. Here the
     ambiguity is resolved by the operator, not by inference: they have ordered the
     fleet DOWN. Measured 2026-09-10 without this command — the operator ran ``tmux
     -L asq kill-server`` by hand (the only off switch they had), every manager
@@ -5169,7 +5335,13 @@ def switch(
         raise
     notes.extend(more)
     failures.extend(receipt.failures)
-    from_name = f"slot {current}" if current is not None else "its shell's claude"
+    labels = claude_accounts_service.slot_labels() if current is not None else {}
+    if current is None:
+        from_name = "its shell's claude"
+    else:  # by name, as the target is: an account renamed is that name here too
+        from_name = (
+            f"{labels[current]} (slot {current})" if current in labels else f"slot {current}"
+        )
     typed = receipt.prompt_typed or "no"
     how = _how_started(resumed, typed=typed)
     why = f" ({reason})" if reason else ""
@@ -5804,7 +5976,7 @@ def _handoff_prompt(
 
 
 def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> ReapReport:
-    """Record dead panes as ended, mark vanished panes lost, remove merged worktrees.
+    """Record dead panes as ended, mark vanished panes lost, remove finished worktrees.
 
     When tmux cannot be asked nothing is marked: absence of evidence is not a
     dead pane, and an unreachable tmux must not end rows whose processes may
@@ -5919,7 +6091,7 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
                             _count_release(report, ended, released, failed)
                             report.ended.append(ended)
                             _emit_exit(store, ended)
-            _remove_merged_worktrees(store, current, report)
+            _remove_finished_worktrees(store, current, report)
     for ended in report.ended:
         nudge_manager(ended.project_id, reason=f"{ended.label} exited")
     return report

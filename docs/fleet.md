@@ -9,9 +9,12 @@ and you are typing into the session itself.
 
 Three ideas carry the whole feature:
 
-- **One view.** Left: a navigator — `Fleet ▸ projects ▸ agents ▸ Doctor`. Right:
-  whatever you clicked — onboarding for a new directory, a project's manager,
-  an agent's live session, the board, doctor findings with their fixes.
+- **One view.** Left: a navigator — `Fleet ▸ projects ▸ agents`, then under a
+  line *⚙ Settings* (App settings, Accounts, Doctor) with a dim status line: the
+  AISquare sign-in and the Claude accounts' headroom as two dots (`?` explains
+  the colours; a click opens Accounts). Right: whatever you clicked — onboarding
+  for a new directory, a project's manager, an agent's live session, the board,
+  the settings, doctor findings with their fixes.
 - **tmux is the substrate.** Agents run as windows of a per-project session on a
   tmux server that is ours alone (`tmux -L asq`, with a bundled config). Your own
   tmux sessions, config and prefix key are never touched.
@@ -263,7 +266,11 @@ has passed, since a parked agent fires no hook); otherwise tmux's facts (a dead
 pane → exited with its code; activity → working; else waiting); no pane at all → lost; `· unknown`
 when neither source can answer. A row whose socket another tmux server answers on
 reads `unknown (another tmux server on its socket)` whatever its board says (see
-*The server was stopped outside the CLI*). The detail beside the chip says why
+*The server was stopped outside the CLI*). An agent no hook has spoken for yet
+whose screen is Claude Code's folder-trust question reads `attention` with
+`waiting for folder trust — approve it once, or aisquare accounts trust <dir>`
+(see *Folder trust* under [Accounts](#accounts)); only those rows have their
+screen read. The detail beside the chip says why
 when that is not obvious — an exit code, `no hooks` for a binary without our
 lifecycle hooks, `pane gone`.
 
@@ -459,8 +466,15 @@ aisquare fleet reap --all --server-down
 
 Records agents whose panes have died as ended (with their exit code), marks
 agents whose panes have vanished as lost, and removes the worktrees of ended
-agents **whose branch is merged**. It never deletes unmerged work. `--all`
-walks every project's fleet, not just this one.
+agents **that hold nothing found only there**: a clean tree whose commits are on
+the default branch or pushed to **any** remote branch (an integration branch
+counts), and then that tree's `fleet/…` branch, once its tip is pushed the same
+way. A tree with uncommitted changes, an untracked file that is not ignored
+(even under `status.showUntrackedFiles=no`), or unpushed commits is kept and
+named, with why (`worktrees_kept` under `--json`, beside `worktrees_removed` and
+`branches_deleted`); push it, and the next `reap` removes it. `fleet stop` says
+so for an agent that had a worktree. `--all` walks every project's fleet, not
+just this one.
 
 Each row is asked of its own server, at the socket its spawn recorded, so a
 shell under another `TMUX_TMPDIR` reaps exactly what the spawning shell would,
@@ -528,8 +542,8 @@ tunnel, with the link, a QR code and the passphrase in one panel — see
 
 ## Accounts
 
-The **Accounts** section at the bottom of the sidebar opens one page for the two
-logins the fleet leans on.
+*⚙ Settings ▸ Accounts* — or a click on the status line under *⚙ Settings* —
+opens one page for the two logins the fleet leans on.
 
 **AISquare** is on top. The card reads the session `aisquare login` stores and
 shows who you are and when it expires. *Sign in* runs the same browser flow the
@@ -538,8 +552,11 @@ opens when one can reach you, and *Cancel* stops the wait — and *Sign out*
 revokes the session exactly as `aisquare logout` does. A token supplied through
 `AISQUARE_TOKEN` is shown as such and cannot be signed out from here.
 
-**Claude Code** is below it: one row per account, with who is signed in, the
-plan, and the five-hour and seven-day usage as bars once they have been read.
+**Claude Code** is below it: a table, one aligned row per account — ★ for the
+default, the slot, its name, who is signed in, the plan, the five-hour and
+seven-day windows (a bar and the percent **used**), a status with **Log in**
+beside it when a login is due, then when each window resets. A value too long for its column ends in `…` (hover it for the whole
+text); on a narrow page the table scrolls sideways as one, header included.
 Slot **1** is the plain `claude` of your machine (whatever `CLAUDE_CONFIG_DIR`
 was in the shell you started `asq` from, `~/.claude` otherwise). Every other
 slot is a directory the CLI created under `~/.aisquare/claude-accounts/` and
@@ -552,17 +569,32 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   the account is recorded, aisquare's hooks go into its `settings.json`, and the
   pane closes by itself. Close the pane without signing in, or press *Cancel
   sign-in*, and the empty slot is discarded.
-- **Sign in** on a row does the same for a slot that has no login (slot 1
-  included).
+- **Log in** on a row does the same for a slot that has no login, or whose
+  token is missing, expired or rejected (slot 1 included) — the status beside
+  it says which. Type `/login` if Claude Code does not prompt you; the pane
+  waits for a *fresh* login, not the stale one on disk, then closes, and the
+  row reads its usage again.
 - **Remove** forgets a slot the CLI owns. Its directory is renamed beside
   itself as `<n>.removed-<stamp>` — the login, the settings and the transcripts
   kept, never listed again, deletable by hand — and the number is free for the
   next add. Slot 1 cannot be removed; sign out of it inside Claude Code.
 - Usage comes from the endpoint Claude Code's own `/usage` reads, called with
-  the token in the account's credentials file, once a minute while the page is
-  open. It is not a documented API; when it does not answer, the row says why
-  (`usage unavailable`, `token expired — open a session to refresh it`) and
-  nothing else on the page is affected. On macOS the token lives in the
+  the token in the account's credentials file. The page asks at most once every
+  five minutes per account. It shares one five-minute cache with the status
+  line under *⚙ Settings*, `aisquare accounts usage` and `accounts list
+  --usage`, so opening it again, or its minute tick, asks nothing while the
+  readings are fresh.
+  **↻ Refresh usage** above the table asks every account now. Beside it a dim
+  line says how old the readings are: `last refreshed 3m ago`, from the oldest
+  reading actually read, and `· last try failed 2m ago` when the endpoint did
+  not answer for an account (`never` before the first). An account that needs a
+  login counts in neither half; its own row says so. The endpoint is not a
+  documented API. A try that fails with nothing to say about the login (the
+  endpoint unreachable, an HTTP 5xx) keeps the account's figure on its row while
+  that figure is under five minutes old, and the line says the try failed. With
+  no such figure, the row's status says why (`usage: HTTP 503 …`). A token the
+  endpoint refuses shows at once (`⚠ token rejected`), and an expired one says
+  so (`⚠ token expired`). Nothing else on the page is affected. On macOS the token lives in the
   Keychain, which the CLI does not read, so the row says so. A reset reads as a
   distance and a clock time — `resets in 3h 10m (18:00)`, `resets in 2d 4h (Tue
   02:00)` — the same string on the page and in `aisquare accounts usage`, so a
@@ -572,22 +604,32 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   specific says. The arrows set the **priority order** — the order the rows are
   listed in, and the order a headroom-based pick will try them in. *Disable*
   keeps a slot out of every automatic choice (its row says `disabled`) while
-  `--account <slot>` still reaches it by hand; *Enable* puts it back. An
-  **alias** (`aisquare accounts alias 2 work`) replaces `account 2` wherever
-  the slot is named — the row, the board, the launch line — and is accepted
-  everywhere a slot number is.
+  `--account <slot>` still reaches it by hand; *Enable* puts it back.
+- **Rename in place**: double-click an account's name (or press Enter or F2
+  on its row) and type. Enter or clicking away saves, Esc cancels, an empty
+  name goes back to `account N` / `plain claude`. The name is any text up to 64
+  characters (`Work laptop`, emoji included), never only digits, never with an
+  `@` and never with an invisible formatting character; it is
+  what `aisquare accounts alias 2 "Work laptop"` sets, replaces `account 2`
+  wherever the slot is named — the row, the board, `fleet ls`, the launch line
+  — and is accepted, in any case, everywhere a slot number is (quote it:
+  `--account "work laptop"`).
 - Which account an agent runs on is decided in one order, for `fleet spawn`,
   `aisquare launch` and a manager spawning a coder alike: `--account` on the
   command line, then the role's binding (the **account** select beside each
-  role on the Settings tab, or `aisquare team bind <role> --account`), then the
+  role in *⚙ Settings ▸ App settings*, or `aisquare team bind <role> --account`), then the
   project's default (`aisquare accounts default <slot> --project .`), then the
-  machine default. With none of those set, the agent runs on whatever `claude`
-  the shell already has — exactly what it did before any of this existed. The
+  machine default, which with one login only is whatever `claude` the shell
+  already has — exactly what it ran on before any of this existed; with several,
+  the one with room comes before it (*Headroom*, below). The
   agent's header and `fleet ls` show the slot it was resolved to.
-- **Headroom.** With `[accounts] pick = "headroom"` (the Settings tab's
-  *launches pick*, or `aisquare config set accounts.pick headroom`) the machine
-  default gives way to the account with room: every enabled, signed-in account's
-  usage is read once, and the first one in priority order under `switch_at`
+- **Headroom.** By default — `[accounts] pick = "headroom"`, *launches pick* in
+  App settings — the machine default gives way to the account with room
+  (`aisquare config set accounts.pick default` keeps it): every enabled, signed-in account's
+  usage is read through the usage cache, from a reading up to a minute old, so
+  a burst of spawns asks the endpoint once. When only one account could be
+  picked, nothing is read: it is the answer. A hand-over (below) and `doctor
+  --live` ask the endpoint now. The first account in priority order under `switch_at`
   (85 % by default) is taken — or, when all are over it, the one with the most
   left. An account counts as full as the fuller of its two windows, so one
   that has spent its week is not taken for an empty five hours. Usage is the
@@ -615,7 +657,8 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   agent whose role, task (done or dropped) or binary would refuse the
   replacement is refused before it is stopped, and a task that closes while
   it is being stopped is left off the replacement.
-  With `on_limit = "switch"` (*on a usage limit* on the Settings tab) the fleet
+  With `on_limit = "switch"`, the default (*on a usage limit* in App settings;
+  `wait` leaves the agent parked for you or the manager), the fleet
   does this by itself when the limit lifts more than
   `wait_if_reset_within_minutes` away, in a worker detached from the agent's
   own hook; a hand-over that finds no headroom leaves the agent parked, its
@@ -624,20 +667,54 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   not move) in a note beside `switched`, and `switched` itself says whether
   the replacement's first line reached it. `doctor` lists parked agents; `doctor --live` warns when every account
   is over the line.
+- **Folder trust.** Claude Code asks *"Is this a project you created or one you
+  trust?"* the first time it starts in a folder, once **per account** — and the
+  answer it highlights is *No, exit*. So a yes on account 2 left every agent on
+  accounts 1, 3, 4… waiting at the question, and the first prompt typed into it
+  ended the agent. Now a launch (`fleet spawn`, `restart`, `switch`, `aisquare
+  launch`, `accounts run`) copies the folder's trust into the account it runs
+  on when any other account has it, and says so on the receipt (*`<folder>` is
+  trusted on account 2 — now on account 3 too*). Only that one entry of the
+  account's `.claude.json` is written — under Claude Code's own lock, every
+  other key byte for byte as it was — and never a trust nobody gave. Claude
+  Code's rules decide what covers what: in a git checkout the yes is the
+  repository's (its worktrees and sub-folders included), outside git a folder's
+  is its sub-folders' too, and a folder above a repository does **not** cover
+  it. `aisquare accounts trust [<dir>]` says yes on every account at once;
+  `--sync` copies every folder any account trusts into all of them. On by
+  default — *share folder trust* in App settings, `accounts.share_trust`. An
+  agent that still meets the question (no account trusts the folder) reads
+  **🔔 NEEDS YOU** *waiting for folder trust — approve it once, or `aisquare
+  accounts trust <dir>`* in `fleet ls`, the sidebar and the Remote, and a spawn
+  does not type its prompt into it: it waits for the answer, then leaves the
+  prompt untyped with a note.
+- **One settings.json.** Opt-in — *share settings.json* in App settings,
+  `accounts.share_settings` — every managed account's `settings.json`
+  (permissions, hooks, model, status line) becomes a link to the plain claude's,
+  so a change made on any account is made on all; the account's own file is
+  kept beside it as `settings.json.own-<stamp>`. Claude Code writes through the
+  link and keeps it. The logins stay apart: `.claude.json` and
+  `.credentials.json` are never shared, and a `settings.json` that sets what
+  decides a login (`apiKeyHelper`, `forceLoginMethod`, `forceLoginOrgUUID`, an
+  `env` API key, OAuth token or cloud provider, `CLAUDE_CONFIG_DIR`) is neither
+  shared nor replaced — the command says which setting stopped it. `aisquare
+  accounts settings --sync` links them now, `--unshare` gives each its own copy
+  back.
 
-Nothing on this page writes into Claude Code's own files: the email and plan
+Nothing on this page writes into Claude Code's login: the email and plan
 are read from what Claude Code recorded, and a token is never refreshed by the
-CLI. Claude Code refreshes it on the account's next session.
+CLI. Claude Code refreshes it on the account's next session. The two things the
+accounts share (above) are the only writes into an account's directory.
 
 Everything the page does is a command, and every reporting one takes `--json`:
 
 ```sh
 aisquare accounts list                 # slots, who is signed in, plan, hooks
-aisquare accounts list --usage         # …plus the two windows (one request per account)
+aisquare accounts list --usage         # …plus the two windows, percent USED (read at most every 5 min)
 aisquare accounts add                  # a fresh slot; Claude Code opens for the sign-in, then exits
 aisquare accounts run 2                # a plain Claude Code session on account 2
 aisquare accounts run 2 --model opus   # arguments after the slot go to claude
-aisquare accounts usage                # the windows, per signed-in account
+aisquare accounts usage                # the windows, per signed-in account; --refresh reads now
 aisquare accounts remove 2             # the directory is kept as 2.removed-<stamp>
 aisquare launch coder --account 2      # a board role on account 2
 aisquare fleet spawn coder --account 2 # a fleet agent on account 2
@@ -649,8 +726,15 @@ aisquare accounts alias 2 work         # a name: --account work, [work] on the b
 aisquare accounts order work 3         # the priority order; the rest follow as they were
 aisquare accounts move 3 top           # up · down · top · bottom
 aisquare accounts disable 3            # out of automatic selection; enable puts it back
-aisquare config set accounts.pick headroom     # spawns go where there is room (see above)
-aisquare config set accounts.on_limit switch   # …and an agent that hits its limit is moved
+aisquare config set accounts.pick default      # spawns stay on the machine default (headroom is the default)
+aisquare config set accounts.on_limit wait     # an agent that hits its limit stays parked (switch is the default)
+aisquare accounts trust                # trust this folder on every account (its repository, in a checkout)
+aisquare accounts trust --sync         # every folder any account trusts, trusted on all of them
+aisquare config set accounts.share_trust false # launches stop copying a folder's trust (on by default)
+aisquare accounts settings             # what each account's settings.json is: shared, its own, none
+aisquare accounts settings --sync      # link every managed account's settings.json to the plain claude's
+aisquare accounts settings --unshare   # each linked account gets its own copy back
+aisquare config set accounts.share_settings true # keep them linked at every launch (off by default)
 aisquare fleet switch coder-auth       # move one now: resumes its session on the account with room
 aisquare fleet restart manager         # an exited (or stuck) agent, back under its label, session resumed
                                        # …launched as it was first launched: the row records the
@@ -685,7 +769,7 @@ answer.
 | --- | --- | --- |
 | manager | `auto` | its tool use is board and fleet CLI calls |
 | coder, tester, validator | `auto` | the classifier answers every tool call, the project's own check commands included. A project allowlist that pre-approves `make check`, `pytest`, `git` and `gh` is designed (plan §3.6) and **is not in this checkout**: nothing here writes or passes an allowed-tools list |
-| reviewer | `auto` + `--disallowedTools=Edit Write NotebookEdit` | the flag is the role's `extra_args`: it keeps Bash, which its whole cycle runs on and `--restricted` would take, and loses the tools that edit files, so a prompt injected through the PR it reads cannot edit the tree with them. Its shell is not read-only: `sed -i`, `git push` or `gh pr merge` injected through a PR meets only its briefing and `auto` mode's check of each action, and no allowlist of commands would hold (its inline comments are `gh api` calls, as a merge is, and verifying a finding runs the PR's code). Where that matters, run it with a `gh` token that cannot write the repository's contents, which can comment but not push or merge, and protect the branch: [A reviewer that cannot push](#a-reviewer-that-cannot-push). `extra_args = []` gives it every tool. A config saved by 0.6.0 or 0.7.0 holds that release's default, `extra_args = ["--restricted"]`; exactly that list loads as today's default, once: the next save writes `config_version = 1` at the top of the file, and from then on `--restricted` set there is yours and kept. A reviewer those releases started recorded the flag in its launch spec, and `fleet restart`, `fleet switch` and Restart replay today's arguments in its place, with `--disallowedTools=Edit Write NotebookEdit` beside them where they do not deny those tools: the spec cannot tell that release's default from a `--restricted` its spawn was given, so the replay errs toward the reviewer without them, and a fresh spawn gets whatever today's arguments give. One recorded since is replayed as recorded. Any other list stays as written |
+| reviewer | `auto` + `--disallowedTools=Edit Write NotebookEdit` | the flag is the role's `extra_args`: it keeps Bash, which its whole cycle runs on and `--restricted` would take, and loses the tools that edit files, so a prompt injected through the PR it reads cannot edit the tree with them. Its shell is not read-only: `sed -i`, `git push` or `gh pr merge` injected through a PR meets only its briefing and `auto` mode's check of each action, and no allowlist of commands would hold (its inline comments are `gh api` calls, as a merge is, and verifying a finding runs the PR's code). Where that matters, run it with a `gh` token that cannot write the repository's contents, which can comment but not push or merge, and protect the branch: [A reviewer that cannot push](#a-reviewer-that-cannot-push). `extra_args = []` gives it every tool. A config saved by 0.6.0 or 0.7.0 holds that release's default, `extra_args = ["--restricted"]`; exactly that list loads as today's default, once: the next save writes the file's `config_version` at its top, and from then on `--restricted` set there is yours and kept. A reviewer those releases started recorded the flag in its launch spec, and `fleet restart`, `fleet switch` and Restart replay today's arguments in its place, with `--disallowedTools=Edit Write NotebookEdit` beside them where they do not deny those tools: the spec cannot tell that release's default from a `--restricted` its spawn was given, so the replay errs toward the reviewer without them, and a fresh spawn gets whatever today's arguments give. One recorded since is replayed as recorded. Any other list stays as written |
 | ui-tester | `auto` + `--chrome` | `--chrome` comes from the role, not this table: `aisquare launch ui-tester` adds it for the default `claude` binary wherever the role starts, and `--no-chrome` in `extra_args` or on the command turns it off. Its "read-only" is a briefing instruction, NOT construction — the row above says so, and the sentence in the coder/tester cell applies here too: nothing here writes or passes an allowed-tools list, so a PreToolUse allowlist (plan §3.6, not in this checkout) is what would enforce it |
 
 The mode is passed straight through to `claude` and nothing here reads its
@@ -740,10 +824,37 @@ Three places to change one:
 - **in config** — `aisquare config set fleet.max_agents_per_project 6`, or
   `aisquare config set fleet.roles.coder.permission_mode acceptEdits`, or edit
   the file directly;
-- **in the UI** — the project's *Settings* tab writes the same config (Phase 6).
+- **in the UI** — *⚙ Settings ▸ App settings* writes the same config, and its
+  *Reset all settings to default* is `config reset`. Its *Save* writes only the
+  settings changed on the page, so one changed in a shell while it was open is
+  kept. A project's own *Settings* tab holds only that project's nickname.
 
-The whole `[fleet]` section of `~/.aisquare/config.toml` at its defaults, as
-`aisquare config set` writes it:
+**Your file holds your changes and nothing else.** The defaults are built in, and
+`~/.aisquare/config.toml` is your layer over them: a save writes only the keys
+that differ from the defaults, so a key you never set follows the built-in default
+even when a release changes it. One exception: each `[fleet.roles.<role>]`
+table is written whole, so a release that reads the file without the defaults
+under it (0.8.1 and earlier, sharing `~/.aisquare`) starts each role as this
+one does. A config 0.8 saved holds every setting; it loads
+with the values that differ from 0.8's defaults kept as yours and the rest
+following today's, and the next save writes it down to yours. A file 0.8 saves
+whole again after a move back is read the same way. Moving back with
+`aisquare upgrade --version 0.8.1` names what that release reads differently:
+the settings the file leaves to today's defaults where 0.8.1's differ
+(`accounts.pick`, `accounts.on_limit`).
+
+```sh
+aisquare config list --overrides   # what you changed, and nothing else
+aisquare config reset              # every setting back to its default; asks first, --yes off a terminal
+```
+
+`config reset` moves the file aside to `config.toml.bak-<stamp>` beside it, so
+moving it back undoes the reset; through a symlink, the file it points at is
+copied there and emptied, and the link stays. With no file, or one that holds
+no setting, it says `nothing to reset` and moves nothing.
+
+The whole `[fleet]` section at its defaults — what you get with no `[fleet]` in
+your file at all:
 
 ```toml
 [fleet]
@@ -785,8 +896,8 @@ worktree = false
 extra_args = []
 ```
 
-A role the file omits gets the built-in shape (`auto`, no worktree, no extra
-args). A config file that will not parse costs you the customisation and
+A role or a key your file leaves out takes its default above; a role the table
+above does not name gets `auto`, no worktree and no extra args. A config file that will not parse costs you the customisation and
 never the fleet: the defaults apply and nothing refuses.
 
 **Model, effort and binary per role stay where they already live** — one home
@@ -861,9 +972,27 @@ directory name; and tmux will *create* a session named `a.b` or `a:b` but
 cannot *target* it, because `.` and `:` are its separators. So the fleet has a
 display name for people and a slug-safe token for machines.
 
-**Project display name.** The directory's basename — `aisquare-cli` — for git
-repos and plain directories alike. Two projects sharing a basename also show
-their parent as a dim subtitle (`~/work/api`, `~/oss/api`).
+**Project display name.** Its nickname when you have given it one, else the
+directory's basename — `aisquare-cli` — for git repos and plain directories
+alike. Two projects sharing a basename also show their parent as a dim subtitle
+(`~/work/api`, `~/oss/api`).
+
+**Nickname.** Free text on one line, up to 255 characters — `API: auth rewrite
+🚀` — like naming a browser tab for what you are doing there. Emoji are fine,
+joined ones (👩‍💻, 🏳️‍🌈) included; an invisible formatting character (a bidi
+control, a zero-width space) is refused, as it would let one name pass for
+another, and so are bytes the terminal could not decode. Double-click a
+card's title (or press `F2` on it) and type: Enter or a click away saves, Esc
+cancels, and an empty name brings the folder's back. The project's *Settings*
+tab and `aisquare project rename "API: auth rewrite"` (`--clear` drops it) set
+the same name, which the sidebar, `project list` and `fleet ls` all show.
+`--project` takes it too, when no id prefix, folder name or codename matches
+first. A card's **⋯** (shown on hover or on the selected card; `.` or a
+right-click too) opens its menu: *Rename*, *Pin*, *Open settings* and *Remove
+from fleet…*, which asks first, then forgets the project as `aisquare project
+forget` does. Its folder and history are kept, and `aisquare project onboard
+<root>` brings it back. A project with live agents is refused, naming them and
+`fleet shutdown`.
 
 **Codename.** Every project that enters the fleet gets an `adjective-animal`
 codename — `amber-otter` — matching `^[a-z]{3,7}-[a-z]{3,7}$`, from two
@@ -874,8 +1003,9 @@ same name on every machine and after a `context.db` loss, and two projects on
 one machine never share one. It is assigned lazily, the first time the project
 touches the fleet — never at `init`, so a memory-only user never sees one. The
 codename is primary only where a stable token is needed: the tmux session, the
-attach hint, branch names, `fleet` command arguments. Elsewhere it is a dim
-badge beside the name. `fleet rename` changes it; `aisquare project switch
+attach hint, branch names, `fleet` command arguments. A card does not show it;
+the project's *Settings* tab names it (`fleet id: amber-otter — tmux session
+asq-amber-otter, branches fleet/amber-otter/…`). `fleet rename` changes it; `aisquare project switch
 amber-otter` and `--project amber-otter` both resolve it, and the "matches
 several projects" error lists codenames, because basenames are what collide.
 
@@ -988,9 +1118,9 @@ codename `amber-otter`, session `asq-amber-otter`, branches
 ```text
   asq  — one Textual process, a VIEW                      tmux server  -L asq  — the SUBSTRATE
  ┌────────────────────────────────────────────┐          ┌───────────────────────────────────────────────┐
- │ left : Fleet ▸ projects ▸ agents ▸ Doctor  │ capture  │ session asq-amber-otter                        │
+ │ left : Fleet ▸ projects ▸ agents · Settings│ capture  │ session asq-amber-otter                        │
  │ right: onboard · manager · agent · board · │◄─────────│  ├─ window manager    : aisquare launch manager│
- │        doctor · explainability · settings  │ send-keys│  ├─ window coder-auth : aisquare launch coder …│
+ │        doctor · AISquare · settings        │ send-keys│  ├─ window coder-auth : aisquare launch coder …│
  └───────────────────┬────────────────────────┘─────────►│  └─ window tester-1   : aisquare launch tester │
                      │ reads (polls, like board -w)      │ session asq-quiet-lynx …                       │
                      ▼                                   └──────────────────────┬────────────────────────┘
@@ -1019,12 +1149,23 @@ no socket and is asked by name. The Manager tab's attach line names the
 server the same way.
 
 **What the UI remembers.** The view that was open — a project, an agent, the
-Accounts page, the Doctor — comes back at the next launch if its row is still
+Settings hub or a page under it — comes back at the next launch if its row is still
 there (an agent that has gone falls back to its project), and so does the
 captured-directories toggle; both live in the store's `ui_state` table (#144),
 the theme in `state.json` because the board shares it, the navigator width
-beside the theme. Nothing else is kept: the panes are tmux's and the rows are
-the store's.
+and the board's line sizes beside the theme. Nothing else is kept: the panes are
+tmux's and the rows are the store's.
+
+**When the doctor runs.** Once when `asq` starts, about the project it reopens,
+and each time its page opens (*⚙ Settings ▸ Doctor*), about the project selected
+last; then again on the page's *Re-run checks*, after one of its fixes, and when
+Welcome connects Claude Code. Selecting a project, opening a tab or pressing `r`
+(which refreshes the fleet) runs nothing, so moving around the UI stays quick.
+What the last run found shows beside the sidebar's settings row (`⚙︎ Settings  ✗ 1  ⚠ 2`,
+nothing when all is clear) and on the hub's Doctor link, so the run at start
+is seen without opening the page. The page's header names what it checked
+(`checks for <project>`, or `checks for this machine`), and while it runs the
+checks again it keeps the last report on screen (`… running the checks again`).
 
 **The UI holds no state that matters.** What must keep running lives in tmux
 (the processes) and `~/.aisquare/context.db` (the `fleet_agent` rows, the
@@ -1273,8 +1414,9 @@ aisquare doctor
 
 **Rows say `✗ lost`, or windows outlive their rows.** The tmux server was
 killed, or a pane vanished. `reap` reconciles both directions — dead panes are
-recorded as ended with their exit code, vanished panes as lost, and worktrees
-whose branch is merged are removed; unmerged work is never deleted:
+recorded as ended with their exit code, vanished panes as lost, and ended
+agents' worktrees that are clean and pushed are removed; uncommitted or
+unpushed work is never deleted:
 
 ```sh
 aisquare fleet reap

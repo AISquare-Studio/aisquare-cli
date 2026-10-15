@@ -46,7 +46,9 @@ first time someone moved a directory by hand.
 organisation, ids) and ``.credentials.json`` (the OAuth tokens) are read to
 describe an account; nothing here writes either. Claude Code refreshes its own
 tokens — a token found expired is reported as such, never refreshed, because a
-second writer racing the agent for that file is how a login gets corrupted.
+second writer racing the agent for that file is how a login gets corrupted. The
+one write into ``.claude.json`` is ``core.claude_sharing``'s: a folder's trust,
+copied from another account under Claude Code's own lock, and nothing else.
 
 This is not the "accounts" cut that ``core.config.RoleLaunchProfile`` records
 deleting. That one expanded a bare name into the OPERATOR's directory layout —
@@ -70,6 +72,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aisquare.core import paths
+from aisquare.core.names import name_flaw, name_key
 from aisquare.core.version import __version__
 from aisquare.models import ClaudeAccount, ClaudeIdentity
 
@@ -199,32 +202,78 @@ def label(account: ClaudeAccount) -> str:
     """
     if account.alias:
         return account.alias
-    return "plain claude" if account.slot == DEFAULT_SLOT else f"account {account.slot}"
+    return default_label(account.slot)
 
 
-ALIAS_PATTERN = re.compile(r"^[a-z][a-z0-9._-]{0,31}$")
-"""What an alias may look like, after lowercasing.
-
-It must START WITH A LETTER so it can never be mistaken for a slot number, and
-it cannot contain ``@`` so it can never be mistaken for an email — those are
-the two other spellings ``--account`` accepts, and a reference that could be
-read two ways is a launch that could land on two accounts. Lowercase because
-``resolve`` compares case-insensitively (as it already does for emails), and a
-name that round-trips through ``--json`` and a shell should have one spelling.
-"""
+def default_label(slot: int) -> str:
+    """What slot ``slot`` is called while it has no alias (:func:`label`)."""
+    return "plain claude" if slot == DEFAULT_SLOT else f"account {slot}"
 
 
-def normalise_alias(raw: str) -> str:
-    """The stored form of an alias, or ``ValueError`` saying what is wrong with it."""
-    alias = raw.strip().lower()
+def _labelled_slot(name: str) -> int | None:
+    """The slot whose :func:`default_label` ``name`` reads as, whatever its case, spacing and
+    variation selectors (:func:`core.names.name_key`): ``account 3`` U+FE00 prints as slot 3's."""
+    words = name_key(name).split()
+    if words == ["plain", "claude"]:
+        return DEFAULT_SLOT
+    if len(words) == 2 and words[0] == "account" and words[1].isdecimal():
+        return int(words[1])
+    return None
+
+
+ALIAS_MAX = 64
+"""The longest alias, in characters, after trimming."""
+ALIAS_HINT = "any name up to 64 characters, not only digits, no @"
+"""``normalise_alias``'s rules in words: ``accounts alias --help`` and asq's name field."""
+
+
+def normalise_alias(raw: str, *, slot: int | None = None) -> str:
+    """``slot``'s alias as stored — trimmed, its case kept — or ``ValueError`` saying why not.
+
+    Free text, because a name is the operator's to choose ("anything I want"):
+    ``Work laptop`` is as good as ``work``. Two rules keep it from shadowing the
+    other spellings ``--account`` takes, since a reference that could be read
+    two ways is a launch that could land on two accounts: it is never all
+    digits (a slot number) and has no ``@`` (an email). Nor is it ANOTHER slot's
+    :func:`default_label` — ``account 3`` on slot 2, ``Plain Claude`` on any slot
+    but 1 — which the board, a headroom note and ``fleet switch`` print for that
+    slot, so two accounts would go by one name and a manager's ``--to "account
+    3"`` would land on slot 2. Whether that slot exists yet or not: a removed
+    slot's number is the next one ``accounts add`` gives out. Without ``slot``,
+    no slot's label is taken. Nothing :func:`core.names.name_flaw` refuses in a
+    project's nickname too — a control character, a lone surrogate, a character
+    that prints nothing or turns the text round (a zero-width space, a
+    right-to-left override) — so it stays one line on every surface that prints
+    it and never prints the same as another; any emoji is a name. The case is
+    kept as typed and compared without it (``services.claude_accounts``
+    refuses ``WORK`` beside ``work``, and resolves either spelling).
+    """
+    alias = raw.strip()
     if not alias:
         raise ValueError("an alias cannot be empty")
-    if alias.isdigit():
-        raise ValueError(f"{raw!r} reads as a slot number — an alias must start with a letter")
+    if len(alias) > ALIAS_MAX:
+        raise ValueError(f"{raw!r} is {len(alias)} characters — an alias is at most {ALIAS_MAX}")
+    if name_key(alias).isdigit():
+        raise ValueError(f"{raw!r} reads as a slot number — an alias cannot be only digits")
     if "@" in alias:
         raise ValueError(f"{raw!r} reads as an email — an alias cannot contain '@'")
-    if not ALIAS_PATTERN.match(alias):
-        raise ValueError(f"{raw!r} is not a valid alias — a letter, then up to 31 of a-z 0-9 . _ -")
+    flaw = name_flaw(alias)
+    if flaw == "control":
+        raise ValueError(f"{raw!r} has a control character — an alias is one line of text")
+    if flaw == "undecodable":
+        raise ValueError(
+            f"{raw!r} has bytes the terminal's encoding could not decode — an alias is text"
+        )
+    if flaw == "invisible":
+        raise ValueError(
+            f"{raw!r} has an invisible formatting character — an alias prints as it is typed"
+        )
+    labelled = _labelled_slot(alias)
+    if labelled is not None and labelled != slot:
+        raise ValueError(
+            f"{raw!r} is what slot {labelled} is called without an alias — "
+            "an alias cannot be another account's name"
+        )
     return alias
 
 

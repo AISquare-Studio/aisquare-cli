@@ -500,6 +500,17 @@ def _index_board_stamps(connection: sqlite3.Connection) -> None:
         )
 
 
+def _index_task_numbers(connection: sqlite3.Connection) -> None:
+    """v29 → v30: at most one task per number on a board (partial: NULL is no number)."""
+    query = "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'team_task'"
+    if connection.execute(query).fetchone() is None:
+        return
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS team_task_number ON team_task (project_id, number) "
+        "WHERE number IS NOT NULL"
+    )
+
+
 # Python that must run before a migration's statements, inside its transaction,
 # keyed by the version being upgraded FROM. Kept apart from _MIGRATIONS so the
 # scripts stay plain SQL that executescript and _statements build identically.
@@ -507,6 +518,7 @@ _PREPARE: dict[int, Callable[[sqlite3.Connection], None]] = {
     11: _retire_v1_metric_table,
     12: _converge_v11_fork,
     25: _index_board_stamps,
+    29: _index_task_numbers,
 }
 
 
@@ -594,6 +606,62 @@ def _bind_keys_to_their_destinations(connection: sqlite3.Connection) -> None:
     )
 
 
+def _number_existing_tasks(connection: sqlite3.Connection) -> None:
+    """v28 → v29's backfill: every task already on a board gets its number, 1, 2, … per
+    project in the order the tasks were added (``created_at``, the id breaking a tie).
+
+    Runs right after ``team_task.number`` is added, in the same transaction, and only
+    then (:data:`_BACKFILLS`), so a store that has its numbers is never renumbered: a
+    number once said on a board keeps meaning that task.
+    """
+    connection.execute(
+        "UPDATE team_task SET number = ("
+        "  SELECT ranked.n FROM ("
+        "    SELECT id, ROW_NUMBER() OVER ("
+        "      PARTITION BY project_id ORDER BY created_at, id"
+        "    ) AS n FROM team_task"
+        "  ) AS ranked WHERE ranked.id = team_task.id"
+        ") WHERE number IS NULL"
+    )
+
+
+def _number_unnumbered_tasks(connection: sqlite3.Connection) -> None:
+    """Every task stored without a number gets one on open: its board's highest plus one,
+    in the order the tasks were added (``created_at``, the id breaking a tie).
+
+    v29's backfill numbers what a store holds when the column is added, and only then. A
+    build from before v29 opens a v30 store without complaint and inserts with ``number``
+    NULL, so the tasks it adds would show an id tail and an empty ``#`` for good (review
+    of #261, m6). Each one is numbered as an add here numbers it (:meth:`SqliteStore.
+    upsert_task`), under the write lock, so a racing add or opener cannot take the same
+    number. A store with every task numbered pays two reads, and a store without
+    ``team_task`` (doctor's damaged-store case) is left to be described.
+    """
+    query = "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'team_task'"
+    if connection.execute(query).fetchone() is None:
+        return
+    query = "SELECT 1 FROM team_task WHERE number IS NULL LIMIT 1"
+    if connection.execute(query).fetchone() is None:
+        return
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        unnumbered = connection.execute(
+            "SELECT id FROM team_task WHERE number IS NULL ORDER BY created_at, id"
+        ).fetchall()
+        for row in unnumbered:
+            connection.execute(
+                "UPDATE team_task SET number = (SELECT COALESCE(MAX(number), 0) + 1 "
+                "FROM team_task AS board WHERE board.project_id = team_task.project_id) "
+                "WHERE id = ?",
+                (row[0],),
+            )
+        connection.execute("COMMIT")
+    except sqlite3.Error:
+        with contextlib.suppress(sqlite3.Error):
+            connection.execute("ROLLBACK")
+        raise
+
+
 #: Backfills that belong to a column, keyed ``(table, column)``. Each runs in the
 #: transaction that adds its column, right after the ALTER, and only when the
 #: column was actually added: by its step on the ladder or by
@@ -605,6 +673,7 @@ def _bind_keys_to_their_destinations(connection: sqlite3.Connection) -> None:
 _BACKFILLS: dict[tuple[str, str], Callable[[sqlite3.Connection], None]] = {
     ("project", "onboarded_at"): _adopt_onboarded_projects,
     ("project_explainability", "api_url"): _bind_keys_to_their_destinations,
+    ("team_task", "number"): _number_existing_tasks,
 }
 
 # v14: ``project forget`` — a tombstone on the registration, in the same spirit as
@@ -854,6 +923,34 @@ _SCHEMA_V25 = ""
 # when each board event was written (:func:`_index_board_stamps`, in :data:`_PREPARE`), so
 # the script is empty.
 _SCHEMA_V26 = ""
+# v27: a project's nickname — free text a person gives it, as they name a browser tab,
+# beside the codename that names its tmux session and branches and so stays constrained.
+# The column is the whole step, so the script is empty: it is in :data:`_PRODUCTS`; a
+# row from before it keeps NULL, which every reader shows as the directory's name. The
+# ``name`` column is not it: written once as the basename and never read, it is not
+# repurposed.
+_SCHEMA_V27 = ""
+# v28: which token a usage reading was taken with — a fingerprint of it, never the token.
+# The five-minute cache (``services.claude_accounts.cached_usage``) serves a recorded
+# reading only to the token that took it: a slot signed into another login, or signed
+# out, is asked again rather than shown the last login's figure. The column is the whole
+# step, so the script is empty: it is in :data:`_PRODUCTS`; a row from before it keeps
+# NULL, which the cache serves to no token, and which the trends read as before.
+_SCHEMA_V28 = ""
+# v29: a task's number on its board (``#12``) — what a person reads and types instead of
+# ``tsk_01m4wd5p…``. Per project, 1, 2, … in the order tasks are added: given at insert
+# as the project's highest plus one, in the INSERT itself (one statement under the write
+# lock), and never reused, since tasks leave a board only with the whole project. The
+# column is the whole step, so the script is empty: it is in :data:`_PRODUCTS`, and its
+# backfill (:func:`_number_existing_tasks`) numbers the tasks a store already holds.
+_SCHEMA_V29 = ""
+# v30: one number per board — a unique index (:func:`_index_task_numbers`). A step of its
+# own because a step's script runs BEFORE its columns are added (:func:`_run_step`): in
+# v29 it would name a column that is not there yet. Python, not a script, because the
+# presence pass applies a step to a store whatever it lacks, and a store without
+# ``team_task`` at all (doctor's damaged-store case) must still open and be described,
+# as :func:`_add_column_if_absent` already lets it for a column.
+_SCHEMA_V30 = ""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -882,6 +979,10 @@ _MIGRATIONS = (
     _SCHEMA_V24,
     _SCHEMA_V25,
     _SCHEMA_V26,
+    _SCHEMA_V27,
+    _SCHEMA_V28,
+    _SCHEMA_V29,
+    _SCHEMA_V30,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -930,9 +1031,15 @@ _PRODUCTS: dict[int, _Products] = {
         columns=(("fleet_agent", "socket_path", "TEXT"), ("fleet_agent", "boot_id", "TEXT"))
     ),
     25: _Products(("team_event_project_created",), (("fleet_agent", "server_started_at", "TEXT"),)),
+    26: _Products(columns=(("project", "nickname", "TEXT"),)),
+    27: _Products(columns=(("claude_usage", "token_fingerprint", "TEXT"),)),
+    28: _Products(columns=(("team_task", "number", "INTEGER"),)),
+    29: _Products(("team_task_number",)),
 }
 
-_PROJECT_COLUMNS = "id, root, linked_repos, codename, onboarded_at, group_id, position, pinned_at"
+_PROJECT_COLUMNS = (
+    "id, root, linked_repos, codename, onboarded_at, group_id, position, pinned_at, nickname"
+)
 _GROUP_COLUMNS = "id, name, position, pinned_at, collapsed, created_at"
 _DESTINATION_COLUMNS = (
     "project_id, api_url, environment, workspace_id, workspace_uid, workspace_name, "
@@ -995,12 +1102,13 @@ _SESSION_COLUMNS = (
     "transcript_path, account, model, effort, limit_resets_at"
 )
 _USAGE_COLUMNS = (
-    "slot, fetched_at, session_percent, session_resets_at, week_percent, week_resets_at"
+    "slot, fetched_at, session_percent, session_resets_at, week_percent, week_resets_at, "
+    "token_fingerprint"
 )
 #: How long usage readings are kept — long enough for a weekly window's history.
 _USAGE_RETENTION = timedelta(days=7)
 _TASK_COLUMNS = (
-    "id, project_id, key, title, detail, status, role, needs, "
+    "id, project_id, number, key, title, detail, status, role, needs, "
     "claimed_by, claim_expires_at, created_by, created_at, updated_at"
 )
 _EVENT_COLUMNS = "seq, id, project_id, session_id, kind, text, task_id, to_role, created_at"
@@ -1085,6 +1193,8 @@ class ContextStore(Protocol):
     def get_task(
         self, ref: str, *, project_ids: Collection[str] | None = None
     ) -> TeamTask | None: ...
+    def task_by_number(self, project_id: str, number: int) -> TeamTask | None: ...
+    def task_numbers(self, project_id: str) -> dict[str, int]: ...
     def team_tasks(
         self, project_id: str, *, status: TaskStatus | None = None
     ) -> list[TeamTask]: ...
@@ -1150,6 +1260,7 @@ class ContextStore(Protocol):
     def latest_seq(self, project_id: str) -> int: ...
     def terminal_events(self, project_id: str) -> dict[str, TeamEvent]: ...
     def set_codename(self, project_id: str, codename: str) -> ProjectInfo: ...
+    def set_project_nickname(self, project_id: str, nickname: str | None) -> ProjectInfo: ...
     def codenames_in_use(self) -> set[str]: ...
     def upsert_fleet_agent(self, agent: FleetAgent) -> FleetAgent: ...
     def get_fleet_agent(self, ref: str) -> FleetAgent | None: ...
@@ -1267,6 +1378,7 @@ def _row_to_project(row: sqlite3.Row) -> ProjectInfo:
         group_id=row["group_id"],
         position=row["position"],
         pinned_at=_maybe_dt(row["pinned_at"]),
+        nickname=row["nickname"],
     )
 
 
@@ -1444,6 +1556,7 @@ def _row_to_usage_sample(row: sqlite3.Row) -> UsageSample:
         session_resets_at=_maybe_dt(row["session_resets_at"]),
         week_percent=row["week_percent"],
         week_resets_at=_maybe_dt(row["week_resets_at"]),
+        token_fingerprint=row["token_fingerprint"],
     )
 
 
@@ -1451,6 +1564,7 @@ def _row_to_task(row: sqlite3.Row) -> TeamTask:
     return TeamTask(
         id=row["id"],
         project_id=row["project_id"],
+        number=row["number"],
         key=row["key"],
         title=row["title"],
         detail=row["detail"],
@@ -1770,12 +1884,25 @@ class SqliteStore:
         return _row_to_project(row) if row is not None else None
 
     def find_projects(self, term: str) -> list[ProjectInfo]:
+        """The live projects ``term`` names: an id prefix, a directory name or a codename,
+        and only when none of those match, a nickname (exactly, case and all).
+
+        The nickname comes last so that one a person types never takes a reference
+        that already worked: a nickname spelled like another project's codename or
+        folder leaves that one found, rather than both refused as ambiguous.
+        """
         rows = self._conn.execute(
             f"SELECT {_PROJECT_COLUMNS} FROM project "
             "WHERE forgotten_at IS NULL AND (id GLOB ? OR name = ? OR codename = ?) "
             "ORDER BY name",
             (_glob_prefix(term), term, term),
         ).fetchall()
+        if not rows:
+            rows = self._conn.execute(
+                f"SELECT {_PROJECT_COLUMNS} FROM project "
+                "WHERE forgotten_at IS NULL AND nickname = ? ORDER BY name",
+                (term,),
+            ).fetchall()
         return [_row_to_project(row) for row in rows]
 
     def forget_project(self, project_id: str) -> None:
@@ -2355,13 +2482,20 @@ class SqliteStore:
 
         The second element reports whether a new task was created — the
         idempotency contract for ``task add``.
+
+        The task's number is the board's highest plus one, read in the INSERT itself,
+        so it is taken under the write lock with the row and two adds cannot share one.
+        A duplicate key inserts nothing and so takes no number. ``task.number`` is
+        ignored: the store gives it.
         """
         cursor = self._conn.execute(
             f"INSERT INTO team_task ({_TASK_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, (SELECT COALESCE(MAX(number), 0) + 1 FROM team_task "
+            "WHERE project_id = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (project_id, key) DO NOTHING",
             (
                 task.id,
+                task.project_id,
                 task.project_id,
                 task.key,
                 task.title,
@@ -2413,6 +2547,22 @@ class SqliteStore:
         if len(matches) > 1:
             raise AmbiguousIdError(ref)
         return _row_to_task(matches[0]) if matches else None
+
+    def task_by_number(self, project_id: str, number: int) -> TeamTask | None:
+        """The task numbered ``number`` on ``project_id``'s board (``#12``), if there is one."""
+        row = self._conn.execute(
+            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE project_id = ? AND number = ?",
+            (project_id, number),
+        ).fetchone()
+        return _row_to_task(row) if row is not None else None
+
+    def task_numbers(self, project_id: str) -> dict[str, int]:
+        """Every numbered task of the board, id → number: for lines that name a task by id."""
+        rows = self._conn.execute(
+            "SELECT id, number FROM team_task WHERE project_id = ? AND number IS NOT NULL",
+            (project_id,),
+        ).fetchall()
+        return {row["id"]: row["number"] for row in rows}
 
     def team_tasks(self, project_id: str, *, status: TaskStatus | None = None) -> list[TeamTask]:
         if status is None:
@@ -2932,6 +3082,25 @@ class SqliteStore:
         project = self.get_project(project_id)
         if project is None:
             raise KeyError(project_id)
+        return project
+
+    def set_project_nickname(self, project_id: str, nickname: str | None) -> ProjectInfo:
+        """Name a project as a person sees it, or clear that name with ``None``.
+
+        Written as given: the service (``services.project.set_nickname``) trims and
+        bounds it. A forgotten project is a ``KeyError``, as an unknown one is, and
+        as :meth:`update_project_layout` refuses one: a rename from a stale frame
+        would otherwise land on the tombstone and come back with a revival.
+        """
+        cursor = self._conn.execute(
+            "UPDATE project SET nickname = ? WHERE id = ? AND forgotten_at IS NULL",
+            (nickname, project_id),
+        )
+        self._conn.commit()
+        if cursor.rowcount != 1:
+            raise KeyError(project_id)
+        project = self.get_project(project_id)
+        assert project is not None  # just written
         return project
 
     def codenames_in_use(self) -> set[str]:
@@ -3801,7 +3970,7 @@ class SqliteStore:
     def add_usage_sample(self, sample: UsageSample) -> None:
         """Record one reading and drop this slot's readings older than :data:`_USAGE_RETENTION`."""
         self._conn.execute(
-            f"INSERT INTO claude_usage ({_USAGE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?)",
+            f"INSERT INTO claude_usage ({_USAGE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 sample.slot,
                 sample.fetched_at.isoformat(),
@@ -3809,6 +3978,7 @@ class SqliteStore:
                 sample.session_resets_at.isoformat() if sample.session_resets_at else None,
                 sample.week_percent,
                 sample.week_resets_at.isoformat() if sample.week_resets_at else None,
+                sample.token_fingerprint,
             ),
         )
         self._conn.execute(
@@ -4194,6 +4364,7 @@ def _migrate(connection: sqlite3.Connection) -> None:
     ``onboarded_at``, which a store stamped 17 by #113 does not have. After the
     last, because a store stamped current never enters the loop, including one
     that a build without this pass carried to current past a step it skipped.
+    Then :func:`_number_unnumbered_tasks` numbers any task an older build added.
     """
     while True:
         if int(connection.execute("PRAGMA user_version").fetchone()[0]) >= len(_MIGRATIONS):
@@ -4212,16 +4383,16 @@ def _migrate(connection: sqlite3.Connection) -> None:
             with contextlib.suppress(sqlite3.Error):
                 connection.execute("ROLLBACK")
             raise
-    if not _steps_missing(connection, len(_MIGRATIONS)):
-        return
-    try:
-        connection.execute("BEGIN IMMEDIATE")
-        _converge_by_presence(connection, len(_MIGRATIONS))
-        connection.execute("COMMIT")
-    except sqlite3.Error:
-        with contextlib.suppress(sqlite3.Error):
-            connection.execute("ROLLBACK")
-        raise
+    if _steps_missing(connection, len(_MIGRATIONS)):
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            _converge_by_presence(connection, len(_MIGRATIONS))
+            connection.execute("COMMIT")
+        except sqlite3.Error:
+            with contextlib.suppress(sqlite3.Error):
+                connection.execute("ROLLBACK")
+            raise
+    _number_unnumbered_tasks(connection)
 
 
 #: The suffixes of the shadow tables FTS5 keeps a table's index in, ``entry_fts_data``

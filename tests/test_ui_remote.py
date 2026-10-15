@@ -629,9 +629,12 @@ def test_m_is_refused_while_focus_is_in_a_view_and_the_palette_lists_remote_cont
         await pilot.press("R")
         await pilot.pause()
         assert not isinstance(app.screen, RemotePanel), "R must not open the modal from a view"
+        # `?` is the one app key a view lets through (help changes nothing): it opens.
         await pilot.press("question_mark")
         await pilot.pause()
-        assert not isinstance(app.screen, HelpScreen)
+        assert isinstance(app.screen, HelpScreen)
+        await pilot.press("escape")
+        await pilot.pause()
         app.sidebar.focus()
         await pilot.pause()
         await pilot.press("question_mark")

@@ -121,14 +121,23 @@ that never opt in see nothing.
 ### Tasks: idempotent, atomic, dependency-aware
 
 ```sh
-aisquare task add "wire auth" --role coder        # idempotent — safe to re-emit
-aisquare task add "ship it" --needs tsk_01k…      # held until its dependency is done
+aisquare task add "wire auth" --role coder        # idempotent — safe to re-emit (#1)
+aisquare task add "ship it" --needs 1             # held until #1 is done
 aisquare task next --role coder --claim --as <id> # atomic claim — exactly one winner; a
                                                   # fleet agent's own assigned task comes first
-aisquare task review tsk_01k… --note "how to verify" --as <id>
-aisquare task reopen tsk_01k… --reason "fails on py3.11" --as <id>
+aisquare task review 1 --note "how to verify" --as <id>
+aisquare task reopen '#1' --reason "fails on py3.11" --as <id>
 aisquare note "JWT it is" --kind decision --as <id>
 ```
+
+Every task has a **number on its board** — `#1`, `#2`, … in the order tasks
+were added to that project — shown beside its id on the board, in `task list`,
+`task show` and every receipt (`✓ claimed: #12 tsk_01k… [doing] …`). Any task
+command, `--needs`, `--task` and the MCP task tools take `12` or `#12` for the
+caller's board (the `--as` session's, else the directory's), or the id as
+before. `12` and `#12` are only ever a number on that board: if it has no task
+#12 it says `no task #12 on this board (<name>)`, rather than matching some
+task's id, here or on another project's board.
 
 Claims are single-`UPDATE` atomic (race-tested), leased (default 120
 minutes), and renewed by the session's own lifecycle hooks — so a dead
@@ -181,10 +190,25 @@ An interactive [Textual](https://textual.textualize.io/) TUI with the
 `[tui]` extra (full-screen Rich fallback without it): every session with a
 live state chip — **▶ working**, **⏸ waiting for input**, **🔔 NEEDS YOU**
 (with a terminal bell) — the open tasks, and a bot-style feed of everything
-the team does. Click any task or feed line for its full detail.
+the team does. A task is one line: its number on the board, a status icon and
+the title, cut with `…` to the width there is, so the table never scrolls
+sideways. Click any task or feed line for its full detail, which starts
+`#12 · doing · tsk_… · claimed by <who> (lease until 14:05) · for coder`.
+The same board is a project's *Board* tab in `asq`.
+
+| Icon | Task |
+| --- | --- |
+| `○` | to do — nobody has it yet |
+| `⧗` | to do, waiting on a task it needs |
+| `▶` | doing — claimed and being worked on |
+| `👀` | in review — waiting to be checked |
+| `⛔` | blocked — the detail says on what |
+| `✓` | done |
+| `✗` | dropped — no longer worth doing |
 
 | Key | Action |
 | --- | --- |
+| `?` | the keys and this icon legend (in `asq` too) |
 | `d` | flip to the done/dropped archive — when it closed, who closed it |
 | `o` | open the author session's transcript at that exact moment |
 | `t` | theme browser — applies live, autosaves |
@@ -193,6 +217,11 @@ the team does. Click any task or feed line for its full detail.
 | `s` | save an SVG screenshot to `~/.aisquare/screenshots/` |
 | `b` | show/hide the board pane |
 | `r` / `q` | refresh now / quit |
+
+Every line between the board's parts drags to resize — the one beside the tasks
+column, the one above the detail, the one between the sessions and the tasks — and
+a double-click puts it back. The sizes are kept in `~/.aisquare/state.json`, one
+for every project's board, and come back at the next launch.
 
 ### Long-term memory (optional, via gbrain)
 
@@ -325,7 +354,7 @@ launched by number — the c1/c2/c3 shell aliases, without the aliases:
 aisquare accounts list             # who is signed in where, plan, hooks
 aisquare accounts add              # a fresh slot: Claude Code opens, you sign in, it is recorded
 aisquare accounts run 2            # a plain session on account 2 (what a c2 alias did)
-aisquare accounts usage            # the 5-hour and weekly windows, per account
+aisquare accounts usage            # the 5-hour and weekly windows, percent USED, per account
 aisquare accounts remove 2         # forget it; the directory is kept as 2.removed-<stamp>
 
 aisquare launch coder --account 2  # a board role on account 2
@@ -358,9 +387,10 @@ aisquare team bind coder --account work   # the same role binding, from the team
 
 A launch — `aisquare launch`, `fleet spawn`, the manager spawning a coder —
 resolves the account in exactly one order: `--account` on the command line, then
-the role's binding, then the project's default, then the machine's default. With
-none of those set it runs on whatever `claude` the shell already has, exactly as
-before, so a machine that never ran `accounts default` notices nothing. One
+the role's binding, then the project's default, then the account with room
+(`[accounts] pick`, below), then the machine's default. With one login and none
+of those set it runs on whatever `claude` the shell already has, exactly as
+before, so a machine that never added an account notices nothing. One
 resolver answers for every surface, so the fleet UI and a hand-typed launch can
 never disagree about which login an agent gets; `accounts list` stars the
 default and lists the slots in priority order; `doctor` warns when the default is
@@ -369,14 +399,17 @@ longer has.
 
 **Spending several accounts.** With more than one login the interesting
 questions are *where is there room* and *what happens when one runs out*. Both
-are `[accounts]` settings (on the Settings tab, or `aisquare config set`):
+are `[accounts]` settings (in *⚙ Settings ▸ App settings*, or `aisquare config set`), and both
+default to using the room there is:
 
 ```sh
-aisquare config set accounts.pick headroom   # spawns take, in priority order, the first account
-                                             # under switch_at % of its 5-hour window — or the one
-                                             # with the most room when all are over it
+aisquare config set accounts.pick headroom   # the default: spawns take, in priority order, the
+                                             # first account under switch_at % of the fuller of
+                                             # its two windows — or the one with the most room
+                                             # when all are over it (usage up to a minute old)
+aisquare config set accounts.pick default    # …or every spawn on the machine default
 aisquare config set accounts.switch_at 85    # the line (default 85 %)
-aisquare config set accounts.on_limit switch # when an agent hits its limit, move it (default: wait)
+aisquare config set accounts.on_limit wait   # when an agent hits its limit, leave it parked (default: switch)
 aisquare fleet switch coder-auth             # move one by hand: same label, task and worktree,
                                              # on the account with headroom, resuming its session
 aisquare fleet switch coder-auth --to work --fresh   # a named account, and a fresh session with a
@@ -387,7 +420,7 @@ When an agent's turn ends on a usage limit — Claude Code's `StopFailure` hook,
 `You've hit your session limit · resets 12:30am` — its row shows **⏳ limited**
 with the reset time, the manager is woken with the one command that moves it,
 and Claude Code's own wait-and-continue at the reset is left in place. With
-`on_limit = switch` the fleet hands the agent over on its own: it stops the
+`on_limit = switch`, the default, the fleet hands the agent over on its own: it stops the
 agent, starts it again on the account with the most headroom, and resumes the
 same session by its transcript (`claude --resume <path>`), unless the limit
 lifts within `wait_if_reset_within_minutes` (a reset ten minutes away is cheaper

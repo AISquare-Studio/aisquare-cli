@@ -205,6 +205,30 @@ def test_spawn_says_which_label_was_asked_when_the_fleet_suffixed_it(
     assert "⚠ label coder-auth is held by a live agent" in line
 
 
+def test_spawn_marks_a_share_made_into_its_account_as_done_not_as_a_warning(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final gate NIT 3: '⚠ accounts: <folder> is trusted on plain claude — now on account 2
+    too' read as a problem. A share that was made is a ✓ line; a note that something did
+    not happen keeps its ⚠."""
+    shared = "accounts: /work is trusted on plain claude — now on account 2 too"
+    receipt = SpawnReceipt(
+        agent=_agent("coder-1"),
+        asked_label=None,
+        tmux_session=SESSION,
+        notes=[shared, "the agent exited before the prompt could be typed"],
+        shared=[shared],
+    )
+    _install(monkeypatch, "spawn", receipt)
+
+    result = runner.invoke(app, ["fleet", "spawn", "coder"])
+
+    assert result.exit_code == 0, result.output
+    line = _plain(result.stdout)
+    assert f"✓ {shared}" in line and "⚠ accounts:" not in line
+    assert "⚠ the agent exited before the prompt could be typed" in line
+
+
 def test_spawn_with_no_asked_label_prints_no_asked_suffix(
     runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -780,6 +804,19 @@ def test_stop_confirms_and_passes_force_through(
     assert stop.calls[-1] == ((PROJECT, "coder-auth"), {"force": True})
 
 
+@pytest.mark.parametrize("worktree", [True, False], ids=["worktree", "no-worktree"])
+def test_stop_says_reap_removes_the_worktree_of_an_agent_that_had_one(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch, worktree: bool
+) -> None:
+    """A stopped agent's worktree stays until its work is pushed and ``reap`` removes it;
+    nothing said so, so trees piled up (one night: 15 of them, 1.2 GB)."""
+    agent = _agent("coder-auth", worktree=worktree, ended=True, exit_status=0)
+    _install(monkeypatch, "stop", StopReceipt(agent, []))
+    said = runner.invoke(app, ["fleet", "stop", "coder-auth"]).stdout
+    hint = "· run `aisquare fleet reap` to remove its worktree once its work is pushed"
+    assert (hint in said) is worktree, said
+
+
 def test_stop_json_returns_the_agent_row(
     runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1326,10 +1363,13 @@ def test_reap_server_down_reaches_the_service_as_a_keyword(
 
 
 def test_reap_json(runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch) -> None:
+    kept = WORKTREE.parent / "coder-open"
     report = ReapReport(
         ended=[_agent("coder-auth", ended=True, exit_status=0)],
         lost=[],
         worktrees_removed=[WORKTREE],
+        worktrees_kept=[(kept, "uncommitted changes")],
+        branches_deleted=["fleet/amber-otter/auth"],
     )
     _install(monkeypatch, "reap", report)
 
@@ -1341,6 +1381,8 @@ def test_reap_json(runner: CliRunner, resolved: Seen, monkeypatch: pytest.Monkey
         "ended",
         "lost",
         "worktrees_removed",
+        "worktrees_kept",
+        "branches_deleted",
         "claims_released",
         "release_failures",
         "held",
@@ -1349,6 +1391,12 @@ def test_reap_json(runner: CliRunner, resolved: Seen, monkeypatch: pytest.Monkey
     assert payload["claims_released"] == []
     assert payload["lost"] == [] and payload["held"] == []
     assert payload["worktrees_removed"] == [str(WORKTREE)]
+    assert payload["worktrees_kept"] == [{"path": str(kept), "reason": "uncommitted changes"}]
+    assert payload["branches_deleted"] == ["fleet/amber-otter/auth"]
+
+    human = runner.invoke(app, ["fleet", "reap", "--all"])
+    assert f"🗑 {WORKTREE}" in human.stdout and "🗑 branch fleet/amber-otter/auth" in human.stdout
+    assert f"⚠ kept {kept} — uncommitted changes" in human.stdout
 
 
 def test_reap_names_a_refused_release_and_exits_1(

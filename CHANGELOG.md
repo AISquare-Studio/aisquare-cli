@@ -250,8 +250,8 @@ all of them, and the fleet cleans up the worktrees it made.**
   - The claude dot is the room **left** across your usable accounts. Each
     account is `100 − max(session % used, week % used)`, and the dot shows the
     average: green over 50 %, yellow 25–50 %, orange-red 5–25 %, red under 5 %,
-    💀 none left. Grey means usage could not be read: offline, a login only in
-    the macOS Keychain, or no usable account.
+    💀 none left. Grey means usage could not be read: offline, a locked macOS
+    Keychain, or no usable account.
   - `N×` counts the usable accounts. ⚠ says an enabled account needs a login:
     signed out, or its token expired or was refused. These are the Accounts
     page's *Log in* rows. The dot is red when no account is usable for want of
@@ -501,6 +501,17 @@ all of them, and the fleet cleans up the worktrees it made.**
   strings in `uninstall --json` and `upgrade --json` change the same way.
 - `b` on the board brings the tasks column back however often it is pressed.
   Hiding the column took the keyboard with it, so the next `b` went nowhere.
+- On macOS, usage works for every Claude account. Claude Code keeps each
+  account's login in the login Keychain, which aisquare did not read, so every
+  row said only that the credentials were there. aisquare now reads
+  that item for the plain claude and every managed slot, through
+  `/usr/bin/security`, as Claude Code names it, and falls back to
+  `.credentials.json` when there is none. `aisquare accounts usage`, `accounts
+  list --usage`, the Accounts page, the status line's dot and headroom picks
+  all read it, through the five-minute cache. A missing login offers Log in,
+  and an expired one says so, as on Linux. A locked Keychain, or one that
+  refuses aisquare, says so on the row with what to do, and **↻ Refresh usage**
+  asks it again. The token is never printed or logged.
 
 ### Security
 - **One choke point.** Every request and every socket handshake passes the

@@ -594,8 +594,12 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   that figure is under five minutes old, and the line says the try failed. With
   no such figure, the row's status says why (`usage: HTTP 503 …`). A token the
   endpoint refuses shows at once (`⚠ token rejected`), and an expired one says
-  so (`⚠ token expired`). Nothing else on the page is affected. On macOS the token lives in the
-  Keychain, which the CLI does not read, so the row says so. A reset reads as a
+  so (`⚠ token expired`). Nothing else on the page is affected. On macOS the
+  token is read from the login Keychain, from the item Claude Code keeps for
+  each account (plain and every managed slot), and from `.credentials.json` when
+  there is no item. A locked Keychain, or one that refuses aisquare, is said on
+  the row (`usage: the login Keychain is locked — unlock it …`) rather than
+  offered a Log in; **↻ Refresh usage** asks it again. A reset reads as a
   distance and a clock time — `resets in 3h 10m (18:00)`, `resets in 2d 4h (Tue
   02:00)` — the same string on the page and in `aisquare accounts usage`, so a
   weekly window six days out never looks like tonight.

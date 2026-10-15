@@ -250,6 +250,51 @@ class TellResult:
     how: str
 
 
+Typed = Literal["yes", "no", "maybe"]
+"""How a write into an agent's pane ended (:class:`PaneWrite`): the word an audit line says."""
+
+
+@dataclass(frozen=True)
+class PaneWrite:
+    """How one write into an agent's pane ended (:func:`pane_write`): ``yes``, tmux typed it;
+    ``no``, tmux refused it and typed nothing; ``maybe``, tmux did not answer in time
+    (``TmuxTimedOut``), and a wedged server may still type it once it recovers.
+
+    Every write that types into an agent on someone's word asks it here: the remote's tell
+    in each of its modes, its Escapes, ``send-keys`` and quick answers, and ``fleet tell``.
+    A ``maybe`` is said by :meth:`late` and audited ``…=maybe``. It is never "nothing was
+    typed", nor advice to type it again: a second paste is submitted beside the first, and
+    a second Enter answers whatever prompt the first one's message brought up. Rounds 7 to
+    9 of #259's review taught that to one call site at a time, each in words of its own,
+    and the sites not reached yet took a timeout for a refusal (round 10, 8/9).
+    """
+
+    typed: Typed
+    what: str
+    error: TmuxError | None = None
+
+    def late(self, label: str, *, then: str = "", again: str = "send it again") -> str:
+        """``maybe``'s sentence: ``what`` may still reach ``label``'s pane (and ``then``), so
+        its live screen is read before anyone does ``again``."""
+        return (
+            f"tmux did not answer in time with {self.what} for {label}'s pane ({self.error}): "
+            f"it may still arrive{then} — read its live screen before you {again}"
+        )
+
+
+def pane_write(what: str, write: Callable[[], object]) -> PaneWrite:
+    """``write()``, which types ``what`` into an agent's pane, and how it ended
+    (:class:`PaneWrite`). ``TmuxError`` is every way a tmux call fails (``core.tmux._tmux``),
+    and ``TmuxTimedOut`` the one way that may still happen."""
+    try:
+        write()
+    except TmuxTimedOut as exc:
+        return PaneWrite("maybe", what, exc)
+    except TmuxError as exc:
+        return PaneWrite("no", what, exc)
+    return PaneWrite("yes", what)
+
+
 @dataclass(frozen=True)
 class ReapReport:
     """What a reap pass found."""

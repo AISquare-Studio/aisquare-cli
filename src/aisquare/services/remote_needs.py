@@ -78,6 +78,7 @@ if TYPE_CHECKING:
 
     from aisquare.core.config import AccountsSettings
     from aisquare.core.tmux import TmuxServer
+    from aisquare.services.fleet import PaneWrite
     from aisquare.services.remote_server import Device, RemoteKit
 
 log = logging.getLogger(__name__)
@@ -3871,19 +3872,26 @@ def _needs_answer_body(body: Mapping[str, object]) -> tuple[str, list[str], str,
     return item_id, keys, text, _remote_flag(body, "enter")
 
 
-def _needs_send(status: FleetAgentStatus, keys: Sequence[str], text: str, enter: bool) -> None:
+def _needs_send(status: FleetAgentStatus, keys: Sequence[str], text: str, enter: bool) -> PaneWrite:
     """Type the answer into the pane of ``status``'s row: the keys, or the text, then Enter if
-    asked. On the server whose screen :func:`needs_prompt_now` just read
-    (:func:`_needs_pane_server`): through ``fleet.server_of`` each answer read ``config.toml``
-    under the agent's lock, and the screen checked and the server typed into came of two
-    workings-out of the row's address (review of #259, round 10, 7/9)."""
+    asked; how it ended, the first write that did not go through (``fleet.PaneWrite``). On
+    the server whose screen :func:`needs_prompt_now` just read (:func:`_needs_pane_server`):
+    through ``fleet.server_of`` each answer read ``config.toml`` under the agent's lock, and
+    the screen checked and the server typed into came of two workings-out of the row's
+    address (review of #259, round 10, 7/9)."""
+    from aisquare.services import fleet as fleet_service
+
     server, pane = _needs_pane_server(status), status.agent.pane_id
-    if keys:
-        server.send_keys(pane, *keys)
-    if text:
-        server.send_literal(pane, text)
-    if enter:
-        server.send_keys(pane, "Enter")
+
+    def answer() -> None:
+        if keys:
+            server.send_keys(pane, *keys)
+        if text:
+            server.send_literal(pane, text)
+        if enter:
+            server.send_keys(pane, "Enter")
+
+    return fleet_service.pane_write("the answer", answer)
 
 
 def _needs_answer_now(
@@ -3908,8 +3916,8 @@ def _needs_answer_now(
     and otherwise is a 409 ``stale``, out of the feed until the next scan; a screen tmux
     could not show is a 503 ``fleet_unavailable``, and the card stays. A tmux that fails
     mid-answer is a 503 whose ``audit`` says it was tried, as part of it may have reached
-    the pane; one that timed out may still type all of it, so its card leaves the feed as
-    an answered one does.
+    the pane; one that timed out may still type all of it (``fleet.PaneWrite``), so its card
+    leaves the feed as an answered one does, and its line says ``delivered=maybe``.
 
     The card leaves ``watcher``'s feed as soon as the keys are typed, here on the write
     thread (:meth:`RemoteNeedsWatcher.needs_answered`). It left once the audit line was written,
@@ -3918,7 +3926,6 @@ def _needs_answer_now(
     second tap typed again, those cards being current with no ``attention`` until the
     agent writes its result (review of #259, remote focus, 2/12).
     """
-    from aisquare.core.tmux import TmuxTimedOut
     from aisquare.services import fleet as fleet_service
     from aisquare.services.remote_server import RequestError, _audit_keys, remote_agent_held
 
@@ -3960,20 +3967,16 @@ def _needs_answer_now(
             gone = f"{label} shows {instead} now — nothing was sent"
             current = [one.needs_item_json() for one in shown]
             raise RequestError(409, "stale", gone, current=current)
-        try:
-            _needs_send(snap.status, keys, text, enter)
-        except TmuxTimedOut as exc:
+        wrote = _needs_send(snap.status, keys, text, enter)
+        if wrote.typed == "maybe":
             # Unanswered, not refused: a wedged server may still type it once it recovers, and
             # a card left live meanwhile typed its digit again (review of #259, round 8, 2/9).
             watcher.needs_answered(item.id)
-            said = (
-                f"tmux did not answer in time ({exc}): the answer may still arrive — read "
-                f"{label}'s live screen before you answer again"
-            )
-            raise RequestError(503, "fleet_unavailable", said, audit=f"{summary} failed") from None
-        except Exception as exc:
-            said = f"tmux could not type it: {exc}"
-            raise RequestError(503, "fleet_unavailable", said, audit=f"{summary} failed") from None
+            said = wrote.late(label, again="answer again")
+            raise RequestError(503, "fleet_unavailable", said, audit=f"{summary} delivered=maybe")
+        if wrote.typed == "no":
+            said = f"tmux could not type it: {wrote.error}"
+            raise RequestError(503, "fleet_unavailable", said, audit=f"{summary} failed")
         watcher.needs_answered(item.id)
         return {"answered": item.id, "agent": label, "project": project.id, "sent": True}, summary
 

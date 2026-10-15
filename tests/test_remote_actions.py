@@ -711,7 +711,7 @@ class FakePane:
         """``"paste"`` or a key name: that call raises ``TmuxError``."""
         self.timing_out: set[str] = set()
         """``"paste"`` or a key name: that call raises ``TmuxTimedOut``, a server that did not
-        answer."""
+        answer, and ``log`` says ``late <it>``."""
         self.prompt = False
         """A permission prompt is drawn, for the tests that open one: text does nothing in
         its list, Escape answers it "No" and Enter its highlighted "1. Yes"."""
@@ -723,6 +723,7 @@ class FakePane:
             if key in self.failing:
                 raise TmuxError(f"send-keys {key}: lost server")
             if key in self.timing_out:
+                self.log.append(f"late {key}")
                 raise TmuxTimedOut("tmux did not answer within 30s: send-keys")
             self.sent.append((pane_id, "key", key))
             self.log.append(f"key {key}")
@@ -734,6 +735,7 @@ class FakePane:
         if "paste" in self.failing:
             raise TmuxError(f"can't find pane: {pane_id}")
         if "paste" in self.timing_out:
+            self.log.append("late paste")
             raise TmuxTimedOut("tmux did not answer within 30s: paste-buffer")
         self.sent.append((pane_id, "paste", text))
         self.log.append("paste")
@@ -2388,6 +2390,70 @@ def test_a_paste_that_timed_out_may_still_land_and_is_on_the_trail(
             'failed=fleet_error text=2ch "hi"',
         )
     ]
+
+
+@dataclass(frozen=True)
+class LateWrite:
+    """A path that types into an agent, and the tmux call of it that is not answered in time."""
+
+    route: str
+    body: dict[str, object]
+    late: str
+    """The call that times out (:attr:`FakePane.timing_out`): ``"paste"`` or a key name."""
+    shows: str = "prompt"
+    """What the agent shows: ``prompt``, its input prompt; ``working``, a turn; ``dialog``."""
+
+
+_LATE_WRITES = [
+    pytest.param(LateWrite("agent/tell", {"mode": "prompt"}, "paste"), id="prompt's paste"),
+    pytest.param(
+        LateWrite("agent/tell", {"mode": "interrupt"}, "Escape", "working"),
+        id="interrupt's Escape",
+    ),
+    pytest.param(
+        LateWrite("agent/tell", {"mode": "interrupt"}, "paste", "working"),
+        id="interrupt's paste",
+    ),
+    *(
+        pytest.param(
+            LateWrite(name, {**PINNED, "dismiss_dialog": True}, "Escape", "dialog"),
+            id=f"{name}'s Escape",
+        )
+        for name in PINNED_ACTIONS
+    ),
+]
+"""Every path the phone types into an agent by, at each of its tmux calls that can time out."""
+
+
+@pytest.mark.parametrize("write", _LATE_WRITES)
+def test_every_write_tmux_did_not_answer_in_time_says_it_may_still_land_and_audits_maybe(
+    phone: Phone,
+    fleet: FleetCalls,
+    needs: FakeNeeds,
+    pane: FakePane,
+    log: list[str],
+    project: ProjectInfo,
+    write: LateWrite,
+) -> None:
+    """Review of #259, round 10, 8/9: rounds 7 to 9 taught "a tmux call that timed out may
+    still land" to one call site at a time, each in words of its own, and the sites not
+    reached yet took a timeout for a refusal: "nothing was typed", "press Enter on the pad",
+    off the trail or ``delivered=no``. Every path says it the one way
+    (``fleet.PaneWrite.late``), types nothing after it, and audits it as ``maybe``."""
+    _row(project)
+    needs.at_prompt = write.shows == "prompt"
+    needs.dialog = write.shows == "dialog"
+    if write.shows == "working":
+        needs.state = "working"
+    pane.timing_out.add(write.late)
+    body = phone.post(write.route, **{"agent": LABEL, "text": "hi", **write.body}).json()
+    said = body.get("message") or body.get("how") or ""
+    assert "it may still arrive" in said and "read its live screen before you" in said, said
+    for refusal in ("nothing was typed", "nothing was done", "press Enter on the pad"):
+        assert refusal not in said, said
+    assert log[-1] == f"late {write.late}", "nothing reached the agent after it"
+    ((_, line),) = phone.audit()
+    assert "=maybe " in f"{line} ", line
 
 
 def test_an_enter_that_fails_after_the_paste_is_a_200_that_says_it_was_not_sent(

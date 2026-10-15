@@ -6403,7 +6403,8 @@ def test_an_answer_whose_keys_timed_out_leaves_the_feed_as_an_answered_one(
     """Review of #259, round 8, 2/9: a send that timed out was a 503, audited, but its card
     stayed live on every phone, and a second tap typed its digit again after a wedged
     server ran the first. It leaves the feed as an answered card does; one tmux refused
-    typed nothing, and its card stays to be answered again."""
+    typed nothing, and its card stays to be answered again. Round 10, 8/9: its line says
+    ``delivered=maybe``, as every write that timed out does (``fleet.PaneWrite``)."""
     monkeypatch.setattr(remote_needs, "NEEDS_RESCAN_AFTER_ANSWER", 30.0)
     live.runtime.set_allow_write(True)
     card = live.card("permission")
@@ -6413,10 +6414,11 @@ def test_an_answer_whose_keys_timed_out_leaves_the_feed_as_an_answered_one(
         live.tmux.fail = True
     response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
     assert (response.status_code, response.json()["error"]) == (503, "fleet_unavailable")
-    assert live.audit()[-1].endswith("enter=False failed")
+    assert live.audit()[-1].endswith(f"enter=False {'delivered=maybe' if timed_out else 'failed'}")
     watcher = live.app.kit.lane_state["needs"]
     if timed_out:
-        assert "may still arrive" in response.json()["message"]
+        said = response.json()["message"]
+        assert "may still arrive" in said and "before you answer again" in said
         assert watcher.needs_lookup(card["id"]) is None
         assert card["id"] not in [item["id"] for item in live.feed()]
     else:

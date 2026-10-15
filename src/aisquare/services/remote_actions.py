@@ -699,29 +699,27 @@ def action_press_escape(snap: AgentNow, label: str, *, audit: Callable[[str], st
     It was "nothing was done", unaudited, and the Escape that arrived later stopped the
     turn; the human's try again sent a second one to the idle prompt, which opened the
     Rewind selector, and the paste went there (review of #259, round 8, 2/9). So it says
-    the Escape may still arrive, and is audited as ``audit(<its error code>)``.
+    the Escape may still arrive (``fleet.PaneWrite``), and is audited as
+    ``audit(<its error code>)``.
     """
-    from aisquare.core.tmux import TmuxError, TmuxTimedOut
     from aisquare.services import fleet as fleet_service
 
     agent = action_pane_agent(snap, label)
-    try:
-        fleet_service.server_of(agent).send_keys(agent.pane_id, "Escape")
-    except TmuxTimedOut as exc:
+    server = fleet_service.server_of(agent)
+    escaped = fleet_service.pane_write("Escape", lambda: server.send_keys(agent.pane_id, "Escape"))
+    if escaped.typed == "maybe":
+        said = escaped.late(
+            label,
+            then=", and stop its turn or answer its prompt No; nothing else was done",
+            again="try again",
+        )
+        raise RequestError(409, "fleet_error", said, audit=audit("fleet_error"))
+    if escaped.typed == "no":
         raise RequestError(
             409,
             "fleet_error",
-            f"tmux did not answer in time with Escape for {label}'s pane ({exc}): it may "
-            "still arrive, and stop its turn or answer its prompt No — nothing else was "
-            "done; read its live screen before you try again",
-            audit=audit("fleet_error"),
-        ) from exc
-    except TmuxError as exc:
-        raise RequestError(
-            409,
-            "fleet_error",
-            f"tmux could not send Escape to {label}'s pane ({exc}) — nothing was done",
-        ) from exc
+            f"tmux could not send Escape to {label}'s pane ({escaped.error}) — nothing was done",
+        )
 
 
 def action_settle(
@@ -1104,33 +1102,30 @@ def action_paste(
     (:func:`action_press_escape`). It said "nothing was typed", off the trail in
     ``prompt`` mode, and the human's Send again pasted the text a second time beside the
     first, both submitted as one message (review of #259, round 9, 1/8). So it says the
-    text may still arrive, unsent, and is audited as ``trail("delivered=maybe …")``.
+    text may still arrive, unsent (``fleet.PaneWrite``), and is audited as
+    ``trail("delivered=maybe …")``.
     """
-    from aisquare.core.tmux import TmuxError, TmuxTimedOut
+    from aisquare.core.tmux import TmuxError
     from aisquare.services import fleet as fleet_service
 
     agent = action_pane_agent(snap, label)
     server = fleet_service.server_of(agent)
     first = "interrupted it with Escape, then " if interrupted else ""
-    try:
-        server.paste(agent.pane_id, text)
-    except TmuxTimedOut as exc:
-        sent, escape = ("Escape was sent, but ", " escape=sent") if interrupted else ("", "")
+    sent, escape = ("Escape was sent, but ", " escape=sent") if interrupted else ("", "")
+    pasted = fleet_service.pane_write("the text", lambda: server.paste(agent.pane_id, text))
+    if pasted.typed == "maybe":
         raise RequestError(
             409,
             "fleet_error",
-            f"{sent}tmux did not answer in time with the text for {label}'s pane ({exc}): "
-            "it may still arrive at its prompt, unsent — read its live screen before you "
-            "send it again",
+            sent + pasted.late(label, then=" at its prompt, unsent"),
             audit=trail(f"delivered=maybe{escape} failed=fleet_error"),
-        ) from exc
-    except TmuxError as exc:
-        sent = "Escape was sent, but " if interrupted else ""
+        )
+    if pasted.typed == "no":
         raise RequestError(
             409,
             "fleet_error",
-            f"{sent}tmux could not type into {label}'s pane ({exc}) — nothing was typed",
-        ) from exc
+            f"{sent}tmux could not type into {label}'s pane ({pasted.error}) — nothing was typed",
+        )
     try:
         server.send_keys(agent.pane_id, "Enter")
     except TmuxError as exc:

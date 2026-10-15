@@ -286,6 +286,33 @@ def test_the_setting_is_parsed_once_until_config_toml_changes(
     assert len(loads) == 2, "and again once it changed"
 
 
+def test_a_read_of_the_setting_that_failed_is_asked_again(
+    work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 18: the fallback a failed read gave (capture off) was kept under
+    the file's unchanged ``stat``, so one read a retry would clear — the file held by a
+    backup tool, an NFS ``EIO`` — turned capture off until config.toml was next edited."""
+    from aisquare.core import config as config_core
+    from aisquare.core import paths
+    from aisquare.services import project as project_service
+
+    real = config_core.load_config
+    failures = [OSError(5, "Input/output error")]
+
+    def flaky(path: Path | None = None) -> config_core.AppConfig:
+        if failures:
+            raise failures.pop()
+        return real(path)
+
+    monkeypatch.setattr(project_service, "load_config", flaky)
+    config = paths.config_path()
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("[projects]\ncapture = true\n", encoding="utf-8")
+
+    assert project_service.capture_on() is False, "a failed read costs the setting, once"
+    assert project_service.capture_on() is True, "and is read again on the next ask"
+
+
 def test_asking_whether_a_project_is_tracked_never_writes(
     work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

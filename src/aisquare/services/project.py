@@ -75,7 +75,9 @@ def capture_on() -> bool:
     Parsed once until config.toml changes: a SessionStart asked twice, each prompt once, and
     asq's UI thread on every refresh tick, and each ask read, parsed and validated the
     whole file (review of #259, round 17). What is kept is keyed by the file as ``stat``
-    sees it, so an edit, or a save that replaces it, is read on the next ask."""
+    sees it, so an edit, or a save that replaces it, is read on the next ask. A read that
+    failed is not kept: its fallback, kept under a file that does not change, turned capture
+    off for the life of the process after one read a retry would have cleared (round 18)."""
     global _capture_read
     path = paths.config_path()
     key: tuple[str, tuple[int, int, int] | None]
@@ -90,7 +92,7 @@ def capture_on() -> bool:
     try:
         value = load_config(path).projects.capture
     except Exception:
-        value = ProjectsSettings().capture
+        return ProjectsSettings().capture
     _capture_read = (key, value)
     return value
 

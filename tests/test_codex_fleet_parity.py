@@ -1573,6 +1573,43 @@ def test_a_replay_with_no_record_is_refused_and_none_is_minted(
     assert not launch_seal._path(agent.id).exists()
 
 
+def test_a_refusal_is_said_on_the_board_once_per_row_and_reason(
+    codex_agent: tuple[Codex, TeamTask],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SMOKE3 on 8a83e6b0's predecessor: a refused replay told only its caller, so an
+    unattended hand-over and a human reading the board saw no reason the row was not
+    replaced. The reason goes on the board, once per row and reason, whichever path met
+    it first: restart, switch, the hand-over, or a message told to the busy agent."""
+    codex, _ = codex_agent
+    codex.start(THREAD_ONE)
+    codex.hook("UserPromptSubmit", THREAD_ONE, prompt="work", turn_id="turn-1")
+    launch_seal._path(codex.agent.id).unlink()
+    monkeypatch.setattr(fleet_service, "_run_native", Mock(side_effect=AssertionError("ran")))
+
+    for replay in (
+        lambda: fleet_service.restart(codex.project, codex.agent.label),
+        lambda: fleet_service.restart(codex.project, codex.agent.label),
+        lambda: fleet_service.switch(codex.project, codex.agent.label, automatic=True),
+    ):
+        with pytest.raises(fleet_service.LaunchRefused):
+            replay()
+    told = fleet_service.tell(codex.project, codex.agent.label, "rebase on main first")
+
+    said = [text for text in _events(codex.project, "note") if UNRECORDED in text]
+    assert said == [
+        f"{codex.agent.label}: cannot restart it — no launch record was written for it (it was "
+        "spawned by an aisquare that keeps none, or its record could not be written); "
+        f"`aisquare fleet stop {codex.agent.label}`, then spawn a new agent"
+    ]
+    assert told.delivered is False and UNRECORDED in told.how
+    # Another reason for the same row is said again.
+    launch_seal._path(codex.agent.id).write_text('{"version": 99}', encoding="utf-8")
+    with pytest.raises(fleet_service.LaunchRefused):
+        fleet_service.restart(codex.project, codex.agent.label)
+    assert len([text for text in _events(codex.project, "note") if "cannot restart" in text]) == 2
+
+
 @pytest.mark.parametrize(
     ("body", "why"),
     [

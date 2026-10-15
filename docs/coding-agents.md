@@ -519,7 +519,9 @@ home. A row with no record (spawned by an aisquare that keeps none, or whose rec
 could not be written), a record that cannot be read or was written by a newer
 aisquare, and a project whose directory in the store is not the record's are refused
 before anything is stopped, with the reason and the way out (stop the agent, spawn a
-new one). Nothing reads the store to write a record, and a spawn that cannot write
+new one). The reason is also a board note, once per row and reason, whichever path met
+it first (restart, switch, the hand-over, a message told to a busy agent), so an
+unattended hand-over leaves it where the manager and `fleet ls` readers look. Nothing reads the store to write a record, and a spawn that cannot write
 one refuses an agent that sandboxes its tools before its window starts. A record is
 read back as it was written, so a release that adds a field reads an older record
 with that field's default.

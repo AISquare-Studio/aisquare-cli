@@ -994,6 +994,13 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             with pytest.raises(fleet.FleetError, match=moved):
                 fleet.restart(stored, reviewer.label)
             assert fleet.status_of(reviewer).state in {"waiting", "working"}, "left running"
+            with store_session() as handle:
+                said = [
+                    event.text
+                    for event in handle.recent_events(project.id, limit=80)
+                    if event.kind == "note" and moved in event.text
+                ]
+            assert said and said[0].startswith(f"{reviewer.label}: cannot restart it"), said
         finally:
             if srv.has_session(fleet.session_name(fleet.ensure_codename(project).codename or "")):
                 srv.run("kill-server")

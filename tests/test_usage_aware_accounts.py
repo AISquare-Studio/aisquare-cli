@@ -459,6 +459,25 @@ def test_claude_codes_routine_notices_leave_a_parked_or_handed_over_row_as_it_is
 # --------------------------------------------------------------------------- the hand-over decision
 
 
+def test_a_hand_over_its_launch_record_refuses_is_said_on_the_board_once(
+    fake_home: Path, work: ProjectInfo, runner: CliRunner
+) -> None:
+    """The usage-limit hand-over of a row with no launch record (``core.launch_seal``) is
+    refused before anything is stopped; the reason is on the board once, said by the
+    switch, not again by the hand-over's own line, and not again at the next limit."""
+    _session(work, "sess-fleet")
+    _fleet_row(work, "agt_unrecorded", "coder-db", "sess-fleet")
+    for _ in range(2):
+        with store_session() as store:
+            store.mark_limited("sess-fleet", None)
+        assert runner.invoke(app, ["hook", "hand-over", "sess-fleet"]).exit_code == 0
+
+    said = [text for _, text in _events(work) if "no launch record was written" in text]
+    assert len(said) == 1 and said[0].startswith("coder-db: cannot switch it — "), said
+    assert not any("not switched" in text for _, text in _events(work))
+    assert _state("sess-fleet")[0] == "limited"
+
+
 def _fleet_row(project: ProjectInfo, agent_id: str, label: str, session_id: str) -> None:
     with store_session() as store:
         store.upsert_fleet_agent(

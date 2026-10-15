@@ -3239,6 +3239,13 @@ def _queue_message(
         return None  # no queue: asked before anything it would run with is read
     record = launch_seal.read(agent.id)
     if isinstance(record, str):
+        _say_refused(
+            agent.project_id,
+            agent,
+            "a message told to it is not queued",
+            record,
+            "it waits on the board for the agent's next prompt",
+        )
         return f"not queued: {record}"
     if record.agent != adapter.id:
         return f"not queued: its launch record is {record.agent}'s, not {adapter.label}'s"
@@ -5331,10 +5338,34 @@ def _launch_record(project: ProjectInfo, agent: FleetAgent, verb: str) -> launch
         if agent.ended_at is None
         else "spawn a new agent"
     )
-    raise FleetError(
+    _say_refused(project.id, agent, f"cannot {verb} it", why, way_out)
+    raise LaunchRefused(
         f"cannot {verb} {agent.label!r}: {why} — a replacement takes nothing from the store "
         f"that its launch record does not hold; {way_out}"
     )
+
+
+class LaunchRefused(FleetError):
+    """A replay of a row, or a queue for it, refused for want of a launch record to take
+    (``core.launch_seal``). Its reason is on the board already (:func:`_say_refused`)."""
+
+
+def _say_refused(project_id: str, agent: FleetAgent, what: str, why: str, way_out: str) -> None:
+    """Put a launch record's refusal on the board, once per row and reason: an unattended
+    hand-over and a human reading the board see why the row is not replayed, not only the
+    caller. Never raises: the refusal is the caller's either way."""
+    key = f"launch-refused:{agent.id}"
+    with contextlib.suppress(Exception), store_session() as store:
+        if store.get_meta(key) == why:
+            return
+        store.set_meta(key, why)
+        _team()._emit(
+            store,
+            project_id,
+            "note",
+            f"{agent.label}: {what} — {why}; {way_out}",
+            session_id=agent.session_id,
+        )
 
 
 def _same_dir(one: Path, other: Path) -> bool:

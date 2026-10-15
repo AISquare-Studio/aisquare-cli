@@ -462,6 +462,8 @@ def hand_over(session_id: str, *, reason: str | None = None) -> None:
         receipt = fleet_service.switch(
             project, agent.label, reason=reason, spawned_by=HANDOVER_SPAWNER, automatic=True
         )
+    except fleet_service.LaunchRefused:
+        return  # its reason is on the board already, once for the row
     except fleet_service.FleetError as exc:
         team_service.hook_note(
             session.project_id, f"{agent.label}: not switched — {exc}", session_id=session.id

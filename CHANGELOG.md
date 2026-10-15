@@ -48,7 +48,8 @@ adapter.**
   thread, home). Agents spawned before this version have none: their restart
   or switch is refused before anything is stopped, naming the way out (stop the
   agent and spawn it again), and so is a project whose directory in the store
-  is not the one the agent was spawned in.
+  is not the one the agent was spawned in. The reason is a board note too, once
+  per agent and reason, so an unattended hand-over says why it did not happen.
 - `fleet.roles.<role>.permission` is new and unset; an existing
   `permission_mode` (or Codex `sandbox` / `approval_policy` / `approve_for_me`)
   means what it did.

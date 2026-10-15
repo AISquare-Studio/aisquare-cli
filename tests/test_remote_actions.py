@@ -926,8 +926,39 @@ def _a_dialog(item: NeedsItem, state: str) -> bool:
     )
 
 
+class FakeTime:
+    """The clock an action's wait for its Escape runs on (``remote_actions._monotonic`` and
+    ``_sleep``): sleeping moves it by exactly what was asked, nothing else does."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.slept: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+
+
 @pytest.fixture
-def needs(monkeypatch: pytest.MonkeyPatch, pane: FakePane) -> FakeNeeds:
+def clock(monkeypatch: pytest.MonkeyPatch) -> FakeTime:
+    """Every wait for an Escape to land here, on a clock only its own polls move.
+
+    The ``needs`` fixture's window is 50 ms of 1 ms polls, and a test whose dialog closes on
+    the third read after the Escape (``FakeNeeds.lag``) timed it by the wall clock: on a
+    Windows runner, whose sleeps last its 15.6 ms timer tick, three polls could be past the
+    window, and the dismissal a 409 "still shows a prompt" (CI of #259, run 38712349477).
+    Polled on this clock, the window is 50 polls wherever it runs."""
+    fake = FakeTime()
+    monkeypatch.setattr(remote_actions, "_monotonic", fake.monotonic)
+    monkeypatch.setattr(remote_actions, "_sleep", fake.sleep)
+    return fake
+
+
+@pytest.fixture
+def needs(monkeypatch: pytest.MonkeyPatch, pane: FakePane, clock: FakeTime) -> FakeNeeds:
     fake = FakeNeeds(pane)
     monkeypatch.setattr(remote_needs, "needs_agent_now", fake.needs_agent_now)
     monkeypatch.setattr(remote_needs, "needs_single_agent_now", fake.needs_single_agent_now)
@@ -1723,13 +1754,12 @@ def test_the_guard_waits_for_rest_as_long_as_the_interrupt_waits_for_its_prompt(
     needs: FakeNeeds,
     project: ProjectInfo,
     monkeypatch: pytest.MonkeyPatch,
+    clock: FakeTime,
 ) -> None:
     """At rest is a pane quiet for ``fleet.ACTIVITY_WINDOW``, and the Escape's own redraw is
     output: a wait of the 3 s settle time alone would have refused every agent stopped at
     work. Each poll reads the agent alone."""
     _row(project)
-    fake_time = FakeTime()
-    monkeypatch.setattr(remote_actions, "time", fake_time)
     monkeypatch.setattr(remote_actions, "ACTION_POLL_SECONDS", 0.25)
     monkeypatch.setattr(remote_actions, "action_interrupt_wait", action_interrupt_wait)
     monkeypatch.setattr(remote_actions, "action_quiet_window", action_quiet_window)
@@ -1737,7 +1767,7 @@ def test_the_guard_waits_for_rest_as_long_as_the_interrupt_waits_for_its_prompt(
     needs.pane_quiet, needs.escape_stops_agent = False, False
     response = phone.post("agent/stop", **PINNED)
     assert response.status_code == 409 and response.json()["error"] == "still_busy"
-    assert fake_time.slept == [0.25] * 32, "8 s of polls: the quiet window, then the settle time"
+    assert clock.slept == [0.25] * 32, "8 s of polls: the quiet window, then the settle time"
     assert (needs.scans, needs.reads) == (1, 1 + 32)
 
 
@@ -2225,30 +2255,14 @@ def test_the_interrupt_waits_out_the_quiet_window_before_the_settle_time(
     assert action_interrupt_wait() == 7.0 + remote_needs.DIALOG_SETTLE_SECONDS
 
 
-class FakeTime:
-    """``time`` for the module under test: sleeping moves the clock, nothing else does."""
-
-    def __init__(self) -> None:
-        self.now = 1000.0
-        self.slept: list[float] = []
-
-    def monotonic(self) -> float:
-        return self.now
-
-    def sleep(self, seconds: float) -> None:
-        self.slept.append(seconds)
-        self.now += seconds
-
-
 def test_the_interrupt_reads_the_agent_every_quarter_second_until_the_wait_is_over(
     phone: Phone,
     needs: FakeNeeds,
     project: ProjectInfo,
     monkeypatch: pytest.MonkeyPatch,
+    clock: FakeTime,
 ) -> None:
     _row(project)
-    fake_time = FakeTime()
-    monkeypatch.setattr(remote_actions, "time", fake_time)
     monkeypatch.setattr(remote_actions, "ACTION_POLL_SECONDS", 0.25)
     monkeypatch.setattr(remote_actions, "action_interrupt_wait", action_interrupt_wait)
     monkeypatch.setattr(remote_actions, "action_quiet_window", action_quiet_window)
@@ -2256,7 +2270,7 @@ def test_the_interrupt_reads_the_agent_every_quarter_second_until_the_wait_is_ov
     needs.escape_stops_agent = False
     response = phone.post("agent/tell", agent=LABEL, text="hi", mode="interrupt")
     assert response.status_code == 409 and response.json()["error"] == "still_busy"
-    assert fake_time.slept == [0.25] * 32, "8 s of polls: the quiet window, then the settle time"
+    assert clock.slept == [0.25] * 32, "8 s of polls: the quiet window, then the settle time"
     assert (needs.scans, needs.reads) == (1, 1 + 32), "32 polls, each of the agent alone"
 
 
@@ -3521,20 +3535,19 @@ def test_the_escape_to_an_agent_nothing_reads_has_a_whole_quiet_window_to_land(
     pane: FakePane,
     project: ProjectInfo,
     monkeypatch: pytest.MonkeyPatch,
+    clock: FakeTime,
 ) -> None:
     """Its pane is all there is, and a prompt left waiting is quiet from before the Escape:
     quiet at the first read says nothing of whether the Escape landed. The ``/exit`` waits
     until the pane has been quiet ``fleet.ACTIVITY_WINDOW`` since the Escape."""
     _hookless_at_a_prompt(own_predicates, pane, project)
-    fake_time = FakeTime()
-    monkeypatch.setattr(remote_actions, "time", fake_time)
     monkeypatch.setattr(remote_actions, "ACTION_POLL_SECONDS", 0.25)
     monkeypatch.setattr(remote_actions, "action_interrupt_wait", action_interrupt_wait)
     monkeypatch.setattr(remote_actions, "action_quiet_window", action_quiet_window)
     monkeypatch.setattr(remote_needs, "DIALOG_SETTLE_SECONDS", 3.0)
     response = phone.post("agent/stop", **PINNED, dismiss_dialog=True)
     assert response.status_code == 200, response.text
-    assert fake_time.slept == [0.25] * 20, "5 s of quiet after the Escape, not the first read"
+    assert clock.slept == [0.25] * 20, "5 s of quiet after the Escape, not the first read"
     assert pane.answered == ["No"]
 
 

@@ -118,6 +118,13 @@ ACTION_FIELD_MAX = 200
 ACTION_POLL_SECONDS = 0.25
 """How often an action reads the agent again while it waits for its Escape to land."""
 
+_monotonic: Callable[[], float] = time.monotonic
+_sleep: Callable[[float], None] = time.sleep
+"""What an action's wait for its Escape to land is timed and paced by
+(:func:`action_settle`, :func:`action_after_escape`), the injection point a test's own
+clock takes, as ``fleet``'s are: a test's 50 ms window timed by the wall clock was three
+1 ms polls on Linux and could be past its end on Windows, whose sleeps are 15.6 ms."""
+
 ACTION_LEDGER_SIZE = 50
 """Finished requests whose answers the ledger keeps per device, for a retry, ``GET
 api/actions/recent`` and the ``action`` frame; the oldest answer goes first, its id stays
@@ -747,9 +754,9 @@ def action_settle(
     here does: a store locked past its busy timeout was "database is locked" alone, the
     agent's prompt answered No (review of #243, round 17, 1/2).
     """
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        time.sleep(ACTION_POLL_SECONDS)
+    deadline = _monotonic() + seconds
+    while _monotonic() < deadline:
+        _sleep(ACTION_POLL_SECONDS)
         try:
             snap = action_fleet_call(lambda: remote_needs.needs_single_agent_now(target, label))
         except RequestError as exc:
@@ -918,11 +925,11 @@ def action_after_escape(reached: Callable[[AgentNow], bool]) -> Callable[[AgentN
     it, as a dialog left waiting is, the Escape may not have been read yet, and the
     ``/exit`` and Enter, or the text and Enter, typed behind it would reach the dialog.
     """
-    escaped = time.monotonic()
+    escaped = _monotonic()
 
     def rested(snap: AgentNow) -> bool:
         if remote_needs.needs_unseen(snap):
-            waited = time.monotonic() - escaped >= action_quiet_window()
+            waited = _monotonic() - escaped >= action_quiet_window()
             return waited and snap.pane_quiet is True
         return reached(snap)
 

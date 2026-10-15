@@ -599,6 +599,31 @@ def test_with_no_other_account_a_limit_starts_no_hand_over_and_posts_nothing_of_
     assert len(started) == 1
 
 
+def test_with_the_registry_unreadable_a_limit_still_reaches_the_worker_that_says_why(
+    fake_home: Path, work: ProjectInfo, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 14: ``somewhere_to_hand_over`` said no where the registry could
+    not be read, and the hook returned without a word, where the worker used to post "not
+    switched — accounts registry unreadable …". Which accounts are enabled is not known, so
+    the worker is started, and its pick, which takes nothing from that registry, says why."""
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    started: list[list[str]] = []
+    monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
+    mine = _slot("work@example.com", "tok-work")
+    _session(work, "sess-fleet")
+    _fleet_row(work, "agt_limited4", "coder-db", "sess-fleet")
+    unreadable = "accounts registry unreadable (database is locked)"
+    monkeypatch.setattr(service, "_read_arranged", lambda: (core.list_accounts(), unreadable))
+
+    assert service.somewhere_to_hand_over(mine.slot)
+    _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
+
+    assert len(started) == 1, "the worker is started, to say why it switched nothing"
+    hooks_service.hand_over("sess-fleet", reason="weekly limit")
+    said = [text for kind, text in _events(work) if "not switched" in text]
+    assert said and unreadable in said[0], _events(work)
+
+
 def test_remote_holds_the_limit_of_an_agent_the_hook_hands_over_from_an_account_disabled_since(
     fake_home: Path, work: ProjectInfo, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:

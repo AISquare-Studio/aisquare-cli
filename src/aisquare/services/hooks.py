@@ -262,7 +262,9 @@ def _hand_over_if_configured(failure: team_service.TurnFailure) -> None:
     # As `fleet.switch` reads where the agent is, and Remote's scan asks the same.
     leaving = claude_accounts_service.leaving_slot(agent.account_slot, session.account)
     if not claude_accounts_service.somewhere_to_hand_over(leaving):
-        return  # one account: `wait`, with no board note on every limit that it is
+        # One account: `wait`, with no board note on every limit that it is. A registry
+        # that cannot be read is no answer, and goes on to the worker, which says so.
+        return
     resets_at = failure.notice.resets_at if failure.notice is not None else None
     if resets_at is not None:
         wait = timedelta(minutes=settings.wait_if_reset_within_minutes)

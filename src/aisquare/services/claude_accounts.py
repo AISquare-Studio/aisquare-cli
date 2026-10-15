@@ -854,8 +854,13 @@ def accounts_settings() -> AccountsSettings:
 def somewhere_to_hand_over(leaving: int | None = None) -> bool:
     """Whether a hand-over of an agent on slot ``leaving`` has an account to go to: an
     enabled, signed-in one other than ``leaving``. Not knowing which slot the agent is on
-    (``None``), two such accounts, so that one is not the agent's. No account to go to
-    where the registry cannot be read, which :func:`choose_for_handover` picks nothing from.
+    (``None``), two such accounts, so that one is not the agent's.
+
+    Where the registry cannot be read, which accounts are enabled is not known, and the
+    answer is yes: the hand-over is started, and :func:`choose_for_handover` picks nothing
+    from that registry and says why, which the worker posts ("not switched — accounts
+    registry unreadable …"). A no here stopped the hook without a word: nothing on the
+    board said the configured ``switch`` was skipped, or why (review of #259, round 14).
 
     ``on_limit = "switch"`` is the default since 0.8.1, so a machine with one account has it
     too. There every limit started a hand-over that could only refuse, posted "not
@@ -865,7 +870,7 @@ def somewhere_to_hand_over(leaving: int | None = None) -> bool:
     """
     accounts, registry_note = _read_arranged()
     if registry_note is not None:
-        return False
+        return True
     usable = [
         account.slot for account in accounts if not account.disabled and core.signed_in(account)
     ]

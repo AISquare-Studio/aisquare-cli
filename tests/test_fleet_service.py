@@ -7824,27 +7824,86 @@ def test_a_spawn_for_a_task_whose_tree_was_reaped_carries_on_from_its_branch(
     assert f"branch {branch} already existed — checked it out" in again.notes
 
 
-def test_a_restart_of_an_agent_whose_worktree_was_reaped_is_refused(
-    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+#: A worktree and its ``fleet/…`` branch over their lifecycle (docs/fleet.md, "One rule for a
+#: worktree and its branch"): what happened to them → what a restart of the agent does,
+#: and what a new spawn for its task starts on. ``None`` for a restart is "made again, or
+#: kept, on its branch at its tip"; a string is the refusal. A spawn ``"tip"`` lands on the
+#: agent's last commit, ``"main"`` on main's.
+_LIFECYCLE: dict[str, tuple[str | None, str]] = {
+    "tree and branch there": (None, "tip"),
+    "tree deleted by hand": (None, "tip"),
+    "pushed, reaped: branch kept": (None, "tip"),
+    "merged, reaped: branch deleted": ("git no longer knows which branch it was on", "tip"),
+    "tree and branch deleted by hand": ("and so is its branch", "main"),
+}
+
+
+@pytest.mark.parametrize("then", ["restart", "spawn"])
+@pytest.mark.parametrize("case", list(_LIFECYCLE))
+def test_a_worktree_and_its_branch_over_their_lifecycle(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    case: str,
+    then: str,
 ) -> None:
-    """Review of #259, round 13: the reaped agent's 💤 row could still be restarted, and
-    its replacement carried on in a tree made anew from main on a new branch, without its
-    commits, with nothing said. Refused, before anything is recorded: the row stays, and
-    no tree is made at its path."""
+    """Review of #259, rounds 13 and 14: one rule for an agent's tree and its branch. A
+    tree that is gone is made again on the branch it was on (deleted by hand, or reaped
+    with the branch kept), and a restart is refused only when that branch is gone, saying
+    so — not blaming ``fleet reap``, which deletes a branch only once main holds it. A
+    spawn for the task asks for the same branch and carries on from it. Refused, nothing
+    is recorded: the 💤 row stays, and no tree is made at its path."""
     _remote(project, tmp_path)
-    coder = fleet_service.spawn(project, "coder", label="coder-reaped").agent
+    task = _add_task(project, "Wire the auth flow")
+    coder = fleet_service.spawn(project, "coder", task_id=task.id).agent
     _commit(coder.cwd, "feature.txt")
-    _git("push", "-q", "origin", "HEAD:feat/integration", cwd=coder.cwd)
-    fleet_service.stop(project, "coder-reaped", force=True)
-    assert fleet_service.reap(project).worktrees_removed == [coder.cwd]
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=coder.cwd)
+    tip = _git("rev-parse", "HEAD", cwd=coder.cwd)
+    fleet_service.stop(project, coder.label, force=True)
+    if case == "pushed, reaped: branch kept":
+        _git("push", "-q", "origin", f"{branch}:feat/integration", cwd=project.root)
+        assert fleet_service.reap(project).branches_kept == [branch]
+    elif case == "merged, reaped: branch deleted":
+        _git("merge", "-q", "--ff-only", branch, cwd=project.root)
+        assert fleet_service.reap(project).branches_deleted == [branch]
+    elif case != "tree and branch there":
+        shutil.rmtree(coder.cwd)
+        if case == "tree and branch deleted by hand":
+            _git("update-ref", "-d", f"refs/heads/{branch}", cwd=project.root)
+    refusal, spawned_on = _LIFECYCLE[case]
 
-    with pytest.raises(FleetError, match=r"worktree .* is gone .*fleet reap"):
-        fleet_service.restart(project, "coder-reaped")
-
-    assert not coder.cwd.exists(), "no tree was made in its place"
-    with store_session() as store:
-        [row] = store.fleet_agents(project.id)
-    assert row.id == coder.id and row.ended_at is not None
+    if then == "spawn":
+        cwd = fleet_service.spawn(project, "coder", task_id=task.id).agent.cwd
+        assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=cwd) == branch
+        main = _git("rev-parse", "main", cwd=project.root)
+        assert _git("rev-parse", "HEAD", cwd=cwd) == (tip if spawned_on == "tip" else main)
+        return
+    if refusal is not None:
+        with pytest.raises(FleetError) as refused:
+            fleet_service.restart(project, coder.label)
+        said = str(refused.value)
+        assert f"its worktree {coder.cwd} is gone" in said and refusal in said, said
+        assert "fleet reap" not in said, "it says what it found"
+        assert not coder.cwd.exists(), "no tree was made in its place"
+        with store_session() as store:
+            [row] = store.fleet_agents(project.id)
+        assert row.id == coder.id and row.ended_at is not None
+        return
+    receipt = fleet_service.restart(project, coder.label)
+    assert receipt.started.cwd == coder.cwd
+    assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=coder.cwd) == branch
+    assert _git("rev-parse", "HEAD", cwd=coder.cwd) == tip, "every commit is there"
+    remade = f"its worktree {coder.cwd} was gone — made it again on its branch {branch}"
+    assert (remade in receipt.notes) == (case != "tree and branch there"), receipt.notes
+    noted = subprocess.run(
+        ["git", "config", "--get-regexp", "aisquare-worktree"],
+        cwd=project.root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert noted.stdout == "", "the note goes once the tree is back"
 
 
 def test_reap_keeps_a_worktree_with_unpushed_commits_or_uncommitted_changes_and_says_why(
@@ -12602,7 +12661,7 @@ def test_a_replay_refused_inside_the_replacements_spawn_names_no_bin_either(
     tmux.die(agent.pane_id, 1)
     # The binary goes after the check before the stop has passed.
     monkeypatch.setattr(
-        fleet_service, "_refuse_a_replay_that_cannot_start", lambda agent, session: None
+        fleet_service, "_refuse_a_replay_that_cannot_start", lambda agent, session, root: None
     )
     monkeypatch.setenv("AISQUARE_BIN_CODER", str(tmp_path / "gone" / "claude"))
 

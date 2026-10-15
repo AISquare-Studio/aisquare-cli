@@ -477,11 +477,10 @@ default branch holds its tip (`branches_deleted`). One with commits the default
 branch lacks — pushed to an integration branch, say — is kept and named
 (`branches_kept`): a branch costs nothing, and a coder spawned again for its
 task asks for the same branch, checks it out and carries on with its commits,
-where it used to start a new one from the main checkout's HEAD without them. An
-agent whose tree was removed is not restarted (Restart, `fleet restart`,
-Remote's restart): its conversation would carry on in a new tree without its
-commits, so spawn a new one for its task. `--all` walks every project's fleet,
-not just this one.
+where it used to start a new one from the main checkout's HEAD without them. A
+restart of an agent whose tree was removed makes the tree again on the branch
+reap kept: *One rule for a worktree and its branch* under [Naming](#naming).
+`--all` walks every project's fleet, not just this one.
 
 Each row is asked of its own server, at the socket its spawn recorded, so a
 shell under another `TMUX_TMPDIR` reaps exactly what the spawning shell would,
@@ -1112,6 +1111,30 @@ branch. Either way the receipt says where the tree came from and where it went.
 A worktree that a *live* agent is already working in is never handed to a
 second one: that spawn is refused rather than suffixed, because the tree named
 by that label belongs to the spawn that won the label.
+
+**One rule for a worktree and its branch: the branch outlives the tree.** A
+tree is disk, and goes when nothing in it is found only there (`fleet reap`);
+its `fleet/…` branch is the agent's work, and goes only once the default branch
+holds its tip. So whatever happened to the tree, an agent that carries on —
+Restart, `fleet restart`, `fleet switch`, Remote's restart — does so on its own
+branch with every commit on it, and a spawn for the same task asks for the same
+branch and checks it out:
+
+| what happened | restart or switch | a new spawn for the task |
+|---|---|---|
+| tree and branch there | kept as it stands | reuses the tree, on the task's branch |
+| tree deleted by hand, branch there | the tree made again on the branch it was on, at the same path | checks the branch out |
+| pushed (to any remote branch) and reaped: tree removed, branch kept | the tree made again on that branch | checks the branch out |
+| merged and reaped: tree removed, branch deleted | refused: git no longer knows which branch it was on | a new branch from HEAD — which holds the work when HEAD is the default branch |
+| tree and branch both deleted by hand | refused: the branch is gone too | a new branch from HEAD |
+
+A restart finds the branch where it was left: git keeps a hand-deleted tree's
+branch in its worktree list until a `git worktree prune`, and `reap` notes the
+tree it removed on the branch it keeps (`branch.<name>.aisquare-worktree` in the
+repo's git config, which `git branch -D` drops with the branch). A refusal says
+which of the two it found, before anything is stopped, and names the way on:
+spawn a new agent for the task. A branch another tree has checked out by then
+is refused too, naming that tree.
 
 Worked examples: `~/Code/AISquare/ws2/aisquare-cli` → `aisquare-cli`,
 codename `amber-otter`, session `asq-amber-otter`, branches

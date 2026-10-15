@@ -429,7 +429,9 @@ all of them, and the fleet cleans up the worktrees it made.**
   ignored, or unpushed commits is kept and named with why; push it, and the
   next `reap` removes it. `--json` adds `worktrees_kept`, `branches_deleted`
   and `branches_kept` beside `worktrees_removed`. A live agent's tree is never
-  touched, as before.
+  touched, as before. A restart or switch of an agent whose tree is gone —
+  reaped, or deleted by hand — makes it again on the branch it was on, and is
+  refused, saying so, only when that branch is gone too.
 - **`fleet stop` says** that `fleet reap` removes the agent's worktree once its
   work is pushed, for an agent that had one.
 - **The role cycles clean up.** The manager's cycle says to stop (`fleet stop`)

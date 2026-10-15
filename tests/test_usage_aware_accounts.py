@@ -558,6 +558,43 @@ def test_the_hook_starts_a_detached_hand_over_only_when_configured_and_the_reset
     )
 
 
+@pytest.mark.parametrize("accounts", ["one", "two"])
+def test_a_limit_that_lifts_soon_waits_without_asking_any_account_whether_it_is_signed_in(
+    fake_home: Path,
+    work: ProjectInfo,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    accounts: str,
+) -> None:
+    """Review of #259, round 16: the StopFailure hook asked ``somewhere_to_hand_over`` —
+    every account's ``.claude.json`` parsed, and on macOS its Keychain item read, perhaps
+    with an unlock dialog from a background hook — before the cheap check that the limit
+    lifts within ``wait_if_reset_within_minutes``, which waits whatever the answer. The
+    reset is asked first, and the wait's note is posted on any machine."""
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    started: list[list[str]] = []
+    monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
+
+    def never(leaving: int | None = None) -> bool:
+        raise AssertionError("every account asked about, for a limit that lifts soon")
+
+    monkeypatch.setattr(service, "somewhere_to_hand_over", never)
+    _slot("work@example.com", "tok-work")
+    if accounts == "two":
+        _slot("home@example.com", "tok-home")
+    _session(work, "sess-fleet")
+    _fleet_row(work, "agt_limited2", "coder-db", "sess-fleet")
+    _settings(wait_if_reset_within_minutes=15)
+    soon = (datetime.now().astimezone() + timedelta(minutes=5)).strftime("%I:%M%p").lstrip("0")
+
+    _fire_limit(
+        runner, work, f"You've hit your session limit · resets {soon.lower()}", "sess-fleet"
+    )
+
+    assert started == []
+    assert any("waiting for the reset instead of switching" in text for _, text in _events(work))
+
+
 @pytest.mark.parametrize("accounts", ["one", "one enabled of two"])
 def test_with_no_other_account_a_limit_starts_no_hand_over_and_posts_nothing_of_it(
     fake_home: Path,

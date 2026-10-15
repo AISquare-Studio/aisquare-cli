@@ -265,16 +265,16 @@ def _hand_over_if_configured(failure: team_service.TurnFailure) -> None:
         project = store.get_project(session.project_id)
     if agent is None or project is None:
         return  # a hand-typed session is the operator's to move
-    # As `fleet.switch` reads where the agent is, and Remote's scan asks the same.
-    leaving = claude_accounts_service.leaving_slot(agent.account_slot, session.account)
-    if not claude_accounts_service.somewhere_to_hand_over(leaving):
-        # One account: `wait`, with no board note on every limit that it is. A registry
-        # that cannot be read is no answer, and goes on to the worker, which says so.
-        return
     resets_at = failure.notice.resets_at if failure.notice is not None else None
     if resets_at is not None:
         wait = timedelta(minutes=settings.wait_if_reset_within_minutes)
         if resets_at - datetime.now(tz=UTC) <= wait:
+            # Asked before whether there is an account to go to, which reads every
+            # account's `.claude.json` (tens of MB) and, on macOS, its Keychain item, each
+            # with a 5 s timeout and perhaps an unlock dialog from a background hook: none
+            # of it changes a wait (review of #259, round 16). The note is true on one
+            # account too — `on_limit = "switch"` is what is not done — and comes only with
+            # a limit this close to its reset.
             team_service.hook_note(
                 session.project_id,
                 f"{agent.label}: usage limit lifts within {settings.wait_if_reset_within_minutes} "
@@ -282,6 +282,12 @@ def _hand_over_if_configured(failure: team_service.TurnFailure) -> None:
                 session_id=session.id,
             )
             return
+    # As `fleet.switch` reads where the agent is, and Remote's scan asks the same.
+    leaving = claude_accounts_service.leaving_slot(agent.account_slot, session.account)
+    if not claude_accounts_service.somewhere_to_hand_over(leaving):
+        # One account: `wait`, with no board note on every limit that it is. A registry
+        # that cannot be read is no answer, and goes on to the worker, which says so.
+        return
     window = failure.notice.window if failure.notice is not None else "usage"
     argv = selfcli.argv_for(
         ["--quiet", "hook", "hand-over", session.id, "--reason", f"{window} limit"]

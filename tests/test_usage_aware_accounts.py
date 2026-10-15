@@ -41,9 +41,16 @@ from aisquare.core import paths, selfcli
 from aisquare.core.config import AccountsSettings, AppConfig, load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
-from aisquare.models import ClaudeAccount, FleetAgent, ProjectInfo, TeamSession, TurnMetric
+from aisquare.models import (
+    ClaudeAccount,
+    FleetAgent,
+    FleetAgentStatus,
+    ProjectInfo,
+    TeamSession,
+    TurnMetric,
+)
 from aisquare.services import claude_accounts as service
-from aisquare.services import diagnostics
+from aisquare.services import diagnostics, remote_needs
 from aisquare.services import fleet as fleet_service
 from aisquare.services import hooks as hooks_service
 from aisquare.services import metrics as metrics_service
@@ -581,15 +588,56 @@ def test_with_no_other_account_a_limit_starts_no_hand_over_and_posts_nothing_of_
 
     assert started == []
     assert not any("switch" in text for kind, text in _events(work) if kind != "limited")
-    assert service.limit_settings().on_limit == "wait"
+    assert not service.somewhere_to_hand_over(mine.slot)
     assert service.accounts_settings().on_limit == "switch"  # as configured
 
     _slot("spare@example.com", "tok-spare")  # an account to go to: switch it is
-    assert service.limit_settings().on_limit == "switch"
+    assert service.somewhere_to_hand_over(mine.slot)
     with store_session() as store:
         store.touch_session("sess-fleet", state="working")
     _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
     assert len(started) == 1
+
+
+def test_remote_holds_the_limit_of_an_agent_the_hook_hands_over_from_an_account_disabled_since(
+    fake_home: Path, work: ProjectInfo, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 14: coder-1 was spawned on slot 2, which was then disabled, and
+    slot 3 is enabled and signed in. The hook hands it over to slot 3; Remote's scan asked
+    with no slot ("two usable accounts": one) and pushed the limit at once, for a limit
+    being handled. Remote asks the hook's question now, with the row's slot."""
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    started: list[list[str]] = []
+    monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
+    mine = _slot("work@example.com", "tok-work")
+    _slot("home@example.com", "tok-home")
+    service.set_disabled(str(mine.slot), True)
+    _session(work, "sess-fleet")
+    _fleet_row(work, "agt_limited3", "coder-1", "sess-fleet")
+    with store_session() as store:
+        row = store.fleet_agent_for_session(work.id, "sess-fleet")
+        assert row is not None
+        row = row.model_copy(update={"account_slot": mine.slot})
+        store.upsert_fleet_agent(row)
+
+    _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
+    assert len(started) == 1, "the hook hands it over"
+
+    with store_session() as store:
+        session = store.get_session("sess-fleet")
+    status = FleetAgentStatus(agent=row, state="limited", session=session)
+    sources = remote_needs.live_needs_sources()
+    now = datetime.now(tz=UTC)
+    [item] = remote_needs.needs_from_agent(
+        status,
+        None,
+        project=work,
+        events=[],
+        now=now,
+        accounts=sources.accounts(),
+        hands_over=sources.hands_over,
+    )
+    assert item.push_after == item.since + remote_needs._LIMITED_PUSH_DELAY, "held for it"
 
 
 def test_a_re_fire_for_the_same_window_starts_no_second_worker(

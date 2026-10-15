@@ -874,13 +874,19 @@ def somewhere_to_hand_over(leaving: int | None = None) -> bool:
     return any(slot != leaving for slot in usable)
 
 
-def limit_settings() -> AccountsSettings:
-    """:func:`accounts_settings` as a usage limit is met: ``on_limit = "switch"`` reads as
-    ``wait`` where no hand-over has an account to go to (:func:`somewhere_to_hand_over`)."""
-    settings = accounts_settings()
-    if settings.on_limit == "switch" and not somewhere_to_hand_over():
-        return settings.model_copy(update={"on_limit": "wait"})
-    return settings
+def leaving_slot(account_slot: int | None, account: str | None) -> int | None:
+    """The slot a hand-over moves an agent from, read as ``fleet.switch`` reads where it is:
+    the row's (``FleetAgent.account_slot``, #145), else its session's config dir's
+    (:func:`slot_of`); ``None`` when neither says.
+
+    The StopFailure hook and Remote's needs scan both ask :func:`somewhere_to_hand_over`
+    with it, so they agree. Remote asked with no slot, "two usable accounts", and the two
+    disagreed where the agent's own account was no longer usable: the hook handed it over
+    to the one left while Remote pushed the limit at once (review of #259, round 14).
+    """
+    if account_slot is not None:
+        return account_slot
+    return slot_of(account) if account else None
 
 
 def sample_usage(

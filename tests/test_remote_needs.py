@@ -2581,11 +2581,45 @@ def test_a_card_and_an_actions_refusal_name_a_project_as_the_project_list_does()
 def test_a_limit_with_no_account_to_switch_to_is_pushed_at_once(isolated_home: Path) -> None:
     """``on_limit = "switch"`` is the default on a machine with one account too, where no
     hand-over can start: the limit's push waited 90 s for one (review of #259, round 13).
-    The scan reads ``[accounts]`` as a limit is met (``limit_settings``): ``wait`` there."""
-    accounts = remote_needs.live_needs_sources().accounts()
-    assert accounts.on_limit == "wait"
-    item = _one(_classify(_limited(NOW + timedelta(hours=3)), accounts=accounts))
+    The scan asks the hook's own question, whether there is an account to go to: none."""
+    sources = remote_needs.live_needs_sources()
+    assert sources.accounts().on_limit == "switch"  # as configured
+    item = _one(
+        _classify(
+            _limited(NOW + timedelta(hours=3)),
+            accounts=sources.accounts(),
+            hands_over=sources.hands_over,
+        )
+    )
     assert item.push_after == item.since
+
+
+@pytest.mark.parametrize(("somewhere", "delay"), [(True, 90), (False, 0)])
+def test_a_limit_is_held_by_the_hand_over_question_asked_with_the_agents_own_slot(
+    somewhere: bool, delay: int
+) -> None:
+    """Review of #259, round 14: the scan asked ``somewhere_to_hand_over()`` with no slot,
+    "two usable accounts", and the hook asks it with the agent's slot, "one other than
+    this". On slot 2, disabled since, with slot 3 left, the hook handed the agent over to 3
+    while Remote pushed the limit at once. Both ask with the row's slot now; and only for
+    a row no reset or manager settles first."""
+    asked: list[int | None] = []
+
+    def hands_over(leaving: int | None) -> bool:
+        asked.append(leaving)
+        return somewhere
+
+    status = _limited(NOW + timedelta(hours=3))
+    status.agent.account_slot = 2
+    item = _one(_classify(status, accounts=AccountsSettings(), hands_over=hands_over))
+    assert asked == [2]
+    assert item.push_after == item.since + timedelta(seconds=delay)
+
+    asked.clear()
+    _one(_classify(status, accounts=AccountsSettings(), hands_over=hands_over, manager_live=True))
+    _one(_classify(_limited(NOW + timedelta(minutes=5)), hands_over=hands_over))
+    _one(_classify(status, accounts=AccountsSettings(on_limit="wait"), hands_over=hands_over))
+    assert asked == [], "settled before it: a manager, a near reset, or `wait`"
 
 
 def test_a_limits_reset_reaches_the_phone_as_an_instant_never_the_machines_clock(

@@ -5953,11 +5953,9 @@ def _account_slot_of(agent: FleetAgent, session: TeamSession | None) -> int | No
     ``choose``'s alone — which is why the config-dir lookup lives in the
     accounts service rather than here.
     """
-    if agent.account_slot is not None:
-        return agent.account_slot
-    if session is None or not session.account:
-        return None
-    return claude_accounts_service.slot_of(session.account)
+    return claude_accounts_service.leaving_slot(
+        agent.account_slot, session.account if session is not None else None
+    )
 
 
 def _mark_handing_over(agent: FleetAgent, session: TeamSession, verb: str, label: str) -> None:

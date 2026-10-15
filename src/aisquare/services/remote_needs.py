@@ -379,6 +379,11 @@ def _needs_answers_every(socket: str, path: Path | None) -> bool:
     return True
 
 
+def _needs_hands_over_anywhere(leaving: int | None) -> bool:
+    """A source's ``hands_over`` when it says nothing: every agent has somewhere to go."""
+    return True
+
+
 def _needs_no_event(
     project_id: str, session_id: str, kind: str, since: datetime
 ) -> TeamEvent | None:
@@ -435,6 +440,7 @@ class NeedsSources:
     """A task's status; ``None`` when it is gone."""
     transcript_tail: Callable[[str], TranscriptTail | None]
     accounts: Callable[[], AccountsSettings]
+    """``[accounts]`` as configured: ``on_limit`` and ``wait_if_reset_within_minutes``."""
     has_live_agents: Callable[[str], bool] = _needs_lists_every
     """Whether the project has a row that has not ended. The scan lists only a project that
     has: ``fleet.list_agents`` reads every row and session the project ever had, and with
@@ -458,6 +464,11 @@ class NeedsSources:
     (:func:`_needs_screen_read`).
     Asked only of an agent with more than one call pending, whose prompt on screen may be
     any of them (:func:`_needs_on_screen`)."""
+    hands_over: Callable[[int | None], bool] = _needs_hands_over_anywhere
+    """Whether ``on_limit = "switch"`` hands an agent leaving the given slot over: an
+    account to go to (``claude_accounts.somewhere_to_hand_over``), asked with the slot the
+    StopFailure hook asks with (``claude_accounts.leaving_slot``). Asked only of a limited
+    row that no reset or live manager settles first (:func:`_needs_limited_push`)."""
     board_project: Callable[[ProjectInfo], str] = _needs_own_board
     """The id of the project whose board a project's agents write: the project's own, a
     worktree's principal checkout's, or under ``AISQUARE_TEAM_HUB`` the hub's, as ``asq board``
@@ -889,6 +900,7 @@ def needs_from_agent(
     now: datetime,
     manager_live: bool = False,
     accounts: AccountsSettings | None = None,
+    hands_over: Callable[[int | None], bool] | None = None,
     pane_output: Callable[[], datetime | None] | None = None,
     pane_screen: Callable[[], Sequence[str] | None] | None = None,
 ) -> list[NeedsItem]:
@@ -1019,6 +1031,7 @@ def needs_from_agent(
                 now=now,
                 manager_live=manager_live,
                 accounts=accounts,
+                hands_over=hands_over,
             )
         ]
     trust = _needs_trust_item(status, project=project, name=name)
@@ -1336,6 +1349,7 @@ def _needs_limited_item(
     now: datetime,
     manager_live: bool,
     accounts: AccountsSettings | None,
+    hands_over: Callable[[int | None], bool] | None = None,
 ) -> NeedsItem:
     """A row parked on a usage limit: the subject is its newest ``limited`` event.
 
@@ -1347,6 +1361,7 @@ def _needs_limited_item(
     the card shows that line without its reset, as of when the hook ran.
     """
     from aisquare.core import claude_accounts as claude_accounts_core
+    from aisquare.services import claude_accounts as claude_accounts_service
     from aisquare.services.remote_server import _iso_seconds
 
     agent, session = status.agent, status.session
@@ -1363,6 +1378,12 @@ def _needs_limited_item(
         lifts = f"limit resets {claude_accounts_core.format_reset(resets, now=now, clock=False)}"
         reason += f" · {lifts}"
         detail["resets_at"] = _iso_seconds(resets)
+
+    def handed_over() -> bool:
+        account = session.account if session is not None else None
+        leaving = claude_accounts_service.leaving_slot(agent.account_slot, account)
+        return hands_over is None or hands_over(leaving)
+
     return _needs_item(
         "limited",
         subject,
@@ -1373,7 +1394,12 @@ def _needs_limited_item(
         detail=_needs_fit(detail, _DETAIL_TEXT_MAX),
         since=since,
         push_after=_needs_limited_push(
-            since, resets, now=now, manager_live=manager_live, accounts=accounts
+            since,
+            resets,
+            now=now,
+            manager_live=manager_live,
+            accounts=accounts,
+            hands_over=handed_over,
         ),
     )
 
@@ -1400,13 +1426,16 @@ def _needs_limited_push(
     now: datetime,
     manager_live: bool,
     accounts: AccountsSettings | None,
+    hands_over: Callable[[], bool] | None = None,
 ) -> datetime | None:
     """When a limit may push: never when it lifts soon; later when someone else is on it.
 
     A reset within ``[accounts] wait_if_reset_within_minutes`` is cheaper to wait
-    out than to act on, so it stays in the feed. With ``on_limit = "switch"`` or a
-    live manager, the hand-over or the manager is already moving it, and its
-    ``switched`` event usually ends the item first.
+    out than to act on, so it stays in the feed. With a live manager, or
+    ``on_limit = "switch"`` and an account for the hand-over to go to
+    (``hands_over``, the StopFailure hook's own question of this agent; asked last,
+    as only this needs it), the hand-over or the manager is already moving it, and
+    its ``switched`` event usually ends the item first.
     """
     if accounts is None:
         from aisquare.core.config import AccountsSettings
@@ -1416,7 +1445,7 @@ def _needs_limited_push(
         minutes=accounts.wait_if_reset_within_minutes
     ):
         return None
-    if accounts.on_limit == "switch" or manager_live:
+    if manager_live or (accounts.on_limit == "switch" and (hands_over is None or hands_over())):
         return since + _LIMITED_PUSH_DELAY
     return since
 
@@ -2197,6 +2226,7 @@ def _needs_scan_project(
             # The manager's own items wait on no one: its own limit's nudge goes to itself.
             manager_live=taking is not None and taking.id != status.agent.id,
             accounts=accounts,
+            hands_over=sources.hands_over,
             pane_output=_needs_output_of(sources, status, reads),
             pane_screen=_needs_screen_of(sources, status, reads),
         )
@@ -3322,7 +3352,8 @@ def live_needs_sources() -> NeedsSources:
         board_sessions=needs_board_sessions,
         task_status=needs_task_status,
         transcript_tail=_needs_cached_tail,
-        accounts=claude_accounts_service.limit_settings,
+        accounts=claude_accounts_service.accounts_settings,
+        hands_over=claude_accounts_service.somewhere_to_hand_over,
         has_live_agents=needs_rows_live,
         tmux_answers=needs_tmux_answers,
         session_event=needs_session_event,

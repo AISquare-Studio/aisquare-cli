@@ -905,16 +905,10 @@ def ensure_codename(project: ProjectInfo, store: ContextStore | None = None) -> 
 def _kept_codename(store: ContextStore, project: ProjectInfo) -> str | None:
     """The codename ``project``'s row holds, a forgotten one's included, or ``None`` when it
     has no row. A forget keeps the codename (its tombstone), and the windows its agents left
-    linger under it; :meth:`~aisquare.core.store.SqliteStore.get_project` reads no tombstone.
-    """
-    return next(
-        (
-            each.codename
-            for each in store.list_projects(include_forgotten=True)
-            if each.id == project.id
-        ),
-        None,
-    )
+    linger under it. One row read by its key: every row was read and built, tombstones
+    included, to find it (review of #259, round 18)."""
+    row = store.get_project(project.id, include_forgotten=True)
+    return row.codename if row is not None else None
 
 
 def _codename_to_add(store: ContextStore, project: ProjectInfo) -> str:

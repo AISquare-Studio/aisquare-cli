@@ -1917,6 +1917,33 @@ def test_with_capture_off_a_row_captured_before_gets_no_codename_but_from_a_spaw
     assert started.tmux_session == f"asq-{listed.codename}"
 
 
+def test_the_codename_a_row_kept_is_read_by_its_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 18: ``_kept_codename`` read and built every project row,
+    tombstones included, to find one by its key, on each ``fleet attach`` and first spawn in
+    a directory nobody added. It reads the one row, live, captured or forgotten."""
+    from aisquare.core.store import SqliteStore
+
+    live, gone, unseen = (team_project(tmp_path / name) for name in ("live", "gone", "unseen"))
+    with store_session() as store:
+        store.ensure_project(live)
+        store.set_codename(live.id, "quiet-lynx")
+        store.onboard_project(gone)
+        store.set_codename(gone.id, "brave-otter")
+        store.forget_project(gone.id)
+
+    def every_row(self: SqliteStore, **_kwargs: object) -> list[ProjectInfo]:
+        raise AssertionError("read every project row for one")
+
+    monkeypatch.setattr(SqliteStore, "list_projects", every_row)
+    with store_session() as store:
+        assert fleet_service._kept_codename(store, live) == "quiet-lynx"
+        assert fleet_service._kept_codename(store, gone) == "brave-otter"
+        assert fleet_service._kept_codename(store, unseen) is None
+        assert store.get_project(gone.id) is None, "a tombstone is still hidden by default"
+
+
 def test_with_capture_off_an_attach_where_nothing_was_added_never_finds_anothers_session(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
 ) -> None:

@@ -1175,7 +1175,9 @@ class ContextStore(Protocol):
         self, *, all: bool = False, include_forgotten: bool = False
     ) -> list[ProjectInfo]: ...
     def captured_projects(self) -> list[ProjectInfo]: ...
-    def get_project(self, project_id: str) -> ProjectInfo | None: ...
+    def get_project(
+        self, project_id: str, *, include_forgotten: bool = False
+    ) -> ProjectInfo | None: ...
     def find_projects(self, term: str) -> list[ProjectInfo]: ...
     def add_linked_repo(self, project_id: str, repo: str) -> ProjectInfo: ...
     def forget_project(self, project_id: str) -> None: ...
@@ -1913,10 +1915,15 @@ class SqliteStore:
         ).fetchall()
         return [_row_to_project(row) for row in rows]
 
-    def get_project(self, project_id: str) -> ProjectInfo | None:
+    def get_project(
+        self, project_id: str, *, include_forgotten: bool = False
+    ) -> ProjectInfo | None:
+        """The live row for ``project_id``; with ``include_forgotten``, its tombstone too, as
+        :meth:`list_projects` reads one: a forgotten project's codename names the session its
+        agents' windows linger in."""
+        live = "" if include_forgotten else " AND forgotten_at IS NULL"
         row = self._conn.execute(
-            f"SELECT {_PROJECT_COLUMNS} FROM project WHERE id = ? AND forgotten_at IS NULL",
-            (project_id,),
+            f"SELECT {_PROJECT_COLUMNS} FROM project WHERE id = ?{live}", (project_id,)
         ).fetchone()
         return _row_to_project(row) if row is not None else None
 

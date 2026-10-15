@@ -1172,7 +1172,7 @@ def test_a_replacement_whose_first_line_was_not_typed_says_how_it_began_and_why(
     fleet.answers[verb] = dataclasses.replace(
         cast(RestartReceipt | SwitchReceipt, fleet.answers[verb]),
         resumed=False,
-        prompt_typed=False,
+        prompt_typed="no",
         notes=["headroom: slot 2 has the most left", why],
         failures=[why],
     )

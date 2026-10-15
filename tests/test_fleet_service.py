@@ -2504,16 +2504,20 @@ def test_tell_whose_enter_did_not_go_through_leaves_the_text_at_its_prompt_and_f
     [TmuxError("server exited unexpectedly"), TmuxTimedOut("tmux did not answer within 30s")],
     ids=["refused", "timed out"],
 )
-def test_a_write_tmux_typed_a_part_of_is_maybe_and_says_how_much(cause: TmuxError) -> None:
+def test_a_write_tmux_typed_a_part_of_says_how_much_and_is_maybe_only_while_more_may_come(
+    cause: TmuxError,
+) -> None:
     """Review of #259, round 11, 7/13: a ``send_literal`` chunk after the first that failed
     left a prefix in the pane. Refused, it was "no" (nothing typed); timed out, "it may still
-    arrive", true of that prefix only, and of the one chunk the timeout asked for."""
+    arrive", true of that prefix only, and of the one chunk the timeout asked for. Round 12,
+    7/9: refused, it was ``maybe`` all the same, audited ``delivered=maybe``, where nothing
+    more can arrive: it is ``unsent``, a part at its prompt."""
 
     def write() -> None:
         raise TmuxPartlyTyped(cause, 512, 2048)
 
     wrote = fleet_service.pane_write("the text", write)
-    assert wrote.typed == "maybe"
+    assert wrote.typed == ("maybe" if isinstance(cause, TmuxTimedOut) else "unsent")
     said = wrote.late("coder-1")
     assert said.startswith(
         "tmux typed 512 of the 2048 bytes of the text into coder-1's pane, then "

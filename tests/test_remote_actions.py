@@ -2578,7 +2578,7 @@ def test_send_keys_whose_text_went_in_says_it_is_at_the_prompt_when_what_followe
             "refused the rest (server exited unexpectedly)"
         ), said
         assert said.endswith("read its live screen before you send it again"), said
-        verdict = "delivered=maybe"
+        verdict = "delivered=unsent"  # round 12, 7/9: no more of it can arrive
     ((_, line),) = phone.audit()
     assert line.endswith(f" {verdict}"), line
 

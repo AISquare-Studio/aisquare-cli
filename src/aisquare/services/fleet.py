@@ -286,9 +286,9 @@ class TellResult:
 class PaneWrite:
     """How one write into an agent's pane ended (:func:`pane_write`): ``yes``, tmux typed it;
     ``no``, tmux refused it and typed nothing; ``unsent``, refused past the writes of its chain
-    that went in (``went``); ``maybe``, tmux did not answer in time
-    (``TmuxTimedOut``), and a wedged server may still type it once it recovers, or it typed
-    a part before it failed (``TmuxPartlyTyped``).
+    that went in (``went``), or past a part of it (``TmuxPartlyTyped``); ``maybe``, tmux did
+    not answer in time (``TmuxTimedOut``), and a wedged server may still type it once it
+    recovers, or the rest of a part it typed.
 
     Every write that types into an agent on someone's word asks it here: the remote's tell
     in each of its modes, its Escapes, ``send-keys`` and quick answers, and ``fleet tell``.
@@ -322,7 +322,8 @@ class PaneWrite:
 
     def late(self, label: str, *, then: str = "", again: str = "send it again") -> str:
         """``maybe``'s sentence: ``what`` may still reach ``label``'s pane (and ``then``), or a
-        part of it did, so its live screen is read before anyone does ``again``."""
+        part of it did, and an ``unsent`` part's, so its live screen is read before anyone does
+        ``again``."""
         error = self.error
         read = f"read its live screen before you {again}"
         if isinstance(error, TmuxPartlyTyped):
@@ -344,10 +345,13 @@ def pane_write(what: str, write: Callable[[], object]) -> PaneWrite:
     (:class:`PaneWrite`). ``TmuxError`` is every way a tmux call fails (``core.tmux._tmux``),
     ``TmuxTimedOut`` the one way that may still happen, and ``TmuxPartlyTyped`` a write of
     several calls that failed past its first: ``core.tmux`` says which of its calls timed out
-    (review of #259, round 11, 7/13)."""
+    (review of #259, round 11, 7/13). Past a refusal no more of it can arrive: ``unsent``, not
+    ``maybe``, which audited it ``delivered=maybe`` (round 12, 7/9)."""
     try:
         write()
-    except (TmuxTimedOut, TmuxPartlyTyped) as exc:
+    except TmuxPartlyTyped as exc:
+        return PaneWrite("maybe" if isinstance(exc.cause, TmuxTimedOut) else "unsent", what, exc)
+    except TmuxTimedOut as exc:
         return PaneWrite("maybe", what, exc)
     except TmuxError as exc:
         return PaneWrite("no", what, exc)

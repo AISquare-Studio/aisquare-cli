@@ -268,8 +268,8 @@ as a length; a tell keeps its first 120 characters, and a switch the start of th
 `reason` it types into the replacement's prompt, because they hand an agent
 free-form instructions. A write refused after part of it already reached the
 agent is on the trail too, with how it ended: keys typed before tmux failed
-(`failed`), text left at its prompt when tmux refused its Enter
-(`delivered=unsent`), an Esc sent before the action stopped short (`refused=<error>`), a
+(`failed`), text left at its prompt when tmux refused its Enter, or refused the rest
+of it after a part (`delivered=unsent`), an Esc sent before the action stopped short (`refused=<error>`), a
 restart that stopped the agent and could not start its replacement
 (`failed=<error>`). A write tmux did not answer in time may still land, as a
 wedged server runs what it was asked once it recovers: its answer says so, and to

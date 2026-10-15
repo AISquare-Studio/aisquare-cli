@@ -6650,6 +6650,33 @@ def test_an_answer_in_words_whose_enter_did_not_go_says_it_waits_and_leaves_the_
     assert card["id"] not in [item["id"] for item in live.feed()]
 
 
+def test_an_answer_tmux_typed_a_part_of_and_refused_the_rest_of_is_unsent_not_maybe(
+    live: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 12, 7/9: a part typed and the rest refused was ``maybe``, the word
+    for "did not answer in time", audited ``delivered=maybe``, where nothing more can arrive.
+    It is ``unsent``: the sentence says how much went in, and the card leaves the feed, where
+    a second tap typed the whole answer after the part."""
+    from aisquare.core.tmux import TmuxError, TmuxPartlyTyped
+
+    def partly(pane_id: str, text: str) -> None:
+        raise TmuxPartlyTyped(TmuxError("server exited unexpectedly"), 512, len(text))
+
+    monkeypatch.setattr(remote_needs, "NEEDS_RESCAN_AFTER_ANSWER", 30.0)
+    monkeypatch.setattr(live.tmux, "send_literal", partly)
+    live.runtime.set_allow_write(True)
+    card = live.card("permission")
+    body = {"id": card["id"], "text": "use the staging remote " * 40, "enter": True}
+    response = live.client.post(live.url("needs/answer"), json=body)
+    assert (response.status_code, response.json()["error"]) == (503, "fleet_unavailable")
+    said = response.json()["message"]
+    assert said.startswith("tmux typed 512 of the 920 bytes of the answer into coder-1's pane, ")
+    assert "then refused the rest (server exited unexpectedly)" in said, said
+    assert live.tmux.typed == [], "no Enter after the part"
+    assert live.audit()[-1].endswith("enter=True delivered=unsent")
+    assert live.app.kit.lane_state["needs"].needs_lookup(card["id"]) is None
+
+
 def test_the_needs_routes_write_their_audit_lines_off_the_event_loop(
     live: Live, monkeypatch: pytest.MonkeyPatch
 ) -> None:

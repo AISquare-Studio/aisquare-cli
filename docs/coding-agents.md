@@ -245,7 +245,7 @@ fixes.
 | Accounts and usage | Numbered slots; usage from the endpoint Claude Code's `/usage` reads | The same slots, on one ladder (`~/.aisquare/codex-accounts/<n>`), with doctor rows. **Differs:** usage is read offline from the account's own rollouts (49 % of 5 h and 8 % of the week in the smoke). It is only as fresh as the last turn, and has no *to the limit* trend. | Smoke 11 |
 | `fleet switch` to another account | Resumes the session on the new account. | **Differs:** a Codex thread lives under its `CODEX_HOME`, so the agent starts fresh with the hand-off prompt (which got through the new home's folder-trust dialog) and its claim moves. A switch onto the same home resumes. | Smoke 12 |
 | Claim, review, done | Board tasks | Same: a Codex coder claimed a task and sent it to review, and a Codex tester marked it done. | Smoke 13 |
-| Board calls from inside the agent | No sandbox: `aisquare` runs as the user. | Same since `e8436fa3`: a sandboxed fleet Codex runs under the fleet's `aisquare` permission profile, and its board calls succeed on the first, sandboxed attempt. **Differs:** Codex sandboxes its tools. Its account homes, config, credentials and keys, the fleet's tmux conf and the agent registry are read-only to it. A restart, switch, hand-over or `tell` queue runs from the row's launch record only, written by its spawner and its own hook where the sandbox cannot write: binary, arguments, permission, role, agent, directory, account, transcript and thread; a row without one, or a project whose directory in the store is not the record's, is refused. A pick in its own `/permissions`, or a `codex` started by hand, uses its own sandbox ([the sandbox and the store](#the-sandbox-and-the-aisquare-store)). | Filed by the smoke: every call needed an escalation. Live sandbox: a note and a task claim succeeded sandboxed. Writes to the read-only paths were refused, and the launch record held (`ca6d43ea`, `8337e88c`, review r2; review r3; one launch record, review r4: a sandboxed reviewer's rewrites of its thread, home, role, binary and account replayed as recorded, the project's directory refused) |
+| Board calls from inside the agent | No sandbox: `aisquare` runs as the user. | Same since `e8436fa3`: a sandboxed fleet Codex runs under the fleet's `aisquare` permission profile, and its board calls succeed on the first, sandboxed attempt. **Differs:** Codex sandboxes its tools. Its account homes, config, credentials and keys, the fleet's tmux conf and the agent registry are read-only to it. A restart, switch, hand-over or `tell` queue runs from the row's launch record only, written by its spawner and its own hook where the sandbox cannot write: binary, arguments, permission, role, agent, directory, account, transcript and thread; a row without one, or a project whose directory in the store is not the record's, is refused. What is typed into a pane or kills a window goes to the pane the record places (socket and pane), never the row's, and a failed turn's limit is read from the record's transcript. A pick in its own `/permissions`, or a `codex` started by hand, uses its own sandbox ([the sandbox and the store](#the-sandbox-and-the-aisquare-store)). | Filed by the smoke: every call needed an escalation. Live sandbox: a note and a task claim succeeded sandboxed. Writes to the read-only paths were refused, and the launch record held (`ca6d43ea`, `8337e88c`, review r2; review r3; one launch record, review r4: a sandboxed reviewer's rewrites of its thread, home, role, binary and account replayed as recorded, the project's directory refused; review r5: a row pointed at another pane or transcript is refused or ignored) |
 | Who answers approvals (`ask` / `auto` / `never`) | `--permission-mode manual` / `auto` / `dontAsk` | Same intent. `ask` puts Codex's "Would you like to run the following command?" in the pane, and `auto` is `--approve-for-me`. **Differs:** the reviewer is pinned on every spawn, restart and resume (`approvals_reviewer`), because a resumed thread otherwise keeps its own. `full:auto` is refused. | Filed by the smoke: a restart onto `ask` kept the automatic reviewer. Fixed in `e8436fa3`. Live sandbox: `fleet restart --permission-mode workspace:ask` brought the prompt |
 | Read-only reviewer | `--disallowedTools=Edit Write NotebookEdit`; its shell can still write | **Differs, and is stricter:** the store profile over `:read-only` with Codex's reviewer (`read_only:auto`). The worktree is read-only to the sandbox, and its verdict still reaches the board. | Live sandbox: the reviewer posted its verdict |
 | MCP (`agents.mcp = true`) | AISquare's stdio server per launch | Same: Codex called `aisquare.team_board` and `aisquare.note_add`, and the note landed on the hook-bound row. | Smoke 14; live hooks |
@@ -485,8 +485,9 @@ So the fleet runs a sandboxed Codex agent under a permission profile of its own,
 This is Codex's built-in profile for the write scope, with the aisquare home
 writable, so a sandboxed agent can write any row of the board's store
 (`context.db`). The rule (`core.launch_seal`): nothing it can write there chooses
-what runs outside the sandbox. What does is read-only, or recorded where the sandbox
-cannot write, or validated against something it cannot write.
+what runs outside the sandbox, what is typed into, or what is killed. What does is
+read-only, or recorded where the sandbox cannot write, or validated against something
+it cannot write.
 
 Read-only inside the profile (`types.store_read_only`):
 
@@ -505,8 +506,11 @@ store holds). `fleet spawn` writes it before the window starts, from what it
 resolved itself: the project and its directory, the role, the agent, the binary,
 the working directory and whether it is a worktree, the account (its slot and its
 home) and the launch spec (permission mode, arguments, the window's command line).
-The agent's own hook adds its session (the id, the native id, the transcript and
-the home), from the payload the agent handed it, in a process outside any sandbox:
+Once tmux has made the window, the spawner adds where it is: the tmux socket's name
+and path, the pane, the server's boot and the row's time, in a file of its own beside
+the record, before the row is written; a window whose place cannot be recorded is
+killed. The agent's own hook adds its session (the id, the native id, the transcript
+and the home), from the payload the agent handed it, in a process outside any sandbox:
 Claude Code has none, and Codex runs its hooks outside the one its tools run in. A
 tool in the sandbox that runs a hook itself cannot write there.
 
@@ -521,10 +525,26 @@ aisquare, and a project whose directory in the store is not the record's are ref
 before anything is stopped, with the reason and the way out (stop the agent, spawn a
 new one). The reason is also a board note, once per row and reason, whichever path met
 it first (restart, switch, the hand-over, a message told to a busy agent), so an
-unattended hand-over leaves it where the manager and `fleet ls` readers look. Nothing reads the store to write a record, and a spawn that cannot write
-one refuses an agent that sandboxes its tools before its window starts. A record is
-read back as it was written, so a release that adds a field reads an older record
-with that field's default.
+unattended hand-over leaves it where the manager and `fleet ls` readers look. Nothing
+reads the store to write a record, and a spawn that cannot write one starts no agent,
+asked before the project is captured or a worktree made. A record is read back as it
+was written, so a release that adds a field reads an older record with that field's
+default.
+
+What is typed into a row's pane, or kills its window, goes to the pane the record
+places, never to the row's `pane_id` at its `socket_path`: `fleet tell`'s typing,
+`fleet stop` and with it restart, switch, the hand-over and `shutdown`, and the
+manager's nudge, which a sandboxed agent's own hooks deliver from outside its sandbox.
+A row that names another pane than its record, or whose record places none (spawned
+before this version recorded it), is not typed into or killed: `tell` files the
+board note, `stop` and a replay are refused before anything is typed, `shutdown`
+leaves the row live and its session up, and the reason is a board note. The way out
+is the agent's own window (`aisquare fleet attach`), where it can be ended by hand.
+What the fleet reads of a session to act on outside the sandbox, a Codex turn that
+failed on its limit with no hook (which parks the row and may hand it over), is read
+from the transcript the record holds, never the board session's, and only by a reader
+whose tmux answered, so a Codex manager's sandboxed `fleet ls` leaves it to the app's
+tick or a `fleet` command of yours.
 
 Validated, besides: a native id goes on Codex's command line only as a UUID, the
 shape Codex makes (`codex resume` and `codex queue` read a value that starts with

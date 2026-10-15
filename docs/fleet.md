@@ -857,10 +857,13 @@ what is written there runs, or chooses what runs, outside any sandbox. The rows 
 restart, switch or hand-over replays stay in the writable store, so none of them is
 replayed from there: `fleet spawn` writes each agent's launch record in
 `launch-seals/`, which is read-only to the sandbox (binary, arguments, permission,
-role, agent, directory, account), the agent's own hook adds its session (transcript,
-thread, home), and a replay and `fleet tell`'s queue read that record and nothing
-else. A row without one, or a project whose directory in the store is not the
-record's, is refused with the reason. So a
+role, agent, directory, account, and the tmux socket and pane its window is in), the
+agent's own hook adds its session (transcript, thread, home), and a replay and `fleet
+tell`'s queue read that record and nothing else. What `tell`, `stop` (restart, switch,
+the hand-over, `shutdown`) and the manager's nudge type into or kill is the pane the
+record places, and a failed turn's limit is read from the record's transcript. A row
+without one, one that names another pane, or a project whose directory in the store
+is not the record's, is refused with the reason. So a
 Codex agent's board calls succeed on their first, sandboxed attempt, a reviewer's
 verdict included, while its worktree stays read-only
 ([the sandbox and the store](coding-agents.md#the-sandbox-and-the-aisquare-store)).

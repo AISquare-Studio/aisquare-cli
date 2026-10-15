@@ -486,6 +486,15 @@ class _ClaudeLogin:
     expired or rejected token: the window waits for a different one, not that one."""
 
 
+def _hooks_did_not_install(error: object) -> str:
+    """What the page says of a slot signed in whose hooks did not install: after its sign-in
+    (``complete_sign_in``), or after a cancel that found its login landed (``settle_sign_in``)."""
+    return (
+        f"⚠ signed in, but aisquare's hooks did not install: {error} — "
+        "run: aisquare agents connect claude-code --config-dir <the slot's directory>"
+    )
+
+
 # --- widgets -----------------------------------------------------------------------------------
 
 
@@ -840,6 +849,9 @@ class AccountsView(Vertical):
         """The slot a *Log in* is reading the stored login of, before its window opens."""
         self._login_poll: Worker[Any] | None = None
         """The sign-in window's poll in flight, or the last one."""
+        self._abandoning: str | None = None
+        """Why the fresh slot being settled (:data:`ABANDON_WORKER`) was given up: kept beside
+        the worker, as one that raises hands back no result to carry it."""
         self._login_timer: Timer | None = None
         self._usage_timer: Timer | None = None
         self._usage_worker: Worker[Any] | None = None
@@ -1746,11 +1758,7 @@ class AccountsView(Vertical):
             hooks = "hooks installed" if status.hooks_installed else "hooks NOT installed"
             self._notice(f"✓ {name}: {who} · {hooks}", "ok" if status.hooks_installed else "warn")
         elif state is WorkerState.ERROR:
-            self._notice(
-                f"⚠ signed in, but aisquare's hooks did not install: {worker.error} — "
-                "run: aisquare agents connect claude-code --config-dir <the slot's directory>",
-                "warn",
-            )
+            self._notice(_hooks_did_not_install(worker.error), "warn")
         self.post_message(AccountsChanged())
 
     def _abandon_login(self, reason: str) -> None:
@@ -1764,8 +1772,9 @@ class AccountsView(Vertical):
             self.post_message(AccountsChanged())
             return
         account = login.account
+        self._abandoning = reason
         self.run_worker(
-            lambda: (account, reason, accounts_service.settle_sign_in(account)),
+            lambda: (account, accounts_service.settle_sign_in(account)),
             name=ABANDON_WORKER,
             group=ABANDON_WORKER,
             thread=True,
@@ -1773,15 +1782,28 @@ class AccountsView(Vertical):
         )
 
     def _abandon_finished(self, worker: Worker[Any], state: WorkerState) -> None:
+        """The fresh slot of a cancelled sign-in, settled. A worker that raised said "nothing
+        changed" with no reason, of a slot whose login had landed and was kept: one whose
+        hooks then failed reads as ``_complete_finished`` reads it, and any other failure
+        says the slot was left as it is (review of #259, round 16)."""
+        reason, self._abandoning = self._abandoning or "cancelled", None
         result = worker.result if state is WorkerState.SUCCESS else None
-        if isinstance(result, tuple) and isinstance(result[2], ClaudeAccountStatus):
-            account, status = result[0], result[2]
-            who = status.identity.email if status.identity else self._name_of(account)
+        settled = result[1] if isinstance(result, tuple) else None
+        if isinstance(result, tuple) and isinstance(settled, ClaudeAccountStatus):
+            account = result[0]
+            who = settled.identity.email if settled.identity else self._name_of(account)
             self._notice(f"✓ {self._name_of(account)}: the login had landed — kept as {who}", "ok")
+        elif isinstance(worker.error, accounts_service.LandedNotWired):
+            self._notice(_hooks_did_not_install(worker.error), "warn")
+        elif state is WorkerState.ERROR:
+            self._notice(
+                f"✗ sign-in cancelled — {reason}; whether its login landed could not be told "
+                f"({worker.error}), so the new slot is left as it is",
+                "error",
+            )
         else:
-            reason, discarded = (result[1], result[2]) if isinstance(result, tuple) else ("", False)
-            what = "the new slot was discarded" if discarded else "nothing changed"
-            self._notice(f"sign-in cancelled — {reason or 'cancelled'}; {what}", "warn")
+            what = "the new slot was discarded" if settled is True else "nothing changed"
+            self._notice(f"sign-in cancelled — {reason}; {what}", "warn")
         self.post_message(AccountsChanged())
 
     @on(Button.Pressed, "#login-cancel")

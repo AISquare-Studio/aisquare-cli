@@ -1901,11 +1901,23 @@ def abandon_sign_in(account: ClaudeAccount) -> bool:
     return True
 
 
+class LandedNotWired(AccountsError):
+    """A cancelled sign-in's login had landed after all, and aisquare's hooks did not install
+    there: the slot is kept, signed in (:func:`settle_sign_in`; the cause is chained)."""
+
+
 def settle_sign_in(account: ClaudeAccount) -> ClaudeAccountStatus | bool:
     """A fresh slot's sign-in, cancelled: kept and wired when its login landed after all
-    (:func:`complete_sign_in`'s status), else discarded (:func:`abandon_sign_in`'s answer)."""
+    (:func:`complete_sign_in`'s status), else discarded (:func:`abandon_sign_in`'s answer).
+
+    Kept and not wired raises :class:`LandedNotWired`, so a caller does not read the
+    failure as a sign-in that changed nothing: the page said "nothing changed" of a slot it
+    had kept (review of #259, round 16)."""
     if sign_in_landed(account) is not None:
-        return complete_sign_in(account)
+        try:
+            return complete_sign_in(account)
+        except Exception as exc:  # whatever wiring the hooks raised: the slot is kept anyway
+            raise LandedNotWired(str(exc)) from exc
     return abandon_sign_in(account)
 
 

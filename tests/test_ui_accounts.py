@@ -1507,6 +1507,52 @@ def test_cancel_after_the_login_landed_keeps_the_new_slot_and_wires_it(
     assert said == "✓ account 2: the login had landed — kept as two@example.com"
 
 
+@pytest.mark.parametrize("fails", ["its hooks", "the login's read"])
+def test_a_cancel_whose_settling_fails_never_says_nothing_changed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fails: str
+) -> None:
+    """Review of #259, round 16: settling a cancelled fresh slot that raised read as "sign-in
+    cancelled — cancelled; nothing changed", its reason lost with the worker's result. A
+    login that had landed was kept, and its hooks had failed: that is said as the sign-in
+    itself says it. A login that could not even be read leaves the slot as it is, and says
+    so, with the cancel's reason."""
+    seen = _script_claude_sign_in(monkeypatch, tmp_path, lands=False)
+    landed = {"now": False}
+
+    def poll(acct: ClaudeAccount, *, since: str | None = None) -> ClaudeIdentity | None:
+        if not landed["now"]:
+            return None
+        if fails == "the login's read":
+            raise PermissionError(13, "Permission denied", ".claude.json")
+        return ClaudeIdentity(email="two@example.com")
+
+    def unwired(acct: ClaudeAccount) -> ClaudeAccountStatus:
+        raise OSError("settings.json is read-only")
+
+    monkeypatch.setattr(accounts_service, "sign_in_landed", poll)
+    monkeypatch.setattr(accounts_service, "complete_sign_in", unwired)
+
+    async def go(pilot: Pilot[None]) -> str:
+        view = await open_accounts(pilot)
+        await pilot.click("#claude-add")
+        await settle(fleet_app(pilot))
+        assert view.login is not None and view.login.fresh
+        landed["now"] = True  # after the last poll, before the next
+        await pilot.click("#login-cancel")
+        await settle(fleet_app(pilot))
+        return notice(view)
+
+    said = " ".join(drive(go).split())
+    assert seen["abandoned"] == [] and "nothing changed" not in said, said
+    if fails == "its hooks":
+        assert said.startswith(
+            "⚠ signed in, but aisquare's hooks did not install: settings.json is read-only"
+        ), said
+    else:
+        assert said.startswith("✗ sign-in cancelled — cancelled; whether its login landed"), said
+        assert "Permission denied" in said and "the new slot is left as it is" in said
+
+
 def test_a_log_in_over_a_login_the_keychain_will_not_show_opens_no_window(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

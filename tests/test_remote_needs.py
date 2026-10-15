@@ -725,6 +725,26 @@ def test_each_dialog_drawn_while_a_question_waits_is_a_card_of_its_own() -> None
     assert _one(landed).id == two.id, "its notice landing names it the same: one push"
 
 
+def test_a_dialog_taller_than_the_screen_is_one_card_whatever_rows_the_screen_shows() -> None:
+    """Review of #259, round 12, 6/9: with no rule above its first option (a long Edit diff, a
+    plan whose top scrolled off), the card was named by every row the screen showed above
+    ``1.``, and a resize changed them (asq attaching to the pane adopts its size): a new
+    card, pushed again, its dismissal lost. It is named after the question alone then; a
+    dialog its rule bounds is still a card of its own."""
+    row = _row()
+    session = _session(row, state="working", seen=NOW - timedelta(minutes=2))
+    status, tail = _status(row, "working", session), _tail(_TASK, _ASK)
+    diff = [f"  {n} + the line numbered {n}" for n in range(60)]
+    tall = _dialog("Edit file", *diff, "Do you want to make this edit?", options=_ASK_AGAIN)
+    shown, resized = tall[-24:], tall[-40:]
+    assert not any("─" in line for line in (*shown, *resized)), "its top rule scrolled off"
+    one = _one(_classify(status, tail, pane_screen=lambda: shown))
+    assert one.reason == "coder-1 shows a dialog that needs you"
+    assert _one(_classify(status, tail, pane_screen=lambda: resized)).id == one.id
+    bounded = _bash_screen("npm test", above=(f"● {_TASK.summary}",))
+    assert _one(_classify(status, tail, pane_screen=lambda: bounded)).id != one.id
+
+
 def test_a_dialog_drawn_while_a_question_waits_is_dated_by_the_scan_that_first_saw_it() -> None:
     """Review of #259, round 11, 8/13: the card was dated when the question was asked, so a
     sub-agent's prompt drawn 25 minutes after it was a card 25 minutes old, in the feed and

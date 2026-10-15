@@ -1564,7 +1564,11 @@ def _needs_drawn_dialog(screen: Callable[[], Sequence[str] | None] | None) -> st
     (round 11, 5/13). A live scan that cannot read it decides nothing, its last items
     standing (:func:`_needs_screen_read`). The card is named after the question or
     the plan (:func:`_needs_dialog_item`), so a notice landing later names it the same: it
-    no longer waits :data:`_NOTICE_WAIT` for one, which a notice later still outran.
+    no longer waits :data:`_NOTICE_WAIT` for one, which a notice later still outran. A dialog
+    with no rule above its first option (taller than the screen: a long Edit diff, a plan
+    whose top scrolled off) is ``""``, named after the question or plan alone: named by the
+    rows it showed, a resize (asq attaching to the pane adopts its size) made it a new card,
+    pushed again, its dismissal lost (review of #259, round 12, 6/9).
 
     A derivation that asks no screen at all (:func:`needs_single_agent_now`) has no such
     card: a screen not asked for is not one that could not be read. It had one for every
@@ -1573,7 +1577,7 @@ def _needs_drawn_dialog(screen: Callable[[], Sequence[str] | None] | None) -> st
     (review of #259, round 10, 9/9).
     """
     rows = None if screen is None else screen()
-    return None if rows is None else _needs_prompt_region(rows)
+    return None if rows is None else _needs_prompt_region(rows, ruled=True)
 
 
 def _needs_prompt_call(
@@ -1636,19 +1640,22 @@ def _needs_prompt_mark(tool: PendingTool) -> str | None:
     return _needs_squashed(text)[:_PROMPT_MARK_MAX] or None
 
 
-def _needs_prompt_region(rows: Sequence[str]) -> str | None:
+def _needs_prompt_region(rows: Sequence[str], *, ruled: bool = False) -> str | None:
     """The squashed text of the dialog on screen above its options: from the rule nearest
     above its first option (or the screen's top) to that option; ``None`` with no option
     row, or with the input box drawn below it (two rules: a list in the conversation, not
-    a dialog, which replaces the input box while it is up)."""
+    a dialog, which replaces the input box while it is up). ``ruled``: ``""`` for a dialog
+    with no rule above it, taller than the screen, whose rows on screen a resize changes."""
     plain = [_ESCAPES.sub("", row) for row in rows]
     option = next(
         (n for n in range(len(plain) - 1, -1, -1) if _PROMPT_OPTION_ONE.match(plain[n])), None
     )
     if option is None or sum(1 for row in plain[option + 1 :] if _PROMPT_RULE.match(row)) > 1:
         return None
-    top = next((n + 1 for n in range(option - 1, -1, -1) if _PROMPT_RULE.match(plain[n])), 0)
-    return _needs_squashed("".join(plain[top:option]))
+    top = next((n + 1 for n in range(option - 1, -1, -1) if _PROMPT_RULE.match(plain[n])), None)
+    if top is None and ruled:
+        return ""
+    return _needs_squashed("".join(plain[top or 0 : option]))
 
 
 def _needs_squashed(text: str) -> str:

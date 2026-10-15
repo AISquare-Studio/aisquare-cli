@@ -1890,6 +1890,33 @@ def test_with_capture_off_a_codename_or_an_attach_writes_no_row(
         assert store.list_projects(all=True) == []
 
 
+def test_with_capture_off_a_row_captured_before_gets_no_codename_but_from_a_spawn(
+    tmux: FakeTmux, claude_on_path: Path, tmp_path: Path
+) -> None:
+    """Review of #259, round 18: ``ensure_codename`` held back only for a directory with no
+    live row, so with capture off a row captured before it went off — hundreds of scratch
+    directories on a 0.8.0 machine — was given a codename by ``fleet attach`` there, which
+    then refused. Nobody added it: it gets none until a spawn adds it, with one."""
+    where = tmp_path / "scratch"
+    where.mkdir()
+    scratch = team_project(where)
+    with store_session() as store:
+        store.ensure_project(scratch)  # what 0.8.0's capture wrote
+
+    assert fleet_service.ensure_codename(scratch).codename is None
+    with pytest.raises(FleetError, match="nothing to attach to"):
+        fleet_service.attach_argv(scratch)
+    with store_session() as store:
+        [row] = store.list_projects(all=True)
+    assert row.codename is None and row.onboarded_at is None, "nothing written"
+
+    started = fleet_service.spawn(scratch, "coder", worktree=False)
+    with store_session() as store:
+        [listed] = store.list_projects()
+    assert listed.id == scratch.id and listed.codename
+    assert started.tmux_session == f"asq-{listed.codename}"
+
+
 def test_with_capture_off_an_attach_where_nothing_was_added_never_finds_anothers_session(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
 ) -> None:

@@ -862,22 +862,26 @@ def ensure_codename(project: ProjectInfo, store: ContextStore | None = None) -> 
     callers onboard for themselves: :func:`spawn` once its agent is recorded,
     :func:`rename` before it writes (review of #168, round 2).
 
-    With capture off there is nothing to capture into: a directory with no live
-    row gets none, and comes back without a codename (:func:`attach_argv` then
-    takes the one a forgotten row kept, or refuses: no agent ran there). A spawn
-    works its codename out without writing it (:func:`_codename_to_add`), and adds
-    the project with it once the window exists, with the agent's row: added here,
-    before the window, a spawn refused afterwards left the directory listed with
-    no agent, or brought a forgotten one back (review of #259, round 17).
+    With capture off, only a project added on purpose gets one here
+    (:func:`~aisquare.services.project.tracked`): a directory nobody added comes back
+    without a codename, whether it has no live row or one captured before capture
+    went off (:func:`attach_argv` then takes the one its row holds, a forgotten
+    one's included, or refuses: no agent ran there). Written onto a captured row, it
+    reserved a codename for a directory nobody added, on every ``fleet attach`` there,
+    which then refused (review of #259, round 18). A spawn works its codename out
+    without writing it (:func:`_codename_to_add`), and adds the project with it once
+    the window exists, with the agent's row: added here, before the window, a spawn
+    refused afterwards left the directory listed with no agent, or brought a
+    forgotten one back (round 17).
     """
     if project.codename:
         return project
 
     def assign(store: ContextStore) -> ProjectInfo:
+        if not project_service.tracked(store, project):
+            return project
         if store.get_project(project.id) is None:
-            if not project_service.capture_on():
-                return project
-            store.ensure_project(project)
+            store.ensure_project(project)  # capture on: captured, as its next prompt would be
         for _ in range(_CODENAME_RETRIES):
             current = store.get_project(project.id)
             if current is not None and current.codename:
@@ -915,8 +919,9 @@ def _kept_codename(store: ContextStore, project: ProjectInfo) -> str | None:
 
 def _codename_to_add(store: ContextStore, project: ProjectInfo) -> str:
     """The codename a spawn names its session and branch by, for a project
-    :func:`ensure_codename` gave none (``[projects] capture`` off, no live row), read
-    without a write: the one a forgotten row kept, else the walk past every name in use.
+    :func:`ensure_codename` gave none (``[projects] capture`` off, and nobody added it),
+    read without a write: the one its row holds, captured or forgotten, else the walk past
+    every name in use.
     :func:`_write_row` stores it with the project's add and the agent's row."""
     kept = _kept_codename(store, project)
     if kept is not None:

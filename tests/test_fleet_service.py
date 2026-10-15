@@ -59,7 +59,7 @@ from aisquare.core.tmux import (
 )
 from aisquare.core.version import __version__
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession, TeamTask
-from aisquare.services import auto_mode, diagnostics, lifecycle
+from aisquare.services import auto_mode, diagnostics, install_route, lifecycle
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from aisquare.services.explainability import PIPELINE_ID_ENV_VAR
@@ -7998,7 +7998,11 @@ def test_the_rename_remedy_names_the_fleets_own_server(
     fleet_service.rename(project, "amber-otter", notes=notes)
 
     [note] = notes
-    assert "`tmux -L asq rename-session -t '$0' asq-amber-otter`" in note, note
+    # In this platform's quoting (a Windows shell's on a Windows runner: CI on 0d660458).
+    remedy = install_route.command_line(
+        ["tmux", "-L", "asq", "rename-session", "-t", "$0", "asq-amber-otter"]
+    )
+    assert f"`{remedy}`" in note, note
 
 
 def test_an_ended_row_with_no_record_lists_exited_not_lost(

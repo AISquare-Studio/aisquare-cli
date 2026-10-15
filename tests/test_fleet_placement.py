@@ -292,15 +292,17 @@ def test_every_listed_site_still_exists() -> None:
     """An entry whose site is gone is a stale exemption: removed, not kept."""
     for table in (MADE, ACTS):
         for module, sites in table.items():
-            defined = {site for site, _, _ in _sites(ast.parse((SRC / module).read_text()))}
+            defined = {
+                site for site, _, _ in _sites(ast.parse((SRC / module).read_text(encoding="utf-8")))
+            }
             classes = {
                 node.name
-                for node in ast.walk(ast.parse((SRC / module).read_text()))
+                for node in ast.walk(ast.parse((SRC / module).read_text(encoding="utf-8")))
                 if isinstance(node, ast.ClassDef)
             }
             stale = {site for site in sites if site not in defined and site not in classes}
             assert not stale, (module, sorted(stale))
-    fleet = {site for site, _, _ in _sites(ast.parse((SRC / FLEET).read_text()))}
+    fleet = {site for site, _, _ in _sites(ast.parse((SRC / FLEET).read_text(encoding="utf-8")))}
     named = {site for site, _ in MINTS} | {s for callers in CALLERS.values() for s in callers}
     assert named <= fleet, sorted(named - fleet)
 

@@ -3354,7 +3354,9 @@ def _remote_board_refusals(
     ``claim_lost`` for a task another session holds, and 400 ``ambiguous_id`` for a ref
     that names two tasks or sessions. They fell to 400 ``write_failed``, "the write
     failed", where nothing had, and to 404 ``not_found`` where two were found (sweep 2 of
-    #243).
+    #243). And 409 ``not_added`` for a board nobody added while ``[projects] capture`` is
+    off (:class:`~aisquare.services.project.NotAdded`), with the command that adds it, as
+    ``asq`` says it: it was a 500 (review of #259, round 17).
 
     A ref that names nothing is 404 ``not_found`` in a sentence that says which field
     sent it, from ``refs``, each ``(field, value, "task" | "session")``. The board's
@@ -3364,12 +3366,15 @@ def _remote_board_refusals(
     (:class:`_RemoteReach`).
     """
     from aisquare.core.store import AmbiguousIdError
+    from aisquare.services import project as project_service
     from aisquare.services import team as team_service
 
     try:
         yield
     except team_service.TeamDisabledError as exc:
         raise RequestError(409, "team_disabled", str(exc)) from None
+    except project_service.NotAdded as exc:
+        raise RequestError(409, "not_added", str(exc)) from None
     except team_service.ClaimLostError as exc:
         raise RequestError(409, "claim_lost", str(exc)) from None
     except AmbiguousIdError as exc:

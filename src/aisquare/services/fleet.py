@@ -3851,7 +3851,9 @@ def _file_note(project: ProjectInfo, label: str, text: str, sender: str | None) 
     team = _team()
     try:
         event = team.add_note(text, session_ref=sender, to_role=label, cwd=project.root)
-    except team.TeamDisabledError as exc:
+    except (team.TeamDisabledError, project_service.NotAdded) as exc:
+        # NotAdded: the board the note resolves to (`AISQUARE_TEAM_HUB`'s, or the project's)
+        # is one nobody added, with `[projects] capture` off (review of #259, round 17).
         raise FleetError(f"cannot file the message as a board note: {exc}") from exc
     except KeyError as exc:
         raise FleetError(f"unknown sender session {sender!r}") from exc

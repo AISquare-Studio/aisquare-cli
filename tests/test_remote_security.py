@@ -2944,6 +2944,26 @@ def test_the_board_writes_are_refused_team_disabled_with_the_orchestrator_off(
     assert (refused.status_code, refused.json()["error"]) == (409, "team_disabled")
 
 
+def test_a_board_write_where_nothing_was_added_is_refused_not_added(
+    home: Path, runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 17: with ``[projects] capture`` off, the board of a directory
+    nobody added takes no write, and ``asq note`` says so with the command that adds it.
+    The phone's note resolves the server's current project when it names none, and that
+    refusal (``NotAdded``) reached it as a 500 ``internal_error``. It is 409 ``not_added``,
+    in ``asq``'s words, and nothing is written."""
+    work = _repo(home / "code" / "unadded")
+    monkeypatch.chdir(work)
+    client = _project_writes(runtime, tmp_path)
+
+    refused = client.post(f"{base(runtime)}/api/note", json={"text": "hi"})
+
+    assert (refused.status_code, refused.json()["error"]) == (409, "not_added"), refused.text
+    said = refused.json()["message"]
+    assert "is not one of your projects — add it first: aisquare project onboard" in said
+    assert project_service.list_projects(all=True) == []
+
+
 # --- (8) the Origin of a write or a socket ------------------------------------------------
 
 

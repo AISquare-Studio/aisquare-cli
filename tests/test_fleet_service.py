@@ -2536,6 +2536,33 @@ def test_tell_files_a_board_note_when_the_agent_is_not_waiting(
     assert len(notes) == 1 and notes[0].text == "please rebase" and notes[0].to_role == "coder-1"
 
 
+def test_tell_to_a_board_nobody_added_is_a_fleet_error_not_a_traceback(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 17: an agent not at its prompt is told through a board note,
+    filed on the board its project resolves to — ``AISQUARE_TEAM_HUB``'s when one is set.
+    With ``[projects] capture`` off, one nobody added refuses the note (``NotAdded``), and
+    ``_file_note`` caught only a board that is off: ``fleet tell`` ended in a traceback.
+    It is a ``FleetError`` now, saying what to add."""
+    agent = _coder(project)
+    _board_session(agent, "working")
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))
+
+    with pytest.raises(FleetError, match="cannot file the message as a board note") as refused:
+        fleet_service.tell(project, "coder-1", "please rebase")
+
+    assert "hub is not one of your projects — add it first: aisquare project onboard" in str(
+        refused.value
+    )
+    assert tmux.typed == []
+
+
 def test_tell_falls_back_to_a_note_when_tmux_cannot_type(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

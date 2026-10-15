@@ -124,6 +124,7 @@ def _ensure_virtual_session() -> str:
             )
         if not project_service.tracked(store, project):
             raise project_service.NotAdded(project)  # capture off, and nobody added it
+        project_service.capture(store, project)  # on: the session row needs one
         session_id = client_session_id(project.id)
         now = datetime.now(tz=UTC)
         store.upsert_session(

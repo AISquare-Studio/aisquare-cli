@@ -521,6 +521,7 @@ def require_project(store: ContextStore, project: ProjectInfo) -> None:
     """
     if not project_service.tracked(store, project):
         raise DestinationError("not_added", str(project_service.NotAdded(project)))
+    project_service.capture(store, project)
 
 
 def choose(

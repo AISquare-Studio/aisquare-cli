@@ -61,33 +61,64 @@ def list_projects(*, all: bool = False) -> list[ProjectInfo]:
         return store.list_projects(all=all)
 
 
+_capture_read: tuple[tuple[str, tuple[int, int, int] | None], bool] | None = None
+"""The last reading of ``[projects] capture``, keyed by config.toml as ``stat`` saw it (its path,
+and its inode, mtime and size, or ``None`` for no file): :func:`capture_on`'s, read again only
+when that changes."""
+
+
 def capture_on() -> bool:
     """``[projects] capture``: whether a directory a hooked session merely runs in gets a
     row of its own, captured and unlisted (#139). Off by default since 0.8.1; an unreadable
-    config costs the setting, never the hook, as every section's does."""
+    config costs the setting, never the hook, as every section's does.
+
+    Parsed once until config.toml changes: a SessionStart asked twice, each prompt once, and
+    asq's UI thread on every refresh tick, and each ask read, parsed and validated the
+    whole file (review of #259, round 17). What is kept is keyed by the file as ``stat``
+    sees it, so an edit, or a save that replaces it, is read on the next ask."""
+    global _capture_read
+    path = paths.config_path()
+    key: tuple[str, tuple[int, int, int] | None]
     try:
-        return load_config().projects.capture
+        seen = path.stat()
+        key = (str(path), (seen.st_ino, seen.st_mtime_ns, seen.st_size))
+    except OSError:
+        key = (str(path), None)
+    kept = _capture_read
+    if kept is not None and kept[0] == key:
+        return kept[1]
+    try:
+        value = load_config(path).projects.capture
     except Exception:
-        return ProjectsSettings().capture
+        value = ProjectsSettings().capture
+    _capture_read = (key, value)
+    return value
 
 
-def tracked(store: ContextStore, project: ProjectInfo, *, capture: bool = True) -> bool:
+def tracked(store: ContextStore, project: ProjectInfo) -> bool:
     """Whether an automatic path may write rows tied to ``project``: a hook's prompt, turn
-    and board rows, the MCP server's session, a destination, a codename.
+    and board rows, the MCP server's session, a destination, a codename. Asked, never
+    written: with capture on any directory may (:func:`capture` then captures it); off, only
+    a project added on purpose may, and a directory nobody added, or a row captured before,
+    may not.
 
-    With capture on any directory may, and this captures it first, as #139 did
-    (:meth:`~aisquare.core.store.SqliteStore.ensure_project`) — unless ``capture`` is
-    False, for a caller that must not take the store's write lock to ask (a session
-    start). Off, only a project added on purpose may, and nothing is written here: a
-    directory nobody added gets no row, and a row captured before is neither revived nor
-    written to.
+    It captured the directory first when capture was on, so a caller that must not take
+    the store's write lock only to ask (a session start) had to say so, while another in
+    the same hook took it anyway (review of #259, round 17). The write is :func:`capture`.
     """
     if capture_on():
-        if capture:
-            store.ensure_project(project)
         return True
     stored = store.get_project(project.id)
     return stored is not None and stored.onboarded_at is not None
+
+
+def capture(store: ContextStore, project: ProjectInfo) -> None:
+    """CAPTURE ``project`` while ``[projects] capture`` is on, as #139 did
+    (:meth:`~aisquare.core.store.SqliteStore.ensure_project`): a live, unlisted row for the
+    rows an automatic path is about to write. Off, nothing: the caller asked
+    :func:`tracked` first, and only an added project gets that far."""
+    if capture_on():
+        store.ensure_project(project)
 
 
 class NotAdded(RuntimeError):

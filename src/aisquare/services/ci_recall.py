@@ -295,7 +295,7 @@ def _recorded_as(store: ContextStore, project: ProjectInfo) -> str | None:
     write no CI row there (each would be a turn tied to a project that does not exist).
     The recall itself is carried all the same (review of #259, round 17). Asked without a
     write."""
-    return project.id if project_service.tracked(store, project, capture=False) else None
+    return project.id if project_service.tracked(store, project) else None
 
 
 def _record(

@@ -90,7 +90,7 @@ def session_start_context(
         project = active_project(store, cwd)
         entries = store.entries(project_id=project.id)
         has_prompts = bool(store.recent_prompts(project.id, limit=1))
-        recorded = project_service.tracked(store, project, capture=False)
+        recorded = project_service.tracked(store, project)
     directive = _directive(project.id, has_prompts=has_prompts)
     block = build_block(entries, project) if entries else ""
     team_block = (
@@ -445,6 +445,7 @@ def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | No
             # spool, no CI consult, no turn row.
             if not project_service.tracked(store, project):
                 return ""
+            project_service.capture(store, project)
             if prompt is not None and prompt.strip():
                 store.add_prompt(prompt, project.id, source="claude-code")
         if prompt is not None and prompt.strip():

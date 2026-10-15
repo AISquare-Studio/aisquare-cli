@@ -252,3 +252,55 @@ def test_doctor_names_the_rows_that_prune_keeps_and_what_drops_them(tmp_path: Pa
         "context or a live agent, which aisquare project prune keeps: notes"
     ), said
     assert "--older-than 0" not in said
+
+
+# --- the setting, read --------------------------------------------------------------------
+
+
+def test_the_setting_is_parsed_once_until_config_toml_changes(
+    work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 17: ``capture_on()`` read, parsed and validated config.toml on
+    every call — twice a SessionStart, once a prompt, and on asq's UI thread every refresh
+    tick. It is parsed again only when the file changes."""
+    from aisquare.core import config as config_core
+    from aisquare.core import paths
+    from aisquare.services import project as project_service
+
+    real = config_core.load_config
+    loads: list[object] = []
+
+    def counted(path: Path | None = None) -> config_core.AppConfig:
+        loads.append(path)
+        return real(path)
+
+    monkeypatch.setattr(project_service, "load_config", counted)
+    config = paths.config_path()
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("[projects]\ncapture = false\n", encoding="utf-8")
+
+    assert [project_service.capture_on() for _ in range(3)] == [False, False, False]
+    assert len(loads) == 1, "parsed once"
+    config.write_text("[projects]\ncapture = true\n", encoding="utf-8")
+    assert project_service.capture_on() is True
+    assert len(loads) == 2, "and again once it changed"
+
+
+def test_asking_whether_a_project_is_tracked_never_writes(
+    work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 17: ``tracked()`` was a predicate that wrote — with capture on it
+    captured the directory first, which is why a session start had to pass ``capture=False``
+    to ask it. Asking writes nothing now; ``capture()`` is the write, and only with capture
+    on."""
+    from aisquare.services import project as project_service
+
+    project = team_project(work_dir)
+    with store_session() as store:
+        assert project_service.tracked(store, project) is False
+        project_service.capture(store, project)  # off: nothing
+        monkeypatch.setattr(project_service, "capture_on", lambda: True)
+        assert project_service.tracked(store, project) is True
+        assert _rows() == [], "asking wrote nothing"
+        project_service.capture(store, project)
+        assert [p.id for p in store.captured_projects()] == [project.id]

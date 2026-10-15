@@ -331,8 +331,11 @@ def _project(store: ContextStore, cwd: Path | None, *, write: bool = False) -> P
     shows is not where anyone meant to post.
     """
     project = orchestrator.team_project(cwd)
-    if not project_service.tracked(store, project) and write:
-        raise project_service.NotAdded(project)
+    if not project_service.tracked(store, project):
+        if write:
+            raise project_service.NotAdded(project)
+        return project
+    project_service.capture(store, project)
     return project
 
 
@@ -1521,6 +1524,7 @@ def hook_session_start(
         project = orchestrator.team_project(cwd)
         if not project_service.tracked(store, project):
             return ""  # capture is off and nobody added it: no session row, no board (#139)
+        project_service.capture(store, project)
         role = orchestrator.env_role()
         if not store.team_active(project.id) and role is None:
             return ""
@@ -1587,6 +1591,7 @@ def hook_prompt_heartbeat(
             project = orchestrator.team_project(cwd)
             if not project_service.tracked(store, project):
                 return ""  # as at session start: nothing on a board nobody added
+            project_service.capture(store, project)
             role = orchestrator.env_role()
             if not store.team_active(project.id) and role is None:
                 return ""

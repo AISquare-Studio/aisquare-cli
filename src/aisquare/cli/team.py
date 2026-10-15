@@ -319,7 +319,7 @@ def _joins_no_board() -> str | None:
     try:
         with store_session() as store:
             project = orchestrator.team_project(None)
-            if project_service.tracked(store, project, capture=False):
+            if project_service.tracked(store, project):
                 return None
     except Exception:
         return None

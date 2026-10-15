@@ -480,19 +480,23 @@ that no tmux here can reach.
 What it kills is the fleet's own sessions, never the server: `tmux kill-server`
 would take down every session on that socket, and the fleet's claim is only ever
 to its own (a hand-made session is not the fleet's to destroy — and `[fleet]
-tmux_socket` may point anywhere). A project's sessions are the ones its live
-agents' launch records name, by tmux's own id for them (`$3`), never by the
-project's codename in the store, which an agent's sandbox can write; the dead
-windows of its agents that ended within a day go too, where their records place
-them, taking a session only they held with them. `--all` also sweeps every
-`asq-` session tmux lists. A server with nothing left on it exits by itself, so
-the next `asq` or `fleet spawn` starts a fresh one on whichever account that
-shell carries.
+tmux_socket` may point anywhere). A project's sessions are every one its spawns
+made, by tmux's own id for it (`$3`), kept beside the launch records, plus the ones
+its records name and the session its agents from before this version run in (the
+one tmux says holds their panes) — whatever rows are left, or how long ago they
+ended, and never by the project's codename in the store, which an agent's sandbox
+can write. A row ended in the store while its window runs is stopped like a running
+one. `--all` also sweeps every `asq-` session tmux lists, sparing one that holds a
+row the run left live. A server with nothing left on it exits by itself, so the
+next `asq` or `fleet spawn` starts a fresh one on whichever account that shell
+carries.
 
-An agent spawned before this version has no launch record. `shutdown` kills its
-window, with no exit command typed, where tmux lists it in a session a record of
-its project names; ends it as lost when it was spawned before this boot; and
-otherwise leaves it live and says so: end it in its own window, and `--forget`
+An agent spawned before this version is stopped like any other: the first fleet
+command of this version took a census of such rows, before anything sandboxed could
+write the store, and placed each by its row as it stood then. A row with no record
+that the census did not find (a fake row, or one whose record was lost) is stopped
+only by removing a dead window of its, ended as lost when it was spawned before this
+boot, and otherwise left live, saying so: end it in its own window, and `--forget`
 ends its row on your word.
 
 Board notes and tasks are kept, but the ended rows' **claims are released**: a
@@ -543,12 +547,11 @@ aisquare fleet attach --project amber-otter
 
 Replaces this terminal with `tmux attach` on the project's fleet session — the
 full-fidelity escape hatch. Under `--json` it prints the command it would run
-instead of running it. The session is the one the project's live agents' launch
-records name, the manager's first, by tmux's own id for it, on the server their
-spawns recorded (`tmux -S`), the line the Manager tab prints, so it works from a
-shell under another `TMUX_TMPDIR` and after a rename tmux was not told of. A
-project whose agents were all spawned before this version has no record to name
-its session; the refusal prints the `tmux attach` command for it.
+instead of running it. The session is one the project's spawns made, its live
+agents' records name (the manager's first) or its agents from before this version
+run in, by tmux's own id for it, on the server their spawns recorded (`tmux -S`),
+the line the Manager tab prints, so it works from a shell under another
+`TMUX_TMPDIR` and after a rename tmux was not told of.
 
 **Scope and exit codes.** `--all` and `--project` name different scopes and are
 refused together rather than one silently winning — a usage error, exit **2**,
@@ -1118,13 +1121,15 @@ registered, showing the plan and asking first. The navigator only loads what is
 registered, so this is also how a slow start is cured (#83).
 
 **tmux.** Session `asq-<codename>`, made by the project's first spawn and
-joined by every later one by tmux's own id for it (`$3`), which each agent's
-launch record holds; a session found under that name that no record of the
-project names is not joined (a swap of two projects' codenames in the store
-would put an agent into the other's), and the spawn makes `asq-<codename>-2`
-instead. Window name = agent label; panes are addressed by `%id`, sessions by
-`$id`, never by name, so renames are harmless: a rename tmux was not told of
-strands nothing.
+joined by every later one by tmux's own id for it (`$3`), which the project's
+session list beside the launch records holds however long its last agent has been
+gone; agents spawned before this version are joined in the session tmux says holds
+theirs. A session found only under that name is not joined (a swap of two projects'
+codenames in the store would put an agent into the other's), and the spawn makes
+`asq-<codename>-2` instead. Window name = agent label; panes are addressed by
+`%id`, sessions by `$id`, never by name, so renames are harmless: a rename tmux was
+not told of strands nothing, and `fleet rename` gives each of a project's sessions a
+name of its own.
 
 **Agent labels.** `manager` — always, one per project; a second is refused.
 Everything else matches `^[a-z][a-z0-9-]{1,23}$`: 2–24 characters, lowercase

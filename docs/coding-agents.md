@@ -488,8 +488,8 @@ writable, so a sandboxed agent can write any row of the board's store
 what runs outside the sandbox, what is typed into, or what is killed. What does is
 read-only, or recorded where the sandbox cannot write, or validated against something
 it cannot write; for tmux, by construction: one resolver places every pane and session
-the fleet acts on from a launch record, and a test fails on any tmux call that does not
-go through it (below).
+the fleet acts on from a launch record, and a test fails where a tmux server is made, or
+a pane, session, socket or path named to one, at a site it does not list (below).
 
 Read-only inside the profile (`types.store_read_only`):
 
@@ -521,51 +521,61 @@ outside any sandbox from that record and nothing else from the store: the binary
 arguments and permission, the role, the agent, the directory (a worktree's as it
 stands), the account and, when it resumes, the transcript and the native thread.
 `fleet tell` queues for a busy Codex agent with the record's binary, thread and
-home. A row with no record (spawned by an aisquare that keeps none, or whose record
-could not be written), a record that cannot be read or was written by a newer
+home. A row with no record, a record that cannot be read or was written by a newer
 aisquare, and a project whose directory in the store is not the record's are refused
-before anything is stopped, with the reason and the way out (stop the agent, spawn a
-new one). The reason is also a board note, once per row and reason, whichever path met
-it first (restart, switch, the hand-over, a message told to a busy agent), so an
-unattended hand-over leaves it where the manager and `fleet ls` readers look. Nothing
-reads the store to write a record, and a spawn that cannot write one starts no agent,
-asked before the project is captured or a worktree made. A record is read back as it
-was written, so a release that adds a field reads an older record with that field's
+before anything is stopped, with the reason and the way out. The reason is also a board
+note, once per row and reason, whichever path met it first (restart, switch, the
+hand-over, a message told to a busy agent), so an unattended hand-over leaves it where
+the manager and `fleet ls` readers look. A spawn that cannot write a record starts no
+agent, asked before the project is captured or a worktree made. A record is read back as
+it was written, so a release that adds a field reads an older record with that field's
 default.
+
+Agents spawned before this version (legacy rows) are trusted as legacy, once: the first
+fleet read or spawn of this aisquare, and any launch of an agent that sandboxes its
+tools, takes a census (`launch-seals/legacy-census.json`, read-only to the sandbox) of
+every fleet row that has no record, while no record has been kept on this machine yet,
+so before anything in a sandbox could have written the store. Each such row gets a
+record made from the row as it stood then, and is placed, told, stopped, restarted
+(fresh: no session is held for it), reaped and shut down like any other; its session is
+the one tmux says holds its pane. The census is never taken again, so a row inserted
+later with no record (a fake one, or one whose record was lost) is not legacy: it is
+told nothing, its word reaches only a dead window of its project's sessions (`fleet
+stop` removes it and ends the row), one spawned before this boot is ended as lost, and
+`fleet shutdown --forget` ends the rest on your word.
 
 Where the fleet acts on a row's window is decided in one place, the placement
 resolver (`services.fleet.resolve_place`): it answers with the pane, the session, the
-server and the agent the row's launch record holds, or with a refusal saying why there
-is none. Every tmux question or act about an agent goes to what it answers, never to
-the row's `pane_id`, `tmux_socket` or `socket_path`, its `agent`, or the project's
-codename: `fleet tell`'s typing and a spawn's prompt, the manager's nudge (which a
-sandboxed agent's own hooks deliver from outside its sandbox), `/exit` and the kill of
-`fleet stop` and with it restart, switch, the hand-over and `shutdown`, whether an agent
-runs (`restart`, the listings, `reap`, a spawn's reconcile), its lingering and late
-windows, the sessions `shutdown` takes down, `fleet rename` and `fleet attach`. The
-record's agent's rules decide whether to type (its readiness check keeps an Enter out of
-Codex's dialogs) and whether it redraws while it waits on you (its bell). A test,
-`tests/test_fleet_placement.py`, enumerates every tmux call in the fleet's and the
-board's services and fails on one that names a pane or a session the resolver did not
-place, or on a place made from anything but a launch record or what tmux itself listed.
+server, the agent, the role and the label the row's launch record holds, or with a
+refusal saying why there is none. Every tmux question or act about an agent goes to
+what it answers, never to the row's `pane_id`, `tmux_socket`, `socket_path`, `agent`,
+`label` or `ended_at`, nor to the project's codename: `fleet tell`'s typing and a
+spawn's prompt, the manager's nudge (which a sandboxed agent's own hooks deliver from
+outside its sandbox), `/exit` and the kill of `fleet stop` and with it restart, switch,
+the hand-over and `shutdown`, whether an agent runs (`restart`, the listings, `reap`, a
+spawn's reconcile, the doctor), its lingering and late windows, the sessions `shutdown`
+takes down, `fleet rename` and `fleet attach`. A label names the row whose record holds
+it. The record's agent's rules decide whether to type (its readiness check keeps an
+Enter out of Codex's dialogs) and whether it redraws while it waits on you (its bell).
+A test, `tests/test_fleet_placement.py`, enumerates every place the fleet's and the
+board's services, the doctor and asq's views make a tmux server or name a pane, a
+session, a socket or a path to one, and fails at a site it does not list with where its
+values come from: a launch record, tmux's own answer, or today's config.
 
-A row rewritten in the store to name another pane, socket or agent is not typed into
-(`tell` files the board note, the nudge waits), and is stopped where its record places
-it, so one `UPDATE` of its own row does not make an agent unstoppable; the board says
-what was rewritten. Sessions are tmux's own ids (`$3`), which the record holds: a spawn
-joins only a session a record of its project names, else makes one of its own, so a
-swap of two projects' codenames never puts an agent into the other's session;
-`shutdown` takes down the sessions its live agents' records name, and the dead windows
-of agents that ended within a day, never `asq-<codename>`; `fleet rename` renames those
-sessions and the records' names for them, whether or not tmux could be told; `--all`
-also sweeps every `asq-` session tmux lists. A row with no record (spawned before this
-version) is not typed into, asked about or listed as anywhere: `fleet ls` shows it
-lost, saying why. `stop` and `shutdown` kill its window, with no exit command typed,
-only where tmux lists it in a session a record of its project names and no record
-places another agent there, so its claims are released by the stop, not by its own
-`SessionEnd`; elsewhere they refuse, nothing typed or killed. One spawned before this
-boot is ended as lost; otherwise end its agent in its own window, and `fleet shutdown
---forget` ends its row on your word.
+A row rewritten in the store — to name another pane, socket, agent or label, or ended
+there while its window runs — is not typed into (`tell` files the board note, the nudge
+waits), and is listed, stopped and shut down where its record places it, as running, so
+one `UPDATE` of its own row neither makes an agent unstoppable nor hides it from
+`shutdown` or `restart`; the board says what was rewritten. Sessions are tmux's own ids
+(`$3`): the ones a project's spawns made are kept beside the records
+(`launch-seals/project-<digest>.json`), a spawn joins one of them (or the legacy
+session) whenever it is still there, else makes its own, so a swap of two projects'
+codenames never puts an agent into the other's session; `shutdown` takes down every
+session the project's spawns made, the ones its records name and its legacy session,
+whatever rows are left or how long ago they ended, never `asq-<codename>`; `fleet
+rename` renames each of them, under names of their own, and the records' names,
+whether or not tmux could be told; `--all` also sweeps every `asq-` session tmux lists,
+sparing one that holds a row the run left live.
 What the fleet reads of a session to act on outside the sandbox, a Codex turn that
 failed on its limit with no hook (which parks the row and may hand it over), is read
 from the transcript the record holds, never the board session's, and only by a reader

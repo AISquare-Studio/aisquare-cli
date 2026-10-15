@@ -47,27 +47,30 @@ adapter.**
   directory, account, and the tmux socket and pane of its window) and the
   agent's own hook adds its session (transcript, thread, home, and when this
   launch's session started, which `fleet tell` asks before typing into a resumed
-  Claude Code agent). One resolver places every agent from its record: `fleet
-  tell`, a spawn's prompt, `fleet stop`, `restart`'s check of whether it runs,
-  the listings, `reap`, `fleet shutdown`, `rename`, `attach` and the manager's
-  nudge type into, ask about and kill only the pane and the session (by tmux's
-  own id) the record holds, by the record's agent's rules, never a row's pane,
-  socket or agent or the project's codename; a test enumerates every tmux call
-  and fails on one that does not go through it. A spawn joins only a session a
-  record of its project names, else makes its own (`asq-<codename>-2` when that
-  name is taken), and `shutdown` takes down the sessions its live agents'
-  records name. A row rewritten in the store is told nothing and stopped where
-  its record places it, the board saying what was rewritten. Agents spawned
-  before this version have none: `fleet ls` shows them lost, saying why, their
-  restart or switch is refused before anything is stopped, naming the way out
-  (stop the agent and spawn it again), `tell` files its message as a board note,
-  and `stop` and `shutdown` kill its window with no exit command typed only
-  where tmux lists it in a session a record of its project names; elsewhere they
-  refuse, and `shutdown --forget` ends its row on your word (one spawned before
-  this boot is ended as lost). A project whose directory in the store is not the
-  one the agent was spawned in is refused too. The reason is a board note too,
-  once per agent and reason, so an unattended hand-over says why it did not
-  happen. A spawn whose record cannot be written starts no agent, of either kind.
+  Claude Code agent, and the label it was given). One resolver places every
+  agent from its record: `fleet tell`, a spawn's prompt, `fleet stop`,
+  `restart`'s check of whether it runs, the listings, `reap`, `fleet shutdown`,
+  `rename`, `attach`, the doctor and the manager's nudge type into, ask about and
+  kill only the pane and the session (by tmux's own id) the record holds, by the
+  record's agent's rules, never a row's pane, socket, agent, label or `ended_at`
+  or the project's codename; a test lists every place the fleet's services, the
+  doctor and asq's views make a tmux server or name a pane, session, socket or
+  path to one, and fails at any site it does not list. The sessions a project's
+  spawns made are kept beside the records: a spawn joins one, however long its
+  agents have been gone, else makes its own (`asq-<codename>-2` when that name is
+  taken), and `shutdown` takes every one of them down. A row rewritten in the
+  store, or ended there while its window runs, is told nothing and stopped where
+  its record places it, the board saying so. Agents spawned before this version
+  are trusted as legacy: the first fleet command takes a census of them, before
+  anything sandboxed can write the store, and they are told, stopped, restarted
+  (fresh), reaped and shut down as before. A row with no record that the census
+  did not find is told nothing, its restart or switch is refused before anything
+  is stopped, naming the way out, and `stop` removes only a dead window of its;
+  `shutdown --forget` ends it on your word (one spawned before this boot is ended
+  as lost). A project whose directory in the store is not the one the agent was
+  spawned in is refused too. The reason is a board note too, once per agent and
+  reason, so an unattended hand-over says why it did not happen. A spawn whose
+  record cannot be written starts no agent, of either kind.
 - `fleet.roles.<role>.permission` is new and unset; an existing
   `permission_mode` (or Codex `sandbox` / `approval_policy` / `approve_for_me`)
   means what it did.
@@ -123,12 +126,11 @@ adapter.**
   `launch-seals/`, which the sandbox can only read, written by its spawner and
   its own hook, and nothing else from the store; `tell`, `stop`, `shutdown` and
   the manager's nudge type into and kill only the pane that record places, by
-  its agent's rules, and `shutdown` only the sessions it names, by tmux's id,
-  all through one resolver a test holds every tmux call to; a failed turn's
-  limit is read from the record's transcript; a native id goes on Codex's
-  command line only as a UUID (an agent spawned before this version, with no
-  record, is stopped only where tmux lists its window in a session a record of
-  its project names). Its
+  its agent's rules, and `shutdown` only the project's own sessions, by tmux's
+  id, all through one resolver a test holds every tmux server and target to; a
+  failed turn's limit is read from the record's transcript; a native id goes on
+  Codex's command line only as a UUID (agents spawned before this version are
+  placed by a census taken before anything sandboxed could write the store). Its
   `aisquare` calls
   succeed on the first, sandboxed attempt instead of each needing an approval,
   and a reviewer's verdict reaches the board while its worktree stays read-only.

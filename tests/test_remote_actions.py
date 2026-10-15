@@ -2392,6 +2392,10 @@ def test_a_paste_that_timed_out_may_still_land_and_is_on_the_trail(
     ]
 
 
+_FLEET_TELL = fleet_service.tell
+"""``fleet tell`` itself, which the ``fleet`` fixture replaces: auto mode's writes are its."""
+
+
 @dataclass(frozen=True)
 class LateWrite:
     """A path that types into an agent, and the tmux call of it that is not answered in time."""
@@ -2419,6 +2423,7 @@ _LATE_WRITES = [
         LateWrite("agent/tell", {"mode": "interrupt"}, "Enter", "working"),
         id="interrupt's Enter",
     ),
+    pytest.param(LateWrite("agent/tell", {"mode": "auto"}, "Enter"), id="auto's Enter"),
     *(
         pytest.param(
             LateWrite(name, {**PINNED, "dismiss_dialog": True}, "Escape", "dialog"),
@@ -2438,6 +2443,7 @@ def test_every_write_tmux_did_not_answer_in_time_says_it_may_still_land_and_audi
     pane: FakePane,
     log: list[str],
     project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
     write: LateWrite,
 ) -> None:
     """Review of #259, round 10, 8/9: rounds 7 to 9 taught "a tmux call that timed out may
@@ -2450,6 +2456,11 @@ def test_every_write_tmux_did_not_answer_in_time_says_it_may_still_land_and_audi
     needs.dialog = write.shows == "dialog"
     if write.shows == "working":
         needs.state = "working"
+    if write.body.get("mode") == "auto":  # fleet tell types, into an agent reading `waiting`
+        monkeypatch.setattr(fleet_service, "tell", _FLEET_TELL)
+        monkeypatch.setattr(
+            fleet_service, "status_of", lambda row: SimpleNamespace(state="waiting")
+        )
     pane.timing_out.add(write.late)
     body = phone.post(write.route, **{"agent": LABEL, "text": "hi", **write.body}).json()
     said = body.get("message") or body.get("how") or ""

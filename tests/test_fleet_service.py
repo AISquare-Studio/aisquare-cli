@@ -2354,6 +2354,41 @@ def test_tell_falls_back_to_a_note_when_tmux_cannot_type(
     assert _events(project, "note") == ["please rebase"]
 
 
+@pytest.mark.parametrize("timed_out", [False, True], ids=["refused", "timed out"])
+def test_tell_whose_enter_did_not_go_through_leaves_the_text_at_its_prompt_and_files_no_note(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    timed_out: bool,
+) -> None:
+    """Review of #259, round 10, 4/9: the paste landed and only its Enter failed, but the tell
+    said "tmux could not type it" and filed the text as a note too. The agent read the note
+    at its next prompt, and the text left unsent in its input box went out with whatever was
+    typed there next. It says the text is at its prompt, and files nothing. One whose Enter
+    timed out may still send it, and is ``maybe``."""
+    agent = _coder(project)
+    _board_session(agent, "waiting")
+    tmux.set_command(agent.pane_id, "claude")
+
+    def enter_fails(pane_id: str, *keys: str) -> None:
+        if timed_out:
+            raise TmuxTimedOut("tmux did not answer within 30s: send-keys")
+        raise TmuxError("send-keys failed (fake)")
+
+    monkeypatch.setattr(tmux, "send_keys", enter_fails)
+    result = fleet_service.tell(project, "coder-1", "please rebase")
+    assert not result.delivered and result.maybe is timed_out
+    assert result.how.startswith("pasted it at its prompt, but "), result.how
+    assert "tmux could not type it" not in result.how and "board note" not in result.how
+    if timed_out:
+        assert "it may still arrive, and send it" in result.how
+    else:
+        assert result.how.endswith("— press Enter in its pane to send it")
+    assert (agent.pane_id, "paste", "please rebase") in tmux.typed
+    assert _events(project, "note") == []
+
+
 def test_tell_says_a_paste_that_timed_out_may_be_typed_as_well_as_noted(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

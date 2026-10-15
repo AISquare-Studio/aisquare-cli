@@ -3093,6 +3093,12 @@ def tell(
     socket, its pane id is another agent's. A held row read its board's ``waiting`` while
     that was fresh, and pasted into, that agent got the text and an Enter (review of #259,
     round 2).
+
+    A paste tmux refused typed nothing, and the text goes to the board instead. Once the
+    paste went through, the text sits at the agent's prompt, and an Enter that did not
+    (:func:`pasted_unsent`) leaves it there, said so, and files no copy: the agent read the
+    note at its next prompt, and the text left in its input box went out with whatever was
+    typed there next (review of #259, round 10, 4/9).
     """
     with store_session() as store:
         agent = _live_agent(store, project, label, agent_id=agent_id)
@@ -3116,18 +3122,20 @@ def tell(
                     "launcher or a shell is in the foreground)"
                 )
             return TellResult(False, f"{why} — {how}")
-        try:
-            srv.paste(agent.pane_id, text)
-            srv.send_keys(agent.pane_id, "Enter")
-        except TmuxTimedOut as exc:
+        pasted = pane_write("the text", lambda: srv.paste(agent.pane_id, text))
+        if pasted.typed == "maybe":
             # A wedged server may still run what it was asked (review of #259, round 9, 1/8).
             how = _file_note(project, label, text, sender)
             return TellResult(
-                False, f"tmux did not answer in time ({exc}), so it may be typed as well — {how}"
+                False,
+                f"tmux did not answer in time ({pasted.error}), so it may be typed as well — {how}",
             )
-        except TmuxError as exc:
+        if pasted.typed == "no":
             how = _file_note(project, label, text, sender)
-            return TellResult(False, f"tmux could not type it ({exc}) — {how}")
+            return TellResult(False, f"tmux could not type it ({pasted.error}) — {how}")
+        entered = pane_write("Enter", lambda: srv.send_keys(agent.pane_id, "Enter"))
+        if entered.typed != "yes":
+            return pasted_unsent(entered, label, press="press Enter in its pane")
         return TellResult(True, "typed into its pane (it was waiting)")
     how = _file_note(project, label, text, sender)
     return TellResult(False, f"it is {status.state} — {how}")

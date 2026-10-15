@@ -7820,6 +7820,30 @@ def test_the_census_is_taken_once_and_never_from_a_store_records_were_kept_besid
     assert "not in the fleet when this aisquare first read it" in placement.why
 
 
+def test_a_legacy_agents_own_hook_leaves_it_placed(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Measured live: a legacy agent's own hook (``launch_seal.observe``, at its next prompt)
+    read the census's record and wrote it out as a record file, without the window the
+    census holds, and the row read "its launch record does not say which pane is its". A
+    legacy record stays the census's."""
+    agent = _coder(project)
+    _before_records()
+    fleet_service.list_agents(project)  # the census
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", agent.id)
+    launch_seal.observe(
+        agent.session_id or "",
+        agent="claude-code",
+        native=None,
+        transcript=None,
+        home=None,
+        own=True,
+    )
+
+    assert not launch_seal.recorded(agent.id)
+    assert isinstance(fleet_service.resolve_place(agent), fleet_service.Placed)
+
+
 def test_shutdown_takes_down_an_agent_that_ended_its_own_row(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

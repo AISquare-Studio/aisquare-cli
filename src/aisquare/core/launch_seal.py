@@ -270,7 +270,11 @@ def writable() -> str | None:
 
 def write(record: LaunchRecord) -> str | None:
     """Write ``record``: ``None`` when written, otherwise why it could not be. Only a
-    process outside the sandbox can (the directory is read-only in it)."""
+    process outside the sandbox can (the directory is read-only in it). A legacy record
+    is the census's (:func:`take_census`) and is never written out on its own: its window
+    is in the census, and a record file without one would place nothing."""
+    if record.legacy:
+        return "a legacy row's record is the census's, and is not written out"
     why = ensure_dir()
     if why is not None:
         return why
@@ -515,7 +519,8 @@ def observe(
     if agent_id is None:
         return
     record = read(agent_id)
-    if not isinstance(record, LaunchRecord) or record.agent != agent:
+    if not isinstance(record, LaunchRecord) or record.legacy or record.agent != agent:
+        # A legacy row's record is the census's, never written out: its replay is fresh.
         return
     kept = record.session
     if (kept is None and own is True) or (kept is not None and kept.id == session_id):
@@ -530,7 +535,7 @@ def adopted(agent_id: str, session_id: str) -> None:
     if facts is None:
         return
     record = read(agent_id)
-    if isinstance(record, LaunchRecord):
+    if isinstance(record, LaunchRecord) and not record.legacy:
         _with_session(record, facts)
 
 

@@ -60,7 +60,10 @@ adapter.**
   agents have been gone, else makes its own (`asq-<codename>-2` when that name is
   taken), and `shutdown` takes every one of them down. A row rewritten in the
   store, or ended there while its window runs, is told nothing and stopped where
-  its record places it, the board saying so. Agents spawned before this version
+  its record places it, the board saying so; whether a row runs is read from the
+  panes (the windows its project's spawns recorded), so it keeps its label, its
+  worktree and its place as the one manager. What the fleet types carries no
+  control characters but line breaks and tabs. Agents spawned before this version
   are trusted as legacy: the first fleet command takes a census of them, before
   anything sandboxed can write the store, and they are told, stopped, restarted
   (fresh), reaped and shut down as before. A row with no record that the census

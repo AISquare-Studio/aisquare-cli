@@ -566,7 +566,14 @@ A row rewritten in the store — to name another pane, socket, agent or label, o
 there while its window runs — is not typed into (`tell` files the board note, the nudge
 waits), and is listed, stopped and shut down where its record places it, as running, so
 one `UPDATE` of its own row neither makes an agent unstoppable nor hides it from
-`shutdown` or `restart`; the board says what was rewritten. Sessions are tmux's own ids
+`shutdown` or `restart`; the board says what was rewritten. Whether a row runs is read
+from the panes alone — the windows its project's spawns recorded beside the records,
+and the census's panes in the legacy session — never from its `ended_at`, so a running
+agent keeps its label, its worktree and its place as the project's one manager whatever
+its row says. A label names the row whose record holds it; a row with no record is taken
+at its word only when no record holds that label. What the fleet types into a pane
+carries no control characters but line breaks and tabs, so text from the store cannot
+end a bracketed paste on a tmux that does not sanitise one. Sessions are tmux's own ids
 (`$3`): the ones a project's spawns made are kept beside the records
 (`launch-seals/project-<digest>.json`), a spawn joins one of them (or the legacy
 session) whenever it is still there, else makes its own, so a swap of two projects'

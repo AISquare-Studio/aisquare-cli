@@ -2584,6 +2584,33 @@ def test_tell_says_a_paste_that_timed_out_may_be_typed_as_well_as_noted(
     assert _events(project, "note") == ["please rebase"]
 
 
+def test_a_tell_whose_paste_timed_out_is_maybe_when_its_store_is_locked(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 12, 3/9: only a ``FleetError`` from the note was caught, and a
+    store locked past its busy timeout raises ``sqlite3.OperationalError``: it went out of
+    ``tell``, the CLI failed and the remote answered 400 ``write_failed`` (``delivered=no``),
+    while the paste may still land and a Send again would type it a second time."""
+    from aisquare.services import team
+
+    agent = _coder(project)
+    _board_session(agent, "waiting")
+    tmux.set_command(agent.pane_id, "claude")
+
+    def wedged(pane_id: str, text: str) -> None:
+        raise TmuxTimedOut("tmux did not answer within 30s: paste-buffer")
+
+    def locked(*args: object, **kwargs: object) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(tmux, "paste", wedged)
+    monkeypatch.setattr(team, "add_note", locked)
+    result = fleet_service.tell(project, "coder-1", "please rebase")
+    assert result.typed == "maybe", result
+    assert "it may still arrive at its prompt, unsent" in result.how
+    assert result.how.endswith("It was not filed as a board note: database is locked"), result.how
+
+
 def test_a_tell_whose_paste_timed_out_is_maybe_when_its_note_cannot_be_filed(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

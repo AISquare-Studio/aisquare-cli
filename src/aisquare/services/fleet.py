@@ -3255,9 +3255,11 @@ def tell(
             # A wedged server may still run what it was asked (review of #259, round 9, 1/8),
             # which the remote's trail says as `delivered=maybe` (round 10, 6/9), a note that
             # could not be filed too: it was the note's error, `delivered=no` (round 11, 6/13).
+            # Whatever the note raised: a store locked past its busy timeout is no `FleetError`
+            # (round 12, 3/9), and the note is a courtesy once the paste may be on its way.
             try:
                 how = _file_note(project, label, text, sender)
-            except FleetError as exc:
+            except Exception as exc:
                 late = told.late(label, then=" at its prompt, unsent", again="type into it")
                 return TellResult("maybe", f"{late}. It was not filed as a board note: {exc}")
             late = told.late(label, then=" at its prompt as well, unsent", again="type into it")

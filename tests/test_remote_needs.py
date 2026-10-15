@@ -4250,6 +4250,47 @@ def test_under_a_team_hub_the_scan_reads_the_hubs_board_once_for_its_projects(
     assert [item.kind for item in needs_agent_now(beta, "coder-1").items] == ["failed"]
 
 
+def test_under_a_team_hub_a_resumed_agent_at_the_trust_question_is_a_card(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restart resumed coder-1's session, on the hub's board, on an account that never
+    trusted the folder, and its pane stopped at the question. The listing read it there; the
+    scan derived the row again with its session by ``_status`` alone, which read the old
+    session's ``waiting``: no card and no push (review of #259, round 13)."""
+    now = datetime.now(UTC)
+    hub = _rooted(tmp_path / "hub")
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub.root))
+    with store_session() as store:
+        alpha = store.onboard_project(_rooted(tmp_path / "alpha"))
+        store.ensure_project(hub)
+        store.upsert_session(
+            TeamSession(
+                id="ses_coder-1", project_id=hub.id, role="coder", label="coder-1",
+                started_at=now - timedelta(hours=1), last_seen_at=now - timedelta(hours=1),
+                state="waiting",
+            )
+        )  # fmt: skip
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_coder-1", project_id=alpha.id, label="coder-1", role="coder",
+                pane_id="%2", session_id="ses_coder-1", cwd=alpha.root,
+                created_at=now - timedelta(minutes=1),
+            )
+        )  # fmt: skip
+    tmux = FakeTmux()
+    tmux.screen = (
+        (Path(__file__).parent / "fixtures" / "claude_code" / "trust_prompt_2.1.299.txt")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+
+    items = scan_needs_you(remote_needs.live_needs_sources(), now=now, dismissed=())
+
+    assert [(item.kind, item.agent) for item in items] == [("permission", "coder-1")]
+    assert "waiting for folder trust" in items[0].reason
+
+
 @pytest.mark.parametrize("under_a_hub", [False, True])
 def test_a_coder_whose_hand_over_never_started_its_replacement_is_reported_under_a_hub_too(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, under_a_hub: bool

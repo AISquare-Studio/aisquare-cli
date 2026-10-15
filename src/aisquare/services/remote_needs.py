@@ -3344,6 +3344,12 @@ def _needs_with_board_sessions(statuses: list[FleetAgentStatus]) -> list[FleetAg
     store session and a server's three questions per row, every row of a hub's every 3 s
     scan. A server that cannot be asked reads its rows as the listing would; a look that
     fails is the listing's failure (:func:`_needs_scan_project`).
+
+    A row the listing read at Claude Code's folder-trust question (``fleet.TRUST_PROMPT``,
+    from its screen) keeps that state: ``_status`` reads the board alone, and a restart
+    that resumed a session on an account that never trusted the folder read as the old
+    session's ``waiting``, with no card and no push (review of #259, round 13). Its screen
+    is not captured again: the listing looked at it a moment ago.
     """
     from aisquare.core.store import store_session
     from aisquare.services import fleet as fleet_service
@@ -3380,7 +3386,18 @@ def _needs_with_board_sessions(statuses: list[FleetAgentStatus]) -> list[FleetAg
         )
         for agent in rows
     }
-    return [derived.get(status.agent.id, status) for status in statuses]
+
+    def again(status: FleetAgentStatus) -> FleetAgentStatus:
+        found = derived.get(status.agent.id)
+        if found is None:
+            return status
+        if status.state == "attention" and (status.detail or "").startswith(
+            fleet_service.TRUST_PROMPT
+        ):
+            return found.model_copy(update={"state": status.state, "detail": status.detail})
+        return found
+
+    return [again(status) for status in statuses]
 
 
 _tails: dict[str, tuple[tuple[int, int], TranscriptTail | None]] = {}

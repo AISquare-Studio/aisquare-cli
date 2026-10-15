@@ -979,8 +979,10 @@ def needs_from_agent(
         if notice is not None:
             form = _INPUT_NOTICE.search(notice.text) is not None
         else:  # a sub-agent's prompts each send a notice, its records not this transcript's
-            form = pending[0].name not in _SUBAGENT_TOOLS and _needs_later_notice(
-                attention_event, tail, session
+            form = (
+                call is not None
+                and call.name not in _SUBAGENT_TOOLS
+                and _needs_later_notice(attention_event, tail, session)
             )
         if not form and call is not None:
             if call.name in _SUBAGENT_TOOLS and session is not None:

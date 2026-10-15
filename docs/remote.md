@@ -669,8 +669,8 @@ from `POST api/unlock`) except unlock itself; every non-GET request needs an
 A `?project=`, a write's or an agent action's `"project"`, `switch`'s name and
 `remove`'s ref name only a project the page is shown: one `api/projects` lists,
 which you added, or the current one. A directory Claude Code only ran in, which
-the hooks captured and nobody added, is named by none of them, and `*` names
-nothing. A switch adds the project it names, so the current one, if you never
+nobody added (the hooks capture one only with `[projects] capture` on), is named by
+none of them, and `*` names nothing. A switch adds the project it names, so the current one, if you never
 added it, is switched to only where `add` would add it. A task's `ref`, a note's
 `task` and a board write's `as` name only a task or session on the board of a
 project the page is shown.

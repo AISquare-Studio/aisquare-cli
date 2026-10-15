@@ -23,7 +23,9 @@ off to `claude` — arguments after the role are forwarded, so `aisquare launch
 coder --model opus` does what it looks like. (The underlying mechanism is the
 `AISQUARE_ROLE` environment variable; `AISQUARE_ROLE=coder claude` still works
 if you prefer it, and is what you need when launching an agent other than
-`claude` without `--command`.)
+`claude` without `--command` — in a project you added: `aisquare team on` adds
+this one, as `launch` and `team spawn --exec` do. Where nobody added it, a
+session started that way joins no board.)
 
 Every session is told its id, its teammates, and its **role's work cycle**
 automatically — no standing prompts to paste:

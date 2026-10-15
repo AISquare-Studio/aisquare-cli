@@ -71,6 +71,14 @@ all of them, and the fleet cleans up the worktrees it made.**
   names those settings before it moves; to keep one there, set it after the
   move. When that release saves the file whole again, this release reads it as
   it did the first time: values equal to 0.8.0's defaults follow today's.
+- **Nothing becomes a project on its own any more** (`[projects] capture`, off;
+  see Changed). The directories 0.8.0 captured stay in the store, unlisted, and
+  `asq` no longer shows them, even where `a` was left on. `aisquare project list
+  --all` lists them, `aisquare doctor` counts them, and `aisquare project prune
+  --captured-only --older-than 0` drops every one that holds no context entry.
+  A project you use that only a hook ever registered is one of them: add it with
+  `aisquare project onboard <path>`, and its prompts and boards are there again.
+  `aisquare config set projects.capture true` keeps 0.8.0's behaviour instead.
 - The store migrates to schema v31 on first open, from 0.8.0's v25, in six
   steps:
   - v26: `fleet_agent.server_started_at`, when each agent's tmux server
@@ -360,6 +368,22 @@ all of them, and the fleet cleans up the worktrees it made.**
   key, a token, a cloud provider or a forced login is left as it is.
 
 ### Changed
+- **A directory becomes a project only when someone adds it** (#139). 0.8.0 gave
+  every directory a hooked Claude Code session ran in a project row, captured and
+  unlisted, with its prompts, turn rows and board, and a saved `a` toggle in `asq`
+  listed them all. Now `[projects] capture` is off by default: a project is what
+  `aisquare project onboard`, `init`, `project link` or `switch`, Welcome or `+` in
+  `asq`, `team on` or a fleet spawn added, or what a manager added when asked.
+  Anywhere else the hooks record nothing: no project row, no prompt, no turn row,
+  no board, no record for the Explainability spool. A board write from there
+  (`note`, `task add`, `task next --claim`, `team signal`), the MCP server's
+  session and `explainability use` are refused with the command that adds the
+  project (`--json` error `not_added`); board reads answer empty and write
+  nothing. A fleet spawn adds the project it starts in, and `fleet attach` or a
+  stop asks for a codename without writing a row. `asq` lists no captured row and
+  `a` is no key; doctor names `aisquare project prune --captured-only --older-than
+  0` for the rows left from before. `aisquare config set projects.capture true`
+  restores 0.8.0's capture.
 - **`aisquare upgrade` warns, and `aisquare uninstall` refuses, while Remote is
   on in another process**, as they already do for running fleet agents. Both
   name it: `aisquare remote serve` in another shell, or another asq's R panel,

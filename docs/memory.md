@@ -43,6 +43,11 @@ aisquare why                       # explain the last injection
 aisquare log                       # your captured prompt history, per project
 ```
 
+Prompts are recorded only in a project you added (`aisquare project onboard`,
+`init`, Welcome or `+` in `asq`, a fleet spawn): a hooked session anywhere else
+keeps nothing. `[projects] capture = true` records them in every directory, as
+0.8.0 did ([fleet](fleet.md#naming)).
+
 The **active project** is whichever repo contains your working directory, or
 the one you pin with `aisquare project switch <name>`. Everything —
 context, snapshots, prompt history, team state — scopes to it consistently.

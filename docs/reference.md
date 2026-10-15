@@ -9,7 +9,7 @@ removes exactly them):
 | Hook | What it does |
 | --- | --- |
 | `SessionStart` | inject orientation: snapshot pointers, context, team briefing |
-| `UserPromptSubmit` | capture the prompt; deliver the teammate delta; heartbeat |
+| `UserPromptSubmit` | record the prompt in a project you added (anywhere, with `[projects] capture` on); deliver the teammate delta; heartbeat |
 | `Stop` | mark the session waiting; renew its task leases |
 | `Notification` | flag **NEEDS YOU** when a prompt needs a human (permission, elicitation); other notices are feed lines, the idle notice nothing |
 | `SessionEnd` | release claims, mark the session gone, final distill |

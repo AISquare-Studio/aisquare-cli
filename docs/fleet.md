@@ -1073,20 +1073,29 @@ aisquare project list --group ui                    # or --pinned; --json carrie
 aisquare project onboard ~/work/new --group tools   # created if new
 ```
 
-**What is listed, and what is only captured.** Every directory a hooked Claude
-Code session runs in is *captured* — registered so that its prompt history and
-injected memory work — but the sidebar and `aisquare project list` show only
-the projects added **on purpose**: `aisquare init`, `project onboard`,
-`project link`, `project switch`, the sidebar's `+`, `team on`, a fleet spawn
-that starts (not a refused one, and not the automatic usage-limit hand-over),
-or a fact written by hand with `context add --project` (#139). A captured
-directory stays out of the way until one of those happens; `a` in the sidebar
-shows the captured ones too (marked *captured*), `project list --all` lists
-them, and `project prune --captured-only [--older-than DAYS]` drops the stale
-ones — those with no context entries and nothing touched in 30 days by
-default. `project forget` now sticks: the next prompt in that directory
-captures it again, silently, instead of putting it back on the list. `doctor`
-says how many are hidden.
+**Only what you add is a project.** A directory becomes a project when it is
+added **on purpose**: `aisquare init`, `project onboard`, `project link`,
+`project switch`, Welcome or the sidebar's `+`, `team on`, a fleet spawn (not
+the automatic usage-limit hand-over), or a fact written by hand with
+`context add --project`. A manager asked to add one runs the same commands.
+Anywhere else a hooked Claude Code session records nothing — no project row, no
+prompt, no turn row, no board — and a board write there (`note`, `task add`,
+`task next --claim`, `team signal`) is refused with the command that adds it.
+That is `[projects] capture = false`, the default since 0.8.1.
+
+`aisquare config set projects.capture true` brings back what 0.8.0 did (#139):
+every directory a hooked session runs in is then *captured* — registered so its
+prompt history and injected memory work, but not listed — and `a` in the
+sidebar shows those too, marked *captured*. With capture off, `a` is no key and
+the sidebar lists no captured row, even with the toggle saved on.
+
+Rows captured before you upgraded stay in the store, unlisted, until you drop
+them: `project list --all` lists them, `doctor` counts them, and
+`project prune --captured-only --older-than 0` drops every one with no context
+entries (without `--older-than`, only those untouched for 30 days).
+`project forget` sticks: with capture off nothing brings the row back, and with
+it on the next prompt there captures it again, silently, instead of putting it
+back on the list.
 
 **Registrations you no longer want** — a deleted checkout, a throwaway worktree —
 go with `aisquare project forget <name|path>`; `aisquare project prune` sweeps
@@ -1207,7 +1216,8 @@ server the same way.
 **What the UI remembers.** The view that was open — a project, an agent, the
 Settings hub or a page under it — comes back at the next launch if its row is still
 there (an agent that has gone falls back to its project), and so does the
-captured-directories toggle; both live in the store's `ui_state` table (#144),
+captured-directories toggle, which lists anything only while `[projects] capture`
+is on; both live in the store's `ui_state` table (#144),
 the theme in `state.json` because the board shares it, the navigator width
 and the board's line sizes beside the theme. Nothing else is kept: the panes are
 tmux's and the rows are the store's.

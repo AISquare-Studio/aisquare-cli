@@ -422,11 +422,13 @@ all of them, and the fleet cleans up the worktrees it made.**
   a tree pushed to an integration branch (`push HEAD:feat/…`) was never
   removed. A tree now goes when it is clean and its commits are on the default
   branch or pushed to **any** remote branch. Its `fleet/…` branch is then
-  deleted, once its tip is pushed the same way; reap never deleted a branch
-  before, and deletes no other. A tree with uncommitted changes, an untracked
-  file that is not ignored, or unpushed commits is kept and named with why;
-  push it, and the next `reap` removes it. `--json` adds `worktrees_kept` and
-  `branches_deleted` beside `worktrees_removed`. A live agent's tree is never
+  deleted once the default branch holds its tip, and kept while it has commits
+  the default branch lacks, so a coder spawned again for its task checks it out
+  and carries on with them; reap never deleted a branch before, and deletes no
+  other. A tree with uncommitted changes, an untracked file that is not
+  ignored, or unpushed commits is kept and named with why; push it, and the
+  next `reap` removes it. `--json` adds `worktrees_kept`, `branches_deleted`
+  and `branches_kept` beside `worktrees_removed`. A live agent's tree is never
   touched, as before.
 - **`fleet stop` says** that `fleet reap` removes the agent's worktree once its
   work is pushed, for an agent that had one.

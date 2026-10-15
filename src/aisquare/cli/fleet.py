@@ -887,6 +887,7 @@ def reap(
                         for path, reason in report.worktrees_kept
                     ],
                     "branches_deleted": list(report.branches_deleted),
+                    "branches_kept": list(report.branches_kept),
                     "claims_released": list(report.claims_released),
                     "release_failures": list(report.release_failures),
                     "held": [_row_json(row) for row in report.held],
@@ -918,6 +919,11 @@ def reap(
         console.print(f"  🗑 {path}")
     for branch in report.branches_deleted:
         console.print(f"  🗑 branch {branch}")
+    for branch in report.branches_kept:
+        console.print(
+            f"  · kept branch {branch} — commits the default branch lacks; "
+            "a spawn for its task carries on there"
+        )
     for path, reason in report.worktrees_kept:
         console.print(f"  ⚠ kept {path} — {reason}")
     _say_released(console, len(report.claims_released))

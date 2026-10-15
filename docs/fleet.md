@@ -468,15 +468,20 @@ Records agents whose panes have died as ended (with their exit code), marks
 agents whose panes have vanished as lost, and removes the worktrees of ended
 agents **that hold nothing found only there**: a clean tree whose commits are on
 the default branch or pushed to **any** remote branch (an integration branch
-counts), and then that tree's `fleet/…` branch, once its tip is pushed the same
-way. A tree with uncommitted changes, an untracked file that is not ignored
+counts). A tree with uncommitted changes, an untracked file that is not ignored
 (even under `status.showUntrackedFiles=no`), or unpushed commits is kept and
-named, with why (`worktrees_kept` under `--json`, beside `worktrees_removed` and
-`branches_deleted`); push it, and the next `reap` removes it. `fleet stop` says
-so for an agent that had a worktree. An agent whose tree was removed is not
-restarted (Restart, `fleet restart`, Remote's restart): its conversation would
-carry on in a new tree without its commits, so spawn a new one on the branch it
-pushed. `--all` walks every project's fleet, not just this one.
+named, with why (`worktrees_kept` under `--json`, beside `worktrees_removed`);
+push it, and the next `reap` removes it. `fleet stop` says so for an agent that
+had a worktree. The removed tree's `fleet/…` branch is deleted only once the
+default branch holds its tip (`branches_deleted`). One with commits the default
+branch lacks — pushed to an integration branch, say — is kept and named
+(`branches_kept`): a branch costs nothing, and a coder spawned again for its
+task asks for the same branch, checks it out and carries on with its commits,
+where it used to start a new one from the main checkout's HEAD without them. An
+agent whose tree was removed is not restarted (Restart, `fleet restart`,
+Remote's restart): its conversation would carry on in a new tree without its
+commits, so spawn a new one for its task. `--all` walks every project's fleet,
+not just this one.
 
 Each row is asked of its own server, at the socket its spawn recorded, so a
 shell under another `TMUX_TMPDIR` reaps exactly what the spawning shell would,

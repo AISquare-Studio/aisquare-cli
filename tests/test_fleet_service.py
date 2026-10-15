@@ -7746,10 +7746,14 @@ def test_reap_removes_a_merged_worktree_and_keeps_an_unmerged_one(
     fleet_service.stop(project, "coder-merged", force=True)
     fleet_service.stop(project, "coder-open", force=True)
 
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=merged.cwd)
+
     report = fleet_service.reap(project)
 
     assert report.worktrees_removed == [merged.cwd]
     assert not merged.cwd.exists() and unmerged.cwd.exists()
+    assert report.branches_deleted == [branch], "main holds its tip: nothing is lost"
+    assert _git("branch", "--list", branch, cwd=project.root) == ""
     assert fleet_service.reap(project).worktrees_removed == []
 
 
@@ -7768,13 +7772,14 @@ def _commit(tree: Path, name: str) -> None:
     _git("commit", "-q", "-m", name, cwd=tree)
 
 
-def test_reap_removes_a_worktree_pushed_to_any_remote_branch_and_its_fleet_branch(
+def test_reap_removes_a_worktree_pushed_to_any_remote_branch_and_keeps_its_fleet_branch(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
 ) -> None:
     """A coder that pushes onto an integration branch (``push HEAD:feat/…``) never merges
     into the default branch, and reap kept every such tree: 15 worktrees and 1.2 GB on one
     night. Pushed anywhere, with nothing uncommitted, the tree holds nothing found only
-    there — it goes, and its ``fleet/…`` branch with it."""
+    there — it goes. Its ``fleet/…`` branch stays, as main lacks its commits (review of
+    #259, round 14)."""
     _remote(project, tmp_path)
     pushed = fleet_service.spawn(project, "coder", label="coder-pushed").agent
     _commit(pushed.cwd, "feature.txt")
@@ -7788,10 +7793,35 @@ def test_reap_removes_a_worktree_pushed_to_any_remote_branch_and_its_fleet_branc
     report = fleet_service.reap(project)
 
     assert report.worktrees_removed == [pushed.cwd] and not pushed.cwd.exists()
-    assert report.branches_deleted == [branch]
-    assert _git("branch", "--list", branch, cwd=project.root) == ""
+    assert report.branches_deleted == [] and report.branches_kept == [branch]
+    assert _git("branch", "--list", branch, cwd=project.root), f"{branch} kept"
     assert report.worktrees_kept == []
     assert _git("rev-parse", "origin/feat/integration", cwd=project.root), "the work is safe"
+
+
+def test_a_spawn_for_a_task_whose_tree_was_reaped_carries_on_from_its_branch(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Review of #259, round 14: reap deleted the ``fleet/…`` branch of a tree pushed to an
+    integration branch, so a coder spawned again for the task — reopened by the reviewer —
+    found no branch and started a new one from main, without its own pushed commits, and
+    nothing said so. The branch is kept, and the respawn checks it out, commits and all."""
+    _remote(project, tmp_path)
+    task = _add_task(project, "Wire the auth flow")
+    first = fleet_service.spawn(project, "coder", task_id=task.id).agent
+    _commit(first.cwd, "feature.txt")
+    _git("push", "-q", "origin", "HEAD:feat/integration", cwd=first.cwd)
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=first.cwd)
+    tip = _git("rev-parse", "HEAD", cwd=first.cwd)
+    fleet_service.stop(project, first.label, force=True)
+    assert fleet_service.reap(project).worktrees_removed == [first.cwd]
+
+    again = fleet_service.spawn(project, "coder", task_id=task.id)
+
+    assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=again.agent.cwd) == branch
+    assert _git("rev-parse", "HEAD", cwd=again.agent.cwd) == tip, "its own commits"
+    assert (again.agent.cwd / "feature.txt").exists()
+    assert f"branch {branch} already existed — checked it out" in again.notes
 
 
 def test_a_restart_of_an_agent_whose_worktree_was_reaped_is_refused(
@@ -7846,7 +7876,7 @@ def test_reap_keeps_a_worktree_with_unpushed_commits_or_uncommitted_changes_and_
     _git("push", "-q", "origin", "HEAD:feat/later", cwd=unpushed.cwd)
     again = fleet_service.reap(project)
     assert again.worktrees_removed == [unpushed.cwd]
-    assert again.branches_deleted == [branches["coder-unpushed"]]
+    assert again.branches_deleted == [] and again.branches_kept == [branches["coder-unpushed"]]
     assert dict(again.worktrees_kept) == {dirty.cwd: "uncommitted changes"}
 
 

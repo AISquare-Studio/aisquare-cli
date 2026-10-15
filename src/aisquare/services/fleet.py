@@ -440,8 +440,11 @@ class ReapReport:
     """An ended agent's worktree left in place, with why: uncommitted changes, or commits
     found nowhere but there (:func:`_remove_finished_worktrees`)."""
     branches_deleted: list[str] = field(default_factory=list)
-    """The ``fleet/…`` branches of removed worktrees, deleted once their tip was found on
-    the default branch or a remote-tracking one."""
+    """The ``fleet/…`` branches of removed worktrees, deleted once the default branch held
+    their tip."""
+    branches_kept: list[str] = field(default_factory=list)
+    """The ``fleet/…`` branches of removed worktrees that hold commits the default branch
+    lacks: kept, so a spawn for their task carries on from them."""
     claims_released: list[str] = field(default_factory=list)
     """Task ids the ended and lost rows' board sessions still held, returned to
     the pool — the same count ``shutdown`` reports, where ``reap`` used to
@@ -1191,9 +1194,17 @@ def _remove_finished_worktrees(
     branch — pushed somewhere. Merged into the default branch was the rule, and a
     coder that pushes onto an integration branch (``push HEAD:feat/…``) never was:
     its worktrees stayed for good, 15 of them and 1.2 GB on one night. Each tree kept
-    is on the report with why. Then its ``fleet/…`` branch is deleted when its tip is
-    pushed the same way; no other branch is. A tree a live agent still sits in (a
-    respawn reused it) is never touched.
+    is on the report with why. A tree a live agent still sits in (a respawn reused it)
+    is never touched.
+
+    The tree goes; its ``fleet/…`` branch is deleted only once the default branch holds
+    its tip, and no other branch is. Deleted when pushed anywhere, as the tree is, it took
+    the task's commits with it: a coder spawned again for the task, after a reviewer
+    reopened it, asks for the same branch (:func:`branch_name`), found none, and started
+    a new one from the main checkout's HEAD, without its own pushed work, and nothing
+    said so (review of #259, round 14). A branch with commits the default branch lacks
+    is kept, costing nothing, and a spawn for the task checks it out
+    (:func:`_ensure_worktree`).
     """
     root = project.root
     if not is_git_project(root):
@@ -1232,12 +1243,12 @@ def _remove_finished_worktrees(
             continue
         report.worktrees_removed.append(agent.cwd)
         branch = branches.get(path)
-        if (
-            branch is not None
-            and branch.startswith(_FLEET_BRANCH_PREFIX)
-            and _pushed(root, f"refs/heads/{branch}", default)
-            and _git(root, "branch", "-D", branch).returncode == 0
-        ):
+        if branch is None or not branch.startswith(_FLEET_BRANCH_PREFIX):
+            continue
+        merged = _git(root, "merge-base", "--is-ancestor", f"refs/heads/{branch}", default)
+        if merged.returncode != 0:
+            report.branches_kept.append(branch)
+        elif _git(root, "branch", "-D", branch).returncode == 0:
             report.branches_deleted.append(branch)
 
 

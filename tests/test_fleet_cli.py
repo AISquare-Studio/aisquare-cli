@@ -1370,6 +1370,7 @@ def test_reap_json(runner: CliRunner, resolved: Seen, monkeypatch: pytest.Monkey
         worktrees_removed=[WORKTREE],
         worktrees_kept=[(kept, "uncommitted changes")],
         branches_deleted=["fleet/amber-otter/auth"],
+        branches_kept=["fleet/amber-otter/billing"],
     )
     _install(monkeypatch, "reap", report)
 
@@ -1383,6 +1384,7 @@ def test_reap_json(runner: CliRunner, resolved: Seen, monkeypatch: pytest.Monkey
         "worktrees_removed",
         "worktrees_kept",
         "branches_deleted",
+        "branches_kept",
         "claims_released",
         "release_failures",
         "held",
@@ -1393,10 +1395,14 @@ def test_reap_json(runner: CliRunner, resolved: Seen, monkeypatch: pytest.Monkey
     assert payload["worktrees_removed"] == [str(WORKTREE)]
     assert payload["worktrees_kept"] == [{"path": str(kept), "reason": "uncommitted changes"}]
     assert payload["branches_deleted"] == ["fleet/amber-otter/auth"]
+    assert payload["branches_kept"] == ["fleet/amber-otter/billing"]
 
     human = runner.invoke(app, ["fleet", "reap", "--all"])
     assert f"🗑 {WORKTREE}" in human.stdout and "🗑 branch fleet/amber-otter/auth" in human.stdout
     assert f"⚠ kept {kept} — uncommitted changes" in human.stdout
+    assert "· kept branch fleet/amber-otter/billing — commits the default branch lacks" in (
+        human.stdout
+    )
 
 
 def test_reap_names_a_refused_release_and_exits_1(

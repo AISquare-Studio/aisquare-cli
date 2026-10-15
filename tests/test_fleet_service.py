@@ -13282,6 +13282,30 @@ def test_an_agent_that_is_not_claude_code_is_never_asked_for_its_screen(
     assert states[claude.id] == "attention" and tmux.captured == [claude.pane_id]
 
 
+def test_a_row_pinned_to_a_session_is_asked_for_its_screen_whatever_its_binary_is_called(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Review of #259, round 15: a row with no session yet was asked about the trust
+    question only when its binary was named ``claude``. Only Claude Code is started on a
+    session id (minted for ``claude`` by name, or one its caller or a resume named), so
+    the ``claude2`` parallel install spawned on a session its caller chose reads at the
+    question as ``attention``, and ``fleet tell`` does not type into it, where Enter picks
+    "No, exit"."""
+    claude2 = _executable(tmp_path / "bin" / "claude2")
+    pinned = "0b3c6a52-9f7e-4d0e-8a51-2f4c1d7e9b60"
+    agent = _coder(project, binary=str(claude2), agent_args=["--session-id", pinned])
+    assert agent.session_id == pinned and not harness.is_default_agent(agent.binary)
+    tmux.set_command(agent.pane_id, "claude2")
+    tmux.screens[agent.pane_id] = TRUST_SCREEN
+
+    (status,) = fleet_service.list_agents(project)
+
+    assert status.state == "attention", status
+    assert status.detail is not None and status.detail.startswith(TRUST_PROMPT)
+    told = fleet_service.tell(project, agent.label, "start on the task")
+    assert not told.delivered and tmux.typed == []
+
+
 def test_an_agent_whose_hooks_run_on_a_hubs_board_is_never_asked_for_its_screen(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
 ) -> None:

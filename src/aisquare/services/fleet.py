@@ -1879,17 +1879,19 @@ def _maybe_at_trust_prompt(status: FleetAgentStatus, session: TeamSession | None
     began: ``session``, the row's found by its id, else the listing's.
 
     Claude Code alone asks the question, so a row is asked about only when it is Claude
-    Code: one with a session (only Claude Code's hooks write one), or by its binary's
-    name (``harness.is_default_agent``, the predicate its flags and ``--session-id``
-    go by). Another harness's agent fires no hook, ever, so its pane was captured on
-    every listing — the sidebar's tick, Remote's scan, each action's ``status_of`` — and
-    read as at the question when its screen held the words (review of #259, round 14).
+    Code: one with a session (only Claude Code's hooks write one), one started on a
+    session id (only Claude Code is: minted for it by name, or named by its caller or a
+    resume, as the ``claude2`` parallel install is — review of #259, round 15), or by its
+    binary's name (``harness.is_default_agent``, the predicate its flags and
+    ``--session-id`` go by). Another harness's agent fires no hook, ever, so its pane was
+    captured on every listing — the sidebar's tick, Remote's scan, each action's
+    ``status_of`` — and read as at the question when its screen held the words (round 14).
     """
     agent, session = status.agent, session or status.session
     if agent.ended_at is not None or status.held or status.state not in ("waiting", "working"):
         return False
     if session is None:
-        return harness.is_default_agent(agent.binary)
+        return agent.session_id is not None or harness.is_default_agent(agent.binary)
     return session.last_seen_at < agent.created_at
 
 

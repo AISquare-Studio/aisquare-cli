@@ -1132,7 +1132,7 @@ def action_paste(
     if entered.typed != "yes":
         told = fleet_service.pasted_unsent(entered, label, press="press Enter on the pad")
         return replace(told, how=first + told.how)
-    return fleet_service.TellResult(True, f"{first}typed into its pane at its prompt")
+    return fleet_service.TellResult("yes", f"{first}typed into its pane at its prompt")
 
 
 def action_type_now(
@@ -1246,7 +1246,7 @@ def action_tell_auto(
         if snap.status is not None and snap.status.agent.session_id is None:
             # The board reaches an agent through its hooks: `no hooks`, and the note waits unread.
             filed += ", which it is not shown without aisquare's hooks: Interrupt & tell types it"
-        return fleet_service.TellResult(False, f"{why} — {filed}")
+        return fleet_service.TellResult("no", f"{why} — {filed}")
     with action_audited(lambda error: trail(f"delivered=no failed={error}")):
         return action_pinned_call(
             target,

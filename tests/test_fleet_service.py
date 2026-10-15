@@ -2419,7 +2419,7 @@ def test_tell_whose_enter_did_not_go_through_leaves_the_text_at_its_prompt_and_f
 
     monkeypatch.setattr(tmux, "send_keys", enter_fails)
     result = fleet_service.tell(project, "coder-1", "please rebase")
-    assert not result.delivered and result.maybe is timed_out
+    assert result.typed == ("maybe" if timed_out else "no")
     assert result.how.startswith("pasted it at its prompt, but "), result.how
     assert "tmux could not type it" not in result.how and "board note" not in result.how
     if timed_out:
@@ -2445,7 +2445,7 @@ def test_tell_says_a_paste_that_timed_out_may_be_typed_as_well_as_noted(
 
     monkeypatch.setattr(tmux, "paste", wedged)
     result = fleet_service.tell(project, "coder-1", "please rebase")
-    assert not result.delivered and result.maybe and result.typed == "maybe"
+    assert not result.delivered and result.typed == "maybe"
     assert result.how.startswith("filed as board note #1 to coder-1, and tmux did not answer")
     assert "it may still arrive at its prompt as well, unsent" in result.how
     assert _events(project, "note") == ["please rebase"]

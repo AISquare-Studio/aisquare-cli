@@ -596,7 +596,7 @@ def test_a_project_without_a_codename_has_no_session_yet(
 def test_tell_reports_how_the_message_travelled(
     runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    tell = _install(monkeypatch, "tell", TellResult(delivered=True, how="typed into pane %7"))
+    tell = _install(monkeypatch, "tell", TellResult(typed="yes", how="typed into pane %7"))
 
     result = runner.invoke(app, ["fleet", "tell", "coder-auth", "ship it", "--as", "mgr"])
 
@@ -610,7 +610,7 @@ def test_tell_to_a_busy_agent_is_marked_as_a_note_not_a_delivery(
     runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tell = _install(
-        monkeypatch, "tell", TellResult(delivered=False, how="agent is working; filed a board note")
+        monkeypatch, "tell", TellResult(typed="no", how="agent is working; filed a board note")
     )
 
     result = runner.invoke(app, ["fleet", "tell", "coder-auth", "ship it"])
@@ -622,7 +622,7 @@ def test_tell_to_a_busy_agent_is_marked_as_a_note_not_a_delivery(
 
 
 def test_tell_json(runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch) -> None:
-    _install(monkeypatch, "tell", TellResult(delivered=False, how="filed a board note"))
+    _install(monkeypatch, "tell", TellResult(typed="no", how="filed a board note"))
 
     result = runner.invoke(app, ["--json", "fleet", "tell", "coder-auth", "ship it"])
 
@@ -1456,7 +1456,7 @@ def test_pause_of_an_unknown_project_is_not_found(
         (["fleet", "spawn", "coder"], {"spawn": SpawnReceipt(_agent(), None, SESSION)}),
         (["fleet", "ls"], {"list_agents": [_status(_agent())]}),
         (["fleet", "status"], {"list_agents": []}),
-        (["fleet", "tell", "coder-auth", "hi"], {"tell": TellResult(True, "typed")}),
+        (["fleet", "tell", "coder-auth", "hi"], {"tell": TellResult("yes", "typed")}),
         (["fleet", "stop", "coder-auth"], {"stop": StopReceipt(_agent(), [])}),
         (["fleet", "attach"], {"attach_argv": list(ATTACH_ARGV)}),
         (["fleet", "reap"], {"reap": ReapReport()}),

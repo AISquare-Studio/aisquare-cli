@@ -242,24 +242,25 @@ class SpawnReceipt:
     is in ``notes`` too; a prompt typed past the wait is typed, and is not here."""
 
 
-@dataclass(frozen=True)
-class TellResult:
-    """How a message reached (or did not reach) an agent. ``maybe``: not delivered, but tmux
-    did not answer in time with its text or its Enter, which may still arrive
-    (:class:`PaneWrite`)."""
-
-    delivered: bool
-    how: str
-    maybe: bool = False
-
-    @property
-    def typed(self) -> Typed:
-        """``delivered`` as an audit line says it."""
-        return "yes" if self.delivered else "maybe" if self.maybe else "no"
-
-
 Typed = Literal["yes", "no", "maybe"]
 """How a write into an agent's pane ended (:class:`PaneWrite`): the word an audit line says."""
+
+
+@dataclass(frozen=True)
+class TellResult:
+    """How a message reached (or did not reach) an agent: ``typed`` as :class:`PaneWrite` says
+    it, ``yes`` once its text and its Enter went through; ``maybe``, tmux did not answer in
+    time with one of them, which may still arrive. One field for the three, as on
+    :class:`PaneWrite`: ``delivered`` and a ``maybe`` beside it could say "delivered, maybe"
+    (review of #259, round 11, 13/13)."""
+
+    typed: Typed
+    how: str
+
+    @property
+    def delivered(self) -> bool:
+        """Whether the message went in and was sent: ``typed`` is ``yes``."""
+        return self.typed == "yes"
 
 
 @dataclass(frozen=True)
@@ -311,9 +312,9 @@ def pasted_unsent(entered: PaneWrite, label: str, *, press: str) -> TellResult:
     permission nobody saw (review of #259, round 10, 3/9)."""
     if entered.typed == "maybe":
         how = entered.late(label, then=", and send it", again="press Enter")
-        return TellResult(False, f"pasted it at its prompt, but {how}", maybe=True)
+        return TellResult("maybe", f"pasted it at its prompt, but {how}")
     return TellResult(
-        False,
+        "no",
         f"pasted it at its prompt, but tmux could not press Enter ({entered.error}) — {press} "
         "to send it",
     )
@@ -3133,23 +3134,23 @@ def tell(
                     "it reads as waiting, but its pane is not running the agent yet (the "
                     "launcher or a shell is in the foreground)"
                 )
-            return TellResult(False, f"{why} — {how}")
+            return TellResult("no", f"{why} — {how}")
         pasted = pane_write("the text", lambda: srv.paste(agent.pane_id, text))
         if pasted.typed == "maybe":
             # A wedged server may still run what it was asked (review of #259, round 9, 1/8),
             # which the remote's trail says as `delivered=maybe` (round 10, 6/9).
             how = _file_note(project, label, text, sender)
             late = pasted.late(label, then=" at its prompt as well, unsent", again="type into it")
-            return TellResult(False, f"{how}, and {late}", maybe=True)
+            return TellResult("maybe", f"{how}, and {late}")
         if pasted.typed == "no":
             how = _file_note(project, label, text, sender)
-            return TellResult(False, f"tmux could not type it ({pasted.error}) — {how}")
+            return TellResult("no", f"tmux could not type it ({pasted.error}) — {how}")
         entered = pane_write("Enter", lambda: srv.send_keys(agent.pane_id, "Enter"))
         if entered.typed != "yes":
             return pasted_unsent(entered, label, press="press Enter in its pane")
-        return TellResult(True, "typed into its pane (it was waiting)")
+        return TellResult("yes", "typed into its pane (it was waiting)")
     how = _file_note(project, label, text, sender)
-    return TellResult(False, f"it is {status.state} — {how}")
+    return TellResult("no", f"it is {status.state} — {how}")
 
 
 def _its_agent(agent: FleetAgent, facts: PaneFacts | None) -> bool:

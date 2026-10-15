@@ -621,7 +621,7 @@ def receipts(project: ProjectInfo) -> Receipts:
         id="tsk_1", project_id=project.id, key="k", title="ship", created_at=T0, updated_at=T0
     )
     return Receipts(
-        tell=TellResult(delivered=False, how="it is working — filed as board note #4 to coder-1"),
+        tell=TellResult(typed="no", how="it is working — filed as board note #4 to coder-1"),
         stop=StopReceipt(old, [task]),
         restart=RestartReceipt(
             replaced=old,

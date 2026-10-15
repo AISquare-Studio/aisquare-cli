@@ -317,6 +317,9 @@ class NeedsItem:
     actions: tuple[str, ...]
     push_after: datetime | None
     """When a push may go out; ``None`` is feed only. Internal: never serialized."""
+    sighted: bool = False
+    """Whether its id names the scan that first saw it too (:func:`_needs_dated`), so each time
+    it is drawn is a card of its own. Internal: never serialized."""
 
     def needs_item_json(self) -> dict[str, object]:
         """The wire shape (SPEC §1.4): the project as ``{id, name}``, ``push_after`` left out,
@@ -806,6 +809,7 @@ def _needs_item(
     since: datetime,
     push_after: datetime | None,
     answers: tuple[QuickAnswer, ...] = (),
+    sighted: bool = False,
 ) -> NeedsItem:
     return NeedsItem(
         id=needs_item_id(project.id, kind, subject),
@@ -821,6 +825,7 @@ def _needs_item(
         since=since,
         actions=_NEEDS_ACTIONS[kind],
         push_after=push_after,
+        sighted=sighted,
     )
 
 
@@ -1110,7 +1115,12 @@ def _needs_dialog_item(
     prompts after its first were never pushed (a pushed id is kept a week), and one
     dismissal hid them all, the question's own too (round 11, 1/13). What the dialog shows
     leaves out its options, so a highlight moved or a notice landing keeps the card, and
-    the next dialog is a card of its own. Its key pad answers whatever is up.
+    the next dialog is a card of its own. Its key pad answers whatever is up. The same
+    dialog drawn again (the same command asked for twice) showed the same, and was the same
+    card: never pushed, hidden by the first one's dismissal. So its id names the scan that
+    first saw it since a scan last did not (``sighted``, :func:`_needs_dated`), as
+    ``_needs_subagent_prompt`` tells a sub-agent's prompts apart by their notices (review of
+    #259, round 12, 5/9).
     """
     session, agent = status.session, status.agent
     seen = session.last_seen_at if session is not None else now
@@ -1133,6 +1143,7 @@ def _needs_dialog_item(
         detail=_needs_fit({"text": text}, _DETAIL_TEXT_MAX),
         since=since,
         push_after=since,
+        sighted=asked is not None and drawn is not None,
     )
 
 
@@ -2374,10 +2385,17 @@ def _needs_board_authors(events: Sequence[TeamEvent], now: datetime) -> set[str]
 def _needs_dated(
     item: NeedsItem, first_seen: MutableMapping[str, datetime], seen: set[str]
 ) -> NeedsItem:
-    """``item`` dated from the first scan that saw it, its push delay moved with it."""
+    """``item`` dated from the first scan that saw it, its push delay moved with it; one
+    ``sighted`` named after that scan too, in UTC seconds as the kept sighting reads back. A
+    sighting is forgotten once a scan does not see it: drawn again, it is a new card."""
+    from aisquare.services.remote_server import _iso_seconds
+
     key = _needs_memory_key(item.project_id, item.id)
     seen.add(key)
     since = first_seen.setdefault(key, item.since)
+    if item.sighted:
+        named = needs_item_id(item.project_id, item.kind, f"{item.id}@{_iso_seconds(since)}")
+        item = replace(item, id=named)
     if since == item.since:
         return item
     shift = item.since - since
@@ -2832,8 +2850,10 @@ def needs_agent_now(project: ProjectInfo, label: str, *, now: datetime | None = 
     when = now or _needs_now()
     sources = live_needs_sources()
     board_id = _needs_board_of(sources, project)
+    # The sightings the watcher kept, which name its cards (a dialog's, :func:`_needs_dated`).
+    first_seen = _needs_first_seen_kept()
     scanned = _needs_scan_project(
-        sources, project, board_id=board_id, now=when, first_seen={}, seen=set()
+        sources, project, board_id=board_id, now=when, first_seen=first_seen, seen=set()
     )
     where = project.root.name or project.id
     if scanned.failed is not None:

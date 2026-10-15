@@ -767,6 +767,45 @@ def test_a_dialog_drawn_while_a_question_waits_is_dated_by_the_scan_that_first_s
     assert (again.id, again.since, again.push_after) == (first.id, NOW, NOW)
 
 
+def test_the_same_dialog_drawn_again_while_a_question_waits_is_a_card_of_its_own(
+    live: Live,
+) -> None:
+    """Review of #259, round 12, 5/9: named after the question and what the dialog shows, the
+    same command asked for twice drew the same dialog, one id: the second was never pushed (a
+    pushed id is kept a week), and the first one's dismissal hid it. Its id names the scan
+    that first saw it since one last did not: still drawn, the same card; drawn again, a card
+    of its own, which the first one's dismissal does not hide. An action reads it by the id
+    the feed gave it (``needs_agent_now``, from the sightings the watcher kept)."""
+    row = _row()
+    session = _session(row, state="working", seen=NOW - timedelta(minutes=2))
+    above = (f"● {_TASK.summary}",)
+    fleet = Fleet(agents=[_status(row, "working", session)], screen=_bash_screen("npm test"))
+    fleet.tails[f"/transcripts/{row.label}.jsonl"] = _tail(_TASK, _ASK)
+    memory: dict[str, datetime] = {}
+
+    def scan(at: timedelta, dismissed: tuple[str, ...] = ()) -> list[NeedsItem]:
+        return scan_needs_you(_sources(fleet), now=NOW + at, dismissed=dismissed, first_seen=memory)
+
+    (first,) = scan(timedelta(0))
+    assert first.reason == "coder-1 shows a dialog that needs you"
+    assert [item.id for item in scan(timedelta(seconds=3))] == [first.id], "still drawn"
+    fleet.screen = _at_work(*above)  # answered: the sub-agent runs it
+    assert scan(timedelta(seconds=6)) == []
+    fleet.screen = _bash_screen("npm test")  # and asks for it again
+    (again,) = scan(timedelta(seconds=9), dismissed=(first.id,))
+    assert again.id != first.id and again.since == NOW + timedelta(seconds=9)
+
+    # Through the watcher: the feed's id is the one an action re-derives.
+    called = datetime.now(UTC) - timedelta(minutes=1)
+    task, ask = replace(_TASK, at=called), replace(_ASK, at=called)
+    live.fleet.tails["/transcripts/coder-1.jsonl"] = _tail(task, ask, at=called)
+    live.fleet.screen = _bash_screen("npm test", above=above)
+    card = live.card("permission")
+    assert card["reason"] == "coder-1 shows a dialog that needs you"
+    later = datetime.now(UTC) + timedelta(seconds=5)
+    assert needs_item_current(needs_agent_now(PROJECT, "coder-1", now=later), card["id"])
+
+
 def test_a_scan_that_cannot_read_a_screen_keeps_its_last_cards_and_makes_none_of_its_own() -> None:
     """Review of #259, round 11, 5/13: a question queued behind a sub-agent at work, whose
     screen could not be captured, was "shows a dialog that needs you", pushed while nothing

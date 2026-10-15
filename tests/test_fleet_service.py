@@ -2876,6 +2876,26 @@ def test_the_sign_in_window_asks_its_check_with_the_config_its_server_was_made_f
     assert window.pane_id in tmux.facts
 
 
+def test_a_server_named_by_its_socket_is_had_without_reading_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 9, 7/8: ``server_for`` read ``config.toml`` for a name it was
+    given, the socket being all ``server`` reads of it. A row with none still takes today's."""
+    sockets: list[str] = []
+
+    def server(config: FleetSettings | None = None) -> TmuxServer:
+        assert config is not None
+        sockets.append(config.tmux_socket)
+        return TmuxServer(config.tmux_socket)
+
+    monkeypatch.setattr(fleet_service, "server", server)
+    monkeypatch.setattr(fleet_service, "settings", lambda: pytest.fail("config.toml read"))
+    assert fleet_service.server_for("asq-old").socket == "asq-old"
+    monkeypatch.setattr(fleet_service, "settings", lambda: FleetSettings(tmux_socket="asq-new"))
+    assert fleet_service.server_for("").socket == "asq-new"
+    assert sockets == ["asq-old", "asq-new"]
+
+
 def _callers_of(name: str) -> set[tuple[str, str]]:
     """``(module under src/aisquare, function)`` for each function whose body calls ``.name(…)``
     or holds the string ``name`` as a whole constant (a tmux command word)."""

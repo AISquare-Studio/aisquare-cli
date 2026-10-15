@@ -2937,6 +2937,32 @@ def _now_of(
     return needs_agent_now(PROJECT, label, now=NOW)
 
 
+def test_the_pane_reads_go_to_the_server_the_listing_found_without_reading_config_again(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review of #259, round 9, 7/8: the screen (every scan, for every agent with more than one
+    call pending, and again for each quick answer under the agent's lock) and the pane's last
+    output were asked of ``fleet.server_of``, which read ``config.toml`` to work out an address
+    the listed row already carries (``socket_at``)."""
+    tmux = FakeTmux(reference=NOW)
+    tmux.screen = ["the screen"]
+    asked: list[str] = []
+
+    def server(config: Any = None) -> FakeTmux:
+        asked.append(config.tmux_socket)
+        return tmux
+
+    monkeypatch.setattr(fleet_service, "server", server)
+    monkeypatch.setattr(fleet_service, "settings", lambda: pytest.fail("config.toml read again"))
+    row = _row()
+    status = _status(row, "attention", _session(row), socket_at=tmp_path / "asq")
+    assert remote_needs._needs_screen_now(status) == ["the screen"]
+    assert remote_needs.live_needs_sources().pane_output(status) is not None
+    snap = remote_needs._needs_snapshot(PROJECT, status, None, (), NOW)
+    assert snap.pane_is_agent
+    assert asked == [row.tmux_socket] * 3
+
+
 def _working(tail: TranscriptTail | None, *, state: str = "working") -> Fleet:
     row = _row()
     session = _session(row, state="attention" if state == "attention" else "working")

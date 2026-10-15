@@ -382,12 +382,12 @@ def _needs_no_event(
     return None
 
 
-def _needs_no_output(agent: FleetAgent) -> datetime | None:
+def _needs_no_output(status: FleetAgentStatus) -> datetime | None:
     """A source's ``pane_output`` when it says nothing: tmux would not say."""
     return None
 
 
-def _needs_no_screen(agent: FleetAgent) -> list[str] | None:
+def _needs_no_screen(status: FleetAgentStatus) -> list[str] | None:
     """A source's ``pane_screen`` when it says nothing: no screen, so no prompt read on it."""
     return None
 
@@ -444,11 +444,11 @@ class NeedsSources:
     """A session's newest board event of a kind written at or after the given time, for the
     facts the window of ``board_events`` no longer holds (:func:`_needs_own_events`). The
     time bounds what the store walks back through to find none."""
-    pane_output: Callable[[FleetAgent], datetime | None] = _needs_no_output
+    pane_output: Callable[[FleetAgentStatus], datetime | None] = _needs_no_output
     """When the row's pane last printed (``#{window_activity}``); ``None``: tmux would not
     say. Asked only of an agent whose sub-agent waits on a prompt, or whose question or plan
     waits beside a call the screen cannot name (:func:`needs_from_agent`)."""
-    pane_screen: Callable[[FleetAgent], list[str] | None] = _needs_no_screen
+    pane_screen: Callable[[FleetAgentStatus], list[str] | None] = _needs_no_screen
     """The rows the row's pane shows now (``capture-pane``); ``None``: tmux would not say.
     Asked only of an agent with more than one call pending, whose prompt on screen may be
     any of them (:func:`_needs_on_screen`)."""
@@ -2070,8 +2070,8 @@ def _needs_scan_project(
             # The manager's own items wait on no one: its own limit's nudge goes to itself.
             manager_live=taking is not None and taking.id != status.agent.id,
             accounts=accounts,
-            pane_output=_needs_output_of(sources, status.agent, reads),
-            pane_screen=_needs_screen_of(sources, status.agent, reads),
+            pane_output=_needs_output_of(sources, status, reads),
+            pane_screen=_needs_screen_of(sources, status, reads),
         ):
             items.append(_needs_dated(item, first_seen, seen) if item.kind == "lost" else item)
     own = board_id == project.id
@@ -2175,17 +2175,17 @@ def _needs_failures(board: Sequence[TeamEvent], status: FleetAgentStatus) -> lis
 
 
 def _needs_output_of(
-    sources: NeedsSources, agent: FleetAgent, reads: _NeedsReads
+    sources: NeedsSources, status: FleetAgentStatus, reads: _NeedsReads
 ) -> Callable[[], datetime | None]:
-    """When ``agent``'s pane last printed, asked of tmux only when called."""
-    return lambda: reads.needs_read(partial(sources.pane_output, agent), "tmux")
+    """When the pane of ``status``'s row last printed, asked of tmux only when called."""
+    return lambda: reads.needs_read(partial(sources.pane_output, status), "tmux")
 
 
 def _needs_screen_of(
-    sources: NeedsSources, agent: FleetAgent, reads: _NeedsReads
+    sources: NeedsSources, status: FleetAgentStatus, reads: _NeedsReads
 ) -> Callable[[], list[str] | None]:
-    """What ``agent``'s pane shows, asked of tmux only when called."""
-    return lambda: reads.needs_read(partial(sources.pane_screen, agent), "tmux")
+    """What the pane of ``status``'s row shows, asked of tmux only when called."""
+    return lambda: reads.needs_read(partial(sources.pane_screen, status), "tmux")
 
 
 def _needs_window(
@@ -2796,16 +2796,13 @@ def _needs_snapshot(
 ) -> AgentNow:
     """The snapshot of ``status``'s row, with tmux asked about its pane only where the
     derivation vouched for it: a live row that reads none of :data:`_NEEDS_PANE_UNVOUCHED`."""
-    from aisquare.services import fleet as fleet_service
-
     pane_is_agent, pane_quiet = False, None
     if (
         status is not None
         and status.agent.ended_at is None
         and status.state not in _NEEDS_PANE_UNVOUCHED
     ):
-        server = fleet_service.server_for(status.agent.tmux_socket).at(status.socket_at)
-        pane_is_agent, pane_quiet = _needs_pane_now(server, status.agent, now)
+        pane_is_agent, pane_quiet = _needs_pane_now(_needs_pane_server(status), status.agent, now)
     return AgentNow(
         project=project,
         status=status,
@@ -3006,7 +3003,7 @@ def needs_prompt_now(
     named = {needs_item_id(snap.project.id, item.kind, tool.tool_use_id): tool for tool in pending}
     if len(pending) <= 1 or item.id not in named or status is None:
         return (item,)
-    rows = _needs_screen_now(status.agent)
+    rows = _needs_screen_now(status)
     if rows is None:
         return None
     if _needs_on_screen(pending, rows) is named[item.id]:
@@ -3020,16 +3017,29 @@ def needs_prompt_now(
     )
 
 
-def _needs_screen_now(agent: FleetAgent) -> list[str] | None:
-    """The rows ``agent``'s pane shows now, on the server its row lives on; ``None`` when
-    tmux cannot say (a pane gone, a server not answering)."""
+def _needs_screen_now(status: FleetAgentStatus) -> list[str] | None:
+    """The rows the pane of ``status``'s row shows now, on the server the row lives on;
+    ``None`` when tmux cannot say (a pane gone, a server not answering)."""
     from aisquare.core.tmux import TmuxError
-    from aisquare.services import fleet as fleet_service
 
     try:
-        return fleet_service.server_of(agent).capture(agent.pane_id).lines
+        return _needs_pane_server(status).capture(status.agent.pane_id).lines
     except TmuxError:
         return None
+
+
+def _needs_pane_server(status: FleetAgentStatus) -> TmuxServer:
+    """The server ``status``'s row lives on, asked where the listing worked out it listens
+    (``FleetAgentStatus.socket_at``), and by the socket's name the row recorded.
+
+    ``fleet.server_of`` works the address out again, reading ``config.toml`` each time
+    (round 29 of #257 measured that), and the screen was read through it for every agent
+    with more than one call pending, every scan, and again under the agent's lock for each
+    quick answer (review of #259, round 9, 7/8).
+    """
+    from aisquare.services import fleet as fleet_service
+
+    return fleet_service.server_for(status.agent.tmux_socket).at(status.socket_at)
 
 
 # --- the live sources ---------------------------------------------------------------------
@@ -3083,11 +3093,10 @@ def live_needs_sources() -> NeedsSources:
     def needs_tmux_answers(socket: str, path: Path | None) -> bool:
         return fleet_service.server_for(socket).at(path).answers()
 
-    def needs_pane_output(agent: FleetAgent) -> datetime | None:
+    def needs_pane_output(status: FleetAgentStatus) -> datetime | None:
         # The fact the snapshot reads (`_needs_pane_now`), from the one format and parse
         # `PaneFacts` owns: a second copy of both read the same pane quiet by another rule.
-        server = fleet_service.server_of(agent)
-        facts = remote_server._remote_pane_facts(server, agent)
+        facts = remote_server._remote_pane_facts(_needs_pane_server(status), status.agent)
         return None if facts is None else facts.last_output
 
     def needs_session_event(

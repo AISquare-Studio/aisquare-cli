@@ -474,9 +474,16 @@ def server_for(socket: str, config: FleetSettings | None = None) -> TmuxServer:
     here does too. Routed through :func:`server` so a caller that fakes that
     one factory sees every socket. This asks by the name alone (``tmux -L``); a
     row's pane is asked of :func:`server_of`, at the path its spawn recorded.
+
+    The socket is all :func:`server` reads of the config, so ``config.toml`` is read only
+    for a row that recorded none: every quick answer's screen check and every snapshot of
+    Remote's re-read it for a name they held (review of #259, round 9, 7/8).
     """
-    config = config or settings()
-    if socket and socket != config.tmux_socket:
+    if config is None:
+        config = (
+            FleetSettings().model_copy(update={"tmux_socket": socket}) if socket else settings()
+        )
+    elif socket and socket != config.tmux_socket:
         config = config.model_copy(update={"tmux_socket": socket})
     return server(config)
 

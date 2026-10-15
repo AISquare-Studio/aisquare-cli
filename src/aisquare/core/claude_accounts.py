@@ -554,15 +554,23 @@ _HEX = re.compile(r"(?:[0-9a-fA-F]{2})+")
 def keychain_account(environ: Mapping[str, str] | None = None) -> str:
     """The item's account, as Claude Code names it: ``$USER``, else this user's login name."""
     source = os.environ if environ is None else environ
-    name = source.get("USER") or ""
-    if not name:
-        try:
-            import pwd  # POSIX only, and only ever asked on macOS
+    name = source.get("USER") or _login_name()
+    if name is None or not _KEYCHAIN_ACCOUNT_NAME.fullmatch(name):
+        return KEYCHAIN_ACCOUNT_FALLBACK
+    return name
 
-            name = pwd.getpwuid(os.geteuid()).pw_name
-        except (ImportError, KeyError, OSError):
-            return KEYCHAIN_ACCOUNT_FALLBACK
-    return name if _KEYCHAIN_ACCOUNT_NAME.fullmatch(name) else KEYCHAIN_ACCOUNT_FALLBACK
+
+def _login_name() -> str | None:
+    """This user's login name as ``os.userInfo().username`` reads it (the effective user's
+    passwd entry), or ``None`` without one. Never asked on Windows, which has no passwd."""
+    if sys.platform == "win32":
+        return None
+    import pwd
+
+    try:
+        return pwd.getpwuid(os.geteuid()).pw_name
+    except (KeyError, OSError):
+        return None
 
 
 def keychain_service(account: ClaudeAccount, environ: Mapping[str, str] | None = None) -> str:

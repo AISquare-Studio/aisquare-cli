@@ -253,21 +253,35 @@ def test_under_a_managed_slot_the_plain_claudes_item_is_the_launching_shells(
         ("jos\u00e9", None, "claude-code-user"),
         ("tester\n", None, "claude-code-user"),
         ("", "macuser", "macuser"),
-        ("", KeyError, "claude-code-user"),
+        ("", None, "claude-code-user"),
         ("", "has space", "claude-code-user"),
     ],
 )
 def test_the_items_account_is_users_or_the_login_name_or_claude_code_user(
-    user: str, login: str | type[Exception] | None, expected: str, monkeypatch: pytest.MonkeyPatch
+    user: str, login: str | None, expected: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(core, "_login_name", lambda: login)
+    assert core.keychain_account({"USER": user}) == expected
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize("found", [True, False], ids=["passwd-entry", "none"])
+def test_the_login_name_is_the_effective_users_passwd_entry(
+    found: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``os.userInfo().username``: the passwd entry of the EFFECTIVE uid, or none."""
+    asked: list[int] = []
+
     def getpwuid(uid: int) -> Any:
-        if isinstance(login, type):
-            raise login(uid)
-        return types.SimpleNamespace(pw_name=login)
+        asked.append(uid)
+        if not found:
+            raise KeyError(uid)
+        return types.SimpleNamespace(pw_name="macuser")
 
     monkeypatch.setitem(sys.modules, "pwd", types.SimpleNamespace(getpwuid=getpwuid))
-    monkeypatch.setattr(os, "geteuid", lambda: 501, raising=False)  # none on Windows
-    assert core.keychain_account({"USER": user}) == expected
+    monkeypatch.setattr(os, "geteuid", lambda: 501)
+    assert core._login_name() == ("macuser" if found else None)
+    assert asked == [501]
 
 
 # --- reading it ------------------------------------------------------------------------------

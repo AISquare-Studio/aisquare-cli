@@ -501,13 +501,26 @@ def _index_board_stamps(connection: sqlite3.Connection) -> None:
 
 
 def _index_task_numbers(connection: sqlite3.Connection) -> None:
-    """v29 → v30: at most one task per number on a board (partial: NULL is no number)."""
+    """v29 → v30: at most one task per number on a board (partial: NULL is no number), and
+    the tasks with no number found without reading the table.
+
+    :func:`_number_unnumbered_tasks` asks for one on every open, so on every hook, and
+    ``number IS NULL`` cannot use the first index, whose rows are the numbered ones: a store
+    with every task numbered read ``team_task`` whole to find none (review of #259, round
+    13). The second holds only the tasks without a number, which is none once they are
+    numbered. A store an earlier build of this line stamped v30 without it gets it from
+    the presence pass at its next open (:data:`_PRODUCTS`).
+    """
     query = "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'team_task'"
     if connection.execute(query).fetchone() is None:
         return
     connection.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS team_task_number ON team_task (project_id, number) "
         "WHERE number IS NOT NULL"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS team_task_unnumbered ON team_task (project_id) "
+        "WHERE number IS NULL"
     )
 
 
@@ -634,7 +647,8 @@ def _number_unnumbered_tasks(connection: sqlite3.Connection) -> None:
     NULL, so the tasks it adds would show an id tail and an empty ``#`` for good (review
     of #261, m6). Each one is numbered as an add here numbers it (:meth:`SqliteStore.
     upsert_task`), under the write lock, so a racing add or opener cannot take the same
-    number. A store with every task numbered pays two reads, and a store without
+    number. A store with every task numbered pays two reads, the second of an empty index
+    (``team_task_unnumbered``, :func:`_index_task_numbers`), and a store without
     ``team_task`` (doctor's damaged-store case) is left to be described.
     """
     query = "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'team_task'"
@@ -1034,7 +1048,7 @@ _PRODUCTS: dict[int, _Products] = {
     26: _Products(columns=(("project", "nickname", "TEXT"),)),
     27: _Products(columns=(("claude_usage", "token_fingerprint", "TEXT"),)),
     28: _Products(columns=(("team_task", "number", "INTEGER"),)),
-    29: _Products(("team_task_number",)),
+    29: _Products(("team_task_number", "team_task_unnumbered")),
 }
 
 _PROJECT_COLUMNS = (

@@ -86,7 +86,9 @@ all of them, and the fleet cleans up the worktrees it made.**
     taken with, never the token. A reading recorded before it is served to no
     login, so each account is asked once after the upgrade.
   - v29: `team_task.number`, backfilled per board in creation order.
-  - v30: a unique index on (project, number).
+  - v30: a unique index on (project, number), and one of the tasks without a
+    number, which every open asks for (a store an earlier 0.8.1 candidate made
+    v30 gets it at its next open).
 
   0.8.0 opens a v30 store as it is. A task it adds gets no number there; the
   next open by 0.8.1 numbers it after the last number on its board, in the

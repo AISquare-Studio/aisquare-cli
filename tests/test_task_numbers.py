@@ -162,7 +162,8 @@ def test_a_store_from_before_numbers_gets_them_per_board_in_the_order_tasks_were
     raw = sqlite3.connect(str(paths.db_path()))
     try:
         raw.executescript(  # the store as v28 left it: no number, no index
-            "DROP INDEX team_task_number; ALTER TABLE team_task DROP COLUMN number; "
+            "DROP INDEX team_task_number; DROP INDEX team_task_unnumbered; "
+            "ALTER TABLE team_task DROP COLUMN number; "
             "PRAGMA user_version = 28;"
         )
     finally:
@@ -265,6 +266,39 @@ def test_a_v30_store_an_earlier_build_of_this_line_made_gets_the_board_stamps_in
     with store_session() as store:
         assert store.missing_schema() == []
         assert _number(store.get_task(first.id)) == 1
+
+
+def test_a_store_with_every_task_numbered_finds_none_unnumbered_without_reading_the_table(
+    work_dir: Path,
+) -> None:
+    """Every open, so every hook, asks whether a task has no number, and ``number IS NULL``
+    could not use the index of numbered tasks: a long-lived board's ``team_task`` was read
+    whole to find none (review of #259, round 13). An index of the unnumbered ones answers
+    it, and a v30 store an earlier build of this line made without it gets it on open."""
+    here = _board(work_dir)
+    for key in ("a", "b", "c"):
+        _add(here, key)
+    raw = sqlite3.connect(str(paths.db_path()))
+    try:
+        plan = raw.execute(
+            "EXPLAIN QUERY PLAN SELECT 1 FROM team_task WHERE number IS NULL LIMIT 1"
+        ).fetchall()
+        assert any("team_task_unnumbered" in row[-1] for row in plan), plan
+        raw.execute("DROP INDEX team_task_unnumbered")  # this line's v30, before the index
+    finally:
+        raw.close()
+
+    open_store().close()
+
+    raw = sqlite3.connect(str(paths.db_path()))
+    try:
+        indexes = {name for (name,) in raw.execute("SELECT name FROM sqlite_master")}
+        version = raw.execute("PRAGMA user_version").fetchone()[0]
+    finally:
+        raw.close()
+    assert "team_task_unnumbered" in indexes and version == 30
+    with store_session() as store:
+        assert store.missing_schema() == []
 
 
 # --- resolution -------------------------------------------------------------------------

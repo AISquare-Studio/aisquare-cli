@@ -922,6 +922,44 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
                 said = [event.text for event in handle.recent_events(project.id, limit=80)]
             assert done["enumerated-a"] == "done" and done["enumerated-b"] == "dropped"
             assert done["enumerated-c"] == "todo" and "a decision" in said
+
+            # Review r10 of #113, findings 1, 3 and 4: this coder runs in the project's own
+            # directory, as a tester does. What a launch outside any sandbox reads there,
+            # another agent's worktree and the tmux sockets' directory are read-only to it,
+            # absent ones included and none left behind; and its broker acts only on its own
+            # board's tasks and in its own project's pool.
+            other_worktree = workspace / ".aisquare-worktrees" / "coder-9"
+            other_worktree.mkdir(parents=True)
+            socket_decoy = srv.socket_path().parent / f"socket_decoy-{os.getpid()}"
+            socket_decoy.write_text("x", encoding="utf-8")
+            elsewhere = tmp_path / "elsewhere"
+            elsewhere.mkdir()
+            team.activate(elsewhere)
+            elsewhere_task, _ = team.add_task("their task", cwd=elsewhere)
+            until(lambda: state(coder) == "waiting", 20, "waiting", pane)
+            seen = len(outputs())
+            launch_inputs = "; ".join(
+                [
+                    "mkdir -p .claude; echo x > .claude/settings.json && echo WROTE-settings",
+                    "echo x > .mcp.json && echo WROTE-mcp",
+                    f"touch {other_worktree / 'x'} && echo WROTE-worktree",
+                    f"rm -f {socket_decoy}; test -e {socket_decoy} || echo REMOVED-socket-dir",
+                    f"touch {socket_decoy.parent / 'planted'} && echo WROTE-socket-dir",
+                    f"{cli} task done {elsewhere_task.id} --as {mine}",
+                    f"{cli} remember everyone --user",
+                ]
+            )
+            assert fleet.tell(project, label, f"RUN {launch_inputs}").delivered
+            until(lambda: answered(seen), 40, "the r10 probe ran", pane)
+            probed = outputs()[-1]
+            assert "WROTE" not in probed and "REMOVED" not in probed, probed
+            assert "another board" in probed and "user pool" in probed, probed
+            assert not (workspace / ".mcp.json").exists(), "nothing left on the host"
+            assert not (workspace / ".claude" / "settings.json").exists() and socket_decoy.exists()
+            with store_session() as handle:
+                their_task = handle.get_task(elsewhere_task.id)
+            assert their_task is not None and their_task.status == "todo"
+            socket_decoy.unlink()
             # A waiting manager is woken by a result the coder posts from its sandbox,
             # which tmux refuses: by the coder's own hook, which Codex runs outside it.
             manager = fleet.spawn(

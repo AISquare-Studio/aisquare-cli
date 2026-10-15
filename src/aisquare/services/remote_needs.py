@@ -3882,16 +3882,11 @@ def _needs_send(status: FleetAgentStatus, keys: Sequence[str], text: str, enter:
     from aisquare.services import fleet as fleet_service
 
     server, pane = _needs_pane_server(status), status.agent.pane_id
-
-    def answer() -> None:
-        if keys:
-            server.send_keys(pane, *keys)
-        if text:
-            server.send_literal(pane, text)
-        if enter:
-            server.send_keys(pane, "Enter")
-
-    return fleet_service.pane_write("the answer", answer)
+    return fleet_service.pane_writes(
+        ("the answer", lambda: server.send_keys(pane, *keys)) if keys else None,
+        ("the answer", lambda: server.send_literal(pane, text)) if text else None,
+        ("Enter", lambda: server.send_keys(pane, "Enter")) if enter else None,
+    )
 
 
 def _needs_answer_now(

@@ -304,6 +304,50 @@ def pane_write(what: str, write: Callable[[], object]) -> PaneWrite:
     return PaneWrite("yes", what)
 
 
+def pane_writes(*writes: tuple[str, Callable[[], object]] | None) -> PaneWrite:
+    """``writes`` in turn, each ``(what, write)`` as :func:`pane_write` takes it (``None``: none
+    here), up to the first that did not go through: how that one ended, its ``what`` saying
+    which it was; the last one's when all did. What comes after a write tmux refused or did
+    not answer would land beside it, or ahead of what may still arrive. ``send-keys`` and a
+    quick answer chained it by hand, the first beside a stand-in "nothing" write (review of
+    #259, round 11, 12/13)."""
+    wrote = PaneWrite("yes", "nothing")
+    for what, write in filter(None, writes):
+        wrote = pane_write(what, write)
+        if wrote.typed != "yes":
+            break
+    return wrote
+
+
+def type_then_enter(
+    server: TmuxServer,
+    pane_id: str,
+    text: str,
+    label: str,
+    *,
+    press: str,
+    done: str = "typed into its pane at its prompt",
+    what: str = "the text",
+) -> TellResult | PaneWrite:
+    """Paste ``text`` (``what``) at the prompt in ``label``'s pane, then press Enter: how every
+    message is typed into an agent, by :func:`tell`, a spawn's prompt (:func:`_type_prompt`)
+    and the remote's paste (``remote_actions.action_paste``).
+
+    A paste that did not go through is answered as its :class:`PaneWrite`, its caller's to
+    say: a tell files the text as a note, the remote refuses with a 409, a spawn notes it.
+    Past the paste the text is at the prompt, and the answer is how the Enter ended:
+    ``done``, or :func:`pasted_unsent` (``press``). The three wrote paste, Enter and
+    :func:`pasted_unsent` out each in words of its own (review of #259, round 11, 12/13).
+    """
+    pasted = pane_write(what, lambda: server.paste(pane_id, text))
+    if pasted.typed != "yes":
+        return pasted
+    entered = pane_write("Enter", lambda: server.send_keys(pane_id, "Enter"))
+    if entered.typed != "yes":
+        return pasted_unsent(entered, label, press=press)
+    return TellResult("yes", done)
+
+
 def pasted_unsent(entered: PaneWrite, label: str, *, press: str) -> TellResult:
     """A message pasted at ``label``'s prompt whose Enter did not go through (``entered``): the
     text is there either way. Refused, it waits there unsent, and ``press`` says where an
@@ -2755,17 +2799,17 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
         notes.append(
             f"the agent did not come up within {PROMPT_TIMEOUT:.0f} s — prompt typed anyway"
         )
-    pasted = pane_write("the prompt", lambda: srv.paste(pane_id, prompt))
-    if pasted.typed == "maybe":
-        notes.append(pasted.late("the agent", then=" at its prompt, unsent"))
+    told = type_then_enter(
+        srv, pane_id, prompt, "the agent", press="press Enter in its pane", what="the prompt"
+    )
+    if isinstance(told, PaneWrite):
+        if told.typed == "maybe":
+            notes.append(told.late("the agent", then=" at its prompt, unsent"))
+        else:
+            notes.append(f"could not type the prompt: {told.error}")
         return False
-    if pasted.typed == "no":
-        notes.append(f"could not type the prompt: {pasted.error}")
-        return False
-    entered = pane_write("Enter", lambda: srv.send_keys(pane_id, "Enter"))
-    if entered.typed != "yes":
-        unsent = pasted_unsent(entered, "the agent", press="press Enter in its pane")
-        notes.append(f"the prompt: {unsent.how}")
+    if not told.delivered:
+        notes.append(f"the prompt: {told.how}")
         return False
     return True
 
@@ -3135,20 +3179,23 @@ def tell(
                     "launcher or a shell is in the foreground)"
                 )
             return TellResult("no", f"{why} — {how}")
-        pasted = pane_write("the text", lambda: srv.paste(agent.pane_id, text))
-        if pasted.typed == "maybe":
+        told = type_then_enter(
+            srv,
+            agent.pane_id,
+            text,
+            label,
+            press="press Enter in its pane",
+            done="typed into its pane (it was waiting)",
+        )
+        if not isinstance(told, PaneWrite):
+            return told
+        how = _file_note(project, label, text, sender)
+        if told.typed == "maybe":
             # A wedged server may still run what it was asked (review of #259, round 9, 1/8),
             # which the remote's trail says as `delivered=maybe` (round 10, 6/9).
-            how = _file_note(project, label, text, sender)
-            late = pasted.late(label, then=" at its prompt as well, unsent", again="type into it")
+            late = told.late(label, then=" at its prompt as well, unsent", again="type into it")
             return TellResult("maybe", f"{how}, and {late}")
-        if pasted.typed == "no":
-            how = _file_note(project, label, text, sender)
-            return TellResult("no", f"tmux could not type it ({pasted.error}) — {how}")
-        entered = pane_write("Enter", lambda: srv.send_keys(agent.pane_id, "Enter"))
-        if entered.typed != "yes":
-            return pasted_unsent(entered, label, press="press Enter in its pane")
-        return TellResult("yes", "typed into its pane (it was waiting)")
+        return TellResult("no", f"tmux could not type it ({told.error}) — {how}")
     how = _file_note(project, label, text, sender)
     return TellResult("no", f"it is {status.state} — {how}")
 

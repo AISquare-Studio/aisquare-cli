@@ -3662,18 +3662,15 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
                 (target.id, label), exits, confirmed=confirmed
             ):
                 raise RequestError(409, "double_press", DOUBLE_PRESS)
-            pane, wrote = agent.pane_id, fleet_service.PaneWrite("yes", "nothing")
-            if text:
-                wrote = fleet_service.pane_write(
-                    "the text", lambda: server.send_literal(pane, text)
-                )
-            if keys and wrote.typed == "yes":
-                wrote = fleet_service.pane_write("the keys", lambda: server.send_keys(pane, *keys))
-                if exits and wrote.typed != "no":
-                    # A press that may land counts (review of #259, round 7, 4/9).
-                    exit_keys.exit_keys_sent((target.id, label))
-            if enter and wrote.typed == "yes":
-                wrote = fleet_service.pane_write("Enter", lambda: server.send_keys(pane, "Enter"))
+            pane = agent.pane_id
+            wrote = fleet_service.pane_writes(
+                ("the text", lambda: server.send_literal(pane, text)) if text else None,
+                ("the keys", lambda: server.send_keys(pane, *keys)) if keys else None,
+                ("Enter", lambda: server.send_keys(pane, "Enter")) if enter else None,
+            )
+            if exits and (wrote.what != "the keys" or wrote.typed != "no"):
+                # A press that may land counts (review of #259, round 7, 4/9).
+                exit_keys.exit_keys_sent((target.id, label))
             if wrote.typed == "maybe":
                 audit = f"{summary} delivered=maybe"
                 raise RequestError(400, "write_failed", wrote.late(label), audit=audit)

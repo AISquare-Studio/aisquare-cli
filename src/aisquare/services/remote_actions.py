@@ -1114,25 +1114,23 @@ def action_paste(
     server = fleet_service.server_of(agent)
     first = "interrupted it with Escape, then " if interrupted else ""
     sent, escape = ("Escape was sent, but ", " escape=sent") if interrupted else ("", "")
-    pasted = fleet_service.pane_write("the text", lambda: server.paste(agent.pane_id, text))
-    if pasted.typed == "maybe":
+    told = fleet_service.type_then_enter(
+        server, agent.pane_id, text, label, press="press Enter on the pad"
+    )
+    if isinstance(told, fleet_service.PaneWrite):
+        if told.typed == "maybe":
+            raise RequestError(
+                409,
+                "fleet_error",
+                sent + told.late(label, then=" at its prompt, unsent"),
+                audit=trail(f"delivered=maybe{escape} failed=fleet_error"),
+            )
         raise RequestError(
             409,
             "fleet_error",
-            sent + pasted.late(label, then=" at its prompt, unsent"),
-            audit=trail(f"delivered=maybe{escape} failed=fleet_error"),
+            f"{sent}tmux could not type into {label}'s pane ({told.error}) — nothing was typed",
         )
-    if pasted.typed == "no":
-        raise RequestError(
-            409,
-            "fleet_error",
-            f"{sent}tmux could not type into {label}'s pane ({pasted.error}) — nothing was typed",
-        )
-    entered = fleet_service.pane_write("Enter", lambda: server.send_keys(agent.pane_id, "Enter"))
-    if entered.typed != "yes":
-        told = fleet_service.pasted_unsent(entered, label, press="press Enter on the pad")
-        return replace(told, how=first + told.how)
-    return fleet_service.TellResult("yes", f"{first}typed into its pane at its prompt")
+    return replace(told, how=first + told.how)
 
 
 def action_type_now(

@@ -883,8 +883,8 @@ def needs_from_agent(
        then from its tool's own prompt: it reads as the prompt, whose digits would go into
        the form. Nor with no call up: more than one pending, and the screen names none,
        which is rule 8's, and with a question or a plan among them is rule 8's before any
-       notice too, once a dialog is drawn (:func:`_needs_unnamed_dialog`), named after the
-       question or the plan before its notice and after it alike;
+       notice too, once a dialog is drawn (:func:`_needs_drawn_dialog`), named after the
+       question or the plan and what the dialog shows, before its notice and after alike;
     6. no pending tool, and the newest record an interruption later than the session's last
        hook, or one only Claude Code's own records follow (a local or ``!`` command run at
        the prompt since, which fires no hook either) → ``interrupted``, whatever the row
@@ -985,12 +985,19 @@ def needs_from_agent(
     # Rule 8's card beside a question or a plan no screen names is named after it, not after
     # the notices around it: one card before its notice and after (round 10, 2/9).
     asked = asking if call is None else None
+    drawn = None if asked is None else _needs_drawn_dialog(screen)
     if pending:
         if not attention:
-            if asked is not None and _needs_unnamed_dialog(screen):
+            if drawn is not None:
                 return [
                     _needs_dialog_item(
-                        status, attention_event, None, project=project, now=now, asked=asked
+                        status,
+                        attention_event,
+                        None,
+                        project=project,
+                        now=now,
+                        asked=asked,
+                        drawn=drawn,
                     )
                 ]
             return []  # a tool running, or the 6 s before Claude Code's notification
@@ -1037,7 +1044,7 @@ def needs_from_agent(
             ]
         return [
             _needs_dialog_item(
-                status, attention_event, notice, project=project, now=now, asked=asked
+                status, attention_event, notice, project=project, now=now, asked=asked, drawn=drawn
             )
         ]
     said, said_at, said_key = ("none", None, None) if tail is None else _needs_settled(tail)
@@ -1085,6 +1092,7 @@ def _needs_dialog_item(
     project: ProjectInfo,
     now: datetime,
     asked: PendingTool | None = None,
+    drawn: str | None = None,
 ) -> NeedsItem:
     """Rule 8's card: a dialog that needs the human, named by the session's newest
     ``attention`` event and the notice ``last_seen_at`` says came last, its words ``notice``'s
@@ -1092,18 +1100,21 @@ def _needs_dialog_item(
     it shows.
 
     Beside a question or a plan pending with a call the screen cannot name (``asked``), it is
-    named after that question or plan instead. Named by the notices, the card made before any
-    (:func:`_needs_unnamed_dialog`) had the turn before's, and a notice that came later, as
+    named after that question or plan, and what the dialog drawn shows above its options
+    (``drawn``, :func:`_needs_prompt_region`). Named by the notices, the card made before any
+    (:func:`_needs_drawn_dialog`) had the turn before's, and a notice that came later, as
     Claude Code's idle one does after a minute, named the same dialog anew: pushed twice, the
-    first push's link a card that was gone (review of #259, round 10, 2/9). So while the
-    question or the plan waits, every dialog of the agent's is this one card: what the
-    screen draws first may be the other call's prompt, its question's next, and the key pad
-    answers either.
+    first push's link a card that was gone (review of #259, round 10, 2/9). Named after the
+    question alone, every dialog drawn while it waited was that one card: a sub-agent's
+    prompts after its first were never pushed (a pushed id is kept a week), and one
+    dismissal hid them all, the question's own too (round 11, 1/13). What the dialog shows
+    leaves out its options, so a highlight moved or a notice landing keeps the card, and
+    the next dialog is a card of its own. Its key pad answers whatever is up.
     """
     session, agent = status.session, status.agent
     seen = session.last_seen_at if session is not None else now
-    if asked is not None:
-        subject, since = f"dialog:{asked.tool_use_id}", asked.at or seen
+    if asked is not None and drawn is not None:
+        subject, since = f"dialog:{asked.tool_use_id}:{drawn}", asked.at or seen
     else:
         seq = "-" if attention_event is None else str(attention_event.seq)
         subject, since = f"attention:{seq}:{seen.isoformat()}", seen
@@ -1532,9 +1543,11 @@ def _needs_screen_once(
     return once
 
 
-def _needs_unnamed_dialog(screen: Callable[[], Sequence[str] | None] | None) -> bool:
-    """A question or a plan is pending beside a call the screen cannot name, no notice came, and
-    a dialog is up, which waits for the human: rule 8's card, before any notice.
+def _needs_drawn_dialog(screen: Callable[[], Sequence[str] | None] | None) -> str | None:
+    """What the dialog up shows above its options (:func:`_needs_prompt_region`), beside a
+    question or a plan pending with a call the screen cannot name; ``None`` with no dialog
+    drawn. With no notice, a dialog is up and waits for the human: rule 8's card, before any
+    notice, named after it (:func:`_needs_dialog_item`).
 
     Its own dialog is all an ``AskUserQuestion`` or an ``ExitPlanMode`` needs (rules 3 and
     4), but beside a call with no mark (a ``Task``, a ``Read``, an MCP tool) the screen
@@ -1556,7 +1569,7 @@ def _needs_unnamed_dialog(screen: Callable[[], Sequence[str] | None] | None) -> 
     (review of #259, round 10, 9/9).
     """
     rows = None if screen is None else screen()
-    return rows is not None and _needs_prompt_region(rows) is not None
+    return None if rows is None else _needs_prompt_region(rows)
 
 
 def _needs_prompt_call(

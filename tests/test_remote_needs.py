@@ -697,6 +697,34 @@ def test_a_card_with_digits_is_only_ever_the_call_whose_prompt_is_up(
         assert [item.id for item in digits] == [named], items
 
 
+def test_each_dialog_drawn_while_a_question_waits_is_a_card_of_its_own() -> None:
+    """Review of #259, round 11, 1/13: named ``dialog:{question}``, every dialog drawn while a
+    question waited behind a sub-agent was one card. Only the sub-agent's first prompt was
+    pushed (a pushed id is kept a week), and one dismissal hid every later one, the
+    question's own dialog too. Each dialog is a card of its own; one whose highlight moved,
+    or whose notice landed, is the same card."""
+    row = _row()
+    session = _session(row, state="working", seen=NOW - timedelta(minutes=2))
+    status, tail = _status(row, "working", session), _tail(_TASK, _ASK)
+    above = (f"● {_TASK.summary}",)
+    first = _bash_screen("npm test", above=above)
+    second = _bash_screen("git push origin main", above=above)
+    one = _one(_classify(status, tail, pane_screen=lambda: first))
+    two = _one(_classify(status, tail, pane_screen=lambda: second))
+    asked = _one(_classify(status, tail, pane_screen=lambda: _question_screen(above=above)))
+    assert len({one.id, two.id, asked.id}) == 3, "three dialogs, three cards"
+    for card in (one, two, asked):
+        assert card.reason == "coder-1 shows a dialog that needs you" and card.answers == ()
+    pointer = [line.replace(_POINTER, " ") if "1." in line else line for line in second]
+    moved = [line.replace("  2.", f"{_POINTER} 2.") for line in pointer]
+    assert moved != second
+    assert _one(_classify(status, tail, pane_screen=lambda: moved)).id == two.id
+    noticed = _session(row, state="attention", seen=NOW)
+    events = [_event(9, "attention", "Claude needs your permission to use Bash", session=noticed)]
+    landed = _classify(_status(row, "attention", noticed), tail, events, pane_screen=lambda: second)
+    assert _one(landed).id == two.id, "its notice landing names it the same: one push"
+
+
 def test_a_scan_that_cannot_read_a_screen_keeps_its_last_cards_and_makes_none_of_its_own() -> None:
     """Review of #259, round 11, 5/13: a question queued behind a sub-agent at work, whose
     screen could not be captured, was "shows a dialog that needs you", pushed while nothing
@@ -746,7 +774,10 @@ def test_a_question_or_plan_beside_a_call_it_cannot_name_has_a_card_before_any_n
     card = _one(_classify(status, tail, pane_screen=lambda: drawn))
     assert (card.kind, card.answers) == ("permission", ())
     assert card.reason == "coder-1 shows a dialog that needs you"
-    assert card.id == needs_item_id(PROJECT.id, "permission", f"dialog:{asking.tool_use_id}")
+    shows = remote_needs._needs_prompt_region(drawn)
+    assert card.id == needs_item_id(
+        PROJECT.id, "permission", f"dialog:{asking.tool_use_id}:{shows}"
+    )
     # Round 11, 5/13: a screen nobody could read is unknown, and makes no card: it was one,
     # pushed while nothing was drawn, under the id the dialog drawn later then needed.
     unread = _classify(status, tail, pane_screen=lambda: None)

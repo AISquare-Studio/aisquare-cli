@@ -4,7 +4,8 @@
 guards ``state.json``'s read-modify-write. Both take the lock on a small file
 that exists only to be locked, never on the data file itself: the data file
 is replaced by rename, so a lock on its inode would not exclude a writer that
-opened the new one.
+opened the new one. :func:`holding` is the bounded wait for a caller that words
+its own refusals (the fleet's lock over a repo's branches).
 
 Non-blocking on purpose. ``flock`` with ``LOCK_EX`` waits forever and
 Windows' ``LK_LOCK`` for about ten seconds, so a holder stalled inside its
@@ -28,8 +29,13 @@ not do.
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import os
 import sys
+import time
+from collections.abc import Iterator
+from pathlib import Path
 
 if sys.platform == "win32":
     import msvcrt
@@ -58,3 +64,44 @@ else:
     def unlock(fd: int) -> None:
         """Release the lock taken by :func:`lock_exclusive`."""
         fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+_HELD = frozenset({errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES})
+"""The errnos that mean "another holder": POSIX ``flock``'s and Windows ``locking``'s."""
+
+_POLL_S = 0.01
+
+
+@contextlib.contextmanager
+def holding(path: Path, *, wait_s: float) -> Iterator[None]:
+    """Hold the lock file ``path`` exclusively for the block, polling for at most ``wait_s``.
+
+    For a caller that words its own refusals: raises :class:`TimeoutError` when another
+    holder keeps the lock past ``wait_s`` (``0`` asks once), and the ``OSError`` that
+    opening or locking raised otherwise, at once. Opened for writing, created ``0o644``,
+    and read-only when writing is refused (a lock file another user left behind), as
+    ``core.state_file`` opens its own. The OS drops the lock if the process dies.
+    """
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    except PermissionError:
+        fd = os.open(path, os.O_RDONLY)
+    try:
+        deadline = time.monotonic() + wait_s
+        while True:
+            try:
+                lock_exclusive(fd)
+                break
+            except OSError as exc:
+                if exc.errno not in _HELD:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"{path} is held by another process") from exc
+                time.sleep(_POLL_S)
+        try:
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                unlock(fd)
+    finally:
+        os.close(fd)

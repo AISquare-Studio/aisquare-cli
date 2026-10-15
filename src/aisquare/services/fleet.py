@@ -55,6 +55,7 @@ from aisquare.core.config import (
     replacing_the_former_reviewer_default_first,
 )
 from aisquare.core.ids import new_agent_id
+from aisquare.core.locking import holding
 from aisquare.core.store import AmbiguousIdError, ContextStore, store_session
 from aisquare.core.tmux import (
     DEFAULT_WINDOW_HEIGHT,
@@ -985,6 +986,45 @@ def _git_ok(cwd: Path, *args: str) -> str:
     return result.stdout
 
 
+def _git_common_dir(root: Path) -> Path:
+    """The repository's own ``.git`` directory, which every worktree of it shares."""
+    common = Path(_git_ok(root, "rev-parse", "--git-common-dir").strip())
+    return common if common.is_absolute() else root / common
+
+
+#: How long a spawn waits for the branch lock (:func:`_branches_locked`): a reap holds it
+#: for a few ``git branch -D``, another spawn for one ``git worktree add``.
+_BRANCHES_LOCK_WAIT = _GIT_TIMEOUT
+
+
+@contextlib.contextmanager
+def _branches_locked(root: Path, *, wait: float) -> Iterator[None]:
+    """Hold the lock a spawn and a reap share over ``root``'s branches, for the block.
+
+    ``git worktree add -b`` makes the branch and only then registers the tree that has it
+    out, and a spawn that finds the branch there checks it out one git command after
+    asking: a reap's sweep between the two read the branch as out of every tree and
+    deleted it, and the spawn failed, or made its tree on a branch that was gone (review
+    of #259, round 16). So :func:`_ensure_worktree` holds this from its first question
+    about a branch until the tree is registered, and :func:`_sweep_fleet_branches` deletes
+    only while it holds it, asking the trees again first. A file in the repository's own
+    ``.git``, which every worktree of it shares. Raises :class:`FleetError` when it cannot
+    be taken within ``wait`` seconds, or at all.
+    """
+    path = _git_common_dir(root) / "aisquare-fleet-branches.lock"
+    taken = contextlib.ExitStack()
+    try:
+        taken.enter_context(holding(path, wait_s=wait))
+    except TimeoutError as exc:
+        raise FleetError(
+            f"another aisquare held {path} past {wait:g} s (a spawn or a reap) — try again"
+        ) from exc
+    except OSError as exc:
+        raise FleetError(f"{path} could not be locked ({exc})") from exc
+    with taken:
+        yield
+
+
 def _exclude_worktrees(root: Path, worktree_dir: str, notes: list[str]) -> None:
     """Add ``<worktree_dir>/`` to ``.git/info/exclude`` once — never to a tracked file.
 
@@ -993,9 +1033,7 @@ def _exclude_worktrees(root: Path, worktree_dir: str, notes: list[str]) -> None:
     """
     line = worktree_dir.rstrip("/") + "/"
     try:
-        common = _git_ok(root, "rev-parse", "--git-common-dir").strip()
-        git_dir = Path(common) if Path(common).is_absolute() else root / common
-        exclude = git_dir / "info" / "exclude"
+        exclude = _git_common_dir(root) / "info" / "exclude"
         existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
         if line in existing.splitlines():
             return
@@ -1113,7 +1151,34 @@ def _ensure_worktree(
     ``refuse_if_taken`` reaches :func:`_reuse_worktree`, which asks it once more
     before switching branches; a tree this call CREATES cannot be another
     agent's, because ``git worktree add`` refuses an existing directory.
+
+    All of it under the branch lock a reap deletes under (:func:`_branches_locked`).
     """
+    with _branches_locked(root, wait=_BRANCHES_LOCK_WAIT):
+        return _worktree_for(
+            root,
+            worktree_dir,
+            label,
+            branch,
+            notes,
+            refuse_if_taken=refuse_if_taken,
+            own=own,
+            own_branch=own_branch,
+        )
+
+
+def _worktree_for(
+    root: Path,
+    worktree_dir: str,
+    label: str,
+    branch: str,
+    notes: list[str],
+    *,
+    refuse_if_taken: Callable[[], None] | None,
+    own: Path | None,
+    own_branch: str | None,
+) -> Path:
+    """:func:`_ensure_worktree`'s work, under its lock."""
     if own is not None and not own.exists():
         return _remake_worktree(root, own, own_branch, notes)
     path = root / worktree_dir / label
@@ -1404,7 +1469,10 @@ def _sweep_fleet_branches(
     or rebase merge, whose tip the default branch never holds. Asked of every such branch
     on every reap: a branch kept when its tree went was never looked at again, so it stayed
     for good once merged, and the repo collected one a task (review of #259, round 15).
-    A branch some worktree has out, the tree gone by hand or not, is left alone.
+    A branch some worktree has out, the tree gone by hand or not, is left alone, and so is
+    one a LIVE row names. The deletes are made under the lock a spawn makes its tree under
+    (:func:`_branches_locked`), after asking the trees again: never meanwhile, as a branch
+    a spawn has just made, or is about to check out, reads as out of every tree.
 
     Only a branch a row recorded is the fleet's. Any ``fleet/…`` branch was, and every reap
     deleted a merged ``git branch fleet/my-own-notes`` in each project it walked, one no
@@ -1412,12 +1480,14 @@ def _sweep_fleet_branches(
     hand, or one its agent left for another — is left as it is, and so is a recorded one
     that is not ``fleet/…`` (``fix/auth``): only branches :func:`branch_name` makes go.
     """
+    live = {row.branch for row in rows if row.ended_at is None}
     recorded = {
         row.branch
         for row in rows
         if row.ended_at is not None
         and row.branch is not None
         and row.branch.startswith(_FLEET_BRANCH_PREFIX)
+        and row.branch not in live
     }
     if not recorded:
         return
@@ -1426,13 +1496,26 @@ def _sweep_fleet_branches(
     if not every or merged is None:
         return
     out = set(_worktree_branches(root).values())
+    done: list[str] = []
     for branch in every:
         if branch not in recorded or branch in out:
             continue
         if branch not in merged and not _squashed(root, branch, default):
             report.branches_kept.append(branch)
-        elif _git(root, "branch", "-D", branch).returncode == 0:
-            report.branches_deleted.append(branch)
+        else:
+            done.append(branch)
+    if not done:
+        return
+    try:
+        # Never waited for: a spawn holds it through a whole `git worktree add`, and the
+        # next reap deletes what this one could not.
+        with _branches_locked(root, wait=0):
+            out = set(_worktree_branches(root).values())  # asked again, under the lock
+            for branch in done:
+                if branch not in out and _git(root, "branch", "-D", branch).returncode == 0:
+                    report.branches_deleted.append(branch)
+    except FleetError:
+        return
 
 
 def _squashed(root: Path, branch: str, default: str) -> bool:

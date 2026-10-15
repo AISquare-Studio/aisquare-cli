@@ -487,11 +487,14 @@ once the default branch has its work (`branches_deleted`): the default branch
 holds its tip, or the branch is pushed and merging it would change nothing, as
 after a squash or rebase merge (git 2.38 or later). Only those are ever deleted:
 a branch no row names — made by hand, or one an agent left for another — and a
-branch that is not `fleet/…` are left as they are, and a project no agent with a
-worktree has ended in is not looked at. One with commits the default branch lacks
-— pushed to an integration branch, say — is kept and named on every reap
-(`branches_kept`), with `git branch -D <branch>` to drop it once its work is
-abandoned: a coder spawned again for its task asks for the same branch, checks
+branch that is not `fleet/…` are left as they are, and so is one a live agent's
+row names; a project no agent with a worktree has ended in is not looked at. A
+spawn makes its tree, and a reap deletes, under one lock in the repo's `.git`,
+so a reap never deletes a branch a spawn is checking out: one that meets a spawn
+deletes nothing, and the next reap does. A recorded branch with commits the
+default branch lacks — pushed to an integration branch, say — is kept and named
+on every reap (`branches_kept`), with `git branch -D <branch>` to drop it once
+its work is abandoned: a coder spawned again for its task asks for the same branch, checks
 it out and carries on with its commits, where it used to start a new one from
 the main checkout's HEAD without them. A restart of an agent whose tree was
 removed makes the tree again on the branch its row recorded: *One rule for a

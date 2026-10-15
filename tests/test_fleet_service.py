@@ -8138,6 +8138,7 @@ def test_reap_keeps_an_untracked_file_that_status_show_untracked_files_hides(
 _SWEEP: dict[str, str] = {
     "an ended agent's, merged": "deleted",
     "an ended agent's, pushed and not merged": "kept",
+    "an ended agent's, merged, named by a live agent whose tree is gone": "left",
     "made by hand, merged, in a project no agent ran in": "left",
     "made by hand, merged, beside an ended agent's": "left",
     "spawned on, then left by its agent for a branch of its own": "left",
@@ -8153,7 +8154,8 @@ def test_reap_deletes_only_a_fleet_branch_an_ended_agent_recorded(
     had out, in every project it walked — a user's ``git branch fleet/my-own-notes`` in a
     repo no agent ever ran in included, as ``fleet reap --all`` walks every captured
     directory. Only a branch an ended agent's row recorded is the fleet's to delete; a
-    branch no row names, or one that is not ``fleet/…``, is never touched."""
+    branch no row names, or one that is not ``fleet/…``, is never touched; and one a live
+    agent's row names is not deleted under it, its tree gone or not."""
     _remote(project, tmp_path)
     if case == "made by hand, merged, in a project no agent ran in":
         branch = "fleet/my-own-notes"
@@ -8167,7 +8169,7 @@ def test_reap_deletes_only_a_fleet_branch_an_ended_agent_recorded(
         elif case == "made by hand, merged, beside an ended agent's":
             branch = "fleet/my-own-notes"
             _git("branch", branch, cwd=project.root)
-        elif case != "an ended agent's, merged":
+        elif "my-own" in case or "not fleet/…" in case or "left by its agent" in case:
             _git("switch", "-q", "-c", "my-own", cwd=agent.cwd)
             _commit(agent.cwd, "mine.txt")
             _git("push", "-q", "origin", "HEAD:my-own", cwd=agent.cwd)
@@ -8175,6 +8177,11 @@ def test_reap_deletes_only_a_fleet_branch_an_ended_agent_recorded(
                 _git("merge", "-q", "--ff-only", "my-own", cwd=project.root)
                 branch = "my-own"
         fleet_service.stop(project, "coder-x", force=True)
+        if case == "an ended agent's, merged, named by a live agent whose tree is gone":
+            again = fleet_service.spawn(project, "coder", label="coder-x").agent
+            assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=again.cwd) == branch
+            shutil.rmtree(again.cwd)
+            _git("worktree", "prune", cwd=project.root)  # out of every tree now
     assert branch in _git("branch", "--list", "--merged", "main", cwd=project.root) or (
         _SWEEP[case] == "kept"
     ), "the premise: main holds its tip, so only whose branch it is decides"
@@ -8185,6 +8192,39 @@ def test_reap_deletes_only_a_fleet_branch_an_ended_agent_recorded(
     assert (branch in report.branches_deleted) == (verdict == "deleted"), report
     assert (branch in report.branches_kept) == (verdict == "kept"), report
     assert bool(_git("branch", "--list", branch, cwd=project.root)) == (verdict != "deleted")
+
+
+def test_a_reap_inside_a_spawn_never_deletes_the_branch_the_spawn_is_making_its_tree_on(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 16: ``git worktree add -b`` makes the branch first and
+    registers the tree after it, so a reap in between (the manager's, or ``fleet reap``)
+    read a respawned task's branch — recorded by its ended agent, at main's tip — as merged
+    and out of every tree, and deleted it under the spawn. A spawn makes its tree under
+    the lock a reap deletes under: a reap that meets it deletes nothing, and the next
+    one does."""
+    task = _add_task(project, "Wire the auth flow")
+    first = fleet_service.spawn(project, "coder", task_id=task.id).agent
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=first.cwd)
+    fleet_service.stop(project, first.label, force=True)
+    assert fleet_service.reap(project).branches_deleted == [branch], "main holds its tip"
+    real = fleet_service._add_worktree
+    meanwhile: list[fleet_service.ReapReport] = []
+
+    def a_reap_in_between(root: Path, path: Path, name: str, *, new: bool = False) -> None:
+        if new:  # `git worktree add -b`, in its two steps: the branch, then the tree
+            _git("branch", name, cwd=root)
+            meanwhile.append(fleet_service.reap(project))
+        real(root, path, name)
+
+    monkeypatch.setattr(fleet_service, "_add_worktree", a_reap_in_between)
+
+    again = fleet_service.spawn(project, "coder", task_id=task.id).agent
+
+    assert [report.branches_deleted for report in meanwhile] == [[]]
+    assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=again.cwd) == branch
+    fleet_service.stop(project, again.label, force=True)
+    assert fleet_service.reap(project).branches_deleted == [branch], "the next reap does"
 
 
 def test_reap_never_removes_a_live_agents_worktree(

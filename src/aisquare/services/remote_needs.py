@@ -3070,7 +3070,7 @@ def _needs_pane_server(status: FleetAgentStatus) -> TmuxServer:
     ``fleet.server_of`` works the address out again, reading ``config.toml`` each time
     (round 29 of #257 measured that), and the screen was read through it for every agent
     with more than one call pending, every scan, and again under the agent's lock for each
-    quick answer (review of #259, round 9, 7/8).
+    quick answer (review of #259, round 9, 7/8), whose keys go here too (:func:`_needs_send`).
     """
     from aisquare.services import fleet as fleet_service
 
@@ -3871,17 +3871,19 @@ def _needs_answer_body(body: Mapping[str, object]) -> tuple[str, list[str], str,
     return item_id, keys, text, _remote_flag(body, "enter")
 
 
-def _needs_send(agent: FleetAgent, keys: Sequence[str], text: str, enter: bool) -> None:
-    """Type the answer into the agent's pane: the keys, or the text, then Enter if asked."""
-    from aisquare.services import fleet as fleet_service
-
-    server = fleet_service.server_of(agent)
+def _needs_send(status: FleetAgentStatus, keys: Sequence[str], text: str, enter: bool) -> None:
+    """Type the answer into the pane of ``status``'s row: the keys, or the text, then Enter if
+    asked. On the server whose screen :func:`needs_prompt_now` just read
+    (:func:`_needs_pane_server`): through ``fleet.server_of`` each answer read ``config.toml``
+    under the agent's lock, and the screen checked and the server typed into came of two
+    workings-out of the row's address (review of #259, round 10, 7/9)."""
+    server, pane = _needs_pane_server(status), status.agent.pane_id
     if keys:
-        server.send_keys(agent.pane_id, *keys)
+        server.send_keys(pane, *keys)
     if text:
-        server.send_literal(agent.pane_id, text)
+        server.send_literal(pane, text)
     if enter:
-        server.send_keys(agent.pane_id, "Enter")
+        server.send_keys(pane, "Enter")
 
 
 def _needs_answer_now(
@@ -3959,7 +3961,7 @@ def _needs_answer_now(
             current = [one.needs_item_json() for one in shown]
             raise RequestError(409, "stale", gone, current=current)
         try:
-            _needs_send(snap.status.agent, keys, text, enter)
+            _needs_send(snap.status, keys, text, enter)
         except TmuxTimedOut as exc:
             # Unanswered, not refused: a wedged server may still type it once it recovers, and
             # a card left live meanwhile typed its digit again (review of #259, round 8, 2/9).

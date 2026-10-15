@@ -2946,7 +2946,8 @@ def test_the_pane_reads_go_to_the_server_the_listing_found_without_reading_confi
     """Review of #259, round 9, 7/8: the screen (every scan, for every agent with more than one
     call pending, and again for each quick answer under the agent's lock) and the pane's last
     output were asked of ``fleet.server_of``, which read ``config.toml`` to work out an address
-    the listed row already carries (``socket_at``)."""
+    the listed row already carries (``socket_at``). Round 10, 7/9: and a quick answer's keys,
+    typed into the server whose screen was checked."""
     tmux = FakeTmux(reference=NOW)
     tmux.screen = ["the screen"]
     asked: list[str] = []
@@ -2963,7 +2964,9 @@ def test_the_pane_reads_go_to_the_server_the_listing_found_without_reading_confi
     assert remote_needs.live_needs_sources().pane_output(status) is not None
     snap = remote_needs._needs_snapshot(PROJECT, status, None, (), NOW)
     assert snap.pane_is_agent
-    assert asked == [row.tmux_socket] * 3
+    remote_needs._needs_send(status, ["1"], "", enter=True)
+    assert tmux.typed == [("keys", row.pane_id, "1"), ("keys", row.pane_id, "Enter")]
+    assert asked == [row.tmux_socket] * 4
 
 
 def _working(tail: TranscriptTail | None, *, state: str = "working") -> Fleet:

@@ -113,7 +113,7 @@ READER_JOIN_SECONDS = 1.0
 _OWN_GROUP: dict[str, Any] = {} if sys.platform == "win32" else {"process_group": 0}
 """Popen's word for a process group of ngrok's own: POSIX only, and the fleet UI runs there."""
 _TIED = """\
-import json, os, signal, subprocess, sys, threading
+import json, os, signal, subprocess, sys, threading, time
 
 def end(signum):
     if os.getpgrp() == os.getpid():
@@ -127,11 +127,10 @@ def gone():
             pass
     except OSError:
         pass
+    ending.set()
     end(signal.SIGTERM)
-    try:
-        child.wait(timeout=%(stop)r)
-    except subprocess.TimeoutExpired:
-        end(signal.SIGKILL)
+    time.sleep(%(stop)r)
+    end(signal.SIGKILL)
 
 signal.signal(signal.SIGTERM, lambda signum, frame: None)
 try:
@@ -139,8 +138,12 @@ try:
 except OSError as exc:
     print(json.dumps({"lvl": "eror", "err": f"could not start {sys.argv[1]}: {exc}"}), flush=True)
     sys.exit(1)
-threading.Thread(target=gone, daemon=True).start()
+ending = threading.Event()
+watching = threading.Thread(target=gone, daemon=True)
+watching.start()
 code = child.wait()
+if ending.is_set():
+    watching.join()
 if code < 0:
     for name in ("SIGTERM", "SIGINT", "SIGPIPE"):
         signal.signal(getattr(signal, name), signal.SIG_DFL)
@@ -149,10 +152,16 @@ sys.exit(code if code >= 0 else 128 - code)
 """
 """What runs ngrok on POSIX (:func:`popen_tied`): its parent, in its group, until the pipe on
 its stdin ends, which it does once this process is gone, however it went. Then it SIGTERMs
-the group, and SIGKILLs what is left of it after :data:`STOP_SECONDS`; ngrok alone, should
-it not lead a group of its own (never the group of whoever started it). A SIGTERM to it
-alone waits for ngrok, whose exit, code or signal, it ends with: stopping signals the
-group."""
+the group, and SIGKILLs what is left of it after :data:`STOP_SECONDS`, itself included;
+ngrok alone, should it not lead a group of its own (never the group of whoever started
+it). A SIGTERM to it alone waits for ngrok, whose exit, code or signal, it ends with:
+stopping signals the group.
+
+The SIGKILL goes whether or not ngrok itself is still there, and the parent waits for it
+once the pipe has ended: nobody reads its exit by then. It went only while ngrok was, so a
+launcher's ngrok that ended on the SIGTERM ended the parent with it, and the real ngrok
+it runs, trapping the SIGTERM, ran on untied, the public link on a port nobody held
+(review of #259, round 8, 6/9)."""
 
 COMMAND_LINE_TUNNEL = "command_line"
 """ngrok's name, in its log and its API, for the tunnel ``ngrok http`` asks for."""

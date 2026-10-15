@@ -1142,6 +1142,42 @@ def test_the_status_lines_words_in_a_command_awaiting_approval_keep_the_bell(
     assert _state(codex) == "working"
 
 
+#: Codex 0.162.1 mid-turn in a window started with no ``COLORTERM`` (measured under tmux
+#: 3.7c, a 120x40 pane, ``TERM=tmux-256color``): its spinner blinks, here at its hollow
+#: frame; with ``COLORTERM=truecolor`` it stayed ``•`` on every read.
+BLINKED = [
+    f"{CHEVRON} say hi",
+    "◦ Working (15s • esc to interrupt)",
+    f"{CHEVRON} Ask Codex to do anything",
+    "  gpt-5 default · ~/w",
+    "  ← for agents · ? for shortcuts                                ⚠ 1 warning · f2",
+]
+
+
+def test_codex_reads_working_through_both_frames_of_its_blinking_spinner(
+    codex_agent: tuple[Codex, TeamTask],
+    tmux: FakeTmux,  # noqa: F811
+) -> None:
+    """Review r4 of #113, finding 7: the status line had to start with ``•``, and Codex
+    blinks its spinner ``•``/``◦`` when its terminal does not report truecolor, which a
+    window gets only from a spawner that had ``COLORTERM``. After an approval, the row of
+    a headless, SSH or cron spawn flipped between working and attention on alternate
+    reads: the bell came back, and ``tell`` alternated between typing and a note."""
+    read = CODEX.capabilities.working_on_screen
+    filled = [row.replace("◦", "•", 1) for row in BLINKED]
+    assert read is not None and read(BLINKED) and read(filled)
+    codex, _ = codex_agent
+    pane = codex.agent.pane_id
+    codex.start(THREAD_ONE)
+    _turn_under(codex, THREAD_ONE, "user")
+    codex.hook("PermissionRequest", THREAD_ONE, **APPROVAL)
+    tmux.printed(pane, ago=timedelta(seconds=-2))
+
+    for screen in (BLINKED, filled, BLINKED):  # 'y', then the spinner's frames
+        tmux.screens[pane] = screen
+        assert _state(codex) == "working"
+
+
 # --- a replacement runs the row's own agent (review r1 of #113, finding 1) ---------------
 
 

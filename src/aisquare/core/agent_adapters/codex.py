@@ -168,10 +168,14 @@ _EVENTS = {
     "PostToolUse": "tool_done",
 }
 
-#: Codex's status line while a turn runs: a header (``Working``, or the one a reasoning
-#: summary gives it), the time it has run and ``esc to interrupt``, then whatever it adds
-#: (`` · 1 background terminal running · …``). Measured on 0.162.1.
-_STATUS_LINE = re.compile(r"• .+ \(\d+[hms](?: \d+[hms])* • esc to interrupt\)(?: · .*)?")
+#: Codex's status line while a turn runs: its spinner, a header (``Working``, or the one a
+#: reasoning summary gives it), the time it has run and ``esc to interrupt``, then whatever
+#: it adds (`` · 1 background terminal running · …``). Measured on 0.162.1. The spinner is
+#: ``•`` in a terminal that reports truecolor (``COLORTERM``), and blinks ``•``/``◦``
+#: otherwise, as in a window whose spawner had no ``COLORTERM`` to pass on (headless, SSH,
+#: cron): measured under tmux, the glyph alternated on reads 0.3 s apart (review r4 of
+#: #113, finding 7).
+_STATUS_LINE = re.compile(r"[•◦] .+ \(\d+[hms](?: \d+[hms])* • esc to interrupt\)(?: · .*)?")
 #: What starts Codex's composer row, and every user prompt in its transcript above it:
 #: U+203A and a space.
 _CHEVRON = "\u203a "

@@ -294,20 +294,32 @@ _SCREEN_ESCAPES = re.compile(
     r"|\x1b\[[0-?]*[ -/]*[@-~]"  # CSI, SGR included
 )
 _TRUST_QUESTION = re.compile(r"\btrust (?:this folder|the files in this folder)\b", re.IGNORECASE)
-_TRUST_EXIT = re.compile(r"\bNo, exit\b")
+_TRUST_EXIT = re.compile(r"(?:\u276f ?|> ?)?(?:\d+\. ?)?No, exit")
+"""The dialog's "No, exit" option, a row of its own: its pointer when highlighted, its
+number on the 1.x builds."""
+_DIALOG_FOOT = 3
+"""The rows that end a screen at the question, blank ones aside: "No, exit" is among them,
+with at most the other option and the key hint below it."""
 
 
 def shows_trust_prompt(lines: Iterable[str]) -> bool:
     """Whether a captured screen is Claude Code's folder-trust question.
 
-    2.1.299 draws "Yes, I trust this folder" under a highlighted "No, exit"; the 1.x
-    builds asked "Do you trust the files in this folder?" over the same "No, exit". Both
-    phrases must be on the screen, so an agent that merely writes about trust is not
-    taken for the dialog. A Claude Code string, not a contract: pinned by a test with
-    the captured screen.
+    2.1.299 draws "Yes, I trust this folder" under a highlighted "No, exit", over its key
+    hint; the 1.x builds asked "Do you trust the files in this folder?" over a numbered
+    "2. No, exit". Read by the dialog's layout: the question's words on the screen, and
+    "No, exit" an option of its own among the screen's last rows (:data:`_DIALOG_FOOT`),
+    where the dialog takes the input box's place. Both phrases anywhere on the screen
+    read an agent at work as at the question when it showed the words — a reviewer
+    reading this module, or the captured screen pinned by the tests — and its input box,
+    under them, is what the screen ends on (review of #259, round 14). A Claude Code
+    string, not a contract: pinned by a test with the captured screen.
     """
-    text = " ".join(" ".join(_SCREEN_ESCAPES.sub("", line).split()) for line in lines)
-    return bool(_TRUST_QUESTION.search(text) and _TRUST_EXIT.search(text))
+    rows = [row for line in lines if (row := " ".join(_SCREEN_ESCAPES.sub("", line).split()))]
+    foot = rows[-_DIALOG_FOOT:]
+    if not any(_TRUST_EXIT.fullmatch(row) for row in foot):
+        return False
+    return bool(_TRUST_QUESTION.search(" ".join(rows)))
 
 
 # --- one settings.json ------------------------------------------------------------------

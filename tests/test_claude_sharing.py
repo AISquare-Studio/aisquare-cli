@@ -417,6 +417,24 @@ def test_the_captured_trust_question_is_recognised_and_ordinary_screens_are_not(
     assert not sharing.shows_trust_prompt(session)  # each phrase alone is not enough
 
 
+def test_the_trust_questions_words_on_a_screen_at_work_are_not_the_question() -> None:
+    """Review of #259, round 14: both phrases anywhere on the screen read an agent at work
+    as at the question — one that ``cat``s the captured screen, or reads this module. The
+    dialog takes the input box's place, so its "No, exit" is an option of its own among
+    the screen's last rows; at work, the input box is what the screen ends on."""
+    screen = (FIXTURES / "trust_prompt_2.1.299.txt").read_text(encoding="utf-8").splitlines()
+    input_box = ["", "─" * 40, f"{CURSOR} ", "─" * 40, "  ? for shortcuts"]
+    assert not sharing.shows_trust_prompt(
+        ["⏺ Bash(cat trust_prompt_2.1.299.txt)", *screen, *input_box]
+    )
+    source = ['_TRUST_EXIT = re.compile(r"No, exit")', '"Yes, I trust this folder"', *input_box]
+    assert not sharing.shows_trust_prompt(source)
+    # "No, exit" in a sentence of the foot is no option either.
+    assert not sharing.shows_trust_prompt(["trust this folder", "Pick No, exit to leave"])
+    # Control: the question with blank rows under it, as a taller pane shows it.
+    assert sharing.shows_trust_prompt([*screen, "", "", ""])
+
+
 # --- aisquare accounts trust ---------------------------------------------------------------------
 
 

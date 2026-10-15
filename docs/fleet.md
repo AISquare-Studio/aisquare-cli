@@ -266,11 +266,16 @@ has passed, since a parked agent fires no hook); otherwise tmux's facts (a dead
 pane → exited with its code; activity → working; else waiting); no pane at all → lost; `· unknown`
 when neither source can answer. A row whose socket another tmux server answers on
 reads `unknown (another tmux server on its socket)` whatever its board says (see
-*The server was stopped outside the CLI*). An agent no hook has spoken for yet
-whose screen is Claude Code's folder-trust question reads `attention` with
+*The server was stopped outside the CLI*). A Claude Code agent no hook has
+spoken for yet whose screen is Claude Code's folder-trust question reads
+`attention` with
 `waiting for folder trust — approve it once, or aisquare accounts trust <dir>`
 (see *Folder trust* under [Accounts](#accounts)); only those rows have their
-screen read. The detail beside the chip says why
+screen read — a row with a board session, or whose binary is `claude` by name,
+never another harness's agent — and the screen is the question only when it
+ends on it (*No, exit* an option of its own among the last rows, where the
+dialog takes the input box's place), not when the words are anywhere on it. The
+detail beside the chip says why
 when that is not obvious — an exit code, `no hooks` for a binary without our
 lifecycle hooks, `pane gone`.
 

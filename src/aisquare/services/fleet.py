@@ -1845,12 +1845,22 @@ def _with_trust_prompts(
 
 
 def _maybe_at_trust_prompt(status: FleetAgentStatus, session: TeamSession | None = None) -> bool:
-    """A live row tmux reports, whose session has said nothing since the row began:
-    ``session``, the row's found by its id, else the listing's."""
+    """A live Claude Code row tmux reports, whose session has said nothing since the row
+    began: ``session``, the row's found by its id, else the listing's.
+
+    Claude Code alone asks the question, so a row is asked about only when it is Claude
+    Code: one with a session (only Claude Code's hooks write one), or by its binary's
+    name (``harness.is_default_agent``, the predicate its flags and ``--session-id``
+    go by). Another harness's agent fires no hook, ever, so its pane was captured on
+    every listing — the sidebar's tick, Remote's scan, each action's ``status_of`` — and
+    read as at the question when its screen held the words (review of #259, round 14).
+    """
     agent, session = status.agent, session or status.session
     if agent.ended_at is not None or status.held or status.state not in ("waiting", "working"):
         return False
-    return session is None or session.last_seen_at < agent.created_at
+    if session is None:
+        return harness.is_default_agent(agent.binary)
+    return session.last_seen_at < agent.created_at
 
 
 def _status(

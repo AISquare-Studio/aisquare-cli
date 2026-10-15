@@ -36,7 +36,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import claude_accounts as accounts_core
-from aisquare.core import claude_sharing, codenames, paths, selfcli
+from aisquare.core import claude_sharing, codenames, harness, paths, selfcli
 from aisquare.core import store as core_store
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import (
@@ -13193,6 +13193,30 @@ def test_an_agent_whose_hooks_have_run_is_never_asked_for_its_screen(
     tmux.set_command(fresh.pane_id, "claude")
     fleet_service.list_agents(project)
     assert tmux.captured == [fresh.pane_id]
+
+
+def test_an_agent_that_is_not_claude_code_is_never_asked_for_its_screen(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Review of #259, round 14: only Claude Code asks the trust question, and another
+    harness's agent fires no hook, ever. Its pane was captured on every listing, and read
+    as at the question when its screen held the words: ``fleet tell`` filed a note it
+    never reads instead of typing, and Remote pushed a trust card for an agent at work."""
+    agent = _coder(project, binary=sys.executable)  # another harness: no --session-id
+    assert agent.session_id is None and not harness.is_default_agent(agent.binary)
+    tmux.set_command(agent.pane_id, "aider")
+    tmux.screens[agent.pane_id] = TRUST_SCREEN  # the question's words, as it reads them
+    tmux.captured.clear()
+
+    (status,) = fleet_service.list_agents(project)
+
+    assert status.state != "attention" and tmux.captured == []
+    # Control: a Claude Code row no hook has spoken for yet is asked, and read at it.
+    claude = _coder(project)
+    tmux.set_command(claude.pane_id, "claude")
+    tmux.screens[claude.pane_id] = TRUST_SCREEN
+    states = {status.agent.id: status.state for status in fleet_service.list_agents(project)}
+    assert states[claude.id] == "attention" and tmux.captured == [claude.pane_id]
 
 
 def test_an_agent_whose_hooks_run_on_a_hubs_board_is_never_asked_for_its_screen(

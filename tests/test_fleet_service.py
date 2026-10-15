@@ -7955,6 +7955,7 @@ def _move_to_a_branch_of_its_own(tree: Path, name: str) -> str:
         "on a branch of its own, exited, reaped",
         "deleted by hand, then git's worktree list pruned",
         "its label's earlier tree was on another branch",
+        "its label's earlier tree was on another branch, and it exited, reaped",
     ],
 )
 def test_a_restart_makes_a_gone_tree_again_on_the_branch_its_row_recorded(
@@ -7967,7 +7968,9 @@ def test_a_restart_makes_a_gone_tree_again_on_the_branch_its_row_recorded(
     by hand could not either once any spawn had pruned; and one whose label's earlier
     tree was reaped from ``fleet/…`` was rebuilt there, on the earlier agent's branch,
     without its own commits. The row records the branch at spawn, at stop and at reap,
-    and a restart makes the tree again there, at its tip."""
+    and a restart makes the tree again there, at its tip. Round 16: reap wrote the tree's
+    branch to the OLDEST row at its path, and a restart acts on the newest, so the later
+    agent, exited rather than stopped, was rebuilt on the earlier one's branch."""
     _remote(project, tmp_path)
     task = _add_task(project, "Wire the auth flow")
     coder = fleet_service.spawn(project, "coder", task_id=task.id).agent
@@ -7993,7 +7996,10 @@ def test_a_restart_makes_a_gone_tree_again_on_the_branch_its_row_recorded(
         coder = fleet_service.spawn(project, "coder", task_id=task.id).agent
         assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=coder.cwd) == branch
         branch, tip = "fix/auth", _move_to_a_branch_of_its_own(coder.cwd, "fix/auth")
-        fleet_service.stop(project, coder.label, force=True)
+        if case.endswith("exited, reaped"):
+            tmux.die(coder.pane_id, 0)  # no stop: only the reap records its branch
+        else:
+            fleet_service.stop(project, coder.label, force=True)
         assert fleet_service.reap(project).worktrees_removed == [coder.cwd]
     assert not coder.cwd.exists()
 

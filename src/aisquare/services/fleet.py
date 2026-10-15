@@ -1328,9 +1328,9 @@ def _remove_finished_worktrees(
     is on the report with why. A tree a live agent still sits in (a respawn reused it)
     is never touched.
 
-    The tree goes, and its branch stays, recorded on the row just before the tree went
-    (:func:`_record_the_branch`), whatever its name: a spawn for the task checks it out
-    (:func:`_ensure_worktree`), and a restart of the agent makes its tree again there
+    The tree goes, and its branch stays, recorded on the newest row at its path just before
+    the tree went (:func:`_record_the_branch`), whatever its name: a spawn for the task checks
+    it out (:func:`_ensure_worktree`), and a restart of the agent makes its tree again there
     (:func:`_remake_worktree`). Deleted when pushed anywhere, as the tree is, it took the
     task's commits with it: a coder spawned again for the task, after a reviewer reopened
     it, asks for the same branch (:func:`branch_name`), found none, and started a new one
@@ -1345,20 +1345,20 @@ def _remove_finished_worktrees(
         default = _default_branch(root)
     except FleetError:
         return  # no git here: nothing can be removed safely, so nothing is
-    candidates = [
-        agent
-        for agent in store.fleet_agents(project.id)
-        if agent.ended_at is not None and agent.worktree and agent.cwd.exists()
-    ]
+    # The row whose tree a path is now: the NEWEST there, the one a restart of its label
+    # acts on (`fleet_agent_by_label`). A label reused — a restart, a switch, a respawn
+    # for its task — leaves older rows at the same path, each with the branch it recorded
+    # when it ended; the tree's branch written to the oldest was a restart's of the newest
+    # rebuilding on the branch before it (review of #259, round 16).
+    owners = {
+        agent.cwd.resolve(): agent for agent in store.fleet_agents(project.id) if agent.worktree
+    }
     in_use = {agent.cwd.resolve() for agent in store.fleet_agents(project.id, live_only=True)} | {
         root.resolve()
     }
-    seen: set[Path] = set()
-    for agent in candidates:
-        path = agent.cwd.resolve()
-        if path in in_use or path in seen:
+    for path, agent in owners.items():
+        if path in in_use or agent.ended_at is None or not agent.cwd.exists():
             continue
-        seen.add(path)
         _record_the_branch(store, agent)
         try:
             kept = _why_kept(root, agent.cwd, default)

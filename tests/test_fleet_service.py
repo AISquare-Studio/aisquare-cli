@@ -7289,8 +7289,11 @@ def test_a_refusal_names_the_field_its_row_and_record_differ_in(
 
     told = fleet_service.tell(project, agent.label, "please rebase")
 
+    # A socket path is a path: the store hands it back as one, and the refusal prints it
+    # as this platform spells it (`\tmp\…` on Windows), as the record holds its own.
+    shown = str(Path(value)) if column == "socket_path" else value
     assert not told.delivered and REWRITTEN in told.how
-    assert f"{field} {value!r} where its launch record has {recorded!r}" in told.how, told.how
+    assert f"{field} {shown!r} where its launch record has {recorded!r}" in told.how, told.how
     assert told.how.count("where its launch record has") == 1, "that field alone"
     assert tmux.typed == []
 

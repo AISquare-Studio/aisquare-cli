@@ -4286,6 +4286,28 @@ the gate reads it, and the next flush that can write saves it (:meth:`Runtime.fl
 writes memory whenever it differs from the file). Not always: a write from another process
 before then is read by this one (``reload_if_changed``) with the device still in it, so the
 sentence names the command that makes the revoke hold (review of #243, round 4)."""
+STATE_LATER = (
+    "the machine could not save that: its ~/.aisquare/remote.json was upgraded by a later "
+    "aisquare while this Remote ran, and is never written over — nothing was changed; turn "
+    "Remote off and on again on the machine, with that aisquare"
+)
+"""503 ``remote_state_unwritable`` for a write refused as :class:`LaterRemoteState`. Said as
+:data:`STATE_UNWRITABLE`, it blamed a full disk or a home it may not write, and the human
+freed space to no end (review of #259, round 8, 7/9): no write of this Remote's ever lands."""
+REVOKE_LATER = (
+    "revoked on the running Remote, but the machine's ~/.aisquare/remote.json was upgraded by "
+    "a later aisquare while this Remote ran, and is never written over: run  aisquare remote "
+    "revoke {device}  on the machine with that aisquare, or the next Remote it starts takes "
+    "the device back"
+)
+"""503 ``remote_state_unwritable`` for a revoke refused as :class:`LaterRemoteState`."""
+
+
+def _state_unsaved(exc: OSError) -> str:
+    """What a phone is told of a write of ``remote.json`` that failed with ``exc``."""
+    return STATE_LATER if isinstance(exc, LaterRemoteState) else STATE_UNWRITABLE
+
+
 CRASHED = "the machine hit an error answering that"
 """500 ``internal_error``: what the ledger answers a retry of a request that crashed, in the
 words the page uses for a crash."""
@@ -5268,7 +5290,7 @@ def build_remote_app(
             return JSONResponse(exc.request_error_body(), status_code=exc.status)
         except OSError as exc:  # its device was taken back (Runtime._write_state's undo)
             log.warning("remote: an unlock could not be saved: %s", exc)
-            return kit.kit_refuse(503, "remote_state_unwritable", STATE_UNWRITABLE)
+            return kit.kit_refuse(503, "remote_state_unwritable", _state_unsaved(exc))
         if isinstance(decided, datetime):
             wait = max(1, math.ceil((decided - _remote_now()).total_seconds()))
             return kit.kit_refuse(429, "locked_out", LOCKED_OUT, headers={"Retry-After": str(wait)})
@@ -5318,7 +5340,7 @@ def build_remote_app(
             extended = await asyncio.to_thread(extend_now)
         except OSError as exc:  # the deadline was put back (Runtime._write_state's undo)
             log.warning("remote: an extend could not be saved: %s", exc)
-            return kit.kit_refuse(503, "remote_state_unwritable", STATE_UNWRITABLE)
+            return kit.kit_refuse(503, "remote_state_unwritable", _state_unsaved(exc))
         if extended is None:
             return kit.kit_refuse(409, "no_auto_off", "Remote has no auto-off deadline to extend")
         stamp = _iso_seconds(extended)
@@ -5383,7 +5405,8 @@ def build_remote_app(
             log.warning("remote: a revoke could not be saved: %s", exc)
             target = "self" if own else device_id
             await asyncio.to_thread(kit.kit_audit, device, "devices/revoke", f"{target} unsaved")
-            unsaved = REVOKE_UNSAVED.format(device=device_id)
+            later = isinstance(exc, LaterRemoteState)
+            unsaved = (REVOKE_LATER if later else REVOKE_UNSAVED).format(device=device_id)
             return kit.kit_refuse(503, "remote_state_unwritable", unsaved)
         if not revoked:
             return kit.kit_refuse(404, "not_found", "no such device")

@@ -116,9 +116,12 @@ def _writing_remote_json() -> Iterator[None]:
     last step, so a write that failed changed nothing.
     """
     from aisquare.core.paths import remote_state_path
+    from aisquare.services.remote_server import LaterRemoteState
 
     try:
         yield
+    except LaterRemoteState as exc:  # its own sentence: no space to free, no mode to fix
+        fail(str(exc), error="remote_state_unwritable", detail=str(exc))
     except OSError as exc:
         fail(
             f"{remote_state_path()} could not be written ({exc}) — nothing was changed; "

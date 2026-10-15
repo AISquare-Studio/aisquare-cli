@@ -777,7 +777,10 @@ first, or Remote is turned on again; its audit line ends in `unsaved`. Free some
 space or fix the permissions, then try again, and run `aisquare remote revoke
 <id>` for a revoke that was not saved. `serve` reaching its auto-off on such a
 home says so too, and exits 1: the phones were not signed out, so run
-`aisquare remote revoke --all` once it can write.
+`aisquare remote revoke --all` once it can write. When the sentence says
+`remote.json` was upgraded by a later aisquare, a later release wrote it while
+this Remote ran, and this one never writes over it: there is no space to free;
+turn Remote off and on again with that aisquare, and revoke there.
 
 **ngrok says `--url` is an unknown flag.** That ngrok is too old for static
 domains; run `ngrok update`.

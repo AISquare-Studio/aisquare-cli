@@ -192,6 +192,38 @@ def test_a_later_release_s_file_under_a_running_server_is_never_written_over(
     assert json.loads(remote_state_path().read_bytes())["version"] == 2
 
 
+def test_a_phone_refused_by_a_later_release_s_file_is_told_so_not_of_a_full_disk(
+    client: TestClient, runtime: Runtime
+) -> None:
+    """Review of #259, round 8, 7/9: ``LaterRemoteState`` is an ``OSError`` on purpose, so
+    every write's caller reports a failed write, but the phone's 503 blamed "a full disk, or
+    a home it may not write": the human freed space, and nothing changed. The unlock, the
+    extend and the revoke say the file was upgraded by a later aisquare, and what to do."""
+    second = make_client(client.app)
+    other = second.post(f"{base(runtime)}/api/unlock", json={"password": PASSWORD})
+    other_id = other.json()["device"]["id"]
+    runtime.set_allow_write(True)
+    runtime.set_auto_off(datetime.now(UTC) + timedelta(minutes=10))
+    other_process_writes(lambda raw: raw.update({"version": 3}))
+    third = make_client(client.app)
+    refused = {
+        "unlock": third.post(f"{base(runtime)}/api/unlock", json={"password": PASSWORD}),
+        "extend": client.post(f"{base(runtime)}/api/remote/extend", json={}),
+        "revoke": client.delete(f"{base(runtime)}/api/devices/{other_id}"),
+    }
+    for name, response in refused.items():
+        assert (response.status_code, response.json()["error"]) == (
+            503,
+            "remote_state_unwritable",
+        ), name
+        said = response.json()["message"]
+        assert "upgraded by a later aisquare" in said and "full disk" not in said, name
+    assert (
+        f"run  aisquare remote revoke {other_id}  on the machine"
+        in (refused["revoke"].json()["message"])
+    )
+
+
 def test_regenerated_password_from_another_process_applies(
     client: TestClient, runtime: Runtime
 ) -> None:

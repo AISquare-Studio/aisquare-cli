@@ -3169,6 +3169,26 @@ def test_every_command_says_when_remote_json_cannot_be_written(
     assert f"{path} could not be written" in human.stderr
 
 
+def test_a_command_refused_by_a_later_release_s_file_is_not_told_to_free_space(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 8, 7/9: a later release upgrading ``remote.json`` between the
+    command's read and its write is :class:`LaterRemoteState`, whose own sentence names the
+    version and what to do. The command printed it, then told the human to make the
+    directory writable or free some space."""
+    monkeypatch.setattr(remote_server, "_runtime", None)  # the CLI is another process
+    path = remote_state_path()
+
+    def upgraded(self: Runtime) -> None:
+        raise remote_server.LaterRemoteState(remote_server._unknown_state_version(path, 3))
+
+    monkeypatch.setattr(Runtime, "_refuse_a_later_file", upgraded)
+    result = CliRunner().invoke(cli, ["remote", "allow-write", "on"])
+    assert result.exit_code == 1 and isinstance(result.exception, SystemExit)
+    assert "is version 3, which this aisquare does not know" in result.stderr
+    assert "free some space" not in result.stderr
+
+
 @pytest.mark.parametrize("command", [["status"], ["serve"]], ids=" ".join)
 def test_a_home_that_will_not_take_a_first_remote_json_is_a_sentence(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch, command: list[str]

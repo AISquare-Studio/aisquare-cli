@@ -491,7 +491,7 @@ def install_outside_the_tree(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         store_broker,
         "install_paths",
-        lambda: (Path("/nonexistent/aisquare-under-test"),),
+        lambda *args, **kwargs: (Path("/nonexistent/aisquare-under-test"),),
         raising=False,
     )
 

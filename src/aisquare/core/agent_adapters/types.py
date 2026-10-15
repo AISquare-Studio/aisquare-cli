@@ -307,6 +307,27 @@ class PermissionIntent:
         return f"{self.write}:{self.approvals}"
 
 
+@dataclass(frozen=True)
+class SandboxWrites:
+    """What a sandboxed session may write: ``writable`` roots, with ``read_only`` paths
+    within them held read-only (the more specific path wins, as Codex's profile rules it)."""
+
+    writable: tuple[Path, ...]
+    read_only: tuple[Path, ...] = ()
+
+    def may_write(self, path: Path) -> bool:
+        """Whether a write at ``path`` is allowed: under a writable root, and under no
+        read-only path more specific than that root."""
+
+        def depth(root: Path) -> int | None:
+            return len(root.parts) if path == root or path.is_relative_to(root) else None
+
+        best = max((d for root in self.writable if (d := depth(root)) is not None), default=None)
+        if best is None:
+            return False
+        return not any((d := depth(root)) is not None and d > best for root in self.read_only)
+
+
 def store_dir() -> Path:
     """The aisquare home a launch from this process gives its agent, and so the store the
     agent's ``aisquare`` calls open: what :meth:`AgentAdapter.store_access` makes reachable."""
@@ -433,7 +454,7 @@ class AgentAdapter(Protocol):
     the config dir), ``capabilities.hooks`` with :func:`hook_args`, ``hooks_off_setting``
     with :meth:`hooks_switch`, ``plugin``. Events: :meth:`decode_event` and
     :meth:`encode_reply`. Launch: :meth:`model_args`, :meth:`permission_args`,
-    :meth:`store_access`, :meth:`broker_access`, :meth:`fleet_args`,
+    :meth:`store_access`, :meth:`sandbox_writes`, :meth:`broker_access`, :meth:`fleet_args`,
     :meth:`label_args`, :meth:`resume_args`,
     ``exit_command``, :meth:`queue_args`,
     :meth:`mcp_args`, :meth:`context_files`, :meth:`disable_native_teams`,
@@ -559,6 +580,14 @@ class AgentAdapter(Protocol):
         (:func:`store_read_only`); its board calls go through its broker
         (:meth:`broker_access`). ``[]`` without ``capabilities.sandboxes_tools`` (nothing
         stands between them) and for a scope the agent runs unsandboxed (``full``)."""
+        ...
+
+    def sandbox_writes(self, args: Sequence[str], cwd: Path) -> SandboxWrites | None:
+        """What the sandbox of a session launched with ``args`` in ``cwd`` may write, from
+        the arguments themselves, whatever chose the sandbox (the store's profile, a native
+        flag or setting, the directories the arguments add); ``None`` where the session
+        runs unsandboxed. ``services.store_broker.refuse_inside`` refuses a launch whose
+        sandbox may write the aisquare its hooks and broker run."""
         ...
 
     def broker_access(

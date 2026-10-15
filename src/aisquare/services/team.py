@@ -440,7 +440,9 @@ def note_refusal(project_id: str, text: str, *, key: str) -> bool:
     """Put ``text`` on ``project_id``'s board for its manager, once per ``key``: a refusal
     of what a sandboxed agent asked its broker for (``services.store_broker.
     record_refusal``). ``False`` when this key's note is there already."""
-    with store_session() as store:
+    with store_session() as store, store.transaction():
+        # One transaction: a note that fails takes its once-only mark back with it, or that
+        # launch's refusals of this kind were never noted again (review r12 of #113, 10).
         if not store.set_meta_once(key, _now().isoformat()):
             return False
         _emit(store, project_id, "note", text, to_role="manager")

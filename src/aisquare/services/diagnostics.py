@@ -192,28 +192,43 @@ def doctor(
 
 
 def _sandboxed_install_check(cwd: Path | None = None) -> DoctorCheck | None:
-    """A warning when this aisquare (its environment, interpreter or package) lives inside
-    the project's tree or a temporary directory, where a sandboxed agent (a Codex tester,
-    validator or ui-tester in the project's directory) may write: its hooks and its store
-    broker run this aisquare outside the sandbox, so what the agent wrote there would run
-    unsandboxed, and such a launch is refused (``store_broker.refuse_inside``; review r11 of
-    #113, finding 2). ``None`` when it lives elsewhere."""
+    """A warning when an aisquare that runs outside a sandboxed agent's sandbox on its behalf
+    lives where such an agent of this project may write: this install, or the one Codex's
+    aisquare hooks run (review r12 of #113, finding 1), inside the project's directory or a
+    temporary directory, which a Codex tester, validator or ui-tester in the project's
+    directory writes (``workspace-write``). A launch of one is refused
+    (``store_broker.refuse_inside``; r11, finding 2). ``None`` when every one lives
+    elsewhere. The fix names no command the doctor would run from this install, which would
+    connect the hooks to it again (r12, finding 6)."""
+    import os
+
+    from aisquare.core.agent_adapters import get_adapter
+    from aisquare.core.agent_adapters.types import SandboxWrites
     from aisquare.core.workspace import find_project_root
     from aisquare.services import store_broker
 
     try:
         root = find_project_root(cwd or Path.cwd())
+        codex = get_adapter("codex")
+        hooks = codex.config_dir(agent_core._home(), os.environ)
     except Exception:
         return None
-    inside = store_broker.install_inside(store_broker.sandbox_writable(root))
+    places = [
+        root,
+        Path("/tmp"),
+        *([Path(os.environ["TMPDIR"])] if os.environ.get("TMPDIR") else []),
+    ]
+    inside = store_broker.install_inside(
+        SandboxWrites(tuple(places)), store_broker.install_paths(hooks, codex.id)
+    )
     if inside is None:
         return None
     return _warn(
         "sandboxed agents' aisquare",
         f"aisquare runs from {inside}, where a sandboxed agent of {root.name or root} may "
         "write: a Codex agent launched in the project's directory is refused",
-        "install aisquare outside the project (`uv tool install aisquare`, or pipx), then "
-        "`aisquare agents connect codex` from it",
+        "install aisquare-cli outside the project (uv tool install aisquare-cli, or pipx "
+        "install aisquare-cli), then connect the Codex hooks again with that install",
     )
 
 

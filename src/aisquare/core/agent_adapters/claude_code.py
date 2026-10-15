@@ -16,6 +16,7 @@ from aisquare.core.agent_adapters.types import (
     NativeChoice,
     PermissionIntent,
     PluginInstall,
+    SandboxWrites,
     WriteScope,
     block_reply,
     option_occurrences,
@@ -340,6 +341,9 @@ class ClaudeCodeAdapter:
 
     def store_access(self, write: WriteScope, store: Path) -> list[str]:
         return []  # no sandbox: its tools write wherever the user can, the store included
+
+    def sandbox_writes(self, args: Sequence[str], cwd: Path) -> SandboxWrites | None:
+        return None  # no sandbox: trusted as its user is
 
     def broker_access(
         self,

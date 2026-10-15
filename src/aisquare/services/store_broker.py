@@ -1,15 +1,16 @@
 """The broker a sandboxed agent's board calls go through.
 
 An agent that sandboxes its tools (Codex, ``capabilities.sandboxes_tools``) is trusted to
-the extent of the tree it may write, as a Claude Code agent and a human contributor are;
-what aisquare itself runs or reads outside its sandbox on its behalf never comes from that
-tree (``core.launch_seal``'s boundary). So the aisquare store is read-only in its sandbox
-(``AgentAdapter.store_access``), and with it the tree tops' launch inputs, the other
-agents' worktrees and the tmux sockets' directories (:func:`launch_paths`); a launch is
-refused where its sandbox may write the aisquare its hooks and this broker run
-(:func:`refuse_inside`). Nothing a process there writes chooses a replay, a kill, a typed
-line, a launch, a model or account choice, a worktree removal or a paste the fleet makes.
-The board calls its role protocol makes still work there, unchanged (``aisquare note …``,
+the extent of the tree it may write, as a Claude Code agent and a human contributor are
+(``core.launch_seal``'s boundary). The aisquare store is read-only in its sandbox under
+the store's profile (``AgentAdapter.store_access``; a native ``--sandbox`` replaces it),
+all of it but its launch's inbox here, and with it the launch inputs at the tops of its
+trees, ``.git``, the other agents' worktrees and the tmux sockets (:func:`launch_paths`);
+whatever its sandbox, a launch is refused where its sandbox may write an aisquare its
+hooks or this broker run (:func:`refuse_inside`, from ``AgentAdapter.sandbox_writes``).
+Under the profile, nothing a process there writes chooses a replay, a kill, a typed line,
+a launch, a model or account choice, a worktree removal or a paste the fleet makes. The
+board calls its role protocol makes still work there, unchanged (``aisquare note …``,
 ``aisquare task claim … --as <id>``): the CLI, finding the store read-only and its launch's
 broker in its environment (:data:`DIR_ENV`), hands its argv and cwd to the broker and
 prints what the command printed, with its exit status (:func:`forward`).
@@ -21,8 +22,10 @@ It runs a request as ``aisquare <argv>`` in the LAUNCH's environment, never the 
 when the argv names a command on :data:`WHITELIST`, the cwd is in the launch's own tree
 (its worktree or its project's directory) and the request is signed with the launch's
 nonce (:data:`NONCE_ENV`, :func:`signature`), once; anything else is refused with a line
-saying why, logged (:func:`record_refusal`) and, for a forged identity, another board's
-task or a fleet operation, put on its board once. The command it runs acts only as the
+saying why. Every refusal it makes, and every scope refusal of a command it runs, is
+logged (:func:`record_refusal`); those of the kinds in :data:`NOTED` (another session,
+another board or pool, a fleet operation, a request its launch did not sign) are put on
+its board too, once per launch and kind. The command it runs acts only as the
 launch's own board sessions (:data:`CALLER_ENV`, held where every ``--as`` resolves,
 ``services.team``): the ones the agent's own hooks, which its agent runs outside the
 sandbox, bound to this launch (``core.agent_sessions.bind_launch_session``); only on the
@@ -71,7 +74,7 @@ from aisquare.core import paths, selfcli
 _log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from aisquare.core.agent_adapters.types import AgentAdapter
+    from aisquare.core.agent_adapters.types import AgentAdapter, SandboxWrites
 
 DIR_NAME = "broker"
 """The launches' broker directories, under the aisquare home (:func:`launch_dir`)."""
@@ -287,8 +290,8 @@ def record_refusal(kind: str, detail: str, *, board: str | None = None) -> None:
         with open(logs / LOG_NAME, "a", encoding="utf-8") as handle:
             handle.write(line)
     board = board or os.environ.get(BOARD_ENV) or None
-    if kind not in NOTED or board is None:
-        return
+    if kind not in NOTED or board is None or launch == "?":
+        return  # no launch to name (a child of a brokered command's): logged only
     with suppress(Exception):
         from aisquare.services import team
 
@@ -717,7 +720,7 @@ def launch_scope(cwd: Path, environ: Mapping[str, str]) -> Scope:
     subdirectory may still run a call from its project's directory (finding 8)."""
     from aisquare.core import launch_seal
     from aisquare.core.orchestrator import team_project
-    from aisquare.core.workspace import current_project, git_common_root
+    from aisquare.core.workspace import current_project, find_project_root, git_common_root
 
     roots: list[Path] = [cwd]
     top = _tree_top(cwd)
@@ -727,6 +730,8 @@ def launch_scope(cwd: Path, environ: Mapping[str, str]) -> Scope:
         principal = git_common_root(cwd)
         if principal is not None:
             roots.append(principal)
+    with suppress(Exception):
+        roots.append(find_project_root(cwd))  # a non-git project's marker (r12, finding 13)
     agent = environ.get("AISQUARE_FLEET_AGENT", "").strip()
     if agent:
         record = launch_seal.read(agent)
@@ -770,21 +775,35 @@ class Broker:
         return self._scope
 
     def _refuse(self, kind: str, message: str, code: int = 2) -> dict[str, object]:
+        """A refusal, recorded: its line whatever else fails, its note when its kind is one
+        (:data:`NOTED`; review r12 of #113, finding 11)."""
+        board: str | None = None
         with suppress(Exception):
-            record_refusal(kind, message, board=self.scope().board)
+            board = self.scope().board
+        with suppress(Exception):
+            record_refusal(kind, message, board=board)
         return _refused(message, code)
+
+    @staticmethod
+    def _exited() -> dict[str, object]:
+        """The refusal of a request that comes once the agent has exited, logged (kind
+        ``closed``): no scope is resolved for it, so it never waits on the store."""
+        message = "this agent has exited: its broker runs nothing more"
+        with suppress(Exception):
+            record_refusal("closed", message)
+        return _refused(message, 75)
 
     def answer(self, raw: bytes, rid: str) -> dict[str, object]:
         """What the request ``raw`` (``in/<rid>.json``) gets: its command's output and
         status, or a refusal. Each request is run once: a replayed one is refused."""
         if self._closing.is_set():
-            return _refused("this agent has exited: its broker runs nothing more", 75)
+            return self._exited()
         try:
             request = json.loads(raw)
         except (ValueError, RecursionError):
-            return _refused("the broker's request did not parse")
+            return self._refuse("request", "the broker's request did not parse")
         if not isinstance(request, dict) or request.get("v") != 1:
-            return _refused("the broker's request is not one this broker reads")
+            return self._refuse("request", "the broker's request is not one this broker reads")
         given = request.pop("mac", None)
         if (
             not isinstance(given, str)
@@ -796,23 +815,25 @@ class Broker:
             )
         with self._lock:
             if rid in self._seen:
-                return _refused("the request was run already", code=77)
+                return self._refuse("replay", "the request was run already", code=77)
             self._seen.add(rid)
         argv = request.get("argv")
         if not isinstance(argv, list) or not all(isinstance(arg, str) for arg in argv):
-            return _refused("the broker's request names no command")
+            return self._refuse("request", "the broker's request names no command")
         if any("\0" in arg for arg in argv):
-            return _refused("an argument holds a NUL byte")
+            return self._refuse("request", "an argument holds a NUL byte")
         why = vet(argv)
         if why is not None:
             return self._refuse(refusal_kind(argv), why)
         cwd = request.get("cwd")
         if not isinstance(cwd, str) or not Path(cwd).is_absolute() or not Path(cwd).is_dir():
-            return _refused("the command's directory is not one the broker can run in")
+            return self._refuse(
+                "request", "the command's directory is not one the broker can run in"
+            )
         try:
             scope = self.scope()
         except Exception as exc:
-            return _refused(f"this agent's board could not be resolved ({exc})")
+            return self._refuse("request", f"this agent's board could not be resolved ({exc})")
         if not scope.holds(Path(cwd)):
             named = command_path(argv)
             reads = not isinstance(named, str) and named[0] in READS
@@ -839,7 +860,7 @@ class Broker:
         last look at whether the agent has exited (review r11, finding 9)."""
         with self._lock:
             if self._closing.is_set():
-                return _refused("this agent has exited: its broker runs nothing more", 75)
+                return self._exited()
             try:
                 child = subprocess.Popen(
                     selfcli.argv_for(argv),
@@ -886,7 +907,7 @@ class Broker:
 
     def _handle(self, rid: str, raw: bytes | str) -> None:
         try:
-            answer = _refused(raw) if isinstance(raw, str) else self.answer(raw, rid)
+            answer = self._refuse("request", raw) if isinstance(raw, str) else self.answer(raw, rid)
         except Exception as exc:  # the broker outlives any one request
             answer = _refused(f"the broker failed on this request ({type(exc).__name__}: {exc})")
         _write_answer(self.directory / OUTBOX, rid, answer)
@@ -1081,7 +1102,9 @@ def _tree_top(start: Path) -> Path | None:
     return None
 
 
-def launch_paths(env: Mapping[str, str], cwd: Path) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+def launch_paths(
+    env: Mapping[str, str], cwd: Path, given: Sequence[Path] = ()
+) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
     """What a sandboxed launch keeps read-only outside the store, and what stays writable
     within it, for ``AgentAdapter.broker_access``. Read-only: :data:`LAUNCH_INPUTS` of
     every tree the agent's launch touches (its own checkout, its project's principal
@@ -1092,16 +1115,18 @@ def launch_paths(env: Mapping[str, str], cwd: Path) -> tuple[tuple[Path, ...], t
     whether or not it exists yet: then it cannot be made (measured on 0.162.1)."""
     from aisquare.core import launch_seal
     from aisquare.core.config import FleetSettings, load_config
-    from aisquare.core.workspace import git_common_root
+    from aisquare.core.workspace import find_project_root, git_common_root
 
     try:
         fleet = load_config().fleet
     except Exception:
         fleet = FleetSettings()
-    trees: list[Path] = [cwd]
+    trees: list[Path] = [cwd, *given]
     own = _tree_top(cwd)
     if own is not None:
         trees.append(own)
+    with suppress(Exception):
+        trees.append(find_project_root(cwd))
     with suppress(Exception):
         principal = git_common_root(cwd)
         if principal is not None:
@@ -1143,57 +1168,106 @@ def _socket_dirs(env: Mapping[str, str], configured: str) -> list[Path]:
         _resolved(Path(place))
         for place in ("/", "/tmp", "/var/tmp", env.get("TMPDIR") or "/tmp", Path.home())
     }
-    return [d for d in dict.fromkeys(_resolved(directory) for directory in dirs) if d not in shared]
+    kept = [d for d in dict.fromkeys(_resolved(directory) for directory in dirs) if d not in shared]
+    if pane_server and _resolved(Path(pane_server).parent) in shared:
+        # Its directory cannot be held, so the socket itself is: measured on 0.162.1, a
+        # read-only socket file in a writable /tmp refuses `mv` and `rm` (EBUSY) (review r12
+        # of #113, finding 4).
+        kept.append(_resolved(Path(pane_server)))
+    return kept
 
 
-def install_paths() -> tuple[Path, ...]:
-    """Where the aisquare that runs outside an agent's sandbox on its behalf lives: the
-    interpreter's environment (its ``.pth`` files run at every start), the interpreter, and
-    the package's own directory (an editable install's source tree). Hooks run the install
-    that connected them, the broker ``sys.executable -m aisquare``: this one."""
+def install_paths(config_dir: Path | None = None, agent: str | None = None) -> tuple[Path, ...]:
+    """Where the aisquare that runs outside an agent's sandbox on its behalf lives: this one,
+    which the broker runs (``sys.executable -P -m aisquare``: the interpreter and the
+    installation it comes from, its environment and the user site it loads, whose ``.pth``
+    files run at every start, the package's own directory, an editable install's source
+    tree), and the program each of the agent's aisquare hooks runs, with its environment,
+    read from its hooks' config in ``config_dir`` (hooks connected from another install keep
+    running that one: review r12 of #113, finding 1)."""
+    import site
+
     import aisquare
     from aisquare.core import agents
 
-    found = [Path(sys.prefix), Path(sys.executable), Path(aisquare.__file__).parent]
+    found = [
+        Path(sys.prefix),
+        Path(sys.base_prefix),
+        Path(sys.executable),
+        Path(aisquare.__file__).parent,
+    ]
     with suppress(Exception):
-        hooks_run = agents.current_install()
-        if hooks_run is not None:
-            found.append(Path(hooks_run))
+        found.append(Path(agents.current_install()))
+    if agent is not None:
+        with suppress(Exception):
+            for command in agents.hook_commands(agent, config_dir):
+                hook = agents.hook_binary(command)
+                if hook is None:
+                    continue
+                program = _resolved(hook.program)
+                found.append(program)
+                if program.parent.name in ("bin", "Scripts"):
+                    found.append(program.parent.parent)  # its environment, its .pth files
+    with suppress(Exception):
+        if site.ENABLE_USER_SITE:  # never in a venv that keeps the system's site out
+            found.append(Path(site.getusersitepackages()))
     return tuple(dict.fromkeys(_resolved(path) for path in found))
 
 
-def install_inside(writable: Sequence[Path]) -> Path | None:
-    """The first of :func:`install_paths` under one of ``writable``, or ``None``."""
-    roots = [_resolved(root) for root in writable]
-    for path in install_paths():
-        if any(path == root or path.is_relative_to(root) for root in roots):
-            return path
-    return None
+def install_inside(writes: SandboxWrites, installs: Sequence[Path]) -> Path | None:
+    """The first of ``installs`` that ``writes`` allows writing, or ``None``: compared as
+    the kernel resolves them (``/tmp`` is ``/private/tmp`` on macOS)."""
+    from aisquare.core.agent_adapters.types import SandboxWrites as Writes
+
+    real = Writes(
+        tuple(_resolved(path) for path in writes.writable),
+        tuple(_resolved(path) for path in writes.read_only),
+    )
+    return next((path for path in installs if real.may_write(_resolved(path))), None)
 
 
-def sandbox_writable(cwd: Path) -> tuple[Path, ...]:
-    """What a sandboxed agent launched in ``cwd`` may write outside the store: its workspace
-    (``cwd``, Codex's ``:workspace``) and the temporary directories every sandbox may."""
-    places = [cwd, Path("/tmp"), Path("/var/tmp")]
-    if os.environ.get("TMPDIR"):
-        places.append(Path(os.environ["TMPDIR"]))
-    return tuple(places)
+def _remedy(inside: Path, cwd: Path) -> str:
+    """What to do about an aisquare at ``inside`` a sandbox launched in ``cwd`` may write: in
+    the project, install it elsewhere; above the project (a launch from the home), launch
+    from the project (review r12 of #113, findings 6 and 14). The distribution is
+    ``aisquare-cli``."""
+    from aisquare.core.workspace import find_project_root
+
+    with suppress(Exception):
+        root = _resolved(find_project_root(cwd))
+        if inside.is_relative_to(root) and root != _resolved(Path.home()):
+            return (
+                "install aisquare outside the project (`uv tool install aisquare-cli`, or "
+                "`pipx install aisquare-cli`), connect the agent's hooks with that install "
+                "(its own `aisquare agents connect codex`), then launch again"
+            )
+    return (
+        f"launch the agent from its project's directory, not {cwd}, whose tree holds that "
+        "aisquare, or install aisquare outside every directory the agent may write "
+        "(`uv tool install aisquare-cli`)"
+    )
 
 
-def refuse_inside(cwd: Path, adapter: AgentAdapter) -> None:
-    """Refuse the launch of ``adapter``'s sandboxed agent in ``cwd`` when the aisquare its
-    hooks and broker run lives where its sandbox may write: a project ``.venv``, an
-    editable ``src/`` in the tree. The next hook or brokered call would run what it wrote,
-    outside any sandbox (review r11 of #113, finding 2). :class:`LaunchRefused`."""
-    inside = install_inside(sandbox_writable(cwd))
+def refuse_inside(
+    argv: Sequence[str], cwd: Path, adapter: AgentAdapter, config_dir: Path | None = None
+) -> None:
+    """Refuse the launch of ``adapter``'s agent with ``argv`` in ``cwd`` when its sandbox may
+    write an aisquare its hooks or broker run outside it (:func:`install_paths`): the next
+    hook or brokered call would run what it wrote (review r11 of #113, finding 2). Decided
+    from what that sandbox may write (``AgentAdapter.sandbox_writes``: the store's profile
+    or a native sandbox, its workspace and added directories, a read-only seat writing
+    none), never from whether the store's profile is there (r12, findings 3 and 7, R1); an
+    unsandboxed agent is trusted as its user is. :class:`LaunchRefused`."""
+    writes = adapter.sandbox_writes(list(argv)[1:], cwd)
+    if writes is None:
+        return
+    inside = install_inside(writes, install_paths(config_dir, adapter.id))
     if inside is None:
         return
     raise LaunchRefused(
-        f"{adapter.label} runs its tools in a sandbox that may write {inside}, where the "
-        "aisquare its hooks and its store broker run outside the sandbox lives: what it "
-        "wrote there would run unsandboxed. Install aisquare outside the project (`uv tool "
-        "install aisquare`, or pipx) and connect its hooks from there (`aisquare agents "
-        "connect codex`), then launch again"
+        f"{adapter.label} runs its tools in a sandbox that may write {inside}, an aisquare "
+        f"its hooks or its store broker run outside that sandbox: what it wrote there would "
+        f"run unsandboxed. {_remedy(inside, cwd).capitalize()}"
     )
 
 
@@ -1209,16 +1283,30 @@ def start_for_launch(
 
     if not adapter.capabilities.sandboxes_tools:
         return argv, ""
+    from aisquare.core import agents
+
     store = store_dir()
     launch = env.get("AISQUARE_LAUNCH_ID", "").strip()
     directory = launch_dir(store, launch or uuid.uuid4().hex)
-    protect, writable = launch_paths(env, Path.cwd())
+    cwd = Path.cwd()
+    # The trees Codex is given beyond the launch's directory (`-C`, `--add-dir`) hold
+    # launch inputs too (review r12 of #113, finding 7).
+    given = adapter.sandbox_writes(argv[1:], cwd)
+    shared = {_resolved(Path(place)) for place in ("/tmp", os.environ.get("TMPDIR") or "/tmp")}
+    trees = [root for root in (given.writable if given else ()) if _resolved(root) not in shared]
+    protect, writable = launch_paths(env, cwd, trees)
+    if given is None or not given.may_write(cwd):
+        # Its own worktree is writable again within the read-only worktree directory only
+        # for a seat that writes its workspace: a `:read-only` one (a reviewer's, in its
+        # own worktree) writes none of it.
+        writable = ()
     access = adapter.broker_access(
         argv, store, directory / INBOX, protect=protect, writable=writable
     )
+    # Whatever sandbox it runs in, the store's profile or a native one (finding 3).
+    refuse_inside(access or argv, cwd, adapter, adapter.config_dir(agents._home(), env))
     if access is None:
         return argv, ""
-    refuse_inside(Path.cwd(), adapter)
     if sys.platform == "win32":
         return access, (
             f"{adapter.label}: the aisquare store is read-only in its sandbox, and its "

@@ -11,8 +11,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Iterator
@@ -25,16 +28,18 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import paths, selfcli
+from aisquare.core import brain, paths, selfcli
 from aisquare.core.agent_adapters import get_adapter
-from aisquare.core.agent_adapters.types import store_dir
+from aisquare.core.agent_adapters.types import WriteScope, store_dir
 from aisquare.core.store import store_session
 from aisquare.models import TeamSession
-from aisquare.services import agent_launch, store_broker
+from aisquare.services import agent_launch, distill, store_broker
 from aisquare.services import team as team_service
 
 #: The real process start, before the suite's ``no_store_broker`` stands it in.
 REAL_RUN_BROKER = store_broker.run_broker
+REAL_INSTALL_PATHS = store_broker.install_paths
+REAL_SPAWN_DRAIN = distill.spawn_drain  # the autouse fixture stubs it
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="the broker is POSIX's (FIFOs)")
 
 MINE = "aaaa1111-0000-0000-0000-000000000000"
@@ -925,33 +930,185 @@ def test_a_hand_launch_runs_calls_from_its_project_and_a_read_elsewhere_is_only_
     assert len([note for note in notes if "refused" in note]) == 1, "the write only"
 
 
+def _installed_at(monkeypatch: pytest.MonkeyPatch, *places: Path) -> None:
+    monkeypatch.setattr(
+        store_broker, "install_paths", lambda *args, **kwargs: tuple(p.resolve() for p in places)
+    )
+
+
 def test_a_sandboxed_launch_is_refused_where_its_sandbox_may_write_aisquare(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
 ) -> None:
     """Review r11 of #113, finding 2: the hooks and the broker run this aisquare outside the
     sandbox, so an aisquare in the project's ``.venv`` or an editable ``src/`` a sandboxed
     tester may write ran what it wrote, at its next hook. Such a launch is refused, naming
-    the remedy, and the doctor says so."""
-    from aisquare.services import diagnostics
+    the remedy with the distribution's own name, ``aisquare-cli`` (r12, finding 6), and the
+    doctor says so with no fix it would run from that install."""
+    from aisquare.services import diagnostics, onboarding
 
     project = tmp_path / "proj"
     venv = project / ".venv"
     venv.mkdir(parents=True)
-    monkeypatch.setattr(store_broker, "install_paths", lambda: (venv.resolve(),))
-    with pytest.raises(store_broker.LaunchRefused, match="uv tool install aisquare"):
-        store_broker.refuse_inside(project, get_adapter("codex"))
+    _installed_at(monkeypatch, venv)
+    codex = get_adapter("codex")
+    argv = ["codex", *_profile()]
+    with pytest.raises(store_broker.LaunchRefused, match="uv tool install aisquare-cli"):
+        store_broker.refuse_inside(argv, project, codex)
     monkeypatch.chdir(project)
     execute = Mock()
     monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
     monkeypatch.setattr(agent_launch, "executable", lambda selected: selected.binary.binary)
     refused = runner.invoke(app, ["launch", "tester", "--agent", "codex", "--", *_profile()])
-    assert refused.exit_code == 1 and "uv tool install aisquare" in refused.output
+    assert refused.exit_code == 1 and "uv tool install aisquare-cli" in refused.output
     assert not execute.called
     row = diagnostics._sandboxed_install_check(project)
     assert row is not None and row.status.value == "warn" and ".venv" in row.detail
-    monkeypatch.setattr(store_broker, "install_paths", lambda: (Path("/opt/elsewhere"),))
+    assert "aisquare-cli" in str(row.fix)
+    assert onboarding.fix_commands([row]) == [], "no button runs connect from this install"
+    _installed_at(monkeypatch, Path("/opt/elsewhere"))
     assert diagnostics._sandboxed_install_check(project) is None
-    store_broker.refuse_inside(project, get_adapter("codex"))  # no refusal
+    store_broker.refuse_inside(argv, project, codex)  # no refusal
+
+
+@pytest.fixture
+def beyond_tmp() -> Iterator[Path]:
+    """A directory outside every temporary directory a sandbox may write (``/tmp``,
+    ``$TMPDIR``), where only the launch's arguments make it writable: pytest's own is in
+    ``/tmp``, which every workspace sandbox may write."""
+    if sys.platform == "win32":
+        pytest.skip("POSIX's")
+    place = Path(tempfile.mkdtemp(prefix="asq-test-", dir="/var/tmp"))
+    try:
+        yield place.resolve()
+    finally:
+        shutil.rmtree(place, ignore_errors=True)
+
+
+def test_the_install_check_reads_what_the_sandbox_may_write(
+    beyond_tmp: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r12 of #113, findings 3, 7 and R1: the check ran only with the store's profile
+    and assumed ``:workspace``. A native ``--sandbox workspace-write`` (or ``-c
+    sandbox_mode``) skipped it, a ``-C`` or ``--add-dir`` tree was not looked at, and a
+    ``:read-only`` seat, whose sandbox writes none of the project, was refused. It asks
+    what the sandbox may write."""
+    monkeypatch.delenv("TMPDIR", raising=False)
+    project = beyond_tmp / "proj"
+    (project / ".venv").mkdir(parents=True)
+    _installed_at(monkeypatch, project / ".venv")
+    elsewhere = beyond_tmp / "elsewhere"
+    elsewhere.mkdir()
+    codex = get_adapter("codex")
+    store = store_dir()
+    writes = ["codex", "--sandbox", "workspace-write"]
+    refused = [
+        (writes, project),
+        (["codex", "-c", 'sandbox_mode="workspace-write"'], project),
+        (["codex", "--approve-for-me", *codex.store_access("workspace", store)], project),
+        ([*writes, "-C", str(project)], elsewhere),
+        ([*writes, "--cd", "../proj"], elsewhere),
+        ([*writes, "--add-dir", str(project)], elsewhere),
+        ([*writes, "--add-dir", "../proj"], elsewhere),  # as the launch's directory reads it
+        ([*writes, "-c", f"sandbox_workspace_write.writable_roots=[{json.dumps(str(project))}]"],
+         elsewhere),
+    ]  # fmt: skip
+    for argv, cwd in refused:
+        with pytest.raises(store_broker.LaunchRefused):
+            store_broker.refuse_inside(argv, cwd, codex)
+    allowed = [
+        (writes, elsewhere),  # given none of the project
+        (["codex", *codex.store_access("read_only", store)], project),
+        (["codex", "--sandbox", "read-only"], project),
+        (["codex", "--sandbox", "danger-full-access"], project),  # unsandboxed: as its user
+    ]
+    for argv, cwd in allowed:
+        store_broker.refuse_inside(argv, cwd, codex)
+
+
+def test_the_install_check_compares_paths_as_the_kernel_resolves_them(
+    beyond_tmp: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A workspace named through a link (``/tmp`` is ``/private/tmp`` on macOS) held an
+    install the resolved comparison saw outside it."""
+    real = beyond_tmp / "real"
+    (real / ".venv").mkdir(parents=True)
+    link = beyond_tmp / "link"
+    link.symlink_to(real)
+    _installed_at(monkeypatch, real / ".venv")
+    with pytest.raises(store_broker.LaunchRefused):
+        store_broker.refuse_inside(
+            ["codex", "--sandbox", "workspace-write"], link, get_adapter("codex")
+        )
+
+
+def test_the_install_check_reads_the_interpreters_whole_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What runs at the start of the broker's interpreter and of a hook's: the installation
+    the interpreter comes from, the user site it loads (its ``.pth`` files), and a hook
+    program's own environment, not the program alone."""
+    import site
+
+    from aisquare.core import agents
+
+    monkeypatch.setattr(store_broker, "install_paths", REAL_INSTALL_PATHS)
+    user_site = tmp_path / "home" / ".local" / "lib" / "site-packages"
+    monkeypatch.setattr(site, "ENABLE_USER_SITE", True)
+    monkeypatch.setattr(site, "getusersitepackages", lambda: str(user_site))
+    environment = tmp_path / "hooks-venv"
+    program = environment / "bin" / "aisquare"
+    program.parent.mkdir(parents=True)
+    program.write_text("#!/bin/sh\n", encoding="utf-8")
+    command = f"{program} hook codex"
+    monkeypatch.setattr(agents, "hook_commands", lambda agent, config_dir=None: [command])
+    found = store_broker.install_paths(tmp_path / "codex-home", "codex")
+    assert Path(sys.base_prefix).resolve() in found
+    assert user_site.resolve() in found
+    assert environment.resolve() in found and program.resolve() in found
+
+
+def test_the_install_check_reads_the_install_the_agents_hooks_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r12 of #113, finding 1: the check read only the launcher's install, so hooks
+    connected earlier from ``<repo>/.venv`` kept running it unsandboxed after the launcher
+    moved to an install elsewhere, and the doctor said nothing."""
+    from aisquare.core import agents
+    from aisquare.services import diagnostics
+
+    monkeypatch.setattr(store_broker, "install_paths", REAL_INSTALL_PATHS)
+    project = tmp_path / "proj"
+    in_tree = project / ".venv" / "bin" / "aisquare"
+    in_tree.parent.mkdir(parents=True)
+    in_tree.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "prefix", "/opt/aisquare-elsewhere")
+    monkeypatch.setattr(sys, "executable", "/opt/aisquare-elsewhere/bin/python")
+    monkeypatch.setattr(agents, "current_install", lambda: Path("/opt/aisquare-elsewhere/bin/x"))
+    command = f"{in_tree} hook codex"
+    monkeypatch.setattr(agents, "hook_commands", lambda agent, config_dir=None: [command])
+    assert in_tree.resolve() in store_broker.install_paths(tmp_path / "codex-home", "codex")
+    with pytest.raises(store_broker.LaunchRefused, match=r"\.venv"):
+        store_broker.refuse_inside(
+            ["codex", "--sandbox", "workspace-write"], project, get_adapter("codex")
+        )
+    row = diagnostics._sandboxed_install_check(project)
+    assert row is not None and ".venv" in row.detail
+
+
+def test_a_launch_from_above_the_project_is_told_to_launch_from_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r12 of #113, finding 14: a launch from the home, whose tree holds every install
+    under it, was refused with advice that cannot help there."""
+    home = tmp_path / "home"
+    install = home / "tools" / "venv"
+    install.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    _installed_at(monkeypatch, install)
+    with pytest.raises(store_broker.LaunchRefused, match="from its project's directory"):
+        store_broker.refuse_inside(
+            ["codex", "--sandbox", "workspace-write"], home, get_adapter("codex")
+        )
 
 
 def test_the_socket_dirs_never_name_a_shared_temporary_directory(tmp_path: Path) -> None:
@@ -1046,3 +1203,190 @@ def test_the_sandbox_probe_runs_once_per_process_and_a_full_disk_is_no_sandbox(
     with caplog.at_level("WARNING", logger="aisquare.services.store_broker"):
         assert real(store_dir()) is True
     assert any("full" in record.message for record in caplog.records)
+
+
+# --- review r12 of #113 -----------------------------------------------------------------
+
+
+def test_a_brokered_commands_own_child_carries_no_brokered_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r12 of #113, finding 5: the ``team distill`` a brokered note starts kept the
+    brokered scope, so its own cwd check refused it (the board's directory is outside the
+    launch's tree under a hub), and a false refusal was noted under no launch id."""
+
+    monkeypatch.setenv(store_broker.CALLER_ENV, "1")
+    monkeypatch.setenv(store_broker.BOARD_ENV, "prj_x")
+    monkeypatch.setenv(store_broker.ROOTS_ENV, "/somewhere")
+    started: list[dict[str, str]] = []
+    monkeypatch.setattr(brain, "brain_enabled", lambda: True)
+    monkeypatch.setattr(shutil, "which", lambda name: "/bin/gbrain")
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: started.append(kwargs["env"]))
+    REAL_SPAWN_DRAIN(root=tmp_path / "hub")
+    assert started and not any(key.startswith("AISQUARE_BROKERED") for key in started[0])
+
+
+def test_a_refusal_with_no_launch_to_name_is_logged_and_never_noted(
+    work: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    board = _brokered(monkeypatch, work)
+    monkeypatch.delenv("AISQUARE_LAUNCH_ID")
+    store_broker.record_refusal("board", "no launch")
+    assert "launch=? " in (paths.log_dir() / store_broker.LOG_NAME).read_text(encoding="utf-8")
+    with store_session() as store:
+        assert not [e for e in store.recent_events(board, limit=50) if "refused" in e.text]
+
+
+def test_a_refusal_note_that_fails_leaves_no_mark(
+    work: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r12 of #113, finding 10: the once-only mark committed before the note, so a
+    note that failed left it, and that launch's refusals of that kind were never noted."""
+    board = _brokered(monkeypatch, work)
+    real = team_service._emit
+
+    def failing(*args: object, **kwargs: object) -> object:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(team_service, "_emit", failing)
+    with pytest.raises(sqlite3.OperationalError):
+        team_service.note_refusal(board, "first", key="broker-refused:l:identity")
+    monkeypatch.setattr(team_service, "_emit", real)
+    assert team_service.note_refusal(board, "second", key="broker-refused:l:identity")
+
+
+def test_every_refusal_the_broker_makes_is_logged(work: Path, tmp_path: Path) -> None:
+    """Review r12 of #113, finding 11: a replay, an unparsable or wrong-version request, an
+    argv that is not strings, a NUL, a bad cwd, a request that is not a file and one after
+    the agent exited were refused with no record, though the docs said every refusal has
+    one."""
+    broker = _broker(tmp_path)
+    signed = _request(["board"], work)
+    _answer(broker, signed)
+    _answer(broker, signed)  # replayed
+    broker.answer(b"not json", RID)
+    broker.answer(b'{"v": 2}', RID)
+    not_strings: list[str] = json.loads('["board", 1]')
+    broker.answer(_request(not_strings, work, rid="3" * 32), "3" * 32)
+    broker.answer(_request(["note", "a\x00b"], work, rid="4" * 32), "4" * 32)
+    broker.answer(_request(["board"], work / "missing", rid="5" * 32), "5" * 32)
+    (tmp_path / "broker-dir" / store_broker.OUTBOX).mkdir(parents=True)
+    broker._handle("6" * 32, "the request is not a file")
+    broker._closing.set()
+    broker.answer(_request(["board"], work, rid="7" * 32), "7" * 32)
+    lines = (paths.log_dir() / store_broker.LOG_NAME).read_text(encoding="utf-8").splitlines()
+    kinds = [line.split()[3] for line in lines]
+    assert kinds.count("replay:") == 1 and kinds.count("request:") == 6, kinds
+    assert kinds.count("closed:") == 1, kinds
+
+
+def test_a_brokered_read_follows_the_launchs_project_past_a_pin(
+    work: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r12 of #113, finding 12: brokered writes went to the launch's project's pool,
+    brokered reads (``inject``, ``context list``/``search``/``preview``) to the pinned one."""
+    from aisquare.core.workspace import current_project, pin_project
+    from aisquare.services import context as context_service
+
+    other = _other_repo(tmp_path)
+    _brokered(monkeypatch, work)
+    context_service.add_entry("ours alone", None, [])
+    pin_project(current_project(other).id)
+    assert "ours alone" in [entry.text for entry in context_service.list_entries()]
+    assert "ours alone" in [entry.text for entry in context_service.search_entries("ours")]
+    assert "ours alone" in context_service.preview()
+
+
+def test_a_non_git_projects_root_is_in_a_hand_launchs_tree(tmp_path: Path) -> None:
+    """Review r12 of #113, finding 13: a non-git project (an ``.aisquare`` marker) launched
+    from a subdirectory had only that subdirectory in its tree."""
+    root = tmp_path / "marked"
+    (root / ".aisquare").mkdir(parents=True)
+    sub = root / "sub"
+    sub.mkdir()
+    scope = store_broker.launch_scope(sub, {})
+    assert scope.holds(root) and scope.holds(sub)
+
+
+def test_a_socket_made_straight_in_tmp_is_itself_held(tmp_path: Path) -> None:
+    """Review r12 of #113, finding 4: with ``/tmp`` itself never named, a socket made there
+    (``tmux -S /tmp/x``) had no protection: the socket file is named instead."""
+    if sys.platform == "win32":
+        pytest.skip("POSIX's")
+    dirs = store_broker._socket_dirs({"TMUX": "/tmp/asq-x,1,0"}, "asq")
+    assert Path("/tmp/asq-x").resolve() in dirs and Path("/tmp").resolve() not in dirs
+
+
+def test_a_read_only_seat_in_its_own_worktree_may_write_none_of_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fleet reviewer runs in its own worktree under ``:read-only``; the launch named that
+    worktree writable within the read-only worktree directory whatever the seat, so the
+    reviewer's sandbox wrote all of it. Only a seat that writes its workspace has it."""
+    import tomllib
+
+    if sys.platform == "win32":
+        pytest.skip("POSIX's")
+    root = tmp_path / "proj"
+    root.mkdir()
+    git = ["git", "-C", str(root), "-c", "user.email=a@b", "-c", "user.name=t"]
+    subprocess.run([*git, "init", "-q"], check=True)
+    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+    worktree = root / ".aisquare-worktrees" / "reviewer-1"
+    subprocess.run([*git, "worktree", "add", "-q", "-b", "r1", str(worktree)], check=True)
+    monkeypatch.chdir(worktree)
+
+    def fails(directory: Path, env: object) -> None:
+        raise RuntimeError("not started")
+
+    monkeypatch.setattr(store_broker, "run_broker", fails)
+    codex = get_adapter("codex")
+
+    def table(write: WriteScope) -> dict[str, str]:
+        argv = ["codex", *codex.store_access(write, store_dir())]
+        launched, _ = store_broker.start_for_launch({"AISQUARE_LAUNCH_ID": LAUNCH}, codex, argv)
+        written: dict[str, str] = tomllib.loads(f"t = {launched[-1].partition('=')[2]}")["t"]
+        return written
+
+    own = str(worktree.resolve())
+    assert table("workspace").get(own) == "write"
+    read_only = table("read_only")
+    assert own not in read_only
+    assert read_only.get(str((root / ".aisquare-worktrees").resolve())) == "read"
+
+
+def test_a_tree_codex_is_given_holds_its_launch_inputs_read_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r12 of #113, finding 7: the launch inputs were held at the launcher's own
+    directory's trees, while ``-C`` and ``--add-dir`` passed through unexamined: the tree
+    Codex was given had its ``.claude/``, ``.mcp.json`` … writable."""
+    import tomllib
+
+    from aisquare.core.agent_adapters.codex import PERMISSION_PROFILE
+
+    launch, workspace, added = (tmp_path / name for name in ("launch", "workspace", "added"))
+    for directory in (launch, workspace, added):
+        directory.mkdir()
+    monkeypatch.chdir(launch)
+
+    def fails(directory: Path, env: object) -> None:
+        raise RuntimeError("not started")
+
+    monkeypatch.setattr(store_broker, "run_broker", fails)
+    codex = get_adapter("codex")
+    argv = [
+        "codex",
+        *codex.store_access("workspace", store_dir()),
+        "-C",
+        str(workspace),
+        "--add-dir",
+        str(added),
+    ]
+    launched, _ = store_broker.start_for_launch({"AISQUARE_LAUNCH_ID": LAUNCH}, codex, argv)
+    key = f"permissions.{PERMISSION_PROFILE}.filesystem="
+    value = next(arg for arg in launched if arg.startswith(key)).partition("=")[2]
+    table: dict[str, str] = tomllib.loads(f"t = {value}")["t"]
+    for tree in (launch, workspace, added):
+        for name in store_broker.LAUNCH_INPUTS:
+            assert table.get(str(tree.resolve() / name)) == "read", (tree, name)

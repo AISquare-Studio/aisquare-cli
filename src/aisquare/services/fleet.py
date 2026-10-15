@@ -2477,6 +2477,25 @@ def spawn(
     unrecordable = launch_seal.writable()
     if unrecordable is not None:
         raise FleetError(_unrecorded_refusal(unrecordable))
+    # Whether its sandbox may write an aisquare its hooks or broker run, asked here as the
+    # window's own launch would ask it: refused there, the spawn reported a live agent whose
+    # window had already exited (review r12 of #113, finding 9).
+    if selected.adapter.capabilities.sandboxes_tools:
+        from aisquare.services import store_broker
+
+        if not use_worktree:
+            prospective = project.root
+        elif own_worktree is not None:
+            prospective = own_worktree
+        else:
+            prospective = project.root / config.worktree_dir / picked
+        home = choice.account.config_dir if choice.account is not None else selected.config_dir
+        try:
+            store_broker.refuse_inside(
+                [resolution.binary, *native, *arguments.argv], prospective, selected.adapter, home
+            )
+        except store_broker.LaunchRefused as exc:
+            raise FleetError(str(exc)) from exc
     # The spawn goes ahead: the codename names its tmux session and its branch. A
     # directory with no live row, never seen or forgotten, is captured for it
     # (`ensure_codename`), not listed, and a worktree or a window that then cannot

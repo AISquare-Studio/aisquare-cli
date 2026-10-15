@@ -12,9 +12,9 @@ from aisquare.core.config import load_config
 from aisquare.core.editor import edit_text
 from aisquare.core.entries import new_entry
 from aisquare.core.injection import build_block, record_injection
-from aisquare.core.store import store_session
+from aisquare.core.store import ContextStore, store_session
 from aisquare.core.workspace import active_project, current_project
-from aisquare.models import ContextEntry, ExportFormat, Pool
+from aisquare.models import ContextEntry, ExportFormat, Pool, ProjectInfo
 
 
 def remember(text: str, pool: Pool | None, tags: list[str]) -> ContextEntry:
@@ -22,10 +22,23 @@ def remember(text: str, pool: Pool | None, tags: list[str]) -> ContextEntry:
     return add_entry(text, pool, tags)
 
 
+def _pool_project(store: ContextStore) -> ProjectInfo:
+    """The project whose pool a command reads and writes: for one a sandboxed agent's
+    broker runs, the launch's own, by its directory, never a ``project switch`` pin (review
+    r11 of #113, finding 7; r12, finding 12: its reads followed the pin, its writes did
+    not); else the active one (the pin, else the directory's)."""
+    from aisquare.services.store_broker import own_pool
+
+    if own_pool() is not None:
+        project = current_project()
+        return store.get_project(project.id) or project
+    return active_project(store)
+
+
 def inject() -> str:
     """Assemble the in-scope context block, record the injection, and return it."""
     with store_session() as store:
-        project = active_project(store)
+        project = _pool_project(store)
         entries = store.entries(project_id=project.id)
     record_injection(entries, project)
     return build_block(entries, project)
@@ -34,7 +47,7 @@ def inject() -> str:
 def list_entries() -> list[ContextEntry]:
     """List context in scope here: the user pool plus the active project's."""
     with store_session() as store:
-        return store.entries(project_id=active_project(store).id)
+        return store.entries(project_id=_pool_project(store).id)
 
 
 def add_entry(text: str, pool: Pool | None, tags: list[str]) -> ContextEntry:
@@ -106,13 +119,13 @@ def remove_entry(entry_id: str) -> None:
 def search_entries(query: str) -> list[ContextEntry]:
     """Search context in scope here: the user pool plus the current project's."""
     with store_session() as store:
-        return store.search(query, project_id=active_project(store).id)
+        return store.search(query, project_id=_pool_project(store).id)
 
 
 def preview() -> str:
     """Return the context block that would be injected right now (no side effects)."""
     with store_session() as store:
-        project = active_project(store)
+        project = _pool_project(store)
         entries = store.entries(project_id=project.id)
     return build_block(entries, project)
 

@@ -25,6 +25,7 @@ from aisquare.core.agent_adapters.types import (
     HooksSwitch,
     NativeChoice,
     PermissionIntent,
+    SandboxWrites,
     WriteScope,
     config_home,
     option_occurrences,
@@ -194,6 +195,12 @@ class FakeAgentAdapter:
         if write == "full":
             return []
         return [arg for path in store_read_only(store) for arg in ("--readonly", str(path))]
+
+    def sandbox_writes(self, args: Sequence[str], cwd: Path) -> SandboxWrites | None:
+        # Its sandbox writes the workspace and /tmp; with no `--readonly`, none at all.
+        if "--readonly" not in args:
+            return None
+        return SandboxWrites((cwd, Path("/tmp")))
 
     def broker_access(
         self,

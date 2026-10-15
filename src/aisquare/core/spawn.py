@@ -382,4 +382,12 @@ def untraced_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
     to is not a failure worth reporting.
     """
     source = os.environ if base is None else base
-    return {key: value for key, value in source.items() if key not in IDENTITY_ENV_VARS}
+    # Nor the scope of a command a sandboxed agent's broker runs (``AISQUARE_BROKERED*``,
+    # ``services.store_broker``): its child (a detached `team distill`) is aisquare's own work
+    # outside the sandbox, run in the board's directory, which the scope's tree need not hold
+    # (review r12 of #113, finding 5).
+    return {
+        key: value
+        for key, value in source.items()
+        if key not in IDENTITY_ENV_VARS and not key.startswith("AISQUARE_BROKERED")
+    }

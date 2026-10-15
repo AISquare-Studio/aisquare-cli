@@ -2640,3 +2640,29 @@ def test_a_switch_resumes_only_onto_the_home_the_thread_ran_under(tmp_path: Path
         unstarted.model_copy(update={"account_home": None}), account(home)
     )
     assert not get_adapter("codex").capabilities.resumes_across_homes
+
+
+def test_the_fleet_refuses_a_codex_agent_whose_sandbox_may_write_its_aisquare(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review r12 of #113, finding 9: the in-tree-install refusal was the window's own
+    ``aisquare launch``'s alone, so a fleet spawn of a Codex agent in a project whose
+    ``.venv`` holds aisquare took a receipt and a live row for a pane that died at once.
+    The spawn refuses it first, naming the remedy, and makes neither window nor row."""
+    from aisquare.services import store_broker
+
+    inside = project.root / ".venv" / "bin" / "python"
+    monkeypatch.setattr(store_broker, "install_paths", lambda *args, **kwargs: (inside,))
+
+    with pytest.raises(fleet_service.FleetError, match="aisquare-cli"):
+        fleet_service.spawn(project, "tester", agent="codex", worktree=False)
+
+    assert tmux.sessions == {}
+    with store_session() as store:
+        assert store.fleet_agents(project.id) == []
+    # A Claude Code agent runs its tools as its user does: no sandbox to keep it from.
+    fleet_service.spawn(project, "tester", agent="claude-code", worktree=False)

@@ -7,6 +7,7 @@ import shlex
 import sys
 import tomllib
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -22,6 +23,7 @@ from aisquare.core.agent_adapters.types import (
     NativeChoice,
     PermissionIntent,
     PluginInstall,
+    SandboxWrites,
     WriteScope,
     block_reply,
     config_assignment,
@@ -161,6 +163,20 @@ def _filesystem(read: Sequence[Path], write: Sequence[Path]) -> str:
     entries = {**dict.fromkeys(read, "read"), **dict.fromkeys(write, "write")}
     body = ", ".join(f"{json.dumps(str(path))} = {json.dumps(at)}" for path, at in entries.items())
     return f"{{{body}}}"
+
+
+def _filesystem_table(value: object) -> dict[str, str]:
+    """A ``-c permissions.<name>.filesystem=`` value as ``{path: "read" | "write"}``;
+    ``{}`` for one that is absent or does not parse."""
+    if not isinstance(value, str):
+        return {}
+    try:
+        parsed = tomllib.loads(f"t = {value}")["t"]
+    except (tomllib.TOMLDecodeError, RecursionError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(path): str(at) for path, at in parsed.items() if isinstance(at, str)}
 
 
 #: Who answers an approval request (``approvals_reviewer``): the human, or Codex's
@@ -750,6 +766,50 @@ class CodexAdapter:
             "-c",
             f"{profile}.filesystem={_filesystem(store_read_only(store), ())}",
         ]
+
+    def sandbox_writes(self, args: Sequence[str], cwd: Path) -> SandboxWrites | None:
+        """What Codex's sandbox may write for a session with ``args`` in ``cwd``, read off
+        the arguments: ``None`` with no sandbox (``--sandbox danger-full-access``, the
+        bypass flags, ``-c sandbox_mode="danger-full-access"``). The workspace is ``-C``/
+        ``--cd``'s directory, else ``cwd``. Measured on 0.162.1: ``read-only`` (the store's
+        profile over ``:read-only``, or ``--sandbox read-only``) writes nothing but the
+        profile's ``write`` paths, ``/tmp`` included; ``workspace-write`` (over
+        ``:workspace``, ``--sandbox workspace-write``, ``--approve-for-me``, or no sandbox
+        named: Codex's own default may be it, so it is taken as it) writes the workspace,
+        ``/tmp`` and ``$TMPDIR``, with ``--add-dir`` and
+        ``sandbox_workspace_write.writable_roots``. The profile's ``read`` paths are read-only
+        within its writable ones, the more specific winning."""
+        if any(arg in ("--dangerously-bypass-approvals-and-sandbox", "--yolo") for arg in args):
+            return None
+        settings: dict[str, object] = {}
+        for value in option_values(args, "-c", "--config"):
+            parsed = config_assignment(value)
+            if parsed is not None:
+                settings[parsed[0]] = value.partition("=")[2].strip()
+        modes = option_values(args, "--sandbox", "-s")
+        mode = modes[-1] if modes else None
+        if mode is None and "sandbox_mode" in settings:
+            mode = str(settings["sandbox_mode"]).strip().strip("\"'")
+        table = _filesystem_table(settings.get(f"permissions.{PERMISSION_PROFILE}.filesystem"))
+        if mode is None and "default_permissions" in settings:
+            extends = str(settings.get(f"permissions.{PERMISSION_PROFILE}.extends", ""))
+            mode = "read-only" if "read-only" in extends else "workspace-write"
+        if mode == "danger-full-access":
+            return None
+        dirs = option_values(args, "-C", "--cd")
+        workspace = (cwd / dirs[-1]) if dirs else cwd
+        written = [Path(path) for path, at in table.items() if at == "write"]
+        read = tuple(Path(path) for path, at in table.items() if at == "read")
+        if mode == "read-only":
+            return SandboxWrites(tuple(written), read)
+        roots = [workspace, Path("/tmp"), *(cwd / d for d in option_values(args, "--add-dir"))]
+        if os.environ.get("TMPDIR"):
+            roots.append(Path(os.environ["TMPDIR"]))
+        extra = settings.get("sandbox_workspace_write.writable_roots")
+        with suppress(tomllib.TOMLDecodeError, RecursionError, TypeError):
+            listed = tomllib.loads(f"v = {extra}")["v"] if extra is not None else []
+            roots += [Path(item) for item in listed if isinstance(item, str)]
+        return SandboxWrites(tuple([*roots, *written]), read)
 
     def broker_access(
         self,

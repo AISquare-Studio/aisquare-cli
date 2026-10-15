@@ -874,13 +874,18 @@ permission profile: Codex's built-in `:workspace` or `:read-only`, with the aisq
 home read-only within it, all of it (the board's database, the launch records, the
 census, the config, the account homes, credentials and keys, the fleet's tmux conf, the
 agent registry, the model probe's cache), and one path writable: the launch's broker
-inbox. Every `aisquare` board call the agent makes there goes, unchanged, through that
-broker, which its launch runs outside the sandbox: it runs only a whitelist of board and
-memory commands, only as the agent's own board sessions, only on its own board, and
+inbox. Read-only too: what the project's trees hold that a launch outside any sandbox
+reads (`.claude/`, `.mcp.json`, `.codex/`, `.agents/`, `.aisquare`, `.git`), every
+worktree but the agent's own, and the directories tmux keeps its sockets in, so a Codex
+tester in the project's directory cannot write the manager's Claude Code settings, nor
+move the fleet's socket out of `/tmp`. Every `aisquare` board call the agent makes there
+goes, unchanged, through that broker, which its launch runs outside the sandbox: it runs
+only a whitelist of board and memory commands, only as the agent's own board sessions,
+only in its own tree, on its own board's tasks and in its own project's memory pool, and
 never a fleet operation (`spawn`, `stop`, `restart`, `switch`, `tell`, `shutdown` …), a
-launch, a hook, the config or an account. So nothing in the store that a restart, a
-switch, a hand-over, `tell`, `stop`, `shutdown`, the manager's nudge, `reap` or a spawn
-reads can have been written from inside a sandbox. The launch records stay as defence
+launch, a hook, the config or an account. So nothing that a restart, a switch, a
+hand-over, `tell`, `stop`, `shutdown`, the manager's nudge, `reap` or a spawn reads can
+have been written from inside a sandbox. The launch records stay as defence
 in depth: `fleet spawn` writes each agent's launch record in `launch-seals/` (binary,
 arguments, permission, role, agent, directory, account, and the tmux socket and pane
 its window is in), the agent's own hook adds its session (transcript, thread, home), and

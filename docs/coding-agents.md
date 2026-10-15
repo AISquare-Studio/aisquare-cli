@@ -461,12 +461,13 @@ Native subagents are disabled in fleet sessions when
 The aisquare store (the aisquare home: `context.db`, the launch records, the config,
 the account homes, the caches) is **read-only in a Codex agent's sandbox, all of it**,
 and the board calls its role protocol makes there go through a broker that its launch
-runs outside the sandbox. A process in the sandbox writes nothing in the store, so
-nothing in the store that chooses what runs outside the sandbox (a replay, a kill, a
-typed line or paste, a launch, a model or an account, a worktree removal) can have been
-written from inside one: by construction, not by checking each column that is read.
-Claude Code runs its tools unsandboxed and is unchanged: its board calls write the
-store themselves.
+runs outside the sandbox. So are what the project's trees hold that a launch outside
+any sandbox reads, and the tmux sockets' directory (below). A process in the sandbox
+writes none of them, so nothing there that chooses what runs outside the sandbox (a
+replay, a kill, a typed line or paste, a launch, a model or an account, a worktree
+removal) can have been written from inside one: by construction, not by checking each
+value that is read. Claude Code runs its tools unsandboxed and is unchanged: its board
+calls write the store themselves.
 
 The profile, `aisquare`, is defined by the launch (`CodexAdapter.store_access`, then
 `broker_access`, which each launch applies over whatever its launch spec recorded):
@@ -475,17 +476,43 @@ The profile, `aisquare`, is defined by the launch (`CodexAdapter.store_access`, 
 -c default_permissions="aisquare"
 -c permissions.aisquare.extends=":workspace"        # ":read-only" for a reviewer's seat
 -c permissions.aisquare.filesystem={"<aisquare home>" = "read",
-     "<aisquare home>/broker/<launch id>/in" = "write"}
+     "<tree>/.claude" = "read", "<tree>/.mcp.json" = "read", "<tree>/.codex" = "read",
+     "<tree>/.agents" = "read", "<tree>/.aisquare" = "read", "<tree>/.git" = "read",
+     "<project>/.aisquare-worktrees" = "read", "/tmp/tmux-<uid>" = "read", …,
+     "<aisquare home>/broker/<launch id>/in" = "write",
+     "<project>/.aisquare-worktrees/<its own>" = "write"}
 ```
 
-This is Codex's built-in profile for the write scope with the aisquare home read-only
-within it (the more specific path wins over a writable one around it: the workspace,
-`/tmp`), and one path writable: this launch's broker inbox, which no other launch's
-profile names. Measured on 0.162.1 (store outside `/tmp`), from a sandboxed command:
-the store's database reads and does not write ("attempt to write a readonly
-database"), no file in the store can be made or changed ("Read-only file system"), and
-`aisquare note`, `aisquare task claim` and `aisquare board` succeed on their first,
-sandboxed attempt, through the broker.
+This is Codex's built-in profile for the write scope with, read-only within it (the
+more specific path wins over a writable one around it: the workspace, `/tmp`):
+
+- the aisquare home, all of it;
+- in every tree the launch touches (its own checkout, its project's principal one, its
+  launch record's), what a launch outside any sandbox reads there
+  (`store_broker.LAUNCH_INPUTS`): Claude Code's project settings, hooks and MCP servers
+  (`.claude/`, `.mcp.json`), Codex's project config and agents (`.codex/`, `.agents/`),
+  aisquare's root marker (`.aisquare`) and the repository (`.git`, whose hooks and
+  config run on the fleet's checkouts). A Codex tester, validator or ui-tester runs in
+  the project's own directory, where the manager's `.claude/` lives, and the next
+  Claude Code start there would have run what it wrote (review r10 of #113, finding 1).
+  `AGENTS.md` and `CLAUDE.md` are content an agent reads, not what runs: they stay
+  writable;
+- every worktree of the project (the fleet's `worktree_dir`) but the agent's own, which
+  stays writable, its own launch inputs read-only within it;
+- the directories tmux keeps sockets in: the one its window's server listens in
+  (`$TMUX`), `$TMUX_TMPDIR` or `/tmp`'s `tmux-<uid>`, and a configured socket path's.
+  From `/tmp`, which every sandbox may write, the fleet's socket could be moved away,
+  and the fleet cut off its agents (finding 4; SMOKE5).
+
+Each path is named whether or not it exists yet: then it cannot be made, and nothing
+is left on the host where it was absent (measured). One path is writable: this launch's
+broker inbox, which no other launch's profile names. Measured on 0.162.1 (store outside
+`/tmp`), from a sandboxed command: the store's database reads and does not write
+("attempt to write a readonly database"), no file in the store can be made or changed
+("Read-only file system"), `.claude/settings.json`, a new `.mcp.json`, another agent's
+worktree and `rm` of the fleet's socket are refused, and `aisquare note`, `aisquare
+task claim` and `aisquare board` succeed on their first, sandboxed attempt, through the
+broker.
 
 **The broker** (`services.store_broker`). `aisquare launch` of an agent that sandboxes
 its tools starts one per launch, outside the sandbox, before it execs the agent (as it
@@ -507,12 +534,26 @@ request as `aisquare <argv>` in the launch's environment, never the caller's, an
   `fleet-session:<row id>`, written by hooks Codex runs outside its sandbox). Another
   session's id is refused ("is not this agent's own session"), and so is any before
   the agent's first hook ran. A filter (`team log --by`) names any session;
-- on the launch's own board: a cwd that resolves to another project is refused;
+- on the launch's own board and in its own project's pool: a request runs only in the
+  launch's own tree (its worktree, its project's directory: from its launch record),
+  never by the board a cwd resolves to (with `AISQUARE_TEAM_HUB`, which every launch
+  with a project sets, every directory resolved to the hub's); a task ref names only a
+  task of its board (`services.team._own_task`: task ids resolve across every board);
+  `remember`/`context add` write only its project's pool, never the user pool, which
+  every project's agents are given (`--user` is refused, and the default is the
+  project's: review r10 of #113, finding 3);
 - signed with the launch's nonce, which only the agent's environment holds (another
   launch's sandbox has its own pid namespace and cannot read it): a request carries a
   MAC under it, never the nonce, as a request file is readable from every sandbox, and
   each request runs once;
-- never setting the fleet's own signals (`fleet-paused`); reading them is fine.
+- never setting the fleet's own signals (`fleet-paused`); reading them is fine. No agent
+  tool sets them: the MCP `signal` tool is refused them too (finding 8), and an MCP
+  server serving an agent that sandboxes its tools names only its board's tasks.
+
+A refusal leaves a record outside the caller's stderr: one line in
+`<aisquare home>/logs/store-broker.log`, and, for a session that is not its own, another
+board's task or project, a fleet operation or a request not signed by its launch, one
+note on its board for its manager and the human, once per launch and kind (SMOKE5).
 
 The transport is files, not a socket, by measurement: on 0.162.1 the sandbox's seccomp
 filter refuses `connect` on every unix socket (a path one, on a read-only or a writable
@@ -521,14 +562,27 @@ a profile's `write` path and a FIFO can be opened for writing on a read-only one
 launch has `<aisquare home>/broker/<launch id>/`: `in/` (the sandbox's to write; a
 request is opened by name, never through a link and never blocking on a FIFO, and
 removed once read), `bell` (a FIFO), and `out/` (read-only to the sandbox), where the
-broker answers. No whitelisted command reads stdin, so none is forwarded. An MCP
+broker answers. The broker takes a request by renaming it, in one step, and the CLI
+says a call failed only once it has taken its request back, so the command never ran:
+a bell it may not open is waited past (the broker polls `in/` every half second), and
+a request taken and not answered says it may have run, so a retrying agent never files
+a note twice (finding 2). The CLI goes through the broker when it cannot make a file in
+the store: `access(2)` alone sees bwrap's read-only mount, not a sandbox that refuses at
+`open` (Landlock), and no variable tells, since Codex gives a command it escalated out of
+its sandbox the very environment of a sandboxed one (measured; finding 6). When the
+agent exits, the commands still running are ended and nothing more is taken (finding
+7); whatever the sandbox leaves in `in/` (a directory, a link) is removed, never taken
+twice (finding 9); output past 4 MB is cut and says so, with exit 74 (finding 10). No
+whitelisted command reads stdin, so none is forwarded. An MCP
 server, by the same measurement, runs outside the sandbox (host namespaces, no
 seccomp), with only the variables its launch hands it: the MCP tools (`agents.mcp`)
 keep their own identity rule (`services.mcp_server`).
 
 A broker that cannot start costs the agent its board calls from the sandbox, which then
 say so ("this agent's broker is not running … restart the agent"), never the launch.
-The broker is POSIX only (FIFOs); the fleet's sandboxed agents are too (tmux).
+The broker is POSIX only (FIFOs); the fleet's sandboxed agents are too (tmux). Measured
+on Linux (bwrap) only: macOS's Seatbelt and Windows' sandbox are unmeasured, which the
+transport's two choices above are made to survive.
 Escalated commands, which Codex runs outside its sandbox once approved, and the agent's
 own hooks write the store directly, as before.
 

@@ -123,16 +123,21 @@ adapter.**
   `aisquare`: Codex's `:workspace` (or `:read-only` for a reviewer) with the
   aisquare home read-only inside it, all of it: the board's database, the launch
   records, the census, the config, the account homes, credentials and keys,
-  `fleet-tmux.conf`, `agents.json` and the model probe's cache. Its board calls
-  (`aisquare note`, `task claim`, `board` and the rest of the role protocol) go,
-  unchanged, through a broker its launch runs outside the sandbox, which runs
+  `fleet-tmux.conf`, `agents.json` and the model probe's cache. Read-only too:
+  what the project's trees hold that a launch outside any sandbox reads
+  (`.claude/`, `.mcp.json`, `.codex/`, `.agents/`, `.aisquare`, `.git`), every
+  other agent's worktree, and the directories tmux keeps its sockets in. Its board
+  calls (`aisquare note`, `task claim`, `board` and the rest of the role protocol)
+  go, unchanged, through a broker its launch runs outside the sandbox, which runs
   only a whitelist of board and memory commands, only as the agent's own board
-  sessions (the ones its own hooks registered), only on its own board, and never
-  a fleet operation, a launch, a hook, the config or an account. The sandbox
-  writes one path in the store, its launch's broker inbox. So nothing in the
-  store that a replay, a kill, a typed line or paste, a launch, a model or
-  account choice or a worktree removal reads can have been written from inside a
-  sandbox. The transport is a spool directory and a FIFO, not a socket: Codex
+  sessions (the ones its own hooks registered), only in its own tree, on its own
+  board's tasks and in its own project's memory pool (never the user pool), and
+  never a fleet operation, a launch, a hook, the config or an account; a refusal
+  is logged, and a forged identity, another board's task or a fleet operation is
+  put on its board once. The sandbox writes one path in the store, its launch's
+  broker inbox. So nothing that a replay, a kill, a typed line or paste, a launch,
+  a model or account choice or a worktree removal reads can have been written
+  from inside a sandbox. The transport is a spool directory and a FIFO, not a socket: Codex
   0.162.1's sandbox refuses `connect` on every unix socket (measured). The launch
   records stay as defence in depth: restart, switch, the hand-over and `fleet
   tell`'s queue read an agent's launch record in `launch-seals/`, written by its

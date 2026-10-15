@@ -1542,8 +1542,16 @@ def _needs_unnamed_dialog(screen: Callable[[], Sequence[str] | None] | None) -> 
     waiting behind a command at work is not up yet. The card is named after the question or
     the plan (:func:`_needs_dialog_item`), so a notice landing later names it the same: it
     no longer waits :data:`_NOTICE_WAIT` for one, which a notice later still outran.
+
+    A derivation that asks no screen at all (:func:`needs_single_agent_now`) has no such
+    card: a screen not asked for is not one that could not be read. It had one for every
+    question or plan beside an unmarked call, one queued behind a sub-agent at work too,
+    and the guards that read it refused a merely pending tool as "is showing a prompt"
+    (review of #259, round 10, 9/9).
     """
-    rows = None if screen is None else screen()
+    if screen is None:
+        return False
+    rows = screen()
     return rows is None or _needs_prompt_region(rows) is not None
 
 

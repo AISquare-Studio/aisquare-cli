@@ -3407,6 +3407,12 @@ def _alone_of(
     return needs_single_agent_now(PROJECT, label, now=NOW)
 
 
+def _showing(fleet: Fleet, screen: list[str]) -> Fleet:
+    """``fleet``, its agent's pane showing ``screen`` to the scan."""
+    fleet.screen = screen
+    return fleet
+
+
 def _attention_answered() -> Fleet:
     escaped = _tail(newest="interrupted", at=NOW - timedelta(minutes=1), text="Stopping.")
     return _working(escaped, state="attention")
@@ -3452,6 +3458,11 @@ def _lost() -> Fleet:
             id="a shell in its pane",
         ),
         pytest.param(_lost, FakeTmux(reference=NOW), id="lost"),
+        pytest.param(
+            lambda: _showing(_working(_tail(_TASK, _ASK)), _at_work(f"● {_TASK.summary}")),
+            FakeTmux(reference=NOW, quiet_for=1),
+            id="a question queued behind a sub-agent at work",
+        ),
     ],
 )
 def test_the_agent_alone_answers_what_an_action_asks_as_its_projects_scan_does(
@@ -3459,7 +3470,11 @@ def test_the_agent_alone_answers_what_an_action_asks_as_its_projects_scan_does(
 ) -> None:
     """Every poll after an action's Escape read the project's whole scan, up to 32 of them
     for one Interrupt & tell (review of #243, round 3, 4/13). The agent's own facts are
-    enough for what a poll asks: the dialog, the pending tool, the prompt."""
+    enough for what a poll asks: the dialog, the pending tool, the prompt.
+
+    Review of #259, round 10, 9/9: without a screen, a question beside a sub-agent at work
+    was rule 8's dialog card here and none in the scan, whose screen showed the work, so
+    the guards said "is showing a prompt" of a tool pending."""
     scanned = _now_of(situation(), tmux, monkeypatch)
     alone = _alone_of(situation(), tmux, monkeypatch)
     for predicate in (needs_dialog_open, needs_tool_pending, needs_at_input_prompt):

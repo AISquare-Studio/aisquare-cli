@@ -283,6 +283,18 @@ def _read_arranged() -> tuple[list[ClaudeAccount], str | None]:
     return accounts, note
 
 
+def _read_for_handover() -> tuple[list[ClaudeAccount] | None, str | None]:
+    """:func:`_read_arranged` for a hand-over: ``None`` for the list, with why, when the slot
+    directories could not even be listed (an ``OSError``), which raised out of the worker
+    with nothing on the board (review of #259, round 15). One read for the hook's question
+    (:func:`somewhere_to_hand_over`) and the worker's pick (:func:`choose_for_handover`),
+    so the two agree."""
+    try:
+        return _read_arranged()
+    except OSError as exc:
+        return None, f"accounts unreadable ({exc})"
+
+
 def list_accounts() -> list[ClaudeAccount]:
     """The accounts in priority order, each carrying its alias, rank, default and disabled flags.
 
@@ -873,6 +885,7 @@ def somewhere_to_hand_over(leaving: int | None = None) -> bool:
     from that registry and says why, which the worker posts ("not switched — accounts
     registry unreadable …"). A no here stopped the hook without a word: nothing on the
     board said the configured ``switch`` was skipped, or why (review of #259, round 14).
+    So does one whose slot directories cannot be listed (round 15).
 
     ``on_limit = "switch"`` is the default since 0.8.1, so a machine with one account has it
     too. There every limit started a hand-over that could only refuse, posted "not
@@ -880,12 +893,10 @@ def somewhere_to_hand_over(leaving: int | None = None) -> bool:
     (review of #259, round 13). ``choose`` drops its "nothing to pick" note for ``pick`` on
     the same grounds.
     """
-    try:
-        accounts, registry_note = _read_arranged()
-    except OSError as exc:  # the slot directories could not be listed: as unreadable
-        accounts, registry_note = [], f"accounts unreadable ({exc})"
+    accounts, registry_note = _read_for_handover()
     if registry_note is not None:
         return True
+    assert accounts is not None  # listed, or there is a note
     usable = [
         account.slot for account in accounts if not account.disabled and core.signed_in(account)
     ]
@@ -1668,9 +1679,10 @@ def choose_for_handover(
     skip = frozenset(exclude)  # read three times below: never an iterator
     if explicit is not None:
         return choose(explicit, role=role, project=project, exclude=skip, fetch=fetch)
-    accounts, registry_note = _read_arranged()
+    accounts, registry_note = _read_for_handover()
     if registry_note is not None:
         return AccountChoice(None, None, [registry_note])
+    assert accounts is not None  # listed, or there is a note
     notes: list[str] = []
     settings = accounts_settings()
     picked, more = headroom_choice(

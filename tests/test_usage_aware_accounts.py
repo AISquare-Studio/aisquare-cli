@@ -624,6 +624,34 @@ def test_with_the_registry_unreadable_a_limit_still_reaches_the_worker_that_says
     assert said and unreadable in said[0], _events(work)
 
 
+def test_with_the_slot_directories_unlistable_the_worker_says_why_rather_than_dying(
+    fake_home: Path, work: ProjectInfo, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 15: an ``OSError`` listing the slot directories read as yes,
+    and the worker then raised the same ``OSError`` out of its pick, which caught only a
+    store error: it exited into ``DEVNULL`` with nothing on the board, the agent stayed
+    parked, and Remote held the limit's push for a hand-over already dead. The pick returns
+    it as its note, and the worker posts it."""
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    started: list[list[str]] = []
+    monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
+    _slot("work@example.com", "tok-work")
+    _session(work, "sess-fleet")
+    _fleet_row(work, "agt_limited5", "coder-db", "sess-fleet")
+
+    def unlistable() -> tuple[list[Any], str | None]:
+        raise PermissionError(13, "Permission denied", "claude-accounts")
+
+    monkeypatch.setattr(service, "_read_arranged", unlistable)
+
+    _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
+    assert len(started) == 1, "the worker is started, to say why it switched nothing"
+    hooks_service.hand_over("sess-fleet", reason="weekly limit")
+
+    said = [text for kind, text in _events(work) if "not switched" in text]
+    assert said and "accounts unreadable" in said[0] and "Permission denied" in said[0], said
+
+
 def test_remote_holds_the_limit_of_an_agent_the_hook_hands_over_from_an_account_disabled_since(
     fake_home: Path, work: ProjectInfo, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -34,7 +34,9 @@ from aisquare.models import (
     DoctorCheck,
     FleetAgent,
     InjectionRecord,
+    ProjectInfo,
     PromptRecord,
+    PruneCandidate,
     ShippingStatus,
     StatusReport,
 )
@@ -1441,37 +1443,85 @@ def _check_captured_projects() -> list[DoctorCheck]:
     Silent when there are none; gated on the store existing (doctor creates
     nothing). ``ok``: a hidden capture is the design working, not a fault. With
     ``[projects] capture`` off, every one is left from before it was: nothing lists
-    them, nothing captures more, and the prune that drops them all is named, with
-    ``--older-than 0`` since none of them is going to be touched again.
+    them, nothing captures more, and the prune that drops them is named, with
+    ``--older-than 0`` since none of them is going to be touched again — for the rows
+    it drops (:func:`~aisquare.services.project.prune_candidates`). A captured row that
+    holds saved context, or a live agent, it keeps whatever ``--older-than`` says: counted
+    under it, they made the line say "drop them" again after every prune, of rows it
+    would never drop (review of #259, round 17). They are named apart, with ``project
+    forget``, which drops one.
     """
     if _uncreated_home("projects") is not None:
         return []
     try:
         with store_session() as store:
-            captured = len(store.captured_projects())
+            captured = store.captured_projects()
+        if captured and not project_service.capture_on():
+            plan = project_service.prune_candidates(
+                missing=False, worktrees=False, captured_older_than=0
+            )
+        else:
+            plan = []
     except Exception:  # the database line reports a broken store
         return []
     if not captured:
         return []
-    noun = "directory" if captured == 1 else "directories"
     if not project_service.capture_on():
-        return [
-            _ok(
-                "projects",
-                f"{captured} captured {noun} left from before project capture was turned off "
-                "(a hooked session ran there; nothing added it on purpose) — listed only by "
-                "aisquare project list --all; drop them: aisquare project prune --captured-only "
-                "--older-than 0",
-            )
-        ]
+        return [_ok("projects", _left_from_before_capture(captured, plan))]
+    noun = "directory" if len(captured) == 1 else "directories"
     return [
         _ok(
             "projects",
-            f"{captured} captured {noun} hidden from the sidebar and `project list` (a hooked "
-            "session ran there; nothing added it on purpose) — see them: aisquare project "
-            "list --all; drop the stale ones: aisquare project prune --captured-only",
+            f"{len(captured)} captured {noun} hidden from the sidebar and `project list` (a "
+            "hooked session ran there; nothing added it on purpose) — see them: aisquare "
+            "project list --all; drop the stale ones: aisquare project prune --captured-only",
         )
     ]
+
+
+def _left_from_before_capture(captured: list[ProjectInfo], plan: list[PruneCandidate]) -> str:
+    """The capture-off line: the rows ``prune --captured-only --older-than 0`` drops (``plan``
+    is what it would do), with that command, and apart from them the rows it keeps, by name,
+    with ``project forget``."""
+    dropped = {c.project.id for c in plan if c.reason == "captured" and not c.live_agents}
+    kept = [project for project in captured if project.id not in dropped]
+    parts: list[str] = []
+    if dropped:
+        noun = "directory" if len(dropped) == 1 else "directories"
+        parts.append(
+            f"{len(dropped)} captured {noun} left from before project capture was turned off "
+            "(a hooked session ran there; nothing added it on purpose) — listed only by "
+            "aisquare project list --all; drop them: aisquare project prune --captured-only "
+            "--older-than 0"
+        )
+    if kept:
+        names = ", ".join(project_service.display_name(p) for p in kept[:3])
+        if len(kept) > 3:
+            names += f", +{len(kept) - 3} more"
+        forget = (
+            install_route.command_line(["aisquare", "project", "forget", str(kept[0].root)])
+            if len(kept) == 1
+            else "aisquare project forget <directory>, for each"
+        )
+        if dropped:
+            verb = "holds" if len(kept) == 1 else "hold"
+            parts.append(
+                f"{len(kept)} more {verb} saved context or a live agent, which that prune "
+                f"keeps: {names} — drop it with {forget}"
+                if len(kept) == 1
+                else f"{len(kept)} more {verb} saved context or a live agent, which that "
+                f"prune keeps: {names} — drop them with {forget}"
+            )
+        else:
+            noun = "directory" if len(kept) == 1 else "directories"
+            verb = "holds" if len(kept) == 1 else "hold"
+            parts.append(
+                f"{len(kept)} captured {noun} left from before project capture was turned off "
+                f"{verb} saved context or a live agent, which aisquare project prune keeps: "
+                f"{names} — listed only by aisquare project list --all; drop "
+                + (f"it with {forget}" if len(kept) == 1 else f"them with {forget}")
+            )
+    return "; ".join(parts)
 
 
 def _check_dead_managers() -> list[DoctorCheck]:

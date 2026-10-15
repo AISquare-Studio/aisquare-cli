@@ -15,6 +15,7 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
+from aisquare.core.entries import new_entry
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
 from aisquare.models import ProjectInfo
@@ -217,3 +218,37 @@ def test_doctor_names_the_prune_that_clears_what_capture_left(tmp_path: Path) ->
     assert check.detail.startswith("1 captured directory left from before project capture")
     assert "aisquare project list --all" in check.detail
     assert check.detail.endswith("aisquare project prune --captured-only --older-than 0")
+
+
+def test_doctor_names_the_rows_that_prune_keeps_and_what_drops_them(tmp_path: Path) -> None:
+    """Review of #259, round 17: doctor counted every captured row and said "drop them" with
+    a prune that keeps each captured row holding a context entry, whatever ``--older-than``
+    says. After running it, those rows remained, and every doctor run repeated the same
+    count with the same advice. The prune is named for the rows it drops, and the rows it
+    keeps are named apart, with what drops them."""
+    with store_session() as store:
+        for name in ("scratch", "notes"):
+            store.ensure_project(ProjectInfo(id=f"prj_{name}", root=tmp_path / name))
+        store.add(new_entry("a fact", "project", "prj_notes", [], "cli"))
+
+    [check] = diagnostics._check_captured_projects()
+
+    said = " ".join(check.detail.split())
+    assert said.startswith("1 captured directory left from before project capture"), said
+    assert "drop them: aisquare project prune --captured-only --older-than 0" in said
+    assert "1 more holds saved context or a live agent, which that prune keeps: notes" in said
+    assert f"aisquare project forget {tmp_path / 'notes'}" in said
+
+    from aisquare.services import project as project_service
+
+    plan = project_service.prune_candidates(missing=False, worktrees=False, captured_older_than=0)
+    assert [c.project.id for c in plan] == ["prj_scratch"], "the prune drops what doctor says"
+    with store_session() as store:
+        store.forget_project("prj_scratch")  # what that prune does
+    [check] = diagnostics._check_captured_projects()
+    said = " ".join(check.detail.split())
+    assert said.startswith(
+        "1 captured directory left from before project capture was turned off holds saved "
+        "context or a live agent, which aisquare project prune keeps: notes"
+    ), said
+    assert "--older-than 0" not in said

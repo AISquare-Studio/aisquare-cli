@@ -56,6 +56,7 @@ from aisquare.core.tmux import (
     SocketAnswer,
     TmuxError,
     TmuxServer,
+    TmuxTimedOut,
     TmuxUnavailable,
     WindowInfo,
 )
@@ -2350,6 +2351,25 @@ def test_tell_falls_back_to_a_note_when_tmux_cannot_type(
     tmux.fail_input = True
     result = fleet_service.tell(project, "coder-1", "please rebase")
     assert not result.delivered and "tmux could not type" in result.how
+    assert _events(project, "note") == ["please rebase"]
+
+
+def test_tell_says_a_paste_that_timed_out_may_be_typed_as_well_as_noted(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 9, 1/8: a wedged server may still run the queued paste once it
+    recovers, so the note it falls back to may reach the agent beside the typed text."""
+    agent = _coder(project)
+    _board_session(agent, "waiting")
+    tmux.set_command(agent.pane_id, "claude")
+
+    def wedged(pane_id: str, text: str) -> None:
+        raise TmuxTimedOut("tmux did not answer within 30s: paste-buffer")
+
+    monkeypatch.setattr(tmux, "paste", wedged)
+    result = fleet_service.tell(project, "coder-1", "please rebase")
+    assert not result.delivered and "it may be typed as well" in result.how
+    assert "board note" in result.how
     assert _events(project, "note") == ["please rebase"]
 
 

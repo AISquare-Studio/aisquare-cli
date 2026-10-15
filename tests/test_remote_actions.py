@@ -710,7 +710,8 @@ class FakePane:
         self.failing: set[str] = set()
         """``"paste"`` or a key name: that call raises ``TmuxError``."""
         self.timing_out: set[str] = set()
-        """A key name: that call raises ``TmuxTimedOut``, a server that did not answer."""
+        """``"paste"`` or a key name: that call raises ``TmuxTimedOut``, a server that did not
+        answer."""
         self.prompt = False
         """A permission prompt is drawn, for the tests that open one: text does nothing in
         its list, Escape answers it "No" and Enter its highlighted "1. Yes"."""
@@ -732,6 +733,8 @@ class FakePane:
     def paste(self, pane_id: str, text: str) -> None:
         if "paste" in self.failing:
             raise TmuxError(f"can't find pane: {pane_id}")
+        if "paste" in self.timing_out:
+            raise TmuxTimedOut("tmux did not answer within 30s: paste-buffer")
         self.sent.append((pane_id, "paste", text))
         self.log.append("paste")
 
@@ -2358,6 +2361,33 @@ def test_a_paste_that_fails_types_nothing_and_is_a_409(
         "— nothing was typed",
     }
     assert phone.audit() == []
+
+
+@pytest.mark.parametrize("mode", ["prompt", "interrupt"])
+def test_a_paste_that_timed_out_may_still_land_and_is_on_the_trail(
+    phone: Phone, needs: FakeNeeds, pane: FakePane, project: ProjectInfo, mode: str
+) -> None:
+    """Review of #259, round 9, 1/8: a timed-out paste was "nothing was typed", and off the
+    trail in prompt mode, while a wedged server may run the queued ``paste-buffer`` once it
+    recovers. The human's Send again pasted the text twice. It says the text may still
+    arrive, unsent, and the trail says ``delivered=maybe``."""
+    _row(project)
+    needs.at_prompt = mode == "prompt"
+    pane.timing_out.add("paste")
+    response = phone.post("agent/tell", agent=LABEL, text="hi", mode=mode)
+    assert (response.status_code, response.json()["error"]) == (409, "fleet_error")
+    said = response.json()["message"]
+    assert "it may still arrive at its prompt, unsent" in said and "nothing was typed" not in said
+    keys = [sent[2] for sent in pane.sent if sent[1] == "key"]
+    assert keys == (["Escape"] if mode == "interrupt" else []), "no Enter after it"
+    escape = " escape=sent" if mode == "interrupt" else ""
+    assert phone.audit() == [
+        (
+            "agent/tell",
+            f"tell coder-1@{project.id} mode={mode} delivered=maybe{escape} "
+            'failed=fleet_error text=2ch "hi"',
+        )
+    ]
 
 
 def test_an_enter_that_fails_after_the_paste_is_a_200_that_says_it_was_not_sent(

@@ -62,6 +62,7 @@ from aisquare.core.tmux import (
     SocketAnswer,
     TmuxError,
     TmuxServer,
+    TmuxTimedOut,
     TmuxUnavailable,
     WindowInfo,
 )
@@ -3042,6 +3043,12 @@ def tell(
         try:
             srv.paste(agent.pane_id, text)
             srv.send_keys(agent.pane_id, "Enter")
+        except TmuxTimedOut as exc:
+            # A wedged server may still run what it was asked (review of #259, round 9, 1/8).
+            how = _file_note(project, label, text, sender)
+            return TellResult(
+                False, f"tmux did not answer in time ({exc}), so it may be typed as well — {how}"
+            )
         except TmuxError as exc:
             how = _file_note(project, label, text, sender)
             return TellResult(False, f"tmux could not type it ({exc}) — {how}")

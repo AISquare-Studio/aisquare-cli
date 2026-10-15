@@ -471,11 +471,14 @@ def action_audited(
     cannot know: a stop that tmux failed said only that, and a label handed on
     meanwhile is "nothing was done to either", with the agent's prompt answered No
     (sweep of #243, round 4).
+
+    A refusal that carries its own line keeps it: it knows more than ``summary`` does, as
+    a paste that timed out knows its text may still arrive (:func:`action_paste`).
     """
     try:
         yield
     except RequestError as exc:
-        if reached is None or reached():
+        if exc.audit is None and (reached is None or reached()):
             exc.audit = summary(exc.error)
         if escaped is not None and escaped():
             exc.message = f"{exc.message} — {_ESCAPE_SENT}"
@@ -1078,18 +1081,32 @@ def action_busy_sentence(snap: AgentNow, label: str) -> str:
     )
 
 
-def action_paste(snap: AgentNow, label: str, text: str, *, interrupted: bool) -> tuple[bool, str]:
+def action_paste(
+    snap: AgentNow,
+    label: str,
+    text: str,
+    *,
+    interrupted: bool,
+    trail: Callable[[str], str],
+) -> tuple[bool, str]:
     """Type ``text`` into the agent's pane the way ``fleet tell`` does: one bracketed paste,
     then Enter. Returns ``(delivered, how)``.
 
     A paste, not keystrokes: Claude Code takes every line of it as one message,
     where each typed newline would submit one. The paste is a single tmux call,
-    so a paste that fails typed nothing, and is a 409. An Enter that fails leaves
-    the text unsent at the prompt. That is a 200 with ``delivered: false`` that
-    says so, because text reached a live agent: the audit line records it, and the
-    page keeps the card.
+    so a paste that tmux refused typed nothing, and is a 409. An Enter that fails
+    leaves the text unsent at the prompt. That is a 200 with ``delivered: false``
+    that says so, because text reached a live agent: the audit line records it, and
+    the page keeps the card.
+
+    A paste that timed out (``TmuxTimedOut``) is a 409 too, but may still land: a wedged
+    server may run the queued ``paste-buffer`` once it recovers, as it may an Escape
+    (:func:`action_press_escape`). It said "nothing was typed", off the trail in
+    ``prompt`` mode, and the human's Send again pasted the text a second time beside the
+    first, both submitted as one message (review of #259, round 9, 1/8). So it says the
+    text may still arrive, unsent, and is audited as ``trail("delivered=maybe …")``.
     """
-    from aisquare.core.tmux import TmuxError
+    from aisquare.core.tmux import TmuxError, TmuxTimedOut
     from aisquare.services import fleet as fleet_service
 
     agent = action_pane_agent(snap, label)
@@ -1097,6 +1114,16 @@ def action_paste(snap: AgentNow, label: str, text: str, *, interrupted: bool) ->
     first = "interrupted it with Escape, then " if interrupted else ""
     try:
         server.paste(agent.pane_id, text)
+    except TmuxTimedOut as exc:
+        sent, escape = ("Escape was sent, but ", " escape=sent") if interrupted else ("", "")
+        raise RequestError(
+            409,
+            "fleet_error",
+            f"{sent}tmux did not answer in time with the text for {label}'s pane ({exc}): "
+            "it may still arrive at its prompt, unsent — read its live screen before you "
+            "send it again",
+            audit=trail(f"delivered=maybe{escape} failed=fleet_error"),
+        ) from exc
     except TmuxError as exc:
         sent = "Escape was sent, but " if interrupted else ""
         raise RequestError(
@@ -1155,7 +1182,7 @@ def action_type_now(
     if not interrupt:
         if not remote_needs.needs_at_input_prompt(snap):
             raise RequestError(409, "agent_busy", action_busy_sentence(snap, label))
-        return action_paste(snap, label, text, interrupted=False)
+        return action_paste(snap, label, text, interrupted=False, trail=trail)
     action_press_escape(
         snap, label, audit=lambda error: trail(f"delivered=no escape=maybe refused={error}")
     )
@@ -1170,7 +1197,7 @@ def action_type_now(
             )
         snap = reached
     with action_audited(lambda error: trail(f"delivered=no escape=sent failed={error}")):
-        return action_paste(snap, label, text, interrupted=True)
+        return action_paste(snap, label, text, interrupted=True, trail=trail)
 
 
 def action_tell_auto(

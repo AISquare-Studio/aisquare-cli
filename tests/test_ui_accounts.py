@@ -1478,6 +1478,57 @@ def test_cancel_stops_a_sign_in_and_a_sign_in_of_an_existing_slot_is_never_disca
     assert said.startswith("sign-in cancelled — cancelled; nothing changed")
 
 
+def test_cancel_after_the_login_landed_keeps_the_new_slot_and_wires_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review of #263, M1: Claude Code stored the login after the window's last poll, and
+    the user pressed Cancel. The slot is settled as the quit settles it: kept, and wired."""
+    seen = _script_claude_sign_in(monkeypatch, tmp_path, lands=False)
+    landed = {"now": False}
+    monkeypatch.setattr(
+        accounts_service,
+        "sign_in_landed",
+        lambda acct, since=None: ClaudeIdentity(email="two@example.com") if landed["now"] else None,
+    )
+
+    async def go(pilot: Pilot[None]) -> str:
+        view = await open_accounts(pilot)
+        await pilot.click("#claude-add")
+        await settle(fleet_app(pilot))
+        assert view.login is not None and view.login.fresh
+        landed["now"] = True  # after the last poll, before the next
+        await pilot.click("#login-cancel")
+        await settle(fleet_app(pilot))
+        return notice(view)
+
+    said = drive(go)
+    assert seen["completed"] == [2] and seen["abandoned"] == []
+    assert said == "✓ account 2: the login had landed — kept as two@example.com"
+
+
+def test_a_log_in_over_a_login_the_keychain_will_not_show_opens_no_window(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review of #263, n4: the window could not tell the login stored from a new one, and
+    would close on the old one at its first poll as "signed in"."""
+    seen = _script_claude_sign_in(monkeypatch, tmp_path, lands=True)
+
+    def unreadable(acct: ClaudeAccount) -> str | None:
+        raise accounts_service.LoginUnreadable(core.KEYCHAIN_LOCKED)
+
+    monkeypatch.setattr(accounts_service, "login_fingerprint", unreadable)
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, str]:
+        view = await open_accounts(pilot)
+        view.begin_claude_sign_in(2)
+        await settle(fleet_app(pilot))
+        return view.login is None and not view.query_one("#login-box").display, notice(view)
+
+    closed, said = drive(go)
+    assert closed and seen["opened"] == [] and seen["landed_polls"] == 0
+    assert said == f"✗ account 2: no log-in opened — {core.KEYCHAIN_LOCKED}"
+
+
 def test_quitting_mid_claude_sign_in_closes_the_window_and_discards_the_fresh_slot(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_real_tmux: list[tuple[str, ...]]
 ) -> None:

@@ -111,7 +111,8 @@ on macOS a Keychain read, a subprocess, and never one on the UI thread."""
 LOGIN_POLL_WORKER = "claude-sign-in-poll"
 """A sign-in window's poll: whether the login landed (``sign_in_landed``), off the UI thread."""
 ABANDON_WORKER = "claude-abandon-sign-in"
-"""Discards a fresh slot whose sign-in never landed, once it has asked whether it did."""
+"""Settles a fresh slot whose sign-in was cancelled: kept and wired if its login landed after
+all (asked afresh), else discarded (``settle_sign_in``)."""
 REMOVE_WORKER = "claude-remove"
 ARRANGE_WORKER = "claude-arrange"
 RENAME_WORKER = "claude-rename"
@@ -1613,15 +1614,22 @@ class AccountsView(Vertical):
         )
 
     def _login_read(self, worker: Worker[Any], state: WorkerState) -> None:
-        """The login a *Log in* opens over was read: open its window now. A read that failed
-        opens it over none, as a fresh slot's: the first login stored then closes it."""
+        """The login a *Log in* opens over was read: open its window now. One that could not
+        be read (a locked Keychain) opens none: the window could not tell the login already
+        stored from a new one, and would close on it at the first poll as signed in."""
         account, self._login_opening = self._login_opening, None
         if account is None:
             return
-        since: str | None = None
-        if state is WorkerState.SUCCESS and isinstance(worker.result, tuple):
-            since = worker.result[1]
-        self._open_login_window(account, fresh=False, since=since)
+        if state is not WorkerState.SUCCESS or not isinstance(worker.result, tuple):
+            error = worker.error
+            why = (
+                str(error)
+                if isinstance(error, accounts_service.LoginUnreadable)
+                else f"it could not be read ({error or 'cancelled'})"
+            )
+            self._notice(f"✗ {self._name_of(account)}: no log-in opened — {why}", "error")
+            return
+        self._open_login_window(account, fresh=False, since=worker.result[1])
 
     def _open_login_window(self, account: ClaudeAccount, *, fresh: bool, since: str | None) -> None:
         try:
@@ -1746,8 +1754,8 @@ class AccountsView(Vertical):
         self.post_message(AccountsChanged())
 
     def _abandon_login(self, reason: str) -> None:
-        """Close the window; a fresh slot is discarded off the UI thread
-        (:data:`ABANDON_WORKER`), since it first asks whether a login landed after all."""
+        """Close the window; a fresh slot is settled off the UI thread (:data:`ABANDON_WORKER`):
+        a login that landed after the last poll keeps it, wired, and nothing is deleted."""
         login = self._close_login_window()
         if login is None:
             return
@@ -1757,7 +1765,7 @@ class AccountsView(Vertical):
             return
         account = login.account
         self.run_worker(
-            lambda: (reason, accounts_service.abandon_sign_in(account)),
+            lambda: (account, reason, accounts_service.settle_sign_in(account)),
             name=ABANDON_WORKER,
             group=ABANDON_WORKER,
             thread=True,
@@ -1766,9 +1774,14 @@ class AccountsView(Vertical):
 
     def _abandon_finished(self, worker: Worker[Any], state: WorkerState) -> None:
         result = worker.result if state is WorkerState.SUCCESS else None
-        reason, discarded = result if isinstance(result, tuple) else ("cancelled", False)
-        what = "the new slot was discarded" if discarded else "nothing changed"
-        self._notice(f"sign-in cancelled — {reason}; {what}", "warn")
+        if isinstance(result, tuple) and isinstance(result[2], ClaudeAccountStatus):
+            account, status = result[0], result[2]
+            who = status.identity.email if status.identity else self._name_of(account)
+            self._notice(f"✓ {self._name_of(account)}: the login had landed — kept as {who}", "ok")
+        else:
+            reason, discarded = (result[1], result[2]) if isinstance(result, tuple) else ("", False)
+            what = "the new slot was discarded" if discarded else "nothing changed"
+            self._notice(f"sign-in cancelled — {reason or 'cancelled'}; {what}", "warn")
         self.post_message(AccountsChanged())
 
     @on(Button.Pressed, "#login-cancel")

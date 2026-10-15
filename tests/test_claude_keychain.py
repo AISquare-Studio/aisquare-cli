@@ -39,7 +39,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import claude_accounts as core
-from aisquare.models import ClaudeAccount
+from aisquare.models import ClaudeAccount, ClaudeAccountStatus
 from aisquare.services import claude_accounts as service
 from tests.test_claude_accounts import NOW, _installed, _sign_in
 from tests.test_usage_aware_accounts import _payload, _Usage
@@ -483,7 +483,10 @@ def test_the_token_never_appears_in_any_output_or_exception(
     for account in accounts:
         said += [repr(core.stored_login(account)), repr(service.describe(account))]
         said.append(repr(service.usage(account, now=NOW)))
-        said.append(str(service.login_fingerprint(account)))
+        try:
+            said.append(str(service.login_fingerprint(account)))
+        except service.LoginUnreadable as exc:  # a locked, slow or broken Keychain
+            said += [str(exc), repr(exc)]
     with core._KEYCHAIN_READS_LOCK:
         said.append(repr(core._KEYCHAIN_READS))
     for args in (
@@ -495,6 +498,8 @@ def test_the_token_never_appears_in_any_output_or_exception(
         said += [result.output, repr(result.exception)]
     captured = capsys.readouterr()
     said += [captured.out, captured.err, caplog.text]
+    for other in ("sk-ant-ort01-refresh-never-read", "mcp-token-never-read"):  # the item's rest
+        assert all(other not in text for text in said), other
     assert all(secret not in text for text in said)
     assert any(LOCKED in text for text in said)  # the reasons did travel
     assert any("no answer in 0.5 s" in text for text in said)
@@ -694,3 +699,205 @@ def test_a_read_from_many_threads_at_once_is_one_answer_each(keychain: FakeKeych
     for thread in threads:
         thread.join()
     assert got == {a.slot: f"sk-ant-oat01-{a.slot}" for a in accounts}
+
+
+# --- the review of #263 ---------------------------------------------------------------------
+
+
+@POSIX_ONLY
+def test_cancel_just_after_a_login_landed_keeps_the_slot_and_its_item(
+    keychain: FakeKeychain,
+) -> None:
+    """Review M1: the last poll found no item (and left that in the memo); Claude Code
+    stored the login a moment later; Cancel. The discard asks the Keychain itself, so the
+    slot stays, and settling it keeps the login, wired, rather than orphan its item."""
+    two = core.create_account()
+    _identity(two, "two@example.com")
+    assert service.sign_in_landed(two) is None  # the last poll: no item yet
+    keychain.login(two, "sk-ant-oat01-just-landed")  # the item lands right after
+    assert service.abandon_sign_in(two) is False
+    assert two.config_dir.is_dir()
+    settled = service.settle_sign_in(two)
+    assert isinstance(settled, ClaudeAccountStatus) and settled.signed_in
+    assert two.config_dir.is_dir()
+
+
+@POSIX_ONLY
+def test_a_cancelled_sign_in_that_never_landed_is_still_discarded(keychain: FakeKeychain) -> None:
+    two = core.create_account()
+    assert service.settle_sign_in(two) is True
+    assert not two.config_dir.exists()
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize(
+    ("exit", "stderr"),
+    [(36, "User interaction is not allowed."), (51, "The user name or passphrase you entered")],
+    ids=["locked", "refused"],
+)
+def test_a_keychain_that_would_not_say_mid_window_is_no_landing(
+    keychain: FakeKeychain, exit: int, stderr: str
+) -> None:
+    """Review m1 (tester's note e): a re-auth over an expired login, and the Keychain locks
+    while the window is open. Its answer is no login, old or new: the window keeps waiting."""
+    two = core.create_account()
+    _identity(two, "two@example.com")
+    keychain.login(two, "sk-ant-oat01-old", expires_in=timedelta(hours=-1))
+    since = service.login_fingerprint(two)
+    assert since is not None
+    keychain.put(core.keychain_service(two), exit=exit, stderr=stderr)
+    assert service.sign_in_landed(two, since=since) is None
+    assert service.sign_in_landed(two) is None  # a fresh slot's window too
+    keychain.login(two, "sk-ant-oat01-new")
+    assert service.sign_in_landed(two, since=since) is not None  # the new login lands
+
+
+@POSIX_ONLY
+def test_a_log_in_over_a_login_that_cannot_be_read_is_refused_with_why(
+    keychain: FakeKeychain,
+) -> None:
+    """Review n4: a fingerprint of nothing would let the login already stored count as the
+    new one at the first poll; a store that would not say raises, with its reason."""
+    two = core.create_account()
+    _identity(two, "two@example.com")
+    assert service.login_fingerprint(two) is None  # none stored: any login is the new one
+    keychain.put(core.keychain_service(two), exit=36, stderr="User interaction is not allowed.")
+    with pytest.raises(service.LoginUnreadable, match="locked"):
+        service.login_fingerprint(two)
+
+
+@POSIX_ONLY
+def test_the_sign_in_reads_ask_the_keychain_not_a_read_of_a_moment_ago(
+    keychain: FakeKeychain,
+) -> None:
+    """Review m4: an item stored within KEYCHAIN_MEMO_SECONDS of a read that found none is
+    seen by the window's poll, by the fingerprint a Log in opens over and by the discard."""
+    two, three, four = (core.create_account() for _ in range(3))
+    for account in (two, three, four):
+        _identity(account, f"slot{account.slot}@example.com")
+        assert core.credentials(account) is None  # remembered: no item
+        keychain.login(account, f"sk-ant-oat01-{account.slot}")
+    assert core.credentials(two) is None, "the control: a plain read is the memo's"
+    assert service.sign_in_landed(two) is not None
+    assert service.login_fingerprint(three) is not None
+    assert service.abandon_sign_in(four) is False and four.config_dir.is_dir()
+
+
+def test_the_keychain_is_read_by_the_one_absolute_security_with_no_shell_or_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review m4: the call itself, on every platform (``subprocess.run`` stubbed). The tool is
+    the module's own constant as written, not a test's: a fresh copy of the module says it."""
+    import importlib.util
+    import subprocess
+
+    spec = importlib.util.find_spec("aisquare.core.claude_accounts")
+    assert spec is not None and spec.loader is not None
+    shipped = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(shipped)
+    assert shipped.KEYCHAIN_TOOL == "/usr/bin/security"  # absolute: never one found on PATH
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 44, b"", b"")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert shipped.read_keychain("Claude Code-credentials-1e91dd84", "tester").found is False
+    [(argv, kwargs)] = calls
+    assert argv == [
+        "/usr/bin/security",
+        "find-generic-password",
+        "-a",
+        "tester",
+        "-w",
+        "-s",
+        "Claude Code-credentials-1e91dd84",
+    ]
+    assert kwargs == {
+        "stdin": subprocess.DEVNULL,
+        "capture_output": True,
+        "timeout": 5.0,
+        "check": False,
+    }
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize("secure", ["/Users/me/shared", ""], ids=["set", "empty"])
+def test_with_securestorage_the_fallback_file_is_where_claude_code_writes_it(
+    keychain: FakeKeychain, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, secure: str
+) -> None:
+    """Review m2 (tester's note c): Claude Code's plaintext store is its wx() directory,
+    SECURESTORAGE when set (empty: ~/.claude), as its item is keyed on it."""
+    shared = tmp_path / "shared" if secure else core.home_config_dir()
+    shared.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", str(shared) if secure else "")
+    two = core.create_account()
+    _sign_in(two, "two@example.com")  # the config dir's own file: not where Claude Code looks
+    assert core.plaintext_credentials_path(two) == shared / ".credentials.json"
+    assert core.credentials(two) is None
+    (shared / ".credentials.json").write_text(_item("sk-ant-oat01-shared"), encoding="utf-8")
+    core.forget_keychain_reads()
+    creds = core.credentials(two)
+    assert creds is not None and creds.access_token == "sk-ant-oat01-shared"
+
+
+def test_on_linux_securestorage_leaves_the_config_dirs_file_as_it_was(
+    fake_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", str(tmp_path / "shared"))
+    two = core.create_account()
+    _sign_in(two, "two@example.com")
+    creds = core.credentials(two)
+    assert creds is not None and creds.access_token == "sk-ant-oat01-secret"
+
+
+@POSIX_ONLY
+def test_asq_never_asks_a_locked_keychain_again_by_itself(keychain: FakeKeychain) -> None:
+    """The tester's concern: a locked login Keychain in a desktop session may put its unlock
+    dialog up on each read. In a real asq, every tick of the shell's accounts read and the
+    sidebar's headroom reads the slot from the memo after the first refusal; opening the
+    Accounts page and ↻ Refresh usage ask again, once each."""
+    import asyncio
+
+    from aisquare.cli.ui.app import FleetApp
+    from tests.test_ui_accounts import accounts_read, open_accounts, settle
+
+    two = core.create_account()
+    _identity(two, "two@example.com")
+    wanted = core.keychain_service(two)
+    keychain.put(wanted, exit=36, stderr="User interaction is not allowed.")
+
+    def asked() -> int:
+        return sum(1 for call in keychain.calls() if call[call.index("-s") + 1] == wanted)
+
+    async def run() -> list[int]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=service.overview)
+        counts: list[int] = []
+        async with app.run_test(size=(240, 40)) as pilot:
+            await settle(app)
+            for _ in range(5):  # the shell's two-second ticks and the sidebar's minute
+                app.refresh_accounts()
+                await accounts_read(app)
+                app.refresh_headroom()
+                await settle(app)
+            counts.append(asked())
+            view = await open_accounts(pilot)
+            await settle(app)
+            for _ in range(3):
+                app.refresh_accounts()
+                await accounts_read(app)
+                view.refresh_readings()
+                await settle(app)
+            counts.append(asked())
+            view.refresh_usage(force=True)
+            await settle(app)
+            counts.append(asked())
+            for _ in range(3):
+                app.refresh_accounts()
+                await accounts_read(app)
+            counts.append(asked())
+            await pilot.pause()
+        return counts
+
+    assert asyncio.run(run()) == [1, 2, 3, 3]

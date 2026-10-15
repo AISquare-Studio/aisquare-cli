@@ -1774,17 +1774,26 @@ def open_sign_in_window(
     )
 
 
+class LoginUnreadable(AccountsError):
+    """The stored login could not be read (a locked or refusing Keychain): a sign-in window
+    opened over it could not tell the login it was opened over from a new one."""
+
+
 def login_fingerprint(account: ClaudeAccount) -> str | None:
-    """A digest of the stored login (its token and expiry), or ``None`` when none is readable.
+    """A digest of the stored login (its token and expiry), or ``None`` when none is stored.
 
     So a sign-in window opened to RE-authenticate an account can tell the login
     it was opened over from a fresh one: an expired or rejected token is still
     a signed-in directory, and :func:`sign_in_landed` alone would answer at the
     first poll, before the user had done anything. A digest, never the token. Read
-    afresh (a login is what changes here), so never on the UI thread.
+    afresh (a login is what changes here), so never on the UI thread. A store that
+    would not say raises :class:`LoginUnreadable` with its reason: ``None`` there
+    would let the login already stored count as the new one at the first poll.
     """
-    creds = core.credentials(account, fresh=True)
-    return _login_digest(creds) if creds is not None else None
+    login = core.stored_login(account, fresh=True)
+    if login.unreadable is not None:
+        raise LoginUnreadable(login.unreadable)
+    return _login_digest(login.credentials) if login.credentials is not None else None
 
 
 def _login_digest(creds: core.ClaudeCredentials) -> str:
@@ -1794,21 +1803,23 @@ def _login_digest(creds: core.ClaudeCredentials) -> str:
 
 
 def sign_in_landed(account: ClaudeAccount, *, since: str | None = None) -> ClaudeIdentity | None:
-    """Who the directory is now signed in as, once Claude Code has written both files.
+    """Who the directory is now signed in as, once Claude Code has stored its login.
 
     ``since`` is :func:`login_fingerprint` as the window opened, for a re-auth:
     the login lands only once the stored one is a different login (a refreshed
     or new token), not the expired or rejected one the window was opened over.
-    Read afresh, as :func:`login_fingerprint` is, and once: the fingerprint is the
-    read the sign-in check just took.
+    Read afresh, as :func:`login_fingerprint` is, and once. A store that would not
+    say (a Keychain locked mid-window) is no landing: the window keeps waiting.
     """
-    if not core.signed_in(account, fresh=True):
+    identity = core.identity(account)
+    if identity is None:
         return None
-    if since is not None:
-        creds = core.credentials(account)
-        if (_login_digest(creds) if creds is not None else None) == since:
-            return None
-    return core.identity(account)
+    creds = core.stored_login(account, fresh=True).credentials
+    if creds is None:  # none stored, or the Keychain would not say
+        return None
+    if since is not None and _login_digest(creds) == since:
+        return None
+    return identity
 
 
 def complete_sign_in(account: ClaudeAccount) -> ClaudeAccountStatus:
@@ -1818,11 +1829,24 @@ def complete_sign_in(account: ClaudeAccount) -> ClaudeAccountStatus:
 
 
 def abandon_sign_in(account: ClaudeAccount) -> bool:
-    """A sign-in that never landed leaves no slot behind. Returns whether one was discarded."""
-    if not account.managed or core.signed_in(account):
+    """A sign-in that never landed leaves no slot behind. Returns whether one was discarded.
+
+    Asked afresh: a login Claude Code stored after the last look (the window's poll a
+    second ago) is the slot's, and a slot deleted from under it leaves its Keychain item
+    behind for whichever slot takes the number next.
+    """
+    if not account.managed or core.signed_in(account, fresh=True):
         return False
     core.discard_account(account)
     return True
+
+
+def settle_sign_in(account: ClaudeAccount) -> ClaudeAccountStatus | bool:
+    """A fresh slot's sign-in, cancelled: kept and wired when its login landed after all
+    (:func:`complete_sign_in`'s status), else discarded (:func:`abandon_sign_in`'s answer)."""
+    if sign_in_landed(account) is not None:
+        return complete_sign_in(account)
+    return abandon_sign_in(account)
 
 
 # --- removing -------------------------------------------------------------------------------

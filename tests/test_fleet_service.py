@@ -8024,6 +8024,36 @@ def test_a_restart_makes_a_gone_tree_again_on_the_branch_its_row_recorded(
     assert f"made it again on its branch {branch}" in " ".join(receipt.notes), receipt.notes
 
 
+@pytest.mark.parametrize("where", ["the main checkout", "another tree"])
+def test_a_restart_refused_for_a_branch_out_elsewhere_says_how_to_free_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path, where: str
+) -> None:
+    """Review of #259, round 16: a restart refused because its gone tree's branch is out in
+    another tree said "remove that tree first" — of the main checkout too, which cannot be
+    removed, and where checking an ended agent's branch out to try its work is common.
+    There it says to switch that checkout to another branch."""
+    coder = fleet_service.spawn(project, "coder", label="coder-x").agent
+    _commit(coder.cwd, "feature.txt")
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=coder.cwd)
+    fleet_service.stop(project, "coder-x", force=True)
+    shutil.rmtree(coder.cwd)
+    _git("worktree", "prune", cwd=project.root)
+    if where == "the main checkout":
+        holder = project.root
+        _git("checkout", "-q", branch, cwd=project.root)
+    else:
+        holder = tmp_path / "elsewhere"
+        _git("worktree", "add", "-q", str(holder), branch, cwd=project.root)
+
+    with pytest.raises(FleetError) as refused:
+        fleet_service.restart(project, "coder-x")
+
+    said = str(refused.value)
+    assert f"{branch} is checked out in {holder.resolve()} now" in said, said
+    way = "switch that checkout to another branch" if holder == project.root else "remove that tree"
+    assert said.endswith(f"carry on there, or {way} first"), said
+
+
 @pytest.mark.parametrize("merge", ["fast-forward", "squash"])
 def test_reap_deletes_a_kept_fleet_branch_once_the_default_branch_has_its_work(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path, merge: str

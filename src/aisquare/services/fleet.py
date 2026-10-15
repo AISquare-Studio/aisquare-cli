@@ -1332,9 +1332,15 @@ def _branch_of_a_gone_tree(root: Path, own: Path, branch: str | None) -> str:
         None,
     )
     if holder is not None:
+        # The main checkout cannot be removed — trying an ended agent's work there is common.
+        way = (
+            "switch that checkout to another branch"
+            if holder == root.resolve()
+            else "remove that tree"
+        )
         raise FleetError(
             f"its worktree {own} is gone, and its branch {branch} is checked out in {holder} "
-            "now — carry on there, or remove that tree first"
+            f"now — carry on there, or {way} first"
         )
     return branch
 

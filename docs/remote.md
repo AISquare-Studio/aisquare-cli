@@ -359,7 +359,9 @@ is checked against the agent **as it is now**: if the prompt has already gone,
 or the screen now shows another call's prompt, the card says "No longer needs
 you" and nothing is typed. An answered card leaves
 the feed at once, on every phone and before any notification goes out, and is
-back a second later if the prompt is still there. Anything else (one of
+back a second later if the prompt is still there. So does one whose answer went in
+and whose Enter did not: the reply says the answer waits at the agent's prompt,
+and Enter on the key pad sends it. Anything else (one of
 Claude Code's own dialogs, a form an MCP server asks you to fill in, a question of
 several answers) is answered from the agent's key pad. The board keeps the words
 of only the first thing a turn asks for. A form an MCP server asks for while its

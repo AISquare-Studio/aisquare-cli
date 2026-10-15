@@ -6615,6 +6615,41 @@ def test_an_answer_whose_keys_timed_out_leaves_the_feed_as_an_answered_one(
         assert watcher.needs_lookup(card["id"]) is not None
 
 
+@pytest.mark.parametrize("timed_out", [False, True], ids=["refused", "timed out"])
+def test_an_answer_in_words_whose_enter_did_not_go_says_it_waits_and_leaves_the_feed(
+    live: Live, monkeypatch: pytest.MonkeyPatch, timed_out: bool
+) -> None:
+    """Review of #259, round 12, 1/9: the text went in and its Enter was refused, and the
+    answer was a 503 "tmux could not type it", audited ``failed``, its card live. Answered
+    again, the text went in a second time beside the first, and the next Enter sent both.
+    It says the answer waits at the prompt (or that its Enter may still arrive), its line
+    says so, and the card leaves the feed, as ``send-keys`` does (round 11, 4/13)."""
+    monkeypatch.setattr(remote_needs, "NEEDS_RESCAN_AFTER_ANSWER", 30.0)
+    live.runtime.set_allow_write(True)
+    card = live.card("permission")
+    if timed_out:
+        live.tmux.timing_out = True  # send_keys alone: the text goes in
+    else:
+        live.tmux.fail = True
+    body = {"id": card["id"], "text": "use the staging remote", "enter": True}
+    response = live.client.post(live.url("needs/answer"), json=body)
+    assert (response.status_code, response.json()["error"]) == (503, "fleet_unavailable")
+    assert live.tmux.typed == [("text", "%7", "use the staging remote")]
+    said = response.json()["message"]
+    assert said.startswith("coder-1: typed it at its prompt, but "), said
+    if timed_out:
+        assert "it may still arrive, and send it" in said, said
+    else:
+        assert said == (
+            "coder-1: typed it at its prompt, but tmux could not press Enter (no server running "
+            "on /tmp/tmux-1000/asq) — press Enter on the pad to send it"
+        )
+    verdict = "delivered=maybe" if timed_out else "delivered=unsent"
+    assert live.audit()[-1].endswith(f"text=22ch enter=True {verdict}")
+    assert live.app.kit.lane_state["needs"].needs_lookup(card["id"]) is None
+    assert card["id"] not in [item["id"] for item in live.feed()]
+
+
 def test_the_needs_routes_write_their_audit_lines_off_the_event_loop(
     live: Live, monkeypatch: pytest.MonkeyPatch
 ) -> None:

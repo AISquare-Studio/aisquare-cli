@@ -4004,7 +4004,11 @@ def _needs_answer_now(
     could not show is a 503 ``fleet_unavailable``, and the card stays. A tmux that fails
     mid-answer is a 503 whose ``audit`` says it was tried, as part of it may have reached
     the pane; one that timed out may still type all of it (``fleet.PaneWrite``), so its card
-    leaves the feed as an answered one does, and its line says ``delivered=maybe``.
+    leaves the feed as an answered one does, and its line says ``delivered=maybe``. So does
+    one whose answer went in and whose Enter did not, which says what waits at the prompt
+    (``fleet.pasted_unsent``), as ``send-keys`` does: it was "tmux could not type it", the
+    card live, and a second tap typed the answer again beside the first, the next Enter
+    sending both (review of #259, round 12, 1/9).
 
     The card leaves ``watcher``'s feed as soon as the keys are typed, here on the write
     thread (:meth:`RemoteNeedsWatcher.needs_answered`). It left once the audit line was written,
@@ -4055,6 +4059,14 @@ def _needs_answer_now(
             current = [one.needs_item_json() for one in shown]
             raise RequestError(409, "stale", gone, current=current)
         wrote = _needs_send(snap.status, keys, text, enter)
+        if wrote.typed != "yes" and wrote.what == "Enter":
+            # The answer is at the prompt, unsent or its Enter on its way: never typed again.
+            watcher.needs_answered(item.id)
+            unsent = fleet_service.pasted_unsent(
+                wrote, label, press="press Enter on the pad", put="typed"
+            )
+            said, verdict = f"{label}: {unsent.how}", f"delivered={unsent.typed}"
+            raise RequestError(503, "fleet_unavailable", said, audit=f"{summary} {verdict}")
         if wrote.typed == "maybe":
             # Unanswered, not refused: a wedged server may still type it once it recovers, and
             # a card left live meanwhile typed its digit again (review of #259, round 8, 2/9).

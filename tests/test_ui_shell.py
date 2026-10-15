@@ -2588,7 +2588,7 @@ def test_r_refreshes_from_the_sidebar_but_is_forwarded_from_a_pane(
 
 
 def test_r_refreshes_the_fleet_and_neither_r_nor_a_runs_the_doctor(
-    tmp_path: Path, script: Script
+    tmp_path: Path, script: Script, project_capture: None
 ) -> None:
     """`r` is "refresh now" — the fleet. The doctor runs at start, when its page opens,
     after a fix and from its Re-run button: seconds of probing a key press must not cost.
@@ -3870,7 +3870,7 @@ def test_restart_from_the_agent_view_selects_the_new_row_in_the_shell(
 
 
 def test_the_sidebar_hides_captured_directories_until_a_shows_them(
-    tmp_path: Path, script: Script
+    tmp_path: Path, script: Script, project_capture: None
 ) -> None:
     """#139: every directory a hooked session ran in used to be a card. Now only the
     projects added on purpose are; `a` shows the captured ones too, marked."""
@@ -3902,6 +3902,39 @@ def test_the_sidebar_hides_captured_directories_until_a_shows_them(
     assert "captured" in title
     assert after == ["prj_a"], "a hides them again"
     assert "captured directories" in keys, "the key is on the ? screen (it has no footer label)"
+
+
+def test_with_capture_off_no_captured_directory_is_listed_whatever_was_saved(
+    tmp_path: Path, script: Script
+) -> None:
+    """``[projects] capture`` off, the default since 0.8.1: the rows captured before stay
+    in the store, and the shell lists none of them — not even with ``a``'s toggle saved
+    on, which is how ~5 of them came back on a machine that had pressed it once. ``a`` is
+    no key then, and the ? screen does not offer it."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    with store_session() as store:
+        store.ensure_project(ProjectInfo(id="prj_scratch", root=tmp_path / "scratch"))  # 0.8.0
+        store.set_ui_state("fleet.show_captured", "1")
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], str]:
+        app = fleet_app(pilot)
+        await settle(app)
+        listed = [card.project.id for card in app.query(ProjectCard)]
+        app.sidebar.focus()
+        await pilot.press("a")
+        await settle(app)
+        after_a = [card.project.id for card in app.query(ProjectCard)]
+        await pilot.press("question_mark")
+        await settle(app)
+        return listed, after_a, shown(app.screen.query_one(Static))
+
+    listed, after_a, keys = drive(go)
+    assert listed == ["prj_a"], "the saved toggle lists nothing once capture is off"
+    assert after_a == ["prj_a"], "and `a` shows nothing"
+    assert "captured directories" not in keys
+    with store_session() as store:
+        assert store.ui_state("fleet.show_captured") == "1", "kept, for capture turned on again"
+        assert [p.id for p in store.captured_projects()] == ["prj_scratch"], "nothing deleted"
 
 
 def test_the_shell_reopens_what_was_open_when_its_row_is_still_there(
@@ -3944,7 +3977,7 @@ def test_the_shell_reopens_what_was_open_when_its_row_is_still_there(
 
 
 def test_the_shell_remembers_the_captured_toggle_and_reopens_a_page(
-    tmp_path: Path, script: Script
+    tmp_path: Path, script: Script, project_capture: None
 ) -> None:
     """Review of #169: what the shell remembers beyond a row came back untested —
     the captured directories shown with `a`, and every page under ⚙ Settings."""
@@ -4257,7 +4290,7 @@ def test_a_card_released_over_an_agents_pane_copies_nothing_and_ctrl_c_still_int
 
 
 def test_a_mark_on_a_card_that_leaves_the_list_goes_with_it(
-    tmp_path: Path, script: Script, isolated_home: Path
+    tmp_path: Path, script: Script, isolated_home: Path, project_capture: None
 ) -> None:
     """Final review of #203, F5. A mark's highlight goes with its card, and the mark
     stayed: a project forgotten from a shell refused the next drag of the selection

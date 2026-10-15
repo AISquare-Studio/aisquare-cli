@@ -249,10 +249,11 @@ class HelpScreen(ModalScreen[None]):
     ]
     BOARD_HEADING: ClassVar[str] = "Board (a project's Board tab, and aisquare board -w)"
 
-    def __init__(self, escape_key: str, *, at_board: bool = False) -> None:
+    def __init__(self, escape_key: str, *, at_board: bool = False, capturing: bool = False) -> None:
         super().__init__()
         self.escape_key = escape_key
         self.at_board = at_board
+        self.capturing = capturing
 
     def compose(self) -> ComposeResult:
         text = Text()
@@ -277,7 +278,12 @@ class HelpScreen(ModalScreen[None]):
             ("t", "themes (applied live, autosaved)"),
             ("R", "remote control — the fleet on your phone: link, QR, password, devices"),
             ("r", "refresh now"),
-            ("a", "show or hide the captured directories (never added)"),
+            # Only while `[projects] capture` is on: off, nothing is captured to show.
+            *(
+                [("a", "show or hide the captured directories (never added)")]
+                if self.capturing
+                else []
+            ),
             ("+  w", "onboard a project · back to the Welcome page"),
             ("F1", "command palette"),
             ("q", "quit — from the sidebar; inside a pane every key goes to the agent"),
@@ -696,6 +702,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         once the screen is gone."""
         self.show_captured = False
         """Whether the sidebar also lists the directories sessions merely ran in (#139)."""
+        self.capturing = False
+        """``[projects] capture``, read at each refresh. Off, the default, the captured rows
+        are never listed, whatever ``show_captured`` says, and ``a`` is no key."""
         self._undo: list[project_groups.UndoEntry] = []
         """The layout gestures of this session, newest last; ``u`` reverts the last (#140)."""
 
@@ -721,6 +730,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         restore_theme(self)
         self._theme_restored = True
         self.show_captured = _ui_state(SHOW_CAPTURED_KEY) == "1"
+        self.capturing = project_service.capture_on()
         self.refresh_data()
         self.set_interval(self.refresh_seconds, self.refresh_data)
         # The status line's headroom is the usage cache's, on its own slow clock: never
@@ -822,6 +832,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return focused is None or not any(
                 isinstance(node, TerminalPane) for node in (focused, *focused.ancestors)
             )
+        if action == "toggle_captured" and not self.capturing:
+            return False  # nothing is captured, so there is nothing to show (#139)
         if action not in self.SIDEBAR_ACTIONS:
             return True
         focused = self.focused
@@ -908,7 +920,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     # --- help / refresh ---------------------------------------------------------------
 
     def action_help(self) -> None:
-        self.push_screen(HelpScreen(self.escape_key, at_board=self._focus_on_the_board()))
+        self.push_screen(
+            HelpScreen(
+                self.escape_key, at_board=self._focus_on_the_board(), capturing=self.capturing
+            )
+        )
 
     def _focus_on_the_board(self) -> bool:
         """Whether the focus is on a project's Board tab — its table, or the tab row on it."""
@@ -923,6 +939,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """The fleet, now. Not the doctor: it runs at start, when its page opens, after a fix
         and from its Re-run button — seconds of git/tmux/claude probing per run."""
         self.refresh_data()
+
+    def _listing_captured(self) -> bool:
+        """Whether the sidebar lists the captured directories: ``a`` showed them, and capture
+        is on. A ``show_captured`` saved while it was on lists nothing once it is off."""
+        return self.show_captured and self.capturing
 
     def action_toggle_captured(self) -> None:
         """Show, or hide again, the captured directories the sidebar leaves out (#139).
@@ -950,9 +971,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         (:class:`_WorkerThreads`), and this one ends on the UI thread before any quit.
         """
         sidebar = self.sidebar
+        self.capturing = project_service.capture_on()
         try:
             with store_session() as store:
-                projects = store.list_projects(all=self.show_captured)
+                projects = store.list_projects(all=self._listing_captured())
                 groups = store.project_groups()
         except Exception as exc:  # the store is briefly unavailable — keep what is shown
             self.store_error = f"{type(exc).__name__}: {exc}"
@@ -1431,7 +1453,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self._layout(lambda s: project_groups.step_group(s, event.ident, event.delta), "move")
         else:
             # One step is one row ON SCREEN: the captured rows count only while `a` shows them.
-            shown = self.show_captured
+            shown = self._listing_captured()
             self._layout(
                 lambda s: project_groups.step(s, event.ident, event.delta, all=shown), "move"
             )

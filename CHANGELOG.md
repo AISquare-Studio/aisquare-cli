@@ -45,20 +45,29 @@ adapter.**
   fleet agent from its launch record in `~/.aisquare/launch-seals/`, never from
   its row: `fleet spawn` writes it (binary, arguments, permission, role, agent,
   directory, account, and the tmux socket and pane of its window) and the
-  agent's own hook adds its session (transcript, thread, home). `fleet tell`,
-  `fleet stop`, `fleet shutdown` and the manager's nudge type into and kill only
-  the pane the record places, by the record's agent's rules, and `shutdown`
-  takes down the sessions the records name. A row rewritten in the store is told
-  nothing and stopped where its record places it, the board saying what was
-  rewritten. Agents spawned before this version have none: their restart or
-  switch is refused before anything is stopped, naming the way out (stop the
-  agent and spawn it again), `tell` files its message as a board note, and
-  `stop` and `shutdown` kill its window in its project's fleet session with no
-  exit command typed; a scoped `shutdown` leaves such a project's session to
-  `--all`. A project whose directory in the store is not the one the agent was
-  spawned in is refused too. The reason is a board note too, once per agent and
-  reason, so an unattended hand-over says why it did not happen. A spawn whose
-  record cannot be written starts no agent, of either kind.
+  agent's own hook adds its session (transcript, thread, home, and when this
+  launch's session started, which `fleet tell` asks before typing into a resumed
+  Claude Code agent). One resolver places every agent from its record: `fleet
+  tell`, a spawn's prompt, `fleet stop`, `restart`'s check of whether it runs,
+  the listings, `reap`, `fleet shutdown`, `rename`, `attach` and the manager's
+  nudge type into, ask about and kill only the pane and the session (by tmux's
+  own id) the record holds, by the record's agent's rules, never a row's pane,
+  socket or agent or the project's codename; a test enumerates every tmux call
+  and fails on one that does not go through it. A spawn joins only a session a
+  record of its project names, else makes its own (`asq-<codename>-2` when that
+  name is taken), and `shutdown` takes down the sessions its live agents'
+  records name. A row rewritten in the store is told nothing and stopped where
+  its record places it, the board saying what was rewritten. Agents spawned
+  before this version have none: `fleet ls` shows them lost, saying why, their
+  restart or switch is refused before anything is stopped, naming the way out
+  (stop the agent and spawn it again), `tell` files its message as a board note,
+  and `stop` and `shutdown` kill its window with no exit command typed only
+  where tmux lists it in a session a record of its project names; elsewhere they
+  refuse, and `shutdown --forget` ends its row on your word (one spawned before
+  this boot is ended as lost). A project whose directory in the store is not the
+  one the agent was spawned in is refused too. The reason is a board note too,
+  once per agent and reason, so an unattended hand-over says why it did not
+  happen. A spawn whose record cannot be written starts no agent, of either kind.
 - `fleet.roles.<role>.permission` is new and unset; an existing
   `permission_mode` (or Codex `sandbox` / `approval_policy` / `approve_for_me`)
   means what it did.
@@ -114,10 +123,12 @@ adapter.**
   `launch-seals/`, which the sandbox can only read, written by its spawner and
   its own hook, and nothing else from the store; `tell`, `stop`, `shutdown` and
   the manager's nudge type into and kill only the pane that record places, by
-  its agent's rules, and `shutdown` only the sessions it names; a failed turn's
+  its agent's rules, and `shutdown` only the sessions it names, by tmux's id,
+  all through one resolver a test holds every tmux call to; a failed turn's
   limit is read from the record's transcript; a native id goes on Codex's
   command line only as a UUID (an agent spawned before this version, with no
-  record, is still stopped by its row's pane in its fleet session). Its
+  record, is stopped only where tmux lists its window in a session a record of
+  its project names). Its
   `aisquare` calls
   succeed on the first, sandboxed attempt instead of each needing an approval,
   and a reviewer's verdict reaches the board while its worktree stays read-only.

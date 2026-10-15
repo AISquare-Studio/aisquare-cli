@@ -357,7 +357,11 @@ it once the agent sits at its prompt, past the folder-trust dialog, so a fresh
 agent is typed into before its first prompt (a compaction's `SessionStart` comes
 mid-turn and changes nothing). Until it has started, the message is a board
 note: the folder-trust dialog fires no hook and is as quiet as a prompt, and an
-Enter there picks its default, *No, exit* (measured on Claude Code 2.1.300). An
+Enter there picks its default, *No, exit* (measured on Claude Code 2.1.300).
+Started is what the agent's own hook wrote in this launch's record, never the
+board session's last-seen time: a resumed replacement keeps its predecessor's
+session, which a `team prune` may end after the launch, and that stamp is the
+prune's. An
 agent whose start no hook can say (the board off, `-- --continue`) is typed into
 when it reads *waiting*, as before, unless a dialog of its own is on its screen:
 then the message is the board note, and with the board off `fleet tell` refuses.
@@ -473,13 +477,23 @@ nothing is stopped or killed: a socket is asked without tmux. Without
 leaving `PATH`. `aisquare uninstall` names it for a row it counts as running
 that no tmux here can reach.
 
-What it kills is the fleet's own `asq-<codename>` sessions, never the server:
-`tmux kill-server` would take down every session on that socket, and the fleet's
-claim is only ever to its own (a hand-made session, or one a failed `rename`
-left under an old name, is not the fleet's to destroy — and `[fleet]
-tmux_socket` may point anywhere). A server with nothing left on it exits by
-itself, so the next `asq` or `fleet spawn` starts a fresh one on whichever
-account that shell carries.
+What it kills is the fleet's own sessions, never the server: `tmux kill-server`
+would take down every session on that socket, and the fleet's claim is only ever
+to its own (a hand-made session is not the fleet's to destroy — and `[fleet]
+tmux_socket` may point anywhere). A project's sessions are the ones its live
+agents' launch records name, by tmux's own id for them (`$3`), never by the
+project's codename in the store, which an agent's sandbox can write; the dead
+windows of its agents that ended within a day go too, where their records place
+them, taking a session only they held with them. `--all` also sweeps every
+`asq-` session tmux lists. A server with nothing left on it exits by itself, so
+the next `asq` or `fleet spawn` starts a fresh one on whichever account that
+shell carries.
+
+An agent spawned before this version has no launch record. `shutdown` kills its
+window, with no exit command typed, where tmux lists it in a session a record of
+its project names; ends it as lost when it was spawned before this boot; and
+otherwise leaves it live and says so: end it in its own window, and `--forget`
+ends its row on your word.
 
 Board notes and tasks are kept, but the ended rows' **claims are released**: a
 task left `doing` by a session that no longer exists is not untouched, it is
@@ -529,9 +543,12 @@ aisquare fleet attach --project amber-otter
 
 Replaces this terminal with `tmux attach` on the project's fleet session — the
 full-fidelity escape hatch. Under `--json` it prints the command it would run
-instead of running it. The session is found on the server the project's live
-agents are on, at the socket their spawns recorded (`tmux -S`), the line the
-Manager tab prints, so it works from a shell under another `TMUX_TMPDIR`.
+instead of running it. The session is the one the project's live agents' launch
+records name, the manager's first, by tmux's own id for it, on the server their
+spawns recorded (`tmux -S`), the line the Manager tab prints, so it works from a
+shell under another `TMUX_TMPDIR` and after a rename tmux was not told of. A
+project whose agents were all spawned before this version has no record to name
+its session; the refusal prints the `tmux attach` command for it.
 
 **Scope and exit codes.** `--all` and `--project` name different scopes and are
 refused together rather than one silently winning — a usage error, exit **2**,
@@ -862,11 +879,13 @@ agent's own hook adds its session (transcript, thread, home), and a replay and `
 tell`'s queue read that record and nothing else. What `tell`, `stop` (restart, switch,
 the hand-over, `shutdown`) and the manager's nudge type into or kill is the pane the
 record places, by the record's agent's rules, and `shutdown` takes down the sessions
-the records name; a failed turn's limit is read from the record's transcript. A row
+the records name; a failed turn's limit is read from the record's transcript. One
+resolver (`fleet.resolve_place`) answers every such question, and
+`tests/test_fleet_placement.py` fails on a tmux call that does not go through it. A row
 rewritten to name another pane is told nothing and stopped where its record places it;
-a row without one has its window killed by `stop` with nothing typed, and its replay,
-like a project whose directory in the store is not the record's, is refused with the
-reason. So a
+a row without one has its window killed by `stop` with nothing typed, only in a session
+a record of its project names, and its replay, like a project whose directory in the
+store is not the record's, is refused with the reason. So a
 Codex agent's board calls succeed on their first, sandboxed attempt, a reviewer's
 verdict included, while its worktree stays read-only
 ([the sandbox and the store](coding-agents.md#the-sandbox-and-the-aisquare-store)).
@@ -1098,11 +1117,14 @@ roots that are gone from disk and worktrees of a repository that is itself
 registered, showing the plan and asking first. The navigator only loads what is
 registered, so this is also how a slow start is cured (#83).
 
-**tmux.** Session `asq-<codename>`, always targeted exactly (`=asq-amber-otter`)
-so `asq-ruby-fox` never prefix-matches an `asq-ruby-foxhound`. Window name =
-agent label; panes are addressed by `%id`, never by name, so renames are
-harmless. A row stores the pane id and *derives* the session name from the
-current codename — a rename never strands an agent.
+**tmux.** Session `asq-<codename>`, made by the project's first spawn and
+joined by every later one by tmux's own id for it (`$3`), which each agent's
+launch record holds; a session found under that name that no record of the
+project names is not joined (a swap of two projects' codenames in the store
+would put an agent into the other's), and the spawn makes `asq-<codename>-2`
+instead. Window name = agent label; panes are addressed by `%id`, sessions by
+`$id`, never by name, so renames are harmless: a rename tmux was not told of
+strands nothing.
 
 **Agent labels.** `manager` — always, one per project; a second is refused.
 Everything else matches `^[a-z][a-z0-9-]{1,23}$`: 2–24 characters, lowercase

@@ -278,7 +278,7 @@ def headroom_dot(
     account needs a login (signed out, its token expired or refused) — ``every_needs_login``,
     which the shell counts against its frame: something to do, not "not read". Grey, never
     the skull, when nothing could be READ otherwise: ``empty`` with no ``percent_left`` is
-    offline, a Keychain login or no usable account — not a fleet at 0 %, and not red because
+    offline, a locked Keychain or no usable account — not a fleet at 0 %, and not red because
     a spare beside them is signed out (review of #261, N2).
     """
     if headroom is not None and headroom.usable == 0 and every_needs_login:

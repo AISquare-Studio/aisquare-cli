@@ -315,7 +315,7 @@ class HelpScreen(ModalScreen[None]):
         text.append("💀 none left  ")
         dot, colour = HEADROOM_DOT["unknown"]
         text.append(dot, style=colour)
-        text.append(" usage could not be read (offline, Keychain-only, nothing usable)\n")
+        text.append(" usage could not be read (offline, a locked Keychain, nothing usable)\n")
         text.append("     ")
         text.append("●", style=RED)
         text.append(" and ⚠ — accounts that need a login (signed out, token expired or refused);\n")
@@ -1973,6 +1973,7 @@ def _writing_workers() -> dict[str, str]:
         explainability.SHIP_WORKER: "Explainability's ship",
         accounts.SIGN_OUT_WORKER: "an AISquare sign-out",
         accounts.COMPLETE_WORKER: "a Claude sign-in",
+        accounts.ABANDON_WORKER: "a Claude sign-in's discard",
         accounts.REMOVE_WORKER: "an account's removal",
         accounts.ARRANGE_WORKER: "an account change",
         accounts.RENAME_WORKER: "an account's rename",
@@ -2005,6 +2006,8 @@ def _waited_reads() -> dict[str, str]:
         doctor.ROUTE_WORKER: "how aisquare was installed",
         accounts.USAGE_WORKER: "the accounts' usage",
         accounts.CREDITS_WORKER: "the workspaces' credits",
+        accounts.LOGIN_OPEN_WORKER: "a Claude log-in's stored login",
+        accounts.LOGIN_POLL_WORKER: "a Claude sign-in's check",
         agent.LABELS_WORKER: "an agent's account names",
         board.LABELS_WORKER: "a board's account names",
         explainability.STATUS_WORKER: "Explainability's status",

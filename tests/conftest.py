@@ -188,6 +188,10 @@ AMBIENT_ENV_VARS = (
     # round).
     "AISQUARE_PLAIN_CLAUDE_CONFIG_DIR",
     "AISQUARE_PLAIN_CLAUDE_CODE_TMPDIR",
+    # Claude Code's override of the directory its macOS Keychain item is keyed on
+    # (`core.claude_accounts.keychain_service`), which it hands to the teammates it
+    # spawns: a suite run from one of those would name every account's item after it.
+    "CLAUDE_SECURESTORAGE_CONFIG_DIR",
     "AISQUARE_TEAM",
     "AISQUARE_ROLE",
     # Read off the ambient env by `services/mcp_server.py` to attribute remote
@@ -552,6 +556,23 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(core, "_now", lambda: CLAUDE_ACCOUNTS_NOW)
     monkeypatch.setattr(service, "_now", lambda: CLAUDE_ACCOUNTS_NOW)
     return home
+
+
+@pytest.fixture(autouse=True)
+def no_real_keychain(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Never read the macOS Keychain of the machine the suite runs on.
+
+    The credentials are read from the files the tests write, on every platform; a test of
+    the Keychain turns it on itself, with a fake ``security`` (tests/test_claude_keychain.py).
+    Run on a Mac, the plain account's item is the developer's own login.
+    """
+    from aisquare.core import claude_accounts as core
+
+    monkeypatch.setattr(core, "keychain_platform", lambda: False)
+    monkeypatch.setattr(core, "KEYCHAIN_TOOL", os.devnull)
+    core.forget_keychain_reads()
+    yield
+    core.forget_keychain_reads()
 
 
 @pytest.fixture(autouse=True)

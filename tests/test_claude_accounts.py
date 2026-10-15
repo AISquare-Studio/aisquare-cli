@@ -376,17 +376,13 @@ def test_credentials_are_read_redacted_and_judged_for_expiry(fake_home: Path) ->
     assert core.subscription_label(core.credentials(account)) == "team"
 
 
-def test_signed_in_needs_both_files_on_linux_and_only_the_identity_on_a_keychain_platform(
-    fake_home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_signed_in_needs_both_the_identity_and_the_credentials(fake_home: Path) -> None:
+    """On macOS too, where the credentials are the Keychain item's (test_claude_keychain.py)."""
     account = core.create_account()
     assert not core.signed_in(account)
     _sign_in(account, "two@example.com", credentials=False)
     assert core.identity(account) is not None
     assert not core.signed_in(account)  # /logout deletes the credentials; the identity lingers
-    monkeypatch.setattr(core, "keychain_platform", lambda: True)
-    assert core.signed_in(account)  # macOS: the file never exists, the identity is the answer
-    monkeypatch.setattr(core, "keychain_platform", lambda: False)
     _sign_in(account, "two@example.com")
     assert core.signed_in(account)
 

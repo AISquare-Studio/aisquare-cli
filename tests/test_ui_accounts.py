@@ -395,16 +395,16 @@ def test_log_in_is_offered_for_no_login_a_missing_an_expired_or_a_rejected_token
     fine = ClaudeUsage(available=True, session_percent=1, week_percent=1)
     rejected = ClaudeUsage(available=False, reason="the token was rejected", needs_login=True)
     offline = ClaudeUsage(available=False, reason="could not reach the usage endpoint")
-    keychain = ClaudeUsage(available=False, reason="credentials are in the macOS Keychain")
+    locked = ClaudeUsage(available=False, reason=core.KEYCHAIN_LOCKED)
     assert needs_login(_status(3, None), None)  # never signed in
     assert needs_login(_status(2, "two@example.com", signed_in=False), fine)  # token missing
     assert needs_login(_status(2, "two@example.com", token_state="expired"), None)
     assert needs_login(_status(2, "two@example.com"), rejected)  # 401
     # Negatives: a working login, one whose reading is owed, an endpoint that is down, and
-    # a macOS Keychain login the CLI cannot read: none is a log-in to do.
-    for reading in (fine, None, offline, keychain):
+    # a login in a locked macOS Keychain: none is a log-in to do.
+    for reading in (fine, None, offline, locked):
         assert not needs_login(_status(2, "two@example.com"), reading), reading
-    assert not needs_login(_status(1, "me@example.com", token_state="missing"), keychain)
+    assert not needs_login(_status(1, "me@example.com", token_state="unreadable"), locked)
 
 
 def test_aisquare_status_text_covers_every_source() -> None:
@@ -744,14 +744,12 @@ def test_usage_that_cannot_be_read_says_why_on_the_row(no_network: dict[str, Any
     assert "usage: the stored token has expired" in drive(go)
 
 
-def test_a_keychain_backed_account_is_asked_and_its_row_says_why(
+def test_an_account_in_a_locked_keychain_is_asked_and_its_row_says_why(
     no_network: dict[str, Any],
 ) -> None:
-    """macOS: signed in, no credentials file — the service's reason must reach the row."""
-    no_network["usage"] = ClaudeUsage(
-        available=False, reason="credentials are in the macOS Keychain, which the CLI does not read"
-    )
-    overview = _overview(_status(1, "me@example.com", token_state="missing"))
+    """macOS: signed in, its Keychain locked — the service's reason must reach the row."""
+    no_network["usage"] = ClaudeUsage(available=False, reason=core.KEYCHAIN_LOCKED)
+    overview = _overview(_status(1, "me@example.com", token_state="unreadable"))
 
     async def go(pilot: Pilot[None]) -> tuple[list[int], str]:
         app = fleet_app(pilot)
@@ -760,8 +758,8 @@ def test_a_keychain_backed_account_is_asked_and_its_row_says_why(
         return no_network["usage_calls"], line(view, 1)
 
     calls, first = drive(go, overview=overview)
-    assert calls == [1]  # asked, although its token state is "missing"
-    assert "usage: credentials are in the macOS Keychain" in first
+    assert calls == [1]  # asked, although its token could not be read
+    assert "usage: the login Keychain is locked — unlock it" in first
     assert "reading usage…" not in first
 
 
@@ -1371,6 +1369,44 @@ def test_add_opens_a_watched_window_and_records_the_account_when_the_login_lands
     assert said.startswith("✓ account 2: two@example.com")
 
 
+def test_a_log_in_reads_the_stored_login_and_polls_off_the_ui_thread(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_real_tmux: list[tuple[str, ...]]
+) -> None:
+    """On macOS the stored login is a Keychain read, a subprocess of up to five seconds:
+    the fingerprint a *Log in* opens over and every poll of its window are read in thread
+    workers, never on the UI thread, and the window opens once the fingerprint is read."""
+    seen = _script_claude_sign_in(monkeypatch, tmp_path, lands=True)
+    threads: dict[str, list[bool]] = {"fingerprint": [], "landed": []}
+    landed = accounts_service.sign_in_landed
+
+    def fingerprint(acct: ClaudeAccount) -> str:
+        threads["fingerprint"].append(threading.current_thread() is threading.main_thread())
+        return "stale-digest"
+
+    def poll(acct: ClaudeAccount, *, since: str | None = None) -> ClaudeIdentity | None:
+        threads["landed"].append(threading.current_thread() is threading.main_thread())
+        return landed(acct, since=since)
+
+    monkeypatch.setattr(accounts_service, "login_fingerprint", fingerprint)
+    monkeypatch.setattr(accounts_service, "sign_in_landed", poll)
+
+    async def go(pilot: Pilot[None]) -> tuple[str | None, bool]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        view.begin_claude_sign_in(2)
+        await settle(app)
+        assert view.login is not None
+        since = view.login.since
+        view._poll_login()
+        await settle(app)
+        return since, view.login is None
+
+    since, closed = drive(go)
+    assert since == "stale-digest" and seen["since"] == "stale-digest"
+    assert threads == {"fingerprint": [False], "landed": [False]}
+    assert closed and seen["completed"] == [2]
+
+
 def test_a_window_that_closes_without_a_login_discards_the_fresh_slot(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1440,6 +1476,57 @@ def test_cancel_stops_a_sign_in_and_a_sign_in_of_an_existing_slot_is_never_disca
     assert begun == 2  # the row's button signs THAT slot in
     assert seen["abandoned"] == []  # an existing slot is kept, login or not
     assert said.startswith("sign-in cancelled — cancelled; nothing changed")
+
+
+def test_cancel_after_the_login_landed_keeps_the_new_slot_and_wires_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review of #263, M1: Claude Code stored the login after the window's last poll, and
+    the user pressed Cancel. The slot is settled as the quit settles it: kept, and wired."""
+    seen = _script_claude_sign_in(monkeypatch, tmp_path, lands=False)
+    landed = {"now": False}
+    monkeypatch.setattr(
+        accounts_service,
+        "sign_in_landed",
+        lambda acct, since=None: ClaudeIdentity(email="two@example.com") if landed["now"] else None,
+    )
+
+    async def go(pilot: Pilot[None]) -> str:
+        view = await open_accounts(pilot)
+        await pilot.click("#claude-add")
+        await settle(fleet_app(pilot))
+        assert view.login is not None and view.login.fresh
+        landed["now"] = True  # after the last poll, before the next
+        await pilot.click("#login-cancel")
+        await settle(fleet_app(pilot))
+        return notice(view)
+
+    said = drive(go)
+    assert seen["completed"] == [2] and seen["abandoned"] == []
+    assert said == "✓ account 2: the login had landed — kept as two@example.com"
+
+
+def test_a_log_in_over_a_login_the_keychain_will_not_show_opens_no_window(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review of #263, n4: the window could not tell the login stored from a new one, and
+    would close on the old one at its first poll as "signed in"."""
+    seen = _script_claude_sign_in(monkeypatch, tmp_path, lands=True)
+
+    def unreadable(acct: ClaudeAccount) -> str | None:
+        raise accounts_service.LoginUnreadable(core.KEYCHAIN_LOCKED)
+
+    monkeypatch.setattr(accounts_service, "login_fingerprint", unreadable)
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, str]:
+        view = await open_accounts(pilot)
+        view.begin_claude_sign_in(2)
+        await settle(fleet_app(pilot))
+        return view.login is None and not view.query_one("#login-box").display, notice(view)
+
+    closed, said = drive(go)
+    assert closed and seen["opened"] == [] and seen["landed_polls"] == 0
+    assert said == f"✗ account 2: no log-in opened — {core.KEYCHAIN_LOCKED}"
 
 
 def test_quitting_mid_claude_sign_in_closes_the_window_and_discards_the_fresh_slot(

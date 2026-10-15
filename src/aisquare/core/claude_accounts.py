@@ -43,7 +43,8 @@ second copy of facts the filesystem already holds, and the two would drift the
 first time someone moved a directory by hand.
 
 **Read-only towards Claude Code's own files.** ``.claude.json`` (email,
-organisation, ids) and ``.credentials.json`` (the OAuth tokens) are read to
+organisation, ids) and ``.credentials.json`` (the OAuth tokens; on macOS the
+login Keychain item Claude Code keeps them in, :func:`read_keychain`) are read to
 describe an account; nothing here writes either. Claude Code refreshes its own
 tokens — a token found expired is reported as such, never refreshed, because a
 second writer racing the agent for that file is how a login gets corrupted. The
@@ -64,6 +65,8 @@ import os
 import re
 import shutil
 import sys
+import threading
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, tzinfo
@@ -420,14 +423,19 @@ class ClaudeCredentials:
         return (now or _now()) >= self.expires_at
 
 
-def credentials(account: ClaudeAccount) -> ClaudeCredentials | None:
-    """The stored OAuth credentials, or ``None`` when the file is absent or not ours to read.
+def credentials(account: ClaudeAccount, *, fresh: bool = False) -> ClaudeCredentials | None:
+    """The stored OAuth credentials, or ``None`` when none are stored or they cannot be read.
 
-    On Linux Claude Code writes ``.credentials.json`` (0600) into the config dir;
-    on macOS it uses the Keychain and the file does not exist — see
-    :func:`keychain_platform`.
+    :func:`stored_login`'s credentials, for a reader that needs no reason when there are
+    none. ``fresh`` reads the Keychain again rather than take a read from the last
+    :data:`KEYCHAIN_MEMO_SECONDS`.
     """
-    data = _read_json(credentials_path(account))
+    return stored_login(account, fresh=fresh).credentials
+
+
+def credentials_in(data: Mapping[str, Any] | None) -> ClaudeCredentials | None:
+    """The OAuth credentials a parsed credentials document holds (``.credentials.json``, or
+    the Keychain item, which holds the same JSON), or ``None`` when it holds no usable token."""
     if data is None:
         return None
     oauth = data.get("claudeAiOauth")
@@ -456,9 +464,304 @@ def credentials(account: ClaudeAccount) -> ClaudeCredentials | None:
     )
 
 
+@dataclass(frozen=True)
+class StoredLogin:
+    """What the store Claude Code keeps an account's login in answered.
+
+    ``credentials`` is ``None`` both when no login is stored and when the store would not
+    say; ``unreadable`` tells the two apart, and says why in a line the Accounts page and
+    ``accounts usage`` show as they stand: a locked or refusing Keychain is not a login to
+    do again, so it is not a missing token. It never carries the token.
+    """
+
+    credentials: ClaudeCredentials | None
+    unreadable: str | None = None
+
+
+def stored_login(account: ClaudeAccount, *, fresh: bool = False) -> StoredLogin:
+    """The ONE credential source: the account's login where Claude Code keeps it.
+
+    On macOS that is the login Keychain, in the item :func:`keychain_service` names for
+    the account (:func:`read_keychain`); a Keychain with no such item is not the end of
+    it, since some setups write ``.credentials.json`` there too (Claude Code falls back
+    to the file when it cannot write the Keychain), so the file is read then
+    (:func:`plaintext_credentials_path`), as on Linux, where Claude Code writes it (0600)
+    into the config dir and nothing else. ``fresh`` is :func:`credentials`'.
+    """
+    if keychain_platform():
+        read = read_keychain(keychain_service(account), keychain_account(), fresh=fresh)
+        if read.found or read.unreadable is not None:
+            return StoredLogin(read.credentials, read.unreadable)
+        return StoredLogin(credentials_in(_read_json(plaintext_credentials_path(account))))
+    return StoredLogin(credentials_in(_read_json(credentials_path(account))))
+
+
+def plaintext_credentials_path(
+    account: ClaudeAccount, environ: Mapping[str, str] | None = None
+) -> Path:
+    """Where a Claude Code on macOS writes the file it falls back to without a Keychain item.
+
+    Its ``wx()``: the directory ``CLAUDE_SECURESTORAGE_CONFIG_DIR`` names when set (an empty
+    one is ``~/.claude``), NFC, as the item is keyed on it (:func:`keychain_service`); else
+    the account's config dir, :func:`credentials_path`. On Linux aisquare reads the config
+    dir's file whatever that variable says, as it always has.
+    """
+    import unicodedata
+
+    source = os.environ if environ is None else environ
+    directory = source.get(SECURE_STORAGE_VAR)
+    if directory is None:
+        return credentials_path(account)
+    base = Path(unicodedata.normalize("NFC", directory)) if directory else home_config_dir()
+    return base / ".credentials.json"
+
+
 def keychain_platform() -> bool:
-    """Whether this platform keeps Claude Code's credentials out of the config dir (macOS)."""
+    """Whether this platform keeps Claude Code's credentials in the Keychain (macOS)."""
     return sys.platform == "darwin"
+
+
+# --- the macOS Keychain -------------------------------------------------------------------
+#
+# Claude Code on macOS keeps each config dir's login in one generic-password item of the
+# login Keychain, as the same JSON `.credentials.json` holds elsewhere. Read from its
+# bundle (2.1.300, chunks 0jv9mjsf and v2e77mt7; the same since 2.1.296):
+#
+#   service  "Claude Code" + OAUTH_FILE_SUFFIX ("" in a release build) + "-credentials"
+#            + ("" when CLAUDE_SECURESTORAGE_CONFIG_DIR is set but empty, or is unset and
+#               CLAUDE_CONFIG_DIR is unset or empty;
+#               else "-" + sha256(dir.normalize("NFC")).hex[:8], where dir is
+#               CLAUDE_SECURESTORAGE_CONFIG_DIR when set, else the RAW CLAUDE_CONFIG_DIR:
+#               not resolved, no trailing slash stripped, no ~ expanded)
+#   account  $USER, else the login name; "claude-code-user" when that is not
+#            /^[a-zA-Z0-9._-]+$/
+#
+# and it writes the item through `security add-generic-password -U -a … -s … -X <hex>`,
+# so `/usr/bin/security` is the item's own creator, and reading through it asks nothing.
+
+KEYCHAIN_TOOL = "/usr/bin/security"
+"""The program that reads the item: never a shell, always this path, never one on PATH."""
+KEYCHAIN_TIMEOUT_SECONDS = 5.0
+"""How long a read may take: a locked Keychain in a desktop session asks to be unlocked."""
+KEYCHAIN_MEMO_SECONDS = 10.0
+"""How long a read that answered (the item, or none) stands for the next readers in this
+process: the Accounts page reads each slot every two seconds, and one usage round read each
+token three times over (the cache's key, the request, the reading's record). A read the
+Keychain refused (locked, an unlock cancelled, no answer) stands until someone asks again
+(:func:`forget_keychain_reads`): asked by itself, a locked Keychain in a desktop session
+puts its unlock dialog up for every read, which every tick of asq's would repeat."""
+SECURE_STORAGE_VAR = "CLAUDE_SECURESTORAGE_CONFIG_DIR"
+"""Claude Code's override of the directory its secure storage is keyed on: it wins."""
+KEYCHAIN_ACCOUNT_FALLBACK = "claude-code-user"
+KEYCHAIN_LOCKED = "the login Keychain is locked — unlock it (or log in to the Mac) and refresh"
+KEYCHAIN_REFUSED = (
+    "macOS refused aisquare access to the Claude Code item — allow it in Keychain Access"
+)
+"""Said for errSecAuthFailed (51): the Deny button on the item's access prompt."""
+
+_KEYCHAIN_SERVICE = "Claude Code"
+_KEYCHAIN_OAUTH_SUFFIX = ""
+"""``OAUTH_FILE_SUFFIX``: empty in a release build (``-local-oauth``, ``-custom-oauth`` else)."""
+_KEYCHAIN_CREDENTIALS_SUFFIX = "-credentials"
+_KEYCHAIN_ACCOUNT_NAME = re.compile(r"[a-zA-Z0-9._-]+")
+# `security` exits with the low byte of the OSStatus it got.
+_ITEM_NOT_FOUND = 44  # errSecItemNotFound (-25300)
+_NO_KEYCHAIN = frozenset({37, 50})  # errSecNoDefaultKeychain, errSecNoSuchKeychain
+_LOCKED = frozenset(
+    {
+        36,  # errSecInteractionNotAllowed (-25308): locked, and no dialog to unlock it with
+        128,  # errSecUserCanceled (-128): the unlock dialog cancelled (/usr/bin/security made
+        # the item, so reading it asks nothing else)
+    }
+)
+_REFUSED = frozenset({51})  # errSecAuthFailed (-25293): Deny on the item's access prompt
+_HEX = re.compile(r"(?:[0-9a-fA-F]{2})+")
+
+
+def keychain_account(environ: Mapping[str, str] | None = None) -> str:
+    """The item's account, as Claude Code names it: ``$USER``, else this user's login name."""
+    source = os.environ if environ is None else environ
+    name = source.get("USER") or _login_name()
+    if name is None or not _KEYCHAIN_ACCOUNT_NAME.fullmatch(name):
+        return KEYCHAIN_ACCOUNT_FALLBACK
+    return name
+
+
+def _login_name() -> str | None:
+    """This user's login name as ``os.userInfo().username`` reads it (the effective user's
+    passwd entry), or ``None`` without one. Never asked on Windows, which has no passwd."""
+    if sys.platform == "win32":
+        return None
+    import pwd
+
+    try:
+        return pwd.getpwuid(os.geteuid()).pw_name
+    except (KeyError, OSError):
+        return None
+
+
+def keychain_service(account: ClaudeAccount, environ: Mapping[str, str] | None = None) -> str:
+    """The Keychain item a Claude Code launched on ``account`` keeps its login in.
+
+    Hashed from the ``CLAUDE_CONFIG_DIR`` a launch on the account is given, byte for byte:
+    a managed slot's is :func:`launch_env`'s; the plain claude's is this shell's own as
+    :func:`plain_environment` reads it, unexpanded, which is none for ``~/.claude`` (the
+    item without a suffix). ``CLAUDE_SECURESTORAGE_CONFIG_DIR``, which every launch from
+    this environment inherits, wins over both, as it does in Claude Code.
+    """
+    source = os.environ if environ is None else environ
+    directory = source.get(SECURE_STORAGE_VAR)
+    if directory is None:
+        if account.managed:
+            directory = launch_env(account)[CONFIG_DIR_VAR]
+        else:
+            directory = plain_environment(source).get(CONFIG_DIR_VAR, "")
+    suffix = f"-{_js_sha256(directory)[:8]}" if directory else ""
+    return f"{_KEYCHAIN_SERVICE}{_KEYCHAIN_OAUTH_SUFFIX}{_KEYCHAIN_CREDENTIALS_SUFFIX}{suffix}"
+
+
+def _js_sha256(text: str) -> str:
+    """``createHash("sha256").update(text.normalize("NFC")).digest("hex")`` for ``text`` read
+    from the environment: Node decodes it as UTF-8, each byte it cannot as U+FFFD, where
+    Python keeps that byte as a lone surrogate (which no macOS path can hold anyway)."""
+    import hashlib
+    import unicodedata
+
+    try:
+        text = text.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+    except UnicodeEncodeError:
+        text = text.encode("utf-8", "replace").decode("utf-8")
+    return hashlib.sha256(unicodedata.normalize("NFC", text).encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class KeychainRead:
+    """What one read of a Keychain item answered: never the item's text, which also holds
+    the refresh token and every MCP server's, only the credentials lifted out of it."""
+
+    found: bool
+    """The item exists (it may still hold no usable login: a ``/logout`` keeps the item)."""
+    credentials: ClaudeCredentials | None = None
+    unreadable: str | None = None
+    """Why the Keychain would not say: locked, refused, timed out (:func:`read_keychain`)."""
+
+
+_KEYCHAIN_READS: dict[tuple[str, str], tuple[float, KeychainRead]] = {}
+"""The last read of each (service, account), with when it was taken (``time.monotonic``)."""
+_KEYCHAIN_READS_LOCK = threading.Lock()
+_KEYCHAIN_GENERATION = [0]
+"""Bumped by each :func:`forget_keychain_reads`: a read that began before one is not kept,
+or a refusal from before an unlock would stand after the refresh that asked again."""
+
+
+def _monotonic() -> float:
+    return time.monotonic()
+
+
+def forget_keychain_reads() -> None:
+    """Drop every remembered Keychain read, so the next asks the Keychain: a forced refresh,
+    after someone unlocked the Keychain or allowed aisquare in at the row's word."""
+    with _KEYCHAIN_READS_LOCK:
+        _KEYCHAIN_READS.clear()
+        _KEYCHAIN_GENERATION[0] += 1
+
+
+def read_keychain(service: str, account: str, *, fresh: bool = False) -> KeychainRead:
+    """The item ``service``/``account`` of the login Keychain, read through ``security``.
+
+    ``security find-generic-password -a <account> -w -s <service>``, run as an argument
+    list (never a shell) under :data:`KEYCHAIN_TIMEOUT_SECONDS`, prints the item's text,
+    the same JSON as ``.credentials.json``. Nothing it prints is logged, kept or put into
+    a reason or an exception; the credentials lifted out of it are kept in this process
+    for :data:`KEYCHAIN_MEMO_SECONDS` (a refusal: until :func:`forget_keychain_reads`)
+    unless ``fresh``. A read is a subprocess, which callers run off the UI thread.
+
+    No item (exit 44), or no login Keychain at all (37, 50), is ``found=False``; a locked
+    Keychain, one that refused, a timeout and anything else is ``unreadable``, in words.
+    """
+    key = (service, account)
+    with _KEYCHAIN_READS_LOCK:
+        remembered = None if fresh else _KEYCHAIN_READS.get(key)
+        generation = _KEYCHAIN_GENERATION[0]
+    if remembered is not None:
+        taken, read = remembered
+        if read.unreadable is not None or 0 <= _monotonic() - taken < KEYCHAIN_MEMO_SECONDS:
+            return read
+    read = _ask_keychain(service, account)
+    with _KEYCHAIN_READS_LOCK:
+        if _KEYCHAIN_GENERATION[0] == generation:
+            _KEYCHAIN_READS[key] = (_monotonic(), read)
+    return read
+
+
+def _ask_keychain(service: str, account: str) -> KeychainRead:
+    import subprocess
+
+    try:
+        done = subprocess.run(
+            [KEYCHAIN_TOOL, "find-generic-password", "-a", account, "-w", "-s", service],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=KEYCHAIN_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:  # carries what it printed so far: dropped here
+        return KeychainRead(
+            found=False,
+            unreadable=f"could not read the Keychain (no answer in {KEYCHAIN_TIMEOUT_SECONDS:g} s)",
+        )
+    except OSError as exc:
+        why = exc.strerror or "not run"
+        return KeychainRead(
+            found=False, unreadable=f"could not read the Keychain ({KEYCHAIN_TOOL}: {why})"
+        )
+    if done.returncode == 0:
+        text = done.stdout.decode("utf-8", "replace").strip()
+        if not text:
+            return KeychainRead(found=False)
+        return KeychainRead(found=True, credentials=credentials_in(_item_json(text)))
+    if done.returncode == _ITEM_NOT_FOUND or done.returncode in _NO_KEYCHAIN:
+        return KeychainRead(found=False)
+    return KeychainRead(found=False, unreadable=_keychain_problem(done.returncode, done.stderr))
+
+
+def _item_json(text: str) -> dict[str, Any] | None:
+    """The item's JSON: as ``security -w`` printed it, or from the hex it prints instead
+    for a password with a byte it will not print as it stands."""
+    for candidate in (text, _unhex(text)):
+        if candidate is None:
+            continue
+        try:
+            loaded: Any = json.loads(candidate)
+        except ValueError:
+            continue
+        return loaded if isinstance(loaded, dict) else None
+    return None
+
+
+def _unhex(text: str) -> str | None:
+    if not _HEX.fullmatch(text):
+        return None
+    try:
+        return bytes.fromhex(text).decode("utf-8")
+    except ValueError:
+        return None
+
+
+def _keychain_problem(code: int, stderr: bytes) -> str:
+    """Why ``security`` exited ``code``, in the row's words. By the exit code first, which
+    is the OSStatus's low byte, then by what it said, as Claude Code classifies it."""
+    said = stderr.decode("utf-8", "replace").lower()
+    if code in _LOCKED or any(
+        words in said
+        for words in ("interaction is not allowed", "interactionnotallowed", "canceled")
+    ):
+        return KEYCHAIN_LOCKED
+    if code in _REFUSED or any(words in said for words in ("name or passphrase", "authfailed")):
+        return KEYCHAIN_REFUSED
+    if "locked" in said or "unlock" in said:
+        return KEYCHAIN_LOCKED
+    return f"could not read the Keychain (security exited {code})"
 
 
 def token_state(creds: ClaudeCredentials | None, now: datetime | None = None) -> str:
@@ -467,17 +770,20 @@ def token_state(creds: ClaudeCredentials | None, now: datetime | None = None) ->
     return "expired" if creds.expired(now) else "ok"
 
 
-def signed_in(account: ClaudeAccount) -> bool:
+def signed_in(account: ClaudeAccount, *, fresh: bool = False) -> bool:
     """A login is recorded AND its credentials are where this platform keeps them.
 
-    Identity alone is not enough on Linux: ``/logout`` deletes the credentials
-    file, and a stale ``oauthAccount`` left behind would read as a working
-    login that Claude Code itself would refuse. On macOS the credentials are in
-    the Keychain, which is not ours to read, so the identity is the answer.
+    Identity alone is not enough: ``/logout`` deletes the credentials (the file on Linux,
+    the item's login on macOS), and a stale ``oauthAccount`` left behind would read as a
+    working login that Claude Code itself would refuse. A Keychain that would not say
+    (:attr:`StoredLogin.unreadable`: locked, refused) is not a logout, so the recorded
+    identity answers then, and the row says why its usage cannot be read rather than
+    offer a log-in that would not help. ``fresh`` is :func:`credentials`'.
     """
     if identity(account) is None:
         return False
-    return keychain_platform() or credentials(account) is not None
+    login = stored_login(account, fresh=fresh)
+    return login.credentials is not None or login.unreadable is not None
 
 
 def subscription_label(creds: ClaudeCredentials | None) -> str | None:

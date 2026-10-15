@@ -252,8 +252,8 @@ all of them, and the fleet cleans up the worktrees it made.**
   - The claude dot is the room **left** across your usable accounts. Each
     account is `100 − max(session % used, week % used)`, and the dot shows the
     average: green over 50 %, yellow 25–50 %, orange-red 5–25 %, red under 5 %,
-    💀 none left. Grey means usage could not be read: offline, a login only in
-    the macOS Keychain, or no usable account.
+    💀 none left. Grey means usage could not be read: offline, a locked macOS
+    Keychain, or no usable account.
   - `N×` counts the usable accounts. ⚠ says an enabled account needs a login:
     signed out, or its token expired or was refused. These are the Accounts
     page's *Log in* rows. The dot is red when no account is usable for want of
@@ -507,6 +507,26 @@ all of them, and the fleet cleans up the worktrees it made.**
   strings in `uninstall --json` and `upgrade --json` change the same way.
 - `b` on the board brings the tasks column back however often it is pressed.
   Hiding the column took the keyboard with it, so the next `b` went nowhere.
+- On macOS, usage works for every Claude account. Claude Code keeps each
+  account's login in the login Keychain, which aisquare did not read, so every
+  row said only that the credentials were there. aisquare now reads
+  that item for the plain claude and every managed slot, through
+  `/usr/bin/security`, as Claude Code names it, and falls back to
+  `.credentials.json` when there is none. `aisquare accounts usage`, `accounts
+  list --usage`, the Accounts page, the status line's dot and headroom picks
+  all read it, through the five-minute cache. A missing login offers Log in,
+  and an expired one says so, as on Linux. A locked Keychain, or one that
+  refuses aisquare, says so on the row with what to do. It is not asked again by
+  itself, so its unlock dialog does not come back every tick: opening the
+  Accounts page, **↻ Refresh usage**, a Log in or an `aisquare` command asks it
+  again. Such an account's `token_state` in `accounts list --json` is the new
+  value `unreadable`. The token is never printed or logged.
+  - Known limit: a Log in on the plain claude (slot 1) from asq's Accounts page
+    may not close by itself when your shell's `CLAUDE_CONFIG_DIR` is written
+    with `~`, relative or with a trailing slash. The window's Claude Code then
+    stores its login under another Keychain item than the one aisquare reads.
+    An absolute path with no trailing slash, or no `CLAUDE_CONFIG_DIR`, is not
+    affected.
 
 ### Security
 - **One choke point.** Every request and every socket handshake passes the

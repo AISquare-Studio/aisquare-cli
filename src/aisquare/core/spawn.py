@@ -61,6 +61,9 @@ otherwise inherit a live identity:
 Excluded, nothing stripped — these are not model processes at all, and
 narrowing their environment would be change without a reason:
   * ``core/brain.py::gbrain_version`` — ``gbrain --version``, a string.
+  * ``core/claude_accounts.py::_ask_keychain`` — ``/usr/bin/security
+    find-generic-password`` on macOS: the Claude Code login an account's
+    Keychain item holds, read for its usage. No model.
   * ``core/agents.py::hook_binary_version`` — ``<hook's aisquare> --version``,
     a string: doctor asking another install of this CLI what version it is,
     so hooks that name a stale binary stop grading as healthy (#84).
@@ -236,6 +239,11 @@ SEAMS: dict[str, Seam] = {
         strips_identity=True,
     ),
     "aisquare/core/brain.py::gbrain_version": Seam(EXCLUDED, "`gbrain --version`, a string"),
+    "aisquare/core/claude_accounts.py::_ask_keychain": Seam(
+        EXCLUDED,
+        "`/usr/bin/security find-generic-password` on macOS — reads the login Claude Code keeps "
+        "in an account's Keychain item, for its usage; a string, no model",
+    ),
     "aisquare/core/agents.py::hook_binary_version": Seam(
         EXCLUDED,
         "`<the aisquare a hook names> --version`, a string — doctor asking another "

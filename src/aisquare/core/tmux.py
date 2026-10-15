@@ -397,8 +397,8 @@ def _ask_boot_id() -> str | None:
             return said
     if sys.platform != "darwin":
         return None
-    said = _sysctl("kern.bootsessionuuid")
-    return said or None
+    asked = _sysctl("kern.bootsessionuuid")
+    return asked or None
 
 
 def _sysctl(name: str) -> str | None:

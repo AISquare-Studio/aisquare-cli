@@ -1531,11 +1531,22 @@ def _left_from_before_capture(
         then = "" if parts else f"{listed}; "
         it = "it" if one else "them"
         if agents:
+            # With the project named: `fleet stop` alone acts on the active project, never
+            # on the directory this line names (review of #259, round 19).
+            # By its codename, else its id, as `ProjectBusyError` names it.
+            stop = (
+                install_route.command_line(
+                    ["aisquare", "fleet", "stop", "--project", kept[0].codename or kept[0].id]
+                )
+                + " <label>"
+                if one
+                else "aisquare fleet stop --project <name> <label>, for each"
+            )
             what = (
                 f"{'has a fleet agent' if one else 'have fleet agents'} still running, which "
                 f"{prune} keeps and aisquare project forget refuses: {names} — {then}stop "
-                f"{'its' if one else 'their'} agents first (aisquare fleet stop <label>), then "
-                f"drop {it} with {forget}"
+                f"{'its' if one else 'their'} agents first ({stop}), then drop {it} with "
+                f"{forget}"
             )
         else:
             what = (

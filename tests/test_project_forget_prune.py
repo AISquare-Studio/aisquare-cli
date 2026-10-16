@@ -1090,3 +1090,9 @@ def test_a_busy_nicknamed_projects_shutdown_is_never_another_projects(work_dir: 
 
     assert said.startswith("web has 1 live fleet agent(s)"), said  # the prose: its nickname
     assert fleet_service.resolve_project(ref).id == api.id != web.id
+    # The stop and the reap it names too: alone, each acted on the active project (round 19).
+    stop = said.split("stop them first (", 1)[1].split(" <label>)", 1)[0]
+    reap = said.split("or run ", 1)[1].split(" if they", 1)[0]
+    for command in (stop, reap):
+        argv = install_route.split_line(command)
+        assert argv[-2] == "--project" and fleet_service.resolve_project(argv[-1]).id == api.id

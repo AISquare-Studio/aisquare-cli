@@ -189,12 +189,16 @@ class ProjectBusyError(Exception):
         # `find_projects` matches last, so `--project web` for a project nicknamed "web"
         # shut down `/work/web`'s fleet when that was registered too (review of #259,
         # round 13). Quoted for this shell all the same (review of #257).
+        # The stop and the reap name it too: alone, each acts on the active project, not
+        # on the one `forget` was given (review of #259, round 19).
         scope = project.codename or project.id
         shutdown = install_route.command_line(["aisquare", "fleet", "shutdown", "--project", scope])
+        stop = install_route.command_line(["aisquare", "fleet", "stop", "--project", scope])
+        reap = install_route.command_line(["aisquare", "fleet", "reap", "--project", scope])
         super().__init__(
             f"{display_name(project)} has {len(agents)} live fleet agent(s): {labels} — "
-            "stop them first (aisquare fleet stop <label>), or run aisquare fleet reap if "
-            f"they are already gone; if their tmux server is gone too, {shutdown} records them"
+            f"stop them first ({stop} <label>), or run {reap} if they are already gone; if "
+            f"their tmux server is gone too, {shutdown} records them"
         )
         self.project = project
         self.agents = agents

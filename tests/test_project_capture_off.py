@@ -399,13 +399,50 @@ def test_doctor_names_the_captured_rows_with_a_live_agent_apart_from_what_forget
     assert "; 1 more holds saved context, which that prune keeps: notes — drop it with " in said
     assert (
         "; 2 more have fleet agents still running, which that prune keeps and aisquare project "
-        "forget refuses: both, busy — stop their agents first (aisquare fleet stop <label>), "
-        "then drop them with aisquare project forget <directory>, for each"
+        "forget refuses: both, busy — stop their agents first (aisquare fleet stop --project "
+        "<name> <label>, for each), then drop them with aisquare project forget <directory>, "
+        "for each"
     ) in said, said
     refused = runner.invoke(app, ["--json", "project", "forget", str(tmp_path / "busy")])
     assert json.loads(refused.stdout)["error"] == "project_busy", "the premise"
     dropped = runner.invoke(app, ["project", "forget", str(tmp_path / "notes")])
     assert dropped.exit_code == 0, dropped.output
+
+
+def test_doctors_stop_for_a_captured_rows_agent_names_that_project(
+    work_dir: Path, tmp_path: Path
+) -> None:
+    """Review of #259, round 19: the line told the user to run ``aisquare fleet stop <label>``,
+    which acts on the active project, never on the captured directory the line names. Run
+    from the main project, with its own ``coder-1``, it stopped that one, and the captured
+    row's agent ran on, so ``project forget`` still refused. The stop names the project."""
+    from datetime import UTC, datetime
+
+    from aisquare.core.ids import new_agent_id
+    from aisquare.services import fleet as fleet_service
+    from aisquare.services import install_route
+
+    (tmp_path / "busy").mkdir()
+    busy, main = team_project(tmp_path / "busy"), team_project(work_dir)
+    with store_session() as store:
+        store.ensure_project(busy)  # 0.8.0's capture
+        store.onboard_project(main)
+        for row in (busy, main):
+            store.upsert_fleet_agent(
+                FleetAgent(
+                    id=new_agent_id(), project_id=row.id, label="coder-1", role="coder",
+                    pane_id="%1", cwd=row.root, created_at=datetime.now(tz=UTC),
+                )
+            )  # fmt: skip
+
+    [check] = diagnostics._check_captured_projects()
+
+    said = " ".join(check.detail.split())
+    stop = said.split("stop its agents first (", 1)[1].split(" <label>)", 1)[0]
+    argv = install_route.split_line(stop)
+    assert argv[:4] == ["aisquare", "fleet", "stop", "--project"], said
+    assert fleet_service.resolve_project(argv[4]).id == busy.id, "the captured row's"
+    assert fleet_service.resolve_project(None).id == main.id, "the premise: not the active one"
 
 
 # --- the setting, read --------------------------------------------------------------------

@@ -2173,7 +2173,9 @@ class FakeTeam:
     def claim_task(self, ref: str, *, session_ref: str | None) -> Any:
         return SimpleNamespace(id=ref, model_dump=lambda mode: {"id": ref})
 
-    def finish_task(self, ref: str, *, note: str | None, session_ref: str | None) -> Any:
+    def finish_task(
+        self, ref: str, *, note: str | None, session_ref: str | None, cwd: Path | None = None
+    ) -> Any:
         self.finished.append((ref, note))
         return SimpleNamespace(id=ref, model_dump=lambda mode: {"id": ref})
 

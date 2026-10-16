@@ -215,7 +215,9 @@ class FakeTeam:
         self.calls.append(("claim", {"ref": ref, "session_ref": session_ref}))
         return SimpleNamespace(id=ref, model_dump=lambda mode: {"id": ref})
 
-    def finish_task(self, ref: str, *, note: str | None, session_ref: str | None) -> Any:
+    def finish_task(
+        self, ref: str, *, note: str | None, session_ref: str | None, cwd: Path | None = None
+    ) -> Any:
         self.calls.append(("done", {"ref": ref, "note": note, "session_ref": session_ref}))
         return SimpleNamespace(id=ref, model_dump=lambda mode: {"id": ref})
 

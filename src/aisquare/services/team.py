@@ -1389,11 +1389,12 @@ def _finish_task(
     note: str | None = None,
     session_ref: str | None = None,
     wakes: bool = True,
+    cwd: Path | None = None,
 ) -> tuple[TeamTask, _Board, str]:
     """Set the task's status with its event; the board, and the project whose manager the
-    write wakes (:func:`_nudge_target`). ``wakes=False``, for a status that wakes nobody
-    (``drop``): the board's, with no lookup, as :func:`add_note` does for its quiet kinds
-    (review of #259, round 25, 9/10)."""
+    write wakes (:func:`_nudge_target`), for a writer with no row the one whose root holds
+    ``cwd``. ``wakes=False``, for a status that wakes nobody (``drop``): the board's, with no
+    lookup, as :func:`add_note` does for its quiet kinds (review of #259, round 25, 9/10)."""
     _DELIVERY.set(None)
     with store_session() as store:
         session = _resolve_session(store, session_ref)
@@ -1416,17 +1417,23 @@ def _finish_task(
         )
         board = _board_of(store, updated.project_id)
         manager = (
-            _nudge_target(store, session.id if session else None, board.id) if wakes else board.id
+            _nudge_target(store, session.id if session else None, board.id, cwd)
+            if wakes
+            else board.id
         )
     _record_delivery(event, board)
     return updated, board, manager
 
 
-def finish_task(ref: str, *, note: str | None = None, session_ref: str | None = None) -> TeamTask:
-    """Mark a task done (``task done``)."""
+def finish_task(
+    ref: str, *, note: str | None = None, session_ref: str | None = None, cwd: Path | None = None
+) -> TeamTask:
+    """Mark a task done (``task done``). ``cwd`` is the writer's directory, which picks the
+    manager a writer with no row wakes (:func:`_nudge_target`): the phone's is the project's
+    root, as for its note, not the directory Remote runs in."""
     _require_enabled()
     task, board, manager = _finish_task(
-        ref, "done", "task_done", note=note, session_ref=session_ref
+        ref, "done", "task_done", note=note, session_ref=session_ref, cwd=cwd
     )
     distill_service.spawn_drain(root=board.root)
     _nudge_manager(manager, reason="task_done", board=board.id)

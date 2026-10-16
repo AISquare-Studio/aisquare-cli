@@ -5045,6 +5045,15 @@ def _case_phone_note_wakes(w: _Hubbed) -> str | None:
     return _woke(w, lambda: team_service.add_note("fyi", to_role="manager", cwd=w.fleet.root))
 
 
+def _case_phone_done_wakes(w: _Hubbed) -> str | None:
+    from aisquare.services.remote_server import live_writes
+
+    other, _ = _another_fleet_on_the_hub(w)
+    w.monkeypatch.chdir(other.root)  # Remote runs in the other project's folder
+    done = live_writes().handlers["task/done"]
+    return _woke(w, lambda: done({"ref": w.task.id, "project": w.fleet.id}))
+
+
 def _case_rowless_session_wakes(w: _Hubbed) -> str | None:
     # A session no row holds: the human's own claude, an MCP client, a manager by hand.
     _stranger(w.monkeypatch, "human")
@@ -5235,6 +5244,7 @@ _HUB_RULE_CASES: list[tuple[str, str, Any]] = [
     ("fleet", "the manager task reopen wakes", _case_reopen_wakes),
     ("fleet", "the manager a deferred Stop wakes", _case_deferred_wake),
     ("fleet", "the manager the phone's note wakes", _case_phone_note_wakes),
+    ("fleet", "the manager the phone's task done wakes", _case_phone_done_wakes),
     ("fleet", "the manager a session with no row wakes", _case_rowless_session_wakes),
 ]
 
@@ -5692,6 +5702,25 @@ def test_under_a_hub_each_fleet_project_pauses_and_resumes_alone(hubbed: _Hubbed
     assert report.paused_cleared == [fleet_service._name(hubbed.fleet)], report
     assert not fleet_service.is_paused(hubbed.fleet)
     assert fleet_service.is_paused(other), "the other project's manager still obeys its pause"
+
+
+def test_under_a_hub_the_phones_task_done_wakes_the_manager_of_the_project_it_names(
+    hubbed: _Hubbed,
+) -> None:
+    """Review of #259, round 26, 6/11: the phone's ``task done`` passed no directory, so of
+    the hub's two managers, the one it woke was the one whose root holds the directory
+    Remote runs in: started in the other project's folder, a done on this project's task
+    woke the other's manager. It writes in the project's root, as the phone's note does."""
+    from aisquare.services.remote_server import live_writes
+
+    other, _ = _another_fleet_on_the_hub(hubbed)
+    hubbed.monkeypatch.chdir(other.root)  # `asq`, and its Remote, started in the other's
+    hubbed.woken.clear()
+
+    live_writes().handlers["task/done"]({"ref": hubbed.task.id, "project": hubbed.fleet.id})
+
+    assert _task_now(hubbed.task.id).status == "done"
+    assert hubbed.woken == [hubbed.fleet.id]
 
 
 def test_under_a_hub_shutdown_all_keeps_the_pause_it_says_it_kept(hubbed: _Hubbed) -> None:

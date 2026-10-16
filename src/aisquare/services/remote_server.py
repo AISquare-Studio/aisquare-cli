@@ -3484,7 +3484,12 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
         with _remote_board_refusals(reach, ("ref", ref, "task"), ("as", author, "session")):
             session = _remote_author(author, reach)
             found = _remote_task(ref, reach, session=session, project=project)
-            task = team_service.finish_task(found.id, note=note, session_ref=session)
+            # In the project's root, as the note is written (`write_note`): of several managers
+            # on a board, the one a write with no row wakes is the one whose root holds it, and
+            # by Remote's own directory a done on B's task woke A's (review of #259, round 26,
+            # 6/11).
+            cwd = _resolve_project(project).root
+            task = team_service.finish_task(found.id, note=note, session_ref=session, cwd=cwd)
         return {"task": task.model_dump(mode="json")}, f"done {task.id} as={session or '-'}"
 
     def write_note(body: dict[str, Any]) -> tuple[dict[str, object], str]:

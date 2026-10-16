@@ -4911,6 +4911,13 @@ def _case_clear_keeps(w: _Hubbed) -> str | None:
     return _kept_by(w, w.coder_sid)
 
 
+def _case_clear_adopts(w: _Hubbed) -> str | None:
+    _clear(w.coder_sid, "sess-after-clear", w.fleet)
+    with store_session() as store:
+        row = store.fleet_agent_for_session("sess-after-clear")
+    return row.project_id if row is not None else None
+
+
 def _case_cycle_project(w: _Hubbed) -> str | None:
     with store_session() as store:
         named = team_service._cycle_project(store, w.hub, w.fleet.root, w.manager_sid, named=None)
@@ -4944,6 +4951,7 @@ _HUB_RULE_CASES: list[tuple[str, str, Any]] = [
     ("board", "the task fleet spawn --task gives", _case_spawn_task),
     ("board", "the claim a hand-over's SessionEnd keeps", _case_hand_over_keeps),
     ("board", "the claim a /clear's SessionEnd keeps", _case_clear_keeps),
+    ("fleet", "the row a /clear's next id is adopted onto", _case_clear_adopts),
     ("fleet", "the cycle's --project", _case_cycle_project),
     ("fleet", "a limited chip's fleet switch", _case_limited_chip),
     ("fleet", "the manager a usage limit wakes", _case_limit_nudge),
@@ -4997,6 +5005,60 @@ def test_under_a_hub_a_hand_over_or_a_clear_keeps_the_agents_claims(
         assert not [e for e in store.recent_events(hubbed.hub.id) if e.kind == "task_released"]
         ended = store.get_session(hubbed.coder_sid)
     assert ended is not None and ended.ended_at is not None, "the presence is retired"
+
+
+@pytest.mark.parametrize("bound_at", ["the start hook", "the next prompt"])
+def test_under_a_hub_a_clears_next_id_is_bound_to_the_row_and_told_its_task(
+    hubbed: _Hubbed, bound_at: str
+) -> None:
+    """Review of #259, round 24, 5/6: the start hook after a ``/clear``, and the prompt that
+    tries again when tmux did not answer it, bind the new id to the row through the
+    assignment, which asked for the row with the session's board and dropped a row of
+    another project. Under a hub that is every row: the row stayed bound to the ended id,
+    the claims parked on it, and every lookup by the new id missed, the usage-limit
+    hand-over's and the board chip's included. The row is adopted in any project, and the
+    ASSIGNED TO YOU block still names only a task of the session's board."""
+    task, _ = team_service.add_task("the hub's task", role="coder", session_ref=hubbed.manager_sid)
+    row = fleet_service.spawn(hubbed.fleet, "coder", task_id=task.id, worktree=False).agent
+    assert row.session_id is not None
+    _become(row, hubbed.tmux, hubbed.monkeypatch, pid=PANE_PID, role="coder")
+    team_service.hook_session_start(row.session_id, hubbed.fleet.root, "startup")
+    team_service.claim_task(task.id, session_ref=row.session_id)
+
+    team_service.hook_session_end(row.session_id, hubbed.fleet.root, reason="clear")
+    if bound_at == "the next prompt":
+        pid = hubbed.tmux.pids.pop(row.pane_id)  # tmux does not answer the start hook
+        started = team_service.hook_session_start("sess-next", hubbed.fleet.root, "clear")
+        assert "ASSIGNED TO YOU" not in started and _row(row.id).session_id == row.session_id
+        hubbed.tmux.pids[row.pane_id] = pid
+        briefed = team_service.hook_prompt_heartbeat("sess-next", hubbed.fleet.root)
+    else:
+        briefed = team_service.hook_session_start("sess-next", hubbed.fleet.root, "clear")
+
+    assert _row(row.id).session_id == "sess-next"
+    assert (_task_now(task.id).status, _task_now(task.id).claimed_by) == ("doing", "sess-next")
+    assert f"ASSIGNED TO YOU: {task.id} [doing]" in briefed
+    assert "You are the one working it" in briefed
+
+
+def test_under_a_hub_the_briefing_names_no_task_of_another_board(hubbed: _Hubbed) -> None:
+    """The other half of 5/6: the row is found in any project, its task only on the
+    session's board. A row spawned for a task of its own project's board, before the hub
+    was set, is still this session's row, and the briefing tells it of no task it cannot
+    see on its board."""
+    hubbed.monkeypatch.delenv("AISQUARE_TEAM_HUB")
+    stray, _ = team_service.add_task("the fleet project's own task", cwd=hubbed.fleet.root)
+    row = fleet_service.spawn(hubbed.fleet, "coder", task_id=stray.id, worktree=False).agent
+    hubbed.monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hubbed.hub.root))
+    assert row.session_id is not None and stray.project_id == hubbed.fleet.id
+    _become(row, hubbed.tmux, hubbed.monkeypatch, pid=PANE_PID, role="coder")
+
+    started = team_service.hook_session_start(row.session_id, hubbed.fleet.root, "startup")
+
+    assert "ASSIGNED TO YOU" not in started and stray.id not in started
+    with store_session() as store:
+        found = store.fleet_agent_for_session(row.session_id)
+    assert found is not None and found.id == row.id
 
 
 @pytest.mark.parametrize(

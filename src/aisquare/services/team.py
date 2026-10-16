@@ -2638,11 +2638,6 @@ def _hook_named_row(store: ContextStore) -> FleetAgent | None:
         return None
 
 
-def _of_project(agent: FleetAgent | None, project_id: str) -> FleetAgent | None:
-    """``agent`` when it is ``project_id``'s row, else ``None``."""
-    return agent if agent is not None and agent.project_id == project_id else None
-
-
 def _fleet_row(
     store: ContextStore,
     session_id: str,
@@ -2878,8 +2873,15 @@ def _late_assignment(store: ContextStore, session: TeamSession) -> Assignment | 
 def _resolve_assignment(
     store: ContextStore, session_id: str, project_id: str, named: FleetAgent | None
 ) -> Assignment | None:
-    """The body of :func:`_assignment`, free to raise; the rules are the section's."""
-    agent = _of_project(_fleet_row(store, session_id, named=named, allow_unbound=True), project_id)
+    """The body of :func:`_assignment`, free to raise; the rules are the section's.
+
+    The row is found, and adopted, in any project; only its task is asked of the board,
+    ``project_id`` (rule 4). With the row filtered by the board, a hub agent's ``/clear`` was
+    never adopted: the row stayed bound to the ended id, and every lookup by the new one
+    missed it, the usage-limit hand-over's and the board chip's included (review of #259,
+    round 24, 5/6).
+    """
+    agent = _fleet_row(store, session_id, named=named, allow_unbound=True)
     if agent is None:
         return None
     if agent.session_id != session_id and not _adopt(store, agent, session_id):
@@ -2889,9 +2891,7 @@ def _resolve_assignment(
         # two doors read the same row now; this one used to give up here and
         # the agent lost its ASSIGNED TO YOU block while `task next` still put
         # its task first (round 8 of #203). The same lookup, bound rows only.
-        agent = _of_project(
-            _fleet_row(store, session_id, named=named, allow_unbound=False), project_id
-        )
+        agent = _fleet_row(store, session_id, named=named, allow_unbound=False)
         if agent is None:
             return None
     if agent.task_id is None:
@@ -2904,6 +2904,8 @@ def _resolve_assignment(
         # task was closed by a path that did not know the row.
         store.retire_fleet_assignments(task.id)
         return None
+    if task.project_id != project_id:
+        return None  # another board's task: this session would be told of work it cannot see
     # ``claimed_by is None`` is NOT this session's: an untouched ``todo`` task
     # read as work in flight told the agent to carry on, and it never claimed
     # it — the pool handed it to somebody else (review of #116, round 3).

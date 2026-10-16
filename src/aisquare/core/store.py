@@ -1198,15 +1198,16 @@ def _read_list(fields: Sequence[str], reads: Mapping[str, str]) -> str:
     return ", ".join(f"{reads[field]} AS {field}" if field in reads else field for field in fields)
 
 
-#: :data:`_FLEET_AGENT_COLUMNS` as a row is read: a ``board`` it never recorded is its
-#: session's, as the v32 backfill gives it (:data:`_UNRECORDED_BOARD`).
-_FLEET_AGENT_READ = _read_list(
-    _FLEET_AGENT_FIELDS, {"board": f"COALESCE(board, {_UNRECORDED_BOARD})"}
-)
-#: :data:`_FLEET_AGENT_READ` for a store without ``team_session`` (doctor's damaged-store
+#: A row's ``board`` as it is read: one it never recorded is its session's, as the v32
+#: backfill gives it (:data:`_UNRECORDED_BOARD`).
+_FLEET_AGENT_BOARD = f"COALESCE(board, {_UNRECORDED_BOARD})"
+#: :data:`_FLEET_AGENT_BOARD` for a store without ``team_session`` (doctor's damaged-store
 #: case): no session to ask, so the project's, as the backfill gives it there.
+_FLEET_AGENT_BOARD_SESSIONLESS = "COALESCE(board, project_id)"
+#: :data:`_FLEET_AGENT_COLUMNS` as a row is read (:data:`_FLEET_AGENT_BOARD`).
+_FLEET_AGENT_READ = _read_list(_FLEET_AGENT_FIELDS, {"board": _FLEET_AGENT_BOARD})
 _FLEET_AGENT_READ_SESSIONLESS = _read_list(
-    _FLEET_AGENT_FIELDS, {"board": "COALESCE(board, project_id)"}
+    _FLEET_AGENT_FIELDS, {"board": _FLEET_AGENT_BOARD_SESSIONLESS}
 )
 _CLAUDE_ACCOUNT_COLUMNS = "slot, config_dir, alias, position, is_default, disabled, created_at"
 
@@ -1365,7 +1366,7 @@ class ContextStore(Protocol):
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
     def live_fleet_agents(self) -> list[FleetAgent]: ...
     def fleet_agents_ended_since(self, project_id: str, since: datetime) -> list[FleetAgent]: ...
-    def newest_fleet_agent(self, project_id: str) -> FleetAgent | None: ...
+    def fleet_agent_boards(self, project_id: str) -> list[str]: ...
     def fleet_agent_for_session(self, session_id: str) -> FleetAgent | None: ...
     def ui_state(self, key: str) -> str | None: ...
     def set_ui_state(self, key: str, value: str | None) -> None: ...
@@ -1770,9 +1771,9 @@ class SqliteStore:
         # read, the live-only ones doctor's own checks make included, fail with "no such
         # table: team_session" (review of #259, round 27, 5/7). Told by the names the open
         # read, not asked of ``sqlite_master`` again (round 28, 9/10).
-        self._fleet_agent_read = (
-            _FLEET_AGENT_READ if "team_session" in names else _FLEET_AGENT_READ_SESSIONLESS
-        )
+        sessions = "team_session" in names
+        self._fleet_agent_read = _FLEET_AGENT_READ if sessions else _FLEET_AGENT_READ_SESSIONLESS
+        self._fleet_agent_board = _FLEET_AGENT_BOARD if sessions else _FLEET_AGENT_BOARD_SESSIONLESS
 
     def add(self, entry: ContextEntry) -> ContextEntry:
         self._conn.execute(
@@ -3849,19 +3850,20 @@ class SqliteStore:
         ).fetchall()
         return [_row_to_fleet_agent(row) for row in rows]
 
-    def newest_fleet_agent(self, project_id: str) -> FleetAgent | None:
-        """The project's newest row, live or ended; ``None`` before its first spawn.
+    def fleet_agent_boards(self, project_id: str) -> list[str]:
+        """Every board one of the project's rows recorded, live or ended, sorted; ``[]``
+        before its first spawn.
 
-        One row through the ``fleet_agent_project`` index, for a question the newest answers
-        (the board a project with nothing live last recorded): every spawn, restart and
+        The boards a project's pause lives on, whichever of its rows are live when it is
+        asked (``services.fleet._pause_boards``). Distinct in SQL: every spawn, restart and
         switch adds a row that is never deleted, and :meth:`fleet_agents` builds them all.
         """
-        row = self._conn.execute(
-            f"SELECT {self._fleet_agent_read} FROM fleet_agent "
-            "WHERE project_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+        rows = self._conn.execute(
+            f"SELECT DISTINCT {self._fleet_agent_board} AS board FROM fleet_agent "
+            "WHERE project_id = ? ORDER BY board",
             (project_id,),
-        ).fetchone()
-        return _row_to_fleet_agent(row) if row is not None else None
+        ).fetchall()
+        return [row["board"] for row in rows]
 
     def fleet_agent_for_session(self, session_id: str) -> FleetAgent | None:
         """The live fleet row recorded against ``session_id``, if there is one, in whichever

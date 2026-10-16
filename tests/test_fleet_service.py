@@ -5207,12 +5207,16 @@ def _paused_on(w: _Hubbed, project: ProjectInfo | None = None) -> list[str]:
 
 
 def _case_pause(w: _Hubbed) -> str | None:
+    """The board the manager reads, if the pause is on it. It is also on the fleet's own
+    board, its checkout's, where a manager spawned without the hub reads
+    (``fleet._pause_homes``), and nowhere else."""
     fleet_service.pause(w.fleet)
-    (paused,) = _paused_on(w)
+    paused = _paused_on(w)
     assert fleet_service.is_paused(w.fleet)
     fleet_service.resume(w.fleet)
     assert _paused_on(w) == [] and not fleet_service.is_paused(w.fleet)
-    return paused
+    assert sorted(paused) == sorted([w.hub.id, w.fleet.id]), paused
+    return _row(w.manager.id).board if _row(w.manager.id).board in paused else None
 
 
 def _case_pause_without_the_hub(w: _Hubbed) -> str | None:
@@ -5960,6 +5964,50 @@ def test_under_a_hub_each_fleet_project_pauses_and_resumes_alone(hubbed: _Hubbed
     assert report.paused_cleared == [fleet_service._name(hubbed.fleet)], report
     assert not fleet_service.is_paused(hubbed.fleet)
     assert fleet_service.is_paused(other), "the other project's manager still obeys its pause"
+
+
+@pytest.mark.parametrize("hubless", [False, True], ids=["under the hub", "without the hub"])
+@pytest.mark.parametrize("clear", ["resume", "shutdown"])
+def test_a_pause_is_cleared_where_a_manager_that_has_stopped_read_it(
+    hubbed: _Hubbed, clear: str, hubless: bool
+) -> None:
+    """Review of #259, round 29, 1/8: a pause's boards were the boards the project's live
+    rows recorded. With a manager spawned under the hub and a coder from a plain shell, the
+    pause went on both boards. Once the manager stopped, ``fleet shutdown`` and ``fleet
+    resume`` asked only the coder's, the checkout's, and the hub's stayed on: the next
+    manager spawned under the hub came up staffing nothing. The pause is on every board the
+    project's rows recorded, whichever are live, and the caller's hub does not change that."""
+    coder = _spawned_without_the_hub(hubbed)
+    assert coder.board == hubbed.fleet.id
+    fleet_service.pause(hubbed.fleet)
+    assert sorted(_paused_on(hubbed)) == sorted([hubbed.hub.id, hubbed.fleet.id])
+    fleet_service.stop(hubbed.fleet, fleet_service.MANAGER_LABEL, force=True)
+    fleet_service.stop(hubbed.fleet, hubbed.coder.label, force=True)
+    if hubless:
+        _without_the_hub(hubbed)
+
+    if clear == "resume":
+        fleet_service.resume(hubbed.fleet)
+    else:
+        report = fleet_service.shutdown(hubbed.fleet, force=True)
+        assert report.paused_cleared == [fleet_service._name(hubbed.fleet)], report
+
+    assert _paused_on(hubbed) == [] and not fleet_service.is_paused(hubbed.fleet)
+
+
+def test_with_nothing_live_a_pause_goes_on_every_board_the_project_read(
+    hubbed: _Hubbed,
+) -> None:
+    """Review of #259, round 29, 1/8: with nothing live, ``fleet pause`` went to the newest
+    row's board, whatever its role: here a coder's, on the checkout's board, while only a
+    manager obeys the pause, and the next one spawned under the hub reads the hub's."""
+    coder = _spawned_without_the_hub(hubbed)
+    for label in (fleet_service.MANAGER_LABEL, hubbed.coder.label, coder.label):
+        fleet_service.stop(hubbed.fleet, label, force=True)
+
+    fleet_service.pause(hubbed.fleet)
+
+    assert sorted(_paused_on(hubbed)) == sorted([hubbed.hub.id, hubbed.fleet.id])
 
 
 def test_under_a_hub_the_phones_task_done_wakes_the_manager_of_the_project_it_names(
@@ -8981,23 +9029,23 @@ def test_the_pause_pass_reads_and_clears_every_signal_through_one_store(
     monkeypatch.setattr(core_store, "open_store", counting_open)
     report = fleet_service.ShutdownReport()
 
-    fleet_service._clear_pause([(project, []), (plain_project, [])], report)
+    fleet_service._clear_pause([project, plain_project], report)
 
     assert sorted(report.paused_cleared) == sorted([project.root.name, plain_project.root.name])
     assert opens == 1, f"two projects, one connection — not {opens}"
     assert not fleet_service.is_paused(project) and not fleet_service.is_paused(plain_project)
 
 
-def test_the_pause_builds_no_row_it_does_not_need(
+def test_the_pause_builds_no_row(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Review of #259, round 26, 10/11: the boards a pause goes to were found from every row
-    the project ever had, the ended ones too, even when the caller had the live rows in hand
-    (``fleet shutdown``'s pass over every visible project). Rows are never deleted. Only the
-    live rows are read, none when the caller gives them, and with nothing live the newest."""
+    the project ever had, the ended ones too (``fleet shutdown``'s pass over every visible
+    project). Rows are never deleted. Since round 29, 1/8, every board they recorded is
+    asked of the store distinct, and no row is built."""
     for _ in range(3):
         fleet_service.stop(project, _coder(project).label, force=True)
-    coder = _coder(project)
+    _coder(project)
     reads: list[bool] = []
     real = core_store.SqliteStore.fleet_agents
 
@@ -9010,14 +9058,12 @@ def test_the_pause_builds_no_row_it_does_not_need(
     fleet_service.pause(project)
     assert fleet_service.is_paused(project)
     fleet_service.resume(project)
-    assert reads == [True, True, True], "the live rows alone"
-    reads.clear()
+    assert not fleet_service.is_paused(project)
+    report = fleet_service.ShutdownReport()
+    fleet_service._clear_pause([project], report)
+    assert reads == [], "no row is built"
     with store_session() as store:
-        assert fleet_service._pause_boards(store, project, [coder]) == [project.id]
-        assert reads == [], "the live rows given are not read again"
-        fleet_service.stop(project, coder.label, force=True)
-        assert fleet_service._pause_boards(store, project) == [project.id], "the newest's"
-        assert reads == [True]
+        assert store.fleet_agent_boards(project.id) == [project.id], "one board, four rows"
 
 
 def test_shutdown_clears_the_fleet_paused_signal(

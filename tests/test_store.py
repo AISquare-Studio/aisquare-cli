@@ -2497,6 +2497,5 @@ def test_a_store_without_team_session_still_reads_its_fleet_rows() -> None:
         assert [row.id for row in store.live_fleet_agents()] == ["agt_1", "agt_2"]
         one = store.get_fleet_agent("agt_1")
         assert one is not None and one.board == PROJECT.id
-        newest = store.newest_fleet_agent(PROJECT.id)
-        assert newest is not None and newest.id in {"agt_1", "agt_2"}
+        assert store.fleet_agent_boards(PROJECT.id) == sorted([PROJECT.id, "prj_hub"])
         assert store.fleet_agent_by_label(PROJECT.id, "coder-2") is not None

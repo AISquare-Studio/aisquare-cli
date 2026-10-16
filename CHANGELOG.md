@@ -593,9 +593,11 @@ all of them, and the fleet cleans up the worktrees it made.**
   - `fleet spawn --task` in a project rooted in a sub-folder of its
     repository, or at a linked worktree, finds the task on the checkout's
     board, where that project's manager and sessions add tasks.
-  - `fleet pause` and `fleet resume` set the `fleet-paused` signal on the
+  - `fleet pause` and `fleet resume` set the `fleet-paused` signal on every
     board the project's agents read, where its manager looks for it, and
-    `fleet shutdown` clears it there. On a board other projects read too
+    `fleet shutdown` clears it there, whichever agents are still running: a
+    pause set where a manager that has since stopped read is cleared too, so
+    the next manager spawned there is not paused. On a board other projects read too
     (the hub's, under a hub) the signal is the project's own,
     `fleet-paused.<project id>`, and its manager's cycle names it, so pausing,
     resuming or shutting down one project leaves the others' managers alone.

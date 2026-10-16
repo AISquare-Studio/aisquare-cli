@@ -612,7 +612,9 @@ def _nudge_target(
     launched by hand) woke the board's project's manager: under a hub the hub's, where no
     manager has a row, so a note to the manager from the phone never woke it (round 25,
     5/10). Read in the write's own store session, after the write: it cannot raise, as a
-    read that fails costs the nudge its target, never the write.
+    read that fails costs the nudge its target, never the write. The manager it names is
+    woken only when it reads ``board_id`` (``fleet.nudge_manager``'s ``board``, which
+    :func:`_nudge_manager` passes).
     """
     try:
         row = store.fleet_agent_for_session(writer) if writer is not None else None
@@ -644,9 +646,14 @@ def _reading_manager(store: ContextStore, board_id: str, cwd: Path | None) -> st
     return None
 
 
-def _nudge_manager(project_id: str, *, reason: str) -> None:
+def _nudge_manager(project_id: str, *, reason: str, board: str) -> None:
     """Wake the project's WAITING manager after a board write it must act on (§7.3, path 2);
-    ``project_id`` is :func:`_nudge_target`'s.
+    ``project_id`` is :func:`_nudge_target`'s, ``board`` the board the write went on.
+
+    Only a manager that reads ``board`` is woken (``fleet.nudge_manager``): the line wakes it
+    to its own board's delta. A coder spawned without the hub its manager was spawned under
+    writes on its project's board, and the manager it woke read the hub's, found nothing and
+    waited again, while Remote counted the question handled (review of #259, round 26, 4/11).
 
     Runs inside the writing agent's CLI process, after the write is confirmed, so
     it is an observer of the write: it may never raise, and a fleet that is not
@@ -660,7 +667,7 @@ def _nudge_manager(project_id: str, *, reason: str) -> None:
 
         nudge = getattr(fleet_service, "nudge_manager", None)
         if nudge is not None:
-            nudge(project_id, reason=reason)
+            nudge(project_id, reason=reason, board=board)
     except Exception:  # the write already succeeded; a lost nudge is the whole cost
         return
 
@@ -1183,14 +1190,14 @@ def add_note(
     if kind in distill_service.DISTILL_KINDS:
         distill_service.spawn_drain(root=board.root)
     if kind in ("result", "question"):
-        _nudge_manager(manager, reason=kind)
+        _nudge_manager(manager, reason=kind, board=board.id)
     elif _addressed_to_manager(to_role):
         # §7.3 path 2 lists `note --to manager` among the writes that wake a
         # waiting manager, and only the KIND was consulted here: a note
         # addressed to the manager reached a waiting one on no path at all —
         # 'note' is not a MANAGER_WAKE_KIND either, so its Stop hook did not
         # deliver it and it sat past the cursor until some unrelated event.
-        _nudge_manager(manager, reason=f"{kind}_to_manager")
+        _nudge_manager(manager, reason=f"{kind}_to_manager", board=board.id)
     return stored
 
 
@@ -1414,7 +1421,7 @@ def finish_task(ref: str, *, note: str | None = None, session_ref: str | None = 
         ref, "done", "task_done", note=note, session_ref=session_ref
     )
     distill_service.spawn_drain(root=board.root)
-    _nudge_manager(manager, reason="task_done")
+    _nudge_manager(manager, reason="task_done", board=board.id)
     return task
 
 
@@ -1425,7 +1432,7 @@ def review_task(ref: str, *, note: str | None = None, session_ref: str | None = 
         ref, "review", "task_review", note=note, session_ref=session_ref
     )
     distill_service.spawn_drain(root=board.root)
-    _nudge_manager(manager, reason="task_review")
+    _nudge_manager(manager, reason="task_review", board=board.id)
     return task
 
 
@@ -1455,7 +1462,7 @@ def reopen_task(ref: str, *, reason: str, session_ref: str | None = None) -> Tea
         manager = _nudge_target(store, session.id if session else None, board.id)
     _record_delivery(event, board)
     distill_service.spawn_drain(root=board.root)
-    _nudge_manager(manager, reason="task_reopened")
+    _nudge_manager(manager, reason="task_reopened", board=board.id)
     return reopened
 
 
@@ -1522,7 +1529,7 @@ def block_task(ref: str, *, reason: str, session_ref: str | None = None) -> Team
         ref, "blocked", "task_blocked", note=reason, session_ref=session_ref
     )
     distill_service.spawn_drain(root=board.root)
-    _nudge_manager(manager, reason="task_blocked")
+    _nudge_manager(manager, reason="task_blocked", board=board.id)
     return task
 
 
@@ -1868,7 +1875,7 @@ def hook_stop(
     if deferred is not None:
         # After the row says waiting, never before: nudge_manager refuses every
         # other state. Outside the `with` too — it opens its own connection.
-        _nudge_manager(manager, reason=deferred)
+        _nudge_manager(manager, reason=deferred, board=session.project_id)
     if failure is not None:
         raise ManagerWakeupError(failure)
     return None
@@ -2181,7 +2188,7 @@ def hook_stop_failure(
         # (it opens its own connection): path 2 types into a WAITING manager;
         # a working one reads the event on its next delta or its own Stop. The manager of
         # the agent's own project, whose row is beside the agent's (`_nudge_target`).
-        _nudge_manager(manager, reason=f"{label} hit its usage limit")
+        _nudge_manager(manager, reason=f"{label} hit its usage limit", board=session.project_id)
     return TurnFailure(refreshed, kind, notice, already_limited=already_limited)
 
 

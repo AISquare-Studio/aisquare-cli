@@ -254,7 +254,7 @@ def test_a_rate_limit_stop_failure_parks_the_session_limited_once_and_wakes_the_
 ) -> None:
     nudges: list[str] = []
     monkeypatch.setattr(
-        team_service, "_nudge_manager", lambda project_id, *, reason: nudges.append(reason)
+        team_service, "_nudge_manager", lambda project_id, *, reason, board: nudges.append(reason)
     )
     _session(work, "sess-coder")
     payload = json.dumps(
@@ -294,7 +294,7 @@ def test_a_rate_limit_stop_failure_parks_the_session_limited_once_and_wakes_the_
 def test_a_limited_fleet_agent_is_named_by_its_label_with_the_switch_command(
     fake_home: Path, work: ProjectInfo, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
     _session(work, "sess-fleet")
     with store_session() as store:
         store.upsert_fleet_agent(
@@ -428,7 +428,7 @@ def test_claude_codes_routine_notices_leave_a_parked_or_handed_over_row_as_it_is
     whose ``SessionEnd`` then released the claims the replacement was to
     inherit. Only a prompt that needs a human rings now.
     """
-    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
     _session(work, "sess-coder")
     team_service.hook_stop_failure(
         "sess-coder", error="rate_limit", message=SESSION_LIMIT, details=None
@@ -504,7 +504,7 @@ def test_the_hook_starts_a_detached_hand_over_only_when_configured_and_the_reset
     output is one detached ``aisquare hook hand-over``; nothing is switched in
     this process, and ``fleet.switch`` must not be reached from here at all.
     """
-    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
     started: list[list[str]] = []
     monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
 
@@ -575,7 +575,7 @@ def test_a_limit_that_lifts_soon_waits_without_asking_any_account_whether_it_is_
     with an unlock dialog from a background hook — before the cheap check that the limit
     lifts within ``wait_if_reset_within_minutes``, which waits whatever the answer. The
     reset is asked first, and the wait's note is posted on any machine."""
-    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
     started: list[list[str]] = []
     monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
 
@@ -611,7 +611,7 @@ def test_with_no_other_account_a_limit_starts_no_hand_over_and_posts_nothing_of_
     every limit there started a hand-over that could only refuse and said "not switched" on
     the board, and Remote held the limit's push 90 s for it (review of #259, round 13). With
     no other enabled, signed-in account it is ``wait``; a second one makes it ``switch``."""
-    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
     started: list[list[str]] = []
     monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
     mine = _slot("work@example.com", "tok-work")
@@ -648,7 +648,7 @@ def test_with_the_registry_unreadable_a_limit_still_reaches_the_worker_that_says
     switched — accounts registry unreadable …". Which accounts are enabled is not known, so
     with another slot among the directories the worker is started, and its pick, which
     takes nothing from that registry, says why."""
-    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
     started: list[list[str]] = []
     monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
     mine = _slot("work@example.com", "tok-work")
@@ -679,7 +679,7 @@ def test_with_the_registry_unreadable_and_no_other_slot_a_limit_starts_no_hand_o
     account away. On a one-account machine whose store was locked, every limit started a
     worker that posted "not switched — accounts registry unreadable", and Remote held the
     push 90 s: round 13's noise again. The fallback list answers."""
-    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
     started: list[list[str]] = []
     monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
     mine = _slot("work@example.com", "tok-work")
@@ -708,7 +708,7 @@ def test_with_the_slot_directories_unlistable_the_worker_says_why_rather_than_dy
     store error: it exited into ``DEVNULL`` with nothing on the board, the agent stayed
     parked, and Remote held the limit's push for a hand-over already dead. The pick returns
     it as its note, and the worker posts it."""
-    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
     started: list[list[str]] = []
     monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
     _slot("work@example.com", "tok-work")
@@ -735,7 +735,7 @@ def test_remote_holds_the_limit_of_an_agent_the_hook_hands_over_from_an_account_
     slot 3 is enabled and signed in. The hook hands it over to slot 3; Remote's scan asked
     with no slot ("two usable accounts": one) and pushed the limit at once, for a limit
     being handled. Remote asks the hook's question now, with the row's slot."""
-    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
     started: list[list[str]] = []
     monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
     mine = _slot("work@example.com", "tok-work")
@@ -775,7 +775,7 @@ def test_a_re_fire_for_the_same_window_starts_no_second_worker(
     """Claude Code re-fires ``StopFailure`` for one window; the second firing found the row
     already ``limited`` and still started a second worker — two switches of one agent at
     once (review of #205, second round). ``TurnFailure.already_limited`` now says so."""
-    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
     started: list[list[str]] = []
     monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
     _settings(on_limit="switch", wait_if_reset_within_minutes=15)
@@ -815,7 +815,7 @@ def test_another_api_error_mid_hand_over_keeps_the_mark_and_the_claims(
     (third round), the other one wrote ``waiting`` over it — an ``overloaded`` landing
     while the switch waits for the ``/exit``, and the SessionEnd that followed released
     the claims the replacement was to inherit."""
-    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
     monkeypatch.setenv("AISQUARE_ROLE", "coder")
     _session(work, "sess-fleet")
     _fleet_row(work, "agt_overload", "coder-db", "sess-fleet")
@@ -935,7 +935,7 @@ def test_the_worker_refuses_a_hand_over_in_flight_or_one_that_just_happened(
     """Two brakes in ``hand_over`` (review of #205, second round): a session already marked
     ``switching``, and a replacement row younger than ``HANDOVER_COOLDOWN`` that the last
     hand-over spawned. Each is a board line; ``fleet.switch`` is never reached."""
-    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
 
     def never(*args: Any, **kwargs: Any) -> None:
         raise AssertionError("a braked hand-over must not switch")
@@ -1026,7 +1026,7 @@ def test_the_detach_puts_the_worker_in_its_own_session_without_this_agents_ident
 def test_the_detached_half_moves_the_agent_and_puts_a_refusal_on_the_board(
     fake_home: Path, work: ProjectInfo, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
     switches: list[tuple[str, str | None, str | None, bool | None]] = []
 
     def fake_switch(project: ProjectInfo, label: str, **kwargs: Any) -> None:
@@ -1085,7 +1085,9 @@ def test_under_a_hub_the_limit_is_handed_over_from_the_agents_own_row(
     monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub_root))
     nudged: list[str] = []
     monkeypatch.setattr(
-        team_service, "_nudge_manager", lambda project_id, *, reason: nudged.append(project_id)
+        team_service,
+        "_nudge_manager",
+        lambda project_id, *, reason, board: nudged.append(project_id),
     )
     started: list[list[str]] = []
     monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))

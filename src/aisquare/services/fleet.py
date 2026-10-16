@@ -4017,7 +4017,7 @@ def _end_dead_rows(
                 ended.append(row)
     if nudge:
         for row in mine:
-            nudge_manager(row.project_id, reason=f"{row.label} exited")
+            nudge_manager(row.project_id, reason=f"{row.label} exited", board=_board_of_row(row))
     return ended
 
 
@@ -4567,7 +4567,7 @@ def _stop_row(
     # Outside the store session, as ``reap`` does: the nudge types into a pane
     # and must not hold the write lock the woken manager's own hooks will want.
     if not handover and nudge:
-        nudge_manager(ended.project_id, reason=f"{ended.label} exited")
+        nudge_manager(ended.project_id, reason=f"{ended.label} exited", board=_board_of_row(ended))
     return StopReceipt(ended, released, release_failed, withheld=handover)
 
 
@@ -6577,7 +6577,7 @@ def restart(
             # The exit went out with its wake-up held back for a replacement that has
             # now failed to start: left unwoken, a waiting manager never hears of the
             # agent it lost, as the hand-over's `_abandon_handover` wakes it for its own.
-            nudge_manager(project.id, reason=f"{label} exited")
+            nudge_manager(project.id, reason=f"{label} exited", board=_board_of_row(agent))
         raise
     notes.extend(more)
     typed = receipt.prompt_typed or "no"
@@ -6705,7 +6705,9 @@ def _abandon_handover(stopped: FleetAgent) -> None:
     with contextlib.suppress(Exception), store_session() as store:
         _team().release_agent_claims(store, stopped, why="hand-over failed")
         _emit_exit(store, stopped, why=HANDOVER_FAILED)
-    nudge_manager(stopped.project_id, reason=f"{stopped.label} exited")
+    nudge_manager(
+        stopped.project_id, reason=f"{stopped.label} exited", board=_board_of_row(stopped)
+    )
 
 
 def _how_started(resumed: bool, *, typed: Typed) -> str:
@@ -6930,7 +6932,7 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
                             _emit_exit(store, ended)
             _remove_finished_worktrees(store, current, report)
     for ended in report.ended:
-        nudge_manager(ended.project_id, reason=f"{ended.label} exited")
+        nudge_manager(ended.project_id, reason=f"{ended.label} exited", board=_board_of_row(ended))
     return report
 
 
@@ -7170,8 +7172,14 @@ def _clear_pause_signal(store: ContextStore, signals: Sequence[tuple[str, str]])
         _team().set_signal_in(store, board, name, "off")
 
 
-def nudge_manager(project_id: str, *, reason: str) -> bool:
+def nudge_manager(project_id: str, *, reason: str, board: str | None = None) -> bool:
     """Wake a WAITING manager with one fixed line + Enter (§7.3); ``False`` if not sent.
+
+    ``board`` is the board the news is on, an agent's exit on the one its row recorded: a
+    manager that reads another is not woken. The line wakes it to its own board's delta,
+    which does not hold the news, and Remote took the crash for handled (review of #259,
+    round 26, 4/11). A board write's nudge is asked the same before it is sent
+    (``team._target_of``).
 
     Never raises and never touches a manager that is working or needs the
     human: this runs inside sub-agents' CLI processes, where a failure must
@@ -7193,6 +7201,8 @@ def nudge_manager(project_id: str, *, reason: str) -> bool:
         with store_session() as store:
             manager = store.fleet_agent_by_label(project_id, MANAGER_LABEL, live_only=True)
             if manager is None or manager.session_id is None:
+                return False
+            if board is not None and _board_of_row(manager) != board:
                 return False
             session = store.get_session(manager.session_id)
             if session is None or session.ended_at is not None:

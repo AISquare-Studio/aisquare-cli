@@ -4498,6 +4498,32 @@ def test_an_agents_limit_and_failed_turn_are_read_on_the_board_it_recorded(
     ]
 
 
+def test_a_live_manager_on_another_board_keeps_nothing_on_this_one_off_the_phone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 26, 4/11: alpha's manager was spawned under a hub and reads its
+    board, and two coders spawned without it read alpha's own. A coder's question there, and
+    another's crash, nudged a manager whose delta holds neither, and Remote, run without the
+    hub, saw a live manager and made no card: nobody heard of either. A manager takes only
+    the items on the board it reads (``fleet.nudge_manager``'s ``board``)."""
+    with store_session() as store:
+        alpha = store.onboard_project(_rooted(tmp_path / "alpha"))
+        hub = _rooted(tmp_path / "hub")
+        store.ensure_project(hub)
+        _seat_up(store, _manager_of("alpha"), alpha, hub)
+        _seat_up(store, _Seat("alpha", "coder-1", asks=True), alpha, alpha)
+        _seat_up(store, _Seat("alpha", "coder-2", end="crash"), alpha, alpha)
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+
+    items = scan_needs_you(remote_needs.live_needs_sources(), now=datetime.now(UTC), dismissed=())
+
+    assert sorted((item.kind, item.project_id, item.agent) for item in items) == [
+        ("board_question", alpha.id, "coder-1"),
+        ("crashed", alpha.id, "coder-2"),
+    ]
+
+
 @dataclass(frozen=True)
 class _Seat:
     """One agent of a board: its fleet project, label and role; whether a fleet row holds it

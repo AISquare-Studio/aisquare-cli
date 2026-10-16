@@ -79,7 +79,7 @@ def no_nudge(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
     """
     calls: list[tuple[str, str]] = []
 
-    def record(project_id: str, *, reason: str) -> bool:
+    def record(project_id: str, *, reason: str, board: str | None = None) -> bool:
         calls.append((project_id, reason))
         return False
 
@@ -978,7 +978,7 @@ def test_the_nudge_comes_after_the_write_is_durable(
     task = _task(work_dir)
     seen: list[str] = []
 
-    def read_back(project_id: str, *, reason: str) -> bool:
+    def read_back(project_id: str, *, reason: str, board: str | None = None) -> bool:
         with store_session() as store:
             kinds = [e.kind for e in store.recent_events(project_id, limit=1)]
         seen.extend(kinds)
@@ -998,7 +998,7 @@ def test_a_fleet_that_raises_costs_only_the_nudge(
     _fleet(runner, monkeypatch, work_dir)
     task = _task(work_dir)
 
-    def broken(project_id: str, *, reason: str) -> bool:
+    def broken(project_id: str, *, reason: str, board: str | None = None) -> bool:
         raise RuntimeError("tmux server gone")
 
     monkeypatch.setattr(fleet_service, "nudge_manager", broken)
@@ -1036,7 +1036,7 @@ def test_the_spy_is_pointed_at_the_real_seam(
 
     calls: list[str] = []
 
-    def record(project_id: str, *, reason: str) -> bool:
+    def record(project_id: str, *, reason: str, board: str | None = None) -> bool:
         calls.append(reason)
         return True
 

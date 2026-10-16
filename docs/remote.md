@@ -319,10 +319,12 @@ its replacement, or a failed turn, is a card even when Remote runs under another
 hub than the agent, or none, and a parked agent's limit card keeps its id.
 
 A manager is there to handle an item only when the fleet wakes it for that item:
-the project's `manager`, for the items of the project's own agents on whatever
-board they write, while it runs (not stopped, not parked on its usage limit) on a
+the project's `manager`, for the items of the project's own agents on the board
+it reads, while it runs (not stopped, not parked on its usage limit) on a
 live session aisquare's hooks registered, which a coder's board write, an
-agent's exit and a usage limit all nudge. Once it cannot
+agent's exit and a usage limit all nudge. An agent spawned under another hub
+than its manager, or without the one its manager has, writes where the manager
+does not read: its items are cards. Once it cannot
 take them, however it went (an exit, its limit, a kill, a death, a failed
 hand-over, a session that never registered or was ended), a coder's question to
 it that is still unanswered is yours: someone waits on the answer. So is a result

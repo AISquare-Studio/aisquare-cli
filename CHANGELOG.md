@@ -609,6 +609,11 @@ all of them, and the fleet cleans up the worktrees it made.**
     a push while the manager was already woken for it. Another project's
     agents' items, and posts by a session no agent row holds, are still cards,
     each once.
+  - A manager is woken only for a write or an exit on the board it reads. A
+    coder spawned from a shell without the hub its manager was spawned under
+    writes on its project's board: its question used to wake the manager to a
+    delta without it, and the phone showed no card since a manager was live.
+    Now the manager is left alone and the phone shows the card.
 
 ### Security
 - **One choke point.** Every request and every socket handshake passes the

@@ -4834,7 +4834,7 @@ def hubbed(
     woken: list[str] = []
     real = fleet_service.nudge_manager
 
-    def nudge(project_id: str, *, reason: str) -> bool:
+    def nudge(project_id: str, *, reason: str, board: str | None = None) -> bool:
         woken.append(project_id)
         return True
 
@@ -5533,6 +5533,38 @@ def test_a_fleet_row_an_older_build_writes_into_a_v32_store_reads_its_sessions_b
         assert listed[hubbed.manager.id] == hubbed.hub.id, "every read, not one of them"
         by_session = store.fleet_agent_for_session(hubbed.coder_sid)
         assert by_session is not None and by_session.board == hubbed.hub.id
+
+
+def test_a_nudge_wakes_a_manager_only_for_a_write_on_the_board_it_reads(hubbed: _Hubbed) -> None:
+    """Review of #259, round 26, 4/11: a write woke the manager of the writer's row's project
+    whatever board that manager reads. Spawned from ``asq`` under the hub, the manager reads
+    the hub's; a coder the human spawned from a shell without it reads its project's, where
+    its question lands. The nudge woke the manager to the hub's delta, which does not hold
+    the question, and it waited again. A manager is woken only for a write on its board,
+    and so for an exit on the board the row recorded."""
+    hubbed.monkeypatch.setattr(fleet_service, "nudge_manager", hubbed.nudge)
+    stray = _spawned_without_the_hub(hubbed)
+    assert stray.session_id is not None
+    hubbed.monkeypatch.delenv("AISQUARE_TEAM_HUB")
+    _become(stray, hubbed.tmux, hubbed.monkeypatch, pid=PANE_PID, role="coder")
+    team_service.hook_session_start(stray.session_id, hubbed.fleet.root, "startup")
+    hubbed.monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hubbed.hub.root))
+    assert stray.board == hubbed.fleet.id != hubbed.manager.board == hubbed.hub.id
+    hubbed.tmux.set_command(hubbed.manager.pane_id, "claude")
+    with store_session() as store:
+        store.touch_session(hubbed.manager_sid, state="waiting")
+    hubbed.tmux.typed.clear()
+
+    team_service.add_note("which branch?", kind="question", session_ref=stray.session_id)
+    hubbed.tmux.die(stray.pane_id, 1)
+    fleet_service.reap()
+
+    assert hubbed.tmux.typed == [], "its manager reads the hub's board, where neither is"
+    team_service.add_note("which branch?", kind="question", session_ref=hubbed.coder_sid)
+    assert hubbed.tmux.typed == [
+        (hubbed.manager.pane_id, "literal", NUDGE_TEXT),
+        (hubbed.manager.pane_id, "key", "Enter"),
+    ], "a write on the board it reads does wake it"
 
 
 @pytest.mark.parametrize("writer", ["the coder's task done", "the manager's deferred Stop"])
@@ -11537,7 +11569,7 @@ def test_a_fresh_switch_hands_the_claims_to_the_replacement_and_announces_no_exi
     assert team_service.claim_task(task.id, session_ref=old).status == "doing"
     nudges: list[str] = []
 
-    def nudge(project_id: str, *, reason: str) -> bool:
+    def nudge(project_id: str, *, reason: str, board: str | None = None) -> bool:
         nudges.append(reason)
         return True
 
@@ -12872,7 +12904,7 @@ def test_a_listing_that_lands_inside_a_switch_leaves_the_hand_over_to_it(
     assert team_service.claim_task(task.id, session_ref=old).status == "doing"
     nudges: list[str] = []
 
-    def nudge(project_id: str, *, reason: str) -> bool:
+    def nudge(project_id: str, *, reason: str, board: str | None = None) -> bool:
         nudges.append(reason)
         return True
 
@@ -13015,7 +13047,7 @@ def _recorded_nudges(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """``nudge_manager`` replaced by a recorder: the reasons it was called with."""
     nudges: list[str] = []
 
-    def nudge(project_id: str, *, reason: str) -> bool:
+    def nudge(project_id: str, *, reason: str, board: str | None = None) -> bool:
         nudges.append(reason)
         return True
 

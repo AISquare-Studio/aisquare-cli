@@ -1980,7 +1980,9 @@ def needs_from_board(
     day (review of #243, rounds 22 to 25).
 
     The manager is the project's, so it takes the items its own agents (``agents``) post,
-    which nudge it (``team._nudge_target``). ``own_board``: the board is the project's own,
+    which nudge it (``team._nudge_target``), while it reads this board: ``manager_live`` is
+    False for one that reads another, which no write here wakes (review of #259, round 26,
+    4/11). ``own_board``: the board is the project's own,
     so it also takes a post by a session no row holds, whose nudge wakes the board's
     reading manager. On a board several projects share, such a post is a card whatever the
     manager: which of them it woke is the writer's directory's to say, which the board does
@@ -2073,10 +2075,11 @@ def _needs_nudged(
     result to the manager, a crash, and for a while the push of a limit. A turn that
     ended on a question wakes no manager, so it waits on none.
 
-    It is the one manager the fleet wakes (``fleet.nudge_manager``) for its agents, on
-    whatever board they write: a board write of theirs (``team._nudge_target``), an
-    agent's exit and a usage limit all nudge the manager of the row's own project, which
-    reads the board the rows recorded (review of #259, round 25, 7/10). A row whose
+    It is the one manager the fleet wakes (``fleet.nudge_manager``) for its agents: a board
+    write of theirs (``team._nudge_target``), an agent's exit and a usage limit all nudge
+    the manager of the row's own project (review of #259, round 25, 7/10), and only for
+    news on the board it reads (round 26, 4/11), which the caller asks of each item's
+    board (:func:`_needs_scan_project`). A row whose
     session never registered (no aisquare hooks) takes nothing (review of #243, round 24,
     5/8). A manager session no row holds, or a numbered seat (``manager-2``), is sent
     nothing. On a board several projects share, as under ``AISQUARE_TEAM_HUB``, an item
@@ -2200,7 +2203,7 @@ def _needs_scan_project(
     :func:`_needs_own_events`). No other project's rows are read: whether a manager hears of
     an item is :func:`_needs_nudged`'s to say.
     """
-    from aisquare.services.fleet import RECENTLY_ENDED
+    from aisquare.services.fleet import RECENTLY_ENDED, _board_of_row
 
     reads = _NeedsReads(project)
     listed = reads.needs_read(
@@ -2223,6 +2226,8 @@ def _needs_scan_project(
     days = [*board, *_needs_elsewhere(sources, rows, board_id, day, reads)]
     manager = _needs_manager(rows)
     taking = _needs_nudged(manager, statuses, now)
+    # The board the manager that takes its agents' items reads: it takes those on that board.
+    hears = None if taking is None else _board_of_row(taking)
     authors = _needs_board_authors(board, now)
     sessions = (
         reads.needs_read(lambda: sources.board_sessions(board_id, authors), "sessions")
@@ -2245,7 +2250,11 @@ def _needs_scan_project(
             ],
             now=now,
             # The manager's own items wait on no one: its own limit's nudge goes to itself.
-            manager_live=taking is not None and taking.id != status.agent.id,
+            manager_live=(
+                taking is not None
+                and taking.id != status.agent.id
+                and hears == _board_of_row(status.agent)
+            ),
             accounts=accounts,
             hands_over=sources.hands_over,
             pane_output=_needs_output_of(sources, status, reads),
@@ -2262,7 +2271,7 @@ def _needs_scan_project(
             days,
             project=project,
             now=now,
-            manager_live=taking is not None,
+            manager_board=hears,
             task_status=lambda ref: reads.needs_read(partial(sources.task_status, ref), "a task"),
         )
     )
@@ -2277,7 +2286,7 @@ def _needs_scan_project(
             rows,
             project=project,
             now=now,
-            manager_live=taking is not None,
+            manager_live=hears == board_id,
             stopped=manager.ended_at if manager is not None else None,
             own_board=own,
         )
@@ -2562,7 +2571,7 @@ def _needs_crashed(
     *,
     project: ProjectInfo,
     now: datetime,
-    manager_live: bool,
+    manager_board: str | None,
     task_status: Callable[[str], str | None],
 ) -> list[NeedsItem]:
     """Agents that died with a failing exit status in the last hour, with nobody on it.
@@ -2573,15 +2582,15 @@ def _needs_crashed(
     nothing took the agent's place, and the exit it announced says so
     (``fleet.HANDOVER_FAILED``, read from the day's ``exits``). An agent whose task
     is closed (``task_status``) did its work; one the fleet woke a live manager for
-    (``manager_live``, :func:`_needs_nudged`) is the manager's; one that was restarted
-    since — a newer row holds its label — was handled. The ``manager`` row's own crash is
-    ``manager_down``; a numbered seat's is a crash like any agent's, which the fleet
-    wakes the ``manager`` for.
+    (:func:`_needs_nudged`, which reads ``manager_board``, the board its exit went on) is
+    the manager's; one that was restarted since — a newer row holds its label — was
+    handled. The ``manager`` row's own crash is ``manager_down``; a numbered seat's is a
+    crash like any agent's, which the fleet wakes the ``manager`` for. A manager that reads
+    another board is not woken for it (``fleet.nudge_manager``): its crash is a card
+    (review of #259, round 26, 4/11).
     """
-    from aisquare.services.fleet import MANAGER_LABEL
+    from aisquare.services.fleet import MANAGER_LABEL, _board_of_row
 
-    if manager_live:
-        return []
     newest: dict[str, datetime] = {}
     for row in rows:
         newest[row.label] = max(newest.get(row.label, row.created_at), row.created_at)
@@ -2589,7 +2598,7 @@ def _needs_crashed(
     for row in ended:
         if row.ended_at is None or now - row.ended_at > CRASH_WINDOW:
             continue
-        if row.label == MANAGER_LABEL:
+        if row.label == MANAGER_LABEL or _board_of_row(row) == manager_board:
             continue
         clean = row.exit_status in (0, None)
         abandoned = clean and _needs_handover_failed(_needs_exit_of(row, exits))

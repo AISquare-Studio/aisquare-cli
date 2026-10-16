@@ -3058,7 +3058,10 @@ def remote_board_payload(project: str | None = None, *, glance: bool = False) ->
     of its own, every frame opened two (connect, WAL switch, migration check), and the
     minute :func:`_remote_board_project` keeps a root's board for spared none of it for a
     project with rows (round 30, 6/8). A root's board, for a project with none, still asks
-    ``git`` at most once a minute, with the connection holding no transaction.
+    ``git`` at most once a minute, with the connection holding no transaction. With the
+    board off it is refused before that store opens, as ``board_data`` refuses: refused by
+    ``board_data_in``, after the board was looked up, a phone's Board tab paid a store open
+    and a ``fleet_board`` query a second for a board that is off (round 31, 4/7).
 
     #240 fold: pass ``exclude_kinds=team_service.CAPTAIN_AUDIT_KINDS`` here (one line).
     """
@@ -3067,6 +3070,7 @@ def remote_board_payload(project: str | None = None, *, glance: bool = False) ->
     from aisquare.services import team as team_service
 
     target = _resolve_project(project)
+    team_service._require_enabled()
     with store_session() as store:
         board = _remote_project_board(target, store)
         read = team_service.board_data_in(

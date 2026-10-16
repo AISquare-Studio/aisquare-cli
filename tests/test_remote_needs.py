@@ -5118,6 +5118,40 @@ def test_a_board_frame_opens_one_store_for_its_board_and_its_events(
     assert project["id"] == (hub.id if end is None else on_elsewhere.project_id)
 
 
+def test_a_board_frame_with_the_board_off_opens_no_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 31, 4/7: since round 29 the Board frame looked its board up in a
+    store first (``_remote_project_board``), and ``board_data_in`` refused a board that is off
+    only then. With ``AISQUARE_TEAM=0`` a phone on the Board tab got the "board unread"
+    frame each second as before, and paid a store open and a ``fleet_board`` query for it
+    each time. It is refused before the store opens, as ``board_data`` refused."""
+    from aisquare.core import store as core_store
+    from aisquare.services import remote_server
+    from aisquare.services.team import TeamDisabledError
+
+    p, _hub, _ = _hubbed_tasks(tmp_path, monkeypatch, "none")
+    remote_server._resolve_project(p.id)
+    opens = 0
+    real_open = core_store.open_store
+
+    def counting_open() -> Any:
+        nonlocal opens
+        opens += 1
+        return real_open()
+
+    monkeypatch.setattr(core_store, "open_store", counting_open)
+    remote_server._resolve_project(p.id)
+    resolving = opens
+    opens = 0
+    monkeypatch.setenv("AISQUARE_TEAM", "0")
+
+    with pytest.raises(TeamDisabledError):
+        remote_server.remote_board_payload(p.id, glance=True)
+
+    assert opens == resolving, f"the project's lookup alone, not {opens}"
+
+
 @pytest.mark.parametrize("end", ["exit", "stop"])
 @pytest.mark.parametrize("remote", ["none", "another"], ids=["no hub", "another hub"])
 @pytest.mark.parametrize(

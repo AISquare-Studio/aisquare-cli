@@ -148,6 +148,27 @@ def find_project_root(start: Path) -> Path:
     return start
 
 
+def real_project_root(start: Path) -> Path | None:
+    """The project root git or a project marker finds for ``start``, as
+    :func:`find_project_root` does, but never its fallback, ``start`` itself for want of
+    one, and never the home or a filesystem root: ``None`` there. Where a launch or a
+    doctor run is in a project, rather than above one (review r13 of #113, findings 2
+    and 10)."""
+    try:
+        start = start.resolve()
+        root = git_common_root(start)
+        if root is None:
+            root = next((d for d in (start, *start.parents) if marks_project_root(d)), None)
+        if root is None:
+            return None
+        root = root.resolve()
+        if root == Path.home().resolve() or root == Path(root.anchor):
+            return None
+    except (OSError, RuntimeError):
+        return None
+    return root
+
+
 def worktree_principal(root: Path) -> Path | None:
     """The principal repository a LINKED worktree at ``root`` belongs to, else ``None``.
 

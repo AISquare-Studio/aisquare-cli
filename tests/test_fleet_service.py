@@ -12705,7 +12705,7 @@ def test_a_replay_refused_inside_the_replacements_spawn_names_no_bin_either(
     tmux.die(agent.pane_id, 1)
     # The binary goes after the check before the stop has passed.
     monkeypatch.setattr(
-        fleet_service, "_refuse_a_replay_that_cannot_start", lambda project, record: None
+        fleet_service, "_refuse_a_replay_that_cannot_start", lambda project, record, home=None: None
     )
     claude_on_path.unlink()
     monkeypatch.setenv("AISQUARE_BIN_CODER", str(tmp_path / "gone" / "claude"))

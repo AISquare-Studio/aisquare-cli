@@ -173,6 +173,7 @@ def doctor(
             _check_fleet_terminal(),
             # Only when this aisquare lives where a sandboxed agent may write (r11 of #113).
             *_optional(_sandboxed_install_check(cwd)),
+            *_optional(_sandbox_path_check(cwd)),
             *_experiment_checks(),
             *explainability_ops.checks(live=live, target_name=target, project_id=project_id),
             # Only while a key the CLI minted is owed a revocation (#142); --live
@@ -191,44 +192,90 @@ def doctor(
         ]
 
 
+def _sandboxed_project(cwd: Path | None) -> Path | None:
+    """The project a Codex agent of this machine, launched here, would write: a real project
+    root (one git or a project marker found, never the directory itself for want of one),
+    never the home or ``/`` (review r13 of #113, finding 2: run from the home, every install
+    under it, the official uv tool's included, read as the project's); ``None`` elsewhere,
+    or with no Codex on ``PATH`` (a Claude-only machine has no sandbox to keep it from)."""
+    import shutil
+
+    from aisquare.core.agent_adapters import get_adapter
+    from aisquare.core.workspace import real_project_root
+
+    try:
+        if shutil.which(get_adapter("codex").binary) is None:
+            return None
+        return real_project_root(cwd or Path.cwd())
+    except Exception:
+        return None
+
+
 def _sandboxed_install_check(cwd: Path | None = None) -> DoctorCheck | None:
     """A warning when an aisquare that runs outside a sandboxed agent's sandbox on its behalf
-    lives where such an agent of this project may write: this install, or the one Codex's
-    aisquare hooks run (review r12 of #113, finding 1), inside the project's directory or a
-    temporary directory, which a Codex tester, validator or ui-tester in the project's
-    directory writes (``workspace-write``). A launch of one is refused
-    (``store_broker.refuse_inside``; r11, finding 2). ``None`` when every one lives
-    elsewhere. The fix names no command the doctor would run from this install, which would
-    connect the hooks to it again (r12, finding 6)."""
+    lives in the tree of the project the doctor runs in (:func:`_sandboxed_project`), which
+    a Codex tester, validator or ui-tester launched there writes (``workspace-write``): this
+    install, or what Codex's aisquare hooks run (review r12 of #113, finding 1; the
+    plugin's launcher too, r13 3). A launch of one is refused
+    (``store_broker.refuse_inside``; r11, finding 2), which also reads the temporary and
+    the added directories this does not. ``None`` outside a real project, and when every
+    one lives elsewhere. One word for its name, as the installer reads names (r13, 2); its
+    fix names no command the doctor would run from this install, which would connect the
+    hooks to it again (r12, finding 6)."""
     import os
 
     from aisquare.core.agent_adapters import get_adapter
     from aisquare.core.agent_adapters.types import SandboxWrites
-    from aisquare.core.workspace import find_project_root
     from aisquare.services import store_broker
 
+    root = _sandboxed_project(cwd)
+    if root is None:
+        return None
     try:
-        root = find_project_root(cwd or Path.cwd())
         codex = get_adapter("codex")
         hooks = codex.config_dir(agent_core._home(), os.environ)
+        installs = store_broker.install_paths(hooks, codex.id, os.environ.get("PATH"))
     except Exception:
         return None
-    places = [
-        root,
-        Path("/tmp"),
-        *([Path(os.environ["TMPDIR"])] if os.environ.get("TMPDIR") else []),
-    ]
-    inside = store_broker.install_inside(
-        SandboxWrites(tuple(places)), store_broker.install_paths(hooks, codex.id)
-    )
+    inside = store_broker.install_inside(SandboxWrites((root,)), installs)
     if inside is None:
         return None
     return _warn(
-        "sandboxed agents' aisquare",
-        f"aisquare runs from {inside}, where a sandboxed agent of {root.name or root} may "
-        "write: a Codex agent launched in the project's directory is refused",
+        "sandbox-install",
+        f"aisquare runs from {inside}, in {root.name or root}'s tree, which a sandboxed "
+        "Codex agent launched there may write: such a launch is refused",
         "install aisquare-cli outside the project (uv tool install aisquare-cli, or pipx "
         "install aisquare-cli), then connect the Codex hooks again with that install",
+    )
+
+
+def _sandbox_path_check(cwd: Path | None = None) -> DoctorCheck | None:
+    """A warning when ``PATH`` names a directory in the tree of the project the doctor runs
+    in (:func:`_sandboxed_project`: an activated virtualenv, direnv's ``PATH_add``): a
+    sandboxed Codex agent launched there may write it, and Codex itself, and aisquare's
+    hooks and broker, run the ``git`` (``gbrain``, ``tmux``) found there outside the sandbox
+    (review r13 of #113, finding 1; ``store_broker.sandbox_environment`` warns at launch
+    too). ``None`` outside a real project or with no such entry. Amber the installer
+    expects: it is the shell's state, not the install's."""
+    import os
+
+    root = _sandboxed_project(cwd)
+    if root is None:
+        return None
+    named = [
+        entry
+        for entry in os.environ.get("PATH", "").split(os.pathsep)
+        if entry and Path(entry).expanduser().resolve().is_relative_to(root)
+    ]
+    if not named:
+        return None
+    return _warn(
+        "sandbox-path",
+        f"PATH names {', '.join(named)}, in {root.name or root}'s tree, which a sandboxed "
+        "Codex agent launched there may write: Codex itself, and aisquare's hooks and store "
+        "broker, run the git found there outside the sandbox",
+        "launch Codex agents from a shell whose PATH names nothing in the project "
+        "(deactivate its virtualenv)",
     )
 
 
@@ -3160,9 +3207,13 @@ def last_injection() -> InjectionRecord | None:
 
 
 def show_log(limit: int = 20) -> list[PromptRecord]:
-    """Recent captured user prompts for the active project (newest first)."""
+    """Recent captured user prompts for the active project (newest first): for a command a
+    sandboxed agent's broker runs, its launch's own project, never a ``project switch``
+    pin (``context.pool_project``; review r13 of #113, finding 5)."""
+    from aisquare.services.context import pool_project
+
     with store_session() as store:
-        project = active_project(store)
+        project = pool_project(store)
         return store.recent_prompts(project.id, limit=limit)
 
 

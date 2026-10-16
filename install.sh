@@ -1900,6 +1900,11 @@ expected_amber() {
         # provisioning run with that flag failed its caller, always.
         _exp="$_exp gh repomix"
     fi
+    # `sandbox-path` is the shell's state, not the install's: PATH names a directory of
+    # the project this ran in (an activated virtualenv), which a sandboxed Codex agent
+    # launched there may write. The doctor says so; this run neither caused nor can
+    # change it, so it is information, not a failure (review r13 of #113, finding 1).
+    _exp="$_exp sandbox-path"
     if [ "$WANT_PROJECT" = 0 ] || [ -z "$PROJECT_DIR" ]; then
         _exp="$_exp snapshot"
     fi

@@ -1130,7 +1130,10 @@ def test_snapshot_is_expected_amber_when_no_project_was_registered(tmp_path: Pat
       project that does not exist. Advice that cannot work is worse than no
       advice.
     """
-    for flag, expected in (("WANT_PROJECT=0", "brain snapshot"), ("", "brain")):
+    for flag, expected in (
+        ("WANT_PROJECT=0", "brain sandbox-path snapshot"),
+        ("", "brain sandbox-path"),
+    ):
         setup = flag or "PROJECT_DIR=/somewhere; WANT_PROJECT=1"
         result = sh(f"{setup}; expected_amber; echo", path=base_path(tmp_path))
         assert result.stdout.strip() == expected, (
@@ -1143,7 +1146,7 @@ def test_a_repoless_directory_also_expects_snapshot_amber(tmp_path: Path) -> Non
     """Not just the flag: running from a directory that is no git repo lands in
     the same state (§4), and the honest report is the same."""
     result = sh('WANT_PROJECT=1; PROJECT_DIR=""; expected_amber; echo', path=base_path(tmp_path))
-    assert result.stdout.strip() == "brain snapshot", result.stderr
+    assert result.stdout.strip() == "brain sandbox-path snapshot", result.stderr
 
 
 def test_doctor_amber_is_sorted_so_the_comparison_is_about_the_set(tmp_path: Path) -> None:
@@ -2688,7 +2691,7 @@ def test_claude_code_is_left_alone_when_only_codex_is_asked_for(tmp_path: Path) 
         env={"PAYLOAD": json.dumps([row])},
     )
 
-    assert expected.stdout.strip() == "brain claude-code", expected.stdout
+    assert expected.stdout.strip() == "brain claude-code sandbox-path", expected.stdout
     assert "  claude-code — left alone by --agent codex; aisquare doctor here says:" in (
         result.stdout
     ), result.stdout
@@ -2769,3 +2772,42 @@ def test_unknown_agent_is_refused_before_installation() -> None:
     assert result.returncode != 0
     assert "unknown coding agent" in result.stdout + result.stderr
     assert "SHOULD_NOT_RUN" not in result.stdout
+
+
+def test_an_install_run_from_the_home_does_not_read_aisquare_there_as_in_a_project(
+    tmp_path: Path, isolated_agent_home: Path
+) -> None:
+    """Review r13 of #113, finding 2: `curl … | sh` runs from the home, and the doctor it
+    runs there took the home, which has no marker, for the project: every install under
+    it, the uv tool's own included, read as in the project's tree, a sandbox row warned
+    (three unexpected words, by its spaced name), and the install exited 2. Here the
+    home is a directory above this tree's real install that is in no project, with a
+    Codex on PATH, as on a machine whose uv-tool install lives under its home."""
+    import aisquare
+    from aisquare.core.workspace import git_common_root, marks_project_root
+
+    package = Path(aisquare.__file__).resolve().parent
+    above = next(
+        (
+            place
+            for place in package.parents
+            if git_common_root(place) is None
+            and not any(marks_project_root(d) for d in (place, *place.parents))
+            and place != Path(place.anchor)
+        ),
+        None,
+    )
+    if above is None:
+        pytest.skip("every directory above this install is in a project")
+    cli = _the_cli(tmp_path)
+    codex = stub_dir(tmp_path, "codexbin", "codex")
+    result = sh(
+        "DRY_RUN=0; WANT_SYSTEM_DEPS=0; PROJECT_DIR=; run_doctor >/dev/null; "
+        'printf "AMBER=%s\\n" "$DOCTOR_AMBER"',
+        cwd=above,
+        env={"HOME": str(above)},
+        path=f"{cli}:{codex}:{base_path(tmp_path)}",
+        no_terminal=True,
+    )
+    amber = next(line for line in result.stdout.splitlines() if line.startswith("AMBER="))
+    assert "sandbox" not in amber and "agents'" not in amber, result.stdout + result.stderr

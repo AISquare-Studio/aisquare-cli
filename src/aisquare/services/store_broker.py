@@ -7,7 +7,10 @@ the store's profile (``AgentAdapter.store_access``; a native ``--sandbox`` repla
 all of it but its launch's inbox here, and with it the launch inputs at the tops of its
 trees, ``.git``, the other agents' worktrees and the tmux sockets (:func:`launch_paths`);
 whatever its sandbox, a launch is refused where its sandbox may write an aisquare its
-hooks or this broker run (:func:`refuse_inside`, from ``AgentAdapter.sandbox_writes``).
+hooks or this broker run (:func:`refuse_inside`, from ``AgentAdapter.sandbox_writes``), and
+a ``PYTHONPATH`` entry it may write is dropped from the launch's environment, which they
+inherit; one in ``PATH`` is the user's to keep out, and warned of
+(:func:`sandbox_environment`).
 Under the profile, nothing a process there writes chooses a replay, a kill, a typed line,
 a launch, a model or account choice, a worktree removal or a paste the fleet makes. The
 board calls its role protocol makes still work there, unchanged (``aisquare note …``,
@@ -1177,14 +1180,33 @@ def _socket_dirs(env: Mapping[str, str], configured: str) -> list[Path]:
     return kept
 
 
-def install_paths(config_dir: Path | None = None, agent: str | None = None) -> tuple[Path, ...]:
+def _with_environment(program: Path) -> list[Path]:
+    """``program`` and the environment it starts in (a ``bin/`` or ``Scripts/`` parent's
+    parent: its ``.pth`` files, its packages), as named and as resolved: a venv's ``python``
+    is a link to the base interpreter, and only the name it is reached by is in the venv
+    (review r13 of #113, finding 8)."""
+    found: list[Path] = []
+    for named in dict.fromkeys((program.absolute(), _resolved(program))):
+        found.append(named)
+        if named.parent.name in ("bin", "Scripts"):
+            found.append(named.parent.parent)
+    return found
+
+
+def install_paths(
+    config_dir: Path | None = None, agent: str | None = None, path: str | None = None
+) -> tuple[Path, ...]:
     """Where the aisquare that runs outside an agent's sandbox on its behalf lives: this one,
     which the broker runs (``sys.executable -P -m aisquare``: the interpreter and the
     installation it comes from, its environment and the user site it loads, whose ``.pth``
     files run at every start, the package's own directory, an editable install's source
-    tree), and the program each of the agent's aisquare hooks runs, with its environment,
-    read from its hooks' config in ``config_dir`` (hooks connected from another install keep
-    running that one: review r12 of #113, finding 1)."""
+    tree), and what each of the agent's aisquare hooks runs, with its environment: the
+    program its hooks' config in ``config_dir`` names (hooks connected from another install
+    keep running that one: review r12 of #113, finding 1), and, where the agent's plugin is
+    installed there, what the plugin's launcher runs: the ``aisquare`` on ``path`` (the
+    launch's ``PATH``), else ``~/.local/bin``'s, else the pinned release through ``uvx``,
+    from uv's cache (r13, finding 3). A ``PYTHONPATH`` the sandbox may write is not here: a
+    launch drops it (:func:`start_for_launch`)."""
     import site
 
     import aisquare
@@ -1193,7 +1215,7 @@ def install_paths(config_dir: Path | None = None, agent: str | None = None) -> t
     found = [
         Path(sys.prefix),
         Path(sys.base_prefix),
-        Path(sys.executable),
+        *_with_environment(Path(sys.executable)),
         Path(aisquare.__file__).parent,
     ]
     with suppress(Exception):
@@ -1202,73 +1224,168 @@ def install_paths(config_dir: Path | None = None, agent: str | None = None) -> t
         with suppress(Exception):
             for command in agents.hook_commands(agent, config_dir):
                 hook = agents.hook_binary(command)
-                if hook is None:
-                    continue
-                program = _resolved(hook.program)
-                found.append(program)
-                if program.parent.name in ("bin", "Scripts"):
-                    found.append(program.parent.parent)  # its environment, its .pth files
+                if hook is not None:
+                    found += _with_environment(hook.program)
+        with suppress(Exception):
+            plugin = agents.plugin_of(agent)
+            if plugin is not None and plugin.installed(config_dir) is not None:
+                on_path = shutil.which("aisquare", path=path or os.environ.get("PATH"))
+                for launcher in (on_path, Path.home() / ".local" / "bin" / "aisquare"):
+                    if launcher is not None and Path(launcher).exists():
+                        found += _with_environment(Path(launcher))
+                cache = os.environ.get("UV_CACHE_DIR") or str(Path.home() / ".cache" / "uv")
+                found += [Path(cache), Path.home() / ".cache" / "aisquare"]
     with suppress(Exception):
         if site.ENABLE_USER_SITE:  # never in a venv that keeps the system's site out
             found.append(Path(site.getusersitepackages()))
     return tuple(dict.fromkeys(_resolved(path) for path in found))
 
 
-def install_inside(writes: SandboxWrites, installs: Sequence[Path]) -> Path | None:
-    """The first of ``installs`` that ``writes`` allows writing, or ``None``: compared as
-    the kernel resolves them (``/tmp`` is ``/private/tmp`` on macOS)."""
+def _resolved_writes(writes: SandboxWrites) -> SandboxWrites:
+    """``writes`` as the kernel resolves its paths (``/tmp`` is ``/private/tmp`` on macOS)."""
     from aisquare.core.agent_adapters.types import SandboxWrites as Writes
 
-    real = Writes(
+    return Writes(
         tuple(_resolved(path) for path in writes.writable),
         tuple(_resolved(path) for path in writes.read_only),
+        _resolved(writes.workspace) if writes.workspace is not None else None,
+        tuple(_resolved(path) for path in writes.temporary),
     )
+
+
+def install_inside(writes: SandboxWrites, installs: Sequence[Path]) -> Path | None:
+    """The first of ``installs`` that ``writes`` allows writing, or ``None``: compared as
+    the kernel resolves them."""
+    real = _resolved_writes(writes)
     return next((path for path in installs if real.may_write(_resolved(path))), None)
 
 
-def _remedy(inside: Path, cwd: Path) -> str:
-    """What to do about an aisquare at ``inside`` a sandbox launched in ``cwd`` may write: in
-    the project, install it elsewhere; above the project (a launch from the home), launch
-    from the project (review r12 of #113, findings 6 and 14). The distribution is
-    ``aisquare-cli``."""
-    from aisquare.core.workspace import find_project_root
+def _remedy(inside: Path, writes: SandboxWrites) -> str:
+    """What to do about an aisquare at ``inside`` that ``writes`` allows writing, by the
+    root that allows it (review r13 of #113, finding 10): a temporary directory, move it
+    out; a directory given the sandbox (``--add-dir``, ``writable_roots``, a profile's
+    ``write`` path), drop it or move the install; the workspace, inside the project,
+    install it elsewhere, above the project (a launch from the home), launch from the
+    project (r12, findings 6 and 14). The distribution is ``aisquare-cli``."""
+    from aisquare.core.workspace import real_project_root
 
+    real = _resolved_writes(writes)
+    root = real.root_of(_resolved(inside))
+    elsewhere = "(`uv tool install aisquare-cli`, or `pipx install aisquare-cli`)"
+    if root is not None and root in real.temporary:
+        return (
+            f"install aisquare outside {root}, which every such sandbox may write "
+            f"{elsewhere}, connect the agent's hooks with that install, then launch again"
+        )
+    if root is not None and root != real.workspace:
+        return (
+            f"drop {root} from what the launch gives its sandbox to write (`--add-dir`, "
+            f"`writable_roots`, a profile's `write` path), or install aisquare outside it "
+            f"{elsewhere}"
+        )
+    workspace = real.workspace or root
     with suppress(Exception):
-        root = _resolved(find_project_root(cwd))
-        if inside.is_relative_to(root) and root != _resolved(Path.home()):
+        project = real_project_root(workspace) if workspace is not None else None
+        if project is not None and _resolved(inside).is_relative_to(project):
             return (
-                "install aisquare outside the project (`uv tool install aisquare-cli`, or "
-                "`pipx install aisquare-cli`), connect the agent's hooks with that install "
-                "(its own `aisquare agents connect codex`), then launch again"
+                f"install aisquare outside the project {elsewhere}, connect the agent's "
+                "hooks with that install (its own `aisquare agents connect codex`), "
+                "then launch again"
             )
     return (
-        f"launch the agent from its project's directory, not {cwd}, whose tree holds that "
-        "aisquare, or install aisquare outside every directory the agent may write "
-        "(`uv tool install aisquare-cli`)"
+        f"launch the agent from its project's directory, not {workspace}, whose tree holds "
+        f"that aisquare, or install aisquare outside every directory the agent may write "
+        f"{elsewhere}"
     )
 
 
+def _sentence(text: str) -> str:
+    """``text`` with its first letter capital and nothing else changed: a path in it is
+    the path it names (``str.capitalize`` lowered the rest; review r13 of #113, 9)."""
+    return text[:1].upper() + text[1:]
+
+
 def refuse_inside(
-    argv: Sequence[str], cwd: Path, adapter: AgentAdapter, config_dir: Path | None = None
+    argv: Sequence[str],
+    cwd: Path,
+    adapter: AgentAdapter,
+    config_dir: Path | None = None,
+    path: str | None = None,
 ) -> None:
     """Refuse the launch of ``adapter``'s agent with ``argv`` in ``cwd`` when its sandbox may
-    write an aisquare its hooks or broker run outside it (:func:`install_paths`): the next
-    hook or brokered call would run what it wrote (review r11 of #113, finding 2). Decided
-    from what that sandbox may write (``AgentAdapter.sandbox_writes``: the store's profile
-    or a native sandbox, its workspace and added directories, a read-only seat writing
-    none), never from whether the store's profile is there (r12, findings 3 and 7, R1); an
-    unsandboxed agent is trusted as its user is. :class:`LaunchRefused`."""
-    writes = adapter.sandbox_writes(list(argv)[1:], cwd)
+    write an aisquare its hooks or broker run outside it (:func:`install_paths`, ``path``
+    the launch's ``PATH``): the next hook or brokered call would run what it wrote (review
+    r11 of #113, finding 2). Decided from what that sandbox may write
+    (``AgentAdapter.sandbox_writes``: the store's profile or a native sandbox, from the
+    agent's config in ``config_dir``, its profile and ``argv``; its workspace and added
+    directories; a read-only seat writing none), never from whether the store's profile is
+    there (r12, findings 3 and 7, R1; r13, finding 6); an unsandboxed agent is trusted as
+    its user is. :class:`LaunchRefused`."""
+    writes = adapter.sandbox_writes(list(argv)[1:], cwd, config_dir)
     if writes is None:
         return
-    inside = install_inside(writes, install_paths(config_dir, adapter.id))
+    inside = install_inside(writes, install_paths(config_dir, adapter.id, path))
     if inside is None:
         return
     raise LaunchRefused(
         f"{adapter.label} runs its tools in a sandbox that may write {inside}, an aisquare "
         f"its hooks or its store broker run outside that sandbox: what it wrote there would "
-        f"run unsandboxed. {_remedy(inside, cwd).capitalize()}"
+        f"run unsandboxed. {_sentence(_remedy(inside, writes))}"
     )
+
+
+#: The variables naming where the hooks' and the broker's Python imports from first: one
+#: that names a directory the sandbox may write is dropped from the launch's environment.
+PYTHON_PATHS = ("PYTHONPATH", "PYTHONHOME")
+
+
+def _writable_entries(value: str, writes: SandboxWrites) -> list[str]:
+    """The entries of the path list ``value`` that ``writes`` allows writing."""
+    real = _resolved_writes(writes)
+    return [
+        entry
+        for entry in value.split(os.pathsep)
+        if entry and real.may_write(_resolved(Path(entry).expanduser()))
+    ]
+
+
+def sandbox_environment(env: dict[str, str], writes: SandboxWrites | None) -> list[str]:
+    """Keep the launch's environment, which the agent's hooks and its broker inherit outside
+    its sandbox, from running what the sandbox may write (review r13 of #113, finding 1),
+    and say what was done: a ``PYTHONPATH`` entry (or ``PYTHONHOME``) the sandbox may write
+    is DROPPED from ``env``, as the hooks' and the broker's Python would import from it
+    before the standard library (a module of its name, a ``sitecustomize``); a ``PATH``
+    entry it may write is WARNED of, not changed: the agent's tools run what is there, and
+    Codex itself runs the ``git`` it finds there outside its sandbox (``git rev-parse`` for
+    its git info, read in 0.162.1's binary by the review), as do aisquare's hooks and
+    broker (its ``git``, ``gbrain``, ``tmux``). Nothing for an unsandboxed agent."""
+    if writes is None:
+        return []
+    said: list[str] = []
+    for key in PYTHON_PATHS:
+        value = env.get(key, "")
+        dropped = _writable_entries(value, writes)
+        if not dropped:
+            continue
+        kept = [entry for entry in value.split(os.pathsep) if entry and entry not in dropped]
+        if kept and key == "PYTHONPATH":
+            env[key] = os.pathsep.join(kept)
+        else:
+            env.pop(key, None)
+        said.append(
+            f"{key} named {', '.join(dropped)}, which this agent's sandbox may write: dropped "
+            "from its environment, as its hooks and its store broker, outside the sandbox, "
+            "would import from there first"
+        )
+    named = _writable_entries(env.get("PATH", ""), writes)
+    if named:
+        said.append(
+            f"PATH names {', '.join(named)}, which this agent's sandbox may write: Codex "
+            "itself, and aisquare's hooks and store broker, run the git (and gbrain, tmux) "
+            "found there outside the sandbox. Launch from a shell whose PATH names none of "
+            "them (deactivate the project's virtualenv)"
+        )
+    return said
 
 
 def start_for_launch(
@@ -1276,9 +1393,10 @@ def start_for_launch(
 ) -> tuple[list[str], str]:
     """``argv`` with this launch's broker inbox the one path in the store its sandbox may
     write (``AgentAdapter.broker_access``), and the broker started; with a line to print
-    when it could not be (the launch goes on: its board calls then say what failed).
-    ``argv`` as it is, with nothing to say, for an agent that runs its tools unsandboxed
-    or under a sandbox of the operator's own (no store profile in ``argv``)."""
+    when it could not be (the launch goes on: its board calls then say what failed), and
+    what :func:`sandbox_environment` did to ``env``. ``argv`` as it is for an agent that
+    runs its tools unsandboxed or under a sandbox of the operator's own (no store profile
+    in ``argv``)."""
     from aisquare.core.agent_adapters.types import store_dir
 
     if not adapter.capabilities.sandboxes_tools:
@@ -1289,9 +1407,10 @@ def start_for_launch(
     launch = env.get("AISQUARE_LAUNCH_ID", "").strip()
     directory = launch_dir(store, launch or uuid.uuid4().hex)
     cwd = Path.cwd()
+    home = adapter.config_dir(agents._home(), env)
     # The trees Codex is given beyond the launch's directory (`-C`, `--add-dir`) hold
     # launch inputs too (review r12 of #113, finding 7).
-    given = adapter.sandbox_writes(argv[1:], cwd)
+    given = adapter.sandbox_writes(argv[1:], cwd, home)
     shared = {_resolved(Path(place)) for place in ("/tmp", os.environ.get("TMPDIR") or "/tmp")}
     trees = [root for root in (given.writable if given else ()) if _resolved(root) not in shared]
     protect, writable = launch_paths(env, cwd, trees)
@@ -1304,14 +1423,16 @@ def start_for_launch(
         argv, store, directory / INBOX, protect=protect, writable=writable
     )
     # Whatever sandbox it runs in, the store's profile or a native one (finding 3).
-    refuse_inside(access or argv, cwd, adapter, adapter.config_dir(agents._home(), env))
+    refuse_inside(access or argv, cwd, adapter, home, env.get("PATH"))
+    said = sandbox_environment(env, adapter.sandbox_writes((access or argv)[1:], cwd, home))
     if access is None:
-        return argv, ""
+        return argv, "\n".join(said)
     if sys.platform == "win32":
-        return access, (
+        said.append(
             f"{adapter.label}: the aisquare store is read-only in its sandbox, and its "
             "board calls go through a broker AISquare runs on POSIX only (or WSL)"
         )
+        return access, "\n".join(said)
     import secrets
 
     prune(store / DIR_NAME)
@@ -1326,13 +1447,14 @@ def start_for_launch(
         run_broker(directory, broker_env)
     except Exception as exc:
         shutil.rmtree(directory, ignore_errors=True)
-        return access, (
+        said.append(
             f"{adapter.label}: the aisquare store is read-only in its sandbox and its broker "
             f"did not start ({exc}), so its board calls will fail there until a restart"
         )
+        return access, "\n".join(said)
     env[DIR_ENV] = str(directory)
     env[NONCE_ENV] = nonce
-    return access, ""
+    return access, "\n".join(said)
 
 
 if __name__ == "__main__":

@@ -22,23 +22,31 @@ def remember(text: str, pool: Pool | None, tags: list[str]) -> ContextEntry:
     return add_entry(text, pool, tags)
 
 
-def _pool_project(store: ContextStore) -> ProjectInfo:
-    """The project whose pool a command reads and writes: for one a sandboxed agent's
-    broker runs, the launch's own, by its directory, never a ``project switch`` pin (review
-    r11 of #113, finding 7; r12, finding 12: its reads followed the pin, its writes did
-    not); else the active one (the pin, else the directory's)."""
-    from aisquare.services.store_broker import own_pool
+def pool_project(store: ContextStore) -> ProjectInfo:
+    """The project whose pool (and captured prompts) a command reads: for one a sandboxed
+    agent's broker runs, the launch's own, the pool its broker names (``own_pool``), never a
+    ``project switch`` pin nor the project another directory in its tree resolves to (a
+    submodule's, a nested marker's: review r11 of #113, finding 7; r12, finding 12; r13,
+    finding 5); else the active one (the pin, else the directory's). :class:`OutOfScope`
+    for a brokered command whose pool is no project the store knows."""
+    from aisquare.services.store_broker import OutOfScope, own_pool
 
-    if own_pool() is not None:
-        project = current_project()
-        return store.get_project(project.id) or project
-    return active_project(store)
+    scoped = own_pool()
+    if scoped is None:
+        return active_project(store)
+    found = store.get_project(scoped)
+    if found is not None:
+        return found
+    here = current_project()
+    if here.id == scoped:
+        return here
+    raise OutOfScope(f"this agent's project ({scoped}) is not one the store knows", kind="pool")
 
 
 def inject() -> str:
     """Assemble the in-scope context block, record the injection, and return it."""
     with store_session() as store:
-        project = _pool_project(store)
+        project = pool_project(store)
         entries = store.entries(project_id=project.id)
     record_injection(entries, project)
     return build_block(entries, project)
@@ -47,7 +55,7 @@ def inject() -> str:
 def list_entries() -> list[ContextEntry]:
     """List context in scope here: the user pool plus the active project's."""
     with store_session() as store:
-        return store.entries(project_id=_pool_project(store).id)
+        return store.entries(project_id=pool_project(store).id)
 
 
 def add_entry(text: str, pool: Pool | None, tags: list[str]) -> ContextEntry:
@@ -90,11 +98,25 @@ def show_entry(entry_id: str) -> ContextEntry:
 
     Raises ``KeyError`` if nothing matches and ``AmbiguousIdError`` if the id
     prefix matches more than one entry.
+
+    From a sandboxed agent's broker (``store_broker.own_pool``), only an entry of the pools
+    it is given, its project's and the user pool, which every project's agents are given:
+    :class:`~aisquare.services.store_broker.OutOfScope` for another project's, whose id
+    or prefix found it (review r13 of #113, finding 4).
     """
+    from aisquare.services.store_broker import OutOfScope, own_pool
+
     with store_session() as store:
         entry = store.get(entry_id)
         if entry is None:
             raise KeyError(entry_id)
+        scoped = own_pool()
+        if scoped is not None and entry.pool != "user" and entry.project_id != scoped:
+            raise OutOfScope(
+                f"{entry_id} is an entry of another project's pool: a command from this "
+                "agent's sandbox reads only its own project's pool and the user pool",
+                kind="pool",
+            )
         return entry
 
 
@@ -119,13 +141,13 @@ def remove_entry(entry_id: str) -> None:
 def search_entries(query: str) -> list[ContextEntry]:
     """Search context in scope here: the user pool plus the current project's."""
     with store_session() as store:
-        return store.search(query, project_id=_pool_project(store).id)
+        return store.search(query, project_id=pool_project(store).id)
 
 
 def preview() -> str:
     """Return the context block that would be injected right now (no side effects)."""
     with store_session() as store:
-        project = _pool_project(store)
+        project = pool_project(store)
         entries = store.entries(project_id=project.id)
     return build_block(entries, project)
 

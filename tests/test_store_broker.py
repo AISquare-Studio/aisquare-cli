@@ -930,6 +930,18 @@ def test_a_hand_launch_runs_calls_from_its_project_and_a_read_elsewhere_is_only_
     assert len([note for note in notes if "refused" in note]) == 1, "the write only"
 
 
+def _a_codex_project(project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``project`` a real one (its ``.aisquare`` marker) on a machine with a ``codex``: where
+    the doctor's sandbox rows look (``diagnostics._sandboxed_project``)."""
+    (project / ".aisquare").mkdir(parents=True, exist_ok=True)
+    tools = tmp_path / "codex-bin"
+    tools.mkdir(exist_ok=True)
+    codex = tools / "codex"
+    codex.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    codex.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tools}{os.pathsep}{os.environ.get('PATH', '')}")
+
+
 def _installed_at(monkeypatch: pytest.MonkeyPatch, *places: Path) -> None:
     monkeypatch.setattr(
         store_broker, "install_paths", lambda *args, **kwargs: tuple(p.resolve() for p in places)
@@ -949,6 +961,7 @@ def test_a_sandboxed_launch_is_refused_where_its_sandbox_may_write_aisquare(
     project = tmp_path / "proj"
     venv = project / ".venv"
     venv.mkdir(parents=True)
+    _a_codex_project(project, tmp_path, monkeypatch)
     _installed_at(monkeypatch, venv)
     codex = get_adapter("codex")
     argv = ["codex", *_profile()]
@@ -1081,6 +1094,7 @@ def test_the_install_check_reads_the_install_the_agents_hooks_run(
     in_tree = project / ".venv" / "bin" / "aisquare"
     in_tree.parent.mkdir(parents=True)
     in_tree.write_text("#!/bin/sh\n", encoding="utf-8")
+    _a_codex_project(project, tmp_path, monkeypatch)
     monkeypatch.setattr(sys, "prefix", "/opt/aisquare-elsewhere")
     monkeypatch.setattr(sys, "executable", "/opt/aisquare-elsewhere/bin/python")
     monkeypatch.setattr(agents, "current_install", lambda: Path("/opt/aisquare-elsewhere/bin/x"))
@@ -1390,3 +1404,286 @@ def test_a_tree_codex_is_given_holds_its_launch_inputs_read_only(
     for tree in (launch, workspace, added):
         for name in store_broker.LAUNCH_INPUTS:
             assert table.get(str(tree.resolve() / name)) == "read", (tree, name)
+
+
+# --- review r13 of #113 -----------------------------------------------------------------
+
+
+def test_a_launch_drops_a_pythonpath_its_sandbox_may_write_and_warns_of_such_a_path(
+    beyond_tmp: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r13 of #113, finding 1: the hooks and the broker inherit the launch's
+    environment outside the sandbox. A ``PYTHONPATH`` entry the sandbox may write (direnv's
+    ``PYTHONPATH=<proj>/src``) is imported from before the standard library: dropped from
+    the agent's environment. A ``PATH`` entry it may write (an activated venv's ``bin``) is
+    where Codex itself and the hooks find ``git``: warned of, at launch."""
+    from aisquare.core.agent_adapters.types import SandboxWrites
+
+    project = beyond_tmp / "proj"
+    (project / "src").mkdir(parents=True)
+    outside = beyond_tmp / "libs"
+    outside.mkdir()
+    env = {
+        "PYTHONPATH": f"{project / 'src'}{os.pathsep}{outside}",
+        "PATH": f"{project / '.venv' / 'bin'}{os.pathsep}/usr/bin",
+    }
+    said = store_broker.sandbox_environment(env, SandboxWrites((project,), workspace=project))
+    assert env["PYTHONPATH"] == str(outside)
+    assert env["PATH"] == f"{project / '.venv' / 'bin'}{os.pathsep}/usr/bin", "warned, kept"
+    assert any("PYTHONPATH named" in line and "dropped" in line for line in said), said
+    assert any("PATH names" in line and "git" in line for line in said), said
+    alone = {"PYTHONPATH": str(project / "src")}
+    store_broker.sandbox_environment(alone, SandboxWrites((project,), workspace=project))
+    assert "PYTHONPATH" not in alone
+    assert store_broker.sandbox_environment(dict(env), None) == [], "unsandboxed: as its user"
+
+    # Through the launch itself: the environment it execs the agent with, and the broker's.
+    monkeypatch.chdir(project)
+    monkeypatch.delenv("TMPDIR", raising=False)
+    monkeypatch.setattr(store_broker, "run_broker", lambda directory, env: None)
+    launched = {"AISQUARE_LAUNCH_ID": LAUNCH, "PYTHONPATH": str(project / "src")}
+    _, note = store_broker.start_for_launch(launched, get_adapter("codex"), ["codex", *_profile()])
+    assert "PYTHONPATH" not in launched and "PYTHONPATH named" in note
+
+
+def test_the_doctors_sandbox_rows_look_only_in_a_real_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r13 of #113, finding 2: from the home (or ``/``), with no marker there, the
+    doctor's project was that directory itself, so every install under the home, the
+    official uv-tool one included, read as in the project, on Claude-only machines too,
+    and the installer, which runs the doctor where it is run, exited 2. The rows look only
+    in a real project (a git root or a project marker, never the home or ``/``), only where
+    a Codex is installed, and their names are one word."""
+    from aisquare.services import diagnostics
+
+    home = tmp_path / "home"
+    install = home / ".local" / "share" / "uv" / "tools" / "aisquare-cli"
+    install.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    _installed_at(monkeypatch, install)
+    venv_bin = home / "proj" / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    _a_codex_project(home / "proj", tmp_path, monkeypatch)
+    monkeypatch.setenv("PATH", f"{venv_bin}{os.pathsep}{os.environ['PATH']}")
+    for place in (home, Path("/"), home / "scratch"):
+        place.mkdir(exist_ok=True)
+        assert diagnostics._sandboxed_install_check(place) is None, place
+        assert diagnostics._sandbox_path_check(place) is None, place
+    row = diagnostics._sandbox_path_check(home / "proj")
+    assert row is not None and row.name == "sandbox-path" and ".venv" in row.detail
+    _installed_at(monkeypatch, home / "proj" / ".venv")
+    row = diagnostics._sandboxed_install_check(home / "proj")
+    assert row is not None and row.name == "sandbox-install"
+    # No Codex installed, no sandbox to keep anything from: nothing to say.
+    monkeypatch.setenv("PATH", "/nonexistent")
+    assert diagnostics._sandboxed_install_check(home / "proj") is None
+    assert diagnostics._sandbox_path_check(home / "proj") is None
+
+
+def test_the_doctor_run_from_above_the_real_install_says_nothing_of_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review r13 of #113, finding 2, with the real install: the doctor run from a directory
+    above it that is no project (as from a home above a uv-tool install) warned of it."""
+    import aisquare
+    from aisquare.core.workspace import git_common_root, marks_project_root
+    from aisquare.services import diagnostics
+
+    monkeypatch.setattr(store_broker, "install_paths", REAL_INSTALL_PATHS)
+    package = Path(aisquare.__file__).resolve().parent
+    above = next(
+        (
+            place
+            for place in package.parents
+            if git_common_root(place) is None
+            and not any(marks_project_root(d) for d in (place, *place.parents))
+            and place != Path(place.anchor)
+        ),
+        None,
+    )
+    if above is None:
+        pytest.skip("every directory above this install is in a project")
+    monkeypatch.setenv("HOME", str(above))
+    codex_bin = Path(tempfile.mkdtemp(prefix="asq-codex-"))
+    try:
+        (codex_bin / "codex").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (codex_bin / "codex").chmod(0o755)
+        monkeypatch.setenv("PATH", f"{codex_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+        assert diagnostics._sandboxed_install_check(above) is None
+    finally:
+        shutil.rmtree(codex_bin, ignore_errors=True)
+
+
+def test_the_plugin_routes_launcher_is_an_install_the_hooks_run(
+    beyond_tmp: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r13 of #113, finding 3: on the plugin route a hook runs the ``aisquare`` on
+    Codex's ``PATH``, else ``~/.local/bin``'s, else ``uvx``'s, and none was checked: with a
+    project venv's first on ``PATH``, every hook ran the in-tree install."""
+    from aisquare.core import agents
+
+    monkeypatch.setattr(store_broker, "install_paths", REAL_INSTALL_PATHS)
+    project = beyond_tmp / "proj"
+    venv_bin = project / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "aisquare").write_text("#!/bin/sh\n", encoding="utf-8")
+    (venv_bin / "aisquare").chmod(0o755)
+    monkeypatch.setattr(agents, "hook_commands", lambda agent, config_dir=None: [])
+
+    class Installed:
+        def installed(self, config_dir: Path | None) -> object:
+            return object()
+
+    monkeypatch.setattr(agents, "plugin_of", lambda agent: Installed())
+    found = store_broker.install_paths(beyond_tmp / "codex-home", "codex", str(venv_bin))
+    assert (venv_bin / "aisquare").resolve() in found and (project / ".venv").resolve() in found
+    monkeypatch.delenv("TMPDIR", raising=False)
+    with pytest.raises(store_broker.LaunchRefused, match=r"\.venv"):
+        store_broker.refuse_inside(
+            ["codex", "--sandbox", "workspace-write"],
+            project,
+            get_adapter("codex"),
+            beyond_tmp / "codex-home",
+            str(venv_bin),
+        )
+    monkeypatch.setattr(agents, "plugin_of", lambda agent: None)
+    found = store_broker.install_paths(beyond_tmp / "codex-home", "codex", str(venv_bin))
+    assert (venv_bin / "aisquare").resolve() not in found, "no plugin: its launcher runs nothing"
+
+
+def test_a_module_form_hooks_venv_is_an_install_the_hooks_run(
+    beyond_tmp: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r13 of #113, finding 8: a module-form hook (``<proj>/.venv/bin/python -P -m
+    aisquare hook codex``) names the venv's ``python``, a link to the base interpreter;
+    resolved, its environment was the base one, and the venv, which ``-m aisquare`` loads
+    from, was never checked."""
+    from aisquare.core import agents
+
+    monkeypatch.setattr(store_broker, "install_paths", REAL_INSTALL_PATHS)
+    venv = beyond_tmp / "proj" / ".venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").symlink_to(Path(sys.executable).resolve())
+    command = f"{venv / 'bin' / 'python'} -P -m aisquare hook codex"
+    monkeypatch.setattr(agents, "hook_commands", lambda agent, config_dir=None: [command])
+    hook = agents.hook_binary(command)
+    assert hook is not None and hook.module_form
+    assert venv.resolve() in store_broker.install_paths(beyond_tmp / "codex-home", "codex")
+
+
+def test_codex_reads_its_sandbox_from_its_config_and_profile_too(beyond_tmp: Path) -> None:
+    """Review r13 of #113, finding 6: the sandbox was read off the arguments alone, while
+    Codex layers ``config.toml``, the ``-p`` profile and ``-c``: a ``writable_roots`` there
+    (``~/.local/share/uv``, the uv-tool install's) went unchecked, and a ``danger-full-access``
+    there was refused as workspace-write. The inline-table spelling of
+    ``sandbox_workspace_write`` was missed as well."""
+    codex = get_adapter("codex")
+    home, cwd = beyond_tmp / "codex-home", beyond_tmp / "w"
+    home.mkdir()
+    cwd.mkdir()
+    uv = beyond_tmp / "uv"
+    (home / "config.toml").write_text(
+        f"[sandbox_workspace_write]\nwritable_roots = [{json.dumps(str(uv))}]\n", encoding="utf-8"
+    )
+    writes = codex.sandbox_writes([], cwd, home)
+    assert writes is not None and writes.may_write(uv / "tools")
+    (home / "config.toml").write_text('sandbox_mode = "danger-full-access"\n', encoding="utf-8")
+    assert codex.sandbox_writes([], cwd, home) is None
+    assert codex.sandbox_writes(["--sandbox", "workspace-write"], cwd, home) is not None
+    store = store_dir()
+    assert codex.sandbox_writes(codex.store_access("workspace", store), cwd, home) is not None, (
+        "the store's profile holds over the file's sandbox_mode (measured on 0.162.1)"
+    )
+    (home / "config.toml").write_text("", encoding="utf-8")
+    (home / "loose.config.toml").write_text('sandbox_mode = "danger-full-access"\n', "utf-8")
+    assert codex.sandbox_writes(["-p", "loose"], cwd, home) is None
+    inline = f"sandbox_workspace_write={{writable_roots=[{json.dumps(str(uv))}]}}"
+    writes = codex.sandbox_writes(["-c", inline], cwd, home)
+    assert writes is not None and writes.may_write(uv)
+
+
+def test_a_refusal_names_its_paths_as_they_are_and_its_remedy_by_the_root_that_holds_it(
+    beyond_tmp: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r13 of #113, findings 9 and 10: ``str.capitalize`` lowered every letter of the
+    remedy but its first, the path it names with them (``/home/u/code/x`` for
+    ``/home/u/Code/X``), and the advice to launch from the project's directory was given
+    for an install the launch reached another way (``--add-dir``, a temporary directory),
+    where the user was in the project already and it could not help."""
+    monkeypatch.delenv("TMPDIR", raising=False)
+    codex = get_adapter("codex")
+    writes = ["codex", "--sandbox", "workspace-write"]
+    project = beyond_tmp / "Code" / "Proj"
+    (project / ".aisquare").mkdir(parents=True)
+    added = beyond_tmp / "Shared" / "Tools"
+    added.mkdir(parents=True)
+    _installed_at(monkeypatch, added / "venv")
+    with pytest.raises(store_broker.LaunchRefused) as refusal:
+        store_broker.refuse_inside([*writes, "--add-dir", str(added)], project, codex)
+    said = str(refusal.value)
+    assert str(added.resolve()) in said and "Drop " in said, said
+    assert "launch the agent from its project's directory" not in said
+    _installed_at(monkeypatch, project / ".venv")
+    with pytest.raises(store_broker.LaunchRefused) as refusal:
+        store_broker.refuse_inside(writes, project, codex)
+    assert "Install aisquare outside the project" in str(refusal.value)
+    above = beyond_tmp / "Code"
+    with pytest.raises(store_broker.LaunchRefused) as refusal:
+        store_broker.refuse_inside(writes, above, codex)
+    assert f"not {above.resolve()}," in str(refusal.value), "the path as it is spelled"
+    with pytest.raises(store_broker.LaunchRefused) as refusal:
+        _installed_at(monkeypatch, Path("/tmp/asq-tools-x"))
+        store_broker.refuse_inside(writes, project, codex)
+    assert "outside /tmp" in str(refusal.value), str(refusal.value)
+
+
+def test_a_brokered_context_show_reads_only_the_pools_the_agent_is_given(
+    work: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """Review r13 of #113, finding 4: ``context show`` took any entry's id or prefix, of any
+    project's pool, from a sandboxed agent's broker."""
+    from aisquare.core.workspace import current_project
+    from aisquare.services import context as context_service
+
+    other = _other_repo(tmp_path)
+    monkeypatch.chdir(other)
+    theirs = context_service.add_entry("another project's secret", "project", [])
+    mine_user = context_service.add_entry("for every project", "user", [])
+    monkeypatch.chdir(work)
+    _brokered(monkeypatch, work)
+    ours = context_service.add_entry("ours", None, [])
+    assert current_project(work).id == ours.project_id
+    assert context_service.show_entry(ours.id).text == "ours"
+    assert context_service.show_entry(mine_user.id).text == "for every project"
+    with pytest.raises(store_broker.OutOfScope):
+        context_service.show_entry(theirs.id[:-3])
+    shown = runner.invoke(app, ["context", "show", theirs.id])
+    assert shown.exit_code != 0 and "secret" not in shown.output
+    assert "pool:" in (paths.log_dir() / store_broker.LOG_NAME).read_text(encoding="utf-8")
+
+
+def test_brokered_reads_take_the_launchs_pool_not_a_directorys_or_a_pin(
+    work: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r13 of #113, finding 5: ``aisquare log`` still followed the ``project switch``
+    pin, and the pool reads took the project of the request's directory, which in the tree
+    may be another's (a nested marker), where the same write was refused."""
+    from aisquare.core.store import store_session as session
+    from aisquare.core.workspace import current_project, pin_project
+    from aisquare.services import context as context_service
+    from aisquare.services import diagnostics
+
+    other = _other_repo(tmp_path)
+    _brokered(monkeypatch, work)
+    ours = current_project(work)
+    with session() as store:
+        store.add_prompt("a prompt of ours", ours.id)
+        store.add_prompt("a prompt of theirs", current_project(other).id)
+    context_service.add_entry("ours alone", None, [])
+    pin_project(current_project(other).id)
+    assert [record.text for record in diagnostics.show_log()] == ["a prompt of ours"]
+    nested = work / "vendored"
+    (nested / ".aisquare").mkdir(parents=True)
+    monkeypatch.chdir(nested)
+    assert "ours alone" in [entry.text for entry in context_service.list_entries()]

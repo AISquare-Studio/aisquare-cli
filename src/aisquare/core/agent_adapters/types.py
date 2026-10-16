@@ -314,10 +314,20 @@ class PermissionIntent:
 @dataclass(frozen=True)
 class SandboxWrites:
     """What a sandboxed session may write: ``writable`` roots, with ``read_only`` paths
-    within them held read-only (the more specific path wins, as Codex's profile rules it)."""
+    within them held read-only (the more specific path wins, as Codex's profile rules it).
+    Of the roots, ``workspace`` is the session's directory and ``temporary`` the
+    temporary directories every such sandbox writes; the rest were added (a directory
+    given it, a writable root, a profile's ``write`` path)."""
 
     writable: tuple[Path, ...]
     read_only: tuple[Path, ...] = ()
+    workspace: Path | None = None
+    temporary: tuple[Path, ...] = ()
+
+    def root_of(self, path: Path) -> Path | None:
+        """The most specific of :attr:`writable` that holds ``path``, or ``None``."""
+        holding = [root for root in self.writable if path == root or path.is_relative_to(root)]
+        return max(holding, key=lambda root: len(root.parts), default=None)
 
     def may_write(self, path: Path) -> bool:
         """Whether a write at ``path`` is allowed: under a writable root, and under no
@@ -586,12 +596,16 @@ class AgentAdapter(Protocol):
         stands between them) and for a scope the agent runs unsandboxed (``full``)."""
         ...
 
-    def sandbox_writes(self, args: Sequence[str], cwd: Path) -> SandboxWrites | None:
-        """What the sandbox of a session launched with ``args`` in ``cwd`` may write, from
-        the arguments themselves, whatever chose the sandbox (the store's profile, a native
-        flag or setting, the directories the arguments add); ``None`` where the session
-        runs unsandboxed. ``services.store_broker.refuse_inside`` refuses a launch whose
-        sandbox may write the aisquare its hooks and broker run."""
+    def sandbox_writes(
+        self, args: Sequence[str], cwd: Path, home: Path | None = None
+    ) -> SandboxWrites | None:
+        """What the sandbox of a session launched with ``args`` in ``cwd`` may write, read
+        as the agent reads its settings: its config in ``home`` (its config dir; ``None``
+        is this shell's), the profile ``args`` select, then ``args`` themselves, whatever
+        chose the sandbox (the store's profile, a native flag or setting, the directories
+        added); ``None`` where the session runs unsandboxed.
+        ``services.store_broker.refuse_inside`` refuses a launch whose sandbox may write
+        the aisquare its hooks and broker run."""
         ...
 
     def broker_access(

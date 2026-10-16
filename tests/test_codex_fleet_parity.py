@@ -2701,3 +2701,46 @@ def test_the_fleet_refuses_a_codex_agent_whose_sandbox_may_write_its_aisquare(
         assert store.fleet_agents(project.id) == []
     # A Claude Code agent runs its tools as its user does: no sandbox to keep it from.
     fleet_service.spawn(project, "tester", agent="claude-code", worktree=False)
+
+
+def test_a_replacement_its_sandbox_would_refuse_is_refused_before_the_agent_stops(
+    codex_agent: tuple[Codex, TeamTask],
+    tmux: FakeTmux,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review r13 of #113, finding 7: restart, switch and the usage-limit hand-over stop the
+    agent and only then spawn, whose install check then refused: the agent was stopped,
+    nothing started, its claims abandoned. The replay is asked first, under the home it
+    would start under: a switch's target slot, whose hooks may run another install."""
+    from aisquare.core import launch_seal as seals
+    from aisquare.services import store_broker
+
+    codex, task = codex_agent
+    _rollout(codex, THREAD_ONE)
+    codex.start(THREAD_ONE)
+    team_service.claim_task(task.id, session_ref=codex.board_id(THREAD_ONE))
+    inside = codex.project.root / ".venv"
+    monkeypatch.setattr(store_broker, "install_paths", lambda *args, **kwargs: (inside,))
+
+    with pytest.raises(fleet_service.FleetError, match="aisquare-cli"):
+        fleet_service.restart(codex.project, codex.agent.label)
+
+    assert tmux.typed == [] and tmux.killed == [], "nothing typed into or killed"
+    assert _claimed_by(task.id) == codex.board_id(THREAD_ONE), "its claim kept"
+    # The target slot's home is the one asked: its hooks, not the current one's.
+    target = codex.home.parent / "slot-2"
+    asked: list[object] = []
+
+    def paths_for(
+        config_dir: Path | None = None, *args: object, **kwargs: object
+    ) -> tuple[Path, ...]:
+        asked.append(config_dir)
+        return (inside,) if config_dir == target else ()
+
+    monkeypatch.setattr(store_broker, "install_paths", paths_for)
+    record = seals.read(codex.agent.id)
+    assert isinstance(record, seals.LaunchRecord)
+    fleet_service._refuse_a_replay_that_cannot_start(codex.project, record)
+    with pytest.raises(fleet_service.FleetError):
+        fleet_service._refuse_a_replay_that_cannot_start(codex.project, record, target)
+    assert asked[-1] == target

@@ -2492,7 +2492,11 @@ def spawn(
         home = choice.account.config_dir if choice.account is not None else selected.config_dir
         try:
             store_broker.refuse_inside(
-                [resolution.binary, *native, *arguments.argv], prospective, selected.adapter, home
+                [resolution.binary, *native, *arguments.argv],
+                prospective,
+                selected.adapter,
+                home,
+                os.environ.get("PATH"),
             )
         except store_broker.LaunchRefused as exc:
             raise FleetError(str(exc)) from exc
@@ -6479,7 +6483,7 @@ def switch(
             f"{claude_accounts_core.agent_label(kind)} cannot resume a thread under another "
             "account's home — the replacement starts fresh with a hand-off prompt"
         )
-    _refuse_a_replay_that_cannot_start(project, record)
+    _refuse_a_replay_that_cannot_start(project, record, target.config_dir)
     # A hand-over whether it resumes or not: the agent is coming back, so its
     # claims wait for the replacement and no exit is announced. A fresh start
     # used to stop the agent as `fleet stop` does — the task went back to the
@@ -6733,7 +6737,7 @@ def _resumable(
 
 
 def _refuse_a_replay_that_cannot_start(
-    project: ProjectInfo, record: launch_seal.LaunchRecord
+    project: ProjectInfo, record: launch_seal.LaunchRecord, home: Path | None = None
 ) -> None:
     """Raise now what replaying ``record`` would refuse — BEFORE its agent is stopped.
 
@@ -6752,6 +6756,11 @@ def _refuse_a_replay_that_cannot_start(
     take none. The agent that binary runs as is asked too, as :func:`spawn` asks it
     (``agent_launch.resolve`` with the recorded agent): a binary another agent's, and a
     wrapper with nothing to name its agent, are refused here rather than after the stop.
+    So is a sandbox that may write an aisquare the replacement's hooks or broker run
+    (``store_broker.refuse_inside``, as :func:`spawn` asks it), under ``home``, the account
+    home it starts under (a switch's target slot, whose hooks may run another install),
+    else the record's: a switch to such a slot stopped the agent and started nothing
+    (review r13 of #113, finding 7).
     """
     replayed = _launch_binary(
         record.role,
@@ -6763,9 +6772,31 @@ def _refuse_a_replay_that_cannot_start(
     )
     chosen = replayed.binary if replayed.source != "default" else None
     try:
-        agent_launch.resolve(record.role, agent=record.agent, binary=chosen, cwd=project.root)
+        selected = agent_launch.resolve(
+            record.role, agent=record.agent, binary=chosen, cwd=project.root
+        )
     except ValueError as exc:
         raise FleetError(str(exc)) from exc
+    if selected.adapter.capabilities.sandboxes_tools:
+        from aisquare.services import store_broker
+
+        # The agent's arguments as its window's `launch` passes them: after the `--` of
+        # the recorded command line (the extra ones, for a record from before there was one).
+        command = list(record.spec.command)
+        native = (
+            command[command.index("--") + 1 :] if "--" in command else list(record.spec.extra_args)
+        )
+        account = home or (Path(record.account_home) if record.account_home else None)
+        try:
+            store_broker.refuse_inside(
+                [record.binary, *native],
+                Path(record.cwd),
+                selected.adapter,
+                account or selected.config_dir,
+                os.environ.get("PATH"),
+            )
+        except store_broker.LaunchRefused as exc:
+            raise FleetError(str(exc)) from exc
 
 
 def _launch_record(project: ProjectInfo, agent: FleetAgent, verb: str) -> launch_seal.LaunchRecord:

@@ -196,7 +196,9 @@ class FakeAgentAdapter:
             return []
         return [arg for path in store_read_only(store) for arg in ("--readonly", str(path))]
 
-    def sandbox_writes(self, args: Sequence[str], cwd: Path) -> SandboxWrites | None:
+    def sandbox_writes(
+        self, args: Sequence[str], cwd: Path, home: Path | None = None
+    ) -> SandboxWrites | None:
         # Its sandbox writes the workspace and /tmp; with no `--readonly`, none at all.
         if "--readonly" not in args:
             return None

@@ -770,21 +770,34 @@ class CodexAdapter:
             f"{profile}.filesystem={_filesystem(store_read_only(store), ())}",
         ]
 
-    def sandbox_writes(self, args: Sequence[str], cwd: Path) -> SandboxWrites | None:
-        """What Codex's sandbox may write for a session with ``args`` in ``cwd``, read off
-        the arguments: ``None`` with no sandbox (``--sandbox danger-full-access``, the
-        bypass flags, ``-c sandbox_mode="danger-full-access"``). The workspace is ``-C``/
+    def sandbox_writes(
+        self, args: Sequence[str], cwd: Path, home: Path | None = None
+    ) -> SandboxWrites | None:
+        """What Codex's sandbox may write for a session with ``args`` in ``cwd``, read as
+        Codex layers its settings: ``config.toml`` in ``home`` (its Codex home; ``None``
+        is this shell's), then the profile ``-p`` selects (``<name>.config.toml`` beside
+        it), then ``args`` (review r13 of #113, finding 6). ``None`` with no sandbox
+        (``--sandbox danger-full-access``, ``sandbox_mode = "danger-full-access"``, the
+        bypass flags). The sandbox is ``--sandbox``, else a ``-c sandbox_mode``, else the
+        store's profile in ``args`` (which holds over a ``sandbox_mode`` in the files,
+        measured on 0.162.1), else the files' ``sandbox_mode``. The workspace is ``-C``/
         ``--cd``'s directory, else ``cwd``. Measured on 0.162.1: ``read-only`` (the store's
         profile over ``:read-only``, or ``--sandbox read-only``) writes nothing but the
         profile's ``write`` paths, ``/tmp`` included; ``workspace-write`` (over
         ``:workspace``, ``--sandbox workspace-write``, ``--approve-for-me``, or no sandbox
         named: Codex's own default may be it, so it is taken as it) writes the workspace,
-        ``/tmp`` and ``$TMPDIR``, with ``--add-dir`` and
-        ``sandbox_workspace_write.writable_roots``. The profile's ``read`` paths are read-only
+        ``/tmp`` and ``$TMPDIR``, with each ``--add-dir`` and every layer's
+        ``sandbox_workspace_write.writable_roots`` (a table key or an inline table: all of
+        them, the more writable reading). The profile's ``read`` paths are read-only
         within its writable ones, the more specific winning."""
         if any(arg in ("--dangerously-bypass-approvals-and-sandbox", "--yolo") for arg in args):
             return None
-        settings: dict[str, object] = {}
+        codex_home = home if home is not None else _codex_home(None)
+        files = [_read_toml(codex_home / "config.toml")]
+        profile = next(reversed(option_values(args, "-p", "--profile")), None)
+        if profile and Path(profile).name == profile and profile not in {".", ".."}:
+            files.append(_read_toml(codex_home / f"{profile}.config.toml"))
+        settings: dict[str, str] = {}
         for value in option_values(args, "-c", "--config"):
             parsed = config_assignment(value)
             if parsed is not None:
@@ -792,27 +805,49 @@ class CodexAdapter:
         modes = option_values(args, "--sandbox", "-s")
         mode = modes[-1] if modes else None
         if mode is None and "sandbox_mode" in settings:
-            mode = str(settings["sandbox_mode"]).strip().strip("\"'")
+            mode = settings["sandbox_mode"].strip().strip("\"'")
         table = _filesystem_table(settings.get(f"permissions.{PERMISSION_PROFILE}.filesystem"))
         if mode is None and "default_permissions" in settings:
-            extends = str(settings.get(f"permissions.{PERMISSION_PROFILE}.extends", ""))
+            extends = settings.get(f"permissions.{PERMISSION_PROFILE}.extends", "")
             mode = "read-only" if "read-only" in extends else "workspace-write"
+        if mode is None:
+            for layer in reversed(files):
+                if isinstance(layer.get("sandbox_mode"), str):
+                    mode = layer["sandbox_mode"]
+                    break
         if mode == "danger-full-access":
             return None
         dirs = option_values(args, "-C", "--cd")
         workspace = (cwd / dirs[-1]) if dirs else cwd
         written = [Path(path) for path, at in table.items() if at == "write"]
         read = tuple(Path(path) for path, at in table.items() if at == "read")
+        temporary = [
+            Path("/tmp"),
+            *([Path(os.environ["TMPDIR"])] if os.environ.get("TMPDIR") else []),
+        ]
         if mode == "read-only":
-            return SandboxWrites(tuple(written), read)
-        roots = [workspace, Path("/tmp"), *(cwd / d for d in option_values(args, "--add-dir"))]
-        if os.environ.get("TMPDIR"):
-            roots.append(Path(os.environ["TMPDIR"]))
-        extra = settings.get("sandbox_workspace_write.writable_roots")
-        with suppress(tomllib.TOMLDecodeError, RecursionError, TypeError):
-            listed = tomllib.loads(f"v = {extra}")["v"] if extra is not None else []
-            roots += [Path(item) for item in listed if isinstance(item, str)]
-        return SandboxWrites(tuple([*roots, *written]), read)
+            return SandboxWrites(tuple(written), read, None, ())
+        listed: list[object] = []
+        for layer in files:
+            nested = layer.get("sandbox_workspace_write")
+            if isinstance(nested, dict) and isinstance(nested.get("writable_roots"), list):
+                listed += nested["writable_roots"]
+        for key, wrapped in (
+            ("sandbox_workspace_write.writable_roots", "v = {}"),
+            ("sandbox_workspace_write", "v = {}"),
+        ):
+            if key not in settings:
+                continue
+            with suppress(tomllib.TOMLDecodeError, RecursionError, TypeError):
+                found = tomllib.loads(wrapped.format(settings[key]))["v"]
+                if isinstance(found, dict):
+                    found = found.get("writable_roots", [])
+                if isinstance(found, list):
+                    listed += found
+        added = [cwd / d for d in option_values(args, "--add-dir")]
+        added += [cwd / Path(item).expanduser() for item in listed if isinstance(item, str)]
+        roots = [workspace, *temporary, *added, *written]
+        return SandboxWrites(tuple(roots), read, workspace, tuple(temporary))
 
     def broker_access(
         self,

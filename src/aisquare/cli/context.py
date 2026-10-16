@@ -67,10 +67,16 @@ def add(
 @app.command("show")
 def show(entry_id: EntryId) -> None:
     """Show a context entry in full."""
+    from aisquare.services.store_broker import OutOfScope, brokered_call, record_refusal
+
     try:
         entry = context_service.show_entry(entry_id)
     except (KeyError, AmbiguousIdError) as exc:
         _fail_lookup(entry_id, exc)
+    except OutOfScope as exc:
+        if brokered_call():
+            record_refusal(exc.kind, str(exc))
+        fail(str(exc), error="out_of_scope")
     emit_entry_detail(entry)
 
 

@@ -121,6 +121,7 @@ if TYPE_CHECKING:
     from starlette.routing import Route
     from starlette.websockets import WebSocket
 
+    from aisquare.core.store import ContextStore
     from aisquare.core.tmux import Capture, PaneFacts, TmuxServer
     from aisquare.services.remote_actions import ActionLedger
     from aisquare.services.remote_needs import NeedsItem
@@ -660,7 +661,7 @@ def _remote_board_project(root: Path) -> ProjectInfo:
     return board
 
 
-def _remote_project_board(project: ProjectInfo) -> ProjectInfo:
+def _remote_project_board(project: ProjectInfo, store: ContextStore | None = None) -> ProjectInfo:
     """The board ``project``'s agents read, which its Board and Tasks tabs show, a task number
     is read on and a note naming no agent, session or running agent's label goes to
     (:func:`_remote_note_board`): the one its running agents' rows recorded at spawn
@@ -677,14 +678,19 @@ def _remote_project_board(project: ProjectInfo) -> ProjectInfo:
     coders work on; a claim or a close of a task on the hub by id was a 404, and ``done #12``
     read #12 on the checkout's board and closed that task if it had one (review of #259,
     round 29, 3/8).
+
+    Through ``store`` when the caller holds one open (:func:`remote_board_payload`).
     """
-    board = _remote_recorded_board(project)
+    board = _remote_recorded_board(project, store)
     return board if board is not None else _remote_board_project(project.root)
 
 
-def _remote_recorded_board(project: ProjectInfo) -> ProjectInfo | None:
+def _remote_recorded_board(
+    project: ProjectInfo, store: ContextStore | None = None
+) -> ProjectInfo | None:
     """:func:`_remote_project_board` as ``project``'s live rows recorded it; ``None`` for a
-    project with none, or whose board the store does not hold.
+    project with none, or whose board the store does not hold. Through ``store`` when the
+    caller holds one open, else its own.
 
     A board forgotten since is still held: its events and tasks are kept, and the agents
     whose rows recorded it still read it. Read as one the store does not hold, a hub
@@ -693,11 +699,13 @@ def _remote_recorded_board(project: ProjectInfo) -> ProjectInfo | None:
     30, 2/8)."""
     from aisquare.core.store import store_session
 
-    with store_session() as store:
-        recorded = store.fleet_board(project.id)
-        if recorded is None:
-            return None
-        return store.get_project(recorded, include_forgotten=True)
+    if store is None:
+        with store_session() as opened:
+            return _remote_recorded_board(project, opened)
+    recorded = store.fleet_board(project.id)
+    if recorded is None:
+        return None
+    return store.get_project(recorded, include_forgotten=True)
 
 
 def _remote_note_board(project: ProjectInfo, to: str | None) -> str | None:
@@ -3004,7 +3012,7 @@ Board tab draws. ``asq board --json`` prints five, a glance in a terminal."""
 
 
 def remote_board_payload(project: str | None = None, *, glance: bool = False) -> dict[str, object]:
-    """``GET api/board`` and the ``board`` frame — the ONE call into ``board_data``.
+    """``GET api/board`` and the ``board`` frame — the ONE call into ``board_data_in``.
 
     The project's root as ``cwd`` is exactly what ``asq board --json`` prints when
     run there, ``AISQUARE_TEAM_HUB`` included (``team_service._project``); ``None``
@@ -3036,18 +3044,26 @@ def remote_board_payload(project: str | None = None, *, glance: bool = False) ->
     The board is the one the project's agents read, as their rows recorded it
     (:func:`_remote_project_board`), and the root's only for a project with none: under
     Remote's own environment the tab showed another board than its manager's when Remote
-    ran without the hub it was spawned under (review of #259, round 29, 3/8).
+    ran without the hub it was spawned under (review of #259, round 29, 3/8). It is found
+    in the store ``board_data`` reads through (``team.board_data_in``): looked up in a store
+    of its own, every frame opened two (connect, WAL switch, migration check), and the
+    minute :func:`_remote_board_project` keeps a root's board for spared none of it for a
+    project with rows (round 30, 6/8). A root's board, for a project with none, still asks
+    ``git`` at most once a minute, with the connection holding no transaction.
 
     #240 fold: pass ``exclude_kinds=team_service.CAPTAIN_AUDIT_KINDS`` here (one line).
     """
     from aisquare.cli.team import board_json
+    from aisquare.core.store import store_session
     from aisquare.services import team as team_service
 
     target = _resolve_project(project)
-    board = _remote_project_board(target)
-    return board_json(
-        *team_service.board_data(target.root, events=BOARD_EVENTS, project=board, glance=glance)
-    )
+    with store_session() as store:
+        board = _remote_project_board(target, store)
+        read = team_service.board_data_in(
+            store, target.root, events=BOARD_EVENTS, project=board, glance=glance
+        )
+    return board_json(*read)
 
 
 def live_sources() -> Sources:

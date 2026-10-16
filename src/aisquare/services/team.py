@@ -767,9 +767,27 @@ def board_data(
     """
     _require_enabled()
     with store_session() as store:
-        return _read_board(
+        return board_data_in(
             store, cwd, events=events, since_seq=since_seq, project=project, glance=glance
         )
+
+
+def board_data_in(
+    store: ContextStore,
+    cwd: Path | None = None,
+    *,
+    events: int = _BOARD_EVENTS,
+    since_seq: int | None = None,
+    project: ProjectInfo | None = None,
+    glance: bool = False,
+) -> tuple[ProjectInfo, list[TeamSession], list[TeamTask], list[TeamEvent]]:
+    """:func:`board_data` through a store the CALLER holds open: Remote's ``board`` frame,
+    which finds the board it shows in that store first (``remote_server``'s
+    ``remote_board_payload``), read every second while a phone shows its Board tab."""
+    _require_enabled()
+    return _read_board(
+        store, cwd, events=events, since_seq=since_seq, project=project, glance=glance
+    )
 
 
 class BoardRead(NamedTuple):

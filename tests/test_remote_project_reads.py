@@ -339,13 +339,13 @@ def test_the_board_is_read_from_the_projects_root_as_asq_board_there_would(
     the current project's root included."""
     current, other = two_projects
     asked: list[Path | None] = []
-    real = team_service.board_data
+    real = team_service.board_data_in
 
-    def spy(cwd: Path | None = None, **kwargs: Any) -> Any:
+    def spy(store: Any, cwd: Path | None = None, **kwargs: Any) -> Any:
         asked.append(cwd)
-        return real(cwd, **kwargs)
+        return real(store, cwd, **kwargs)
 
-    monkeypatch.setattr(team_service, "board_data", spy)
+    monkeypatch.setattr(team_service, "board_data_in", spy)
     remote_board_payload(other.id)
     remote_board_payload(None)
     assert asked == [other.root, current.root]

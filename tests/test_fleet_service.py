@@ -8799,32 +8799,28 @@ def test_a_waiter_on_the_branch_lock_waits_while_its_holder_moves_on(
         holder.join(30)
 
 
-def test_a_spawn_says_it_moved_on_once_its_window_is_up(
-    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+def test_a_holder_of_the_branch_lock_says_it_holds_it_whatever_step_it_is_on(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Between the tree's last git command and the row's, a spawn opens its window: tmux
-    commands, not git. It says it moved on once the window is up."""
-    said: list[str] = []
-    real_window, real_announce = fleet_service.open_window, fleet_service._announce_holder
+    """Review of #259, round 19: a holder said it moved on after each git command (a check in
+    the git seam) and once a spawn's window was up. Every other step under the lock, the
+    account files, the server's socket and start, the row, said nothing, and each step added
+    later had to remember to. The hold says so itself, from a thread of its own, whatever
+    the holder does, and stops once it lets go."""
+    monkeypatch.setattr(fleet_service, "_HOLDER_LOOK", 0.01)
+    common = fleet_service._git_common_dir(repo)
+    words: set[str] = set()
 
-    def window(*args: Any, **kwargs: Any) -> WindowInfo:
-        said.append("window")
-        return real_window(*args, **kwargs)
+    with fleet_service._branches_locked(common, wait=0):
+        deadline = time.monotonic() + 5
+        while len(words) < 3 and time.monotonic() < deadline:  # no git, no tmux: a step
+            words.add(fleet_service._lock_holder(common))
+            time.sleep(0.005)
 
-    def announce(common: Path) -> None:
-        said.append("moved on")
-        real_announce(common)
-
-    monkeypatch.setattr(fleet_service, "open_window", window)
-    monkeypatch.setattr(fleet_service, "_announce_holder", announce)
-
-    fleet_service.spawn(project, "coder", label="coder-w")
-
-    assert said[said.index("window") + 1] == "moved on"
-    monkeypatch.setattr(fleet_service, "_announce_holder", real_announce)
-    said.clear()
-    fleet_service._git(project.root, "rev-parse", "HEAD")
-    assert said == [], "outside the lock, a git command says nothing"
+    assert len(words) >= 3, "the holder said nothing while it held"
+    assert not [t for t in threading.enumerate() if t.name == "aisquare-branch-lock"], (
+        "still saying so after it let go"
+    )
 
 
 def test_a_spawn_waits_through_a_queue_of_holders_of_the_branch_lock(

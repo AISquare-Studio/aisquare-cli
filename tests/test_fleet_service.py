@@ -5043,6 +5043,18 @@ def _case_limited_chip(w: _Hubbed) -> str | None:
     return _named_by(switches[w.coder_sid], w)
 
 
+def _case_phone_note_wakes(w: _Hubbed) -> str | None:
+    # The phone's Board note to the manager: no session, the project's root (`write_note`).
+    return _woke(w, lambda: team_service.add_note("fyi", to_role="manager", cwd=w.fleet.root))
+
+
+def _case_rowless_session_wakes(w: _Hubbed) -> str | None:
+    # A session no row holds: the human's own claude, an MCP client, a manager by hand.
+    _stranger(w.monkeypatch, "human")
+    team_service.hook_session_start("sess-by-hand", w.hub.root, "startup")
+    return _woke(w, lambda: team_service.finish_task(w.task.id, session_ref="sess-by-hand"))
+
+
 def _case_limit_nudge(w: _Hubbed) -> str | None:
     team_service.hook_stop_failure(
         w.coder_sid, error="rate_limit", message="You've hit your session limit", details=None
@@ -5204,6 +5216,8 @@ _HUB_RULE_CASES: list[tuple[str, str, Any]] = [
     ("fleet", "the manager task block wakes", _case_block_wakes),
     ("fleet", "the manager task reopen wakes", _case_reopen_wakes),
     ("fleet", "the manager a deferred Stop wakes", _case_deferred_wake),
+    ("fleet", "the manager the phone's note wakes", _case_phone_note_wakes),
+    ("fleet", "the manager a session with no row wakes", _case_rowless_session_wakes),
 ]
 
 
@@ -5354,6 +5368,26 @@ def test_under_a_hub_a_manager_is_told_its_coder_exited_and_was_restarted(
     assert hubbed.woken and set(hubbed.woken) == {hubbed.fleet.id}, "its own manager"
     with store_session() as store:
         assert not store.recent_events(hubbed.fleet.id), "nothing on a board nobody reads"
+
+
+def test_under_a_hub_a_write_with_no_row_wakes_the_manager_of_the_writers_project(
+    hubbed: _Hubbed, plain_project: ProjectInfo
+) -> None:
+    """Review of #259, round 25, 5/10: a writer with no fleet row (the phone, a shell, an
+    MCP client) nudged the board's project's manager, under a hub the hub's, where none has
+    a row. It wakes the manager that reads the board, and with two on one hub, the one
+    whose project holds the writer's directory; in neither, none."""
+    other, _ = _spawned(plain_project, "manager", None, hubbed.tmux, hubbed.monkeypatch)
+    assert other.board == hubbed.manager.board == hubbed.hub.id
+
+    for where, woken in (
+        (plain_project.root, [plain_project.id]),
+        (hubbed.fleet.root, [hubbed.fleet.id]),
+        (hubbed.hub.root, [hubbed.hub.id]),  # neither project's: the board's, as before
+    ):
+        hubbed.woken.clear()
+        team_service.add_note("which branch?", kind="question", cwd=where)
+        assert hubbed.woken == woken, where
 
 
 @pytest.mark.parametrize("nested", ["a sub-folder", "a linked worktree"])

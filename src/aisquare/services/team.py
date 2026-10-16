@@ -593,9 +593,12 @@ def task_key(title: str) -> str:
     return slug[:64] or "task"
 
 
-def _nudge_target(store: ContextStore, writer: str | None, board_id: str) -> str:
-    """The project whose manager a nudge for session ``writer``'s board write wakes: that of
-    the writer's own live fleet row, else ``board_id``, the board's, as every nudge was.
+def _nudge_target(
+    store: ContextStore, writer: str | None, board_id: str, cwd: Path | None = None
+) -> str:
+    """The project whose manager a nudge for session ``writer``'s write on board ``board_id``
+    wakes: that of the writer's own live fleet row; with none, that of the manager that reads
+    the board (:func:`_reading_manager`); else ``board_id``'s, as every nudge was.
 
     Which manager is a fleet question, the news a board one (docs/fleet.md, "Under a hub: one
     board, many fleet projects"): the nudge types a fixed line into the manager row's pane,
@@ -605,16 +608,40 @@ def _nudge_target(store: ContextStore, writer: str | None, board_id: str) -> str
     deferred wake reached nobody, or woke the hub directory's own manager. The row is the
     writer's, in whichever project: a coder's manager is in its own row's project, as round
     22 spawns it there, and a manager's Stop wakes its own row (review of #259, round 24,
-    4/6). Read in the write's own store session, after the write: it cannot raise, as a
+    4/6). A writer with no row (the phone, the human's own shell, an MCP client, a manager
+    launched by hand) woke the board's project's manager: under a hub the hub's, where no
+    manager has a row, so a note to the manager from the phone never woke it (round 25,
+    5/10). Read in the write's own store session, after the write: it cannot raise, as a
     read that fails costs the nudge its target, never the write.
     """
-    if writer is None:
-        return board_id
     try:
-        row = store.fleet_agent_for_session(writer)
+        row = store.fleet_agent_for_session(writer) if writer is not None else None
+        if row is not None:
+            return row.project_id
+        return _reading_manager(store, board_id, cwd) or board_id
     except Exception:
         return board_id
-    return row.project_id if row is not None else board_id
+
+
+def _reading_manager(store: ContextStore, board_id: str, cwd: Path | None) -> str | None:
+    """The project of the live ``manager`` row whose agent reads board ``board_id``, as its
+    spawn recorded (``FleetAgent.board``). Of several, as under a hub, the one whose project's
+    root holds the writer's directory, ``cwd`` or this process's (the phone writes a project's
+    note in its root); of none that holds it, none.
+    """
+    managers = [
+        row
+        for row in store.live_fleet_agents()
+        if row.label == MANAGER_ROLE and row.board == board_id
+    ]
+    if len(managers) == 1:
+        return managers[0].project_id
+    here = (cwd or Path.cwd()).resolve()
+    for manager in managers:
+        project = store.get_project(manager.project_id)
+        if project is not None and here.is_relative_to(project.root):
+            return project.id
+    return None
 
 
 def _nudge_manager(project_id: str, *, reason: str) -> None:
@@ -1138,7 +1165,9 @@ def add_note(
         )
         wakes = kind in ("result", "question") or _addressed_to_manager(to_role)
         manager = (
-            _nudge_target(store, session.id if session else None, board.id) if wakes else board.id
+            _nudge_target(store, session.id if session else None, board.id, cwd)
+            if wakes
+            else board.id
         )
     stored = _record_delivery(event, board)
     if kind in distill_service.DISTILL_KINDS:
@@ -1811,7 +1840,7 @@ def hook_stop(
                 if decision is None and stop_hook_active:
                     deferred = _deferred_wake_reason(store, session)
                     if deferred is not None:  # its own row's project: under a hub, not the board's
-                        manager = _nudge_target(store, session.id, session.project_id)
+                        manager = _nudge_target(store, session.id, session.project_id, cwd)
             except Exception as exc:  # waiting is the contract; the wake-up is the extra
                 failure = exc
             else:

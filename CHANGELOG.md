@@ -584,6 +584,11 @@ all of them, and the fleet cleans up the worktrees it made.**
     board the project's agents read, where its manager looks for it, and
     `fleet shutdown` clears it there. Under a hub that is the hub's board,
     so a pause holds every manager on the hub.
+  - A board write by a writer with no agent row (a note to the manager from
+    the phone, a question from your own shell, an MCP client's task update)
+    wakes the waiting manager that reads that board. Under a hub with several
+    managers, it wakes the one whose project holds the writer's directory.
+    Before, it woke nobody.
 
 ### Security
 - **One choke point.** Every request and every socket handshake passes the

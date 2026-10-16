@@ -104,7 +104,9 @@ def test_connect_is_one_click_and_the_planned_agents_have_no_button(
     # By line, not by sentence: the row names the version of whatever `claude` is on PATH.
     lines = {line.split(":")[0]: line for line in report.splitlines() if ": " in line}
     assert "connected (all lifecycle hooks installed" in lines["✓ claude-code"], report
-    assert f"Codex detected at {isolated_agent_home / '.codex'}" in lines["✓ codex"], report
+    # Codex's row is its integration's since #113 (`_check_other_agents`), not a path's.
+    assert "Codex detected" in lines["✓ codex"], report
+    assert f"Cursor detected at {isolated_agent_home / '.cursor'}" in lines["✓ cursor"], report
     refreshed = [m for m in received if isinstance(m, DoctorRefreshed)]
     assert len(refreshed) == 1, received
     rows: dict[str, DoctorCheck] = {check.name: check for check in refreshed[0].checks}

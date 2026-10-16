@@ -1,0 +1,571 @@
+"""Per-launch, loopback OTLP/JSON receiver for Codex's native telemetry.
+
+For an agent with ``capabilities.native_telemetry``: the exporter's launch arguments are
+its adapter's (``AgentAdapter.telemetry_args``); the config layers that may hold the
+operator's own exporter (:func:`operator_configured`) and the attributes the receiver
+keeps (``_FIELDS``) are Codex's, which another agent's telemetry would extend here.
+
+The receiver has no provider credentials and never proxies model requests.
+It writes redacted metadata into the existing spool; the existing ship command
+owns gateway authentication, delivery and retry. It exits with its owner.
+"""
+
+from __future__ import annotations
+
+import argparse
+import errno
+import hashlib
+import hmac
+import json
+import os
+import re
+import sqlite3
+import stat
+import subprocess
+import tempfile
+import time
+import tomllib
+from collections.abc import Callable, Iterator, MutableMapping, Sequence
+from contextlib import suppress
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+from urllib.parse import quote
+
+from aisquare.core import insights, orchestrator, outbox, paths, selfcli, spawn
+from aisquare.core.agent_adapters.types import AgentAdapter, option_values
+from aisquare.core.agent_sessions import METADATA_PRUNE_INTERVAL, prune_metadata
+from aisquare.core.agent_sessions import NATIVE_METADATA_TTL as NATIVE_METADATA_TTL
+from aisquare.core.store import store_session
+
+MAX_BYTES = 2_000_000
+SYSTEM_CONFIG = Path("/etc/codex/config.toml")
+HEADERS_ENV = "OTEL_EXPORTER_OTLP_LOGS_HEADERS"
+"""OTLP's headers variable for the logs exporter, where the receiver's ``Authorization``
+rides: a process's environment is its owner's to read (``/proc/<pid>/environ``), its
+argv every local user's. Codex 0.162.1's otlp-http exporter sends it, and prefers it to
+the general ``OTEL_EXPORTER_OTLP_HEADERS`` (both measured)."""
+TOKEN_PREFIX = "aisquare-otlp-"
+_OWN_HEADERS = re.compile(rf"Authorization=Bearer%20{TOKEN_PREFIX}[A-Za-z0-9_-]+")
+_config_stamp: tuple[object, ...] | None = None
+
+
+class NativeConfigError(ValueError):
+    """A config layer could contain operator settings we cannot safely inspect."""
+
+
+def _read_config(path: Path, layer: str) -> dict[str, Any]:
+    problem: Exception
+    cause: BaseException
+    try:
+        if not stat.S_ISREG(path.stat().st_mode):
+            raise ValueError("not a regular file")
+        with path.open("rb") as handle:
+            return tomllib.load(handle)
+    except FileNotFoundError as exc:
+        # Windows says "not found" under a home that is a file, where POSIX says ENOTDIR.
+        if not os.path.lexists(path.parent) or os.path.isdir(path.parent):
+            return {}
+        problem, cause = NotADirectoryError(f"{path.parent} is not a directory"), exc
+    except (OSError, ValueError, RecursionError) as exc:
+        problem = cause = exc
+    raise NativeConfigError(
+        f"Cannot inspect Codex {layer} config {path}: {problem}. "
+        "Native telemetry configuration left unchanged."
+    ) from cause
+
+
+def _overrides(args: list[str]) -> list[tuple[str, dict[str, Any]]]:
+    """Each ``-c``/``--config`` override in ``args``: its key as written, and its value parsed
+    as Codex parses it; one that does not parse is Codex's to refuse, and skipped."""
+    overrides: list[tuple[str, dict[str, Any]]] = []
+    for value in option_values(args, "-c", "--config"):
+        key, separator, raw = value.partition("=")
+        if not separator:
+            continue
+        try:
+            try:
+                parsed = tomllib.loads(value)
+            except (tomllib.TOMLDecodeError, RecursionError):
+                # Codex accepts an unquoted string as a config override value.
+                parsed = tomllib.loads(f"{key}={json.dumps(raw)}")
+        except (tomllib.TOMLDecodeError, RecursionError):
+            continue  # Native argument validation belongs to Codex.
+        # Keep each dotted override: a shallow update would erase sibling keys
+        # under profiles when a later -c configures something else there.
+        overrides.append((key.strip(), parsed))
+    return overrides
+
+
+def _layers(
+    config_dir: Path, args: list[str], overrides: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], str | None]:
+    """The config layers ``config_dir``'s launch may read (its system and user config,
+    ``overrides`` and the selected profile's file), with the profile that selects; a
+    reader asks them all, whatever their order. Measured on 0.162.1, only ``-p`` selects
+    a profile file: a ``profile`` key in config.toml loads none, ``-c profile=`` and a
+    legacy ``[profiles.<p>]`` table beside ``-p`` refuse the launch, so reading them
+    too only ever reads more."""
+    configs = [
+        _read_config(SYSTEM_CONFIG, "system"),
+        _read_config(config_dir / "config.toml", "user"),
+        *overrides,
+    ]
+    profile = next((config["profile"] for config in reversed(configs) if "profile" in config), None)
+    for value in option_values(args, "-p", "--profile"):
+        profile = value
+    if (
+        not isinstance(profile, str)
+        or "\x00" in profile
+        or Path(profile).name != profile
+        or profile in {".", ".."}
+    ):
+        profile = None
+    if profile:
+        configs.append(_read_config(config_dir / f"{profile}.config.toml", f"profile {profile!r}"))
+    return configs, profile
+
+
+def _selected(config: dict[str, Any], profile: str | None) -> list[dict[str, Any]]:
+    """``config``, and the legacy ``[profiles.<profile>]`` table in it when one is selected."""
+    legacy_profiles = config.get("profiles", {})
+    if profile and isinstance(legacy_profiles, dict):
+        selected = legacy_profiles.get(profile, {})
+        if isinstance(selected, dict):
+            return [config, selected]
+    return [config]
+
+
+def operator_configured(config_dir: Path, args: list[str]) -> bool:
+    """Preserve exporters in native user/system config and the selected profile.
+
+    Codex ignores `otel` in project-local config. Other account homes and
+    unselected profile files are not layers of this launch either.
+    """
+    overrides = [parsed for _, parsed in _overrides(args)]
+    if any("otel" in parsed for parsed in overrides):
+        return True
+    configs, profile = _layers(config_dir, args, overrides)
+    return any("otel" in table for config in configs for table in _selected(config, profile))
+
+
+def operator_sets(config_dir: Path, args: list[str], key: str) -> bool:
+    """Whether a config layer of this launch sets the dotted ``key``: an override in
+    ``args``, the system or user config, or the selected profile's file or legacy table
+    (:func:`_layers`), whatever the value. Raises :class:`NativeConfigError` for a layer
+    that cannot be read."""
+    path = key.split(".")
+
+    def sets(table: Any) -> bool:
+        for part in path:
+            if not isinstance(table, dict) or part not in table:
+                return False
+            table = table[part]
+        return True
+
+    overrides = [parsed for _, parsed in _overrides(args)]
+    configs, profile = _layers(config_dir, args, overrides)
+    return any(sets(table) for config in configs for table in _selected(config, profile))
+
+
+TOOL_SHELL_POLICY = "shell_environment_policy"
+"""Codex's setting for the environment the shells its tools run in inherit, whose
+``exclude`` keeps :data:`HEADERS_ENV` out of them (:func:`tool_shell_excludes`)."""
+
+
+def tool_shell_excludes(config_dir: Path, args: list[str], cwd: Path) -> list[str] | None:
+    """The patterns the operator's config keeps out of the shells Codex's tools run in
+    (``shell_environment_policy.exclude``), which the receiver's must join.
+
+    Ours goes in with ``-c``, which replaces the list every file layer sets (measured on
+    0.162.1: the user config's, the ``-p`` profile file's and the project's
+    ``.codex/config.toml``), so no file the operator keeps can drop the receiver's header
+    from it (review r3 of #113, finding 7). Without the operator's patterns in it, every
+    variable their config kept from the tools would reach them again, so every layer this
+    launch may read is asked, the project's from ``cwd`` up included, and the patterns are
+    their union: a superset of the list Codex applies, so a pattern a higher layer
+    dropped stays out, the safe side. ``None`` when an override of the operator's own
+    sets the list (or the whole table): it comes after ours on the command line and wins,
+    which would hand the receiver's header to every tool.
+    """
+    overrides = _overrides(args)
+    for key, parsed in overrides:
+        policy = parsed.get(TOOL_SHELL_POLICY)
+        if key == TOOL_SHELL_POLICY or (isinstance(policy, dict) and "exclude" in policy):
+            return None
+    configs, profile = _layers(config_dir, args, [parsed for _, parsed in overrides])
+    for value in option_values(args, "-C", "--cd"):
+        cwd = cwd / value
+    for directory in (cwd, *cwd.parents):
+        if (directory / ".codex").is_dir():
+            configs.append(_read_config(directory / ".codex" / "config.toml", "project"))
+    patterns: list[str] = []
+    for config in configs:
+        for table in _selected(config, profile):
+            policy = table.get(TOOL_SHELL_POLICY)
+            excluded = policy.get("exclude") if isinstance(policy, dict) else None
+            if isinstance(excluded, list):
+                patterns += [item for item in excluded if isinstance(item, str)]
+    return list(dict.fromkeys(patterns))
+
+
+_FIELDS = frozenset(
+    {
+        "event.name",
+        "event",
+        "model",
+        "model_name",
+        "provider_name",
+        "conversation.id",
+        "thread.id",
+        "turn.id",
+        "tool_name",
+        "tool.name",
+        "input_token_count",
+        "output_token_count",
+        "cached_token_count",
+        "cached_input_token_count",
+        "reasoning_output_token_count",
+        "duration_ms",
+        "success",
+        "gen_ai.request.model",
+        "gen_ai.usage.input_tokens",
+        "gen_ai.usage.output_tokens",
+        "tool.execution_time_ms",
+        "response_id",
+        "call_id",
+    }
+)
+
+
+class InvalidPayload(ValueError):
+    """Malformed OTLP JSON cannot succeed on retry."""
+
+
+def _objects(value: Any) -> list[dict[str, Any]]:
+    """Skip malformed members; proto3 JSON null means the field is absent."""
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _attributes(items: Any) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for item in _objects(items):
+        key = item.get("key")
+        value = item.get("value", {})
+        if not isinstance(key, str) or key not in _FIELDS or not isinstance(value, dict):
+            continue
+        for scalar in ("stringValue", "intValue", "doubleValue", "boolValue"):
+            if scalar in value:
+                raw = value[scalar]
+                if isinstance(raw, (str, int, float, bool)):
+                    result[key] = insights.token_count(raw) if "token" in key else raw
+                break
+    return result
+
+
+def events(payload: dict[str, Any]) -> Iterator[dict[str, object]]:
+    """Documented Codex OTLP logs, the canonical model/tool event stream.
+
+    Trace spans can describe the same usage again, so they are not replayed
+    alongside the logs. Rust's logger can omit the event timestamp (zero)
+    and set only the observed timestamp. Preserve that identity on retries
+    without collapsing distinct calls that happen to have identical usage.
+    """
+    resources = payload.get("resourceLogs")
+    if resources is not None and (
+        not isinstance(resources, list) or (resources and not _objects(resources))
+    ):
+        raise InvalidPayload("OTLP resourceLogs must contain resource objects")
+    for resource in _objects(resources):
+        attributes = resource.get("resource")
+        base = _attributes(attributes.get("attributes") if isinstance(attributes, dict) else None)
+        for scope in _objects(resource.get("scopeLogs", [])):
+            for log in _objects(scope.get("logRecords", [])):
+                record = {**base, **_attributes(log.get("attributes", []))}
+                record["event.name"] = (
+                    record.get("event.name") or log.get("eventName") or "codex.event"
+                )
+                timestamp = log.get("timeUnixNano")
+                if timestamp in (None, "", "0", 0):
+                    timestamp = log.get("observedTimeUnixNano", "")
+                record["native_time"] = timestamp
+                yield record
+
+
+def _refresh_settings() -> None:
+    global _config_stamp
+    path = paths.config_path()
+    try:
+        info = path.stat()
+        stamp: tuple[object, ...] = (
+            path,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+            info.st_size,
+            info.st_ino,
+        )
+    except OSError:
+        stamp = (path, None)
+    if stamp != _config_stamp:
+        insights.reset_cache()
+        _config_stamp = stamp
+
+
+def capture(payload: dict[str, Any], launch_id: str) -> int:
+    observations = list(events(payload))
+    _refresh_settings()
+    if not observations or not insights.shipping_enabled() or not insights.settings().enabled:
+        return 0
+    count = 0
+    spool_failed = False
+    # The outbox owns durable retry identity independently of this board cache.
+    # No board writer lock is held while files are queued.
+    with store_session() as store:
+        session_id = store.get_meta(f"launch-session:{launch_id}")
+        session = store.get_session(session_id) if session_id else None
+        marker_key = f"native-launch:{launch_id}"
+        try:
+            marker = json.loads(store.get_meta(marker_key) or "{}")
+        except ValueError:
+            marker = {}
+        project_id = (
+            session.project_id
+            if session
+            else (marker.get("project_id") if isinstance(marker, dict) else None)
+        )
+        project_id = project_id or orchestrator.team_project().id
+        updates = {marker_key: json.dumps({"seen_at": time.time(), "project_id": project_id})}
+        dedup = store.list_meta(f"native-event:{launch_id}:")
+        providers = store.list_meta(f"native-provider:{launch_id}:")
+        try:
+            for native in observations:
+                if native.get("provider_name") and native.get("conversation.id"):
+                    provider_key = f"native-provider:{launch_id}:{native['conversation.id']}"
+                    provider = insights._outbound(str(native["provider_name"]))
+                    if providers.get(provider_key) != provider:
+                        providers[provider_key] = provider
+                        updates[provider_key] = provider
+            with outbox.retry_batch() as batch:
+                for native in observations:
+                    # Redact before writing anything destined for the gateway. No raw
+                    # body, prompt, tool parameters, authorization or exporter headers.
+                    clean = {
+                        key: insights._outbound(value) if isinstance(value, str) else value
+                        for key, value in native.items()
+                    }
+                    digest = hashlib.sha256(json.dumps(clean, sort_keys=True).encode()).hexdigest()
+                    dedup_key = f"native-event:{launch_id}:{digest}"
+                    if dedup_key in dedup:
+                        continue
+                    # Provider is reported at conversation start, not on each SSE
+                    # usage event. Enrich after hashing so a late startup observation
+                    # cannot make a retried usage record count twice.
+                    known_provider = providers.get(
+                        f"native-provider:{launch_id}:{native.get('conversation.id')}"
+                    )
+                    if known_provider:
+                        clean.setdefault("provider_name", known_provider)
+                    record: dict[str, object] = {
+                        "v": insights.RECORD_VERSION,
+                        "kind": "native_event",
+                        "agent": "codex",
+                        "at": datetime.now(UTC).isoformat(),
+                        "run_key": launch_id,
+                        "session_id": session_id,
+                        "project_id": project_id,
+                        "text": "",
+                        "native": clean,
+                    }
+                    queued = batch.enqueue(record, dedup_key)
+                    if queued is None:
+                        spool_failed = True
+                        break  # One failed write per request on a permanently unwritable queue.
+                    updates[dedup_key] = "1"
+                    dedup[dedup_key] = "1"
+                    count += int(queued)
+        except BaseException:
+            try:
+                with store.transaction():
+                    for key, value in updates.items():
+                        store.set_meta(key, value)
+            except Exception as checkpoint_error:
+                outbox.report_failure(checkpoint_error)
+            raise
+        else:
+            with store.transaction():
+                for key, value in updates.items():
+                    store.set_meta(key, value)
+    if not spool_failed:
+        outbox.clear_failure()
+    return count
+
+
+def serve(
+    ready: Path,
+    owner_pid: int,
+    launch_id: str,
+    *,
+    owner_alive: Callable[[], bool] | None = None,
+) -> None:
+    import secrets
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    token = TOKEN_PREFIX + secrets.token_urlsafe(32)
+
+    class Handler(BaseHTTPRequestHandler):
+        timeout = 0.5
+
+        def do_POST(self) -> None:
+            if not hmac.compare_digest(self.headers.get("Authorization", ""), f"Bearer {token}"):
+                self.send_error(403)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= MAX_BYTES:
+                    self.send_error(413)
+                    return
+                payload = json.loads(self.rfile.read(length))
+                if not isinstance(payload, dict):
+                    raise ValueError("OTLP request must be an object")
+            except Exception:
+                self.send_error(400)
+                return
+            try:
+                capture(payload, launch_id)
+            except InvalidPayload:
+                self.send_error(400)
+                return
+            except OSError as exc:
+                outbox.report_failure(exc)
+                # Only known permanent write failures are acknowledged. Unknown
+                # observer bugs must be visible and must not silently lose a batch.
+                if exc.errno not in {errno.EACCES, errno.EPERM, errno.EROFS}:
+                    self.send_error(503)
+                    return
+            except sqlite3.Error as exc:
+                outbox.report_failure(exc)
+                code = getattr(exc, "sqlite_errorcode", 0) & 0xFF
+                if code != sqlite3.SQLITE_READONLY and "readonly database" not in str(exc).lower():
+                    self.send_error(503)
+                    return
+            except Exception as exc:
+                outbox.report_failure(exc)
+                self.send_error(503)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    with HTTPServer(("127.0.0.1", 0), Handler) as server:
+        server.timeout = 0.5
+        staging = ready.with_suffix(".tmp")
+        staging.write_text(json.dumps({"port": server.server_port, "token": token}))
+        os.chmod(staging, 0o600)
+        staging.replace(ready)
+        last_pruned = 0.0
+        try:
+            while owner_alive is None or owner_alive():
+                # Avoid opening the board on each socket timeout. The store's
+                # own gate coordinates maintenance with other hook processes.
+                if time.monotonic() - last_pruned >= METADATA_PRUNE_INTERVAL:
+                    with suppress(Exception), store_session() as store:
+                        prune_metadata(store)
+                    last_pruned = time.monotonic()
+                server.handle_request()
+                if owner_alive is None:
+                    try:
+                        os.kill(owner_pid, 0)
+                    except ProcessLookupError:
+                        break
+        finally:
+            with suppress(Exception), store_session() as store:
+                store.clear_native_launch(launch_id)
+            with suppress(OSError):
+                ready.unlink(missing_ok=True)
+            with suppress(OSError):
+                ready.parent.rmdir()
+
+
+def disown_headers(env: MutableMapping[str, str]) -> None:
+    """Drop a receiver's header this launch inherited: a launch from a traced agent's tool
+    shell carries that agent's (:data:`HEADERS_ENV`), which authenticates its receiver,
+    never this one's, and would replace an exporter's own headers. Only ever ours."""
+    if _OWN_HEADERS.fullmatch(env.get(HEADERS_ENV, "")):
+        del env[HEADERS_ENV]
+
+
+def start_receiver(
+    env: dict[str, str], adapter: AgentAdapter, keep_out: Sequence[str] = ()
+) -> tuple[list[str], str]:
+    """Start only for an opted-in launch. Failure costs telemetry, never launch.
+
+    The receiver's header (:data:`HEADERS_ENV`) is kept out of the shells the agent's
+    tools run in, beside ``keep_out``, the patterns the operator's config already keeps
+    out (:func:`tool_shell_excludes`): every OpenTelemetry SDK in a process a tool starts
+    reads that variable, where it would send the token to the app's own collector in
+    place of the app's headers (review r2 of #113, finding 5)."""
+    if os.name != "posix":
+        return (
+            [],
+            f"{adapter.label} native telemetry requires POSIX or WSL; native launch is available",
+        )
+    directory = Path(tempfile.mkdtemp(prefix="aisquare-otel-"))
+    ready = directory / "ready.json"
+    child: subprocess.Popen[bytes] | None = None
+    try:
+        child = subprocess.Popen(
+            selfcli.isolated_argv_for(
+                [
+                    "--ready",
+                    str(ready),
+                    "--owner-pid",
+                    str(os.getpid()),
+                    "--launch-id",
+                    env["AISQUARE_LAUNCH_ID"],
+                ],
+                module="aisquare.services.native_telemetry",
+            ),
+            env=spawn.untraced_env(env),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + 2
+        while not ready.exists() and child.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.025)
+        if not ready.exists():
+            raise RuntimeError("local telemetry receiver did not start")
+        state = json.loads(ready.read_text())
+        # Native exporter does asynchronous delivery. No model routing or auth changes.
+        endpoint = f"http://127.0.0.1:{state['port']}/v1/logs"
+        args = adapter.telemetry_args(endpoint, keep_out=[*keep_out, HEADERS_ENV])
+        env[HEADERS_ENV] = "Authorization=" + quote("Bearer " + state["token"], safe="")
+        env["AISQUARE_PIPELINE_ID"] = env["AISQUARE_LAUNCH_ID"]
+        env["AISQUARE_TRACE_AGENT_NAME"] = "aisquare-" + env.get("AISQUARE_ROLE", "coder")
+        return (
+            args,
+            f"{adapter.label} native telemetry enabled "
+            "(local receiver; gateway delivery uses ship)",
+        )
+    except Exception as exc:
+        if child is not None and child.poll() is None:
+            child.terminate()
+            child.wait(timeout=3)
+        for file in directory.iterdir():
+            file.unlink()
+        directory.rmdir()
+        return [], f"{adapter.label} launched without native telemetry: {exc}"
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ready", type=Path, required=True)
+    parser.add_argument("--owner-pid", type=int, required=True)
+    parser.add_argument("--launch-id", required=True)
+    options = parser.parse_args()
+    serve(options.ready, options.owner_pid, options.launch_id)

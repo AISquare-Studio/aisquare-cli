@@ -128,6 +128,14 @@ class Machine:
     frames: list[list[ProjectInfo] | None] = field(default_factory=list)
     onboarded: list[Path] = field(default_factory=list)
     connects: int = 0
+    connected_states: list[ClaudeState | None] = field(default_factory=list)
+    """The step-2 state each Connect was asked for (whose agent, which home)."""
+    chosen: list[str] = field(default_factory=list)
+    """Every agent a *Use …* pick saved as the user default."""
+    sign_ins: list[ClaudeState] = field(default_factory=list)
+    sign_in_slot: int = 0
+    after_choice: list[ClaudeState] = field(default_factory=list)
+    """What the looks answer once a pick is saved; the current answers when empty."""
     starts: list[tuple[str, bool, int]] = field(default_factory=list)
     live: list[FleetAgent] = field(default_factory=list)
     states: dict[str, FleetAgentState] = field(default_factory=dict)
@@ -174,8 +182,9 @@ class Machine:
             report = SetupReport(home=path / ".home", already_initialized=False, project=project)
             return OnboardOutcome(path=path, project_id=project.id, report=report)
 
-        def connect() -> FixResult:
+        def connect(state: ClaudeState | None) -> FixResult:
             self.connects += 1
+            self.connected_states.append(state)
             if self.connect_answer is not None:
                 return self.connect_answer
             self.claude = [READY]
@@ -192,6 +201,18 @@ class Machine:
                 restart=self.restart,
             )
 
+        def sign_in(state: ClaudeState) -> int:
+            self.sign_ins.append(state)
+            return self.sign_in_slot
+
+        def choose(agent: str) -> None:
+            self.chosen.append(agent)
+            # Saved: the next look is about that agent, now the user's default.
+            self.claude = [
+                dataclasses.replace(answer, agent=agent, chosen_by="user")
+                for answer in (self.after_choice or self.claude)
+            ]
+
         return Seams(
             tmux=lambda: self.tmux,
             claude=claude,
@@ -201,6 +222,8 @@ class Machine:
             onboard=onboard,
             project=self.stored.get,
             connect=connect,
+            sign_in=sign_in,
+            choose=choose,
             start=start,
             platform=platform,
         )

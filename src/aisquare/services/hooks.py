@@ -23,10 +23,12 @@ import os
 import shutil
 import subprocess
 import sys
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from aisquare.core import insights, selfcli
+from aisquare.core import claude_accounts as claude_accounts_core
+from aisquare.core import insights, launch_seal, selfcli
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core import spawn as spawn_core
 from aisquare.core.injection import build_block
@@ -81,10 +83,27 @@ def session_start_context(
     transcript_path: str | None = None,
     model: str | None = None,
     effort: str | None = None,
+    agent: str = "claude-code",
+    native_session_id: str | None = None,
+    account: str | None = None,
 ) -> str:
     """Context to inject at Claude Code ``SessionStart`` (empty if nothing useful)."""
     began = datetime.now(tz=UTC)  # the row's started_at: when the hook was entered
     record_trace_join(session_id)
+    if session_id:
+        _observe(session_id, agent, native_session_id, transcript_path, account)
+        with store_session() as store:
+            from aisquare.core.agent_adapters import recorded_adapter
+            from aisquare.core.agent_sessions import bind_launch_session, own_process
+
+            adapter = recorded_adapter(agent)
+            bind_launch_session(
+                store,
+                session_id,
+                started=True,
+                source=source,
+                own=own_process(adapter) if adapter is not None else None,
+            )
     with store_session() as store:
         project = active_project(store, cwd)
         entries = store.entries(project_id=project.id)
@@ -93,7 +112,15 @@ def session_start_context(
     block = build_block(entries, project) if entries else ""
     team_block = (
         team_service.hook_session_start(
-            session_id, cwd, source, transcript_path=transcript_path, model=model, effort=effort
+            session_id,
+            cwd,
+            source,
+            transcript_path=transcript_path,
+            model=model,
+            effort=effort,
+            agent=agent,
+            native_session_id=native_session_id,
+            account=account,
         )
         if session_id
         else ""
@@ -105,6 +132,41 @@ def session_start_context(
     return "\n\n".join(
         part for part in (directive, block, team_block, instruction, retrieved) if part
     )
+
+
+def _observe(
+    session_id: str,
+    agent: str,
+    native_session_id: str | None,
+    transcript_path: str | None,
+    account: str | None,
+) -> None:
+    """What the agent handed this hook of its session, for its fleet row's launch record
+    (``core.launch_seal.observe``): written there only from a process outside any
+    sandbox, and only for the row's own session. Never raises: the record is a
+    replay's, never the hook's to fail over."""
+    with suppress(Exception):
+        from aisquare.core.agent_adapters import recorded_adapter
+        from aisquare.core.agent_sessions import own_process
+
+        adapter = recorded_adapter(agent)
+        launch_seal.observe(
+            session_id,
+            agent=agent,
+            native=native_session_id or session_id,
+            transcript=transcript_path,
+            home=account or _home_of(agent),
+            own=own_process(adapter) if adapter is not None else None,
+        )
+
+
+def _home_of(agent: str) -> str | None:
+    """The config dir this hook's agent runs under, as its launch exported it."""
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    adapter = recorded_adapter(agent)
+    value = os.environ.get(adapter.home_env, "").strip() if adapter is not None else ""
+    return value or None
 
 
 def _session_start_ci(
@@ -146,13 +208,25 @@ def prompt_submitted(
     transcript_path: str | None = None,
     model: str | None = None,
     effort: str | None = None,
+    agent: str = "claude-code",
+    native_session_id: str | None = None,
+    account: str | None = None,
+    source: str = "claude-code",
 ) -> str:
     """Record a submitted prompt; return the team delta to add to context."""
-    retrieved = capture_prompt(prompt, cwd, session_id=session_id)
+    retrieved = capture_prompt(prompt, cwd, session_id=session_id, source=source)
     if session_id is None:
         return retrieved
+    _observe(session_id, agent, native_session_id, transcript_path, account)
     delta = team_service.hook_prompt_heartbeat(
-        session_id, cwd, transcript_path=transcript_path, model=model, effort=effort
+        session_id,
+        cwd,
+        transcript_path=transcript_path,
+        model=model,
+        effort=effort,
+        agent=agent,
+        native_session_id=native_session_id,
+        account=account,
     )
     return "\n\n".join(part for part in (delta, retrieved) if part)
 
@@ -212,6 +286,8 @@ def turn_failed(
     error: str | None = None,
     message: str | None = None,
     details: str | None = None,
+    notice: claude_accounts_core.LimitNotice | None = None,
+    hand_over: bool = True,
 ) -> None:
     """The turn ended on an API error (Claude Code's ``StopFailure``), not a Stop (#146).
 
@@ -234,16 +310,27 @@ def turn_failed(
     :func:`hand_over`), and the hook returns at once. A hand-over that cannot
     find headroom leaves the agent limited, its own wait intact, and says so on
     the board — which is the ``wait`` behaviour, and correct.
+
+    Codex has no ``StopFailure``: its hooks read the limit off the end of the
+    session's rollout and come here with the ``notice`` already read
+    (``services.agent_events``). ``hand_over=False`` records the limit without
+    moving the agent — a session that is ending has nothing left to move.
     """
     if session_id is None:
         return
     try:
-        failure = team_service.hook_stop_failure(
-            session_id, error=error, message=message, details=details
+        failure = (
+            team_service.hook_stop_failure(
+                session_id, error=error, message=message, details=details
+            )
+            if notice is None
+            else team_service.hook_stop_failure(
+                session_id, error=error, message=message, details=details, notice=notice
+            )
         )
     finally:
         metrics_service.close_turn(session_id)
-    if failure is not None and failure.limited and not failure.already_limited:
+    if failure is not None and failure.limited and not failure.already_limited and hand_over:
         # A re-fire for the same window (Claude Code does that) is not a second
         # hand-over: the first worker is at work, or has already moved the agent.
         _hand_over_if_configured(failure)
@@ -271,7 +358,7 @@ def _hand_over_if_configured(failure: team_service.TurnFailure) -> None:
             )
             return
     window = failure.notice.window if failure.notice is not None else "usage"
-    argv = selfcli.argv_for(
+    argv = selfcli.isolated_argv_for(
         ["--quiet", "hook", "hand-over", session.id, "--reason", f"{window} limit"]
     )
     try:
@@ -375,6 +462,8 @@ def hand_over(session_id: str, *, reason: str | None = None) -> None:
         receipt = fleet_service.switch(
             project, agent.label, reason=reason, spawned_by=HANDOVER_SPAWNER, automatic=True
         )
+    except fleet_service.LaunchRefused:
+        return  # its reason is on the board already, once for the row
     except fleet_service.FleetError as exc:
         team_service.hook_note(
             session.project_id, f"{agent.label}: not switched — {exc}", session_id=session.id
@@ -388,7 +477,13 @@ def hand_over(session_id: str, *, reason: str | None = None) -> None:
         )
 
 
-def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | None = None) -> str:
+def capture_prompt(
+    prompt: str | None,
+    cwd: Path | None,
+    *,
+    session_id: str | None = None,
+    source: str = "claude-code",
+) -> str:
     """Record the prompt, consult CI, open this turn's row.
 
     Three steps, deliberately separated. The store is opened for the prompt
@@ -425,7 +520,7 @@ def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | No
             # resolves names through that table.
             store.ensure_project(project)
             if prompt is not None and prompt.strip():
-                store.add_prompt(prompt, project.id, source="claude-code")
+                store.add_prompt(prompt, project.id, source=source)
         if prompt is not None and prompt.strip():
             insights.record_prompt(prompt, session_id=session_id, project_id=project.id)
     except Exception as exc:  # never disrupt the session to record it — but say what it cost

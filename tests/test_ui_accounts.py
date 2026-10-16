@@ -40,6 +40,7 @@ from aisquare.cli.ui.views.accounts import (
     SIGN_IN_WORKER,
     USAGE_WORKER,
     AccountRow,
+    AccountsChanged,
     AccountsView,
     account_line_text,
     aisquare_status_text,
@@ -270,6 +271,56 @@ def painted(view: AccountsView, *slots: int) -> bool:
 # --- pure helpers --------------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("changed", [False, True])
+def test_slow_accounts_refresh_finishes_without_cancelling_or_spawning_more_threads(
+    no_network: dict[str, Any],
+    changed: bool,
+) -> None:
+    no_network["session"] = _session()
+    started, release = threading.Event(), threading.Event()
+    calls = 0
+    first = _overview(_status(1, "slow@example.com"))
+    second = _overview(_status(1, "refreshed@example.com"))
+
+    def accounts() -> AccountsOverview:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            if not release.wait(timeout=10):
+                raise TimeoutError("test did not release the account reader")
+            return first
+        return second
+
+    async def run() -> None:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=accounts)
+        async with app.run_test(size=SIZE) as pilot:
+            try:
+                assert await asyncio.to_thread(started.wait, 3)
+                for _ in range(5):
+                    app.refresh_accounts()
+                    await pilot.pause()
+                assert calls == 1
+                if changed:
+                    app.on_accounts_changed(AccountsChanged())
+                    app.on_accounts_changed(AccountsChanged())
+                release.set()
+                await settle(app)
+                await pilot.pause()
+                await settle(app)
+                # main's rule (`FleetApp.refresh_accounts`): however many ticks the wait
+                # outlived, they owe ONE read after it, and a change asked for meanwhile is
+                # that same read; never a thread per tick.
+                assert calls == 2 and app.accounts_overview == second
+                assert "refreshed@example.com" in shown(
+                    app.query_one(AccountsSection).query_one(".accounts-line", Static)
+                )
+            finally:
+                release.set()
+
+    asyncio.run(run())
+
+
 def test_usage_bar_fills_five_cells_and_colours_by_pressure() -> None:
     assert usage_bar(0).plain == "▯▯▯▯▯ 0%"
     assert usage_bar(12).plain == "▮▯▯▯▯ 12%"
@@ -352,7 +403,7 @@ def test_summarise_names_the_worst_thing_first() -> None:
     assert no_aisquare.line.plain == "1 Claude · AISquare: sign in"
 
     missing = summarise(_overview(installed=False), None)
-    assert missing.line is not None and missing.line.plain == "⚠ Claude Code not installed"
+    assert missing.line is not None and missing.line.plain == "⚠ no coding agent installed"
 
     unreadable = summarise(None, None, session_known=False)
     assert unreadable.aisquare is None
@@ -610,7 +661,8 @@ def test_without_claude_code_the_page_says_how_to_install_and_add_is_disabled() 
     claude, disabled, title, detail = drive(go, overview=overview)
     assert "Claude Code is not installed" in claude and core.INSTALL_COMMAND in claude
     assert disabled
-    assert title == "Accounts  ✗ AISquare" and detail == "⚠ Claude Code not installed"
+    # Neither agent is here (the overview has no Codex install): nothing to sign in with.
+    assert title == "Accounts  ✗ AISquare" and detail == "⚠ no coding agent installed"
 
 
 def test_usage_is_fetched_only_for_signed_in_slots_and_painted_into_their_rows(

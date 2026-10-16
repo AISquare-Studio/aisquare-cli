@@ -117,7 +117,15 @@ class DoctorSelected(Message):
 
 
 class AccountsSelected(Message):
-    """The Accounts section: the AISquare sign-in and the Claude Code accounts."""
+    """The Accounts section: the AISquare sign-in and the coding agents' accounts.
+
+    ``sign_in`` asks the page to open that slot's sign-in as it shows (Welcome's step 2
+    for a Codex login, the Doctor's *Sign in* fix); ``None`` only shows the page.
+    """
+
+    def __init__(self, *, sign_in: int | None = None) -> None:
+        self.sign_in = sign_in
+        super().__init__()
 
 
 RESIZE_STEP = 4

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import cache
 from types import MappingProxyType
@@ -448,9 +449,18 @@ def needs_extended_keys(name: str) -> bool:
 
 
 def translate(
-    key: str, character: str | None, *, printable: bool, extended_keys: bool = True
+    key: str,
+    character: str | None,
+    *,
+    printable: bool,
+    extended_keys: bool = True,
+    spellings: Mapping[str, str] | None = None,
 ) -> Translation | Drop:
     """Translate one Textual key event; a :class:`Drop` when tmux has no safe name for it.
+
+    ``spellings`` are the pane's agent's own (``AgentAdapter.key_spellings``): a key name
+    that agent reads under another one, sent that way on every server — Codex 0.162.1
+    takes ``S-Enter`` as Enter and submits, and ``C-j`` as its newline.
 
     ``extended_keys`` says whether the tmux SERVER is ≥ :data:`EXTENDED_MINIMUM`
     (the pane reads its version once): on an older server the extended-only
@@ -519,6 +529,13 @@ def translate(
     held = frozenset(MODIFIERS[modifier] for modifier in modifiers)
     translation = _translate(key, base, character, printable=printable, held=held)
     if (
+        spellings
+        and isinstance(translation, Translation)
+        and translation.kind == "key"
+        and translation.value in spellings
+    ):
+        translation = Translation("key", spellings[translation.value])
+    if (
         isinstance(translation, Translation)
         and translation.kind == "key"
         and not extended_keys
@@ -546,7 +563,8 @@ def translate(
 
 #: What an extended-only chord becomes on a tmux below :data:`EXTENDED_MINIMUM`
 #: when the same meaning has a name every version carries (#147). ``S-Enter``
-#: is Claude Code's newline; so is ``C-j``, in every terminal. The outer
+#: is Claude Code's newline; so is ``C-j``, in every terminal (and Codex's, which
+#: reads ``S-Enter`` as Enter on every server: ``AgentAdapter.key_spellings``). The outer
 #: terminal already told us shift was held — only one speaking the kitty
 #: protocol reports the chord at all — so nothing is faked: the meaning travels
 #: by the older spelling instead of being dropped, which typed nothing and

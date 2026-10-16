@@ -13,6 +13,7 @@ import asyncio
 import builtins
 import dataclasses
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -620,11 +621,14 @@ def test_a_hand_over_kept_waiting_says_by_what_and_a_second_press_calls_it_off(
     said, early, overdue, exits, restarted = drive(fn)
 
     assert early == overdue == ("upgrade", "--reopen"), "waiting, the early press ignored"
-    assert said[:2] == [
-        "asq quits once the reads running end",
-        "Still waiting for a read after 0 s. Press Update or Uninstall again to stay "
-        "in asq; quit, and it runs once they end.",
-    ], said
+    assert said[0] == "asq quits once the reads running end", said
+    # The wait as measured: past the 0.3 s patience, by however long a slow runner's
+    # poll took to see it (CI's ambient job said "after 1 s").
+    assert re.fullmatch(
+        r"Still waiting for a read after \d+ s\. Press Update or Uninstall again to stay "
+        r"in asq; quit, and it runs once they end\.",
+        said[1],
+    ), said
     assert said[2:] == ["Called off: asq carries on"], said
     assert exits == [], "no quit once the read ended"
     assert restarted, "asq's reads start again"

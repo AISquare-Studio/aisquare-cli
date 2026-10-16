@@ -115,7 +115,7 @@ import itertools
 import time
 import weakref
 from bisect import bisect_left
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from functools import partial
 from pathlib import Path
 from typing import Any, ClassVar, Literal, NamedTuple, assert_never
@@ -907,12 +907,16 @@ class TerminalPane(Widget, can_focus=True):
         server: TmuxServer | None = None,
         escape_key: str = "f12",
         placeholder: str = NO_PANE,
+        key_spellings: Mapping[str, str] | None = None,
         id: str | None = None,
     ) -> None:
         super().__init__(id=id)
         self.pane_id = pane_id
         self.server = server
         self.escape_key = escape_key
+        self.key_spellings: Mapping[str, str] = key_spellings or {}
+        """The shown agent's own key names (``AgentAdapter.key_spellings``), which a view
+        sets as it learns whose pane this is: Codex's newline is ``C-j``."""
         self.placeholder = placeholder
         """What the pane says while nothing is attached. A view that shows ONE agent
         passes :data:`PANE_GONE`: it detaches only from a row with no pane of its own
@@ -1959,6 +1963,7 @@ class TerminalPane(Widget, can_focus=True):
             event.character,
             printable=event.is_printable,
             extended_keys=self._extended_keys(),
+            spellings=self.key_spellings,
         )
         if isinstance(translation, Drop):
             # Nothing is typed — mistyping into a running agent is the worse

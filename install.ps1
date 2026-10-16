@@ -26,8 +26,29 @@ $Repo = 'AISquare-Studio/aisquare-cli'
 $InstallUrl = "https://raw.githubusercontent.com/$Repo/main/install.sh"
 
 # Arguments are passed straight through to install.sh, so
-# `... | iex` with no arguments and `install.ps1 --yes --no-agent` both work.
-$Forward = if ($args.Count -gt 0) { $args -join ' ' } else { '' }
+# `... | iex` with no arguments and `install.ps1 --yes --no-agent` both work,
+# and so does `install.ps1 --agent codex`.
+#
+# `irm ... | iex` itself takes no arguments, so the coding agent can also be
+# named in AISQUARE_INSTALL_AGENT (claude-code, codex or both), which becomes
+# install.sh's --agent inside WSL: Windows' environment does not reach WSL's on
+# its own. Checked against the three names before it goes anywhere near the
+# bash command line below. Arguments that name an agent themselves win.
+#
+#   $env:AISQUARE_INSTALL_AGENT = 'codex'; irm .../install.ps1 | iex
+#   & ([scriptblock]::Create((irm .../install.ps1))) --agent codex
+$ForwardArgs = @($args)
+$AgentNames = @('claude-code', 'codex', 'both')
+$agentNamed = @($args | Where-Object { "$_" -eq '--agent' -or "$_" -like '--agent=*' }).Count -gt 0
+if ($env:AISQUARE_INSTALL_AGENT -and -not $agentNamed) {
+    $agentName = $env:AISQUARE_INSTALL_AGENT.Trim()
+    if ($AgentNames -cnotcontains $agentName) {
+        Write-Host "AISQUARE_INSTALL_AGENT is '$agentName'; use claude-code, codex or both." -ForegroundColor Yellow
+        exit 64
+    }
+    $ForwardArgs += @('--agent', $agentName)
+}
+$Forward = $ForwardArgs -join ' '
 
 function Write-Step($Message) { Write-Host "==> $Message" -ForegroundColor Cyan }
 function Write-Note($Message) { Write-Host "    $Message" -ForegroundColor DarkGray }

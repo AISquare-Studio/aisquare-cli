@@ -8,11 +8,12 @@ removed — it validates the role, opts the repo in explicitly, then *replaces*
 this process with the agent so signals, job control and the TTY behave exactly
 as if you had run the agent yourself.
 
-Anything after the role is forwarded untouched: ``aisquare launch coder
---model opus`` runs ``claude --model opus``.
+Native arguments follow the AISquare options: ``aisquare launch coder
+--model opus`` runs ``claude --model opus``. A native command/prompt or an
+explicit ``--`` ends AISquare's option parsing.
 
 One exception, and only when tracing is on AND actually succeeded: the launch
-appends ``--session-id <uuid>`` so the agent's session id, the board row and
+prepends ``--session-id <uuid>`` so the agent's session id, the board row and
 the gateway Run's ``X-Pipeline-Id`` are one key (see
 ``services.explainability``). With tracing off — the default — the argv is
 byte-identical to what it always was.
@@ -22,7 +23,8 @@ The environment has one more decision in it since #145: WHICH CLAUDE ACCOUNT.
 project's default and the machine's default are consulted in that order
 (``aisquare accounts default``), and with none of those set the environment is
 exactly what it always was. One resolver, ``services.claude_accounts.choose``,
-answers for ``launch`` and ``fleet spawn`` alike.
+answers for ``launch`` and ``fleet spawn`` alike — for a Codex role too, where
+the account is a Codex slot and the launch sets ``CODEX_HOME`` to it.
 """
 
 from __future__ import annotations
@@ -30,7 +32,6 @@ from __future__ import annotations
 import contextlib
 import os
 import re
-import shutil
 import sqlite3
 import time
 from collections.abc import Callable
@@ -40,14 +41,17 @@ import typer
 from rich.text import Text
 
 from aisquare.cli.common import fail
+from aisquare.cli.native_args import NativeForwardingCommand as LaunchCommand
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import harness, orchestrator
+from aisquare.core.agent_adapters import codex
+from aisquare.core.agent_adapters.types import BadEffortError
 from aisquare.core.config import load_config
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, is_locked_error, store_session
+from aisquare.services import agent_launch, explainability_ops
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
-from aisquare.services import explainability_ops
 from aisquare.services import team as team_service
 from aisquare.services.team import TeamDisabledError
 
@@ -74,6 +78,9 @@ ROLES = ("planner", "coder", "runner", "tester", "reviewer", "validator", "manag
 _SEAT = re.compile(rf"^({'|'.join(ROLES)})\d+$")
 
 DEFAULT_AGENT = "claude"
+
+#: What Codex's own -a takes, which a launch's -a (--account) is told apart from.
+_CODEX_APPROVALS = frozenset({"untrusted", "on-failure", *codex.APPROVAL_POLICIES})
 
 FLEET_ROW_TIMEOUT = 10.0
 """Seconds of LOOKS a fleet launch spends on its row before starting the agent anyway.
@@ -198,11 +205,24 @@ def launch(
         typer.Option(
             "--command",
             "-c",
-            help="Agent command to launch. Overrides the role's bound `bin`; "
-            f"defaults to that, then to `{DEFAULT_AGENT}`.",
+            help="Agent command to launch (-c BINARY; Codex -c KEY=VALUE is forwarded). "
+            "Overrides the role's bound `bin`; "
+            "defaults to that, then to the selected coding agent.",
             metavar="CMD",
         ),
     ] = None,
+    agent: Annotated[str | None, typer.Option("--agent", help="Coding agent family.")] = None,
+    bound_args: Annotated[
+        bool,
+        typer.Option(
+            "--bound-args/--no-bound-args",
+            help="Use the role's saved native arguments (disable to supply a complete command).",
+        ),
+    ] = True,
+    custom_role: Annotated[
+        bool,
+        typer.Option("--custom-role", help="Allow an unbound custom role, as team spawn does."),
+    ] = False,
     env_pairs: Annotated[
         list[str] | None,
         typer.Option(
@@ -218,10 +238,12 @@ def launch(
         typer.Option(
             "--account",
             "-a",
-            help="Claude Code account to run under: a slot number, an alias or the email it "
-            "is signed in as (see `aisquare accounts`). Sets CLAUDE_CONFIG_DIR and "
-            "CLAUDE_CODE_TMPDIR over the role's binding. Without it: the role's bound "
-            "account, then the project default, then the machine default.",
+            help="Account to run under, of the role's agent: a slot number, an alias or the "
+            "email it is signed in as (see `aisquare accounts`). Sets CLAUDE_CONFIG_DIR and "
+            "CLAUDE_CODE_TMPDIR (Claude Code) or CODEX_HOME (Codex) over the role's binding. "
+            "Without it: the role's bound account, then the project default, then the "
+            "machine default. -a is this option's, not Codex's --ask-for-approval: spell "
+            "that one out, or pass it after --.",
             metavar="ACCOUNT",
         ),
     ] = None,
@@ -239,7 +261,7 @@ def launch(
     ``--command`` cannot resolve — an alias is not an executable — so bind the
     variables the alias sets and keep the ordinary binary.
     """
-    if not _role_ok(role):
+    if not custom_role and not _role_ok(role):
         fail(
             f"unknown role {role!r} — expected one of: {', '.join(ROLES)}, "
             "a numbered seat of one (coder1, coder2), or a role you have "
@@ -251,8 +273,21 @@ def launch(
     # alone and ignore the binding entirely, which is worse than not supporting
     # it: the docstring promised the profile supplied the binary, so `launch`
     # silently started the DEFAULT agent under the right role name and exited 0.
-    resolution = harness.resolve_binary(role, override=command)
-    binary = shutil.which(resolution.binary)
+    try:
+        environment = harness.parse_env_pairs(env_pairs or [])
+    except ValueError as exc:
+        fail(str(exc), error="bad_env_pair")
+    try:
+        selected = agent_launch.resolve(
+            role,
+            agent=agent,
+            binary=command,
+            env_overrides=environment,
+        )
+    except ValueError as exc:
+        fail(str(exc), error="agent_configuration")
+    resolution = selected.binary
+    binary = agent_launch.executable(selected)
     if binary is None:
         # Name the candidate AND who chose it — a bare "not on your PATH" sends
         # the reader hunting through flag, env and config to learn which won.
@@ -284,11 +319,7 @@ def launch(
     # The role's bound spec plus this launch's overrides, carried verbatim.
     # Resolved even with no flag, so a bound role launches correctly without
     # the operator remembering to say anything.
-    try:
-        overrides = harness.parse_env_pairs(env_pairs or [])
-    except ValueError as exc:
-        fail(str(exc), error="bad_env_pair")
-    profile = harness.resolve_profile(role, env_overrides=overrides)
+    profile = selected.profile if bound_args else selected.profile.model_copy(update={"args": []})
     if profile.notice is not None:
         # No silent fail-soft: unreadable config means this role launches
         # UNBOUND — possibly on a different install than the operator believes.
@@ -297,6 +328,7 @@ def launch(
             style="dim",
         )
     env.update(profile.env)
+    parent_run = agent_launch.launch_identity(env, selected, project.root if project else None)
     # WHICH ACCOUNT, decided in exactly one place (#145): the flag, else the
     # role's `team bind --account`, else the project's default, else the
     # machine's — `services.claude_accounts.choose`, pinned by
@@ -307,11 +339,28 @@ def launch(
     # own two variables (or their absence) over whatever the binding set — a
     # launch announced as `[plain claude]` must not run on the binding's other
     # login. When NOTHING chose (no flag, no binding, no default — every
-    # machine before #145), the environment is left exactly as it was.
-    try:
-        choice = claude_accounts_service.choose(account, role=role, project=project)
-    except claude_accounts_service.NoSuchAccount as exc:
-        fail(str(exc), error="unknown_account", ref=account)
+    # machine before #145), the environment is left exactly as it was. Every
+    # rung answers with an account of the role's agent: a Codex role runs on a
+    # Codex slot (`CODEX_HOME`), and another agent's account is refused, naming both.
+    choice = claude_accounts_service.AccountChoice(account=None, source=None)
+    if selected.adapter.accounts is not None:
+        try:
+            choice = claude_accounts_service.choose(
+                account, role=role, project=project, agent=selected.adapter.id
+            )
+        except claude_accounts_service.NoSuchAccount as exc:
+            message = str(exc)
+            if account in _CODEX_APPROVALS:
+                message += (
+                    f". launch's -a is --account: for Codex's approval policy pass "
+                    f"--ask-for-approval {account}, or -a {account} after --"
+                )
+            fail(message, error="unknown_account", ref=account)
+    elif account is not None:
+        fail(
+            f"--account selects an account, and {selected.adapter.label} has no account slots",
+            error="agent_configuration",
+        )
     for note in choice.notes:
         # A skipped rung is otherwise invisible: the launch lands on the next
         # one down and nobody learns why. Same channel and style as the
@@ -332,14 +381,10 @@ def launch(
             f"explainability: config unreadable ({exc}) — launching untraced",
             style="dim",
         )
-    # The role's OWN flags (`RoleProfile.default_args`), resolved before the
-    # tracing block because the identity planner below must see every arg the
-    # agent will get. ONE precedence rule, shared with `team spawn`: the role's
-    # defaults sit after the binding's args, and an explicit flag or its
-    # `--no-` opt-out WINS wherever it appears — not because of where these
-    # land in argv, but because `role_defaults` stands down when either
-    # spelling is already in the args it is given.
-    defaults = harness.role_defaults(
+    # Managed role defaults precede saved and forwarded arguments so a native
+    # literal separator cannot turn them into prompt text. Explicit opt-outs
+    # still win: role_defaults stands down when either spelling is present.
+    defaults = selected.adapter.role_defaults(
         role, binary=resolution.binary, args=[*profile.args, *ctx.args]
     )
     role_args = defaults.args
@@ -348,9 +393,19 @@ def launch(
         # role degrades silently (a ui-tester with no browser reopens every UI
         # task). Same surface and style as the tracing notes below.
         stderr_console().print(f"{role}: {note}", style="dim")
-    #: Appended to the agent's argv, and empty unless a trace actually happened.
+    try:
+        arguments = agent_launch.prepare_arguments(selected, [*role_args, *profile.args], ctx.args)
+        native_model = agent_launch.launch_model_for(selected, role, arguments)
+        for message in native_model.notes if native_model else []:
+            stderr_console().print(message, markup=False)
+        model_args = agent_launch.resolved_model_args(selected, native_model, arguments)
+    except BadEffortError as exc:
+        fail(str(exc), error="bad_effort")
+    except ValueError as exc:
+        fail(str(exc), error="agent_configuration")
+    #: Managed flags precede native arguments, and are empty unless tracing succeeded.
     pinned_id: list[str] = []
-    if tracing is not None and tracing.enabled:
+    if tracing is not None and tracing.enabled and selected.adapter.capabilities.model_proxy:
         # Fail-open by contract: wire_session returns an empty env delta (plus
         # the reason) rather than raising, so a dead or wrong proxy can only
         # ever cost the trace, never the launch. Disabled config skips even
@@ -367,29 +422,15 @@ def launch(
         # is disowned and the child wires its own. A gateway the operator set
         # up has no marker beside it, is not ours, and still makes us stand
         # down at the reserved-var guard exactly as before.
-        parent_run = explainability_service.disown_inherited_trace(env)
         if parent_run:
             stderr_console().print(
                 f"explainability: launched from a session traced as {parent_run} — "
                 "this one takes its own identity",
                 style="dim",
             )
-        # The EFFECTIVE argument list, not just what this invocation typed.
-        # `argv` below is
-        # `[binary, *profile.args, *role_args, *ctx.args, *pinned_id]`, so a
-        # role bound with `--session-id`, `--resume` or `--continue` via
-        # `team bind --arg` — or handed one by its own `RoleProfile.default_args`
-        # — carries it here without appearing in `ctx.args`.
-        # Planning on `ctx.args` alone therefore read those launches as fresh:
-        # a bound `--session-id X` got a SECOND `--session-id` appended after
-        # it, and a bound `--continue`/`--resume` defeated the deliberate
-        # refusal to pin — the one this module's own comment calls "pure risk
-        # for no correlation", because guessing an id merges two agents onto one
-        # board row and one Run. `team spawn` already passes its profile args
-        # (cli/team.py), so this path was the asymmetric one.
-        identity = explainability_service.plan_session_identity(
-            resolution.binary, [*profile.args, *role_args, *ctx.args]
-        )
+        # Plan from the complete normalized argument list, including saved
+        # session/resume flags. The planner ignores literal prompt text.
+        identity = explainability_service.plan_session_identity(resolution.binary, arguments.argv)
         # The ACTIVE target's overrides folded onto the settings the wiring
         # reads. `explainability enable --target prod --proxy-url …` writes
         # them per target, and wire_session only ever looks at the top level —
@@ -440,7 +481,30 @@ def launch(
             # the join for EVERY binary, wrapper or not — which is why nothing
             # here needs to write one, and why an unpinnable launch still joins.
             env.update(explainability_service.trace_marker(wiring))
-    argv = [resolution.binary, *profile.args, *role_args, *ctx.args, *pinned_id]
+    native_trace_args, native_trace_note = agent_launch.telemetry_args(
+        selected, env, arguments.argv
+    )
+    if native_trace_note:
+        stderr_console().print(native_trace_note, markup=False)
+    argv = [
+        resolution.binary,
+        *model_args,
+        *pinned_id,
+        *native_trace_args,
+        *agent_launch.fleet_settings_args(selected, env, arguments.argv),
+        *agent_launch.mcp_args(selected),
+        *arguments.argv,
+    ]
+    # Last, over the environment as it will be exec'd: the store is read-only in the
+    # agent's sandbox, and its board calls go through this launch's broker.
+    from aisquare.services.store_broker import LaunchRefused
+
+    try:
+        argv, broker_note = agent_launch.start_broker(selected, env, argv)
+    except LaunchRefused as exc:
+        fail(str(exc), error="sandbox_writes_aisquare")
+    if broker_note:
+        stderr_console().print(broker_note, markup=False)
     # Text.assemble rather than "[bold]{role}[/bold]": this is the one line that
     # styles a single token instead of the whole line, and it interpolates a
     # role name, a binary path and a project name. A Text carries its styling
@@ -454,6 +518,7 @@ def launch(
             else " with no board row (context.db unreadable)…",
         )
     )
+    agent_launch.prepare_sandbox(selected)
     _await_fleet_row()
     _exec(binary, argv, env)
 
@@ -462,5 +527,6 @@ def register(app: typer.Typer) -> None:
     """Attach ``launch`` to ``app``, forwarding unknown options to the agent."""
     app.command(
         "launch",
+        cls=LaunchCommand,
         context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
     )(launch)

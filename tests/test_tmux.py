@@ -458,12 +458,17 @@ def test_has_session_targets_the_name_exactly(fake_bin: Path, conf: Path) -> Non
     ]
 
 
+_SPAWN_FORMAT = f"#{{window_id}}{_SEP}#{{pane_id}}{_SEP}#{{session_id}}{_SEP}#{{session_name}}"
+"""What ``spawn_window`` asks tmux to print of the window it made: the window, the pane, and
+the session as tmux answers it, its own id first (``$3``)."""
+
+
 def test_spawn_window_creates_the_session_when_it_is_absent(
     fake_bin: Path, conf: Path, tmp_path: Path
 ) -> None:
     fake = FakeTmux(
         Completed(1, "", "can't find session: asq-amber-fox"),  # has-session
-        Completed(0, f"@4{_SEP}%9\n", ""),  # new-session -P
+        Completed(0, f"@4{_SEP}%9{_SEP}$2{_SEP}asq-amber-fox\n", ""),  # new-session -P
     )
     info = _server(fake, fake_bin, conf).spawn_window(
         "asq-amber-fox",
@@ -475,7 +480,7 @@ def test_spawn_window_creates_the_session_when_it_is_absent(
         height=40,
     )
     assert fake.commands()[1] == [
-        "new-session", "-d", "-P", "-F", f"#{{window_id}}{_SEP}#{{pane_id}}",
+        "new-session", "-d", "-P", "-F", _SPAWN_FORMAT,
         "-s", "asq-amber-fox", "-n", "coder-1", "-c", str(tmp_path), "-x", "120", "-y", "40",
         "-e", "AISQUARE_ROLE=coder", "-e", "X=a=b",
         "--", "claude", "--name", "coder-1", "-p", "--dangerously-skip",
@@ -489,7 +494,39 @@ def test_spawn_window_creates_the_session_when_it_is_absent(
         dead_status=None,
         current_command="claude",
         activity=False,
+        session_id="$2",
     )
+
+
+def test_spawn_window_joins_a_session_by_its_id_and_creates_only_by_a_name(
+    fake_bin: Path, conf: Path, tmp_path: Path
+) -> None:
+    """A session given by tmux's own id (``$3``) is one that is there: the window goes into
+    it, whatever it is called now, or nowhere; ``create`` makes a session by a name only,
+    never joining one tmux already holds (``services.fleet._new_session_window``); and a
+    name that would read as an id is refused."""
+    fake = FakeTmux(
+        Completed(0, "", ""),  # has-session -t $3
+        Completed(0, f"@5{_SEP}%10{_SEP}$3{_SEP}asq-renamed\n", ""),  # new-window -P
+        Completed(0, "", ""),  # resize
+        Completed(1, "", "can't find session: $4"),  # has-session -t $4
+    )
+    server = _server(fake, fake_bin, conf)
+    info = server.spawn_window("$3", name="coder-2", cwd=tmp_path, command=["claude"])
+    assert fake.commands()[0] == ["has-session", "-t", "$3"]
+    assert fake.commands()[1][:7] == ["new-window", "-d", "-P", "-F", _SPAWN_FORMAT, "-t", "$3:"]
+    assert (info.session, info.session_id, info.pane_id) == ("asq-renamed", "$3", "%10")
+    with pytest.raises(TmuxError, match="no longer on the server"):
+        server.spawn_window("$4", name="coder-3", cwd=tmp_path, command=["claude"])
+    with pytest.raises(TmuxError, match="never by an id"):
+        server.spawn_window("$3", name="coder-3", cwd=tmp_path, command=["claude"], create=True)
+    with pytest.raises(TmuxError, match="tmux's id for a session"):
+        tmux_module._require_targetable("$9")
+    created = FakeTmux(Completed(0, f"@1{_SEP}%1{_SEP}$0{_SEP}asq-new\n", ""))
+    _server(created, fake_bin, conf).spawn_window(
+        "asq-new", name="m", cwd=tmp_path, command=["claude"], create=True
+    )
+    assert created.commands()[0][0] == "new-session", "no has-session asked: never joined"
 
 
 def test_spawn_window_takes_the_env_pairs_back_out_of_a_new_sessions_environment(
@@ -572,7 +609,7 @@ def test_spawn_window_adds_a_window_when_the_session_exists(
     )
     new_window = fake.commands()[1]
     assert new_window == [
-        "new-window", "-d", "-P", "-F", f"#{{window_id}}{_SEP}#{{pane_id}}",
+        "new-window", "-d", "-P", "-F", _SPAWN_FORMAT,
         "-t", "=asq-amber-fox:", "-n", "reviewer", "-c", str(tmp_path),
         "--", "sh", "-c", "exit 3",
     ]  # fmt: skip
@@ -648,7 +685,7 @@ def test_spawn_window_escapes_the_separator_in_every_argument_it_carries(
     # and is applied here exactly as the code applies it.
     escaped_cwd = str(directory).replace(";", "\\;")
     assert fake.commands()[1] == [
-        "new-window", "-d", "-P", "-F", f"#{{window_id}}{_SEP}#{{pane_id}}",
+        "new-window", "-d", "-P", "-F", _SPAWN_FORMAT,
         "-t", "=asq-amber-fox:", "-n", "coder\\;", "-c", escaped_cwd,
         "-e", "K=v\\;",
         # "a;b" is data to tmux already: only a LAST ";" separates commands.

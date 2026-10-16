@@ -186,6 +186,14 @@ AMBIENT_ENV_VARS = (
     # round).
     "AISQUARE_PLAIN_CLAUDE_CONFIG_DIR",
     "AISQUARE_PLAIN_CLAUDE_CODE_TMPDIR",
+    # Codex's CLAUDE_CONFIG_DIR, and the coding-agent family a launch or an operator
+    # chose (`services.agent_launch`): a suite run from inside a Codex session, or a
+    # fleet pane, would otherwise detect, connect and launch THEIR agent.
+    "CODEX_HOME",
+    "AISQUARE_CODING_AGENT",
+    "AISQUARE_LAUNCH_AGENT",
+    "AISQUARE_LAUNCH_ID",
+    "AISQUARE_LAUNCH_PID",
     "AISQUARE_TEAM",
     "AISQUARE_ROLE",
     # Read off the ambient env by `services/mcp_server.py` to attribute remote
@@ -404,8 +412,8 @@ def fresh_file_checks() -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def isolated_agent_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point agent detection and the Claude accounts at a temp home so tests never read
-    ``~/.claude*``.
+    """Point agent detection, launch and the Claude accounts at a temp home so tests never
+    read ``~/.claude*`` or ``~/.codex``.
 
     ``core.agents._home`` is the indirection its own docstring offers for this.
     Without it the claude-code doctor row read the developer's REAL
@@ -450,6 +458,42 @@ def no_hook_binary_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     from aisquare.core.version import __version__
 
     monkeypatch.setattr(agents, "hook_binary_version", lambda argv, **_kwargs: __version__)
+
+
+@pytest.fixture(autouse=True)
+def no_store_broker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never start a store broker process from a test's launch; mark it ready instead.
+
+    ``aisquare launch`` of an agent that sandboxes its tools starts one per launch
+    (``services.store_broker.run_broker``), owned by the process the agent becomes, which
+    in a test is the suite itself: each would poll until the run ends. Tests of the broker
+    capture the real function at import and start it against their own directory.
+    """
+    from aisquare.services import store_broker
+
+    def ready(directory: Path, env: object) -> None:
+        (directory / store_broker.READY).write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(store_broker, "run_broker", ready)
+
+
+@pytest.fixture(autouse=True)
+def install_outside_the_tree(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer, for the suite, that this aisquare lives outside every project tree.
+
+    The install under test is this checkout (an editable ``src/``, a ``.venv`` beside it),
+    and a test that does not ``chdir`` runs in it, where a sandboxed launch is refused
+    (``services.store_broker.refuse_inside``) as it must be in a real project. Tests of
+    that refusal set the install's place themselves.
+    """
+    from aisquare.services import store_broker
+
+    monkeypatch.setattr(
+        store_broker,
+        "install_paths",
+        lambda *args, **kwargs: (Path("/nonexistent/aisquare-under-test"),),
+        raising=False,
+    )
 
 
 @pytest.fixture(autouse=True)

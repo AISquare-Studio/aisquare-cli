@@ -41,7 +41,7 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.board import BoardPanel
 from aisquare.cli.ui.terminal import PANE_GONE, TerminalPane
-from aisquare.cli.ui.views.agent import shown_pane
+from aisquare.cli.ui.views.agent import key_spellings, shown_pane
 from aisquare.cli.ui.views.doctor import DoctorView
 from aisquare.cli.ui.views.explainability import ExplainabilityView
 from aisquare.cli.ui.views.settings import SettingsView
@@ -202,8 +202,11 @@ class ManagerTab(Vertical):
             return
         try:
             status = fleet_service.status_of(manager)
-        except fleet_service.FleetError:
-            status = FleetAgentStatus(agent=manager, socket_at=fleet_service.socket_at(manager))
+        except fleet_service.FleetError as exc:
+            # No pane from the row itself: the store's word for where it is, which a
+            # sandboxed agent writes (`fleet.resolve_place`), is never shown or typed into.
+            self.show(None, unavailable=str(exc))
+            return
         self.show(status)
 
     def show(
@@ -235,6 +238,7 @@ class ManagerTab(Vertical):
         header.update(manager_text(status))
         button.display = False
         pane.display = True
+        pane.key_spellings = key_spellings(status)
         if (wanted := shown_pane(status)) != pane.pane_id:
             if wanted is not None:
                 # The row's own server, where its spawn said it listened: `-L` by the name

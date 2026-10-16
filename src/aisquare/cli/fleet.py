@@ -26,6 +26,7 @@ import typer
 from rich.console import Console
 
 from aisquare.cli.common import fail, refuse_conflicting_scope
+from aisquare.cli.native_args import NativeForwardingCommand
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.models import FleetAgentStatus, ProjectInfo
@@ -120,7 +121,9 @@ def slot_label(slot: int, labels: Mapping[int, str] | None) -> str:
     named = (labels or {}).get(slot)
     if named:
         return named
-    return "plain claude" if slot == 1 else f"account {slot}"
+    from aisquare.core.claude_accounts import slot_name
+
+    return slot_name(slot)
 
 
 def _emit_agents(project: ProjectInfo, agents: list[FleetAgentStatus]) -> None:
@@ -144,6 +147,7 @@ def _emit_agents(project: ProjectInfo, agents: list[FleetAgentStatus]) -> None:
 
 @app.command(
     "spawn",
+    cls=NativeForwardingCommand,
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
 def spawn(
@@ -169,8 +173,22 @@ def spawn(
         str | None,
         typer.Option(
             "--permission-mode",
-            help="Claude Code permission mode (auto, acceptEdits, …); default per role.",
+            help="Permission as WRITE:APPROVALS, mapped to each agent's own flags "
+            "(workspace:auto, read_only:auto, workspace:ask, full:never…; docs/fleet.md), "
+            "or in the agent's own words (Claude Code: auto, acceptEdits, …; Codex: a "
+            "sandbox); default per role.",
         ),
+    ] = None,
+    agent: Annotated[str | None, typer.Option("--agent", help="Coding agent family.")] = None,
+    sandbox: Annotated[
+        str | None,
+        typer.Option(
+            "--sandbox", help="Codex write scope: read-only, workspace-write, danger-full-access."
+        ),
+    ] = None,
+    approval: Annotated[
+        str | None,
+        typer.Option("--approval", help="Codex approval policy: on-request, untrusted, never."),
     ] = None,
     binary: Annotated[
         str | None, typer.Option("--bin", help="Agent executable (default: the role's binding).")
@@ -206,7 +224,10 @@ def spawn(
             task_id=task,
             worktree=worktree,
             permission_mode=permission_mode,
+            sandbox=sandbox,
+            approval_policy=approval,
             binary=binary,
+            agent=agent,
             prompt=prompt,
             agent_args=list(ctx.args),
             spawned_by=as_session or "user",
@@ -284,9 +305,10 @@ def restart(
         str | None,
         typer.Option(
             "--permission-mode",
-            help="Claude Code permission mode for the replacement (auto, acceptEdits, …); "
-            "default: the one the agent was launched with, or the role's for an agent "
-            "spawned before that was recorded (#144).",
+            help="Permission for the replacement: WRITE:APPROVALS mapped per agent "
+            "(workspace:auto, read_only:auto…) or the agent's own (Claude Code: auto, "
+            "acceptEdits, …); default: the one the agent was launched with, or the role's "
+            "for an agent spawned before that was recorded (#144).",
         ),
     ] = None,
     project: ProjectRef = None,
@@ -459,12 +481,15 @@ def stop(
                     "agent": agent.model_dump(mode="json"),
                     "claims_released": released,
                     "release_failed": receipt.release_failed,
+                    "killed": receipt.killed,
                 }
             )
         )
     else:
         console = stdout_console()
         console.print(f"✓ stopped {agent.label} ({agent.id})")
+        if receipt.killed:
+            console.print(f"  ⚠ {receipt.killed}", markup=False)
         _say_released(console, len(released))
         # The work the stop returned to the pool is the one thing the next agent
         # inherits from this one; here the receipt carries the tasks, so they are

@@ -13,6 +13,7 @@ from pathlib import Path
 
 from aisquare.core import agents as agent_core
 from aisquare.core import paths
+from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.entries import new_entry
 from aisquare.core.store import store_session
 from aisquare.models import AgentConnection, AgentInfo
@@ -122,7 +123,8 @@ def plugin_beside_note(name: str, config_dir: Path | None = None) -> str | None:
     wrote the hooks beside the plugin and said nothing (review of #257). A plugin enabled
     for one repository is not named: beside the hooks it doubles nothing there.
     """
-    plugin = claude_plugin(config_dir) if name == "claude-code" else None
+    route = agent_core.plugin_of(name)
+    plugin = route.installed(config_dir) if route is not None else None
     if plugin is None:
         return None
     return (
@@ -148,20 +150,21 @@ def disconnect_notes(name: str, config_dir: Path | None = None, *, removed: bool
     if spec is None or not spec.connectable:
         return []
     notes: list[str] = []
-    user = claude_plugin(config_dir) if name == "claude-code" else None
-    if user is not None:
+    route = agent_core.plugin_of(name)
+    user = route.installed(config_dir) if route is not None else None
+    if route is not None and user is not None:
         notes.append(
             f"the aisquare plugin is still enabled in {user.config_dir}, so aisquare keeps "
-            f"running there — to stop it: {claude_plugin_command('disable', user.config_dir)}"
+            f"running there — to stop it: {route.command('disable', user.config_dir)}"
         )
-    if name == "claude-code" and agent_core.plugin_route_supported():
+    if route is not None:
         notes.extend(
             f"the aisquare plugin is still enabled in {plugin.project} ({plugin.scope} scope), "
             "so aisquare keeps running in sessions started there — to stop it: "
-            + agent_core.claude_plugin_command(
+            + route.command(
                 "uninstall", plugin.config_dir, scope=plugin.scope, project=plugin.project
             )
-            for plugin in agent_core.claude_repo_plugins(config_dir)
+            for plugin in route.repo_installs(config_dir)
         )
     if not removed and not notes:
         notes.append(
@@ -184,10 +187,11 @@ class AgentNotInstalledError(ValueError):
     """The agent is not on this machine: the one ``ValueError`` reported as ``not_installed``."""
 
 
-class AgentFileUnreadableError(ValueError):
+class AgentFileUnreadableError(agent_core.AgentSettingsError):
     """A file ``connect`` must read (``CLAUDE.md``, ``settings.json``) is not readable UTF-8
-    text, or a ``settings.json`` that is not a JSON object, which is never rewritten, or
-    one this user may not write.
+    text, or a ``settings.json`` that is not a JSON object or whose hooks have another
+    shape, which is never rewritten, or one this user may not write. An
+    :class:`~aisquare.core.agents.AgentSettingsError`, and so a ``ValueError``.
 
     Any ``ValueError`` used to be reported as ``not_installed``, which is what an
     undecodable ``CLAUDE.md`` became, and an ``OSError`` (a directory where the
@@ -202,7 +206,17 @@ class AgentFileUnreadableError(ValueError):
 
 
 def _read_agent_file(path: Path) -> str | None:
-    """The text of one of the agent's own files, or ``None`` when there is none."""
+    """The text of one of the agent's own files, or ``None`` when there is none.
+
+    A FIFO or a device is refused unread: reading a FIFO no writer opens never returns,
+    and connect hung there (#113). A directory is left to the read, which names it.
+    """
+    try:
+        mode = os.stat(path).st_mode
+    except OSError:
+        mode = None  # gone, or not to be stated: the read below says which
+    if mode is not None and not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+        raise AgentFileUnreadableError(f"can't read {path}: it is not a regular file", path)
     try:
         return path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -221,8 +235,18 @@ def _settings_readable(path: Path) -> None:
     """Refuse a settings file that cannot be read, or is not a JSON object."""
     _read_agent_file(path)
     try:
-        agent_core.read_settings(path)
-    except agent_core.SettingsNotAnObjectError as exc:
+        agent_core.settings_for_write(path)
+    except agent_core.AgentSettingsError as exc:
+        raise AgentFileUnreadableError(str(exc), path) from exc
+
+
+def _hooks_file_readable(path: Path) -> None:
+    """:func:`_settings_readable` for a hooks file whose hooks of another shape are refused,
+    never rewritten (``agent_core.hooks_shape_strict``: Codex's ``hooks.json``)."""
+    _read_agent_file(path)
+    try:
+        agent_core.settings_for_write(path, strict=True)
+    except agent_core.AgentSettingsError as exc:
         raise AgentFileUnreadableError(str(exc), path) from exc
 
 
@@ -260,20 +284,22 @@ def _unless_changed(check: Callable[[Path], object], path: Path) -> None:
         raise AgentFileUnreadableError(*kept[1])
 
 
-def _check_settings(path: Path, *, kept: bool = False) -> None:
+def _check_settings(path: Path, *, kept: bool = False, strict: bool = False) -> None:
     """Refuse, naming it, a settings file the hooks cannot be written into, before any
     write: one not a JSON object, which ``install_hooks`` never replaces, one this user may
     not write (a link into a read-only ``/nix/store``), and one under a ``~user`` this
     machine does not have, which read as written lands in the cwd. Each refused only after
     the context was ingested and ``~/.aisquare`` built (review of #257). ``kept``: read
-    again only once it changes (:func:`_unless_changed`).
+    again only once it changes (:func:`_unless_changed`). ``strict``: hooks of another
+    shape are refused too (:func:`_hooks_file_readable`).
     """
     if paths.names_no_home(path):
         raise AgentFileUnreadableError(f"can't write {path}: {_NO_HOME}", path)
+    readable = _hooks_file_readable if strict else _settings_readable
     if kept:
-        _unless_changed(_settings_readable, path)
+        _unless_changed(readable, path)
     else:
-        _settings_readable(path)
+        readable(path)
     unwritable = settings_unwritable(path)
     if unwritable is not None:
         raise AgentFileUnreadableError(f"can't write {path}: {unwritable}", path)
@@ -288,7 +314,7 @@ def _read_before_writing(name: str, config_dir: Path | None, *, kept: bool = Fal
     (:func:`_unless_changed`), and no text returned."""
     spec = agent_core.spec(name, config_dir)
     if spec is not None and spec.settings_path is not None:
-        _check_settings(spec.settings_path, kept=kept)
+        _check_settings(spec.settings_path, kept=kept, strict=agent_core.hooks_shape_strict(name))
     context = agent_core.context_files(name, config_dir)
     if kept:
         for path in context:
@@ -398,7 +424,7 @@ def remedies(name: str, directory: Path, refusal: Refusal, *, also: str | None =
         # shell read, with `claude` on PATH: any other not known to be there must be again
         # (behind a folder this user cannot enter, it may not be: delta review 8 of #257).
         there = ""
-        made = refusal.this_shell and agent_core.claude_on_path() is not None
+        made = refusal.this_shell and agent_core.on_path(name) is not None
         if refusal.path in directory.parents and not (made or os.path.isdir(directory)):
             there = f" so that {directory} is there"
         found.append(f"repair {refusal.path} ({refusal.fact}){there}, then connect again")
@@ -413,7 +439,7 @@ def remedies(name: str, directory: Path, refusal: Refusal, *, also: str | None =
         (refusal.this_shell or recorded)
         and access(name, directory).disconnect is None
         # Disconnect takes the hooks and the record out, and leaves a plugin to grade.
-        and not (agent_core.plugin_route_supported() and agent_core.claude_plugin(directory))
+        and not ((plugin := agent_core.plugin_of(name)) and plugin.installed(directory))
     ):
         this = f"{_REPOINT}, and disconnect this one: {disconnect}"
         found.append(this if refusal.this_shell else f"forget it: {disconnect}")
@@ -488,7 +514,7 @@ def _disconnect_refusal(name: str, config_dir: Path | None) -> Refusal | None:
     from aisquare.services import lifecycle  # lazy: lifecycle imports this module
 
     directory = spec.settings_path.parent
-    _binaries, stuck = lifecycle.hooks_stuck(directory)
+    _binaries, stuck = lifecycle.hooks_stuck(directory, name)
     if stuck is None:
         return None
     return Refusal(
@@ -541,8 +567,18 @@ def _first_run_dir(name: str, config_dir: Path | None) -> Path | None:
     from this shell read is made, however it is named; never any other ``--config-dir``
     (a typo must not get hooks), nor a ``~olduser/…`` this machine lacks, which read as
     written would be made in the cwd.
+
+    An agent without ``capabilities.ambient_first_run`` (Codex) whose binary is on PATH
+    gets its config dir as named: it too makes the directory only when it first runs, and
+    a fleet account's directory is connected before its first launch.
     """
-    if agent_core.claude_on_path() is None:
+    try:
+        adapter = get_adapter(name)
+    except ValueError:
+        return None
+    if not adapter.capabilities.ambient_first_run:
+        return _native_first_run_dir(name, config_dir)
+    if agent_core.on_path(name) is None:
         return None
     where = _this_shells_dir(name, config_dir)
     if where is None or paths.names_no_home(where) or agent_core.present(where):
@@ -550,10 +586,27 @@ def _first_run_dir(name: str, config_dir: Path | None) -> Path | None:
     return where
 
 
+def _native_first_run_dir(name: str, config_dir: Path | None) -> Path | None:
+    """:func:`_first_run_dir` for an agent that makes any dir it is given: its config dir,
+    when its binary is on PATH and the directory is not there yet."""
+    spec = agent_core.spec(name, config_dir)
+    if spec is None or not spec.connectable or agent_core.on_path(name) is None:
+        return None
+    where = spec.home
+    if paths.names_no_home(where) or agent_core.present(where):
+        return None
+    return where
+
+
 def _this_shells_dir(name: str, config_dir: Path | None) -> Path | None:
-    """``config_dir`` when it is the Claude Code config dir sessions from this shell read
-    (``CLAUDE_CONFIG_DIR``, else ``~/.claude``), or it is ``None``; else ``None``."""
-    ambient = agent_core.ambient_hook_dir(name) if name == "claude-code" else None
+    """``config_dir`` when it is the config dir sessions from this shell read
+    (``CLAUDE_CONFIG_DIR``, else ``~/.claude``), or it is ``None``; else ``None``. Only
+    for an agent with ``capabilities.ambient_first_run``, the one connect makes alone."""
+    try:
+        ambient_only = get_adapter(name).capabilities.ambient_first_run
+    except ValueError:
+        ambient_only = False
+    ambient = agent_core.ambient_hook_dir(name) if ambient_only else None
     if ambient is None or config_dir is None:
         return ambient
     same = agent_core.dir_identity(config_dir) == agent_core.dir_identity(ambient)
@@ -671,11 +724,13 @@ def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
 
     # Every file is read before anything is written: a settings.json that cannot
     # be read stopped connect after the context was ingested and the home built.
+    # A damaged native settings file must leave the shared pool untouched.
     sections = [
         section
         for text in _read_before_writing(name, config_dir)
         for section in _split_sections(text)
     ]
+    notes = agent_core.inspect_context(name, config_dir, read_documents=False).notes
 
     added = 0
     with store_session() as store:
@@ -693,10 +748,13 @@ def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
         # for, and it must never be recorded, or printed, as connected.
         raise UnsupportedAgentError(f"aisquare can't connect {spec.label} yet")
     agent_core.set_connected(name, True, config_dir)
+    readiness, detail = agent_core.integration_readiness(name, spec.home)
     return AgentConnection(
         name=name,
         hooks_installed=True,
         imported=added,
+        readiness=readiness,
+        detail=" ".join(filter(None, [detail, *notes])),
         hooks_off=agent_core.hooks_off(name, config_dir),
     )
 
@@ -723,6 +781,16 @@ def disconnect(name: str, config_dir: Path | None = None) -> bool:
             f"cannot take the hooks out of {where}: can't write {path}: {exc.strerror or exc}",
             path,
         ) from exc
+    except agent_core.AgentSettingsError as exc:
+        if isinstance(exc, AgentFileUnreadableError):
+            raise
+        # Hooks of a shape it refuses to rewrite (agent_core.hooks_shape_strict): named, as
+        # connect names them, and the file and the record are kept.
+        spec = agent_core.spec(name, config_dir)
+        path = spec.settings_path if spec is not None else None
+        where = path.parent if path is not None else config_dir
+        message = f"cannot take the hooks out of {where}: {exc}"
+        raise AgentFileUnreadableError(message, path) from exc
     recorded = agent_core.connected_dirs(name)
     agent_core.set_connected(name, False, config_dir)
     return removed or agent_core.connected_dirs(name) != recorded
@@ -763,7 +831,7 @@ def refresh_hooks(name: str, config_dir: Path | None = None) -> bool:
     spec = agent_core.spec(name, config_dir)
     path = spec.settings_path if spec is not None else None
     if path is not None:
-        _check_settings(path)
+        _check_settings(path, strict=agent_core.hooks_shape_strict(name))
     written = _install_hooks(name, config_dir, path)
     if written:
         agent_core.set_connected(name, True, config_dir)

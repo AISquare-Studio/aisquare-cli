@@ -296,8 +296,38 @@ def test_migrations_reach_the_current_schema_version() -> None:
     # v20 project groups, pins and manual order (#140), v21 project destinations (#142),
     # v22 the revocations owed for keys the CLI minted (#142), v23 the one-time repair of
     # old tombstones (#139, #140), v24 the destination a project's key was attached for (#142),
-    # v25 where a fleet agent's server listened and in which boot (round 25 of #257)
-    assert version == SCHEMA_VERSION == 25
+    # v25 where a fleet agent's server listened and in which boot (round 25 of #257),
+    # v26-v28 the coding-agent identity, team_meta dates and their repair (#113),
+    # v29 the arrangement of another agent's account slots (Codex accounts)
+    assert version == SCHEMA_VERSION == 29
+
+
+def test_v14_upgrades_native_identity_without_guessing_legacy_agents() -> None:
+    db = _at_version(14)
+    now = datetime.now(UTC).isoformat()
+    with sqlite3.connect(str(db)) as raw:
+        for sid, account, transcript in (
+            ("claude", "/home/claude", "/home/claude/projects/repo/thread.jsonl"),
+            ("unclassified", None, None),
+            ("wrapper", "/home/other", "/home/other/session.jsonl"),
+        ):
+            raw.execute(
+                "INSERT INTO team_session "
+                "(id, project_id, started_at, last_seen_at, account, transcript_path) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (sid, "prj_old", now, now, account, transcript),
+            )
+    open_store().close()
+    with sqlite3.connect(str(db)) as raw:
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert raw.execute(
+            "SELECT id, agent, native_session_id FROM team_session ORDER BY id"
+        ).fetchall() == [
+            ("claude", "claude-code", "claude"),
+            ("unclassified", None, None),
+            ("wrapper", None, None),
+        ]
+        assert "forgotten_at" in {row[1] for row in raw.execute("PRAGMA table_info(project)")}
 
 
 def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:
@@ -422,6 +452,41 @@ def _at_version(version: int, *, after: str = "", stamp: int | None = None) -> P
     finally:
         raw.close()
     return db
+
+
+#: The steps #113 stamped 15, 16 and 17 while it was dogfooded, as that branch ran them,
+#: before the merge appended them to the ladder as v26-v28 (the note above
+#: ``store._SCHEMA_V15``). A store they made lacks this line's v15-v17, which the presence
+#: pass (``store._converge_by_presence``) restores.
+DOGFOODED_113 = (
+    """
+ALTER TABLE team_session ADD COLUMN agent TEXT;
+ALTER TABLE team_session ADD COLUMN native_session_id TEXT;
+ALTER TABLE fleet_agent ADD COLUMN agent TEXT;
+UPDATE team_session SET agent = 'claude-code', native_session_id = id
+ WHERE account IS NOT NULL AND transcript_path LIKE '%/projects/%.jsonl';
+UPDATE fleet_agent SET agent = 'claude-code' WHERE binary = 'claude';
+""",
+    """
+ALTER TABLE team_meta ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
+UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER);
+CREATE TRIGGER team_meta_insert_time AFTER INSERT ON team_meta BEGIN
+ UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE key = NEW.key;
+END;
+CREATE TRIGGER team_meta_update_time AFTER UPDATE OF value ON team_meta BEGIN
+ UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE key = NEW.key;
+END;
+""",
+    """
+UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER)
+ WHERE updated_at = 0;
+""",
+)
+
+
+def _dogfooded_113(version: int) -> Path:
+    """A store #113 carried from v14 to ``version`` (15-17) with its own steps, stamped so."""
+    return _at_version(14, after="".join(DOGFOODED_113[: version - 14]), stamp=version)
 
 
 # The metric table the branch's v1 contract created (7557751..31956f2), stamped

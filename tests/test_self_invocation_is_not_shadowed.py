@@ -130,8 +130,9 @@ def test_the_detached_distiller_is_built_by_the_same_helper(
     _REAL_SPAWN_DRAIN(root=tmp_path)
 
     assert seen["cwd"] == str(tmp_path)
-    assert seen["argv"] == selfcli.argv_for(["--quiet", "team", "distill"])
-    assert seen["argv"][:4] == [sys.executable, "-P", "-m", "aisquare"]
+    # `-E` too: a drain a brokered note starts runs for a sandboxed agent (r14 of #113).
+    assert seen["argv"] == selfcli.isolated_argv_for(["--quiet", "team", "distill"])
+    assert seen["argv"][:5] == [sys.executable, "-E", "-P", "-m", "aisquare"]
 
 
 def test_the_hook_fallback_carries_the_flag_and_still_round_trips(

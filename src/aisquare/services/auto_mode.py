@@ -44,7 +44,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from aisquare.core import orchestrator, paths, transcripts
-from aisquare.core.config import FleetSettings
+from aisquare.core.agent_adapters import recorded_adapter
+from aisquare.core.agent_adapters.types import PermissionIntent
+from aisquare.core.config import FleetRoleSettings, FleetSettings
 from aisquare.core.store import store_session
 from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, TeamSession
 from aisquare.services import explainability as explainability_service
@@ -194,6 +196,25 @@ def measure_baseline(limit: int = SAMPLE_SESSIONS) -> Baseline:
     return Baseline(tuple(samples))
 
 
+def is_auto(mode: str | None) -> bool:
+    """Whether a fleet permission value launches Claude Code in ``auto``: the mode itself,
+    or a ``WRITE:APPROVALS`` intent whose approvals are ``auto``, which Claude Code's
+    adapter maps to that mode (``PermissionIntent``)."""
+    if not mode:
+        return False
+    if PermissionIntent.written(mode):
+        try:
+            return PermissionIntent.parse(mode).approvals == "auto"
+        except ValueError:
+            return False
+    return mode == "auto"
+
+
+def role_permission(settings: FleetRoleSettings) -> str:
+    """The value a role's spawn takes its permission from: its intent, else its mode."""
+    return settings.permission or settings.permission_mode
+
+
 def auto_roles(config: FleetSettings | None = None) -> list[str]:
     """The fleet roles whose effective permission mode is ``auto`` — the classifier's users."""
     from aisquare.services import fleet as fleet_service  # lazy: fleet imports this module
@@ -205,7 +226,7 @@ def auto_roles(config: FleetSettings | None = None) -> list[str]:
     return [
         role
         for role in roles
-        if fleet_service.role_settings(role, active).permission_mode == "auto"
+        if is_auto(role_permission(fleet_service.role_settings(role, active)))
     ]
 
 
@@ -229,10 +250,19 @@ def running_in_auto() -> list[str]:
                 f"{agent.label} ({project.root.name or project.id})"
                 for project in store.list_projects(include_forgotten=True)
                 for agent in store.fleet_agents(project.id, live_only=True)
-                if agent.launch_spec is not None and agent.launch_spec.permission_mode == "auto"
+                if agent.launch_spec is not None
+                and is_auto(agent.launch_spec.permission_mode)
+                and _behind_the_proxy(agent)
             ]
     except Exception:
         return []
+
+
+def _behind_the_proxy(agent: FleetAgent) -> bool:
+    """Whether ``agent`` runs an agent whose model traffic the explainability proxy carries
+    (``capabilities.model_proxy``): another one's ``auto`` is not this one's to warn of."""
+    adapter = recorded_adapter(agent.agent)
+    return adapter is not None and adapter.capabilities.model_proxy
 
 
 def exposed(baseline: Baseline) -> bool:
@@ -261,6 +291,12 @@ def _mode_step(role: str, config: FleetSettings) -> str:
     costs every ``[fleet]`` customisation (the fleet falls back to its
     defaults, every role back on ``auto``).
     """
+    if role in config.roles and config.roles[role].permission:
+        # The role's one permission for every agent wins over its Claude Code mode.
+        return (
+            f"aisquare config set fleet.roles.{role}.permission workspace:ask (or "
+            "workspace:never; any approvals but auto)"
+        )
     if role in config.roles:
         return f"aisquare config set fleet.roles.{role}.permission_mode acceptEdits"
     return (
@@ -381,7 +417,7 @@ def spawn_evidence(mode: str | None) -> Baseline | None:
     warning rested on (review of #169, round 2). Never raises: a warning is
     not a reason not to spawn.
     """
-    if mode != "auto":
+    if not is_auto(mode):
         return None
     try:
         if not explainability_service.tracing_configured():

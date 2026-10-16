@@ -35,8 +35,10 @@ that actually matters, and it is the one an operator experiences.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
+import sys
 from pathlib import Path
 
 import pytest
@@ -45,7 +47,13 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import paths
 from aisquare.core.config import AppConfig, ExplainabilityTarget, load_config, save_config
-from aisquare.core.store import damaged_store_recovery
+from aisquare.core.store import (
+    StoreUnopenable,
+    damaged_store_message,
+    damaged_store_recovery,
+    is_unreachable_error,
+    store_recovery,
+)
 from aisquare.models import CheckStatus, DoctorCheck
 from aisquare.services import diagnostics
 
@@ -376,3 +384,53 @@ def test_json_callers_get_the_recovery_too(runner: CliRunner) -> None:
     assert payload["error"] == "store_unopenable"
     assert "mv " in payload["hint"]
     assert "aisquare init" in payload["hint"]
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0, reason="a directory's POSIX permissions"
+)
+def test_a_store_out_of_reach_is_never_called_damaged(runner: CliRunner) -> None:
+    """An agent's sandbox that leaves the aisquare home out (Codex 0.162.1 in its
+    workspace-write sandbox, t8 smoke) answers every board call with SQLite's "unable to
+    open database file": the file is whole, and the sentence told the agent to move it
+    aside and re-create it, which run as an approved escalation would have cost the
+    board's history for nothing. A home this process may not write is the same case."""
+    runner.invoke(app, ["init", "--yes"], catch_exceptions=False)
+    home, db = paths.aisquare_home(), paths.db_path()
+    home.chmod(0o500)
+    try:
+        result = runner.invoke(app, ["board"])
+        as_json = runner.invoke(app, ["--json", "board"])
+    finally:
+        home.chmod(0o700)
+
+    assert result.exit_code == 1 and "Traceback" not in result.output
+    assert "Leave it where it is" in result.output and "mv " not in result.output
+    payload = json.loads(as_json.output.strip().splitlines()[0])
+    assert payload["error"] == "store_unopenable"
+    assert "mv " not in payload["hint"] and str(home) in payload["hint"]
+    assert db.is_file()
+
+
+def test_what_the_sandbox_answers_is_out_of_reach_and_corruption_stays_damage() -> None:
+    """Codex's sandbox reads as ``SQLITE_CANTOPEN`` (measured: "unable to open database
+    file" on an intact store), a home without write permission as ``SQLITE_READONLY``;
+    neither is the damage that ``mv … && aisquare init`` is for."""
+
+    def error(code: int, text: str) -> StoreUnopenable:
+        cause = sqlite3.OperationalError(text)
+        cause.sqlite_errorcode = code
+        wrapped = StoreUnopenable(text)
+        wrapped.__cause__ = cause
+        return wrapped
+
+    cantopen = error(sqlite3.SQLITE_CANTOPEN, "unable to open database file")
+    readonly = error(sqlite3.SQLITE_READONLY_DIRECTORY, "attempt to write a readonly database")
+    corrupt = error(sqlite3.SQLITE_NOTADB, "file is not a database")
+    for reached in (cantopen, readonly):
+        assert is_unreachable_error(reached)
+        assert "mv " not in damaged_store_message(reached)
+        assert "Leave it where it is" in store_recovery(reached)
+    assert not is_unreachable_error(corrupt)
+    assert store_recovery(corrupt) == damaged_store_recovery()
+    assert damaged_store_recovery() in damaged_store_message(corrupt)

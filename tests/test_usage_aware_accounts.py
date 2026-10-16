@@ -459,6 +459,27 @@ def test_claude_codes_routine_notices_leave_a_parked_or_handed_over_row_as_it_is
 # --------------------------------------------------------------------------- the hand-over decision
 
 
+def test_a_hand_over_its_launch_record_refuses_is_said_on_the_board_once(
+    fake_home: Path, work: ProjectInfo, runner: CliRunner
+) -> None:
+    """The usage-limit hand-over of a row with no launch record (``core.launch_seal``) that
+    the census of the fleet before records did not find (``fleet.take_census``) is refused
+    before anything is stopped; the reason is on the board once, said by the switch, not
+    again by the hand-over's own line, and not again at the next limit."""
+    _session(work, "sess-fleet")
+    fleet_service.take_census()  # taken before the row was written
+    _fleet_row(work, "agt_unrecorded", "coder-db", "sess-fleet")
+    for _ in range(2):
+        with store_session() as store:
+            store.mark_limited("sess-fleet", None)
+        assert runner.invoke(app, ["hook", "hand-over", "sess-fleet"]).exit_code == 0
+
+    said = [text for _, text in _events(work) if "no launch record was written" in text]
+    assert len(said) == 1 and said[0].startswith("coder-db: cannot switch it — "), said
+    assert not any("not switched" in text for _, text in _events(work))
+    assert _state("sess-fleet")[0] == "limited"
+
+
 def _fleet_row(project: ProjectInfo, agent_id: str, label: str, session_id: str) -> None:
     with store_session() as store:
         store.upsert_fleet_agent(
@@ -522,8 +543,10 @@ def test_the_hook_starts_a_detached_hand_over_only_when_configured_and_the_reset
     _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
     assert len(started) == 1
     argv = started[0]
-    assert argv[:4] == selfcli.argv_for([])  # this interpreter, -P, -m aisquare
-    assert argv[4:] == ["--quiet", "hook", "hand-over", "sess-fleet", "--reason", "weekly limit"]
+    # This interpreter, -E -P -m aisquare: the hook that starts it runs for a sandboxed
+    # agent, outside its sandbox, in its environment (review r14 of #113, finding 4).
+    assert argv[:5] == selfcli.isolated_argv_for([])
+    assert argv[5:] == ["--quiet", "hook", "hand-over", "sess-fleet", "--reason", "weekly limit"]
 
     # …one that lifts within the wait window does not (the note says why)…
     soon = (datetime.now().astimezone() + timedelta(minutes=5)).strftime("%I:%M%p").lstrip("0")

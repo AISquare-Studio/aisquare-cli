@@ -447,6 +447,11 @@ class _KnownFix:
     """Bare flags the hint may carry that ``argv`` already covers."""
     valued: frozenset[str] = frozenset()
     """Flags the hint may carry WITH one value we pass through verbatim."""
+    slot: bool = False
+    """The hint names an account slot first (a number), passed through verbatim."""
+    interactive: bool = False
+    """It hands the terminal to an agent's own sign-in: never run under ``--json``
+    (:func:`apply_fix` refuses it); the UI opens it in the Accounts page's pane."""
 
 
 #: The doctor hints that become buttons. ``init`` is deliberately absent — from
@@ -454,6 +459,12 @@ class _KnownFix:
 #: which starts a model process. Extending this table is the whole review
 #: surface for "what can one click run".
 KNOWN_FIXES: tuple[_KnownFix, ...] = (
+    _KnownFix(
+        "agents connect codex",
+        ("agents", "connect", "codex"),
+        "machine",
+        valued=frozenset({"--config-dir"}),
+    ),
     _KnownFix(
         "agents connect claude-code",
         ("agents", "connect", "claude-code"),
@@ -465,6 +476,16 @@ KNOWN_FIXES: tuple[_KnownFix, ...] = (
     ),
     _KnownFix("doctor --fix", ("doctor", "--fix", "--yes"), "machine", frozenset({"--yes", "-y"})),
     _KnownFix("explainability enable", ("explainability", "enable"), "machine"),
+    # A slot's sign-in (`accounts run <n>`, `accounts run <n> login` for Codex): the
+    # agent's own login in a terminal, which the Accounts page opens in its pane.
+    _KnownFix(
+        "accounts run",
+        ("accounts", "run"),
+        "machine",
+        frozenset({"login"}),
+        slot=True,
+        interactive=True,
+    ),
 )
 
 _MENTION = re.compile(
@@ -487,11 +508,20 @@ class FixCommand:
     """``project`` fixes need the project's cwd; ``machine`` fixes do not care."""
     source: str
     """The hint text, verbatim, for a tooltip."""
+    interactive: bool = False
+    """A sign-in the user finishes in the agent's own terminal (see ``_KnownFix``)."""
 
     @property
     def label(self) -> str:
         """The command as the fix it came from prints it, quoted for this shell."""
         return install_route.command_line(["aisquare", *self.argv])
+
+    @property
+    def sign_in_slot(self) -> int | None:
+        """The account slot an interactive sign-in is for; ``None`` for any other fix."""
+        if not self.interactive or len(self.argv) < 3 or not self.argv[2].isdigit():
+            return None
+        return int(self.argv[2])
 
 
 def _argv_for(known: _KnownFix, rest: str) -> tuple[str, ...] | None:
@@ -504,6 +534,11 @@ def _argv_for(known: _KnownFix, rest: str) -> tuple[str, ...] | None:
         return None
     argv = list(known.argv)
     index = 0
+    if known.slot:
+        if not tokens or not tokens[0].isdigit():
+            return None
+        argv.append(tokens[0])
+        index = 1
     while index < len(tokens):
         token = tokens[index]
         if token in known.flags:
@@ -537,7 +572,13 @@ def fix_commands(checks: Iterable[DoctorCheck]) -> list[FixCommand]:
                 continue
             seen.add(argv)
             fixes.append(
-                FixCommand(check=check.name, argv=argv, scope=known.scope, source=check.fix)
+                FixCommand(
+                    check=check.name,
+                    argv=argv,
+                    scope=known.scope,
+                    source=check.fix,
+                    interactive=known.interactive,
+                )
             )
     return fixes
 
@@ -567,8 +608,15 @@ def apply_fix(fix: FixCommand, cwd: Path | None, *, run: Runner = selfcli.run) -
     ``doctor --fix --yes`` exits 1 when a check still fails AFTER repairing,
     which is a report, not a failed fix — so for that one command a non-zero
     exit with a readable check list on stdout counts as done, and the re-run
-    the view performs shows what is still wrong.
+    the view performs shows what is still wrong. An interactive fix (a sign-in) is
+    never run here: it needs a terminal, and the UI opens it in one.
     """
+    if fix.interactive:
+        return FixResult(
+            fix=fix,
+            returncode=None,
+            reason="it opens the agent's own sign-in: run it in a terminal, or from asq → Accounts",
+        )
     result, asked = _invoke(run, ["--json", *fix.argv], cwd)
     if result is None:
         return FixResult(fix=fix, returncode=None, reason=asked)

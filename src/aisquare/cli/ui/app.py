@@ -1217,11 +1217,16 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.notify(f"undid: {done}", timeout=4, markup=False)
 
     def on_spawn_agent(self, event: SpawnAgent) -> None:
-        # The Spawn dialog is Phase 7 (§9); until it lands the CLI is the way.
-        self.notify(
-            "the spawn dialog is not built yet — from a terminal: aisquare fleet spawn <role>",
-            timeout=6,
-        )
+        from aisquare.cli.ui.views.spawn import SpawnScreen
+
+        project = self.snapshot.project(event.project_id) if self.snapshot else None
+        if project is not None:
+            self.push_screen(SpawnScreen(project))
+        else:
+            self.notify(
+                "Project data is not available yet; refresh and try spawning again.",
+                severity="warning",
+            )
 
     async def on_accounts_selected(self, event: AccountsSelected) -> None:
         await self._show(
@@ -1229,8 +1234,12 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         )
         self.sidebar.select("accounts")
         self._remember_selection("accounts")
+        view = self.query_one("#accounts", AccountsView)
         if self.accounts_overview is not None:
-            self.query_one("#accounts", AccountsView).show(self.accounts_overview)
+            view.show(self.accounts_overview)
+        if event.sign_in is not None:
+            # Welcome's step 2 or a Doctor fix: that slot's sign-in, open in the page's pane.
+            view.begin_claude_sign_in(event.sign_in)
 
     def on_accounts_changed(self, event: AccountsChanged) -> None:
         """The page added, removed or signed in something: the section follows at once."""
@@ -1478,6 +1487,8 @@ def _writing_workers() -> dict[str, str]:
         onboard.ONBOARD_WORKER: "a folder's setup",
         welcome.worker_name("onboard"): "a folder's setup",
         welcome.worker_name("connect"): "Connect",
+        welcome.worker_name("choose"): "the default agent's save",
+        welcome.worker_name("sign-in"): "a sign-in's start",
         welcome.worker_name("manager"): "a manager start",
         welcome.worker_name("coders"): "the coders' start",
         project.SPAWN_WORKER: "a manager start",
@@ -1509,6 +1520,7 @@ def _waited_reads() -> dict[str, str]:
         explainability,
         project,
         settings,
+        spawn,
         welcome,
     )
 
@@ -1526,6 +1538,7 @@ def _waited_reads() -> dict[str, str]:
         welcome.worker_name("look"): "Welcome's checks",
         welcome.worker_name("candidates"): "Welcome's folder list",
         welcome.worker_name("validate"): "Welcome's folder check",
+        spawn.FACTS_WORKER: "the spawn dialog's choices",
     }
 
 

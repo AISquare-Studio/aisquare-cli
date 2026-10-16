@@ -296,7 +296,7 @@ def _discovery_cache_path(api_url: str) -> Path:
     parsed = urlparse(api_url)
     host = (parsed.hostname or "unknown").replace(":", "_")
     port = f"-{parsed.port}" if parsed.port else ""
-    return paths.cache_dir() / "oidc" / f"{host}{port}.json"
+    return paths.oidc_cache_dir() / f"{host}{port}.json"
 
 
 def discover(api_url: str, *, refresh: bool = False) -> Endpoints:

@@ -96,6 +96,13 @@ class AgentInfo(BaseModel):
     detected: bool = False
     config_paths: list[Path] = Field(default_factory=list)
     connected: bool = False
+    readiness: str = "not_connected"
+    detail: str = ""
+    route: str | None = None
+    """How aisquare reaches the sessions of the directory a session from this shell reads
+    (``core.agents.hook_route``): ``hooks``, the agent's own hooks file; ``plugin``,
+    aisquare's plugin for it; ``both``, the plugin standing down beside those hooks; or
+    ``None``, neither."""
     sites: list[AgentHookSite] = Field(default_factory=list)
     """Every config dir this agent was connected in, with that dir's hook health."""
 
@@ -218,17 +225,24 @@ class PromptRecord(BaseModel):
 
 
 class ClaudeAccount(BaseModel):
-    """One Claude Code login the CLI can launch: a numbered slot over a config directory.
+    """One coding-agent login the CLI can launch: a numbered slot over a home directory.
 
     Slot 1 is the machine's default — whatever a plain ``claude`` in this shell
     uses (``CLAUDE_CONFIG_DIR`` when set, ``~/.claude`` otherwise) — and is never
     a directory of ours. Every other slot is a directory the CLI created and
     owns, launched by pointing ``CLAUDE_CONFIG_DIR`` and ``CLAUDE_CODE_TMPDIR``
     at it.
+
+    Codex logins are slots too (``agent="codex"``): slot 0 is the plain ``codex``
+    (``CODEX_HOME``, else ``~/.codex``), and a managed one is a directory under
+    ``codex-accounts`` launched with ``CODEX_HOME`` pointing at it. One ladder
+    numbers the managed slots of both agents, so a number names one account.
     """
 
     slot: int
     config_dir: Path
+    agent: str = "claude-code"
+    """The coding agent whose login this is (``core.agent_adapters`` id)."""
     tmp_dir: Path | None = None
     """The account's own ``CLAUDE_CODE_TMPDIR``; ``None`` for the default slot."""
     managed: bool = False
@@ -271,7 +285,11 @@ class ClaudeAccountRecord(BaseModel):
 
 
 class ClaudeIdentity(BaseModel):
-    """Who a Claude Code config directory is signed in as, read from its ``.claude.json``."""
+    """Who a Claude Code config directory is signed in as, read from its ``.claude.json``.
+
+    For a Codex home, the claims of the id token ``auth.json`` holds (never the token);
+    an API-key login has no email and reads ``API key``.
+    """
 
     email: str
     organization: str | None = None
@@ -279,7 +297,12 @@ class ClaudeIdentity(BaseModel):
 
 
 class ClaudeUsage(BaseModel):
-    """One account's rate-limit windows, as Claude Code's own ``/usage`` reads them."""
+    """One account's rate-limit windows, as Claude Code's own ``/usage`` reads them.
+
+    A Codex account's come from the newest ``token_count`` its sessions recorded
+    (``core.codex_accounts.usage``): the shorter window is ``session``, the longer
+    ``week``, and ``fetched_at`` is when that session recorded it.
+    """
 
     available: bool
     reason: str | None = None
@@ -336,11 +359,12 @@ class ClaudeAccountStatus(BaseModel):
     subscription: str | None = None
     """The plan the credentials file names (``max``, ``team``, …), when it does."""
     hooks_installed: bool = False
+    detail: str = ""
     usage: ClaudeUsage | None = None
 
 
 class ClaudeInstall(BaseModel):
-    """Whether Claude Code is on this machine, and which one."""
+    """Whether a coding agent (Claude Code unless named) is on this machine, and which one."""
 
     installed: bool
     binary: str | None = None
@@ -348,10 +372,12 @@ class ClaudeInstall(BaseModel):
 
 
 class AccountsOverview(BaseModel):
-    """The Claude side of the Accounts page in one read: the install and every slot."""
+    """The Accounts page in one read: the installs and every slot."""
 
     claude: ClaudeInstall
     accounts: list[ClaudeAccountStatus] = Field(default_factory=list)
+    installs: dict[str, ClaudeInstall] = Field(default_factory=dict)
+    """Every agent with account slots, by adapter id — Claude Code's is ``claude`` too."""
 
 
 # --- Collective Intelligence: the vocabularies both layers share --------------
@@ -580,6 +606,8 @@ class TeamSession(BaseModel):
     """One live agent session on the orchestrator (id = the agent's session id)."""
 
     id: str
+    agent: str | None = None
+    native_session_id: str | None = None
     project_id: str
     role: str = "unassigned"
     label: str | None = None
@@ -786,6 +814,8 @@ class AgentConnection(BaseModel):
     name: str
     hooks_installed: bool = False
     imported: int = 0
+    readiness: str = "configured"
+    detail: str = ""
     hooks_off: Path | None = None
     """The settings file the hooks went into, when it switches every hook off
     (``"disableAllHooks": true``): they are installed, and Claude Code runs none of them
@@ -957,6 +987,7 @@ class FleetAgent(BaseModel):
     """Unique among the project's LIVE agents; an ended agent frees its label."""
     role: str
     binary: str = "claude"
+    agent: str | None = None
     tmux_socket: str = "asq"
     pane_id: str
     session_id: str | None = None
@@ -993,6 +1024,8 @@ class FleetAgentStatus(BaseModel):
     session: TeamSession | None = None
     tmux_session: str | None = None
     socket_at: Path | None = None
-    """Where the agent's server is asked (``tmux -S``), worked out once with the listing's
-    config (``services.fleet.socket_at``); ``None`` when it is asked by its socket's name
-    (``tmux -L``). Carried so the UI's panes and attach line read it off the frame."""
+    """Where the agent's server is asked (``tmux -S``), as its launch record places it
+    (``services.fleet.resolve_place``), worked out once with the listing's config; ``None``
+    when it is asked by its socket's name (``tmux -L``), and for a row no record places,
+    whose pane is not shown. Carried so the UI's panes and attach line read it off the
+    frame."""

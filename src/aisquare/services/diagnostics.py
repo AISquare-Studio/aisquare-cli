@@ -7,9 +7,11 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import string
 import sys
+import tempfile
 from collections.abc import Callable, Container, Mapping, Sequence
 from datetime import UTC, datetime
 from importlib import metadata
@@ -19,9 +21,10 @@ from urllib.parse import urlsplit
 from aisquare.core import agents as agent_core
 from aisquare.core import brain as brain_core
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import harness, orchestrator, paths
+from aisquare.core import harness, launch_seal, orchestrator, outbox, paths
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core import tmux as tmux_core
+from aisquare.core.agent_adapters.types import AgentAdapter, PluginInstall
 from aisquare.core.config import load_config
 from aisquare.core.injection import load_last
 from aisquare.core.keys import EXTENDED_MINIMUM
@@ -131,51 +134,238 @@ def doctor(
     section resolves, as its launches do (``doctor --project``); ``None`` is
     the machine's key.
     """
+    from aisquare.services import agent_launch
+
+    with agent_launch.selection_snapshot(cwd), agent_core.inspection_snapshot():
+        return [
+            _check_python(),
+            _check_install(),
+            _check_provenance(),
+            _check_home(),
+            _check_home_filesystem(),
+            _check_config(),
+            _check_database(),
+            _check_repomix(),
+            _check_tiktoken(),
+            _check_claude_code(cwd),
+            *_check_other_agents(cwd),
+            *_planned_agent_checks(),
+            *_claude_accounts_checks(),
+            *_other_accounts_checks(),
+            _check_tmux(),
+            _check_gh(),
+            _check_snapshot(cwd),
+            _check_brain(cwd),
+            _check_harness(cwd),
+            _check_self_invocation(cwd),
+            _check_fleet(),
+            *_check_dead_managers(),
+            *_check_resumable_agents(),
+            *_check_captured_projects(),
+            # After the actionable machine checks on purpose. The fleet UI's sidebar
+            # shows the first three not-ok rows (`DOCTOR_LINES == 3`, a stable sort
+            # within the warn group), so a row inserted at position 12 evicted one
+            # of `brain` / `snapshot` / a logged-out `gh` — the ones an operator can
+            # act on — from the only doctor surface visible without a click. The
+            # fleet terminal row (#147) can warn too, about a running server's kept
+            # prefix, so it waits here with them rather than beside tmux.
+            _check_browser_tools(cwd),
+            _check_fleet_terminal(),
+            # Only when this aisquare lives where a sandboxed agent may write (r11 of #113).
+            *_optional(_sandboxed_install_check(cwd)),
+            *_optional(_sandbox_path_check(cwd)),
+            *_optional(_sandbox_hooks_check()),
+            *_experiment_checks(),
+            *explainability_ops.checks(live=live, target_name=target, project_id=project_id),
+            # Only while a key the CLI minted is owed a revocation (#142); --live
+            # tries each again first — one request per key, on the API that minted it.
+            *_optional(_minted_keys_check(live)),
+            # Only when a fleet role runs `auto` behind a configured proxy (#150);
+            # offline — config, the store, the head of a few transcripts.
+            *_optional(auto_mode.doctor_check()),
+            # Offline: another agent's usage is read from its own sessions (Codex's rollouts).
+            *_other_accounts_headroom_checks(),
+            # Leaves the machine (one usage request per account), so --live only (#146).
+            *_live_only(live, _claude_account_headroom_check),
+            # One balance request per destination workspace (#143), so --live only.
+            *_live_only(live, _workspace_credits_check),
+            _check_outbox(),
+        ]
+
+
+def _sandboxing_agents(installed: bool = True) -> list[AgentAdapter]:
+    """The registered agents that sandbox their tools (``capabilities.sandboxes_tools``),
+    with ``installed`` only those whose binary is on ``PATH``: what the doctor's sandbox
+    rows ask about, every such agent, never one by name (GATE #113)."""
+    import shutil
+
+    from aisquare.core.agent_adapters import adapters
+
     return [
-        _check_python(),
-        _check_install(),
-        _check_provenance(),
-        _check_home(),
-        _check_home_filesystem(),
-        _check_config(),
-        _check_database(),
-        _check_repomix(),
-        _check_tiktoken(),
-        _check_claude_code(cwd),
-        *_planned_agent_checks(),
-        *_claude_accounts_checks(),
-        _check_tmux(),
-        _check_gh(),
-        _check_snapshot(cwd),
-        _check_brain(cwd),
-        _check_harness(cwd),
-        _check_self_invocation(cwd),
-        _check_fleet(),
-        *_check_dead_managers(),
-        *_check_resumable_agents(),
-        *_check_captured_projects(),
-        # After the actionable machine checks on purpose. The fleet UI's sidebar
-        # shows the first three not-ok rows (`DOCTOR_LINES == 3`, a stable sort
-        # within the warn group), so a row inserted at position 12 evicted one
-        # of `brain` / `snapshot` / a logged-out `gh` — the ones an operator can
-        # act on — from the only doctor surface visible without a click. The
-        # fleet terminal row (#147) can warn too, about a running server's kept
-        # prefix, so it waits here with them rather than beside tmux.
-        _check_browser_tools(cwd),
-        _check_fleet_terminal(),
-        *_experiment_checks(),
-        *explainability_ops.checks(live=live, target_name=target, project_id=project_id),
-        # Only while a key the CLI minted is owed a revocation (#142); --live
-        # tries each again first — one request per key, on the API that minted it.
-        *_optional(_minted_keys_check(live)),
-        # Only when a fleet role runs `auto` behind a configured proxy (#150);
-        # offline — config, the store, the head of a few transcripts.
-        *_optional(auto_mode.doctor_check()),
-        # Leaves the machine (one usage request per account), so --live only (#146).
-        *_live_only(live, _claude_account_headroom_check),
-        # One balance request per destination workspace (#143), so --live only.
-        *_live_only(live, _workspace_credits_check),
+        adapter
+        for adapter in adapters()
+        if adapter.capabilities.sandboxes_tools
+        and (not installed or shutil.which(adapter.binary) is not None)
     ]
+
+
+def _sandboxed_project(cwd: Path | None) -> Path | None:
+    """The project an agent that sandboxes its tools, launched here, would write: a real
+    project root (one git or a project marker found, never the directory itself for want
+    of one), never the home or ``/`` (review r13 of #113, finding 2: run from the home,
+    every install under it, the official uv tool's included, read as the project's);
+    ``None`` elsewhere, or with no such agent installed (a Claude-only machine has no
+    sandbox to keep it from)."""
+    from aisquare.core.workspace import project_tree
+
+    try:
+        if not _sandboxing_agents():
+            return None
+        # The checkout itself: a worktree's own tree, outside its repository too (r14, 8).
+        return project_tree(cwd or Path.cwd())
+    except Exception:
+        return None
+
+
+def _sandboxed_install_check(cwd: Path | None = None) -> DoctorCheck | None:
+    """A warning when an aisquare that runs outside a sandboxed agent's sandbox on its behalf
+    lives in the tree of the project the doctor runs in (:func:`_sandboxed_project`), which
+    such an agent's tester, validator or ui-tester launched there writes
+    (``workspace-write``): this install, or what that agent's aisquare hooks run (review
+    r12 of #113, finding 1; the plugin's launcher too, r13 3), for every agent that
+    sandboxes its tools (GATE #113). A launch of one is refused
+    (``store_broker.refuse_inside``; r11, finding 2), which also reads the temporary and
+    the added directories this does not. ``None`` outside a real project, and when every
+    one lives elsewhere. One word for its name, as the installer reads names (r13, 2); its
+    fix names no command the doctor would run from this install, which would connect the
+    hooks to it again (r12, finding 6)."""
+    import os
+
+    from aisquare.core.agent_adapters.types import SandboxWrites
+    from aisquare.services import store_broker
+
+    root = _sandboxed_project(cwd)
+    if root is None:
+        return None
+    for adapter in _sandboxing_agents():
+        try:
+            hooks = adapter.config_dir(agent_core._home(), os.environ)
+            installs = store_broker.install_paths(hooks, adapter.id, os.environ.get("PATH"))
+        except Exception:
+            continue
+        inside = store_broker.install_inside(SandboxWrites((root,)), installs)
+        if inside is None:
+            continue
+        return _warn(
+            "sandbox-install",
+            f"aisquare runs from {inside}, in {root.name or root}'s tree, which a sandboxed "
+            f"{adapter.label} agent launched there may write: such a launch is refused",
+            "install aisquare-cli outside the project (uv tool install aisquare-cli, or "
+            f"pipx install aisquare-cli), then connect the {adapter.label} hooks again with "
+            "that install",
+        )
+    return None
+
+
+def _sandbox_hooks_check() -> DoctorCheck | None:
+    """A warning when an agent that sandboxes its tools runs aisquare hooks (its hooks file in
+    this shell's config dir for it) in the console-script form, whose interpreter reads
+    ``PYTHONPATH`` outside the agent's sandbox, where the agent keeps it for its tools and
+    its sandbox may write a directory it names: Codex hooks a build of this branch connected
+    before review r14 of #113. ``aisquare agents connect <agent>``, and an upgrade's
+    refresh, write ``<python> -E -P -m aisquare`` (``agents.hook_runs_isolated``; r15,
+    finding 1). Every such agent, never one by name (GATE #113). ``None`` otherwise."""
+    import os
+
+    for adapter in _sandboxing_agents(installed=False):
+        try:
+            home = adapter.config_dir(agent_core._home(), os.environ)
+            commands = agent_core.hook_commands(adapter.id, home)
+        except Exception:
+            continue
+        if not commands or all(agent_core.hook_runs_isolated(c) for c in commands):
+            continue
+        return _warn(
+            "sandbox-hooks",
+            f"{adapter.label}'s aisquare hooks in {home} run the console script, which "
+            "imports from PYTHONPATH outside the agent's sandbox, where its sandbox may write "
+            "a directory it names (direnv's $PWD/src)",
+            f"aisquare agents connect {adapter.id}",
+        )
+    return None
+
+
+def _resolved_or_none(place: Path, root: Path) -> bool:
+    """Whether ``place`` resolves into ``root``; ``False`` where it cannot be resolved."""
+    try:
+        return place.resolve().is_relative_to(root)
+    except (OSError, RuntimeError):
+        return False
+
+
+def _sandbox_path_check(cwd: Path | None = None) -> DoctorCheck | None:
+    """A warning when ``PATH`` names a directory in the tree of the project the doctor runs
+    in (:func:`_sandboxed_project`: an activated virtualenv, direnv's ``PATH_add``): an
+    agent that sandboxes its tools, launched there, may write it, and the agent itself (Codex
+    runs the ``git`` it finds there outside its sandbox, measured on 0.162.1), and
+    aisquare's hooks and broker, run the ``git`` (``gbrain``, ``tmux``) found there outside
+    the sandbox (review r13 of #113, finding 1; ``store_broker.sandbox_environment`` warns at
+    launch too). ``None`` outside a real project or with no such entry. Amber the installer
+    expects: it is the shell's state, not the install's."""
+    import os
+
+    root = _sandboxed_project(cwd)
+    if root is None:
+        return None
+    # As an agent launched in the project reads it: an empty or relative entry is under
+    # the directory a process runs in, the project's; PATH expands no `~` (r14, 3 and 7).
+    value = os.environ.get("PATH", "")
+    named = [
+        entry or "(an empty entry)"
+        for entry in (value.split(os.pathsep) if value else [])
+        if _resolved_or_none(root / entry if entry else root, root)
+    ]
+    if not named:
+        return None
+    labels = " or ".join(adapter.label for adapter in _sandboxing_agents())
+    return _warn(
+        "sandbox-path",
+        f"PATH names {', '.join(named)}, in {root.name or root}'s tree, which a sandboxed "
+        f"{labels} agent launched there may write: the agent itself, and aisquare's hooks "
+        "and store broker, run the git found there outside its sandbox",
+        f"launch {labels} agents from a shell whose PATH names nothing in the project "
+        "(deactivate its virtualenv)",
+    )
+
+
+def _check_outbox() -> DoctorCheck:
+    """Test the actual write/rename seam; os.access is unreliable under ACLs."""
+    name = "explainability-spool"
+    directory = outbox.queue_dir()
+    fix = f"Restore write access and free space in {directory}, then rerun aisquare doctor"
+    try:
+        settings = load_config().explainability
+        if not settings.enabled or not settings.ship:
+            return _ok(name, "Insight shipping is disabled")
+        directory.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".doctor-", dir=directory) as scratch:
+            source = Path(scratch) / "probe"
+            source.write_bytes(b"aisquare spool write probe")
+            source.replace(source.with_suffix(".renamed"))
+        failure = outbox.root() / "last-error.json"
+        if failure.exists():
+            recent = json.loads(failure.read_text())
+            if not isinstance(recent, dict):
+                raise ValueError("Invalid receiver diagnostic")
+            return _warn(
+                name,
+                f"Spool is writable at {directory}; last receiver failure: "
+                f"{recent.get('kind', 'unknown')} ({recent.get('code')})",
+                f"Retry insight shipping; inspect {failure} if events remain missing",
+            )
+    except (OSError, ValueError) as exc:
+        return _warn(name, f"Cannot write telemetry spool at {directory}: {exc}", fix)
+    return _ok(name, f"Telemetry spool is writable at {directory}")
 
 
 def _optional(check: DoctorCheck | None) -> list[DoctorCheck]:
@@ -510,11 +700,12 @@ _MISSING_SHOWN = 6
 #: pyproject's ``[project.urls] Issues``, kept in step by the tests.
 _ISSUES_URL = "https://github.com/AISquare-Studio/aisquare-cli/issues"
 
-#: What the database row says each missing trigger costs. Every trigger of this build
-#: keeps `aisquare context search` in step with the notes, and each one's absence puts
-#: it out of step in its own way, measured with it dropped (the tests repeat each
-#: measurement). One per trigger the ladder makes, in its order (pinned by the tests),
-#: so a trigger added without its sentence fails a test, not the operator.
+#: What the database row says each missing trigger costs. The ``entry_*`` triggers keep
+#: `aisquare context search` in step with the notes, and each one's absence puts it out
+#: of step in its own way, measured with it dropped (the tests repeat each measurement);
+#: the ``team_meta_*`` ones date the launch metadata its cleanup reads (#113). One per
+#: trigger the ladder makes, in its order (pinned by the tests), so a trigger added
+#: without its sentence fails a test, not the operator.
 _TRIGGER_COSTS = {
     "entry_ai": (
         "without trigger entry_ai a new note is not indexed: `aisquare context search` "
@@ -529,6 +720,14 @@ _TRIGGER_COSTS = {
     "entry_au": (
         "without trigger entry_au an edited note stays indexed under its old text, so "
         "`aisquare context search` matches what it said, not what it says"
+    ),
+    "team_meta_insert_time": (
+        "without trigger team_meta_insert_time a new launch binding or replay record is "
+        "never dated, so the launch-metadata cleanup keeps it for good"
+    ),
+    "team_meta_update_time": (
+        "without trigger team_meta_update_time a binding a session refreshes keeps the date "
+        "it was first written, so the launch-metadata cleanup can drop it while it is in use"
     ),
 }
 
@@ -959,6 +1158,21 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
     sites = agent_core.hook_sites("claude-code", cwd=cwd)
     if info is None or (not info.detected and not sites):
         return _ok("claude-code", "Claude Code not detected on this machine")
+    from aisquare.services import agent_launch
+
+    try:
+        uses_claude = any(
+            agent_launch.resolve(role, cwd=cwd).adapter.id == info.name
+            for role in harness.ROLE_PROFILES
+        )
+    except ValueError:
+        uses_claude = True  # the separate configuration check explains this
+    if not uses_claude and not os.environ.get("CLAUDE_CONFIG_DIR", "").strip():
+        sites = [
+            site for site in sites if site.recorded or site.hooks_installed or site.binary_state
+        ]
+        if not sites:
+            return _ok("claude-code", "Claude Code detected but not selected")
     version = claude_code_version()
     product = f"Claude Code {version}" if version else "Claude Code"
     # Hooks switched off ("disableAllHooks": true) run none of ours however complete
@@ -1259,13 +1473,13 @@ def _refused_fix(
     return "; or ".join(agents_service.remedies("claude-code", directory, refusal, also=also))
 
 
-def _disconnect_fix(directory: Path, lead: str) -> str:
+def _disconnect_fix(directory: Path, lead: str, agent: str = claude_accounts_core.AGENT) -> str:
     """``lead`` and the disconnect that takes aisquare's hooks out of ``directory``, or,
     where disconnect would refuse it (``agents_service.access``), that refusal and its
     remedy: a fix never names a command that would refuse (review of #257)."""
-    refusal = agents_service.access("claude-code", directory).disconnect
+    refusal = agents_service.access(agent, directory).disconnect
     if refusal is None:
-        return f"{lead}{agents_service.config_dir_command('disconnect', 'claude-code', directory)}"
+        return f"{lead}{agents_service.config_dir_command('disconnect', agent, directory)}"
     return f"{lead}{refusal.why}"
 
 
@@ -1360,6 +1574,102 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
         *_claude_account_default_checks(),
         *_claude_account_limit_checks(),
     ]
+
+
+def _other_accounts_checks() -> list[DoctorCheck]:
+    """The rows :func:`_claude_accounts_checks` gives Claude Code, for every other agent with
+    account slots (Codex): ``codex-accounts``, ``codex-account-default``,
+    ``codex-account-bindings`` and ``codex-account-limits`` — each only when there is
+    something of that agent's to report, so a machine without Codex slots is unchanged."""
+    return [
+        check
+        for agent in claude_accounts_core.account_agents()
+        if agent != claude_accounts_core.AGENT
+        for check in _agent_accounts_checks(agent)
+    ]
+
+
+def _agent_accounts_checks(agent: str) -> list[DoctorCheck]:
+    """:func:`_claude_accounts_checks` for ``agent``'s slots: one line for the ones the CLI
+    added, the default checks when something is arranged, and its limited agents.
+
+    Reads only, like Claude Code's: ``managed_accounts`` lists directories and
+    ``describe`` reads the files the agent left in them (for Codex, ``auth.json``'s
+    id-token claims — never a token). An unsigned slot's fix is the agent's own
+    sign-in in it (``aisquare accounts run <n> login`` for Codex).
+    """
+    kind = claude_accounts_core.kind(agent)
+    managed = claude_accounts_core.managed_accounts(agent)
+    if not managed:
+        defaults = _account_default_checks(agent) if _arranges_an_agent_account(agent) else []
+        return [*defaults, *_account_limit_checks(agent)]
+    statuses = [claude_accounts_service.describe(account) for account in managed]
+    parts = [
+        f"{status.account.slot} {status.identity.email if status.identity else 'not signed in'}"
+        for status in statuses
+    ]
+    detail = f"{len(statuses)} added beside the {kind.plain_label}: " + " · ".join(parts)
+    unsigned = [status.account.slot for status in statuses if not status.signed_in]
+    name = f"{agent}-accounts"
+    rest = [*_account_default_checks(agent), *_account_limit_checks(agent)]
+    if unsigned:
+        sign_in = " ".join(("", *kind.sign_in_args()))
+        return [
+            _warn(
+                name,
+                detail,
+                "Sign in from asq → Accounts, or: "
+                + "; ".join(f"aisquare accounts run {slot}{sign_in}" for slot in unsigned),
+            ),
+            *rest,
+        ]
+    return [_ok(name, detail), *rest]
+
+
+def _arranges_an_agent_account(agent: str) -> bool:
+    """:func:`_arranges_an_account` for ``agent``: a binding of one of its roles, a project
+    default under its key, or a machine default in ``agent_account``. Writes nothing."""
+    try:
+        bindings = settings_service.role_account_bindings()
+        if any(whose == agent for whose in _role_agents(bindings).values()):
+            return True
+        if not paths.db_path().exists():
+            return False
+        with store_session() as store:
+            if store.project_settings(claude_accounts_service.project_account_key(agent)):
+                return True
+            return any(record.is_default for record in store.agent_accounts(agent))
+    except Exception:
+        return False
+
+
+def _role_agents(bindings: Mapping[str, str]) -> dict[str, str]:
+    """Each bound role's agent, as the config names it: the role's own ``agent``, else the one
+    its bound binary runs, else ``[agents] default``, else Claude Code.
+
+    Without the project's or the shell's say (``agent_launch.resolve`` asks those, and
+    registers the project to): a doctor row may not write. An agent without account
+    slots counts as Claude Code's, whose rows have always checked every binding.
+    """
+    try:
+        config = load_config()
+    except Exception:
+        return dict.fromkeys(bindings, claude_accounts_core.AGENT)
+    from aisquare.core.agent_adapters import adapter_for_binary
+
+    known = claude_accounts_core.account_agents()
+    agents: dict[str, str] = {}
+    for role in bindings:
+        profile = config.team.profiles.get(role)
+        inferred = adapter_for_binary(profile.bin) if profile is not None and profile.bin else None
+        whose = (
+            (profile.agent if profile is not None else None)
+            or (inferred.id if inferred is not None else None)
+            or config.agents.default
+            or claude_accounts_core.AGENT
+        )
+        agents[role] = whose if whose in known else claude_accounts_core.AGENT
+    return agents
 
 
 def _arranges_an_account() -> bool:
@@ -1507,6 +1817,13 @@ def _claude_account_limit_checks() -> list[DoctorCheck]:
     and when its limit lifts, with the one command that moves it. Nothing when
     no session is limited, so an idle machine's doctor output is unchanged.
     """
+    return _account_limit_checks(claude_accounts_core.AGENT)
+
+
+def _account_limit_checks(agent: str) -> list[DoctorCheck]:
+    """:func:`_claude_account_limit_checks` for the sessions of ``agent`` (a session that
+    names no agent is Claude Code's): one row per agent, in its own words — nothing is
+    relied on to continue a Codex agent at the reset, as Claude Code's own wait does."""
     if not paths.db_path().exists():
         return []
     try:
@@ -1517,12 +1834,14 @@ def _claude_account_limit_checks() -> list[DoctorCheck]:
                 (session, names[p.id])
                 for p in projects
                 for session in store.team_sessions(p.id)
-                if session.ended_at is None and session.state == "limited"
+                if session.ended_at is None
+                and session.state == "limited"
+                and (session.agent or claude_accounts_core.AGENT) == agent
             ]
             labels = {}
             for session, _project_name in limited:
-                agent = store.fleet_agent_for_session(session.project_id, session.id)
-                labels[session.id] = agent.label if agent is not None else session.id[:8]
+                row = store.fleet_agent_for_session(session.project_id, session.id)
+                labels[session.id] = row.label if row is not None else session.id[:8]
     except Exception:  # the database line reports a broken store
         return []
     if not limited:
@@ -1536,6 +1855,16 @@ def _claude_account_limit_checks() -> list[DoctorCheck]:
             else "reset time unknown"
         )
         parts.append(f"{labels[session.id]} ({project_name}, {when})")
+    if agent != claude_accounts_core.AGENT:
+        name = claude_accounts_core.agent_label(agent)
+        return [
+            _warn(
+                f"{agent}-account-limits",
+                f"{len(limited)} agent(s) parked on a {name} usage limit: " + " · ".join(parts),
+                "Move one to an account with headroom: aisquare fleet switch <label>; or wait "
+                f"for the reset and prompt it again — AISquare does not wait for {name} to go on",
+            )
+        ]
     return [
         _warn(
             "claude-account-limits",
@@ -1568,7 +1897,9 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
     accounts = [
         account
         for account in claude_accounts_service.list_accounts()
-        if not account.disabled and claude_accounts_core.signed_in(account)
+        if account.agent == claude_accounts_core.AGENT
+        and not account.disabled
+        and claude_accounts_core.signed_in(account)
     ]
     if not accounts:
         return None
@@ -1608,6 +1939,88 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
     return _ok(
         "claude-account-headroom",
         f"five-hour and weekly windows ({settings.switch_at}% is the line): {summary}",
+    )
+
+
+def _other_accounts_headroom_checks() -> list[DoctorCheck]:
+    """:func:`_agent_account_headroom_check` for every other agent with account slots."""
+    return [
+        check
+        for agent in claude_accounts_core.account_agents()
+        if agent != claude_accounts_core.AGENT
+        and (check := _agent_account_headroom_check(agent)) is not None
+    ]
+
+
+def _agent_account_headroom_check(agent: str) -> DoctorCheck | None:
+    """:func:`_claude_account_headroom_check` for an agent whose usage is read OFFLINE.
+
+    Codex's windows come from the newest ``token_count`` its own sessions wrote
+    (``core.codex_accounts``): no request leaves the machine, so this runs on
+    every ``doctor``, not only ``--live``. An account is as full as the fuller of
+    the windows it HAS (``headroom_percent(..., agent=...)``): a Codex plan can have
+    a weekly window and no five-hour one. ``None`` before ``context.db`` exists
+    (the arranged list reconciles through the store) and when no enabled account
+    of the agent is signed in.
+    """
+    if not paths.db_path().exists():
+        return None
+    try:
+        if claude_accounts_core.kind(agent).network_usage:
+            return None  # leaves the machine: never on a plain doctor run
+        accounts = [
+            account
+            for account in claude_accounts_service.list_accounts()
+            if account.agent == agent
+            and not account.disabled
+            and claude_accounts_core.signed_in(account)
+        ]
+    except Exception:  # the database line reports a broken store
+        return None
+    if not accounts:
+        return None
+    name = f"{agent}-account-headroom"
+    settings = claude_accounts_service.accounts_settings()
+    readings = claude_accounts_service.read_usage(accounts)
+    measured = [
+        (account, percent)
+        for account in accounts
+        if (
+            percent := claude_accounts_service.headroom_percent(readings[account.slot], agent=agent)
+        )
+        is not None
+    ]
+    unreadable = [
+        f"{claude_accounts_core.label(account)}: {readings[account.slot].reason or 'no reading'}"
+        for account in accounts
+        if account.slot not in {a.slot for a, _ in measured}
+    ]
+    summary = " · ".join(
+        claude_accounts_service.describe_headroom(account, readings[account.slot])
+        for account, _pct in measured
+    )
+    if unreadable:
+        summary = (summary + " · " if summary else "") + "unreadable: " + "; ".join(unreadable)
+    label = claude_accounts_core.agent_label(agent)
+    if measured and all(pct >= settings.switch_at for _, pct in measured):
+        return _warn(
+            name,
+            f"every {label} account is at or over {settings.switch_at}% of a window, as its "
+            f"newest session recorded it: {summary}",
+            f"Add or sign in another account (aisquare accounts add --agent {agent}), or wait "
+            "for a reset — a fleet spawned now has nowhere to switch to",
+        )
+    if not measured:
+        return _warn(
+            name,
+            f"no {label} account's usage has been recorded yet: {summary}",
+            f"Open a session on the account (aisquare accounts run <slot>): {label} records "
+            "its limits as it works; then: aisquare accounts usage",
+        )
+    return _ok(
+        name,
+        f"windows as each account's newest session recorded them ({settings.switch_at}% is "
+        f"the line): {summary}",
     )
 
 
@@ -1713,6 +2126,16 @@ def _minted_keys_check(live: bool) -> DoctorCheck | None:
 def _claude_account_default_checks() -> list[DoctorCheck]:
     """The arrangement (#145): is the account a launch will pick one that can launch?
 
+    Claude Code's: :func:`_account_default_checks` for its slots, project defaults and
+    the bindings of its roles, in the words it always used.
+    """
+    return _account_default_checks(claude_accounts_core.AGENT)
+
+
+def _account_default_checks(agent: str) -> list[DoctorCheck]:
+    """The arrangement (#145) of ``agent``'s accounts: is the account a launch will pick one
+    that can launch?
+
     Reads the registry only when ``context.db`` already exists — a doctor run
     must not create the store (``tests/test_doctor_does_not_create_state.py``)
     — and says nothing at all when no default, project default or role binding
@@ -1723,13 +2146,19 @@ def _claude_account_default_checks() -> list[DoctorCheck]:
     and a binding or project default naming a removed slot refuses every
     launch of that role or project with `unknown_account`.
     """
+    claude = agent == claude_accounts_core.AGENT
+    prefix = "claude" if claude else agent
     if not paths.db_path().exists():
         return []
     try:
-        accounts = claude_accounts_service.list_accounts()
-        bindings = settings_service.role_account_bindings()
+        everyone = claude_accounts_service.list_accounts()
+        accounts = [account for account in everyone if account.agent == agent]
+        every_binding = settings_service.role_account_bindings()
+        role_agents = _role_agents(every_binding)
+        # The bindings of THIS agent's roles: each is checked against the agent it launches.
+        bindings = {role: ref for role, ref in every_binding.items() if role_agents[role] == agent}
         with store_session() as store:
-            per_project = store.project_settings(claude_accounts_service.PROJECT_ACCOUNT_KEY)
+            per_project = store.project_settings(claude_accounts_service.project_account_key(agent))
             names = {
                 project_id: (project.root.name or project.id)
                 for project_id in per_project
@@ -1738,7 +2167,7 @@ def _claude_account_default_checks() -> list[DoctorCheck]:
     except Exception as exc:  # the database line says WHY the store is broken; this says the cost
         return [
             _warn(
-                "claude-account-default",
+                f"{prefix}-account-default",
                 f"the accounts registry could not be read ({exc}) — launches run without a "
                 "default account",
                 "aisquare doctor  (the database line above says what is wrong with context.db)",
@@ -1749,29 +2178,43 @@ def _claude_account_default_checks() -> list[DoctorCheck]:
     if default is None and not per_project and not bindings:
         return []
     checks: list[DoctorCheck] = []
+    name = claude_accounts_core.agent_label(agent)
+    whose = "" if claude else f"{name} "
     if default is not None:
         label = f"slot {default.slot} ({claude_accounts_core.label(default)})"
         if default.disabled:
             checks.append(
                 _warn(
-                    "claude-account-default",
-                    f"the machine default is {label} and it is disabled — launches skip it",
+                    f"{prefix}-account-default",
+                    f"the {whose}machine default is {label} and it is disabled — launches skip it"
+                    if not claude
+                    else f"the machine default is {label} and it is disabled — launches skip it",
                     f"aisquare accounts enable {default.slot}, or pick another: "
                     "aisquare accounts default <slot>",
                 )
             )
         elif not claude_accounts_core.signed_in(default):
+            sign_in = " ".join(("", *claude_accounts_core.kind(agent).sign_in_args()))
             checks.append(
                 _warn(
-                    "claude-account-default",
+                    f"{prefix}-account-default",
                     f"the machine default is {label} but it is not signed in — a launch "
-                    "would open Claude Code's login instead of the account you meant",
-                    f"aisquare accounts run {default.slot} and sign in, or pick another: "
+                    "would open Claude Code's login instead of the account you meant"
+                    if claude
+                    else f"the {whose}machine default is {label} but it is not signed in — "
+                    f"a launch would start {name} with no login instead of the account you "
+                    "meant",
+                    f"aisquare accounts run {default.slot}{sign_in} and sign in, or pick "
+                    "another: aisquare accounts default <slot>"
+                    if not claude
+                    else f"aisquare accounts run {default.slot} and sign in, or pick another: "
                     "aisquare accounts default <slot>",
                 )
             )
         else:
-            checks.append(_ok("claude-account-default", f"machine default: {label}"))
+            checks.append(
+                _ok(f"{prefix}-account-default", f"{whose}machine default: {label}".strip())
+            )
     dangling: list[str] = []
     for project_id, raw in per_project.items():
         if not raw.isdigit() or int(raw) not in by_slot:
@@ -1779,18 +2222,25 @@ def _claude_account_default_checks() -> list[DoctorCheck]:
     for role, ref in bindings.items():
         try:
             # Against the list in hand: `resolve` re-opened the store and rescanned
-            # the directories once per binding (review of #205, fourth round).
-            claude_accounts_service._resolve_in(accounts, ref)
+            # the directories once per binding (review of #205, fourth round). As the
+            # role's agent: an account of another agent refuses its launches as well.
+            claude_accounts_service._resolve_in(everyone, ref, agent=agent)
         except claude_accounts_service.AccountsError:
             dangling.append(f"role {role} → {ref}")
     if dangling:
         checks.append(
             _warn(
-                "claude-account-bindings",
+                f"{prefix}-account-bindings",
                 "these name an account this machine does not have, so their launches are "
+                "refused: " + "; ".join(dangling)
+                if claude
+                else f"these name no {name} account this machine has, so their launches are "
                 "refused: " + "; ".join(dangling),
                 "aisquare accounts default --clear --project <project>, or "
-                "aisquare team bind <role> --clear-account",
+                "aisquare team bind <role> --clear-account"
+                if claude
+                else f"aisquare accounts default --clear --agent {agent} --project <project>, "
+                "or aisquare team bind <role> --clear-account",
             )
         )
     return checks
@@ -2351,6 +2801,9 @@ def _check_browser_tools(cwd: Path | None = None) -> DoctorCheck:
     # disagree with itself between the CLI and the fleet UI, and the CLI was
     # the surface telling operators to install what their repo declares.
     cwd = Path.cwd() if cwd is None else cwd
+    own = _agents_own_browser(cwd)
+    if own is not None:
+        return own
     dirs = agent_core.claude_config_dirs()
     # Every `.claude.json` parsed ONCE for both scans below; see `_browser_tools_in`.
     parsed = _claude_jsons(dirs)
@@ -2388,6 +2841,38 @@ def _check_browser_tools(cwd: Path | None = None) -> DoctorCheck:
         "rather than passing them on code alone — add the Chrome DevTools MCP with "
         "`claude mcp add -s user chrome-devtools npx chrome-devtools-mcp`, or install the "
         "Claude in Chrome extension (claude.ai/chrome)",
+    )
+
+
+def _agents_own_browser(cwd: Path) -> DoctorCheck | None:
+    """The browser-tools row for a ui-tester whose agent brings its own browser
+    (``AgentAdapter.browser_tools``: Codex's ``browser_use`` feature and bundled browser
+    plugin, read from the config dir it launches with); ``None`` for an agent whose
+    browser this row finds by its own scan (Claude Code), or a role that cannot be
+    resolved (its launch says why). OK either way, as the row always is."""
+    from aisquare.services import agent_launch
+
+    name = "browser tools"
+    try:
+        selected = agent_launch.resolve("ui-tester", cwd=cwd)
+        tools = selected.adapter.browser_tools(selected.config_dir)
+    except Exception:
+        return None
+    if tools is None:
+        return None
+    where = f"{selected.adapter.label}, {_short_path(selected.config_dir)}"
+    if tools:
+        return _ok(
+            name,
+            f"the ui-tester runs {where}: {' and '.join(tools)} — it browses with "
+            f"{selected.adapter.label}'s own browser (no --chrome)",
+        )
+    config = selected.config_dir / "config.toml"
+    return _ok(
+        name,
+        f"the ui-tester runs {where} with no browser of its own (browser_use is off in "
+        f"{_short_path(config)}) — it reopens UI tasks as 'not browser-verified' rather "
+        "than passing them on code alone; set `browser_use = true` under [features] there",
     )
 
 
@@ -2781,9 +3266,13 @@ def last_injection() -> InjectionRecord | None:
 
 
 def show_log(limit: int = 20) -> list[PromptRecord]:
-    """Recent captured user prompts for the active project (newest first)."""
+    """Recent captured user prompts for the active project (newest first): for a command a
+    sandboxed agent's broker runs, its launch's own project, never a ``project switch``
+    pin (``context.pool_project``; review r13 of #113, finding 5)."""
+    from aisquare.services.context import pool_project
+
     with store_session() as store:
-        project = active_project(store)
+        project = pool_project(store)
         return store.recent_prompts(project.id, limit=limit)
 
 
@@ -2815,14 +3304,26 @@ def _check_harness(cwd: Path | None = None) -> DoctorCheck:
             if not store.team_active(project.id):
                 return _ok(name, "not activated for this project")
             live = [s for s in store.team_sessions(project.id) if s.ended_at is None]
-        interference = harness.interfering_env()
+        from aisquare.services import agent_launch
+
+        selected_roles = []
+        for role in harness.ROLE_PROFILES:
+            try:
+                selected = agent_launch.resolve(role, cwd=cwd)
+            except ValueError:
+                continue
+            if selected.adapter.capabilities.model_ladders:
+                selected_roles.append((role, selected))
+        interference = harness.interfering_env() if selected_roles else []
         mismatches: list[str] = []
         for session in live:
             # `base_role`: a numbered seat (`coder1`, the shape README documents
             # for a parallel crew) rides its role's ladder, so it is judged
             # against it. Keyed on the raw role, `ROLE_PROFILES.get` missed and
             # every seat was silently exempt from the board's only tiering signal.
-            complaint = harness.model_mismatch(team_service.base_role(session.role), session.model)
+            complaint = harness.model_mismatch(
+                team_service.base_role(session.role), session.model, agent=session.agent
+            )
             if complaint:
                 mismatches.append(f"{session.id[:8]} ({session.role}): {complaint}")
         problems: list[str] = []
@@ -2837,17 +3338,27 @@ def _check_harness(cwd: Path | None = None) -> DoctorCheck:
                 "unset the interfering env vars and relaunch off-ladder roles with "
                 "`aisquare team spawn <role>`",
             )
-        fable = harness.cached_probe("fable")
-        if fable is not None and not fable.available:
-            return _warn(
-                name,
-                f"fable probed unavailable ({fable.reason}) — top-tier roles fall back to opus",
-                "expected on non-enterprise accounts; re-check with "
-                "`aisquare team spawn planner --refresh`",
+        seen_scopes: set[str] = set()
+        detail = "role ladders clean" if selected_roles else "native model selection"
+        for role, selected in selected_roles:
+            context = harness.ProbeContext(
+                binary=selected.binary.binary, env={**os.environ, **selected.profile.env}
             )
-        detail = "role ladders clean"
-        if fable is not None and fable.resolved_id:
-            detail = f"role ladders clean; fable available ({fable.resolved_id})"
+            with harness.probe_context(context):
+                scope = harness.account_scope()
+                if scope in seen_scopes:
+                    continue
+                seen_scopes.add(scope)
+                fable = harness.cached_probe("fable")
+            if fable is not None and not fable.available:
+                return _warn(
+                    name,
+                    f"fable probed unavailable for {role} ({fable.reason}) — "
+                    "top-tier roles fall back to opus",
+                    f"aisquare team spawn {role} --refresh",
+                )
+            if fable is not None and fable.resolved_id:
+                detail = f"role ladders clean; fable available ({fable.resolved_id})"
         return _ok(name, detail)
     except Exception:  # diagnostics must never crash
         return _ok(name, "not evaluated")
@@ -2919,7 +3430,7 @@ def _check_fleet(
     ``fleet reap`` with no project reaps them all. Each row is checked on the
     socket IT was spawned on — the socket is a default the user may change
     (§3.10), and a row must not read as lost because the config moved after it —
-    at the path its spawn recorded, where the fleet asks it (``fleet._address``):
+    at the path its launch record holds, where the fleet asks it (``fleet.resolve_place``):
     ``tmux -L`` by the name, from a shell under another ``TMUX_TMPDIR``, reaches
     another server, whose ``%N`` is another agent (round 28 of #257). ``server_for``
     builds the server for a socket; tests hand in fakes.
@@ -2954,13 +3465,24 @@ def _check_fleet(
         gone: list[FleetAgent] = []
         exited: list[FleetAgent] = []
         started: dict[fleet_service._Address, datetime | None] = {}
-        for agent in live:
-            address = fleet_service._address(agent, config)
+        # Where their launch records place them, as `reap` asks (`fleet.resolve_place`): a
+        # row no record places is judged by nothing, there or here.
+        # Read as written, the census never taken here: the doctor writes nothing.
+        placed = [
+            placement
+            for placement in (
+                fleet_service.resolve_place(row, launch_seal.read(row.id), config) for row in live
+            )
+            if isinstance(placement, fleet_service.Placed)
+        ]
+        addresses = {placement.row.id: placement.pane.address for placement in placed}
+        for placement in placed:
+            agent, address = placement.agent, placement.pane.address
             if address not in servers:
                 servers[address] = server_for(address.name).at(address.path)
             server = servers[address]
             try:
-                facts = server.pane_facts(agent.pane_id)
+                facts = server.pane_facts(placement.pane.pane_id)
             except tmux_core.TmuxError:
                 facts = None
             if facts is not None and address not in started:
@@ -2972,8 +3494,8 @@ def _check_fleet(
             # empty, so "gone" is "no facts OR facts about no pane", not only None.
             if (
                 facts is None
-                or facts.pane_id != agent.pane_id
-                or fleet_service._outlived(agent, started[address])
+                or facts.pane_id != placement.pane.pane_id
+                or fleet_service._outlived(placement.pane.created_at, started[address])
             ):
                 gone.append(agent)
             elif facts.dead:
@@ -2983,7 +3505,7 @@ def _check_fleet(
         unreached: list[FleetAgent] = []
         by_socket: dict[fleet_service._Address, list[FleetAgent]] = {}
         for agent in gone:
-            by_socket.setdefault(fleet_service._address(agent, config), []).append(agent)
+            by_socket.setdefault(addresses[agent.id], []).append(agent)
         this_boot = tmux_core.boot_id()
         for sock, agents in by_socket.items():
             listed = _fleet_labels(agents, names)
@@ -3080,3 +3602,284 @@ def _check_fleet(
             f"not evaluated ({exc}) — stale fleet rows, if any, go unreported until "
             "the store opens",
         )
+
+
+def _unmarked_hooks(agent: str, directory: Path) -> bool:
+    """Whether some of aisquare's hooks in ``directory`` carry no ``--definition`` marker
+    (written before it existed): a run of them is never evidence (``observe_hooks``), so
+    the row stays unverified until ``agents connect`` rewrites them with one."""
+    return any(
+        "--definition" not in command.split()
+        for command in agent_core.hook_commands(agent, directory)
+    )
+
+
+def _trust_fix(adapter: AgentAdapter, directory: Path) -> str:
+    """How the user trusts aisquare's hooks in ``directory``: in the agent itself, started on
+    that home (Codex's ``/hooks``). Not a command a button can run, and not Connect, which
+    writes the hooks and cannot trust them."""
+    ambient = agent_core.ambient_hook_dir(adapter.id)
+    run = adapter.binary
+    if ambient is None or agent_core._dir_key(ambient) != agent_core._dir_key(directory):
+        run = f"{adapter.home_env}={shlex.quote(str(directory))} {adapter.binary}"
+    return (
+        f"Start {run}, type /hooks, and trust aisquare's hooks there (in asq, the manager's "
+        f"pane does it); {adapter.label} runs them only once trusted, and this row reads "
+        "observed after one runs"
+    )
+
+
+def _launch_hooks_off(adapter: AgentAdapter, cwd: Path | None) -> list[DoctorCheck]:
+    """Roles whose own launch arguments switch the agent's hooks off (``--disable hooks``,
+    ``-c features.hooks=false``, a profile that does), where its config alone does not.
+
+    The arguments are the role's binding (``team bind --arg``) and its fleet
+    ``agent_args``; the directory's own switch is the row above.
+    """
+    from aisquare.services import agent_launch
+
+    roles: dict[str, list[str]] = {}
+    for role in harness.ROLE_PROFILES:
+        try:
+            selected = agent_launch.resolve(role, cwd=cwd)
+        except ValueError:
+            continue  # the configuration check explains this
+        if selected.adapter.id != adapter.id:
+            continue
+        args = [
+            *selected.profile.args,
+            *fleet_service.role_settings(role).agent_args.get(adapter.id, []),
+        ]
+        switch = agent_core.hooks_switch(adapter.id, selected.config_dir, args)
+        if switch is not None and switch != agent_core.hooks_switch(
+            adapter.id, selected.config_dir
+        ):
+            roles.setdefault(str(switch), []).append(role)
+    return [
+        _warn(
+            adapter.id,
+            f"{adapter.label}: hooks are switched off for {', '.join(named)} ({switch}) — "
+            f"{adapter.label} runs none of them in those sessions",
+            f"Remove it from the role's arguments (aisquare team bind ROLE, or "
+            f"fleet.roles.ROLE.agent_args.{adapter.id})",
+        )
+        for switch, named in roles.items()
+    ]
+
+
+def _plugin_install(adapter: AgentAdapter, directory: Path) -> PluginInstall | None:
+    """The aisquare plugin ``directory`` installed for ``adapter``, where it runs here."""
+    plugin = agent_core.plugin_of(adapter.id)
+    return plugin.installed(directory) if plugin is not None else None
+
+
+def _plugin_route_checks(
+    adapter: AgentAdapter, directory: Path, install: PluginInstall
+) -> list[DoctorCheck]:
+    """The plugin route's row for ``directory``, which installed aisquare's plugin for
+    ``adapter`` (Codex's; Claude Code's is ``_check_claude_code``): ``plugin``, ``hooks``
+    or both, as that row grades them.
+
+    Beside hooks of ours whose program can start, the plugin's launcher stands down, so
+    nothing doubles, but the two routes drift apart (the plugin pins its own release),
+    and keeping one is the operator's choice: a warning whose fix is not a button. Beside
+    hooks whose program is gone, the plugin runs in their place, and those hooks fail on
+    every event. Alone, it runs what its launcher finds (``_plugin_runner``) once its
+    hooks are trusted, which installing it does not do.
+    """
+    label = agent_core.plugin_label(install)
+    where = f"{label} in {directory}"
+    if agent_core.hook_commands(adapter.id, directory):
+        if agent_core.plugin_stands_down(adapter.id, directory):
+            plugin = agent_core.plugin_of(adapter.id)
+            remove = plugin.command("remove", directory) if plugin is not None else ""
+            return [
+                _warn(
+                    adapter.id,
+                    f"{adapter.label}: runs aisquare two ways in {directory} — "
+                    f"{adapter.settings_name} hooks and {label}, whose hooks stand down "
+                    "while those are installed; keep one",
+                    _disconnect_fix(directory, "keep the plugin: ", adapter.id)
+                    + f" (or keep the hooks: {remove})",
+                )
+            ]
+        return [
+            _warn(
+                adapter.id,
+                f"{adapter.label}: {adapter.settings_name} hooks in {directory} name an "
+                "aisquare that does not exist or cannot start, so they fail on every event "
+                f"and {label} runs in their place",
+                _disconnect_fix(directory, "remove them, and the plugin runs alone: ", adapter.id),
+            )
+        ]
+    if not install.trusted:
+        # The same step as hooks.json's unverified row, in the same opening words: install.sh
+        # leaves exactly that to the user, and reads the row by them.
+        return [
+            _warn(
+                adapter.id,
+                f"{adapter.label}: unverified in {directory} — {label} has hooks "
+                f"{adapter.label} has not trusted, so it runs none of them; installing a plugin "
+                "trusts none of its hooks",
+                _trust_fix(adapter, directory),
+            )
+        ]
+    runs, problem, fix = _plugin_runner(install.version)
+    if problem is not None:
+        return [_warn(adapter.id, f"{adapter.label}: {where} {problem}", fix or "")]
+    return [_ok(adapter.id, f"{adapter.label}: connected through {where}, which runs {runs}")]
+
+
+@agent_core.inspection_snapshot()
+def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
+    from aisquare.core.agent_adapters import adapters
+    from aisquare.services import agent_launch
+
+    checks = []
+    selected = None
+    try:
+        selected = agent_launch.resolve(cwd=cwd)
+    except ValueError as exc:
+        fix = (
+            exc.fix
+            if isinstance(exc, agent_launch.UnknownWrapperError)
+            else "aisquare agents use claude-code"
+        )
+        checks.append(_warn("coding-agent", str(exc), fix))
+    for adapter in adapters():
+        if adapter.capabilities.own_doctor_check:
+            continue  # its own check includes detailed timeout/version checks
+        info = agent_core.detect(adapter.id)
+        sites = {site.config_dir: site for site in agent_core.hook_sites(adapter.id)}
+        configured = selected is not None and selected.adapter.id == adapter.id
+        selected_dirs = set()
+        if configured and selected is not None:
+            selected_dirs.add(agent_core._dir_key(selected.config_dir))
+        if os.environ.get(adapter.home_env, "").strip():
+            ambient = agent_core.ambient_hook_dir(adapter.id)
+            if ambient is not None:
+                selected_dirs.add(agent_core._dir_key(ambient))
+        if (
+            configured
+            and selected is not None
+            and agent_core._dir_key(selected.config_dir)
+            not in {agent_core._dir_key(path) for path in sites}
+        ):
+            sites[selected.config_dir] = agent_core.hook_site_health(
+                adapter.id, selected.config_dir, recorded=False
+            )
+        sites = {
+            path: site
+            for path, site in sites.items()
+            if agent_core._dir_key(path) in selected_dirs
+            or site.recorded
+            or site.hooks_installed
+            or site.binary_state is not None
+            or _plugin_install(adapter, path) is not None
+        }
+        if info is None or (not info.detected and not sites):
+            checks.append(_ok(adapter.id, f"{adapter.label} not detected on this machine"))
+            continue
+        if not sites:
+            checks.append(
+                _ok(adapter.id, f"{adapter.label} detected; AISquare integration not selected")
+            )
+        for directory in sorted(sites):
+            state, detail = agent_core.integration_readiness(adapter.id, directory)
+            site = sites.get(directory)
+            # Quoted for this shell, as the doctor's button reads it back (onboarding).
+            fix = agents_service.config_dir_command("connect", adapter.id, directory)
+            if state == "unreadable" or (site and site.error):
+                checks.append(
+                    _warn(
+                        adapter.id,
+                        detail or (site.error if site else "") or "Cannot read native settings",
+                        "Repair native settings file access/JSON, then rerun aisquare doctor",
+                    )
+                )
+                continue
+            # Switched off, the hooks run nowhere however complete, and Connect cannot
+            # change that: the setting is the row, as `disableAllHooks` is Claude Code's.
+            switch = agent_core.hooks_switch(adapter.id, directory)
+            if switch is not None:
+                checks.append(
+                    _warn(
+                        adapter.id,
+                        f"{adapter.label}: hooks are switched off ({switch}) — {adapter.label} "
+                        "runs none of them, so no context is injected and no prompt is captured",
+                        f"Turn hooks back on: remove {switch.setting} from {switch.path}",
+                    )
+                )
+                continue
+            install = _plugin_install(adapter, directory)
+            if install is not None:
+                checks.extend(_plugin_route_checks(adapter, directory, install))
+                if not agent_core.plugin_stands_down(adapter.id, directory):
+                    # The plugin is the route that runs here, alone or in place of hooks
+                    # that cannot start: its row is the directory's. Beside working
+                    # hooks, which it leaves every event to, those are graded too.
+                    continue
+            if site and site.binary_state not in (None, agent_core.HOOK_BINARY_CURRENT):
+                checks.append(_warn(adapter.id, "; ".join(_hook_binary_problems([site])), fix))
+                continue
+            short = agent_core.hook_timeout_shortfall(adapter.id, directory)
+            if short:
+                checks.append(
+                    _warn(adapter.id, f"Context hook timeout too short: {', '.join(short)}", fix)
+                )
+                continue
+            if state in {"configured", "observed"}:
+                checks.append(_ok(adapter.id, f"{adapter.label}: {state} in {directory}"))
+            elif state == "unverified":
+                # Installed, and the agent runs them only once the user trusts them: the
+                # one step no command takes (install.sh reads this row's opening words).
+                # Hooks from before the definition marker can never be seen running, so
+                # those are reconnected first: then the fix is the command, a button.
+                legacy = _unmarked_hooks(adapter.id, directory)
+                said = f"{adapter.label}: unverified in {directory}" + (
+                    f". {detail.rstrip('. ')}" if detail else ""
+                )
+                if legacy:
+                    said += (
+                        f". After reconnecting, review /hooks in {adapter.label} and start a "
+                        "session"
+                    )
+                checks.append(
+                    _warn(adapter.id, said, fix if legacy else _trust_fix(adapter, directory))
+                )
+            else:
+                missing = agent_core._missing_events(adapter.id, directory, reconciled=False)
+                every = [hook.event for hook in adapter.capabilities.hooks]
+                if agent_core.hook_commands(adapter.id, directory) and missing != every:
+                    # Some of aisquare's hooks, from an install that knew fewer events: they
+                    # run, and the events they lack never reach the board.
+                    said = (
+                        f"{adapter.label}: partial in {directory} — aisquare's hooks are "
+                        f"missing for {', '.join(missing)}"
+                    )
+                else:
+                    said = (
+                        f"{adapter.label}: {state} in {directory} — aisquare's hooks are not "
+                        f"installed there"
+                    )
+                checks.append(_warn(adapter.id, said + (f". {detail}" if detail else ""), fix))
+        checks.extend(_launch_hooks_off(adapter, cwd))
+    if selected is None:
+        return checks
+    # Coding agents are optional on a fresh CLI-only install (--no-agent).
+    # A user/project/role/binary choice is a dependency we should diagnose;
+    # the implicit compatibility default is not an installation request.
+    configured = (
+        selected.source != "default"
+        or selected.binary.source != "default"
+        or not selected.profile.is_empty
+    )
+    if configured and agent_launch.executable(selected) is None:
+        checks.append(
+            _warn(
+                "coding-agent",
+                f"Selected agent executable {selected.binary.binary!r} is not on PATH",
+                selected.adapter.install_hint,
+            )
+        )
+    return checks

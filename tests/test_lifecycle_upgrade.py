@@ -36,6 +36,7 @@ from aisquare.cli import install as install_cli
 from aisquare.cli.app import app
 from aisquare.core import agents as agent_core
 from aisquare.core import paths, spawn
+from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxServer
@@ -1791,7 +1792,9 @@ def test_a_claude_config_dir_pathlib_raises_on_is_read_as_absent_and_never_made(
     cwd.mkdir()
     monkeypatch.chdir(cwd)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(exported))
-    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/usr/bin/claude")
+    monkeypatch.setattr(
+        agent_core, "on_path", lambda name: "/usr/bin/claude" if name == "claude-code" else None
+    )
     _record(_hooked(tmp_path / "claude", tmp_path / "gone" / "aisquare"))
     reads = [
         ["uninstall", "--dry-run"],
@@ -1856,7 +1859,14 @@ def test_a_site_that_fails_to_reconnect_gets_the_whole_reason(
 
     hooks = _one_object(result.stdout)["hooks"]
     assert hooks == [
-        {"config_dir": str(site), "refreshed": False, "error": reason, "hooks_off": None}
+        {
+            "config_dir": str(site),
+            "agent": "claude-code",
+            "refreshed": False,
+            "error": reason,
+            "hooks_off": None,
+            "review": False,
+        }
     ], hooks
 
 
@@ -2064,7 +2074,14 @@ def test_under_json_the_report_is_one_object_and_uv_talks_on_stderr(
     assert report["upgraded"] is True
     assert report["previous"] == "0.9.0" and report["version"] == "0.9.1"
     assert report["hooks"] == [
-        {"config_dir": str(site), "refreshed": True, "error": None, "hooks_off": None}
+        {
+            "config_dir": str(site),
+            "agent": "claude-code",
+            "refreshed": True,
+            "error": None,
+            "hooks_off": None,
+            "review": False,
+        }
     ]
     assert machine.installs[0][2] is True, "the installer's output must go to stderr"
 
@@ -3599,3 +3616,302 @@ def test_a_pin_pypi_does_not_list_keeps_the_command_of_a_uv_tool_aisquare_does_n
     assert f"({why}: the command finds it only on an index set up for it)" in check.stdout
     assert "cannot install it" not in check.stdout, check.stdout
     assert check.stdout.count(why) == 1, check.stdout
+
+
+# --- Codex homes: re-connected as Claude Code's directories are ---------------------------
+
+#: What `agents connect codex` writes, event by event (the Codex adapter's hooks).
+_CODEX_HOOKS = get_adapter("codex").capabilities.hooks
+#: A Codex hook of the user's own, which every rewrite must keep exactly.
+_CODEX_FOREIGN = {"hooks": [{"type": "command", "command": "notify-send 'codex stopped'"}]}
+
+
+def _codex_hooked(home: Path, program: Path | str, *, foreign: bool = True) -> Path:
+    """A Codex home whose hooks.json carries aisquare's hooks naming ``program`` — and, by
+    default, one group of the user's own — beside a config.toml and an AGENTS.md of theirs."""
+    home.mkdir(parents=True, exist_ok=True)
+    hooks: dict[str, list[dict[str, Any]]] = {}
+    for spec in _CODEX_HOOKS:
+        handler = {
+            "type": "command",
+            "command": f"{program} hook codex --config-dir {home}",
+            "timeout": spec.timeout,
+        }
+        group: dict[str, Any] = {"hooks": [handler]}
+        if spec.matcher is not None:
+            group["matcher"] = spec.matcher
+        hooks.setdefault(spec.event, []).append(group)
+    if foreign:
+        hooks["Stop"].insert(0, _CODEX_FOREIGN)
+    (home / "hooks.json").write_text(json.dumps({"hooks": hooks}, indent=2), encoding="utf-8")
+    (home / "config.toml").write_text(
+        'model = "gpt-5-codex"\n\n[mcp_servers.docs]\ncommand = "npx"\nargs = ["docs-mcp"]\n',
+        encoding="utf-8",
+    )
+    (home / "AGENTS.md").write_text("# House rules\nsmall commits\n", encoding="utf-8")
+    return home
+
+
+def _record_agents(**connections: list[Path]) -> None:
+    """This home connected these directories, per agent (``claude_code`` is claude-code)."""
+    named = {name.replace("_", "-"): dirs for name, dirs in connections.items()}
+    paths.ensure_home()
+    paths.agents_registry_path().write_text(
+        json.dumps(
+            {
+                "connected": sorted(named),
+                "connections": {name: [str(d) for d in dirs] for name, dirs in named.items()},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _codex_commands(home: Path) -> list[str]:
+    return agent_core.hook_commands("codex", home)
+
+
+def _codex_account(slot: str) -> Path:
+    """Where the Codex account home of ``slot`` lives: under this home's codex-accounts."""
+    return paths.aisquare_home() / "codex-accounts" / slot
+
+
+@pytest.fixture
+def new_install_refreshes(
+    machine: Machine, tool: Tool, monkeypatch: pytest.MonkeyPatch
+) -> list[list[str]]:
+    """The new install's `agents refresh-hooks`, run for real (in this process) where the
+    machine fake only records it: the hooks it writes name the tool's script, as the
+    console script of the install that ran it does. Returns the refreshes it ran."""
+    recorded = install_route.run_captured  # the machine's fake
+    ran: list[list[str]] = []
+
+    def run_captured(argv: Any, *, timeout: float) -> Captured:
+        if list(argv[1:3]) != ["agents", "refresh-hooks"]:
+            return recorded(argv, timeout=timeout)
+        machine.captured.append(list(argv))
+        ran.append(list(argv))
+        written = agents_service.refresh_hooks(argv[3], Path(argv[-1]))
+        return Captured(0 if written else 1, "✓ hooks rewritten\n")
+
+    monkeypatch.setattr(install_route, "run_captured", run_captured)
+    monkeypatch.setattr(agent_core, "_aisquare_command", lambda *args, **kwargs: str(tool.script))
+    return ran
+
+
+def test_upgrade_rewrites_codex_hooks_in_the_codex_home_and_an_account_home(
+    runner: CliRunner,
+    tool: Tool,
+    machine: Machine,
+    new_install_refreshes: list[list[str]],
+    isolated_agent_home: Path,
+    tmp_path: Path,
+) -> None:
+    """Acceptance 1 of t4: a hooks.json naming an old install, in ~/.codex (connected) and
+    in a Codex account home (found by its place, recorded or not), is rewritten BY the new
+    install to name it; the user's own hook group, config.toml and AGENTS.md stay exactly."""
+    old = tmp_path / "old-install" / "bin" / "aisquare"  # gone: those hooks fail every session
+    codex = _codex_hooked(isolated_agent_home / ".codex", old)
+    slot = _codex_hooked(_codex_account("2"), old)
+    claude = _hooked(tmp_path / "claude", tool.script)
+    _record_agents(claude_code=[claude], codex=[codex])
+    kept = {
+        path: path.read_bytes()
+        for home in (codex, slot)
+        for path in (home / "config.toml", home / "AGENTS.md")
+    }
+
+    result = runner.invoke(app, ["upgrade", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert new_install_refreshes == [
+        [str(tool.script), "agents", "refresh-hooks", "claude-code", "--config-dir", str(claude)],
+        [str(tool.script), "agents", "refresh-hooks", "codex", "--config-dir", str(codex)],
+        [str(tool.script), "agents", "refresh-hooks", "codex", "--config-dir", str(slot)],
+    ], "Claude Code's directory first, as before, then each Codex home, BY the new install"
+    for home in (codex, slot):
+        commands = _codex_commands(home)
+        assert len(commands) == len(_CODEX_HOOKS), commands
+        assert all(command.startswith(f"{tool.script} hook codex") for command in commands)
+        assert not any(str(old) in command for command in commands), commands
+        stop = json.loads((home / "hooks.json").read_text("utf-8"))["hooks"]["Stop"]
+        assert stop[0] == _CODEX_FOREIGN, "the user's own group stays, exactly and first"
+        assert f"✓ hooks re-connected in {home} (Codex) — Codex asks to review them again: " in (
+            result.stdout
+        ), result.stdout
+    assert {path: path.read_bytes() for path in kept} == kept, "config.toml and AGENTS.md stay"
+
+
+def test_a_codex_home_rewritten_into_the_same_definition_needs_no_review(
+    runner: CliRunner,
+    tool: Tool,
+    machine: Machine,
+    new_install_refreshes: list[list[str]],
+    isolated_agent_home: Path,
+) -> None:
+    """Negative control for the review line: hooks that already name the new install are
+    rewritten into the definition Codex trusts, so the file is left as it is and no review
+    is asked for."""
+    codex = isolated_agent_home / ".codex"
+    codex.mkdir(parents=True)
+    assert agent_core.install_hooks("codex", codex)  # written by `tool.script`, as connect does
+    _record_agents(codex=[codex])
+    before = (codex / "hooks.json").read_bytes()
+
+    result = runner.invoke(app, ["--json", "upgrade", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    [hook] = _one_object(result.stdout)["hooks"]
+    assert hook["agent"] == "codex" and hook["refreshed"] is True and hook["review"] is False
+    assert (codex / "hooks.json").read_bytes() == before, "an identical definition is not written"
+
+
+def test_a_codex_home_this_home_never_connected_is_not_rewritten(
+    tool: Tool, isolated_agent_home: Path
+) -> None:
+    """As for Claude Code: a ~/.codex holding aisquare hooks that this home did not connect
+    (another AISQUARE_HOME's) was never this upgrade's to rewrite. A Codex install with no
+    hooks of ours is no site at all."""
+    _codex_hooked(isolated_agent_home / ".codex", tool.script)
+    _codex_hooked(isolated_agent_home / ".codex-bare", tool.script, foreign=True)
+    (isolated_agent_home / ".codex-bare" / "hooks.json").write_text(
+        json.dumps({"hooks": {"Stop": [_CODEX_FOREIGN]}}), encoding="utf-8"
+    )
+    _record_agents(codex=[isolated_agent_home / ".codex-bare"])
+
+    refresh, left = lifecycle.refresh_sites(tool.facts)
+
+    assert refresh == () and left == ()
+
+
+def test_a_claude_only_machine_plans_exactly_what_it_did(
+    runner: CliRunner, tool: Tool, machine: Machine, tmp_path: Path, isolated_agent_home: Path
+) -> None:
+    """A Claude-only machine sees no change: its sites are Claude Code's, with nothing more
+    in the plan's --json than the agent each names, and a ~/.codex with no hooks of ours
+    (Codex installed, never connected) adds nothing."""
+    (isolated_agent_home / ".codex").mkdir(parents=True)
+    site = _hooked(tmp_path / "claude", tool.script)
+    _record(site)
+
+    planned = _one_object(runner.invoke(app, ["--json", "upgrade"]).stdout)
+    result = runner.invoke(app, ["upgrade", "--yes"])
+
+    assert planned["refresh_hooks"] == [str(site)]
+    assert planned["refresh"] == [{"config_dir": str(site), "agent": "claude-code"}]
+    assert planned["hooks_left"] == []
+    assert machine.connects() == [
+        [str(tool.script), "agents", "refresh-hooks", "claude-code", "--config-dir", str(site)]
+    ]
+    assert "Codex" not in result.stdout, result.stdout
+
+
+def test_a_codex_hooks_file_it_cannot_rewrite_is_left_and_named(
+    tool: Tool, isolated_agent_home: Path
+) -> None:
+    """A hooks.json holding our hooks whose events are not all arrays: Codex's file is
+    refused rather than rewritten in another shape, so the plan leaves it, saying so."""
+    codex = _codex_hooked(isolated_agent_home / ".codex", tool.script)
+    data = json.loads((codex / "hooks.json").read_text("utf-8"))
+    data["hooks"]["Notification"] = "not a list"
+    (codex / "hooks.json").write_text(json.dumps(data), encoding="utf-8")
+    _record_agents(codex=[codex])
+
+    refresh, left = lifecycle.refresh_sites(tool.facts)
+
+    assert refresh == ()
+    [site] = left
+    assert site.agent == "codex" and site.config_dir == codex
+    assert site.reason == (
+        "its hooks.json holds aisquare hooks but has a hooks event that is not an array, "
+        "so aisquare cannot rewrite it safely"
+    )
+
+
+def test_a_move_back_to_a_release_without_codex_hooks_leaves_them_and_names_the_way_out(
+    runner: CliRunner, tool: Tool, machine: Machine, tmp_path: Path, isolated_agent_home: Path
+) -> None:
+    """0.8.0 has `agents refresh-hooks` and no Codex hooks: its refresh of a Codex home
+    fails, so the plan leaves it, naming the disconnect to run first, and still refreshes
+    Claude Code's directory."""
+    codex = _codex_hooked(isolated_agent_home / ".codex", tool.script)
+    claude = _hooked(tmp_path / "claude", tool.script)
+    _record_agents(claude_code=[claude], codex=[codex])
+    machine.new_version = "0.8.0"
+
+    planned = _one_object(runner.invoke(app, ["--json", "upgrade", "--version", "0.8.0"]).stdout)
+    result = runner.invoke(app, ["upgrade", "--version", "0.8.0", "--yes"])
+
+    remove = install_route.command_line(
+        ["aisquare", "agents", "disconnect", "codex", "--config-dir", str(codex)]
+    )
+    assert planned["refresh_hooks"] == [str(claude)], planned
+    [left] = planned["hooks_left"]
+    assert left["agent"] == "codex" and left["config_dir"] == str(codex)
+    assert left["reason"] == (
+        "0.8.0 has no Codex hooks: the move back leaves them as they are, and they fail in "
+        f"every Codex session there — take them out first with `{remove}`"
+    )
+    assert result.exit_code == 0, result.output
+    assert [argv[3] for argv in machine.connects()] == ["claude-code"]
+    assert f"· {codex} (Codex) left as it is: 0.8.0 has no Codex hooks" in result.stdout
+
+
+def test_a_release_after_the_last_without_codex_hooks_has_them() -> None:
+    assert lifecycle.lacks_agent_hooks("codex", lifecycle.LAST_WITHOUT_CODEX_HOOKS)
+    assert lifecycle.lacks_agent_hooks("codex", "0.7.0")
+    assert not lifecycle.lacks_agent_hooks("codex", "0.9.0")
+    assert not lifecycle.lacks_agent_hooks("claude-code", "0.7.0"), "refresh-hooks' question"
+
+
+def test_the_refresh_the_upgrade_runs_for_codex_is_a_command_this_cli_has(
+    runner: CliRunner, isolated_agent_home: Path
+) -> None:
+    """`agents refresh-hooks codex` writes Codex's hooks into the home it is given and
+    imports nothing, as the Claude Code one does."""
+    codex = isolated_agent_home / ".codex"
+    codex.mkdir(parents=True)
+    (codex / "AGENTS.md").write_text("# House rules\nsmall commits\n", encoding="utf-8")
+
+    result = runner.invoke(
+        app, ["--json", *lifecycle.refresh_hooks_argv("codex"), "--config-dir", str(codex)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {"name": "codex", "hooks_installed": True}
+    assert agent_core.hooks_installed("codex", codex)
+    assert not paths.db_path().exists(), "a refresh imports nothing, so it never opens the store"
+
+
+def test_a_retired_codex_account_home_is_not_refreshed_back_into_a_connection(
+    tool: Tool, isolated_agent_home: Path
+) -> None:
+    """A removed Codex account is renamed `<n>.removed-<stamp>`, as Claude Code's are. Its
+    hooks stay until uninstall takes them, but the upgrade does not rewrite them: the
+    refresh records the home it writes, and the account would come back connected."""
+    live = _codex_hooked(_codex_account("2"), tool.script)
+    _codex_hooked(_codex_account("3.removed-20261013T120000"), tool.script)
+
+    refresh, left = lifecycle.refresh_sites(tool.facts)
+
+    assert [(site.agent, site.config_dir) for site in refresh] == [("codex", live)]
+    assert left == ()
+
+
+def test_a_codex_home_whose_hooks_are_switched_off_is_named_by_codexs_setting(
+    runner: CliRunner, tool: Tool, machine: Machine, isolated_agent_home: Path
+) -> None:
+    """`features.hooks = false` in a Codex home's config.toml switches its hooks off: the
+    plan and the report name that setting, never Claude Code's "disableAllHooks"."""
+    codex = _codex_hooked(isolated_agent_home / ".codex", tool.script)
+    (codex / "config.toml").write_text("[features]\nhooks = false\n", encoding="utf-8")
+    _record_agents(codex=[codex])
+
+    planned = runner.invoke(app, ["upgrade", "--dry-run"])
+    result = runner.invoke(app, ["upgrade", "--yes"])
+
+    off = "`features.hooks = false`"
+    assert f"rewrites the Codex hooks in {codex} (switched off there: {off})" in planned.stdout
+    assert result.exit_code == 0, result.output
+    assert f"but switched off: remove {off} from {codex / 'config.toml'}" in result.stdout
+    assert "disableAllHooks" not in planned.stdout + result.stdout

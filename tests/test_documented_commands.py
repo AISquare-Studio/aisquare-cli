@@ -117,6 +117,9 @@ DOCUMENTED = (
     # disconnect` that keeps one route are steps the reader types. The `/plugin`
     # lines are Claude Code input, fenced `text`, which this guard does not read.
     "docs/claude-code-plugin.md",
+    # The Codex plugin route, likewise: `remember`, `doctor` and the `agents disconnect`
+    # that keeps one route are steps the reader types, beside the `codex plugin` ones.
+    "docs/codex-plugin.md",
     # The README's long form, moved out when the README became a front page
     # (roadmap 9.5). Its fenced commands moved with it and are still steps a
     # reader types, so each page is listed in its own right; the command tree
@@ -130,6 +133,8 @@ DOCUMENTED = (
     # every `aisquare fleet …` line there is a step the reader types, so a flag
     # that leaves the CLI must fail here (docs/plans/fleet-tui.md §5, §10).
     "docs/fleet.md",
+    "docs/coding-agents.md",
+    "docs/plans/coding-agent-support.md",
     # The CI test bed's smoke: `aisquare doctor` and `aisquare metrics list`
     # against the stub server, meant to be typed.
     "docs/ci-contract.md",
@@ -248,7 +253,7 @@ _SEQUENCERS = re.compile(r"\s*(?:&&|\|\||;)\s*")
 #: `exec` is how a wrapper hands the process over. `aisquare-runner` and
 #: `.../aisquare/file.env` do not match: the name must be followed by a space
 #: or the end of the segment.
-_INVOCATION_HEAD = re.compile(r"^(?:exec\s+)?(\S*/)?aisquare(?=\s|$)")
+_INVOCATION_HEAD = re.compile(r"^(?:exec\s+)?(\S*/)?(?:aisquare|asq)(?=\s|$)")
 
 
 def _as_invocation(segment: str) -> str | None:
@@ -853,6 +858,8 @@ def test_typer_is_the_instrument_not_the_help_renderer() -> None:
 #: quietly — a silent skip makes this file read as covering everything while
 #: covering less, which is worse than not having it.
 _NOT_AN_INVOCATION = (
+    ("a tmux command whose socket is named asq", re.compile(r"^\s*tmux\s+-L\s+asq\b")),
+    ("a tree of CLI commands, not a shell invocation", re.compile(r"^\s*[├└]──")),
     # `…/aisquare` with a WORD after it is an invocation by absolute path, not a
     # path. Without the lookahead this reason silently swallowed a cron
     # wrapper's `exec /usr/local/bin/aisquare explainability ship --strict`.
@@ -898,6 +905,8 @@ _NOT_AN_INVOCATION = (
 #: raising each entry to an absurd value and reading the counts out of the
 #: failure message, which is the only way this file reports them.
 CENSUS = {
+    "docs/coding-agents.md": (12, 0),
+    "docs/plans/coding-agent-support.md": (6, 0),
     ".github/ISSUE_TEMPLATE/bug_report.md": (1, 0),
     "docs/runbooks/MORNING-HANDOFF.md": (1, 0),
     # Re-measured 2026-10-07 when the README became a front page (roadmap 9.5):
@@ -909,6 +918,11 @@ CENSUS = {
     # and three classified mentions (`aisquare-cli` and `aisquare@aisquare-cli`
     # in the `claude plugin` and `uv tool install` lines).
     "docs/claude-code-plugin.md": (3, 3),
+    # Measured 2026-10-14 on the day the page was written: three fenced commands
+    # (`remember`, `doctor`, `agents disconnect codex`) and six classified mentions
+    # (`aisquare-cli` and `aisquare@aisquare-cli` in the `codex plugin` and `uv tool
+    # install` lines).
+    "docs/codex-plugin.md": (3, 6),
     # Measured 2026-10-07 on the day they were split out of the README; their
     # commands summed to the README's 82 before the split. Re-measured the same
     # day at (3, 3) for install.md, when it stopped repeating the first-run
@@ -976,7 +990,7 @@ def test_every_aisquare_mention_is_classified(document: str) -> None:
     unexplained: list[str] = []
     classified = 0
     for number, line in _shell_lines(text):
-        if "aisquare" not in line or number in extracted:
+        if not re.search(r"aisquare|\basq\b", line) or number in extracted:
             continue
         if any(pattern.search(line) for _reason, pattern in _NOT_AN_INVOCATION):
             classified += 1
@@ -1243,7 +1257,9 @@ def _staleness_sweep(root: Path) -> list[str]:
     """The documents the staleness detector would flag under `root`."""
     unlisted: list[str] = []
     for path in sorted(root.rglob("*.md")):
-        if any(part in _SWEEP_EXCLUDES for part in path.parts):
+        # Parts below `root` alone: the fleet's own worktrees live in a folder this
+        # set excludes, so read whole, a run from inside one swept nothing and passed.
+        if any(part in _SWEEP_EXCLUDES for part in path.relative_to(root).parts):
             continue
         relative = path.relative_to(root).as_posix()
         if relative in DOCUMENTED:
@@ -1377,3 +1393,13 @@ def _leaf_chains() -> list[list[str]]:
 
     walk(_root(), [])
     return found
+
+
+@pytest.mark.parametrize("binary", ["aisquare", "asq", "/usr/local/bin/asq"])
+def test_agent_document_aliases_reach_command_validation(binary: str) -> None:
+    lines = _from_text("fixture.md", f"```sh\n{binary} definitelynotacommand\n```\n")
+    assert len(lines) == 1
+    assert lines[0].text == "aisquare definitelynotacommand"
+    assert _unknown_commands(lines)
+    valid = _from_text("fixture.md", f"```sh\n{binary} agents list\n```\n")
+    assert valid and not _unknown_commands(valid)

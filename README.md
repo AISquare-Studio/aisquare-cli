@@ -13,7 +13,7 @@ plain words, and it runs the coders, testers and reviewers for you.**
 Type `asq` and you get a full-screen, mouse-driven view: your projects on the
 left, and on the right a **manager** agent you task in prose — it plans, spawns
 coders, testers and reviewers, and loops until the goal is met. Click any of
-them and you are inside its *real* Claude Code session, typing at it directly.
+them and you are inside its *real* Claude Code or Codex session, typing at it directly.
 Nothing is relayed or re-rendered as a chat.
 
 Underneath, agents get a **memory** that persists across sessions — your
@@ -37,8 +37,9 @@ aisquare remember --user "prefer pytest over unittest"
 new session starts with what you told it to remember. `aisquare context list`
 shows what is in scope;
 [Memory](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/memory.md)
-has the rest. To install from inside Claude Code instead, see
-[the Claude Code plugin](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/claude-code-plugin.md).
+has the rest. To install from inside your agent instead, see
+[the Claude Code plugin](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/claude-code-plugin.md)
+or [the Codex plugin](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/codex-plugin.md).
 
 ## Quickstart 2: the full fleet
 
@@ -93,8 +94,9 @@ backed by one SQLite file: no daemon, no cloud dependency. Sign in with
 
 - macOS, Linux, or Windows through WSL2.
 - Python 3.11+ if you install by hand (the one-liner brings its own 3.13).
-- [Claude Code](https://claude.com/claude-code) for the agents, and tmux 3.2+
-  for the fleet.
+- [Claude Code](https://claude.com/claude-code) or
+  [Codex](https://learn.chatgpt.com/docs/codex/cli) (CLI 0.162.1 or newer) for
+  the agents, either or both, and tmux 3.2+ for the fleet.
 - Node 22+, optional, for the codebase snapshot each session starts from.
 
 The package is `aisquare-cli`; the command is `aisquare`, with `asq` as the
@@ -106,7 +108,8 @@ short alias.
 | --- | --- |
 | [Install](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/install.md) | The one-liner's flags and exit codes, reading it before you run it, installing by hand, Windows, starting the UI, updating and removing it |
 | [Memory](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/memory.md) | Your agent remembers preferences and project conventions, and starts every session oriented. For everyone; nothing to run after setup |
-| [The fleet](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/fleet.md) | The UI, the roles, `aisquare fleet …`, Claude accounts, and every default you can change |
+| [Coding agents](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/coding-agents.md) | Claude Code (the compatibility default) or Codex: setup, mixed teams and the tested compatibility boundary |
+| [The fleet](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/fleet.md) | The UI, the roles, `aisquare fleet …`, Claude Code and Codex accounts, and every default you can change |
 | [Orchestration](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/orchestration.md) | Several agent sessions work one problem as a team, with a shared task board. Opt-in, per repo |
 | [Reference](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/reference.md) | The hooks, the `~/.aisquare` layout, the main command tree and the global flags |
 | [The AISquare platform](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/platform.md) | Optional: signing in, Explainability, the Collective Intelligence test bed |

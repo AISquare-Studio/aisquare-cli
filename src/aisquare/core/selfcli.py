@@ -38,7 +38,7 @@ class CliResult:
         return self.returncode == 0
 
 
-def argv_for(args: Sequence[str]) -> list[str]:
+def argv_for(args: Sequence[str], *, module: str = "aisquare") -> list[str]:
     """``python -P -m aisquare <args>`` on THIS interpreter — the one install we know runs.
 
     ``-P`` (the flag form of ``PYTHONSAFEPATH``, Python 3.11+, which this CLI
@@ -60,7 +60,26 @@ def argv_for(args: Sequence[str]) -> list[str]:
     the fleet's window command, the detached distiller and the hook fallback —
     so the flag has exactly one home.
     """
-    return [sys.executable, "-P", "-m", "aisquare", *args]
+    # Internal worker modules use the same safe interpreter invocation.
+    return [sys.executable, "-P", "-m", module, *args]
+
+
+def isolated_argv_for(args: Sequence[str], *, module: str = "aisquare") -> list[str]:
+    """:func:`argv_for` with ``-E`` too: the interpreter ignores ``PYTHONPATH`` and
+    ``PYTHONHOME`` (every ``PYTHON*`` variable), which it would otherwise import from
+    before the standard library (a module of its name, a ``sitecustomize``).
+
+    For what aisquare runs outside a sandboxed agent's sandbox on its behalf, and for
+    the launches the fleet makes: the broker and the commands it runs, the fleet
+    window's ``aisquare launch``, the hand-over, the distiller, the telemetry receiver,
+    and the hooks a sandboxed agent's own hooks file runs (``agents.install_hooks``).
+    A ``PYTHONPATH`` there may name a directory the agent's sandbox writes (direnv's
+    ``PYTHONPATH=$PWD/src``; an empty entry, which is the directory the process runs
+    in). The variables stay in the environment: the agent a launch execs keeps them as
+    the operator set them, its own tools need them (review r14 of #113, finding 1:
+    dropping them broke a tester's ``pytest``). aisquare never needs them: it is
+    installed in the interpreter it runs on."""
+    return [sys.executable, "-E", "-P", "-m", module, *args]
 
 
 def run(

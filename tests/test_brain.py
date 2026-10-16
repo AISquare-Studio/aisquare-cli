@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
 import sys
 import time
@@ -17,6 +19,9 @@ from aisquare.core.orchestrator import team_project
 from aisquare.services import distill
 from aisquare.services import team as team_service
 from tests import fakebin
+
+#: The real gbrain, when one is installed: looked up before any test puts its fake first.
+REAL_GBRAIN = shutil.which("gbrain")
 
 _FAKE_GBRAIN = r"""# Schema-aware fake: `init` records the embedding choice into config.json
 # exactly like real gbrain, and `query` (hybrid) REJECTS a vectorless brain --
@@ -37,6 +42,10 @@ def home() -> Path:
 
 
 def main(argv: list[str]) -> int:
+    cwds = os.environ.get("FAKE_GBRAIN_CWDS")
+    if cwds:
+        with open(cwds, "a", encoding="utf-8") as log:
+            log.write(os.getcwd() + "\n")
     if not argv:
         return 0
     command = argv[0]
@@ -70,8 +79,25 @@ def main(argv: list[str]) -> int:
         with (home() / "puts.log").open("a", encoding="utf-8") as log:
             log.write(slug + "\n")
         return 0
+    # The query as gbrain's own parseOpArgs reads it (0.42.69 to 0.60.41, read in its
+    # source by review r12 of #113): a token that starts with `-` is an option, and one
+    # with no `=` that is not a known flag takes the next token as its value, a bare `--`
+    # included (an option with no name); the query is the first token left.
+    flags = {"--no-expand"}
+    positional: list[str] = []
+    rest = iter(argv[1:])
+    for token in rest:
+        if token.startswith("-"):
+            if "=" not in token and token not in flags:
+                next(rest, None)
+            continue
+        positional.append(token)
+    query = positional[0] if positional else ""
+    if command in ("search", "query") and not query:
+        print(f"usage: gbrain {command} <query>", file=sys.stderr)
+        return 1
     if command == "search":
-        print(f"results for: {argv[1]}")
+        print(f"results for: {query}")
         return 0
     if command == "query":
         config = home() / ".gbrain" / "config.json"
@@ -79,7 +105,7 @@ def main(argv: list[str]) -> int:
         if "embedding_disabled" in body:
             print("hybrid query needs a vectorized brain", file=sys.stderr)
             return 1
-        print(f"hybrid results for: {argv[1]}")
+        print(f"hybrid results for: {query}")
         return 0
     return 0
 
@@ -185,6 +211,75 @@ def test_recall_auto_drains_the_backlog(
     assert found.exit_code == 0, found.output
     assert "results for: auth" in found.stdout
     assert distill.drain(work_dir) == 0  # recall left nothing undistilled
+
+
+def test_a_recall_query_is_never_an_option_of_gbrains(
+    runner: CliRunner, fake_gbrain: Path, work_dir: Path
+) -> None:
+    """Review r11 of #113, finding 12: the query went into gbrain's argv as it was, so
+    ``recall -- --<opt>`` (a sandboxed agent's, through its broker) reached gbrain as an
+    option, outside the sandbox. Such a query is refused, before anything is asked."""
+    _seed_events(runner)
+    refused = runner.invoke(app, ["recall", "--", "--format=json"])
+    assert refused.exit_code == 1 and "may not start with '-'" in refused.output
+    found = runner.invoke(app, ["recall", "auth --flags inside"])
+    assert found.exit_code == 0 and "results for: auth --flags inside" in found.stdout
+
+
+def test_recall_asks_gbrain_as_its_parser_reads_a_query(
+    runner: CliRunner, fake_gbrain: Path, work_dir: Path
+) -> None:
+    """Review r12 of #113, finding 8: ``search -- <query>`` broke every recall on a real
+    gbrain, whose parser reads a bare ``--`` as an option that eats the query. The fake
+    parses as gbrain does, and the query goes as its positional."""
+    _seed_events(runner)
+    found = runner.invoke(app, ["recall", "auth"])
+    assert found.exit_code == 0, found.output
+    assert "results for: auth" in found.stdout
+
+
+def test_gbrain_never_starts_in_the_tree_it_is_asked_from(
+    runner: CliRunner,
+    fake_gbrain: Path,
+    work_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A brokered ``recall`` and a note's distill run in a sandboxed agent's tree, and ran
+    gbrain there, outside the sandbox: a runtime may read its configuration from the
+    directory it starts in (Bun, gbrain's, ``bunfig.toml`` and ``.env``), which the agent
+    may write. gbrain starts in its brain's home, or the aisquare home, never the tree."""
+    cwds = tmp_path / "gbrain-cwds.log"
+    monkeypatch.setenv("FAKE_GBRAIN_CWDS", str(cwds))
+    _seed_events(runner)
+    assert distill.drain(work_dir) == 3
+    found = runner.invoke(app, ["recall", "auth"])
+    assert found.exit_code == 0, found.output
+    started = [Path(line).resolve() for line in cwds.read_text(encoding="utf-8").splitlines()]
+    assert len(started) >= 3, started
+    assert not [place for place in started if place.is_relative_to(work_dir.resolve())]
+    home = brain.brain_home(team_project(work_dir).id).resolve()
+    assert home in started
+
+
+@pytest.mark.skipif(REAL_GBRAIN is None, reason="no gbrain installed")
+def test_recall_finds_a_page_on_the_real_gbrain(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r12 of #113, finding 8, measured where gbrain is installed: the query is
+    gbrain's positional as its parser reads one, so a recall finds a distilled page; a
+    query gbrain would read as an option is refused before gbrain is asked. A hit, not an
+    echo: the page's own words beyond the query, which no "no results for 'JWT'" prints
+    (r13, finding 12)."""
+    assert REAL_GBRAIN is not None
+    monkeypatch.setenv("PATH", str(Path(REAL_GBRAIN).parent), prepend=os.pathsep)
+    _seed_events(runner)
+    assert distill.drain(work_dir) == 3
+    found = runner.invoke(app, ["recall", "JWT"])
+    assert found.exit_code == 0, found.output
+    assert "we will use" in found.stdout, found.stdout
+    refused = runner.invoke(app, ["recall", "--", "--help"])
+    assert refused.exit_code == 1 and "may not start with '-'" in refused.output
 
 
 def test_distill_all_backfills_past_the_watermark(

@@ -40,9 +40,10 @@ import sys
 import time
 from typing import TYPE_CHECKING, Any, cast
 
+from aisquare.core import agent_sessions, paths
 from aisquare.core import credentials as credentials_store
-from aisquare.core import paths
-from aisquare.core.store import is_locked_error
+from aisquare.core.spawn import LAUNCH_AGENT_ENV
+from aisquare.core.store import ContextStore, is_locked_error, store_session
 from aisquare.models import TaskStatus, TeamSession
 from aisquare.services import team as team_service
 from aisquare.services.team import ClaimLostError, DeliveryUnconfirmedError, TeamDisabledError
@@ -89,12 +90,31 @@ def client_session_id(project_id: str) -> str:
     every other project's board would render the remote unattributed while
     the first kept a phantom live session forever.
     """
+    with store_session() as store:
+        return _client_session_id(store, project_id)
+
+
+def _client_session_id(store: ContextStore, project_id: str) -> str:
+    tokens = agent_sessions.launch_tokens()
+    if tokens:
+        prefix, token = tokens[0]
+        bound = store.get_meta(f"{prefix}-session:{token}")
+        session = store.get_session(bound) if bound else None
+        if session is not None and session.project_id == project_id:
+            return agent_sessions.adopt_local_session(store, session).id
+        return agent_sessions.provisional_id(project_id, prefix, token)
+    # Hooks may be untrusted, pending or inherited from a different board.
+    # Keep MCP usable under its project-scoped identity until a native join.
     client = os.environ.get("AISQUARE_SERVE_CLIENT", "").strip() or "remote"
     return f"mcp:{client}:{project_id.removeprefix('prj_')[:6]}"
 
 
 def _client_role() -> str:
-    return os.environ.get("AISQUARE_SERVE_ROLE", "").strip() or "remote"
+    return (
+        os.environ.get("AISQUARE_SERVE_ROLE", "").strip()
+        or (os.environ.get("AISQUARE_ROLE", "").strip() if agent_sessions.launch_tokens() else "")
+        or "remote"
+    )
 
 
 def _ensure_virtual_session() -> str:
@@ -105,34 +125,60 @@ def _ensure_virtual_session() -> str:
     project explicitly at startup). Without the gate, one read-only MCP call
     against a never-opted-in directory would permanently activate it.
     """
-    from datetime import UTC, datetime
+    from datetime import UTC, datetime, timedelta
 
-    from aisquare.core.orchestrator import team_enabled, team_project
+    from aisquare.core.orchestrator import lease_minutes, team_enabled, team_project
     from aisquare.core.store import store_session
 
     if not team_enabled():
         raise TeamDisabledError()
     with store_session() as store:
         project = team_project(None)
+        bound_id = _client_session_id(store, project.id)
+        bound_session = store.get_session(bound_id)
+        if bound_session is not None and not bound_id.startswith("mcp:"):
+            store.touch_session(bound_id)
+            store.renew_leases(bound_id, datetime.now(tz=UTC) + timedelta(minutes=lease_minutes()))
+            return bound_id
         if not store.team_active(project.id):
             raise ValueError(
                 f"the agent orchestrator is not active for {project.root} — start `aisquare serve` "
                 "from the project (it activates it), or run `aisquare team on` there"
             )
-        session_id = client_session_id(project.id)
         store.ensure_project(project)
         now = datetime.now(tz=UTC)
-        store.upsert_session(
+        session = store.upsert_session(
             TeamSession(
-                id=session_id,
+                id=bound_id,
                 project_id=project.id,
                 role=_client_role(),
+                agent=os.environ.get(LAUNCH_AGENT_ENV) if agent_sessions.launch_tokens() else None,
                 started_at=now,
                 last_seen_at=now,
                 cursor=store.latest_seq(project.id),
             )
         )
-    return session_id
+        store.renew_leases(session.id, now + timedelta(minutes=lease_minutes()))
+    return session.id
+
+
+def _sandboxed_launch_board() -> str | None:
+    """The board this server's tools are bound to when it serves an agent that sandboxes
+    its tools (its launch's tokens and family in its environment): its tools then name
+    only that board's tasks, as the agent's broker does (``services.store_broker``;
+    review r10 of #113, finding 8). ``None`` for any other client."""
+    from aisquare.core.agent_adapters import get_adapter
+    from aisquare.core.orchestrator import team_project
+
+    family = os.environ.get(LAUNCH_AGENT_ENV, "").strip()
+    if not family or not agent_sessions.launch_tokens():
+        return None
+    try:
+        if not get_adapter(family).capabilities.sandboxes_tools:
+            return None
+        return team_project(None).id
+    except Exception:
+        return None
 
 
 def _tool_error(message: str) -> Exception:
@@ -149,8 +195,13 @@ def _guard(fn: Any, *args: Any, **kwargs: Any) -> str:
     used — remote agents self-correct off it — moved off the success channel
     onto the protocol's error channel.
     """
+    from aisquare.services.store_broker import OutOfScope, scoped_board
+
     try:
-        return str(fn(*args, **kwargs))
+        with scoped_board(_sandboxed_launch_board()):
+            return str(fn(*args, **kwargs))
+    except OutOfScope as exc:
+        raise _tool_error(f"error: {exc}") from exc
     except TeamDisabledError as exc:
         raise _tool_error(
             "error: the agent orchestrator is disabled on the host (AISQUARE_TEAM=0)"
@@ -348,7 +399,7 @@ def signal(name: str, value: str | None = None) -> str:
             return (
                 f"{state.name} = {state.value} · set by {state.set_by or 'cli'} · seq {state.seq}"
             )
-        state, prev = team_service.set_signal(name, value, session_ref=me)
+        state, prev = team_service.set_signal(name, value, session_ref=me, agent_tool=True)
         was = f" (was {prev})" if prev is not None else ""
         return f"signal {state.name}: {state.value}{was} · seq {state.seq}"
 

@@ -1,0 +1,882 @@
+"""Native coding-agent contracts. No service, UI, or subprocess dependencies.
+
+:class:`AgentAdapter` is everything AISquare knows about one terminal agent, and the
+shared services ask it rather than the agent's name: a new agent is a module that
+implements it and one :func:`aisquare.core.agent_adapters.register` line
+(docs/coding-agents.md, "Adding a terminal agent"; tests/test_adapter_contract.py
+holds every registered adapter to it).
+"""
+
+from __future__ import annotations
+
+import re
+import tomllib
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import suppress
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal, Protocol, get_args
+
+from aisquare.core import harness, paths
+
+if TYPE_CHECKING:
+    from aisquare.core.claude_accounts import FailedTurn, LimitNotice
+    from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage
+
+
+@dataclass(frozen=True)
+class HookSpec:
+    """One native hook event AISquare installs, and the ``aisquare hook`` subcommand it runs.
+
+    ``command`` is the subcommand: Claude Code's are one per event (``session-start``…),
+    Codex's is ``codex`` for every event, and a new agent's is :data:`GENERIC_HOOK`
+    (``aisquare hook event --agent <id>``), so it needs no subcommand of its own.
+    ``timeout`` is seconds, ``None`` for the agent's default; ``matcher`` narrows the
+    event where the agent's hook format has one (Codex's ``PreToolUse``).
+    """
+
+    event: str
+    command: str
+    timeout: int | None = None
+    matcher: str | None = None
+
+
+#: The ``aisquare hook`` subcommand any adapter can install: ``event --agent <id> --event
+#: <native event>`` (:func:`hook_args`), decoded by that adapter.
+GENERIC_HOOK = "event"
+
+
+@dataclass(frozen=True)
+class AgentCapabilities:
+    """What one agent does differently, as flags the shared services read instead of its id.
+
+    Every flag defaults to the behaviour a new agent most likely has; each says which
+    service reads it.
+    """
+
+    hooks: tuple[HookSpec, ...]
+    assigns_session_id: bool = False
+    """AISquare names the session at launch (Claude Code's ``--session-id``), so the
+    native id IS the board's session id; otherwise the board's is derived from the config
+    dir and the native id (``services.agent_events.session_key``) and every hook binds
+    it to the launch (``core.agent_sessions.bind_launch_session``)."""
+    requires_hook_trust: bool = False
+    """The agent runs a hook only once the user trusts its definition (Codex's
+    ``/hooks``): the installed commands carry ``--definition <fingerprint>`` and the
+    integration reads ``unverified`` until AISquare sees that definition run."""
+    hook_names_home: bool = False
+    """The installed hook command names its config dir (``--config-dir``): the agent
+    does not tell its hooks which home they run for. The dir is then the session's
+    account; otherwise the account is read off the transcript path."""
+    strict_hooks_file: bool = False
+    """A hooks file whose ``hooks`` is not an object of arrays is refused, never
+    rewritten (Codex's ``hooks.json``); Claude Code's ``settings.json`` reads it as none."""
+    stop_reason_as_prompt: bool = False
+    """A Stop hook's ``block`` reason comes back as the next ``UserPromptSubmit`` (Codex),
+    which is then recorded as a continuation, not as the human's prompt."""
+    limits_in_transcript: bool = False
+    """No turn-failed event: a usage limit is read off the end of the session's
+    transcript (``accounts.limit_from_transcript``) when a turn stops, is interrupted
+    or the session ends, and a turn that failed with no hook at all (Codex 0.162.1 fires
+    no ``Stop`` for one) when the fleet reads a row its board says is working
+    (``accounts.failed_turn``). Claude Code reports both in ``StopFailure``."""
+    ambient_first_run: bool = False
+    """``agents connect`` makes a config dir the agent has not made yet only when it is
+    the one a session from this shell reads (Claude Code: a typo must not get hooks);
+    otherwise the dir as named (Codex: a fleet account is connected before its first run)."""
+    reads_pane_readiness: bool = False
+    """The fleet can tell from the pane that the agent sits at its prompt, so ``fleet
+    tell`` types into a pane the listing reads as waiting; without it, only into one
+    whose own hooks freshly say waiting (anything else is a board note)."""
+    starts_at_its_prompt: bool = False
+    """The agent's ``SessionStart`` fires as it comes to rest at its prompt, ready, and
+    nothing fires before it: Claude Code's, once its folder-trust dialog is answered
+    (measured on 2.1.300, where an Enter at that dialog picks its default, ``No, exit``).
+    A session that starts (not a compaction) is then ``waiting`` until a prompt says
+    otherwise, and one that has not started is not typed into. Codex's fires with its
+    first prompt."""
+    idle_prompt_mark: str | None = None
+    """What starts the last line of the agent's screen while it sits at an EMPTY prompt
+    (Codex's footer ``? for shortcuts``, measured on 0.162.1; text in the prompt replaces
+    it, and a turn redraws the pane every second, the footer kept below an empty
+    composer). For an agent without :attr:`reads_pane_readiness` whose hooks say nothing
+    fresh — none fire before its first prompt — a pane quiet for ``ACTIVITY_WINDOW`` that
+    shows it is at its prompt, so ``fleet tell`` and the manager's nudge type there; the
+    agent's folder-trust and hook-review dialogs are as quiet and show no such line. And
+    the line is asked for even when its hooks freshly say waiting, by them and by ``fleet
+    stop``'s ``/exit``: Codex opens dialogs of its own after a turn's ``Stop`` (``Switch
+    to gpt-6-luna for lower credit usage?``, past a turn near its limit), where an Enter
+    picks for the human."""
+    fleet_settings: tuple[str, ...] = ()
+    """``-c`` settings (``key=value``, Codex's config overrides) the agent of a fleet window
+    launches with, each unless a config layer of the operator's sets its key
+    (``services.agent_launch.fleet_settings_args``): Codex's
+    ``notice.hide_rate_limit_model_nudge=true``, which keeps its ``Switch to gpt-6-luna
+    for lower credit usage?`` dialog, opened past a turn near the five-hour limit while
+    its hooks say waiting, out of a pane the fleet types into (measured on 0.162.1), and
+    ``check_for_update_on_startup=false``, which keeps its ``Update available`` dialog
+    out of a starting pane: an npm-installed 0.162.1 opened it once 0.163.0 was out
+    (CI on 72a88fc0), its first choice, which an Enter picks, running ``npm install
+    -g @openai/codex``."""
+    start_dialog_mark: str | None = None
+    """What starts the last line of the agent's screen while a dialog it puts up before its
+    start holds it for the human, where an Enter answers it: Claude Code's ``Enter to
+    confirm``, the row under its folder-trust and MCP-server dialogs alike, the folder's
+    defaulting to ``No, exit`` (measured on 2.1.300); the phrase elsewhere on the screen is
+    the agent's output. A spawn's prompt for an agent whose start the board sees
+    (:attr:`starts_at_its_prompt`) waits past ``PROMPT_TIMEOUT`` while none is on screen;
+    one the board cannot see start (``--continue``, the board off) is not typed while one
+    is, nor is ``fleet tell``."""
+    resumes_across_homes: bool = False
+    """A session resumes from another config dir (Claude Code finds a transcript by its
+    absolute path), so ``fleet switch`` to another account resumes it; otherwise the
+    thread lives in its home and the replacement starts fresh with a hand-off prompt."""
+    pid_env: str | None = None
+    """The variable in which the agent hands each hook its own pid (Claude Code's
+    ``CLAUDE_PID``): the process identity ``services.team`` binds a fleet row to. Any such
+    variable a hook of another agent finds is some other process's, inherited."""
+    tool_shell_env: str | None = None
+    """The variable the agent sets in the shells its tools run in, and never in its own
+    hooks (Codex's ``CODEX_THREAD_ID``, measured on 0.162.1): a hook that finds it set
+    belongs to a process one of those tools started (a nested ``codex exec``), never to
+    the agent ``aisquare launch`` started, which clears it (``core.agent_sessions.
+    own_process``; rule 1 of ``services.team``'s fleet-row section)."""
+    exports_home_env: bool = True
+    """A launch sets :attr:`AgentAdapter.home_env` to the config dir it resolved; Claude
+    Code's ``CLAUDE_CONFIG_DIR`` stays as the shell or the binding wrote it."""
+    native_telemetry: bool = False
+    """The agent exports OpenTelemetry to a local receiver AISquare starts
+    (:meth:`AgentAdapter.telemetry_args`)."""
+    own_doctor_check: bool = False
+    """``services.diagnostics`` has a dedicated check for this agent (Claude Code's hook
+    timeouts, plugin route and config-dir siblings), so the per-adapter row skips it."""
+    model_proxy: bool = False
+    model_ladders: bool = False
+    """AISquare's role model ladder and its probe choose the model (Claude Code); an
+    agent without keeps its native default unless a model is pinned."""
+    positional_prompt: bool = False
+    """The first prompt is a positional argument (Codex); otherwise the fleet types it."""
+    first_context_file_only: bool = False
+    sandbox_permissions: bool = False
+    """``fleet.roles.<role>.sandbox``/``approval_policy``/``approve_for_me`` apply."""
+    launch_inputs: tuple[str, ...] = ()
+    """The paths in a project's tree, relative to it, that THIS agent's launch reads and
+    runs code from: its project settings, hooks, MCP servers, project config, agents
+    (Claude Code's ``.claude``, ``.mcp.json``; Codex's ``.codex``, ``.agents``). A sandboxed
+    agent's profile holds every registered agent's read-only at the tops of its trees
+    (``services.store_broker.launch_inputs``), so a sandboxed Codex in a project cannot
+    plant what another agent's next unsandboxed start there runs (review r10 of #113,
+    finding 1; GATE #113). Every adapter declares its own; the conformance suite fails one
+    that declares none."""
+    sandboxes_tools: bool = False
+    """The agent runs its tools' commands in an OS sandbox that confines their writes
+    (Codex's). Its permission flags make the aisquare store read-only there
+    (:meth:`AgentAdapter.store_access`), and every board call it makes there goes through
+    its launch's broker, outside the sandbox (``services.store_broker``), whose inbox is
+    the one path in the store its sandbox may write (:meth:`AgentAdapter.broker_access`).
+    Claude Code runs its tools unsandboxed."""
+    redraws_while_asking: bool = False
+    """The agent's UI keeps redrawing while it waits on the human (Codex's approval view,
+    every second, the screen unchanged: 0.162.1), so output in its pane answers nothing:
+    an ``attention`` row holds until one of its hooks moves the row, or
+    :attr:`working_on_screen` says its screen shows a turn running
+    (``services.fleet._derive``). Claude Code's prompt sits still until it is answered."""
+    working_on_screen: Callable[[Sequence[str]], bool] | None = None
+    """Whether the agent's screen (its visible rows) shows a turn running unblocked:
+    Codex's status line ``• Working (12s • esc to interrupt)`` where Codex draws it,
+    measured on 0.162.1, which its approval view replaces until the human answers and
+    which is back the moment they do. The answer's first hook is the approved command's
+    PostToolUse, which fires only when the command finishes, so without it an approved
+    12-minute command read ``attention`` throughout."""
+    idle_on_screen: Callable[[Sequence[str]], bool] | None = None
+    """Whether the agent's screen (its visible rows) shows it at its EMPTY prompt with
+    nothing drawn over it, where a typed line and its Enter land as a prompt: read in
+    place of :attr:`idle_prompt_mark` alone, which an agent may draw only in one of its
+    layouts (Codex's ``? for shortcuts``, absent under ``--no-alt-screen``, measured on
+    0.162.1)."""
+    legacy_fleet_args: bool = False
+    """``fleet.roles.<role>.extra_args`` and ``permission_mode`` are in this agent's
+    vocabulary (they predate adapters and are Claude Code's); another agent takes only
+    an explicitly passed mode and its ``agent_args``."""
+    value_options: frozenset[str] = frozenset()
+    switch_options: frozenset[str] = frozenset()
+
+
+# --- events: one vocabulary for every agent's lifecycle hooks -----------------------------
+
+EventKind = Literal[
+    "session_start",
+    "prompt",
+    "stop",
+    "session_end",
+    "interrupt",
+    "attention",
+    "tool_done",
+    "turn_failed",
+    "notification",
+]
+EVENT_KINDS: tuple[EventKind, ...] = get_args(EventKind)
+
+
+@dataclass(frozen=True)
+class AgentEvent:
+    """One native hook call, decoded (:meth:`AgentAdapter.decode_event`).
+
+    ``session_id`` is the agent's own id for the session, ``None`` when the payload
+    carries none (the shared services then record what needs no session). The rest is
+    what the kind uses: ``prompt`` for ``prompt``; ``source``
+    (``startup|resume|clear|compact``) for ``session_start``; ``reason`` for
+    ``session_end``; ``stop_hook_active``, the loop guard, for ``stop``; ``error``,
+    ``message`` and ``details`` for ``turn_failed``; ``message`` and
+    ``notification_type`` for ``attention`` and ``notification``. ``turn_id``, where the
+    agent has one, makes a redelivered prompt or stop answer as it did the first time.
+    """
+
+    kind: EventKind
+    session_id: str | None
+    cwd: Path | None = None
+    prompt: str | None = None
+    transcript_path: str | None = None
+    model: str | None = None
+    effort: str | None = None
+    source: str | None = None
+    reason: str | None = None
+    stop_hook_active: bool = False
+    turn_id: str | None = None
+    error: str | None = None
+    message: str | None = None
+    details: str | None = None
+    notification_type: str | None = None
+
+
+def payload_text(payload: Mapping[str, Any], key: str) -> str | None:
+    """A non-empty string field of a hook payload, else ``None``."""
+    value = payload.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def payload_cwd(payload: Mapping[str, Any]) -> Path | None:
+    cwd = payload_text(payload, "cwd")
+    return Path(cwd) if cwd else None
+
+
+def block_reply(reason: str) -> str:
+    """A Stop hook's "keep going" as Claude Code and Codex both read it: the top-level
+    ``{"decision": "block", "reason": …}`` object (``services.team.StopDecision``)."""
+    import json
+
+    return json.dumps({"decision": "block", "reason": reason})
+
+
+# --- permissions: one intent, each agent's flags ------------------------------------------
+
+WriteScope = Literal["read_only", "workspace", "full"]
+Approvals = Literal["ask", "auto", "never"]
+
+
+@dataclass(frozen=True)
+class PermissionIntent:
+    """What an agent may do without asking, in no agent's vocabulary.
+
+    ``write``: ``read_only`` (no edits), ``workspace`` (the project and its worktree)
+    or ``full`` (anything). ``approvals``: ``ask`` the human, ``auto`` (the agent's own
+    reviewer decides: Claude Code's ``auto`` mode, Codex's ``--approve-for-me``) or
+    ``never`` ask (what is not allowed fails). :meth:`AgentAdapter.permission_args` maps
+    it; an explicit native flag (``--permission-mode``, ``--sandbox``…) still wins.
+    Written ``write:approvals`` (``workspace:auto``).
+    """
+
+    write: WriteScope = "workspace"
+    approvals: Approvals = "auto"
+
+    @classmethod
+    def for_role(cls, role: str) -> PermissionIntent:
+        """The built-in intent: a reviewer's seats are read-only, every role else
+        ``workspace:auto`` (the fleet's ``auto`` mode and Codex's ``--approve-for-me``)."""
+        if harness.base_role(role) == "reviewer":
+            return cls("read_only", "auto")
+        return cls()
+
+    @staticmethod
+    def written(value: str) -> bool:
+        """Whether ``value`` is written as an intent (``write:approvals``) rather than in an
+        agent's own words (Claude Code's ``auto``, Codex's ``read-only``): no native
+        permission value has a colon."""
+        return ":" in value
+
+    @classmethod
+    def parse(cls, value: str) -> PermissionIntent:
+        write, _, approvals = value.strip().partition(":")
+        writes, asks = get_args(WriteScope), get_args(Approvals)
+        if write not in writes or approvals not in asks:
+            raise ValueError(
+                f"permission intent must be WRITE:APPROVALS with WRITE one of "
+                f"{', '.join(writes)} and APPROVALS one of {', '.join(asks)}, not {value!r}"
+            )
+        return cls(write, approvals)  # type: ignore[arg-type]
+
+    def __str__(self) -> str:
+        return f"{self.write}:{self.approvals}"
+
+
+@dataclass(frozen=True)
+class SandboxWrites:
+    """What a sandboxed session may write: ``writable`` roots, with ``read_only`` paths
+    within them held read-only (the more specific path wins, as Codex's profile rules it).
+    Of the roots, ``workspace`` is the session's directory and ``temporary`` the
+    temporary directories every such sandbox writes; the rest were added (a directory
+    given it, a writable root, a profile's ``write`` path)."""
+
+    writable: tuple[Path, ...]
+    read_only: tuple[Path, ...] = ()
+    workspace: Path | None = None
+    temporary: tuple[Path, ...] = ()
+
+    def root_of(self, path: Path) -> Path | None:
+        """The most specific of :attr:`writable` that holds ``path``, or ``None``."""
+        holding = [root for root in self.writable if path == root or path.is_relative_to(root)]
+        return max(holding, key=lambda root: len(root.parts), default=None)
+
+    def may_write(self, path: Path) -> bool:
+        """Whether a write at ``path`` is allowed: under a writable root, and under no
+        read-only path more specific than that root."""
+
+        def depth(root: Path) -> int | None:
+            return len(root.parts) if path == root or path.is_relative_to(root) else None
+
+        best = max((d for root in self.writable if (d := depth(root)) is not None), default=None)
+        if best is None:
+            return False
+        return not any((d := depth(root)) is not None and d > best for root in self.read_only)
+
+
+def store_dir() -> Path:
+    """The aisquare home a launch from this process gives its agent, and so the store the
+    agent's ``aisquare`` calls open: what :meth:`AgentAdapter.store_access` makes reachable."""
+    home = paths.expand_user(paths.aisquare_home())
+    try:
+        return home.resolve()
+    except (OSError, RuntimeError):
+        return home.absolute()
+
+
+def store_read_only(store: Path) -> tuple[Path, ...]:
+    """What under the aisquare home ``store`` a sandboxed agent may read and not write: all
+    of it, the store's database first. So nothing a process in its sandbox writes reaches
+    the board, the launch records, the census, the config, the account homes, the model
+    probe's cache or anything else there, and nothing there that chooses what runs outside
+    the sandbox (a replay, a kill, a typed line, a launch, a model or an account, a
+    worktree removal, a paste) can have been written from inside one. The one path there
+    the sandbox may write is its own launch's broker inbox
+    (:meth:`AgentAdapter.broker_access`), whose requests the broker runs only from its
+    whitelist, as the launch's own sessions (``services.store_broker``)."""
+    return (store,)
+
+
+def prepare_store(store: Path) -> None:
+    """Make the store its profile names before the agent starts, and the launch records'
+    directory (``launch_seal.ensure_dir``): a fleet agent's own record was written before
+    its window started, and an agent that sandboxes its tools is not started without one.
+    The broker's inbox, the profile's one writable path there, is made by
+    ``services.store_broker.start_for_launch``. A path the profile names that does not exist
+    is no harm: measured on 0.162.1 in a real turn (the worktree layout, a path inside the
+    workspace and outside every writable root, an absent parent too), the sandbox shows it
+    as an empty read-only mount point and leaves nothing on the host (review r11 of #113,
+    finding 3). Never raises."""
+    from aisquare.core import launch_seal
+
+    with suppress(OSError):
+        store.mkdir(parents=True, exist_ok=True)
+    launch_seal.ensure_dir()
+
+
+# --- version probe, hooks switch, plugin route ---------------------------------------------
+
+
+_VERSION_TOKEN = re.compile(r"\d+(?:\.\d+)+[0-9A-Za-z.+!-]*")
+
+
+def version_in(output: str) -> str | None:
+    """The first dotted version in what a ``--version`` printed (``codex-cli 0.162.1``,
+    ``2.1.250 (Claude Code)``, aisquare's own), or ``None`` when it printed none."""
+    match = _VERSION_TOKEN.search(output)
+    return match.group(0) if match else None
+
+
+@dataclass(frozen=True)
+class HooksSwitch:
+    """What switches every one of an agent's hooks off: the setting, as the operator writes
+    it, and the file that sets it (``None``: a launch argument)."""
+
+    setting: str
+    path: Path | None = None
+
+    def __str__(self) -> str:
+        return f"{self.setting} in {self.path or 'the launch arguments'}"
+
+
+@dataclass(frozen=True)
+class PluginInstall:
+    """The aisquare plugin, installed in one config directory and enabled there (user
+    scope) or in one repository (project and local scope)."""
+
+    config_dir: Path
+    version: str | None
+    """What the agent's install record says; ``None`` when it records none."""
+    scope: str = "user"
+    """``user``, or ``project``/``local``: the scope the plugin was installed at."""
+    project: Path | None = None
+    """The repository a project- or local-scope install is enabled in; ``None`` at user scope."""
+    trusted: bool = True
+    """Whether the agent runs the plugin's hooks: Codex runs none until ``/hooks`` trusts
+    them; an agent that never asks always does."""
+
+
+class AgentPlugin(Protocol):
+    """The no-installer route: an aisquare plugin whose hooks run ``aisquare hook`` and
+    stand down where the agent's hooks file already runs aisquare's. Read-only; never
+    raises. ``config_dir`` ``None`` is the dir a session from this shell reads."""
+
+    stands_down_per_event: bool
+    """The plugin's launcher stands down only for the events the hooks file already runs
+    (Claude Code's), so it covers a partial install; otherwise it stands down beside any
+    of our hooks there whose program can start (``core.agents.plugin_stands_down``), and
+    a partial install is not covered."""
+
+    def supported(self) -> bool:
+        """Whether the plugin's hooks can run on this platform."""
+        ...
+
+    def installed(self, config_dir: Path | None) -> PluginInstall | None:
+        """The user-scope install that ``config_dir`` enables, else ``None``."""
+        ...
+
+    def repo_installs(self, config_dir: Path | None) -> list[PluginInstall]:
+        """Project- and local-scope installs recorded in ``config_dir`` whose repository
+        still enables them."""
+        ...
+
+    def repo_install_here(self, config_dir: Path | None, cwd: Path | None) -> PluginInstall | None:
+        """The repository install a session of ``config_dir`` started in ``cwd`` loads."""
+        ...
+
+    def command(
+        self, verb: str, config_dir: Path, *, scope: str = "user", project: Path | None = None
+    ) -> str:
+        """The agent's own ``plugin <verb>`` command line for that install, to paste."""
+        ...
+
+
+class AgentAdapter(Protocol):
+    """One terminal agent, in the terms the shared services ask in.
+
+    Identity and installation: ``id`` (the board's and the config's name), ``label``,
+    ``binary``, ``home_env``/``home_name`` with :meth:`config_dir`, ``install_hint``,
+    ``version_args`` with :func:`version_in`. Hooks: ``settings_name`` (the hooks file in
+    the config dir), ``capabilities.hooks`` with :func:`hook_args`, ``hooks_off_setting``
+    with :meth:`hooks_switch`, ``plugin``. Events: :meth:`decode_event` and
+    :meth:`encode_reply`. Launch: :meth:`model_args`, :meth:`permission_args`,
+    :meth:`store_access`, :meth:`sandbox_writes`, :meth:`broker_access`, :meth:`fleet_args`,
+    :meth:`label_args`, :meth:`resume_args`,
+    ``exit_command``, :meth:`queue_args`,
+    :meth:`mcp_args`, :meth:`context_files`, :meth:`disable_native_teams`,
+    :meth:`telemetry_args`. Accounts: ``accounts``. ``capabilities`` says the rest.
+    """
+
+    id: str
+    label: str
+    binary: str
+    home_env: str
+    home_name: str
+    settings_name: str
+    capabilities: AgentCapabilities
+    install_hint: str
+    version_args: tuple[str, ...]
+    """Arguments that print the version without starting a session (``--version``)."""
+    hooks_off_setting: str
+    """The setting that switches every hook off, as a message names it without a file."""
+    exit_command: str
+    """What the fleet types into the agent's prompt to end the session gracefully, so its
+    ``SessionEnd`` hook runs (``/exit``)."""
+    key_spellings: Mapping[str, str]
+    """tmux key names this agent reads under another spelling, which the fleet UI's pane
+    sends instead (``core.keys.translate``): Codex submits on ``S-Enter`` and takes
+    ``C-j`` as its newline. Empty where every key means what tmux names it."""
+
+    @property
+    def accounts(self) -> AgentAccounts | None:
+        """Numbered login slots (``aisquare accounts``); ``None`` for an agent without them."""
+        ...
+
+    @property
+    def plugin(self) -> AgentPlugin | None:
+        """The aisquare plugin route for this agent; ``None`` when there is none."""
+        ...
+
+    def config_dir(self, home: Path, env: Mapping[str, str], explicit: Path | None = None) -> Path:
+        """The config dir the agent reads, launched with ``env``: ``explicit``, else
+        ``env[home_env]``, else ``home / home_name`` (:func:`config_home`)."""
+        ...
+
+    def hooks_switch(
+        self, home: Path, settings_path: Path, args: Sequence[str] = ()
+    ) -> HooksSwitch | None:
+        """What switches every hook off for the agent in ``home``, launched with ``args``;
+        ``None`` when nothing does. Read-only; never raises."""
+        ...
+
+    def decode_event(self, payload: Mapping[str, Any]) -> AgentEvent | None:
+        """The hook payload as an :class:`AgentEvent`; ``None`` for one AISquare ignores.
+
+        The event is the payload's ``hook_event_name`` (``aisquare hook <subcommand>``
+        sets it from the :class:`HookSpec` that installed it, where the agent does not).
+        """
+        ...
+
+    def encode_reply(self, kind: EventKind, reply: str | None) -> str:
+        """What the hook prints for ``reply``: context for ``session_start`` and
+        ``prompt``, a continuation reason for ``stop``; ``""`` prints nothing."""
+        ...
+
+    def mcp_args(
+        self,
+        executable: str,
+        args: list[str],
+        env_vars: list[str] | None = None,
+    ) -> list[str]:
+        """Launch arguments that register AISquare's MCP server for this session only."""
+        ...
+
+    def resolve_model(
+        self,
+        role: str,
+        *,
+        binary: str,
+        env: dict[str, str],
+        probe: bool | None,
+        refresh: bool,
+        effort: str | None,
+    ) -> harness.ModelResolution | None: ...
+    def native_args(self, args: list[str]) -> list[str]:
+        """``args`` with AISquare's spellings of native values made native (effort aliases)."""
+        ...
+
+    def native_choice(self, args: Sequence[str]) -> NativeChoice:
+        """The model and effort ``args`` choose natively, the last one winning."""
+        ...
+
+    def validate(self, model: str | None, effort: str | None) -> None:
+        """Raise :class:`BadEffortError` for an effort the agent cannot take."""
+        ...
+
+    def effort_alias(self, effort: str) -> str: ...
+    def context_files(self, home: Path) -> tuple[Path, ...]:
+        """The instruction files the agent reads from its config dir, in its precedence."""
+        ...
+
+    def browser_tools(self, home: Path) -> list[str] | None:
+        """The browser tooling the agent brings itself in config dir ``home``, as the
+        doctor names it (empty: none, or switched off); ``None`` for an agent whose
+        browser the doctor finds another way (Claude Code's MCP servers and plugins,
+        ``services.diagnostics``). Read-only; never raises."""
+        ...
+
+    def model_args(self, model: str | None, effort: str | None) -> list[str]: ...
+    def role_defaults(self, role: str, *, binary: str, args: Sequence[str]) -> harness.RoleDefaults:
+        """The flags ``role`` needs on this agent wherever it starts (the ui-tester's
+        browser), less what ``args`` already says, with a note for each it withholds."""
+        ...
+
+    def permission_args(
+        self, intent: PermissionIntent, role: str, native: Sequence[str] = ()
+    ) -> list[str]:
+        """The native flags for ``intent``, less what the ``native`` arguments the launch
+        already carries settle (they win, as an explicit native flag always does), with
+        :meth:`store_access` for its write scope wherever its flags choose the sandbox.
+        Raises ``ValueError`` for an intent the agent cannot express."""
+        ...
+
+    def store_access(self, write: WriteScope, store: Path) -> list[str]:
+        """Launch arguments that run a session sandboxed at ``write`` with the aisquare
+        store in ``store`` (:func:`store_dir`) read-only in its sandbox, all of it
+        (:func:`store_read_only`); its board calls go through its broker
+        (:meth:`broker_access`). ``[]`` without ``capabilities.sandboxes_tools`` (nothing
+        stands between them) and for a scope the agent runs unsandboxed (``full``)."""
+        ...
+
+    def sandbox_writes(
+        self, args: Sequence[str], cwd: Path, home: Path | None = None
+    ) -> SandboxWrites | None:
+        """What the sandbox of a session launched with ``args`` in ``cwd`` may write, read
+        as the agent reads its settings: its config in ``home`` (its config dir; ``None``
+        is this shell's), the profile ``args`` select, then ``args`` themselves, whatever
+        chose the sandbox (the store's profile, a native flag or setting, the directories
+        added); ``None`` where the session runs unsandboxed.
+        ``services.store_broker.refuse_inside`` refuses a launch whose sandbox may write
+        the aisquare its hooks and broker run."""
+        ...
+
+    def broker_access(
+        self,
+        args: Sequence[str],
+        store: Path,
+        inbox: Path,
+        *,
+        protect: Sequence[Path] = (),
+        writable: Sequence[Path] = (),
+    ) -> list[str] | None:
+        """``args`` with ``inbox``, the launch's broker inbox (``services.store_broker``),
+        the one path under ``store`` the sandbox may write, and the rest of the store
+        read-only whatever ``args`` recorded (a launch spec from before this rule); every
+        launch of an agent with ``capabilities.sandboxes_tools`` asks this before it
+        starts. ``protect`` is read-only there too, outside the store, whether or not it
+        exists yet (the launch inputs of the project's trees, the other agents' worktrees,
+        the tmux sockets' directory: ``services.store_broker.launch_paths``), and
+        ``writable`` stays writable within it (the agent's own worktree), the more specific
+        path winning. ``None`` where ``args`` run no sandbox of :meth:`store_access`'s (the
+        agent unsandboxed, or a sandbox the operator chose), which no broker serves."""
+        ...
+
+    def fleet_args(
+        self,
+        role: str,
+        label: str,
+        permission_mode: str | None,
+        *,
+        sandbox: str | None = None,
+        approval: str | None = None,
+        approve_for_me: bool | None = None,
+        native: Sequence[str] = (),
+    ) -> list[str]:
+        """A fleet spawn's flags from the role's native permission settings, and its label."""
+        ...
+
+    def label_args(self, label: str) -> list[str]:
+        """Flags that show the fleet label in the agent's UI; ``[]`` where it has none."""
+        ...
+
+    def resume_args(self, native_session_id: str, transcript_path: Path | None) -> list[str]:
+        """Arguments that resume a session, put before every other argument."""
+        ...
+
+    def queue_args(self, native_session_id: str, message: str) -> list[str] | None:
+        """Arguments to the agent's binary that queue ``message`` for its RUNNING session,
+        delivered as the next turn once the current one ends (``fleet tell`` to a busy
+        agent), run with :attr:`home_env` set to the session's config dir; ``None`` for
+        an agent without such a queue (the message is then a board note)."""
+        ...
+
+    def disable_native_teams(self) -> tuple[list[str], dict[str, str]]:
+        """Arguments and environment that keep the agent's own sub-agent teams off."""
+        ...
+
+    def telemetry_args(self, endpoint: str, *, keep_out: Sequence[str] = ()) -> list[str]:
+        """Arguments exporting the agent's OpenTelemetry logs to ``endpoint`` (OTLP/HTTP
+        JSON); ``[]`` without ``native_telemetry``. Never the receiver's ``Authorization``:
+        argv is every local user's to read, so the header rides in the launch environment
+        (``services.native_telemetry.HEADERS_ENV``), and ``keep_out`` names the variables
+        the shells the agent's tools run in must not inherit, that one among them. Whether
+        the operator configured an exporter of their own, which is kept, is
+        ``services.native_telemetry.operator_configured`` (Codex's config layers)."""
+        ...
+
+
+@dataclass(frozen=True)
+class NativeChoice:
+    """What a native argv chooses: the model, the effort, and where an effort AISquare
+    validates was given (``effort_index``): Claude Code's ``--effort`` takes AISquare's
+    scale, so a saved one is AISquare's to refuse; ``None`` where the native CLI
+    validates the value itself (Codex's ``-c model_reasoning_effort``)."""
+
+    model: str | None = None
+    effort: str | None = None
+    effort_index: int | None = None
+
+
+def hook_args(adapter: AgentAdapter, hook: HookSpec, home: Path) -> list[str]:
+    """What ``aisquare hook`` is given for ``hook``: its subcommand, the agent and the
+    event for :data:`GENERIC_HOOK`, and the config dir where the hook must be told it."""
+    argv = [hook.command]
+    if hook.command == GENERIC_HOOK:
+        argv += ["--agent", adapter.id, "--event", hook.event]
+    if adapter.capabilities.hook_names_home:
+        argv += ["--config-dir", str(home)]
+    return argv
+
+
+def config_home(
+    adapter: AgentAdapter,
+    home: Path,
+    env: Mapping[str, str],
+    explicit: Path | None = None,
+) -> Path:
+    """Resolve against the environment the selected executable will actually use.
+
+    A ``~olduser`` this machine does not have is kept as written (``paths.expand_user``),
+    so ``paths.names_no_home`` still refuses to make it; a symlink loop is not resolved.
+    Claude Code's directory, as ``core.agents`` names it, is ``core.agents._claude_home``.
+    """
+    raw = explicit or env.get(adapter.home_env, "").strip() or home / adapter.home_name
+    path = paths.expand_user(Path(raw))
+    if paths.names_no_home(path):
+        return path
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError):
+        return path.absolute()
+
+
+@dataclass(frozen=True)
+class OptionValue:
+    index: int
+    value_index: int
+    prefix: str
+    value: str
+
+
+def option_occurrences(args: Sequence[str], *options: str) -> Iterator[OptionValue]:
+    """Read native option values up to the native CLI's own ``--`` boundary.
+
+    The outer AISquare separator has already been consumed. Like the native
+    CLI, ``-mfoo`` is a model; a literal dash-prefixed prompt needs native ``--``.
+    """
+    tokens = iter(enumerate(args))
+    for index, arg in tokens:
+        if arg == "--":
+            break
+        if arg in options:
+            following = next(tokens, None)
+            if following is not None and following[1] != "--":
+                yield OptionValue(index, following[0], "", following[1])
+            elif following is not None:
+                break
+        else:
+            for option in options:
+                if arg.startswith(option + "="):
+                    yield OptionValue(index, index, option + "=", arg[len(option) + 1 :])
+                    break
+                if len(option) == 2 and arg.startswith(option) and len(arg) > 2:
+                    yield OptionValue(index, index, option, arg[2:])
+                    break
+
+
+def option_values(args: Sequence[str], *options: str) -> list[str]:
+    return [item.value for item in option_occurrences(args, *options)]
+
+
+def rewrite_option_values(
+    args: Sequence[str], transform: Callable[[str], str], *options: str
+) -> list[str]:
+    """Transform values while preserving native spelling and the literal boundary."""
+    result = list(args)
+    for item in option_occurrences(args, *options):
+        result[item.value_index] = item.prefix + transform(item.value)
+    return result
+
+
+def is_config_assignment(value: str) -> bool:
+    return re.match(r"^[A-Za-z_][\w.-]*\s*=", value.lstrip()) is not None
+
+
+def config_assignment(assignment: str) -> tuple[str, str] | None:
+    key, sep, value = assignment.partition("=")
+    if not sep:
+        return None
+    try:
+        decoded = tomllib.loads("value=" + value)["value"]
+    except (ValueError, RecursionError):
+        decoded = value  # Native CLI validation owns malformed/future TOML values.
+    return key.strip(), decoded if isinstance(decoded, str) else value
+
+
+def model_overrides(agent: str, args: Sequence[str]) -> tuple[str | None, str | None]:
+    """Explicit native model/effort wins over AISquare's configured defaults."""
+    from aisquare.core.agent_adapters import get_adapter
+
+    choice = get_adapter(agent).native_choice(args)
+    return choice.model, choice.effort
+
+
+def executable_name(binary: str) -> str:
+    """Canonical native executable name, including Windows paths and npm shims."""
+    name = binary.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].lower()
+    for suffix in (".exe", ".cmd", ".ps1"):
+        if name.endswith(suffix):
+            return name.removesuffix(suffix)
+    return name
+
+
+def fleet_extra_args(
+    adapter: AgentAdapter, legacy: Sequence[str], native: Mapping[str, list[str]]
+) -> list[str]:
+    """Old fleet args belong to Claude; native argument lists name their owner."""
+    return [
+        *(legacy if adapter.capabilities.legacy_fleet_args else []),
+        *native.get(adapter.id, []),
+    ]
+
+
+class BadEffortError(ValueError):
+    """An explicit reasoning level is invalid for the selected agent."""
+
+
+# --- accounts: one login per home directory, in numbered slots --------------------------
+#
+# ``core.claude_accounts`` owns the slot directories for every agent that has this
+# slot; what differs per agent is here. One ladder numbers the slots of every agent
+# (a managed slot's number is unique across them), and each agent's PLAIN home —
+# whatever its binary uses in this shell — has a reserved number of its own.
+
+UsageFetch = Callable[[str, Mapping[str, str], float], tuple[int, bytes]]
+"""``(url, headers, timeout) -> (status, body)``: how an agent that reads usage over the
+network reaches it. Supplied by the service layer; core never opens a socket."""
+
+
+class AgentAccounts(Protocol):
+    agent: str
+    home_env: str
+    """The variable naming the home a login lives in (``CLAUDE_CONFIG_DIR``, ``CODEX_HOME``)."""
+    extra_env: tuple[str, ...]
+    """Further per-slot variables, each set to the slot's own directory under ``cache``."""
+    plain_vars: Mapping[str, str]
+    """Each launch variable → where a launch onto a managed slot keeps the shell's own."""
+    dir_name: str
+    """The slots' parent under the aisquare home (``claude-accounts``, ``codex-accounts``)."""
+    plain_slot: int
+    plain_label: str
+    install_command: str
+    network_usage: bool
+    """Whether :meth:`usage` leaves the machine (Claude's endpoint) or reads local files."""
+
+    def sign_in_args(self) -> tuple[str, ...]:
+        """Arguments to the agent's binary that start its own sign-in in a slot's env."""
+        ...
+
+    def plain_home(self, home: Path, plain: Mapping[str, str]) -> Path:
+        """The plain home, from the shell's own launch variables (``plain``)."""
+        ...
+
+    def identity(
+        self, account: ClaudeAccount, *, env: Mapping[str, str] | None = None
+    ) -> ClaudeIdentity | None: ...
+    def signed_in(self, account: ClaudeAccount) -> bool: ...
+    def subscription(self, account: ClaudeAccount) -> str | None: ...
+    def token_state(self, account: ClaudeAccount) -> str:
+        """``ok``, ``expired`` or ``missing`` — read, never refreshed."""
+        ...
+
+    def usage(
+        self, account: ClaudeAccount, *, now: datetime | None, fetch: UsageFetch
+    ) -> ClaudeUsage: ...
+    def limit_from_transcript(
+        self, path: Path, *, now: datetime | None = None
+    ) -> LimitNotice | None:
+        """A usage limit the session's own transcript records at its end, or ``None``."""
+        ...
+
+    def failed_turn(self, path: Path) -> FailedTurn | None:
+        """The transcript's newest turn when it ended on an error that fired no hook, or
+        ``None`` (an agent whose hooks report every failure: ``None`` always). Read on
+        every fleet listing of a working row, so it reads only the transcript's end."""
+        ...

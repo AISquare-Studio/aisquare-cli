@@ -682,12 +682,20 @@ def _remote_project_board(project: ProjectInfo) -> ProjectInfo:
 
 def _remote_recorded_board(project: ProjectInfo) -> ProjectInfo | None:
     """:func:`_remote_project_board` as ``project``'s live rows recorded it; ``None`` for a
-    project with none, or whose board the store does not hold."""
+    project with none, or whose board the store does not hold.
+
+    A board forgotten since is still held: its events and tasks are kept, and the agents
+    whose rows recorded it still read it. Read as one the store does not hold, a hub
+    forgotten to tidy the project list sent the Board tab and ``#N`` back to Remote's own
+    environment's board, while a claim by id still reached the hub (review of #259, round
+    30, 2/8)."""
     from aisquare.core.store import store_session
 
     with store_session() as store:
         recorded = store.fleet_board(project.id)
-        return store.get_project(recorded) if recorded is not None else None
+        if recorded is None:
+            return None
+        return store.get_project(recorded, include_forgotten=True)
 
 
 def _remote_boards() -> set[str]:

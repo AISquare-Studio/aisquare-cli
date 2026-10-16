@@ -4945,10 +4945,11 @@ def _note(p: ProjectInfo, hub: ProjectInfo) -> str:
     event = result["event"]
     assert isinstance(event, dict)
     with store_session() as store:
+        boards = {p.id, hub.id, *(project.id for project in store.list_projects(all=True))}
         (posted,) = [
-            board.id
-            for board in store.list_projects(all=True)
-            if any(e.text == "hi" for e in store.recent_events(board.id, limit=5))
+            board
+            for board in boards
+            if any(e.text == "hi" for e in store.recent_events(board, limit=5))
         ]
     return posted
 
@@ -4969,6 +4970,31 @@ def test_remotes_board_and_task_paths_go_to_the_board_the_projects_agents_read(
     the other board's #1, and a note from the Board tab went where the manager does not
     read. Each goes to the board P's rows recorded."""
     p, hub, on_elsewhere = _hubbed_tasks(tmp_path, monkeypatch, remote)
+
+    assert path(p, hub) == hub.id
+    with store_session() as store:
+        untouched = store.get_task(on_elsewhere.id)
+    assert untouched is not None and untouched.status == "todo"
+
+
+@pytest.mark.parametrize("remote", ["none", "another"], ids=["no hub", "another hub"])
+@pytest.mark.parametrize(
+    "path",
+    [_board_tab, _tasks_tab, _claim_by_id, _done_by_id, _done_by_number, _note],
+    ids=lambda path: path.__name__.strip("_"),
+)
+def test_remotes_board_paths_go_to_a_hub_forgotten_since(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: Any, remote: str
+) -> None:
+    """Review of #259, round 30, 2/8: the board P's live manager recorded was looked up among
+    the projects the store has not forgotten, so with hub H forgotten (``project forget``,
+    to tidy the list) it counted as a board the store does not hold. The Board and Tasks
+    tabs, ``#N`` and the note went back to Remote's own environment's board, while a claim
+    by id still reached H. H's events and tasks are kept, and the manager still reads it."""
+    p, hub, on_elsewhere = _hubbed_tasks(tmp_path, monkeypatch, remote)
+    with store_session() as store:
+        store.forget_project(hub.id)
+        assert store.get_project(hub.id) is None, "forgotten"
 
     assert path(p, hub) == hub.id
     with store_session() as store:

@@ -4509,7 +4509,8 @@ def test_a_fleet_agents_cycle_names_its_own_project_under_a_hub(
     hub's board, and the cycle named the board's project in every fleet command. So the
     manager was told to spawn its coders in the hub's directory, and its ``stop``,
     ``tell`` and ``switch`` found no live agent there. They name the agent's own row's
-    project, by its codename. A session with no row is left bare under a hub."""
+    project, by its codename. A session with no row names its own directory's project, the
+    hub aside (round 23, 3/10, below)."""
     hub = tmp_path / "hub"
     hub.mkdir()
     with store_session() as store:
@@ -4534,12 +4535,47 @@ def test_a_fleet_agents_cycle_names_its_own_project_under_a_hub(
     assert all(command.endswith(f"--project {stored.codename}") for command in commands), commands
     assert team_project(hub).id not in board
 
-    _stranger(monkeypatch, "manager")
-    plain = team_service.hook_session_start("sess-no-row", project.root, "startup")
 
-    assert "`aisquare fleet reap` again, then" in plain
-    bare = re.findall(r"aisquare fleet [a-z]+(?: --project [\w.-]+)?", plain)
-    assert bare and not any("--project" in command for command in bare), bare
+def test_under_a_hub_a_session_with_no_fleet_row_names_its_own_directorys_project(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 23, 3/10: under ``AISQUARE_TEAM_HUB`` a session with no fleet
+    row, one the human launched, got every fleet command of its cycle without
+    ``--project``. Alone, a fleet command acts on the active project, the machine-wide pin
+    before the working directory: the manager launched in ``/work/app`` while another shell
+    had pinned ``site`` spawned its coders in ``site``, and stopped and reaped there, the
+    bug round 21 fixed. Its commands name its directory's project, the hub aside. A
+    directory nobody registered names a ``<project>`` to fill in, and says so: never a bare
+    command."""
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    with store_session() as store:
+        store.onboard_project(team_project(hub))
+        named = store.onboard_project(project, codename="calm-otter")
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))
+    _stranger(monkeypatch, "manager")
+
+    started = team_service.hook_session_start("sess-no-row", project.root, "startup")
+    joined = team_service.hook_prompt_heartbeat("sess-late-no-row", project.root)
+
+    for board in (started, joined):
+        assert "`aisquare fleet reap --project calm-otter` again, then" in board
+        commands = re.findall(r"aisquare fleet [a-z]+(?: --project [\w.-]+)?", board)
+        assert commands and all(c.endswith(f"--project {named.codename}") for c in commands)
+        assert team_project(hub).id not in board
+
+    elsewhere = tmp_path / "unregistered"
+    elsewhere.mkdir()
+    loose = team_service.hook_session_start("sess-loose", elsewhere, "startup")
+
+    assert "Your standing cycle (manager)" in loose
+    assert "`aisquare fleet reap --project <project>` again, then" in loose
+    assert "The fleet commands below name <project>:" in loose
+    assert not re.search(r"aisquare fleet [a-z]+(?! --project)\b", loose), loose
 
 
 def test_a_cycle_with_no_fleet_row_names_its_project_by_its_codename(

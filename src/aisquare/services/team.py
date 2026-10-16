@@ -1618,7 +1618,7 @@ def hook_session_start(
             me=session,
             assigned=assigned,
             labels=lambda: slot_labels_via(store),
-            fleet=_cycle_project(store, project),
+            fleet=_cycle_project(store, project, cwd),
         )
 
 
@@ -1679,7 +1679,7 @@ def hook_prompt_heartbeat(
                 me=session,
                 assigned=assigned,
                 labels=lambda: slot_labels_via(store),
-                fleet=_cycle_project(store, project),
+                fleet=_cycle_project(store, project, cwd),
             )
         # Same check as session_start, on the path that actually runs every turn.
         # It must survive the empty-delta early return below: a collision warning
@@ -3014,18 +3014,40 @@ def _role_cycle(me: TeamSession, project: ProjectInfo | None) -> list[str]:
 
     Its fleet commands name ``project``, the session's fleet project
     (:func:`_cycle_project`), through ``project_service.fleet_command``. With none, they
-    are bare, and act on the active project, as they did before round 21 of the review of
-    #259.
+    name a ``<project>`` placeholder, and a line above the cycle says to fill it in. Never
+    bare: alone, a fleet command acts on the active project, the machine-wide pin before
+    the working directory (round 21 of the review of #259), and a bare one came back for
+    every hand-launched session under a hub (round 23).
     """
-    fleet: harness.FleetCommand = (
-        (lambda verb: project_service.fleet_command(verb, project))
-        if project is not None
-        else (lambda verb: install_route.command_line(["aisquare", "fleet", verb]))
+    if project is not None:
+        return harness.role_cycle(
+            base_role(me.role),
+            short_id(me.id),
+            fleet=lambda verb: project_service.fleet_command(verb, project),
+        )
+    cycle = harness.role_cycle(
+        base_role(me.role),
+        short_id(me.id),
+        fleet=lambda verb: (
+            install_route.command_line(["aisquare", "fleet", verb, "--project"])
+            + f" {_NO_CYCLE_PROJECT}"
+        ),
     )
-    return harness.role_cycle(base_role(me.role), short_id(me.id), fleet=fleet)
+    if not any(_NO_CYCLE_PROJECT in line for line in cycle):
+        return cycle
+    return [
+        f"The fleet commands below name {_NO_CYCLE_PROJECT}: this session's own project "
+        "could not be told, so put in the codename of the one they are for (`aisquare "
+        "project list` names them).",
+        *cycle,
+    ]
 
 
-def _cycle_project(store: ContextStore, board: ProjectInfo) -> ProjectInfo | None:
+_NO_CYCLE_PROJECT = "<project>"
+"""What a cycle's fleet commands name when :func:`_cycle_project` has no project."""
+
+
+def _cycle_project(store: ContextStore, board: ProjectInfo, cwd: Path | None) -> ProjectInfo | None:
     """The project a session's cycle names in its fleet commands: its fleet row's.
 
     Not the board's. Under ``AISQUARE_TEAM_HUB`` the board is the hub's, and ``fleet
@@ -3039,12 +3061,15 @@ def _cycle_project(store: ContextStore, board: ProjectInfo) -> ProjectInfo | Non
     A session with no live row is named by the board when no hub is set: the board is then
     its directory's project. Read stored too: the board ``orchestrator.team_project`` builds
     carries no codename, so every cycle named its project by its raw id, unlike ``fleet
-    ls``, the sidebar and every receipt (round 22). Under a hub it is ``None``, and the
-    commands are left bare. Fail-open, like the assignment: a read that fails costs the
-    project, never the board, and is logged. Every read, the stored board's too: outside
-    the guard, a ``get_project`` that raised took the session's whole ``<aisquare-team>``
-    injection with it (round 23). Without a hub the board, as it is, is still this
-    session's project; under one, no project is.
+    ls``, the sidebar and every receipt (round 22). Under a hub it is the project of its
+    ``cwd``, the hub aside (``orchestrator.directory_project``), when that is registered:
+    left bare, the commands of a manager the human launched in ``/work/app`` acted on
+    whichever project another shell had pinned, and spawned its coders there (round 23).
+    A directory with no registration has ``None``. Fail-open, like the assignment: a read
+    that fails costs the project, never the board, and is logged. Every read, the stored
+    board's too: outside the guard, a ``get_project`` that raised took the session's whole
+    ``<aisquare-team>`` injection with it (round 23). Without a hub the board, as it is, is
+    still this session's project; under one, no project is.
     """
     hub = orchestrator.team_hub() is not None
     agent_id = orchestrator.env_fleet_agent()
@@ -3054,7 +3079,7 @@ def _cycle_project(store: ContextStore, board: ProjectInfo) -> ProjectInfo | Non
             if agent is not None and agent.ended_at is None:
                 return store.get_project(agent.project_id)
         if hub:
-            return None
+            return store.get_project(orchestrator.directory_project(cwd).id)
         return store.get_project(board.id) or board
     except Exception as exc:
         _log.warning(

@@ -163,7 +163,8 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ("services/team.py", "_limited_text"): _ROW_OF_SESSION,
     ("services/team.py", "_role_cycle"): (
         "``_cycle_project``: the row ``AISQUARE_FLEET_AGENT`` names, any project; with no "
-        "row, the board's only when no hub is set"
+        "row, the board's when no hub is set, else the cwd's own (``directory_project``), "
+        "else a ``<project>`` to fill in"
     ),
 }
 """Where each caller of ``fleet_command`` takes the project it names, by module and enclosing

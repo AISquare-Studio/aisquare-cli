@@ -186,6 +186,17 @@ def team_project(cwd: Path | None = None) -> ProjectInfo:
     if hub:
         root = Path(hub).expanduser().resolve()
         return ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
+    return directory_project(cwd)
+
+
+def directory_project(cwd: Path | None = None) -> ProjectInfo:
+    """The project of the directory itself, whatever ``AISQUARE_TEAM_HUB`` says: its
+    principal checkout's, so every worktree of one repository answers alike.
+
+    :func:`team_project`'s answer when no hub is set. Under one, it is still where a
+    session's own work is: a session the human launched in ``/work/app`` is on the hub's
+    board, and its fleet commands are about ``app`` (review of #259, round 23).
+    """
     start = (cwd or Path.cwd()).resolve()
     root = git_common_root(start) or find_project_root(start)
     return ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])

@@ -81,11 +81,12 @@ def git_common_root(start: Path) -> Path | None:
     single project.
 
     Returns ``None`` when git is unavailable or ``start`` is not in a work
-    tree, leaving callers on the marker-based fallback.
+    tree, leaving callers on the marker-based fallback. With ``--no-optional-locks``, as
+    every git command the fleet runs is (a spawn asks this for the board it records).
     """
     try:
         result = subprocess.run(
-            ["git", "-C", str(start), "rev-parse", "--git-common-dir"],
+            ["git", "--no-optional-locks", "-C", str(start), "rev-parse", "--git-common-dir"],
             capture_output=True,
             text=True,
             encoding="utf-8",

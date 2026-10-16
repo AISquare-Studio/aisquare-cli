@@ -433,8 +433,8 @@ def test_migrations_reach_the_current_schema_version() -> None:
     # v26 when that server started, the identity of the server its pane id names (follow-up),
     # v27 a project's nickname, v28 which token took a usage reading (its fingerprint),
     # v29 a task's number on its board, v30 its unique index, v31 the branch of a fleet
-    # agent's worktree (review of #259, round 15)
-    assert version == SCHEMA_VERSION == 31
+    # agent's worktree (review of #259, round 15), v32 the board a fleet agent reads (round 25)
+    assert version == SCHEMA_VERSION == 32
 
 
 def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:

@@ -1074,6 +1074,12 @@ class FleetAgent(BaseModel):
     the tree went: where a restart or switch makes a gone tree again
     (``services.fleet._remake_worktree``). ``None`` for an agent with no worktree, one on
     a detached HEAD, or a row spawned before 0.8.1."""
+    board: str | None = None
+    """The id of the board its sessions read, as its spawn gave it: the hub's under
+    ``AISQUARE_TEAM_HUB``, else its project's principal checkout's
+    (``services.fleet._board_for``). A replacement inherits it. Every question of which
+    board an agent reads asks this (``services.fleet._board_of_row``). ``None`` only before
+    the row is stored, which records the row's project then."""
     created_at: datetime
     ended_at: datetime | None = None
     exit_status: int | None = None

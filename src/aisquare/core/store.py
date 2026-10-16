@@ -676,6 +676,26 @@ def _number_unnumbered_tasks(connection: sqlite3.Connection) -> None:
         raise
 
 
+def _board_existing_agents(connection: sqlite3.Connection) -> None:
+    """v31 → v32's backfill: every fleet agent already recorded reads the board of the
+    session bound to it, the one its hooks registered on, else its own project's.
+
+    Runs right after ``fleet_agent.board`` is added, in the same transaction, and only then
+    (:data:`_BACKFILLS`). A store without ``team_session`` (doctor's damaged-store case)
+    gives every row its project's.
+    """
+    query = "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'team_session'"
+    if connection.execute(query).fetchone() is None:
+        connection.execute("UPDATE fleet_agent SET board = project_id WHERE board IS NULL")
+        return
+    connection.execute(
+        "UPDATE fleet_agent SET board = COALESCE(("
+        "  SELECT session.project_id FROM team_session AS session"
+        "  WHERE session.id = fleet_agent.session_id"
+        "), project_id) WHERE board IS NULL"
+    )
+
+
 #: Backfills that belong to a column, keyed ``(table, column)``. Each runs in the
 #: transaction that adds its column, right after the ALTER, and only when the
 #: column was actually added: by its step on the ladder or by
@@ -688,6 +708,7 @@ _BACKFILLS: dict[tuple[str, str], Callable[[sqlite3.Connection], None]] = {
     ("project", "onboarded_at"): _adopt_onboarded_projects,
     ("project_explainability", "api_url"): _bind_keys_to_their_destinations,
     ("team_task", "number"): _number_existing_tasks,
+    ("fleet_agent", "board"): _board_existing_agents,
 }
 
 # v14: ``project forget`` — a tombstone on the registration, in the same spirit as
@@ -972,6 +993,13 @@ _SCHEMA_V30 = ""
 # stale. The column is the whole step, so the script is empty: it is in :data:`_PRODUCTS`;
 # a row from before it keeps NULL, which a restart of a gone tree reads as no branch known.
 _SCHEMA_V31 = ""
+# v32 (review of #259, round 25): the board a fleet agent's sessions read, as its spawn
+# gave it: the hub's under ``AISQUARE_TEAM_HUB``, else its project's principal checkout's.
+# Worked out again from the process environment, the bound session, the cwd or Remote's
+# own environment, each reader had its own answer. The column is the whole step, so the
+# script is empty: it is in :data:`_PRODUCTS`, and its backfill
+# (:func:`_board_existing_agents`) gives a row from before it its session's board.
+_SCHEMA_V32 = ""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -1005,6 +1033,7 @@ _MIGRATIONS = (
     _SCHEMA_V29,
     _SCHEMA_V30,
     _SCHEMA_V31,
+    _SCHEMA_V32,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -1058,6 +1087,7 @@ _PRODUCTS: dict[int, _Products] = {
     28: _Products(columns=(("team_task", "number", "INTEGER"),)),
     29: _Products(("team_task_number", "team_task_unnumbered")),
     30: _Products(columns=(("fleet_agent", "branch", "TEXT"),)),
+    31: _Products(columns=(("fleet_agent", "board", "TEXT"),)),
 }
 
 _PROJECT_COLUMNS = (
@@ -1138,7 +1168,7 @@ _EVENT_COLUMNS = "seq, id, project_id, session_id, kind, text, task_id, to_role,
 _FLEET_AGENT_COLUMNS = (
     "id, project_id, label, role, binary, tmux_socket, pane_id, session_id, cwd, worktree, "
     "task_id, spawned_by, created_at, ended_at, exit_status, account_slot, launch_spec, "
-    "socket_path, boot_id, server_started_at, branch"
+    "socket_path, boot_id, server_started_at, branch, board"
 )
 _CLAUDE_ACCOUNT_COLUMNS = "slot, config_dir, alias, position, is_default, disabled, created_at"
 
@@ -1445,6 +1475,8 @@ def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
         boot_id=row["boot_id"],
         server_started_at=_maybe_dt(row["server_started_at"]),
         branch=row["branch"],
+        # NULL only on a row a build from before v32 wrote: its project's, as it spawned it.
+        board=row["board"] or row["project_id"],
     )
 
 
@@ -3173,7 +3205,7 @@ class SqliteStore:
         """
         self._conn.execute(
             f"INSERT INTO fleet_agent ({_FLEET_AGENT_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "pane_id = excluded.pane_id, session_id = excluded.session_id, "
             "cwd = excluded.cwd, worktree = excluded.worktree, task_id = excluded.task_id, "
@@ -3203,6 +3235,7 @@ class SqliteStore:
                 agent.boot_id,
                 agent.server_started_at.isoformat() if agent.server_started_at else None,
                 agent.branch,
+                agent.board if agent.board is not None else agent.project_id,
             ),
         )
         self._conn.commit()

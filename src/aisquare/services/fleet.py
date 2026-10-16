@@ -70,7 +70,7 @@ from aisquare.core.tmux import (
     WindowInfo,
 )
 from aisquare.core.version import __version__
-from aisquare.core.workspace import active_project, project_id_for
+from aisquare.core.workspace import active_project
 from aisquare.models import (
     CLOSED_STATUSES,
     FleetAgent,
@@ -2295,38 +2295,59 @@ def _require_role(role: str) -> None:
         )
 
 
-def _board_for(project_id: str) -> str:
-    """The board an agent this process spawns into project ``project_id`` reads: the hub's
-    when this process honours one, as its window is given (:func:`orchestrator.window_team_hub`),
-    else the project's own.
+def _board_for(project: ProjectInfo) -> str:
+    """The board an agent this process spawns into ``project`` reads: the one its window's
+    ``launch`` and hooks resolve in the project's root (:func:`orchestrator.team_project`),
+    under the hub the window is given (:func:`orchestrator.window_team_hub`). That is the
+    hub's when this process honours one, else that of the checkout the root belongs to, so
+    a project rooted in a sub-folder of its repository, or at a linked worktree, reads its
+    principal checkout's board (review of #259, round 25, 3/10).
 
-    A task is the board's (docs/fleet.md, "Under a hub: one board, many fleet projects").
-    Looked up on the row's project, the task ``fleet spawn --task`` names was refused under a
-    hub for every task the manager had added, as ``task add`` puts each on the hub's board,
-    and ``--task 12`` read another board's #12 (review of #259, round 24, 2/6).
+    Asked once, at spawn, and recorded on the row (``FleetAgent.board``); every later
+    question of the row's board asks the row (:func:`_board_of_row`).
     """
-    hub = orchestrator.team_hub()
-    return project_id_for(hub) if hub is not None else project_id
+    return orchestrator.team_project(project.root).id
 
 
-def _board_of_row(agent: FleetAgent, session: TeamSession | None) -> str:
-    """The board ``agent``'s sessions read: that of ``session``, the one bound to the row,
-    else the one a spawn from here gives it (:func:`_board_for`).
+def _board_of_row(agent: FleetAgent) -> str:
+    """The board ``agent``'s sessions read, as its spawn recorded it (``FleetAgent.board``).
 
-    The fleet's own feed lines are the board's (docs/fleet.md, "Under a hub: one board, many
-    fleet projects"): ``agent_exited``, ``switched`` and ``restarted`` are for the manager,
-    whose Stop and prompt deltas read its session's board. Written to the row's project,
-    under a hub they went to a board nobody reads, and a manager was never told that its
-    coders exited, switched or restarted (review of #259, round 24, 3/6). The entries a
-    replacement's hand-off prompt quotes are read there too: on the row's project they were
-    none.
+    docs/fleet.md, "Under a hub: one board, many fleet projects": a task, the fleet's own
+    feed lines (``agent_exited``, ``switched``, ``restarted``), the entries a hand-off prompt
+    quotes, the ``fleet-paused`` signal and the exits Remote reads are the board's. Rounds 21
+    to 24 of the review of #259 worked that board out again at each call site, from the
+    process's ``AISQUARE_TEAM_HUB``, the bound session, the cwd or Remote's own
+    environment, and where two disagreed, a switch was refused its own task, an exit went to
+    a board its manager does not read, and a pause to one it does not ask (round 25, 10/10).
+    The row says, whoever asks and from wherever.
     """
-    return session.project_id if session is not None else _board_for(agent.project_id)
+    return agent.board or agent.project_id
+
+
+def _board_and_hub(store: ContextStore, project: ProjectInfo, board: str | None) -> tuple[str, str]:
+    """The board an agent spawned into ``project`` reads, and the ``AISQUARE_TEAM_HUB`` its
+    window is given so that its ``launch`` and hooks resolve that board.
+
+    ``board`` is a replacement's: the board the row it replaces recorded, kept, with the hub
+    that gives it, blank when the project's own checkout resolves to it, else the board's
+    root. A ``restart`` or ``switch`` from ``asq``, the phone or a shell that does not
+    export the hub the agent was spawned under asked for the task on the caller's board and
+    refused it, and the replacement's window took the caller's hub, moving the agent off the
+    board its manager reads (review of #259, round 25, 1/10). A new agent, or a board whose
+    root the store no longer has, reads the board this process gives it (:func:`_board_for`).
+    """
+    if board is not None:
+        if board == orchestrator.directory_project(project.root).id:
+            return board, ""
+        known = store.get_project(board)
+        if known is not None:
+            return board, str(known.root)
+    return _board_for(project), orchestrator.window_team_hub()
 
 
 def _task_for(store: ContextStore, board_id: str, task_id: str | None) -> TeamTask | None:
     """The board task an agent is spawned for — on the board it will read
-    (:func:`_board_for`), or refused."""
+    (:func:`_board_and_hub`, :func:`_board_of_row`), or refused."""
     if task_id is None:
         return None
     try:
@@ -2411,6 +2432,7 @@ def spawn(
     bin_flag: bool = True,
     own_worktree: Path | None = None,
     own_branch: str | None = None,
+    board: str | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -2433,7 +2455,10 @@ def spawn(
     is taken as it stands — branch, uncommitted work and all — when it is the
     tree this spawn lands in (:func:`_worktree_for`), never put on the
     branch today's task and codename would name; gone, it is made again on
-    ``own_branch``, the branch the replaced row recorded it on.
+    ``own_branch``, the branch the replaced row recorded it on. ``board`` is such a
+    replacement's too: the board the replaced row recorded, which the replacement reads and
+    records in turn, its window given the hub that resolves it (:func:`_board_and_hub`);
+    the task is looked up there. A new agent reads the board this process gives it.
 
     Every ``None`` means "the role's default" (config, then built-in). Refuses
     past ``max_agents_per_project``, a second manager, a worktree in a non-git
@@ -2450,8 +2475,8 @@ def spawn(
     carries the row id into the window; ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0``
     keeps Claude's native teams out of the fleet unless configured otherwise (§7.6);
     ``AISQUARE_TEAM_HUB`` is set to this process's hub, or blank
-    (:func:`orchestrator.window_team_hub`), and ``AISQUARE_EXPLAINABILITY_TARGET``
-    to this process's value, or blank.
+    (:func:`orchestrator.window_team_hub`), a replacement's to the hub of the board it
+    keeps, and ``AISQUARE_EXPLAINABILITY_TARGET`` to this process's value, or blank.
     Every variable set here is THIS window's: none reaches the tmux session's
     environment, so a later spawn sets its own account and opt-out rather than
     inheriting the first spawn's, and a window the operator opens by hand keeps
@@ -2577,7 +2602,8 @@ def spawn(
                 f"(max_agents_per_project = {config.max_agents_per_project}) — stop one, "
                 "or raise the limit in [fleet]"
             )
-        task = _task_for(store, _board_for(project.id), task_id)
+        board, hub = _board_and_hub(store, project, board)
+        task = _task_for(store, board, task_id)
         resolved_task_id = task.id if task is not None else None
         picked = next_label(project, role, wanted=label, task_id=resolved_task_id, store=store)
     if label is not None and picked != label:
@@ -2692,7 +2718,8 @@ def spawn(
     # `launch` joins the project the spawner — and the UI's Explainability tab
     # beside it — resolves, and takes that project's key, not the one the tmux
     # server's frozen environment would name (review of #170, D1b round 2, B1).
-    env[orchestrator.TEAM_HUB_ENV_VAR] = orchestrator.window_team_hub()
+    # A replacement's is the hub of the board its row recorded (`_board_and_hub`).
+    env[orchestrator.TEAM_HUB_ENV_VAR] = hub
     # The deployment override too, for the same reason: the tab resolves the
     # key's deployment, and shows the target, with THIS process's variable,
     # and the window's `launch` has to trace where the tab says. Blank for
@@ -2854,6 +2881,7 @@ def spawn(
             boot_id=tmux_core.boot_id(),
             server_started_at=server_started,
             branch=_spawned_on(cwd) if use_worktree else None,
+            board=board,
             created_at=_now(),
         )
         stored = _record(
@@ -5988,8 +6016,8 @@ def switch(
         # agent stopped and nothing started: a row spawned before rule 3 still names
         # its closed task until its next briefing, and switching one always lost it
         # (review of #203, final round, FLEET-3).
-        task = _task_for(store, _board_for(project.id), agent.task_id)
-        board = _board_of_row(agent, session)
+        board = _board_of_row(agent)
+        task = _task_for(store, board, agent.task_id)
         # The session's own newest entries (oldest first), not the project's last
         # 60 filtered down: on a busy board those all belonged to other agents
         # and the prompt lost its "last board entries" (review of #205, third round).
@@ -6222,6 +6250,7 @@ def _respawn(
         bin_flag=False,
         own_worktree=agent.cwd if agent.worktree else None,
         own_branch=agent.branch,
+        board=_board_of_row(agent),
     )
     if agent.launch_spec is not None:
         # Said once the replacement is up, for what it really took from the row: a
@@ -6405,10 +6434,10 @@ def restart(
             raise _in_hand_over(project, "restart", label)
         try:
             # `spawn`'s refusal for the task (done, dropped, gone from the board).
-            task = _task_for(store, _board_for(project.id), agent.task_id)
+            board = _board_of_row(agent)
+            task = _task_for(store, board, agent.task_id)
         except FleetError as exc:
             raise FleetError(f"cannot restart {label!r}: {exc}") from exc
-        board = _board_of_row(agent, session)
         # The session's own newest entries, as `switch` reads them: the project's
         # last 60 filtered down lost them on a busy board (review of #205, third round).
         recent = (
@@ -6939,12 +6968,13 @@ def _emit_exit(store: ContextStore, agent: FleetAgent, *, why: str | None = None
     ``why`` after the status when the status does not say it all."""
     status = "?" if agent.exit_status is None else str(agent.exit_status)
     # The row is already ended; the event is the courtesy, not the record. On the board the
-    # manager reads (`_board_of_row`), which under a hub is not the row's project's.
+    # row recorded (`_board_of_row`), which its manager reads: under a hub not the row's
+    # project's, and never the board of whichever process ends the row, a session or none
+    # (review of #259, round 25, 4/10).
     with contextlib.suppress(Exception):
-        session = store.get_session(agent.session_id) if agent.session_id else None
         _team()._emit(
             store,
-            _board_of_row(agent, session),
+            _board_of_row(agent),
             "agent_exited",
             f"{agent.label} exited ({status})" + (f": {why}" if why else ""),
             session_id=agent.session_id,

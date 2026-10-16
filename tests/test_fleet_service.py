@@ -5050,7 +5050,83 @@ def _case_limit_nudge(w: _Hubbed) -> str | None:
     return woken
 
 
+def _without_the_hub(w: _Hubbed) -> None:
+    """Run on as a caller that does not export the hub: ``asq``, the phone's Remote or a
+    plain shell (review of #259, round 25)."""
+    w.monkeypatch.delenv("AISQUARE_TEAM_HUB")
+
+
+def _for_its_task(w: _Hubbed) -> FleetAgent:
+    """The coder's row, now naming the task it holds, as a ``spawn --task`` row does."""
+    with store_session() as store:
+        return store.upsert_fleet_agent(w.coder.model_copy(update={"task_id": w.task.id}))
+
+
+def _window_board(w: _Hubbed, row: FleetAgent) -> str | None:
+    """The board the last window's ``launch`` and hooks resolve, under the hub it was given,
+    when that is the board ``row`` recorded; else ``None``."""
+    env, cwd = w.tmux.spawned[-1]["env"], w.tmux.spawned[-1]["cwd"]
+    assert isinstance(env, dict) and isinstance(cwd, (str, Path))
+    with pytest.MonkeyPatch.context() as window:
+        window.setenv("AISQUARE_TEAM_HUB", env["AISQUARE_TEAM_HUB"])
+        resolved = team_project(Path(cwd)).id
+    return resolved if resolved == row.board else None
+
+
+def _case_spawn_records(w: _Hubbed) -> str | None:
+    return _row(w.coder.id).board
+
+
+def _case_restart_without_the_hub(w: _Hubbed) -> str | None:
+    row = _for_its_task(w)
+    w.tmux.die(row.pane_id, 0)
+    _without_the_hub(w)
+    started = fleet_service.restart(w.fleet, row.label).started
+    assert started.task_id == w.task.id
+    return _window_board(w, started)
+
+
+def _case_switch_without_the_hub(w: _Hubbed) -> str | None:
+    row = _for_its_task(w)
+    _two_slots_with_usage(w.monkeypatch, work=95, personal=10)
+    _without_the_hub(w)
+    started = fleet_service.switch(w.fleet, row.label, to="2").started
+    assert started.task_id == w.task.id
+    return _window_board(w, started)
+
+
+def _case_exited_without_a_session_or_the_hub(w: _Hubbed) -> str | None:
+    row = fleet_service.spawn(w.fleet, "coder", worktree=False).agent  # its hook never ran
+    _without_the_hub(w)
+    w.tmux.die(row.pane_id, 1)
+    fleet_service.reap()
+    return _fed_to(w, "agent_exited")
+
+
+def _spawned_without_the_hub(w: _Hubbed) -> FleetAgent:
+    """A coder spawned by a caller that exported no hub, the hub set again after."""
+    _without_the_hub(w)
+    row = fleet_service.spawn(w.fleet, "coder", worktree=False).agent
+    w.monkeypatch.setenv("AISQUARE_TEAM_HUB", str(w.hub.root))
+    return row
+
+
+def _case_restart_under_the_hub_of_a_row_without(w: _Hubbed) -> str | None:
+    row = _spawned_without_the_hub(w)
+    w.tmux.die(row.pane_id, 0)
+    return _window_board(w, fleet_service.restart(w.fleet, row.label).started)
+
+
+def _case_exited_under_the_hub_of_a_row_without(w: _Hubbed) -> str | None:
+    row = _spawned_without_the_hub(w)
+    w.tmux.die(row.pane_id, 1)
+    fleet_service.reap()
+    return _fed_to(w, "agent_exited")
+
+
 #: Each case: which of the rule's two places it goes to, what it is, and how to run it.
+#: A board case is about an agent spawned under the hub; the board is the one its spawn
+#: recorded, whoever asks, with the hub or without it.
 _HUB_RULE_CASES: list[tuple[str, str, Any]] = [
     ("board", "task add", _case_task_add),
     ("board", "a question on the feed", _case_note),
@@ -5064,6 +5140,20 @@ _HUB_RULE_CASES: list[tuple[str, str, Any]] = [
     ("board", "restarted", _case_restarted),
     ("board", "switched", _case_switched),
     ("board", "the entries a hand-off prompt quotes", _case_hand_off_entries),
+    ("board", "the board a spawn records", _case_spawn_records),
+    ("board", "a restart from a caller without the hub", _case_restart_without_the_hub),
+    ("board", "a switch from a caller without the hub", _case_switch_without_the_hub),
+    ("board", "agent_exited, no session, the hub unset", _case_exited_without_a_session_or_the_hub),
+    (
+        "fleet",
+        "a restart under the hub of a row without",
+        _case_restart_under_the_hub_of_a_row_without,
+    ),
+    (
+        "fleet",
+        "agent_exited under the hub of a row without",
+        _case_exited_under_the_hub_of_a_row_without,
+    ),
     ("fleet", "the row a /clear's next id is adopted onto", _case_clear_adopts),
     ("fleet", "the cycle's --project", _case_cycle_project),
     ("fleet", "a limited chip's fleet switch", _case_limited_chip),
@@ -5226,6 +5316,59 @@ def test_under_a_hub_a_manager_is_told_its_coder_exited_and_was_restarted(
     assert hubbed.woken and set(hubbed.woken) == {hubbed.fleet.id}, "its own manager"
     with store_session() as store:
         assert not store.recent_events(hubbed.fleet.id), "nothing on a board nobody reads"
+
+
+@pytest.mark.parametrize("nested", ["a sub-folder", "a linked worktree"])
+def test_a_project_rooted_below_its_checkout_spawns_for_a_task_on_the_checkouts_board(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    nested: str,
+) -> None:
+    """Review of #259, round 25, 3/10: a project rooted in a sub-folder of its repository,
+    or at a linked worktree, has its manager, its sessions and every ``task add`` on its
+    principal checkout's board, as ``team_project`` maps it. ``fleet spawn --task`` looked
+    the task up on the project's own id ("no task #1 on this board"; "belongs to another
+    project's board" by id). The board is the one the agent's window resolves, recorded."""
+    if nested == "a sub-folder":
+        root = project.root / "api"
+        root.mkdir()
+    else:
+        root = tmp_path / "wt"
+        _git("worktree", "add", "-q", "-b", "wt", str(root), cwd=project.root)
+    below = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
+    with store_session() as store:
+        store.onboard_project(below)
+    task, _ = team_service.add_task("the checkout's task", role="coder", cwd=root)
+    assert task.project_id == project.id != below.id, "the checkout's board, added"
+
+    row = fleet_service.spawn(below, "coder", task_id=f"#{task.number}", worktree=False).agent
+
+    assert (row.project_id, row.task_id, row.board) == (below.id, task.id, task.project_id)
+    tmux.die(row.pane_id, 0)
+    assert fleet_service.restart(below, row.label).started.task_id == task.id
+
+
+def test_a_fleet_row_from_before_v32_reads_its_sessions_board(hubbed: _Hubbed) -> None:
+    """v32's backfill: a row recorded before the board was reads the board of the session
+    bound to it, where its hooks registered, else its own project's."""
+    hubbed.monkeypatch.delenv("AISQUARE_TEAM_HUB")
+    unbound = fleet_service.spawn(hubbed.fleet, "coder", worktree=False).agent
+    raw = sqlite3.connect(str(paths.db_path()))
+    try:
+        raw.executescript(
+            "UPDATE fleet_agent SET board = NULL; "  # what a v31 store's rows hold
+            "ALTER TABLE fleet_agent DROP COLUMN board; PRAGMA user_version = 31;"
+        )
+    finally:
+        raw.close()
+
+    core_store.open_store().close()
+
+    assert _row(hubbed.coder.id).board == hubbed.hub.id, "its session's"
+    assert _row(unbound.id).board == hubbed.fleet.id, "no session registered: its project's"
 
 
 @pytest.mark.parametrize("writer", ["the coder's task done", "the manager's deferred Stop"])

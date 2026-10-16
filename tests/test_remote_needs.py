@@ -4432,7 +4432,7 @@ def test_a_coder_whose_hand_over_never_started_its_replacement_is_reported_under
             FleetAgent(
                 id="agt_c", project_id=alpha.id, label="coder-1", role="coder", pane_id="%1",
                 session_id="ses_c", cwd=alpha.root, created_at=hour_ago, ended_at=stopped,
-                exit_status=0,
+                exit_status=0, board=board.id,
             )
         )  # fmt: skip
         fleet_service._emit_exit(store, row, why=fleet_service.HANDOVER_FAILED)
@@ -4473,8 +4473,8 @@ def _manager_of(where: str, label: str = "manager", **kw: Any) -> _Seat:
 
 
 def _seat_up(store: Any, seat: _Seat, project: ProjectInfo, board: ProjectInfo) -> None:
-    """``seat``'s session on ``board`` and its row in ``project``, as of an hour ago, and what
-    it ended with and asked ten minutes ago."""
+    """``seat``'s session on ``board`` and its row in ``project``, spawned to read ``board``,
+    as of an hour ago, and what it ended with and asked ten minutes ago."""
     from aisquare.services import team as team_service
 
     now = datetime.now(UTC)
@@ -4503,7 +4503,7 @@ def _seat_up(store: Any, seat: _Seat, project: ProjectInfo, board: ProjectInfo) 
             id=f"agt_{seat.where}_{seat.label}", project_id=project.id, label=seat.label,
             role=seat.role, pane_id=f"%{seat.where}-{seat.label}", session_id=session,
             cwd=project.root, created_at=now - timedelta(hours=1), task_id="tsk_open",
-            ended_at=stopped if seat.end else None, exit_status=status,
+            ended_at=stopped if seat.end else None, exit_status=status, board=board.id,
         )
     )  # fmt: skip
     if seat.end and seat.end != "lost":

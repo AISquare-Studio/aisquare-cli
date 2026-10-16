@@ -79,7 +79,7 @@ all of them, and the fleet cleans up the worktrees it made.**
   A project you use that only a hook ever registered is one of them: add it with
   `aisquare project onboard <path>`, and its prompts and boards are there again.
   `aisquare config set projects.capture true` keeps 0.8.0's behaviour instead.
-- The store migrates to schema v31 on first open, from 0.8.0's v25, in six
+- The store migrates to schema v32 on first open, from 0.8.0's v25, in seven
   steps:
   - v26: `fleet_agent.server_started_at`, when each agent's tmux server
     started, as the server said at spawn. It is the identity of the server the
@@ -102,8 +102,14 @@ all of them, and the fleet cleans up the worktrees it made.**
     switch makes a gone tree again on it. An agent started before 0.8.1
     recorded none, so a restart of one whose tree is gone is refused, saying
     so. `fleet ls --json` carries the field.
+  - v32: `fleet_agent.board`, the board each agent's sessions read, as its
+    spawn gave it: the hub's under `AISQUARE_TEAM_HUB`, else its project's
+    checkout's. A restart, a switch, an exit, a pause and Remote's needs feed
+    read it, whoever runs them (see Fixed). An agent started before it reads
+    the board its session registered on, else its own project's. `fleet ls
+    --json` carries the field.
 
-  0.8.0 opens a v31 store as it is. A task it adds gets no number there; the
+  0.8.0 opens a v32 store as it is. A task it adds gets no number there; the
   next open by 0.8.1 numbers it after the last number on its board, in the
   order such tasks were added.
 - Remote keeps its state in `~/.aisquare`: `remote.json` (owner-only),
@@ -560,6 +566,20 @@ all of them, and the fleet cleans up the worktrees it made.**
     stores its login under another Keychain item than the one aisquare reads.
     An absolute path with no trailing slash, or no `CLAUDE_CONFIG_DIR`, is not
     affected.
+- Under `AISQUARE_TEAM_HUB`, an agent keeps the board it was spawned under,
+  whoever acts on it. Each agent's board is now recorded when it is spawned
+  (`fleet_agent.board`, schema v32), and is no longer worked out again from the
+  environment of whoever asks:
+  - `fleet restart` and `fleet switch` from `asq`, the phone or a shell
+    without the hub no longer refuse an agent's task with "belongs to another
+    project's board". The replacement reads the same board as the agent it
+    replaces, and its window gets that board's hub, not the caller's.
+  - An agent's exit is announced on the board its manager reads, even when it
+    ended before its session registered and was reaped by a process with
+    another hub, or none.
+  - `fleet spawn --task` in a project rooted in a sub-folder of its
+    repository, or at a linked worktree, finds the task on the checkout's
+    board, where that project's manager and sessions add tasks.
 
 ### Security
 - **One choke point.** Every request and every socket handshake passes the

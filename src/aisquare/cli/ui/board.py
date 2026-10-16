@@ -311,7 +311,7 @@ class BoardPanel(Vertical):
     The panel outlives every tab switch, so the feed is the one structure here
     that only grows: ``_events_by_id``, ``_feed_order`` and the OptionList all
     gain a row per event for the life of the app. 2000 lines is ~5x the first
-    fetch (``board_data(events=400)``) — deep enough that scrolling back has
+    fetch (``board_read(events=400)``) — deep enough that scrolling back has
     somewhere to go, bounded enough that a week-long session cannot swell.
     """
 
@@ -418,7 +418,7 @@ class BoardPanel(Vertical):
     def refresh_data(self) -> None:
         """Re-read the board; keep the last frame when the store is briefly busy."""
         try:
-            project, sessions, tasks, events = team_service.board_data(
+            project, sessions, tasks, events, switches = team_service.board_read(
                 events=400 if self._last_seq == 0 else 200,
                 since_seq=self._last_seq or None,
                 project=self.project,
@@ -435,7 +435,7 @@ class BoardPanel(Vertical):
         self._statuses = {t.id: t.status for t in tasks}
         self._all_tasks = tasks
         self._refresh_labels(sessions)
-        self._switches = team_service.fleet_switches(sessions)
+        self._switches = switches
         self.query_one("#sessions", Static).update(
             watch._session_lines(sessions, self._labels, switches=self._switches)
         )

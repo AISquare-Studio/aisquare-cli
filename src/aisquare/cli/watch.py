@@ -458,7 +458,7 @@ def _run_tui(interval: float) -> None:
 def board_frame(height: int, width: int) -> Text:
     """One fallback frame: header, sessions, open tasks, then as many recent
     events as the remaining terminal rows can hold."""
-    project, sessions, tasks, events = team_service.board_data(events=200)
+    project, sessions, tasks, events, switches = team_service.board_read(events=200)
     text = Text(no_wrap=True, overflow="ellipsis")
     text.append(
         f"aisquare board — {project.root.name or project.id} — {datetime.now():%H:%M:%S}\n",
@@ -467,7 +467,7 @@ def board_frame(height: int, width: int) -> Text:
     live_sessions = [s for s in sessions if s.ended_at is None]
     text.append("sessions\n", style="bold cyan")
     if live_sessions:
-        text.append(_session_lines(sessions, switches=team_service.fleet_switches(sessions)))
+        text.append(_session_lines(sessions, switches=switches))
     else:
         text.append("  (none live)\n", style="dim")
     statuses = {t.id: t.status for t in tasks}

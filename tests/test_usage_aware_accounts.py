@@ -1112,8 +1112,8 @@ def test_under_a_hub_the_limit_is_handed_over_from_the_agents_own_row(
 
     with store_session() as store:
         parked = store.get_session("sess-fleet")
-    assert parked is not None and parked.state == "limited"
-    assert team_service.fleet_switches([parked]) == {"sess-fleet": switch}
+        assert parked is not None and parked.state == "limited"
+        assert team_service.fleet_switches(store, [parked]) == {"sess-fleet": switch}
     [doctor] = diagnostics._claude_account_limit_checks()
     assert switch in (doctor.fix or ""), doctor
     assert session.project_id == hub.id  # the premise: the board is the hub's

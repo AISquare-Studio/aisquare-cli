@@ -653,21 +653,69 @@ def board_data(
     """
     _require_enabled()
     with store_session() as store:
-        resolved = project if project is not None else _project(store, cwd)
-        if since_seq is None:
-            fetched = store.recent_events(resolved.id, limit=events)
-        else:
-            fetched = store.events_since(resolved.id, since_seq, limit=events)
-        if glance:
-            named = sorted({event.session_id for event in fetched if event.session_id})
-            sessions = store.team_sessions_seen_since(resolved.id, None, ids=named)
-            return resolved, sessions, [], fetched
-        return (
-            resolved,
-            store.team_sessions(resolved.id),
-            store.team_tasks(resolved.id),
-            fetched,
+        return _read_board(
+            store, cwd, events=events, since_seq=since_seq, project=project, glance=glance
         )
+
+
+class BoardRead(NamedTuple):
+    """What a painted board shows: :func:`board_data`'s four, and the ``fleet switch`` of
+    each limited session's chip (:func:`fleet_switches`)."""
+
+    project: ProjectInfo
+    sessions: list[TeamSession]
+    tasks: list[TeamTask]
+    events: list[TeamEvent]
+    switches: dict[str, str]
+
+
+def board_read(
+    cwd: Path | None = None,
+    *,
+    events: int = _BOARD_EVENTS,
+    since_seq: int | None = None,
+    project: ProjectInfo | None = None,
+) -> BoardRead:
+    """:func:`board_data` for a board that paints its sessions, with their chips' switches,
+    in its one store session.
+
+    The board panel and ``aisquare board``'s frame asked :func:`fleet_switches` for them
+    after :func:`board_data` had closed its session, and that opened another: a new
+    connection, the migration check and the presence pass, on the event loop, at every 2 s
+    tick of every visible board for as long as a session stayed limited, which is hours
+    (review of #259, round 23).
+    """
+    _require_enabled()
+    with store_session() as store:
+        read = _read_board(store, cwd, events=events, since_seq=since_seq, project=project)
+        return BoardRead(*read, fleet_switches(store, read[1]))
+
+
+def _read_board(
+    store: ContextStore,
+    cwd: Path | None,
+    *,
+    events: int,
+    since_seq: int | None,
+    project: ProjectInfo | None,
+    glance: bool = False,
+) -> tuple[ProjectInfo, list[TeamSession], list[TeamTask], list[TeamEvent]]:
+    """The body of :func:`board_data`, through the caller's store."""
+    resolved = project if project is not None else _project(store, cwd)
+    if since_seq is None:
+        fetched = store.recent_events(resolved.id, limit=events)
+    else:
+        fetched = store.events_since(resolved.id, since_seq, limit=events)
+    if glance:
+        named = sorted({event.session_id for event in fetched if event.session_id})
+        sessions = store.team_sessions_seen_since(resolved.id, None, ids=named)
+        return resolved, sessions, [], fetched
+    return (
+        resolved,
+        store.team_sessions(resolved.id),
+        store.team_tasks(resolved.id),
+        fetched,
+    )
 
 
 def board_scope_note(cwd: Path | None = None) -> str | None:
@@ -2042,7 +2090,7 @@ def hook_stop_failure(
     return TurnFailure(refreshed, kind, notice, already_limited=already_limited)
 
 
-def fleet_switches(sessions: list[TeamSession]) -> dict[str, str]:
+def fleet_switches(store: ContextStore, sessions: list[TeamSession]) -> dict[str, str]:
     """The ``fleet switch`` that moves each ``limited`` session's agent, by session id: the
     project and label of its own live fleet row, in whichever project that is.
 
@@ -2051,8 +2099,9 @@ def fleet_switches(sessions: list[TeamSession]) -> dict[str, str]:
     <hub> <label>`` answered "no live agent" (review of #259, round 22). The row is the one
     the store records against the session (``fleet_agent_for_session``), the lookup the
     ``limited`` feed line and the hand-over make too. A session with no live row, or whose
-    row's project is gone, has none. The store is opened only when a live session is
-    limited, and a read that fails costs the commands, never the board — logged, as
+    row's project is gone, has none. Read through the board's own store session
+    (:func:`board_read`), and only when a live session is limited. A read that fails
+    costs the commands, never the board — logged, as
     :func:`_cycle_project` does: swallowed silently, a store or schema regression took the
     switch off every limited chip with nothing anywhere saying so (round 23).
     """
@@ -2061,14 +2110,11 @@ def fleet_switches(sessions: list[TeamSession]) -> dict[str, str]:
         return {}
     switches: dict[str, str] = {}
     try:
-        with store_session() as store:
-            for session_id in limited:
-                agent = store.fleet_agent_for_session(session_id)
-                project = store.get_project(agent.project_id) if agent is not None else None
-                if agent is not None and project is not None:
-                    switches[session_id] = project_service.fleet_command(
-                        "switch", project, agent.label
-                    )
+        for session_id in limited:
+            agent = store.fleet_agent_for_session(session_id)
+            project = store.get_project(agent.project_id) if agent is not None else None
+            if agent is not None and project is not None:
+                switches[session_id] = project_service.fleet_command("switch", project, agent.label)
     except Exception as exc:
         _log.warning(
             "the fleet rows of %d limited session(s) could not be read, so their chips name "

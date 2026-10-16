@@ -780,13 +780,13 @@ def test_a_hidden_board_tab_stops_polling_and_catches_up_when_shown(
     app, N-1 of them invisible.
     """
     reads: list[float] = []
-    real = team_service.board_data
+    real = team_service.board_read
 
     def counting(*args: Any, **kwargs: Any) -> Any:
         reads.append(1.0)
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(team_service, "board_data", counting)
+    monkeypatch.setattr(team_service, "board_read", counting)
 
     async def scenario(pilot: Pilot[None], host: Host) -> tuple[int, int, int, bool]:
         view = host.query_one(ProjectView)
@@ -941,7 +941,11 @@ def test_the_board_names_its_accounts_from_a_worker_never_from_the_ui_thread(
         )
         for account in (two, three)
     ]
-    monkeypatch.setattr(team_service, "board_data", lambda **kwargs: (project, sessions, [], []))
+    monkeypatch.setattr(
+        team_service,
+        "board_read",
+        lambda **kwargs: team_service.BoardRead(project, sessions, [], [], {}),
+    )
     asked: list[str] = []
 
     def slot_labels(store: Any = None) -> dict[int, str]:
@@ -989,10 +993,10 @@ def test_the_feed_keeps_its_last_lines_and_forgets_the_rest(
     """
     events = [_event(project, index) for index in range(12)]
 
-    def board_data(*args: Any, **kwargs: Any) -> Any:
-        return (project, [], [], list(events))
+    def board_read(*args: Any, **kwargs: Any) -> Any:
+        return team_service.BoardRead(project, [], [], list(events), {})
 
-    monkeypatch.setattr(team_service, "board_data", board_data)
+    monkeypatch.setattr(team_service, "board_read", board_read)
 
     async def scenario(pilot: Pilot[None], host: Host) -> tuple[int, list[str], str]:
         panel = host.query_one("#board-panel", BoardPanel)

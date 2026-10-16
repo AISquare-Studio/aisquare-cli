@@ -4601,6 +4601,39 @@ def test_the_boards_limited_chip_names_the_agents_own_project_under_a_hub(
     assert team_project(hub).id not in frame
 
 
+def test_the_limited_chips_switch_is_read_in_the_boards_own_store_session(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 23, 9/10: the board panel and ``aisquare board``'s frame asked
+    ``fleet_switches`` for the limited chips after ``board_data`` had closed its store
+    session, and it opened a second one: a connection, the migration check and the presence
+    pass, at every 2 s tick of every visible board for as long as a session stayed limited.
+    The frame is read in one, the chip's switch included."""
+    from aisquare.cli.watch import board_frame
+
+    monkeypatch.chdir(project.root)  # the frame reads the board of where it runs
+    agent, session_id = _spawned(project, "coder", None, tmux, monkeypatch)
+    team_service.hook_session_start(session_id, project.root, "startup")
+    with store_session() as store:
+        store.mark_limited(session_id, None)
+        stored = store.get_project(project.id)
+    assert stored is not None and stored.codename
+    opened: list[str] = []
+
+    @contextmanager
+    def counted(*args: Any, **kwargs: Any) -> Iterator[ContextStore]:
+        opened.append("store")
+        with store_session(*args, **kwargs) as store:
+            yield store
+
+    monkeypatch.setattr(team_service, "store_session", counted)
+
+    frame = board_frame(height=40, width=200).plain
+
+    assert f"`aisquare fleet switch --project {stored.codename} {agent.label}`" in frame
+    assert opened == ["store"]
+
+
 def test_a_limited_chips_switch_that_cannot_be_read_is_logged_not_swallowed(
     project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -4623,8 +4656,11 @@ def test_a_limited_chips_switch_that_cannot_be_read_is_logged_not_swallowed(
 
     monkeypatch.setattr(SqliteStore, "fleet_agent_for_session", changed)
 
-    with caplog.at_level(logging.WARNING, logger="aisquare.services.team"):
-        assert team_service.fleet_switches([limited]) == {}
+    with (
+        caplog.at_level(logging.WARNING, logger="aisquare.services.team"),
+        store_session() as store,
+    ):
+        assert team_service.fleet_switches(store, [limited]) == {}
 
     [record] = [r for r in caplog.records if r.name == "aisquare.services.team"]
     assert "could not be read" in record.getMessage()

@@ -1350,6 +1350,8 @@ class ContextStore(Protocol):
         *,
         kinds: Sequence[str],
         human_kinds: Sequence[str] = (),
+        session_kinds: Sequence[str] = (),
+        sessions: Sequence[str] = (),
     ) -> list[TeamEvent]: ...
     def newest_session_event(
         self, project_id: str, session_id: str, kind: str, *, since: datetime
@@ -3155,9 +3157,12 @@ class SqliteStore:
         *,
         kinds: Sequence[str],
         human_kinds: Sequence[str] = (),
+        session_kinds: Sequence[str] = (),
+        sessions: Sequence[str] = (),
     ) -> list[TeamEvent]:
-        """The project's events of ``kinds`` written at or after ``since``, and those of
-        ``human_kinds`` the human wrote (no session), oldest first.
+        """The project's events of ``kinds`` written at or after ``since``, those of
+        ``human_kinds`` the human wrote (no session), and those of ``session_kinds`` that one
+        of ``sessions`` wrote, oldest first.
 
         For a reader that runs every few seconds over the last day of a board (``remote``'s
         needs scan), however busy that day was: the ``(project_id, created_at)`` index
@@ -3176,6 +3181,12 @@ class SqliteStore:
         if human_kinds:
             wanted.append(f"(session_id IS NULL AND kind IN ({', '.join('?' * len(human_kinds))}))")
             params += human_kinds
+        if session_kinds and sessions:
+            wanted.append(
+                f"(session_id IN ({', '.join('?' * len(sessions))}) "
+                f"AND kind IN ({', '.join('?' * len(session_kinds))}))"
+            )
+            params += [*sessions, *session_kinds]
         if not wanted:
             return []
         rows = self._conn.execute(

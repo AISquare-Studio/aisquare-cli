@@ -19,7 +19,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -1475,6 +1475,20 @@ def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> Needs
             )
         ]
 
+    def board_posts(pid: str, since: datetime, sessions: Collection[str]) -> list[TeamEvent]:
+        """The store's ``team_events_since`` over the kinds and sessions the live source asks
+        for."""
+        return [
+            event
+            for event in fleet.events
+            if event.created_at >= since
+            and (
+                event.kind in remote_needs._NEEDS_FLEET_KINDS
+                or (event.session_id in sessions and event.kind in remote_needs._NEEDS_ASKED)
+                or (event.session_id is None and event.kind in remote_needs._NEEDS_REPLIED)
+            )
+        ]
+
     def tmux_answers(socket: str, path: Path | None) -> bool:
         server = str(path or socket)
         fleet.probed.append(server)
@@ -1497,6 +1511,7 @@ def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> Needs
         ],
         board_events=board_events,
         board_since=board_since,
+        board_posts=board_posts,
         board_sessions=lambda pid, ids: [
             session for session in fleet.sessions if session.id in ids
         ],
@@ -4581,6 +4596,50 @@ def test_a_question_on_a_board_its_row_recorded_is_answered_there(
     items = scan_needs_you(remote_needs.live_needs_sources(), now=datetime.now(UTC), dismissed=())
 
     assert items == []
+
+
+def test_a_board_its_row_recorded_is_read_for_what_the_scan_takes_of_it_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 28, 8/10: a board a row recorded, which the scan does not read
+    whole, was read whole for the day (``board_since``) and filtered here to its rows' posts,
+    the human's replies and the fleet's kinds: on a board other sessions write, every scan
+    read a day of all their questions, results and decisions. The store is asked for those
+    alone (``board_posts``), and the card is the same."""
+    from aisquare.services import team as team_service
+
+    with store_session() as store:
+        alpha = store.onboard_project(_rooted(tmp_path / "alpha"))
+        hub = _rooted(tmp_path / "hub")
+        store.ensure_project(hub)
+        _seat_up(store, _manager_of("alpha"), alpha, hub)
+        _seat_up(store, _Seat("alpha", "coder-1", asks=True), alpha, alpha)
+        for n in range(5):  # another session's posts on alpha's board, which no row holds
+            team_service._emit(store, alpha.id, "question", f"#{n}?", session_id="ses_by_hand")
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub.root))
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    live = remote_needs.live_needs_sources()
+    days: list[str] = []
+    posts: dict[str, list[str]] = {}
+
+    def day(board: str, since: datetime) -> list[TeamEvent]:
+        days.append(board)
+        return live.board_since(board, since)
+
+    def board_posts(board: str, since: datetime, sessions: Collection[str]) -> list[TeamEvent]:
+        read = live.board_posts(board, since, sessions)
+        posts[board] = [event.text for event in read]
+        return read
+
+    sources = replace(live, board_since=day, board_posts=board_posts)
+    items = scan_needs_you(sources, now=datetime.now(UTC), dismissed=())
+
+    assert [(item.kind, item.project_id, item.agent) for item in items] == [
+        ("board_question", alpha.id, "coder-1")
+    ]
+    assert set(days) == {hub.id}, "alpha's board is not read whole"
+    assert posts == {alpha.id: ["Which branch?"]}
 
 
 def test_a_question_read_on_a_board_another_project_reads_whole_is_one_card(

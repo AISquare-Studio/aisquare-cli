@@ -2215,6 +2215,47 @@ def test_the_events_since_a_time_are_the_kinds_asked_for_from_that_time_on(
     assert store.team_events_since(PROJECT.id, since, kinds=[]) == []
 
 
+def test_the_events_since_a_time_can_be_one_sessions_kinds_alone(store: ContextStore) -> None:
+    """Review of #259, round 28, 8/10: of a board remote's needs scan does not read whole, it
+    takes the posts of its own rows' sessions, the human's replies and the fleet's kinds. It
+    read the board's whole day for them and dropped the rest itself; the store reads only
+    those (``session_kinds`` of ``sessions``)."""
+    from datetime import timedelta
+
+    now = datetime.now(tz=UTC)
+    _board(
+        store,
+        PROJECT.id,
+        ("question", "ses_1", now - timedelta(hours=3)),
+        ("question", "ses_2", now - timedelta(hours=3)),
+        ("note", "ses_1", now - timedelta(hours=2)),
+        ("note", None, now - timedelta(hours=2)),
+        ("agent_exited", "ses_3", now - timedelta(hours=1)),
+        ("result", "ses_1", now),
+    )
+    since = now - timedelta(days=1)
+
+    read = store.team_events_since(
+        PROJECT.id,
+        since,
+        kinds=["agent_exited"],
+        human_kinds=["note"],
+        session_kinds=["question", "result"],
+        sessions=["ses_1"],
+    )
+
+    assert [(e.kind, e.session_id) for e in read] == [
+        ("question", "ses_1"),
+        ("note", None),
+        ("agent_exited", "ses_3"),
+        ("result", "ses_1"),
+    ], "ses_2's question and ses_1's own note are not asked for"
+    no_session = store.team_events_since(
+        PROJECT.id, since, kinds=[], session_kinds=["question"], sessions=[]
+    )
+    assert no_session == []
+
+
 def test_the_events_since_a_time_do_not_take_seq_order_for_stamp_order(
     store: ContextStore,
 ) -> None:

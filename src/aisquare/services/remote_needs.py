@@ -440,6 +440,13 @@ class NeedsSources:
     ended on an API error (``turn_failed``). An item lives for :data:`QUESTION_HORIZON`
     however busy the board is, so it is read by time, not from a window of the newest
     events that 300 notes push it out of."""
+    board_posts: Callable[[str, datetime, Collection[str]], list[TeamEvent]]
+    """Of a board the scan does not read whole, the events written at or after the given time
+    that :func:`_needs_elsewhere` takes: the exits the fleet announces and the turns that
+    failed (:data:`_NEEDS_FLEET_KINDS`), the questions, results and decisions of the given
+    sessions (:data:`_NEEDS_ASKED`), and the human's notes, decisions and results
+    (:data:`_NEEDS_REPLIED`). Asked of the store by kind and session, not read whole and
+    filtered here."""
     board_sessions: Callable[[str, Collection[str]], list[TeamSession]]
     """The project's sessions with the given ids: the authors of the board's open questions."""
     task_status: Callable[[str], str | None]
@@ -2449,7 +2456,7 @@ def _needs_elsewhere(
     day: datetime,
     reads: _NeedsReads,
 ) -> list[tuple[str, list[TeamEvent]]]:
-    """What the scan takes of the day since ``day`` (``board_since``) of each board ``rows``
+    """What the scan takes of the day since ``day`` (``board_posts``) of each board ``rows``
     recorded (``fleet._board_of_row``) but ``board_id``, whose whole day the scan reads
     already, by board: the exits the fleet announced and the turns that failed
     (:data:`_NEEDS_FLEET_KINDS`), the posts of the sessions of the rows that recorded that
@@ -2462,23 +2469,20 @@ def _needs_elsewhere(
     started its replacement was no card, a manager's failed hand-over "the manager stopped"
     (review of #259, round 25, 6/10); no failed turn, no card (round 26, 3/11); and no
     question, no card (round 27, 1/7). The rest of those boards is their own projects' to
-    scan. One read a board: the scan's reads are each asked once (:func:`_needs_read_once`),
-    so a hub several projects' rows recorded is read once.
+    scan, and is not read (``board_posts``): read whole, a hub several projects write was a
+    day of all their questions, results and decisions, every scan, for each project's few
+    (round 28, 8/10). Not from a ``seq``: the store reads a day by time, since a clock set
+    back stamps an event after one with a lower ``seq`` (``team_events_since``).
     """
     from aisquare.services.fleet import _board_of_row
 
     found: list[tuple[str, list[TeamEvent]]] = []
     for other in sorted({_board_of_row(row) for row in rows} - {board_id}):
-        posters = {row.session_id for row in rows if row.session_id and _board_of_row(row) == other}
-        read = reads.needs_read(partial(sources.board_since, other, day), "the board") or []
-        kept = [
-            event
-            for event in read
-            if event.kind in _NEEDS_FLEET_KINDS
-            or event.session_id in posters
-            or (event.session_id is None and event.kind in _NEEDS_REPLIED)
-        ]
-        found.append((other, kept))
+        posters = frozenset(
+            row.session_id for row in rows if row.session_id and _board_of_row(row) == other
+        )
+        asked = partial(sources.board_posts, other, day, posters)
+        found.append((other, reads.needs_read(asked, "the board") or []))
     return found
 
 
@@ -2915,6 +2919,7 @@ def _needs_read_once(sources: NeedsSources) -> NeedsSources:
     return replace(
         sources,
         board_since=once("day", sources.board_since),
+        board_posts=once("posts", sources.board_posts),
         board_events=once("window", sources.board_events),
         board_sessions=once("sessions", sources.board_sessions),
         tmux_answers=once("tmux", sources.tmux_answers),
@@ -3437,6 +3442,19 @@ def live_needs_sources() -> NeedsSources:
                 project_id, since, kinds=_NEEDS_DAY_KINDS, human_kinds=_NEEDS_REPLIED
             )
 
+    def needs_board_posts(
+        board_id: str, since: datetime, sessions: Collection[str]
+    ) -> list[TeamEvent]:
+        with store_session() as store:
+            return store.team_events_since(
+                board_id,
+                since,
+                kinds=_NEEDS_FLEET_KINDS,
+                human_kinds=_NEEDS_REPLIED,
+                session_kinds=_NEEDS_ASKED,
+                sessions=sorted(sessions),
+            )
+
     def needs_board_sessions(project_id: str, ids: Collection[str]) -> list[TeamSession]:
         with store_session() as store:
             return store.team_sessions_seen_since(project_id, None, ids=sorted(ids))
@@ -3481,6 +3499,7 @@ def live_needs_sources() -> NeedsSources:
         ended_agents=needs_rows_ended,
         board_events=needs_board_events,
         board_since=needs_board_since,
+        board_posts=needs_board_posts,
         board_sessions=needs_board_sessions,
         task_status=needs_task_status,
         transcript_tail=_needs_cached_tail,

@@ -3305,7 +3305,8 @@ def test_the_rows_a_new_server_would_answer_for_are_read_in_one_query(
     recorded there is asked about, in every project, forgotten ones' included. That walked
     `list_projects` and ran one `fleet_agents` query per project ever registered, captured
     directories included, twice per spawn. One query now, and the refusal still names a
-    forgotten project's row by its project."""
+    forgotten project's row by its project. (A store asks once, at its first fleet read,
+    whether it has ``team_session`` to read a row's unrecorded board from: round 27, 5/7.)"""
     monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
     coder = _coder(project)
     other = fleet_service.spawn(plain_project, "manager").agent
@@ -3324,6 +3325,9 @@ def test_the_rows_a_new_server_would_answer_for_are_read_in_one_query(
 
     assert {agent.id: answer for agent, answer in rows} == {coder.id: "gone", other.id: "gone"}
     reads = [sql for sql in asked if sql.lstrip().upper().startswith("SELECT")]
+    presence = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'team_session'"
+    assert reads[:1] == [presence], reads
+    reads = reads[1:]
     assert len(reads) == 1 and "FROM fleet_agent WHERE ended_at IS NULL" in reads[0], reads
     with pytest.raises(FleetError, match="lost its socket file") as refused:
         fleet_service.spawn(project, "coder")

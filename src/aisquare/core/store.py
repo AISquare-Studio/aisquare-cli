@@ -20,6 +20,7 @@ project is forgotten the same way (``forgotten_at``, see v12); only
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import os
 import random
@@ -676,6 +677,11 @@ def _number_unnumbered_tasks(connection: sqlite3.Connection) -> None:
         raise
 
 
+def _has_table(connection: sqlite3.Connection, table: str) -> bool:
+    query = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?"
+    return connection.execute(query, (table,)).fetchone() is not None
+
+
 #: The board of a ``fleet_agent`` row that recorded none: that of the session bound to it,
 #: the one its hooks registered on, else its own project's. The one answer for the v32
 #: backfill (:func:`_board_existing_agents`) and for every read of a row written with no
@@ -698,8 +704,7 @@ def _board_existing_agents(connection: sqlite3.Connection) -> None:
     (:data:`_BACKFILLS`). A store without ``team_session`` (doctor's damaged-store case)
     gives every row its project's.
     """
-    query = "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'team_session'"
-    if connection.execute(query).fetchone() is None:
+    if not _has_table(connection, "team_session"):
         connection.execute("UPDATE fleet_agent SET board = project_id WHERE board IS NULL")
         return
     connection.execute(f"UPDATE fleet_agent SET board = {_UNRECORDED_BOARD} WHERE board IS NULL")
@@ -1198,6 +1203,11 @@ def _read_list(fields: Sequence[str], reads: Mapping[str, str]) -> str:
 #: session's, as the v32 backfill gives it (:data:`_UNRECORDED_BOARD`).
 _FLEET_AGENT_READ = _read_list(
     _FLEET_AGENT_FIELDS, {"board": f"COALESCE(board, {_UNRECORDED_BOARD})"}
+)
+#: :data:`_FLEET_AGENT_READ` for a store without ``team_session`` (doctor's damaged-store
+#: case): no session to ask, so the project's, as the backfill gives it there.
+_FLEET_AGENT_READ_SESSIONLESS = _read_list(
+    _FLEET_AGENT_FIELDS, {"board": "COALESCE(board, project_id)"}
 )
 _CLAUDE_ACCOUNT_COLUMNS = "slot, config_dir, alias, position, is_default, disabled, created_at"
 
@@ -1751,6 +1761,20 @@ class SqliteStore:
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._conn = connection
         self._layout_depth = 0  # open :meth:`layout_change` blocks
+
+    @functools.cached_property
+    def _fleet_agent_read(self) -> str:
+        """The SELECT list of a ``fleet_agent`` read on this store.
+
+        A row that recorded no board reads its session's (:data:`_FLEET_AGENT_READ`), a
+        subquery on ``team_session``. On a store without that table (doctor's damaged-store
+        case, which the v32 backfill tolerates) it made every fleet read, the live-only ones
+        doctor's own checks make included, fail with "no such table: team_session" (review
+        of #259, round 27, 5/7). Asked once per store, at its first fleet read.
+        """
+        if _has_table(self._conn, "team_session"):
+            return _FLEET_AGENT_READ
+        return _FLEET_AGENT_READ_SESSIONLESS
 
     def add(self, entry: ContextEntry) -> ContextEntry:
         self._conn.execute(
@@ -3774,7 +3798,7 @@ class SqliteStore:
     def get_fleet_agent(self, ref: str) -> FleetAgent | None:
         """A fleet agent by id or unambiguous id prefix (git-style)."""
         rows = self._conn.execute(
-            f"SELECT {_FLEET_AGENT_READ} FROM fleet_agent WHERE id GLOB ? LIMIT 2",
+            f"SELECT {self._fleet_agent_read} FROM fleet_agent WHERE id GLOB ? LIMIT 2",
             (_glob_prefix(ref),),
         ).fetchall()
         if len(rows) > 1:
@@ -3784,7 +3808,7 @@ class SqliteStore:
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]:
         clause = " AND ended_at IS NULL" if live_only else ""
         rows = self._conn.execute(
-            f"SELECT {_FLEET_AGENT_READ} FROM fleet_agent "
+            f"SELECT {self._fleet_agent_read} FROM fleet_agent "
             f"WHERE project_id = ?{clause} ORDER BY created_at, id",
             (project_id,),
         ).fetchall()
@@ -3798,7 +3822,7 @@ class SqliteStore:
         ran one query per project ever registered, captured directories included, and a
         spawn asks it twice (review of #259, round 4)."""
         rows = self._conn.execute(
-            f"SELECT {_FLEET_AGENT_READ} FROM fleet_agent "
+            f"SELECT {self._fleet_agent_read} FROM fleet_agent "
             "WHERE ended_at IS NULL ORDER BY created_at, id"
         ).fetchall()
         return [_row_to_fleet_agent(row) for row in rows]
@@ -3812,7 +3836,7 @@ class SqliteStore:
         ``since`` compares as the stored ISO-8601 UTC strings do.
         """
         rows = self._conn.execute(
-            f"SELECT {_FLEET_AGENT_READ} FROM fleet_agent "
+            f"SELECT {self._fleet_agent_read} FROM fleet_agent "
             "WHERE project_id = ? AND ended_at >= ? ORDER BY created_at, id",
             (project_id, since.astimezone(UTC).isoformat()),
         ).fetchall()
@@ -3826,7 +3850,7 @@ class SqliteStore:
         switch adds a row that is never deleted, and :meth:`fleet_agents` builds them all.
         """
         row = self._conn.execute(
-            f"SELECT {_FLEET_AGENT_READ} FROM fleet_agent "
+            f"SELECT {self._fleet_agent_read} FROM fleet_agent "
             "WHERE project_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
             (project_id,),
         ).fetchone()
@@ -3849,7 +3873,7 @@ class SqliteStore:
         sits, so the row recorded against it is that session's.
         """
         row = self._conn.execute(
-            f"SELECT {_FLEET_AGENT_READ} FROM fleet_agent "
+            f"SELECT {self._fleet_agent_read} FROM fleet_agent "
             "WHERE session_id = ? AND ended_at IS NULL "
             "ORDER BY created_at DESC LIMIT 1",
             (session_id,),
@@ -3933,7 +3957,7 @@ class SqliteStore:
     ) -> FleetAgent | None:
         clause = " AND ended_at IS NULL" if live_only else ""
         row = self._conn.execute(
-            f"SELECT {_FLEET_AGENT_READ} FROM fleet_agent "
+            f"SELECT {self._fleet_agent_read} FROM fleet_agent "
             f"WHERE project_id = ? AND label = ?{clause} ORDER BY created_at DESC LIMIT 1",
             (project_id, label),
         ).fetchone()

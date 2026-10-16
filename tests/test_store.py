@@ -2422,3 +2422,40 @@ def test_a_fleet_row_is_read_as_the_columns_it_is_written_with_whatever_follows_
     named = tuple(column[0] for column in cursor.description)
     assert named == store_module._FLEET_AGENT_FIELDS, named
     assert ", ".join(named) == store_module._FLEET_AGENT_COLUMNS
+
+
+def test_a_store_without_team_session_still_reads_its_fleet_rows() -> None:
+    """Review of #259, round 27, 5/7: a row that recorded no board reads its session's, a
+    subquery on ``team_session``, and it was in every fleet read. On a store without that
+    table (doctor's damaged-store case, which the v32 backfill tolerates) every fleet read
+    failed, the live-only ones doctor's own checks make included. Such a store reads a row
+    with no board as its project's, as the backfill gives it there."""
+    from aisquare.models import FleetAgent
+
+    with store_session() as store:
+        store.ensure_project(PROJECT)
+        for n, board in ((1, None), (2, "prj_hub")):
+            store.upsert_fleet_agent(
+                FleetAgent(
+                    id=f"agt_{n}", project_id=PROJECT.id, label=f"coder-{n}", role="coder",
+                    pane_id=f"%{n}", cwd=Path("/w"), created_at=datetime.now(tz=UTC),
+                    board=board,
+                )
+            )  # fmt: skip
+    with sqlite3.connect(str(_db_path())) as raw:
+        raw.execute("UPDATE fleet_agent SET board = NULL WHERE id = 'agt_1'")  # 0.8.0's
+    raw.close()
+    with sqlite3.connect(str(_db_path())) as raw:
+        raw.execute("DROP TABLE team_session")
+    raw.close()
+
+    with store_session() as store:
+        assert "table team_session" in store.missing_schema()
+        live = {row.id: row.board for row in store.fleet_agents(PROJECT.id, live_only=True)}
+        assert live == {"agt_1": PROJECT.id, "agt_2": "prj_hub"}, live
+        assert [row.id for row in store.live_fleet_agents()] == ["agt_1", "agt_2"]
+        one = store.get_fleet_agent("agt_1")
+        assert one is not None and one.board == PROJECT.id
+        newest = store.newest_fleet_agent(PROJECT.id)
+        assert newest is not None and newest.id in {"agt_1", "agt_2"}
+        assert store.fleet_agent_by_label(PROJECT.id, "coder-2") is not None

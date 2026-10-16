@@ -210,6 +210,32 @@ def test_a_grant_changes_the_one_value_and_every_other_byte_stays(
     assert path.stat().st_mtime_ns == stamp
 
 
+def test_a_lone_surrogate_node_wrote_is_written_back_as_the_escape_it_was(
+    three: tuple[ClaudeAccount, ...], tmp_path: Path
+) -> None:
+    """Review of #259, round 21: Node writes a string cut between the halves of a pair as
+    ``"\\ud83d"``. ``json.loads`` reads a lone surrogate, which UTF-8 cannot hold, so the
+    write raised and every launch on the account said the trust could not be shared."""
+    _plain, second, third = three
+    folder = tmp_path / "work"
+    folder.mkdir()
+    _write_claude_json(second, "two@x.dev", trusted=(_key(folder),))
+    path = core.claude_json_path(third)
+    text = path.read_text(encoding="utf-8")
+    cut = text[:-1] + ',\n  "history": "abc \\ud83d",\n  "pair": "\\ud83d\\ude00 \\udc00x"\n}'
+    path.write_text(cut, encoding="utf-8")
+    before = json.loads(cut)
+
+    notes = service.share_for_launch(folder, account=third)
+
+    assert notes == [f"{_key(folder)} is trusted on account 2 — now on account 3 too"]
+    written = path.read_text(encoding="utf-8")
+    assert '"history": "abc \\ud83d"' in written and "\\udc00x" in written
+    after = json.loads(written)
+    assert after["projects"].pop(_key(folder)) == {"hasTrustDialogAccepted": True}
+    assert after == before  # the halves and the whole pair read back as they were
+
+
 def test_a_damaged_or_missing_file_is_never_written(
     three: tuple[ClaudeAccount, ...], tmp_path: Path
 ) -> None:

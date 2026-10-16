@@ -220,7 +220,7 @@ def grant_trust(path: Path, *keys: str) -> list[str]:
             written.append(key)
         if not written:
             return []
-        body = json.dumps(data, indent=2, ensure_ascii=False)
+        body = _LONE_SURROGATE.sub(_escaped, json.dumps(data, indent=2, ensure_ascii=False))
         if raw.endswith(b"\n"):  # hand-edited: kept as found
             body += "\n"
         try:
@@ -228,6 +228,17 @@ def grant_trust(path: Path, *keys: str) -> list[str]:
         except (OSError, UnicodeError) as exc:
             raise SharingError(f"its .claude.json could not be written ({exc})") from exc
     return written
+
+
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+"""Half of a surrogate pair, alone: what ``json.loads`` makes of the ``"\\ud83d"`` Node's
+``JSON.stringify`` writes for a string cut between the two halves (a history entry cut
+mid-emoji). UTF-8 cannot hold it, so it is written back as the escape it was read from —
+only ever inside a string, so the JSON stays valid (review of #259, round 21)."""
+
+
+def _escaped(match: re.Match[str]) -> str:
+    return f"\\u{ord(match.group()):04x}"
 
 
 @contextlib.contextmanager

@@ -4918,6 +4918,57 @@ def _case_clear_adopts(w: _Hubbed) -> str | None:
     return row.project_id if row is not None else None
 
 
+def _fed_to(w: _Hubbed, kind: str) -> str | None:
+    """The one board, of the hub's and the fleet's, whose feed has a ``kind`` line."""
+    with store_session() as store:
+        boards = [
+            project.id
+            for project in (w.hub, w.fleet)
+            if any(event.kind == kind for event in store.recent_events(project.id, limit=100))
+        ]
+    return boards[0] if len(boards) == 1 else None
+
+
+def _ready_windows(w: _Hubbed) -> None:
+    """Every window the fleet opens from here runs ``claude`` at once, so a hand-off prompt
+    is pasted into it."""
+    original = w.tmux.spawn_window
+
+    def ready(*args: Any, **kwargs: Any) -> WindowInfo:
+        window = original(*args, **kwargs)
+        w.tmux.set_command(window.pane_id, "claude")
+        return window
+
+    w.monkeypatch.setattr(w.tmux, "spawn_window", ready)
+
+
+def _case_exited(w: _Hubbed) -> str | None:
+    w.tmux.die(w.coder.pane_id, 1)
+    fleet_service.reap()
+    return _fed_to(w, "agent_exited")
+
+
+def _case_restarted(w: _Hubbed) -> str | None:
+    w.tmux.die(w.coder.pane_id, 0)
+    fleet_service.restart(w.fleet, w.coder.label)
+    return _fed_to(w, "restarted")
+
+
+def _case_switched(w: _Hubbed) -> str | None:
+    _two_slots_with_usage(w.monkeypatch, work=95, personal=10)
+    fleet_service.switch(w.fleet, w.coder.label, to="2")
+    return _fed_to(w, "switched")
+
+
+def _case_hand_off_entries(w: _Hubbed) -> str | None:
+    team_service.add_note("halfway through the router", session_ref=w.coder_sid)
+    _ready_windows(w)
+    w.tmux.die(w.coder.pane_id, 0)
+    fleet_service.restart(w.fleet, w.coder.label)
+    [prompt] = [text for _pane, kind, text in w.tmux.typed if kind == "paste"]
+    return _delivered() if "- note: halfway through the router" in prompt else None
+
+
 def _case_cycle_project(w: _Hubbed) -> str | None:
     with store_session() as store:
         named = team_service._cycle_project(store, w.hub, w.fleet.root, w.manager_sid, named=None)
@@ -4951,6 +5002,10 @@ _HUB_RULE_CASES: list[tuple[str, str, Any]] = [
     ("board", "the task fleet spawn --task gives", _case_spawn_task),
     ("board", "the claim a hand-over's SessionEnd keeps", _case_hand_over_keeps),
     ("board", "the claim a /clear's SessionEnd keeps", _case_clear_keeps),
+    ("board", "agent_exited", _case_exited),
+    ("board", "restarted", _case_restarted),
+    ("board", "switched", _case_switched),
+    ("board", "the entries a hand-off prompt quotes", _case_hand_off_entries),
     ("fleet", "the row a /clear's next id is adopted onto", _case_clear_adopts),
     ("fleet", "the cycle's --project", _case_cycle_project),
     ("fleet", "a limited chip's fleet switch", _case_limited_chip),
@@ -5082,6 +5137,29 @@ def test_a_prompt_under_a_fleet_window_reads_the_row_it_names_once(hubbed: _Hubb
 
     assert reads == [hubbed.coder.id]
     assert _row(hubbed.coder.id).session_id == hubbed.coder_sid, "the child is refused it"
+
+
+def test_under_a_hub_a_manager_is_told_its_coder_exited_and_was_restarted(
+    hubbed: _Hubbed,
+) -> None:
+    """Review of #259, round 24, 3/6: since round 22 a hub manager's coders are spawned
+    into its row's project, and the fleet wrote ``agent_exited``, ``switched`` and
+    ``restarted`` to the row's project's board. The manager reads its session's, the hub's,
+    at its Stop and in its prompt deltas, so it never heard that a coder had died, and a
+    nudge woke it to an empty delta. They go to the board the row's session reads."""
+    _become(hubbed.manager, hubbed.tmux, hubbed.monkeypatch, pid=PANE_PID, role="manager")
+    team_service.hook_prompt_heartbeat(hubbed.manager_sid, hubbed.fleet.root)  # caught up
+    hubbed.tmux.die(hubbed.coder.pane_id, 1)
+
+    fleet_service.reap()
+    fleet_service.restart(hubbed.fleet, hubbed.coder.label)
+
+    delta = team_service.hook_prompt_heartbeat(hubbed.manager_sid, hubbed.fleet.root)
+    assert f"{hubbed.coder.label} exited (1)" in delta
+    assert f"{hubbed.coder.label} restarted" in delta
+    assert hubbed.woken and set(hubbed.woken) == {hubbed.fleet.id}, "its own manager"
+    with store_session() as store:
+        assert not store.recent_events(hubbed.fleet.id), "nothing on a board nobody reads"
 
 
 @pytest.mark.parametrize(

@@ -2295,10 +2295,10 @@ def _require_role(role: str) -> None:
         )
 
 
-def _board_for(project: ProjectInfo) -> str:
-    """The board an agent this process spawns into ``project`` reads: the hub's when this
-    process honours one, as its window is given (:func:`orchestrator.window_team_hub`),
-    else ``project``'s own.
+def _board_for(project_id: str) -> str:
+    """The board an agent this process spawns into project ``project_id`` reads: the hub's
+    when this process honours one, as its window is given (:func:`orchestrator.window_team_hub`),
+    else the project's own.
 
     A task is the board's (docs/fleet.md, "Under a hub: one board, many fleet projects").
     Looked up on the row's project, the task ``fleet spawn --task`` names was refused under a
@@ -2306,7 +2306,22 @@ def _board_for(project: ProjectInfo) -> str:
     and ``--task 12`` read another board's #12 (review of #259, round 24, 2/6).
     """
     hub = orchestrator.team_hub()
-    return project_id_for(hub) if hub is not None else project.id
+    return project_id_for(hub) if hub is not None else project_id
+
+
+def _board_of_row(agent: FleetAgent, session: TeamSession | None) -> str:
+    """The board ``agent``'s sessions read: that of ``session``, the one bound to the row,
+    else the one a spawn from here gives it (:func:`_board_for`).
+
+    The fleet's own feed lines are the board's (docs/fleet.md, "Under a hub: one board, many
+    fleet projects"): ``agent_exited``, ``switched`` and ``restarted`` are for the manager,
+    whose Stop and prompt deltas read its session's board. Written to the row's project,
+    under a hub they went to a board nobody reads, and a manager was never told that its
+    coders exited, switched or restarted (review of #259, round 24, 3/6). The entries a
+    replacement's hand-off prompt quotes are read there too: on the row's project they were
+    none.
+    """
+    return session.project_id if session is not None else _board_for(agent.project_id)
 
 
 def _task_for(store: ContextStore, board_id: str, task_id: str | None) -> TeamTask | None:
@@ -2562,7 +2577,7 @@ def spawn(
                 f"(max_agents_per_project = {config.max_agents_per_project}) — stop one, "
                 "or raise the limit in [fleet]"
             )
-        task = _task_for(store, _board_for(project), task_id)
+        task = _task_for(store, _board_for(project.id), task_id)
         resolved_task_id = task.id if task is not None else None
         picked = next_label(project, role, wanted=label, task_id=resolved_task_id, store=store)
     if label is not None and picked != label:
@@ -5973,12 +5988,13 @@ def switch(
         # agent stopped and nothing started: a row spawned before rule 3 still names
         # its closed task until its next briefing, and switching one always lost it
         # (review of #203, final round, FLEET-3).
-        task = _task_for(store, _board_for(project), agent.task_id)
+        task = _task_for(store, _board_for(project.id), agent.task_id)
+        board = _board_of_row(agent, session)
         # The session's own newest entries (oldest first), not the project's last
         # 60 filtered down: on a busy board those all belonged to other agents
         # and the prompt lost its "last board entries" (review of #205, third round).
         recent = (
-            store.filtered_events(project.id, session_id=agent.session_id, limit=_HANDOFF_NOTES)
+            store.filtered_events(board, session_id=agent.session_id, limit=_HANDOFF_NOTES)
             if agent.session_id is not None
             else []
         )
@@ -6105,7 +6121,7 @@ def switch(
     with contextlib.suppress(Exception), store_session() as store:  # the courtesy, not the record
         _team()._emit(
             store,
-            project.id,
+            board,
             "switched",
             f"{label} moved from {from_name} to {claude_accounts_core.label(target)} "
             f"(slot {target.slot}){why} — {how}",
@@ -6389,13 +6405,14 @@ def restart(
             raise _in_hand_over(project, "restart", label)
         try:
             # `spawn`'s refusal for the task (done, dropped, gone from the board).
-            task = _task_for(store, _board_for(project), agent.task_id)
+            task = _task_for(store, _board_for(project.id), agent.task_id)
         except FleetError as exc:
             raise FleetError(f"cannot restart {label!r}: {exc}") from exc
+        board = _board_of_row(agent, session)
         # The session's own newest entries, as `switch` reads them: the project's
         # last 60 filtered down lost them on a busy board (review of #205, third round).
         recent = (
-            store.filtered_events(project.id, session_id=agent.session_id, limit=_HANDOFF_NOTES)
+            store.filtered_events(board, session_id=agent.session_id, limit=_HANDOFF_NOTES)
             if agent.session_id is not None
             else []
         )
@@ -6514,7 +6531,7 @@ def restart(
     with contextlib.suppress(Exception), store_session() as store:  # the courtesy, not the record
         _team()._emit(
             store,
-            project.id,
+            board,
             "restarted",
             f"{label} restarted — {how}",
             session_id=receipt.agent.session_id,
@@ -6921,11 +6938,13 @@ def _emit_exit(store: ContextStore, agent: FleetAgent, *, why: str | None = None
     """The ``agent_exited`` board event the manager's Stop hook wakes on (§7.3), with
     ``why`` after the status when the status does not say it all."""
     status = "?" if agent.exit_status is None else str(agent.exit_status)
-    # The row is already ended; the event is the courtesy, not the record.
+    # The row is already ended; the event is the courtesy, not the record. On the board the
+    # manager reads (`_board_of_row`), which under a hub is not the row's project's.
     with contextlib.suppress(Exception):
+        session = store.get_session(agent.session_id) if agent.session_id else None
         _team()._emit(
             store,
-            agent.project_id,
+            _board_of_row(agent, session),
             "agent_exited",
             f"{agent.label} exited ({status})" + (f": {why}" if why else ""),
             session_id=agent.session_id,

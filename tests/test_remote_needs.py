@@ -1497,11 +1497,6 @@ def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> Needs
         ],
         board_events=board_events,
         board_since=board_since,
-        exits_since=lambda pid, since: [
-            event
-            for event in fleet.events
-            if event.kind == "agent_exited" and event.created_at >= since
-        ],
         board_sessions=lambda pid, ids: [
             session for session in fleet.sessions if session.id in ids
         ],
@@ -4413,11 +4408,11 @@ def test_under_a_team_hub_a_resumed_agent_at_the_trust_question_is_a_card(
 def test_a_coder_whose_hand_over_never_started_its_replacement_is_reported_under_a_hub_too(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, under_a_hub: bool
 ) -> None:
-    """The fleet announces a row's exit on the board of the row's own project
-    (``fleet._emit_exit``), and under ``AISQUARE_TEAM_HUB`` the scan looked for it on the
-    hub's, where the team writes: a coder's switch whose replacement never started was no
-    card and no push, the case ``HANDOVER_FAILED`` is for (review of #243, round 18, 1/4).
-    The exit is read where the fleet writes it, with a hub and without."""
+    """A coder's switch whose replacement never started is a card and a push, the case
+    ``HANDOVER_FAILED`` is for, with a hub and without: the scan reads the exit where the
+    fleet writes it (review of #243, round 18, 1/4). That is the board the row's session
+    reads (``fleet._emit_exit``), the hub's under one, where its manager reads it too
+    (review of #259, round 24, 3/6)."""
     hour_ago = datetime.now(UTC) - timedelta(hours=1)
     stopped = datetime.now(UTC) - timedelta(minutes=10)
     with store_session() as store:
@@ -4965,7 +4960,6 @@ _READS = (
     "session_event",
     "transcript_tail",
     "pane_output",
-    "exits_since",
     "task_status",
 )
 """Every read of a project's scan (:class:`NeedsSources`) but ``list_projects``, which a
@@ -5166,27 +5160,6 @@ def test_under_a_hub_a_projects_needs_read_no_other_projects_rows(
     scan_needs_you(remote_needs.live_needs_sources(), now=datetime.now(UTC), dismissed=())
     assert sorted(name for what, name in reads if what == "ended") == sorted(projects)
     assert [name for what, name in reads if what in ("day", "sessions")] == ["hub", "hub"]
-
-
-def test_a_project_on_another_board_reads_its_own_exits_only_with_a_listing() -> None:
-    """The exits of a project whose agents write another board were its own board's whole
-    day, every kind the scan reads, for its ``agent_exited`` alone, and were read when
-    the listing failed, though only the rules a listing feeds read them (review of #243,
-    round 19, 3/3)."""
-    asked: list[str] = []
-
-    def exits_since(pid: str, since: datetime) -> list[TeamEvent]:
-        asked.append(pid)
-        return []
-
-    for fails, reads in ((False, [PROJECT.id]), (True, [])):
-        asked.clear()
-        fleet = Fleet(agents=[_status(_row(), "working")], listing_fails=fails)
-        sources = replace(
-            _sources(fleet), board_project=lambda project: "prj_hub", exits_since=exits_since
-        )
-        scan_needs_you(sources, now=NOW, dismissed=())
-        assert asked == reads
 
 
 def test_under_a_team_hub_a_projects_rows_are_derived_again_in_one_look_at_tmux(

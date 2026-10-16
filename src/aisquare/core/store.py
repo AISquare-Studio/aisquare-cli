@@ -20,7 +20,6 @@ project is forgotten the same way (``forgotten_at``, see v12); only
 from __future__ import annotations
 
 import contextlib
-import functools
 import json
 import os
 import random
@@ -1760,23 +1759,20 @@ def _scope_filter(
 class SqliteStore:
     """The SQLite implementation of :class:`ContextStore`."""
 
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    def __init__(self, connection: sqlite3.Connection, *, names: Collection[str]) -> None:
+        """``names``: the store's tables and indexes, as :func:`_migrate` read them opening it."""
         self._conn = connection
         self._layout_depth = 0  # open :meth:`layout_change` blocks
-
-    @functools.cached_property
-    def _fleet_agent_read(self) -> str:
-        """The SELECT list of a ``fleet_agent`` read on this store.
-
-        A row that recorded no board reads its session's (:data:`_FLEET_AGENT_READ`), a
-        subquery on ``team_session``. On a store without that table (doctor's damaged-store
-        case, which the v32 backfill tolerates) it made every fleet read, the live-only ones
-        doctor's own checks make included, fail with "no such table: team_session" (review
-        of #259, round 27, 5/7). Asked once per store, at its first fleet read.
-        """
-        if _has_table(self._conn, "team_session"):
-            return _FLEET_AGENT_READ
-        return _FLEET_AGENT_READ_SESSIONLESS
+        # The SELECT list of a ``fleet_agent`` read on this store. A row that recorded no board
+        # reads its session's (:data:`_FLEET_AGENT_READ`), a subquery on ``team_session``,
+        # which SQLite's COALESCE runs only for such a row. On a store without that table
+        # (doctor's damaged-store case, which the v32 backfill tolerates) it made every fleet
+        # read, the live-only ones doctor's own checks make included, fail with "no such
+        # table: team_session" (review of #259, round 27, 5/7). Told by the names the open
+        # read, not asked of ``sqlite_master`` again (round 28, 9/10).
+        self._fleet_agent_read = (
+            _FLEET_AGENT_READ if "team_session" in names else _FLEET_AGENT_READ_SESSIONLESS
+        )
 
     def add(self, entry: ContextEntry) -> ContextEntry:
         self._conn.execute(
@@ -4473,17 +4469,26 @@ def _run_step(connection: sqlite3.Connection, version: int) -> None:
                 backfill(connection)
 
 
-def _steps_missing(connection: sqlite3.Connection, below: int) -> list[int]:
+def _schema_names(connection: sqlite3.Connection) -> frozenset[str]:
+    """Every name in ``sqlite_master``: the store's tables, indexes and triggers."""
+    return frozenset(row[0] for row in connection.execute("SELECT name FROM sqlite_master"))
+
+
+def _steps_missing(
+    connection: sqlite3.Connection, below: int, names: frozenset[str] | None = None
+) -> list[int]:
     """The steps under ``below``, from v15 on, that left something out of this store.
 
     A store stamped ``below`` claims to have run them all; one that another line
     stamped has run that line's steps under these numbers instead. Only reads:
-    one ``sqlite_master`` query and a ``table_info`` per table a column belongs to.
+    one ``sqlite_master`` query, unless the caller read ``names`` already, and a
+    ``table_info`` per table a column belongs to.
     """
     steps = sorted(step for step in _PRODUCTS if step < below)
     if not steps:
         return []
-    names = {row[0] for row in connection.execute("SELECT name FROM sqlite_master")}
+    if names is None:
+        names = _schema_names(connection)
     tables = {table for step in steps for table, _, _ in _PRODUCTS[step].columns}
     columns = {
         table: {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
@@ -4509,8 +4514,9 @@ def _converge_by_presence(connection: sqlite3.Connection, below: int) -> None:
         _run_step(connection, step)
 
 
-def _migrate(connection: sqlite3.Connection) -> None:
-    """Bring the schema to the current version, safely under concurrency.
+def _migrate(connection: sqlite3.Connection) -> frozenset[str]:
+    """Bring the schema to the current version, safely under concurrency; the names in
+    ``sqlite_master`` once it is done (:func:`_schema_names`).
 
     Hooks race: several sessions can open (and try to migrate) the store in the
     same instant. Each migration runs as ONE ``BEGIN IMMEDIATE`` transaction
@@ -4548,6 +4554,12 @@ def _migrate(connection: sqlite3.Connection) -> None:
     last, because a store stamped current never enters the loop, including one
     that a build without this pass carried to current past a step it skipped.
     Then :func:`_number_unnumbered_tasks` numbers any task an older build added.
+
+    The names the last presence pass read are what it returns, read again only when it
+    applied a step: the store asks them of nothing else (:class:`SqliteStore`). Asked again by
+    each store, at its first fleet read, whether it had ``team_session``, every
+    ``store_session()`` that read a fleet row paid a ``sqlite_master`` query of its own, and
+    hooks and Remote's 3 s needs scan open many (review of #259, round 28, 9/10).
     """
     while True:
         if int(connection.execute("PRAGMA user_version").fetchone()[0]) >= len(_MIGRATIONS):
@@ -4566,7 +4578,8 @@ def _migrate(connection: sqlite3.Connection) -> None:
             with contextlib.suppress(sqlite3.Error):
                 connection.execute("ROLLBACK")
             raise
-    if _steps_missing(connection, len(_MIGRATIONS)):
+    names = _schema_names(connection)
+    if _steps_missing(connection, len(_MIGRATIONS), names):
         try:
             connection.execute("BEGIN IMMEDIATE")
             _converge_by_presence(connection, len(_MIGRATIONS))
@@ -4575,7 +4588,9 @@ def _migrate(connection: sqlite3.Connection) -> None:
             with contextlib.suppress(sqlite3.Error):
                 connection.execute("ROLLBACK")
             raise
+        names = _schema_names(connection)
     _number_unnumbered_tasks(connection)
+    return names
 
 
 #: The suffixes of the shadow tables FTS5 keeps a table's index in, ``entry_fts_data``
@@ -4753,8 +4768,8 @@ def open_store() -> ContextStore:
         try:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA foreign_keys = ON")
-            _migrate(connection)
-            return SqliteStore(connection)
+            names = _migrate(connection)
+            return SqliteStore(connection, names=names)
         except sqlite3.OperationalError as exc:
             if is_locked_error(exc):
                 if time.monotonic() >= deadline:

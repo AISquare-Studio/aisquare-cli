@@ -7135,10 +7135,20 @@ def pause(project: ProjectInfo, *, session_ref: str | None = None) -> None:
 
 
 def resume(project: ProjectInfo, *, session_ref: str | None = None) -> None:
+    """Set the project's ``fleet-paused`` signal off where it reads on (:func:`_set_pause`)."""
     _set_pause(project, "off", session_ref)
 
 
 def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> None:
+    """Set ``project``'s pause to ``value`` on the boards it lives on (:func:`_pause_signals`):
+    ``on`` on every one, ``off`` only where it reads on (:func:`_paused_signals`).
+
+    Each write is a ``signal`` event in the delta of every session on that board. Off on
+    every board one of the project's rows ever recorded, ``fleet resume -P a`` put
+    ``fleet-paused.a: off`` in the next prompt of every agent on every hub ``a`` ever ran
+    under, where it had never been paused (review of #259, round 30, 5/8). With nothing on,
+    ``--as`` is still checked: an unknown session is refused, as a write refuses it.
+    """
     team = _team()
     try:
         # The team off: `set_signal` refuses before any store opens.
@@ -7147,6 +7157,10 @@ def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> Non
             homes = _pause_homes(project)
             with store_session() as store:
                 signals = _pause_signals(store, project, homes)
+                if value == "off":
+                    signals = _paused_signals(store, signals)
+                    if session_ref is not None and store.get_session(session_ref) is None:
+                        raise KeyError(session_ref)
         for board, name in signals:
             team.set_signal(name, value, session_ref=session_ref, project_id=board)
     except team.TeamDisabledError as exc:

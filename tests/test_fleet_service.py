@@ -9066,6 +9066,40 @@ def test_the_pause_builds_no_row(
         assert store.fleet_agent_boards(project.id) == [project.id], "one board, four rows"
 
 
+def test_a_resume_writes_off_only_where_the_pause_reads_on(hubbed: _Hubbed) -> None:
+    """Review of #259, round 30, 5/8: ``fleet resume`` wrote ``off`` on every board one of
+    the project's rows ever recorded and both of its homes, and each write is a ``signal``
+    event in the delta of every session on that board. ``fleet-paused.<id>: off`` reached
+    every agent on every hub the project ever ran under, where it had never been paused.
+    Off is written only where the pause reads on; on goes to every board, as before."""
+    w = hubbed
+
+    def signal_events() -> dict[str, int]:
+        with store_session() as store:
+            return {
+                board.id: sum(e.kind == "signal" for e in store.recent_events(board.id, limit=500))
+                for board in (w.hub, w.fleet)
+            }
+
+    before = signal_events()
+    with pytest.raises(FleetError, match="unknown session"):
+        fleet_service.resume(w.fleet, session_ref="ses_nobody")
+    fleet_service.resume(w.fleet)
+    assert signal_events() == before, "paused nowhere: nothing written"
+
+    team_service.set_signal(
+        harness.pause_signal(w.fleet.id, w.fleet.id), "on", project_id=w.fleet.id
+    )
+    assert _paused_on(w) == [w.fleet.id]
+    before = signal_events()
+    fleet_service.resume(w.fleet, session_ref=w.manager_sid)
+    assert _paused_on(w) == [] and not fleet_service.is_paused(w.fleet)
+    assert signal_events() == {w.hub.id: before[w.hub.id], w.fleet.id: before[w.fleet.id] + 1}
+
+    fleet_service.pause(w.fleet)
+    assert sorted(_paused_on(w)) == sorted([w.hub.id, w.fleet.id]), "on: every board"
+
+
 def test_shutdown_clears_the_fleet_paused_signal(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

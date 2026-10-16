@@ -1,0 +1,569 @@
+{
+  "run_id": "38869924897-1-main",
+  "started_at": "2026-10-16T07:52:50+00:00",
+  "finished_at": "2026-10-16T07:54:19+00:00",
+  "verdict": "PASSED",
+  "env": {
+    "os": "Linux 6.17.0-1022-azure x86_64",
+    "runner": "github-hosted",
+    "track": "main",
+    "agent": "e2e stand-in (no LLM)",
+    "aisquare": "aisquare 0.8.0",
+    "commit": "bbdaa12850c4",
+    "versions": {
+      "xterm.js": "6.0.0",
+      "ttyd": "1.7.7-40e79c7",
+      "chromium": "153.0.8010.12",
+      "tmux": "tmux 3.4",
+      "uv": "uv 0.13.1 (x86_64-unknown-linux-gnu)",
+      "git": "git version 2.55.0",
+      "node": "v22.23.3",
+      "claude (stand-in)": "2.1.281 (Claude Code) · e2e stand-in, no LLM",
+      "python (harness)": "3.13.16"
+    }
+  },
+  "journeys": [
+    {
+      "id": "J01",
+      "title": "Install with the README one-liner",
+      "story": "On a fresh machine I paste the one-line installer; it installs aisquare and offers to open the fleet UI, and I say yes.",
+      "status": "passed",
+      "duration_s": 26.46,
+      "steps": [
+        {
+          "id": "J01.S01.fresh-machine",
+          "title": "A fresh machine",
+          "status": "passed",
+          "started_at": "2026-10-16T07:52:51+00:00",
+          "duration_s": 1.91,
+          "shot": "shots/J01/J01.S01.fresh-machine.png",
+          "text": "text/J01/J01.S01.fresh-machine.txt",
+          "checks": [
+            {
+              "name": "aisquare is not on this machine yet",
+              "ok": true,
+              "detail": ""
+            },
+            {
+              "name": "no traceback on screen",
+              "ok": true,
+              "detail": ""
+            }
+          ],
+          "note": ""
+        },
+        {
+          "id": "J01.S02.installer-done",
+          "title": "Paste the one-liner and let it run",
+          "status": "passed",
+          "started_at": "2026-10-16T07:52:53+00:00",
+          "duration_s": 21.35,
+          "shot": "shots/J01/J01.S02.installer-done.png",
+          "text": "text/J01/J01.S02.installer-done.txt",
+          "checks": [
+            {
+              "name": "installer reached its last question",
+              "ok": true,
+              "detail": ""
+            },
+            {
+              "name": "installer printed no error line",
+              "ok": true,
+              "detail": ""
+            },
+            {
+              "name": "aisquare is installed (checked from a second window)",
+              "ok": true,
+              "detail": "aisquare 0.8.0"
+            },
+            {
+              "name": "no traceback on screen",
+              "ok": true,
+              "detail": ""
+            }
+          ],
+          "note": ""
+        },
+        {
+          "id": "J01.S03.welcome",
+          "title": "Say yes: open the fleet UI",
+          "status": "passed",
+          "started_at": "2026-10-16T07:53:14+00:00",
+          "duration_s": 3.2,
+          "shot": "shots/J01/J01.S03.welcome.png",
+          "text": "text/J01/J01.S03.welcome.txt",
+          "checks": [
+            {
+              "name": "asq took over the same terminal",
+              "ok": true,
+              "detail": ""
+            },
+            {
+              "name": "the installer registered the folder I'm standing in",
+              "ok": true,
+              "detail": ""
+            },
+            {
+              "name": "no traceback on screen",
+              "ok": true,
+              "detail": ""
+            }
+          ],
+          "note": ""
+        }
+      ],
+      "video": "video/core.webm",
+      "error": null,
+      "kind": "journey",
+      "finding": null
+    },
+    {
+      "id": "J02",
+      "title": "Welcome: from a project to \"Your fleet is up\"",
+      "story": "In the fleet UI's first-run page I use the folder I'm in, connect Claude Code, and start a manager and two coders.",
+      "status": "passed",
+      "duration_s": 9.94,
+      "steps": [
+        {
+          "id": "J02.S01.project",
+          "title": "My project is already picked",
+          "status": "passed",
+          "started_at": "2026-10-16T07:53:17+00:00",
+          "duration_s": 1.32,
+          "shot": "shots/J02/J02.S01.project.png",
+          "text": "text/J02/J02.S01.project.txt",
+          "checks": [
+            {
+              "name": "step 1 done: acme-api is the project",
+              "ok": true,
+              "detail": ""
+            },
+            {
+              "name": "Welcome offers a way to choose another folder",
+              "ok": true,
+              "detail": ""
+            },
+            {
+              "name": "no traceback on screen",
+              "ok": true,
+              "detail": ""
+            }
+          ],
+          "note": ""
+        },
+        {
+          "id": "J02.S02.claude-connected",
+          "title": "Claude Code connected",
+          "status": "passed",
+          "started_at": "2026-10-16T07:53:19+00:00",
+          "duration_s": 1.33,
+          "shot": "shots/J02/J02.S02.claude-connected.png",
+          "text": "text/J02/J02.S02.claude-connected.txt",
+          "checks": [
+            {
+              "name": "aisquare's hooks are in Claude Code",
+              "ok": true,
+              "detail": ""
+            },
+            {
+              "name": "Welcome found the claude on PATH",
+              "ok": true,
+              "detail": ""
+            },
+            {
+              "name": "no traceback on screen",
+              "ok": true,
+              "detail": ""
+            }
+          ],
+          "note": ""
+        },
+        {
+          "id": "J02.S03.manager-started",
+          "title": "Start the manager",
+          "status": "passed",
+          "started_at": "2026-10-16T07:53:20+00:00",
+          "duration_s": 3.23,
+          "shot": "shots/J02/J02.S03.manager-started.png",
+          "text": "text/J02/J02.S03.manager-started.txt",
+          "checks": [
+            {
+              "name": "the manager appears in the sidebar",
+              "ok": true,
+              "detail": ""
+            },
+            {
+              "name": "no traceback on screen",
+              "ok": true,
+              "detail": ""
+            }
+          ],
+          "note": ""
+        },
+        {
+          "id": "J02.S04.fleet-up",
+          "title": "Start the coders",
+          "status": "passed",
+          "started_at": "2026-10-16T07:53:23+00:00",
+          "duration_s": 4.05,
+          "shot": "shots/J02/J02.S04.fleet-up.png",
+          "text": "text/J02/J02.S04.fleet-up.txt",
+          "checks": [
+            {
+              "name": "manager is in the sidebar",
+              "ok": true,
+              "detail": ""
+            },
+            {
+              "name": "coder-1 is in the sidebar",
+              "ok": true,
+              "detail": ""
+            },
+            {
+              "name": "coder-2 is in the sidebar",
+              "ok": true,
+              "detail": ""
+            },
+            {
+              "name": "aisquare fleet ls lists the three agents",
+              "ok": true,
+              "detail": "coder-1, coder-2, manager"
+            },
+            {
+              "name": "coder-1 works in its own git worktree",
+              "ok": true,
+              "detail": ""
+            },
+            {
+              "name": "coder-2 works in its own git worktree",
+              "ok": true,
+              "detail": ""
+            },
+            {
+              "name": "no traceback on screen",
+              "ok": true,
+              "detail": ""
+            }
+          ],
+          "note": ""
+        }
+      ],
+      "video": "video/core.webm",
+      "error": null,
+      "kind": "journey",
+      "finding": null
+    },
+    {
+      "id": "J04",
+      "title": "Talk to an agent",
+      "story": "I click a coder in the sidebar, type to it in its pane, then F12 and w take me back to Welcome.",
+      "status": "passed",
+      "duration_s": 5.75,
+      "steps": [
+        {
+          "id": "J04.S01.open-coder",
+          "title": "Click coder-1 in the sidebar",
+          "status": "passed",
+          "started_at": "2026-10-16T07:53:27+00:00",
+          "duration_s": 1.66,
+          "shot": "shots/J04/J04.S01.open-coder.png",
+          "text": "text/J04/J04.S01.open-coder.txt",
+          "checks": [
+            {
+              "name": "coder-1's pane is on screen",
+              "ok": true,
+              "detail": ""
+            },
+            {
+              "name": "no traceback on screen",
+              "ok": true,
+              "detail": ""
+            }
+          ],
+          "note": ""
+        },
+        {
+          "id": "J04.S02.typed",
+          "title": "Type to the agent",
+          "status": "passed",
+          "started_at": "2026-10-16T07:53:29+00:00",
+          "duration_s": 2.5,
+          "shot": "shots/J04/J04.S02.typed.png",
+          "text": "text/J04/J04.S02.typed.txt",
+          "checks": [
+            {
+              "name": "the keystrokes reached the agent and came back",
+              "ok": true,
+              "detail": "seen 2 times"
+            },
+            {
+              "name": "no traceback on screen",
+              "ok": true,
+              "detail": ""
+            }
+          ],
+          "note": ""
+        },
+        {
+          "id": "J04.S03.back-to-welcome",
+          "title": "F12, then w: back to Welcome",
+          "status": "passed",
+          "started_at": "2026-10-16T07:53:31+00:00",
+          "duration_s": 1.59,
+          "shot": "shots/J04/J04.S03.back-to-welcome.png",
+          "text": "text/J04/J04.S03.back-to-welcome.txt",
+          "checks": [
+            {
+              "name": "Welcome is back and still says the fleet is up",
+              "ok": true,
+              "detail": ""
+            },
+            {
+              "name": "no traceback on screen",
+              "ok": true,
+              "detail": ""
+            }
+          ],
+          "note": ""
+        }
+      ],
+      "video": "video/core.webm",
+      "error": null,
+      "kind": "journey",
+      "finding": null
+    },
+    {
+      "id": "J06",
+      "title": "Doctor and Accounts pages",
+      "story": "From the sidebar I open the Doctor to see the machine is healthy, then Accounts to see which Claude logins aisquare knows, and w takes me back to Welcome.",
+      "status": "passed",
+      "duration_s": 5.0,
+      "steps": [
+        {
+          "id": "J06.S01.doctor",
+          "title": "Open the Doctor from the sidebar",
+          "status": "passed",
+          "started_at": "2026-10-16T07:53:33+00:00",
+          "duration_s": 1.9,
+          "shot": "shots/J06/J06.S01.doctor.png",
+          "text": "text/J06/J06.S01.doctor.txt",
+          "checks": [
+            {
+              "name": "the doctor lists the Claude Code connection",
+              "ok": true,
+              "detail": ""
+            },
+            {
+              "name": "the sidebar's doctor summary shows no failures",
+              "ok": true,
+              "detail": ""
+            },
+            {
+              "name": "no traceback on screen",
+              "ok": true,
+              "detail": ""
+            }
+          ],
+          "note": ""
+        },
+        {
+          "id": "J06.S02.accounts",
+          "title": "Open Accounts from the sidebar",
+          "status": "passed",
+          "started_at": "2026-10-16T07:53:35+00:00",
+          "duration_s": 1.47,
+          "shot": "shots/J06/J06.S02.accounts.png",
+          "text": "text/J06/J06.S02.accounts.txt",
+          "checks": [
+            {
+              "name": "Accounts offers to add a Claude account",
+              "ok": true,
+              "detail": ""
+            },
+            {
+              "name": "Accounts shows the AISquare sign-in section",
+              "ok": true,
+              "detail": ""
+            },
+            {
+              "name": "no traceback on screen",
+              "ok": true,
+              "detail": ""
+            }
+          ],
+          "note": ""
+        },
+        {
+          "id": "J06.S03.back-to-welcome",
+          "title": "w: back to Welcome",
+          "status": "passed",
+          "started_at": "2026-10-16T07:53:36+00:00",
+          "duration_s": 1.63,
+          "shot": "shots/J06/J06.S03.back-to-welcome.png",
+          "text": "text/J06/J06.S03.back-to-welcome.txt",
+          "checks": [
+            {
+              "name": "Welcome is back",
+              "ok": true,
+              "detail": ""
+            },
+            {
+              "name": "no traceback on screen",
+              "ok": true,
+              "detail": ""
+            }
+          ],
+          "note": ""
+        }
+      ],
+      "video": null,
+      "error": null,
+      "kind": "journey",
+      "finding": null
+    },
+    {
+      "id": "W-QA-01",
+      "title": "`project forget` leaves no machine-wide pin",
+      "story": "QA-01: forgetting a project from inside its own folder must not write a machine-wide pin (~/.aisquare/state.json) that re-routes every other session.",
+      "status": "failed",
+      "duration_s": 7.96,
+      "steps": [
+        {
+          "id": "W-QA-01.S01.forget",
+          "title": "Register a project, then forget it from inside it",
+          "status": "failed",
+          "started_at": "2026-10-16T07:53:39+00:00",
+          "duration_s": 7.96,
+          "shot": "shots/W-QA-01/W-QA-01.S01.forget.png",
+          "text": "text/W-QA-01/W-QA-01.S01.forget.txt",
+          "checks": [
+            {
+              "name": "no ~/.aisquare/state.json was written",
+              "ok": false,
+              "detail": "state.json exists: every session on the machine is now pinned"
+            },
+            {
+              "name": "no traceback on screen",
+              "ok": true,
+              "detail": ""
+            }
+          ],
+          "note": ""
+        }
+      ],
+      "video": "video/watchlist.webm",
+      "error": "W-QA-01.S01.forget: no ~/.aisquare/state.json was written (state.json exists: every session on the machine is now pinned)",
+      "kind": "watch",
+      "finding": "QA-01"
+    },
+    {
+      "id": "W-QA-13",
+      "title": "Different tasks stay different",
+      "story": "QA-13: two different tasks with non-Latin titles must be two tasks; an ASCII-only idempotency key makes the second one 'already tracked' instead.",
+      "status": "failed",
+      "duration_s": 3.08,
+      "steps": [
+        {
+          "id": "W-QA-13.S01.tasks",
+          "title": "Add two different tasks with Cyrillic titles",
+          "status": "failed",
+          "started_at": "2026-10-16T07:53:47+00:00",
+          "duration_s": 3.08,
+          "shot": "shots/W-QA-13/W-QA-13.S01.tasks.png",
+          "text": "text/W-QA-13/W-QA-13.S01.tasks.txt",
+          "checks": [
+            {
+              "name": "the second task was added, not merged into the first",
+              "ok": false,
+              "detail": "the second add answered 'already tracked'"
+            },
+            {
+              "name": "no traceback on screen",
+              "ok": true,
+              "detail": ""
+            }
+          ],
+          "note": ""
+        }
+      ],
+      "video": "video/watchlist.webm",
+      "error": "W-QA-13.S01.tasks: the second task was added, not merged into the first (the second add answered 'already tracked')",
+      "kind": "watch",
+      "finding": "QA-13"
+    },
+    {
+      "id": "W-QA-19",
+      "title": "Context search survives the word AND",
+      "story": "QA-19: searching remembered context for an everyday word (AND/OR/NOT) must not crash with a traceback.",
+      "status": "failed",
+      "duration_s": 2.3,
+      "steps": [
+        {
+          "id": "W-QA-19.S01.search",
+          "title": "Search memory for \"AND\"",
+          "status": "failed",
+          "started_at": "2026-10-16T07:53:50+00:00",
+          "duration_s": 2.3,
+          "shot": "shots/W-QA-19/W-QA-19.S01.search.png",
+          "text": "text/W-QA-19/W-QA-19.S01.search.txt",
+          "checks": [
+            {
+              "name": "the search exits cleanly",
+              "ok": false,
+              "detail": "exit 1"
+            },
+            {
+              "name": "no traceback on screen",
+              "ok": false,
+              "detail": "❱"
+            }
+          ],
+          "note": ""
+        }
+      ],
+      "video": "video/watchlist.webm",
+      "error": "W-QA-19.S01.search: the search exits cleanly (exit 1); no traceback on screen (❱)",
+      "kind": "watch",
+      "finding": "QA-19"
+    },
+    {
+      "id": "W-QA-09",
+      "title": "Turning capture off stops capture",
+      "story": "QA-09: with capture.enabled = false, a prompt sent through Claude Code's UserPromptSubmit hook must not be stored in the prompt log.",
+      "status": "failed",
+      "duration_s": 7.68,
+      "steps": [
+        {
+          "id": "W-QA-09.S01.capture",
+          "title": "Turn capture off, then send a prompt",
+          "status": "failed",
+          "started_at": "2026-10-16T07:53:52+00:00",
+          "duration_s": 7.68,
+          "shot": "shots/W-QA-09/W-QA-09.S01.capture.png",
+          "text": "text/W-QA-09/W-QA-09.S01.capture.txt",
+          "checks": [
+            {
+              "name": "the prompt was not recorded",
+              "ok": false,
+              "detail": "`aisquare log` shows it 1 time(s)"
+            },
+            {
+              "name": "no traceback on screen",
+              "ok": true,
+              "detail": ""
+            }
+          ],
+          "note": ""
+        }
+      ],
+      "video": "video/watchlist.webm",
+      "error": "W-QA-09.S01.capture: the prompt was not recorded (`aisquare log` shows it 1 time(s))",
+      "kind": "watch",
+      "finding": "QA-09"
+    }
+  ],
+  "notes": [
+    "Agents are the e2e stand-in: aisquare itself (installer, Welcome, fleet, panes, worktrees) is real; no model is called."
+  ],
+  "schema": "aisquare-e2e/run/v1"
+}

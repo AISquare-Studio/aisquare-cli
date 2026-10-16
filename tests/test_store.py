@@ -2529,3 +2529,31 @@ def test_fleet_board_is_a_live_rows_a_live_managers_first() -> None:
         assert store.fleet_board(PROJECT.id) == "prj_b", "the newest live row's"
         store.upsert_fleet_agent(row(0, "manager", "prj_m"))
         assert store.fleet_board(PROJECT.id) == "prj_m", "a live manager's first"
+
+
+def test_fleet_manager_board_is_the_newest_manager_rows_a_live_one_first() -> None:
+    """Review of #259, round 32, 2/9: the board a pause is set on besides its homes is the one
+    a manager of the project reads, or the one a restart of its last one hands on. Only a
+    manager's: a coder never reads the pause."""
+    from datetime import timedelta
+
+    from aisquare.models import FleetAgent
+
+    start = datetime.now(tz=UTC)
+
+    def row(n: int, role: str, board: str, *, ended: bool = False) -> FleetAgent:
+        return FleetAgent(
+            id=f"agt_{n}", project_id=PROJECT.id, label=f"{role}-{n}", role=role,
+            pane_id=f"%{n}", cwd=Path("/w"), created_at=start + timedelta(minutes=n),
+            board=board, ended_at=start + timedelta(hours=1) if ended else None,
+        )  # fmt: skip
+
+    with store_session() as store:
+        store.ensure_project(PROJECT)
+        store.upsert_fleet_agent(row(9, "coder", "prj_c"))
+        assert store.fleet_manager_board(PROJECT.id) is None, "before its first manager"
+        store.upsert_fleet_agent(row(1, "manager", "prj_old", ended=True))
+        store.upsert_fleet_agent(row(2, "manager", "prj_hub", ended=True))
+        assert store.fleet_manager_board(PROJECT.id) == "prj_hub", "the newest, stopped"
+        store.upsert_fleet_agent(row(0, "manager", "prj_m"))
+        assert store.fleet_manager_board(PROJECT.id) == "prj_m", "a live one first"

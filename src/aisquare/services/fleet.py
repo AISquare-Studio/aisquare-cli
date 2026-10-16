@@ -7153,10 +7153,10 @@ def pause(project: ProjectInfo, *, session_ref: str | None = None) -> None:
     """Set the project's ``fleet-paused`` board signal — its manager spawns nothing while it
     is on.
 
-    On every board the project's rows recorded, its checkout's and the one a spawn from here
-    gives (:func:`_pause_boards`), by the project's own name there (:func:`_pause_signals`): under
-    a hub the hub's board, where every other fleet project's manager reads its own project's
-    pause, not this one."""
+    On the board its newest manager row recorded, its checkout's and the one a spawn from
+    here gives (:func:`_pause_boards`), by the project's own name there
+    (:func:`_pause_signals`): under a hub the hub's board, where every other fleet project's
+    manager reads its own project's pause, not this one."""
     _set_pause(project, "on", session_ref)
 
 
@@ -7222,18 +7222,23 @@ def _pause_homes(project: ProjectInfo) -> set[str]:
 
 
 def _pause_boards(store: ContextStore, project: ProjectInfo, homes: Collection[str]) -> list[str]:
-    """The boards ``project``'s ``fleet-paused`` signal is set on: every board one of its rows
-    recorded, live or ended (:meth:`ContextStore.fleet_agent_boards`, :func:`_board_of_row`),
-    and ``homes`` (:func:`_pause_homes`), where the next manager a spawn gives reads.
+    """The boards ``project``'s ``fleet-paused`` signal is set on: the ones a manager of it
+    reads now or would read next. The board its newest manager row recorded, live or ended
+    (:meth:`ContextStore.fleet_manager_board`, :func:`_board_of_row`), where it reads, or
+    where a ``restart`` of it puts its replacement; and ``homes`` (:func:`_pause_homes`),
+    where the next manager a spawn gives reads.
 
-    Whichever rows are live and whether the caller exports the hub or not. Taken from the
-    rows live at the moment, a pause set on a hub where the manager read was left on there
-    once that manager stopped: the shutdown and the resume asked only the boards still live,
-    or the newest row's, a coder's on the checkout's board, and the next manager spawned
-    under the hub came up staffing nothing (review of #259, round 29, 1/8). ``fleet
-    resume``, ``is_paused`` and ``fleet shutdown`` now find the pause wherever it is on, by
-    its name (:func:`_pause_where_on`). One ``SELECT DISTINCT``, so no row is built: every
-    spawn, restart and switch adds a row that is never deleted (round 26, 10/11).
+    Whether that manager is live and whether the caller exports the hub or not. Taken from
+    the rows live at the moment, a pause set on a hub where the manager read was left on
+    there once that manager stopped, and the next manager spawned under the hub came up
+    staffing nothing (review of #259, round 29, 1/8). ``fleet resume``, ``is_paused`` and
+    ``fleet shutdown`` now find the pause wherever it is on, by its name
+    (:func:`_pause_where_on`), so a board no manager of the project reads any more needs
+    none: set on every board any row ever recorded, ``fleet pause -P a`` put ``a``'s pause,
+    and its resume the ``off``, in the next prompt of every agent on every hub ``a`` ever
+    ran under (round 32, 2/9). Only a manager reads the pause, so a coder's board is not
+    one. One ``SELECT``, so no row is built: every spawn, restart and switch adds a row that
+    is never deleted (round 26, 10/11).
 
     A signal is the board's (docs/fleet.md, "Under a hub: one board, many fleet projects"),
     and the manager asks its own session's board, as its cycle line tells it to. Set, read
@@ -7241,7 +7246,8 @@ def _pause_boards(store: ContextStore, project: ProjectInfo, homes: Collection[s
     spawning, and a pause set where it does read was never cleared by ``fleet shutdown``
     (review of #259, round 25, 2/10). By what name: :func:`_pause_signals`.
     """
-    return sorted({*store.fleet_agent_boards(project.id), *homes})
+    manager = store.fleet_manager_board(project.id)
+    return sorted({*homes} if manager is None else {manager, *homes})
 
 
 def _pause_signals(

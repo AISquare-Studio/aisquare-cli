@@ -9241,6 +9241,50 @@ def test_a_resume_writes_off_only_where_the_pause_reads_on(hubbed: _Hubbed) -> N
     assert sorted(_paused_on(w)) == sorted([w.hub.id, w.fleet.id]), "on: every board"
 
 
+@pytest.mark.parametrize("live", [True, False], ids=["its manager live", "nothing live"])
+def test_a_pause_goes_only_where_a_manager_of_the_project_reads_or_would_next(
+    hubbed: _Hubbed, tmp_path: Path, live: bool
+) -> None:
+    """Review of #259, round 32, 2/9: ``fleet pause`` set the pause on every board one of
+    the project's rows ever recorded, live or ended. Each write is a ``signal`` event in
+    the delta of every session on that board, and ``fleet resume``, which clears it where it
+    reads on, then wrote ``off`` on each again: a project that ran under another hub a month
+    ago put both in the next prompt of every agent still on that hub. The pause goes where a
+    manager of the project reads, or would next: its newest manager row's board, live or
+    stopped (a restart hands it on), and its homes. With nothing live and a caller without
+    the hub, the stopped manager's hub is still paused."""
+    w = hubbed
+    root = tmp_path / "old-hub"
+    root.mkdir()
+    month_ago = datetime.now(tz=UTC) - timedelta(days=30)
+    with store_session() as store:
+        old = store.onboard_project(ProjectInfo(id=project_id_for(root), root=root))
+        for role in ("manager", "coder"):
+            store.upsert_fleet_agent(
+                FleetAgent(
+                    id=f"agt_old_{role}", project_id=w.fleet.id, label=f"old-{role}",
+                    role=role, pane_id=f"%old-{role}", cwd=w.fleet.root, created_at=month_ago,
+                    ended_at=month_ago + timedelta(days=1), board=old.id,
+                )
+            )  # fmt: skip
+        assert old.id in store.fleet_agent_boards(w.fleet.id)
+    if not live:
+        for label in (fleet_service.MANAGER_LABEL, w.coder.label):
+            fleet_service.stop(w.fleet, label, force=True)
+        _without_the_hub(w)
+
+    def signals_on_the_old_hub() -> int:
+        with store_session() as store:
+            return sum(e.kind == "signal" for e in store.recent_events(old.id, limit=500))
+
+    fleet_service.pause(w.fleet)
+    assert sorted(_paused_on(w)) == sorted([w.hub.id, w.fleet.id])
+    assert fleet_service.is_paused(w.fleet)
+    fleet_service.resume(w.fleet)
+    assert _paused_on(w) == [] and not fleet_service.is_paused(w.fleet)
+    assert signals_on_the_old_hub() == 0, "neither the pause nor the resume reached it"
+
+
 def test_a_pause_or_resume_as_a_prefix_of_two_sessions_is_refused_as_ambiguous(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, runner: CliRunner
 ) -> None:

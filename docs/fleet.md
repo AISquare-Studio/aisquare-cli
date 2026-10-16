@@ -549,10 +549,12 @@ aisquare fleet resume
 
 Sets (and clears) a named board signal, the project's `fleet-paused`, that the
 manager's cycle respects: while it is on, the manager spawns nothing. Running
-agents are not touched. Both take `--as SESSION`. The signal goes on every board
-the project's agents read, as each was recorded at spawn, whether it still runs
-or not, on the project's checkout's board and on the one a spawn from here would
-give; `fleet resume` and `fleet shutdown` clear it wherever it is on under the
+agents are not touched. Both take `--as SESSION`. The signal goes on the boards a
+manager of the project reads now or would read next: the one its newest manager
+was recorded at spawn to read, whether it still runs or not (a `restart` of it
+hands its replacement that board), the project's checkout's board and the one a
+spawn from here would give. A board only a coder, or a manager long since
+replaced, read is left alone. `fleet resume` and `fleet shutdown` clear it wherever it is on under the
 project's name, from `asq` under a hub or a plain shell alike, and only there, so a
 resume puts no `off` in the prompts of agents on boards it was never paused on. On a board other
 projects read too (the hub's under `AISQUARE_TEAM_HUB`, or the checkout's for a
@@ -1264,7 +1266,7 @@ was only a default, and the replacement reads the checkout's.
 | Tasks: `task add`, `next`, `claim`, `review`, `done`, `block` and `reopen`. Also the task `fleet spawn --task` gives an agent, looked up (`12`, `#12` or an id) on the board that agent will read; `switch` and `restart` check it, before they stop anything, on the board the replacement will read | Finding a session's row: the hand-over and the `/clear` that keep its claims for the id that follows, and the adoption of that id onto the row, whatever project the row is in |
 | Notes, questions, results and every other feed line. A `fleet tell` filed as a note goes on the board the told agent recorded | The panes, tmux, and the row's label and state |
 | The fleet's own lines, `agent_exited`, `switched` and `restarted`, on the board the row recorded, with a session or none; and the entries a replacement's hand-off prompt quotes | `--project` in every hint and cycle command, and the project `fleet spawn`, `stop`, `tell`, `switch` and `restart` act on |
-| The claims a session holds, released or kept when it ends. The project's own `fleet-paused` signal, on each board the project's agents recorded, running or not, by the project's name there | Which manager a nudge wakes: the manager row in the writer's own row's project; for a writer with no row (the phone, a shell, an MCP client), a task update's the manager in the project of the row working the task (spawned for it, else its claimant's), else the manager that reads the board, and of several, the one whose project holds the writer's directory, the innermost when projects nest (the phone writes in the root of the project it names, and naming none, has no directory and picks none). The deferred wake of a manager's own Stop wakes its own row, and a manager no row holds (one launched by hand) wakes nobody. A manager is woken only for a write, or an exit, on the board it reads |
+| The claims a session holds, released or kept when it ends. The project's own `fleet-paused` signal, on the board its newest manager recorded, running or not, and the ones a spawn would give, by the project's name there | Which manager a nudge wakes: the manager row in the writer's own row's project; for a writer with no row (the phone, a shell, an MCP client), a task update's the manager in the project of the row working the task (spawned for it, else its claimant's), else the manager that reads the board, and of several, the one whose project holds the writer's directory, the innermost when projects nest (the phone writes in the root of the project it names, and naming none, has no directory and picks none). The deferred wake of a manager's own Stop wakes its own row, and a manager no row holds (one launched by hand) wakes nobody. A manager is woken only for a write, or an exit, on the board it reads |
 | What a nudge delivers: the delta of the board the woken manager reads | |
 
 Without a hub the two are one project, so a call site that asks the wrong one

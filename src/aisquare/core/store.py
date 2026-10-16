@@ -1368,6 +1368,7 @@ class ContextStore(Protocol):
     def fleet_agents_ended_since(self, project_id: str, since: datetime) -> list[FleetAgent]: ...
     def fleet_agent_boards(self, project_id: str) -> list[str]: ...
     def fleet_board(self, project_id: str) -> str | None: ...
+    def fleet_manager_board(self, project_id: str) -> str | None: ...
     def fleet_agent_for_session(self, session_id: str) -> FleetAgent | None: ...
     def ui_state(self, key: str) -> str | None: ...
     def set_ui_state(self, key: str, value: str | None) -> None: ...
@@ -3855,9 +3856,9 @@ class SqliteStore:
         """Every board one of the project's rows recorded, live or ended, sorted; ``[]``
         before its first spawn.
 
-        The boards a project's pause is set on, whichever of its rows are live when it is
-        asked (``services.fleet._pause_boards``). Distinct in SQL: every spawn, restart and
-        switch adds a row that is never deleted, and :meth:`fleet_agents` builds them all.
+        The boards a phone may reach for the project (``services.remote_server``'s
+        ``_remote_boards``). Distinct in SQL: every spawn, restart and switch adds a row that
+        is never deleted, and :meth:`fleet_agents` builds them all.
         """
         rows = self._conn.execute(
             f"SELECT DISTINCT {self._fleet_agent_board} AS board FROM fleet_agent "
@@ -3881,6 +3882,22 @@ class SqliteStore:
             f"SELECT {self._fleet_agent_board} AS board FROM fleet_agent "
             "WHERE project_id = ? AND ended_at IS NULL "
             "ORDER BY role = 'manager' DESC, created_at DESC, id DESC LIMIT 1",
+            (project_id,),
+        ).fetchone()
+        return None if row is None else str(row["board"])
+
+    def fleet_manager_board(self, project_id: str) -> str | None:
+        """The board the project's newest manager row recorded, a live one first: the board
+        its manager reads, or the one a ``restart`` of its last one hands the replacement
+        (``services.fleet._board_and_hub``); ``None`` before its first manager.
+
+        Where a pause is set besides its homes (``services.fleet._pause_boards``). Picked in
+        SQL, as :meth:`fleet_board` is.
+        """
+        row = self._conn.execute(
+            f"SELECT {self._fleet_agent_board} AS board FROM fleet_agent "
+            "WHERE project_id = ? AND role = 'manager' "
+            "ORDER BY ended_at IS NULL DESC, created_at DESC, id DESC LIMIT 1",
             (project_id,),
         ).fetchone()
         return None if row is None else str(row["board"])

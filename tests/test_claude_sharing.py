@@ -353,6 +353,65 @@ def test_a_launch_on_account_3_gets_the_trust_account_2_gave_and_says_so(
     assert again.exit_code == 0 and "trusted on" not in again.stderr
 
 
+def test_a_launch_a_spawn_shared_for_reads_no_claude_json_again(
+    three: tuple[ClaudeAccount, ...],
+    tmp_path: Path,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    launched: dict[str, Any],
+) -> None:
+    """Review of #259, round 21: a fleet spawn shares into the account it picked before its
+    window opens, and the window's `aisquare launch` read every account's .claude.json
+    again for the same share. The spawn says so on the window (``SHARED_ENV``), for that
+    slot only, and the agent does not inherit it."""
+    _plain, second, _third = three
+    folder = tmp_path / "work"
+    folder.mkdir()
+    _write_claude_json(second, "two@x.dev", trusted=(_key(folder),))
+    reads: list[Path] = []
+    real = sharing.read_claude_json
+
+    def read(path: Path) -> dict[str, Any]:
+        reads.append(path)
+        return real(path)
+
+    monkeypatch.setattr(sharing, "read_claude_json", read)
+    monkeypatch.chdir(folder)
+    monkeypatch.setenv(service.SHARED_ENV, "3")
+
+    told = runner.invoke(app, ["launch", "coder", "--account", "3"])
+
+    assert told.exit_code == 0, told.output
+    assert reads == [] and "trusted on" not in told.stderr
+    assert service.SHARED_ENV not in launched["env"], "not the agent's to inherit"
+    # Control: told of another slot, this launch shares as before.
+    monkeypatch.setenv(service.SHARED_ENV, "2")
+    other = runner.invoke(app, ["launch", "coder", "--account", "3"])
+    assert other.exit_code == 0, other.output
+    assert reads and "now on account 3 too" in other.stderr
+
+
+def test_a_machine_with_one_account_reads_no_claude_json_to_share(
+    fake_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 21: with only the plain claude there is no trust to copy from
+    and no settings.json to link to it, yet every launch read its .claude.json."""
+    plain = core.default_account()
+    _write_claude_json(plain, "one@x.dev")
+    reads: list[Path] = []
+
+    def read(path: Path) -> dict[str, Any]:
+        reads.append(path)
+        return {}
+
+    monkeypatch.setattr(sharing, "read_claude_json", read)
+    assert service.share_for_launch(tmp_path, account=plain) == []
+    assert reads == []
+    core.create_account()  # control: a second account, and the plain claude's file is read
+    assert service.share_for_launch(tmp_path, account=plain) == []
+    assert reads
+
+
 def test_a_parents_trust_is_copied_as_the_parents_entry(
     three: tuple[ClaudeAccount, ...], tmp_path: Path
 ) -> None:

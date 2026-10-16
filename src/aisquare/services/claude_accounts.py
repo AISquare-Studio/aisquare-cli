@@ -2090,6 +2090,13 @@ class SettingsChange:
     reason: str | None = None
 
 
+SHARED_ENV = "AISQUARE_ACCOUNTS_SHARED"
+"""The slot ``fleet spawn`` shared into (:func:`share_for_launch`), set on its window, so the
+window's ``aisquare launch`` does not read the accounts' ``.claude.json`` files again for the
+share just made: files of tens of MB on a long-used account (review of #259, round 21). The
+launch takes it out of the agent's environment."""
+
+
 class SharedNote(str):
     """A :func:`share_for_launch` note that says a share was made (a folder's trust
     copied, settings.json linked), not one that could not be: a receipt shows it as done,
@@ -2125,6 +2132,8 @@ def share_for_launch(
         if not (knobs.share_trust or knobs.share_settings):
             return []
         accounts = list_accounts()
+        if len(accounts) < 2:
+            return []  # one account: no trust to copy from, no plain claude's settings to link
         target = (
             next((one for one in accounts if one.slot == account.slot), account)
             if account is not None

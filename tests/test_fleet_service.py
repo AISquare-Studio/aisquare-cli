@@ -73,6 +73,7 @@ from aisquare.models import (
     TeamTask,
 )
 from aisquare.services import auto_mode, lifecycle
+from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import project as project_service
 from aisquare.services import team as team_service
@@ -14174,6 +14175,59 @@ def test_a_spawn_shares_the_folder_trust_into_the_account_it_picks_and_says_so(
     # The plain claude was not the one launched: nothing written there.
     plain = json.loads(accounts_core.claude_json_path(accounts_core.default_account()).read_text())
     assert plain["projects"] == {}
+
+
+def test_a_spawn_shares_the_trust_outside_the_branch_lock_and_tells_the_window(
+    fake_home: Path,
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 21: a worktree spawn shared the trust while it held the
+    repository's branch lock, which a reap and every other spawn there queue on, reading
+    and parsing a .claude.json (tens of MB on a long-used account) for each account it
+    asked; the window's `aisquare launch` then read them again. It shares before the lock,
+    reads each file once, and tells the window, whose launch reads none."""
+    root = claude_sharing.project_key(Path(os.path.realpath(project.root)))
+    _signed_in(accounts_core.default_account(), "one@x.dev")
+    second, third = accounts_core.create_account(), accounts_core.create_account()
+    _signed_in(second, "two@x.dev", trusted=(root,))
+    _signed_in(third, "three@x.dev")
+    held: list[bool] = []
+    reads: list[tuple[Path, bool]] = []
+    real_lock, real_read = fleet_service._branches_locked, claude_sharing.read_claude_json
+
+    @contextmanager
+    def locked(common: Path, *, wait: float) -> Iterator[None]:
+        with real_lock(common, wait=wait):
+            held.append(True)
+            try:
+                yield
+            finally:
+                held.pop()
+
+    def read(path: Path) -> dict[str, Any]:
+        reads.append((path, bool(held)))
+        return real_read(path)
+
+    monkeypatch.setattr(fleet_service, "_branches_locked", locked)
+    monkeypatch.setattr(claude_sharing, "read_claude_json", read)
+
+    receipt = fleet_service.spawn(project, "coder", worktree=True, account="3")
+
+    assert receipt.agent.cwd != project.root, "a worktree, made under the lock"
+    assert receipt.shared == [f"accounts: {root} is trusted on account 2 — now on account 3 too"]
+    assert reads and not any(under for _path, under in reads), "none under the branch lock"
+    assert len(reads) == len({path for path, _under in reads}), "each file read once"
+    told = tmux.spawned[-1]["env"]
+    assert isinstance(told, dict) and told[accounts_service.SHARED_ENV] == "3"
+    # A share it could not make is left to the window's launch to try again.
+    accounts_core.claude_json_path(third).write_text("{not json", encoding="utf-8")
+    again = fleet_service.spawn(project, "coder", worktree=True, account="3")
+    assert again.shared == [] and any("could not be shared" in note for note in again.notes)
+    untold = tmux.spawned[-1]["env"]
+    assert isinstance(untold, dict) and accounts_service.SHARED_ENV not in untold
 
 
 def test_an_agent_at_the_trust_question_needs_the_human_until_it_is_answered(

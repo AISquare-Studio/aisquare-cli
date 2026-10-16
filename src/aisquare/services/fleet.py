@@ -2693,6 +2693,24 @@ def spawn(
     # of the branch lock a reap removes trees under (`_reap_tree`): a reap that
     # landed between a reuse and the row read the tree as an ended agent's, clean and
     # pushed, and removed it from under the agent starting in it (review of #259, round 17).
+    made: list[str] = []
+    if choice.account is not None:
+        # Here as well as in the window's `aisquare launch`, so the receipt — the manager's
+        # one view of the spawn — says when the folder's trust could not be shared and the
+        # agent will stop at Claude Code's question. Before the branch lock, which a reap
+        # and every other spawn in the repository queue on: the trust a worktree needs is
+        # its main checkout's, the project's own, so the tree need not exist yet. And the
+        # window is told, so its launch does not read the same files again (review of #259,
+        # round 21); with no account chosen, only the window knows its environment.
+        shared = claude_accounts_service.share_for_launch(project.root, account=choice.account)
+        notes.extend(f"accounts: {note}" for note in shared)
+        made = [
+            f"accounts: {note}"
+            for note in shared
+            if isinstance(note, claude_accounts_service.SharedNote)
+        ]
+        if len(made) == len(shared):  # nothing it could not share, which the launch tries again
+            env[claude_accounts_service.SHARED_ENV] = str(choice.account.slot)
     common = _git_common_dir(project.root) if use_worktree else None
     tree_lock = (
         _branches_locked(common, wait=_BRANCHES_LOCK_WAIT)
@@ -2718,19 +2736,6 @@ def spawn(
                 own_branch=own_branch,
                 common=common,
             )
-        made: list[str] = []
-        if choice.account is not None:
-            # Here as well as in the window's `aisquare launch`, so the receipt — the
-            # manager's one view of the spawn — says when the folder's trust could not be
-            # shared and the agent will stop at Claude Code's question. The launch finds it
-            # done; with no account chosen, only the window knows its environment.
-            shared = claude_accounts_service.share_for_launch(cwd, account=choice.account)
-            notes.extend(f"accounts: {note}" for note in shared)
-            made = [
-                f"accounts: {note}"
-                for note in shared
-                if isinstance(note, claude_accounts_service.SharedNote)
-            ]
         try:
             # Every pair is this window's alone: `spawn_window` keeps them out of
             # the session environment, so a later spawn — or a window opened by hand

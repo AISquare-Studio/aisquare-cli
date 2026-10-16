@@ -702,6 +702,32 @@ def test_accounts_settings_sync_links_each_managed_account_to_the_plain_claudes(
     assert json.loads(path.read_text()) == json.loads(source.read_text())
 
 
+@pytest.mark.skipif(not can_symlink(), reason="needs symlinks")
+def test_a_second_link_within_the_same_second_keeps_the_first_copy(
+    three: tuple[ClaudeAccount, ...],
+) -> None:
+    """Review of #259, round 32, 8/9: the account's own settings.json was kept as
+    ``settings.json.own-<second>`` and copied over whatever held that name. A sync, an
+    unshare (which writes the shared content as the account's own) and a sync again within
+    one second replaced the copy of the account's original with the shared settings. Each
+    copy is created anew, the second under ``-2``."""
+    from datetime import UTC, datetime
+
+    plain, second, _ = three
+    source = _settings(plain, {"model": "opus"})
+    _settings(second, {"model": "sonnet"})
+    now = datetime(2026, 10, 16, 12, 0, 0, tzinfo=UTC)
+
+    first = sharing.link_settings(second, source, now=now)
+    assert sharing.unlink_settings(second, source)
+    again = sharing.link_settings(second, source, now=now)
+
+    assert first is not None and first.name == "settings.json.own-20261016T120000Z"
+    assert again is not None and again.name == "settings.json.own-20261016T120000Z-2"
+    assert json.loads(first.read_text()) == {"model": "sonnet"}, "the original is kept"
+    assert json.loads(again.read_text()) == {"model": "opus"}
+
+
 def test_a_plain_settings_json_that_decides_a_login_is_never_shared(
     three: tuple[ClaudeAccount, ...], runner: CliRunner
 ) -> None:

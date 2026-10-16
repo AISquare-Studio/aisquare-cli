@@ -425,9 +425,10 @@ def settings_state(account: ClaudeAccount, source: Path) -> SettingsState:
 def link_settings(account: ClaudeAccount, source: Path, *, now: datetime) -> Path | None:
     """Make ``account``'s settings.json a link to ``source``; the copy of its own it kept.
 
-    The account's own file is copied beside it first, as ``settings.json.own-<UTC stamp>``,
-    then the link is renamed over it in one step: a session starting meanwhile reads the
-    old file or the shared one, never none. Refused (:class:`SharingError`) when its own
+    The account's own file is copied beside it first, as ``settings.json.own-<UTC stamp>``
+    (:func:`_keep_beside`: ``-2``, ``-3`` and on within one second, never over a copy kept
+    before), then the link is renamed over it in one step: a session starting meanwhile
+    reads the old file or the shared one, never none. Refused (:class:`SharingError`) when its own
     file sets what decides its login (:func:`login_keys`), since the link would drop it.
     An own file that is not JSON is copied and replaced: Claude Code reads nothing from it.
     ``None`` when there was nothing to keep. The caller checks ``source`` itself.
@@ -444,8 +445,7 @@ def link_settings(account: ClaudeAccount, source: Path, *, now: datetime) -> Pat
             raise SharingError(
                 f"its own settings.json sets {', '.join(login)}, which decide its login"
             )
-        backup = target.with_name(f"{SETTINGS_FILE}.own-{now:%Y%m%dT%H%M%SZ}")
-        shutil.copy2(target, backup)
+        backup = _keep_beside(target, f"{SETTINGS_FILE}.own-{now:%Y%m%dT%H%M%SZ}")
     temporary = target.with_name(f".{SETTINGS_FILE}.link-{os.getpid()}")
     with contextlib.suppress(FileNotFoundError):
         temporary.unlink()
@@ -457,6 +457,27 @@ def link_settings(account: ClaudeAccount, source: Path, *, now: datetime) -> Pat
             temporary.unlink()
         raise
     return backup
+
+
+def _keep_beside(path: Path, name: str) -> Path:
+    """Copy ``path`` beside itself as ``name``, or ``name-2``, ``name-3`` and on when one is
+    there, as a removed slot is kept (``claude_accounts.remove_account``); the copy.
+
+    Created exclusively, so a copy kept before is never written over. Named to the second
+    and copied over whatever held the name, a sync, an unshare and a sync again within one
+    second replaced the account's own settings with the shared ones it was given back
+    (review of #259, round 32, 8/9)."""
+    counter = 1
+    while True:
+        kept = path.with_name(name if counter == 1 else f"{name}-{counter}")
+        try:
+            with path.open("rb") as own, kept.open("xb") as copy:
+                shutil.copyfileobj(own, copy)
+        except FileExistsError:
+            counter += 1
+            continue
+        shutil.copystat(path, kept)
+        return kept
 
 
 def unlink_settings(account: ClaudeAccount, source: Path) -> bool:

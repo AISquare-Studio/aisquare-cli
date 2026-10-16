@@ -3243,19 +3243,40 @@ def _before_a_server_starts(srv: TmuxServer, config: FleetSettings) -> list[Flee
 
 def _exited_note(srv: TmuxServer, exited: Sequence[FleetAgent]) -> str:
     """What a spawn says of the rows :func:`_before_a_server_starts` forgot the start of: they
-    read lost from now on, named with their projects, forgotten ones' included."""
+    read lost from now on, named with their projects, forgotten ones' included.
+
+    The rows are any project's, so the commands it names reach every project: ``reap --all``,
+    and a ``restart`` naming each row's project (:func:`project_service.fleet_command`).
+    ``aisquare fleet reap`` alone walked the active project's rows, and a ``restart`` with
+    no label is a usage error (review of #259, round 21). A forgotten project is reached by
+    neither until it is added back, so its rows are told that instead."""
     one = len(exited) == 1
     with store_session() as store:
-        known = {each.id: _name(each) for each in store.list_projects(include_forgotten=True)}
+        known = {each.id: each for each in store.list_projects(include_forgotten=True)}
+        live = {each.id for each in store.list_projects(all=True)}
+    called = {each.id: _name(each) for each in known.values()}
     names = ", ".join(
-        f"{row.label} ({known.get(row.project_id, row.project_id)})" for row in exited
+        f"{row.label} ({called.get(row.project_id, row.project_id)})" for row in exited
     )
+    restarts = [
+        f"`{project_service.fleet_command('restart', known[row.project_id], row.label)}`"
+        for row in exited
+        if row.project_id in live
+    ]
+    ways = [f"`aisquare fleet reap --all` records {'it' if one else 'them'}"]
+    if restarts:
+        again = "starts it again" if len(restarts) == 1 else "start them again"
+        ways.append(f"{' and '.join(restarts)} {again}")
+    forgotten = {row.project_id for row in exited if row.project_id in known.keys() - live}
+    ways += [
+        f"{called[gone]} is forgotten: {project_service.onboard_command(known[gone].root)} "
+        "adds it back for both"
+        for gone in sorted(forgotten)
+    ]
     return (
         f"the tmux server at {srv.socket_path()} had exited, leaving its socket file: "
         f"{names} {'reads' if one else 'read'} lost from now on, as {'its' if one else 'their'}"
-        f" {'pane' if one else 'panes'} went with it (`aisquare fleet reap` records "
-        f"{'it' if one else 'them'}, `aisquare fleet restart` starts {'it' if one else 'them'}"
-        " again)"
+        f" {'pane' if one else 'panes'} went with it ({'; '.join(ways)})"
     )
 
 

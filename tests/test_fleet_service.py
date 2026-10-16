@@ -74,6 +74,7 @@ from aisquare.models import (
 )
 from aisquare.services import auto_mode, lifecycle
 from aisquare.services import fleet as fleet_service
+from aisquare.services import project as project_service
 from aisquare.services import team as team_service
 from aisquare.services.explainability import PIPELINE_ID_ENV_VAR
 from aisquare.services.fleet import (
@@ -3367,6 +3368,16 @@ def test_a_spawn_over_a_server_that_exited_leaves_its_rows_lost_not_held(
         assert f"{name} ({project.root.name})" in said, said
     assert f"manager ({plain_project.root.name})" in said, "every project's, on a shared server"
     assert " read lost from now on, as their panes went with it " in said, said
+    # Rows of every project: `reap --all`, and a restart naming each row's project and label
+    # (review of #259, round 21) — bare, each acted on the active project, or was refused.
+    assert "(`aisquare fleet reap --all` records them; " in said, said
+    with store_session() as store:
+        ours, theirs_project = store.get_project(project.id), store.get_project(plain_project.id)
+    assert ours is not None and theirs_project is not None
+    for where, label in ((ours, "manager"), (ours, "coder-1"), (theirs_project, "manager")):
+        restart = project_service.fleet_command("restart", where, label)
+        assert f"`{restart}`" in said, said
+    assert "`aisquare fleet reap`" not in said and "`aisquare fleet restart`" not in said
     # Lost, as in 0.8.0: a coder comes back under its own label, the manager's row ends at
     # a stop, and `reap` records the rest; nothing is held, and nothing of coder-3's touched.
     assert fleet_service.restart(project, "coder-1").replaced.id == coder.id
@@ -3377,6 +3388,28 @@ def test_a_spawn_over_a_server_that_exited_leaves_its_rows_lost_not_held(
         still = store.get_fleet_agent(kept.id)
     assert still is not None and still.ended_at is None and still.server_started_at is not None
     assert [typed for typed in tmux.typed if typed[0] == receipt.agent.pane_id] == []
+
+
+def test_the_exited_note_tells_a_forgotten_projects_rows_to_add_it_back_first(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, plain_project: ProjectInfo
+) -> None:
+    """Review of #259, round 21: the note names rows of forgotten projects too, which neither
+    ``reap --all`` nor ``restart --project`` reaches: a restart for one was refused as no
+    such project. Such a row gets no restart, and its project is said to need adding back."""
+    ours = fleet_service.spawn(project, "manager").agent
+    theirs = fleet_service.spawn(plain_project, "manager").agent
+    with store_session() as store:
+        store.forget_project(plain_project.id)
+        named = store.get_project(project.id)
+    assert named is not None
+
+    said = fleet_service._exited_note(tmux, [ours, theirs])
+
+    restart = project_service.fleet_command("restart", named, "manager")
+    assert f"`{restart}` starts it again" in said, said
+    assert said.count("aisquare fleet restart") == 1, said
+    onboard = project_service.onboard_command(plain_project.root)
+    assert f"{plain_project.root.name} is forgotten: {onboard} adds it back for both" in said
 
 
 def test_a_check_at_a_path_with_no_file_reads_the_fleets_socket_once(

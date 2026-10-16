@@ -1612,7 +1612,11 @@ def test_a_poll_that_raises_is_said_of_the_window_it_was_asked_for(
     so the stale-answer guard, which held for an answer, did not hold for a failure. A poll
     asked for window A that raised after A was cancelled and window B opened set B's
     ``poll_failed`` and said "could not tell whether the log-in landed" of B's account, and
-    B's own failure later was never said. A failure names its window as an answer does."""
+    B's own failure later was never said. A failure names its window as an answer does.
+
+    Held and waited for for :data:`HOLD_S`, and the wait is the event loop's: with 5 s, and
+    a thread of the loop's executor to wait in, the poll had not started by then on every
+    windows-latest run. Its worker queues on that executor too, behind the wait itself."""
     _script_claude_sign_in(monkeypatch, tmp_path, lands=False)
     asked = threading.Event()
     gate = threading.Event()
@@ -1621,7 +1625,7 @@ def test_a_poll_that_raises_is_said_of_the_window_it_was_asked_for(
         acct: ClaudeAccount, *, since: str | None = None
     ) -> ClaudeIdentity | None:
         asked.set()
-        gate.wait(5)
+        gate.wait(HOLD_S)
         raise PermissionError(13, "Permission denied", ".claude.json")
 
     alive = tmux_core.PaneFacts(
@@ -1650,7 +1654,10 @@ def test_a_poll_that_raises_is_said_of_the_window_it_was_asked_for(
         await settle(app)
         view._notice("before")
         view._poll_login()  # asked for this window, A
-        assert await asyncio.to_thread(asked.wait, 5)
+        deadline = time.monotonic() + HOLD_S
+        while not asked.is_set() and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert asked.is_set(), "the poll never started"
         first = view.login
         assert first is not None
         view.login = dataclasses.replace(first)  # A gone, B open, while A's poll runs

@@ -1955,6 +1955,7 @@ def needs_from_board(
     now: datetime,
     manager_live: bool = False,
     stopped: datetime | None = None,
+    own_board: bool = True,
 ) -> list[NeedsItem]:
     """The board's open questions and results for the human (:func:`is_needs_board_event`).
 
@@ -1970,6 +1971,13 @@ def needs_from_board(
     result stays on the board, news, not a question, while the stop is a card of its own or
     a clean exit. Judged by the result's own time, it is the same card every scan of its
     day (review of #243, rounds 22 to 25).
+
+    The manager is the project's, so it takes the items its own agents (``agents``) post,
+    which nudge it (``team._nudge_target``). ``own_board``: the board is the project's own,
+    so it also takes a post by a session no row holds, whose nudge wakes the board's
+    reading manager. On a board several projects share, such a post is a card whatever the
+    manager: which of them it woke is the writer's directory's to say, which the board does
+    not record (review of #259, round 25, 7/10).
     """
     from aisquare.services.fleet import RECENTLY_ENDED
 
@@ -1994,10 +2002,13 @@ def needs_from_board(
             label = row.label if row is not None else own
             names = {n.strip().lower() for n in (label, own, role) if n and n.strip()}
             open_still = event.session_id not in moved_on and not names & addressed
-            taken = manager_live or (
-                event.kind == "result"
-                and stopped is not None
-                and event.created_at - stopped <= RECENTLY_ENDED
+            taken = (row is not None or own_board) and (
+                manager_live
+                or (
+                    event.kind == "result"
+                    and stopped is not None
+                    and event.created_at - stopped <= RECENTLY_ENDED
+                )
             )
             if open_still and is_needs_board_event(event, author_role=role, manager_live=taken):
                 items.append(
@@ -2039,16 +2050,12 @@ in one of them is no manager to leave a crash or a coder's question to."""
 
 
 def _needs_nudged(
-    project: ProjectInfo,
-    board_id: str,
-    manager: FleetAgent | None,
-    listed: list[FleetAgentStatus],
-    now: datetime,
+    manager: FleetAgent | None, listed: list[FleetAgentStatus], now: datetime
 ) -> FleetAgent | None:
     """``manager``, the project's (:func:`_needs_manager`), while it hears of what its agents
     need and can take it: live in ``listed``, the listing, on a board session not ended, in
-    none of :data:`_NEEDS_NOT_ACTING`. ``board_id`` is the project's board. ``None``:
-    nobody does, and what they need is the human's. A row younger than
+    none of :data:`_NEEDS_NOT_ACTING`. ``None``: nobody does, and what they need is the
+    human's. A row younger than
     :data:`_NEEDS_STARTING` whose session has yet to register is starting, not one that
     cannot take them: read as none, a restart, a switch or a spawn made every coder's open
     question and result to it of the day a card, due at once (review of #243, round 26, 1/2).
@@ -2059,23 +2066,19 @@ def _needs_nudged(
     result to the manager, a crash, and for a while the push of a limit. A turn that
     ended on a question wakes no manager, so it waits on none.
 
-    On its own board it is the one manager the fleet wakes (``fleet.nudge_manager``),
-    which a board write (``team.note``), an agent's exit and a usage limit all nudge by
-    the project's id, through its board session: a row whose session never registered
-    (no aisquare hooks) takes nothing (review of #243, round 24, 5/8). A manager session
-    no row holds, or a numbered seat (``manager-2``), is sent nothing.
-
-    When its agents write another project's board (under ``AISQUARE_TEAM_HUB`` the
-    hub's, for a worktree its principal checkout's) it is nobody. A board write there
-    nudges the board's manager, not the project's, and which manager on a shared board
-    would handle an item had no answer that held: keyed by the board, the project or
-    the spawner, each left items that no card showed and no nudge reached (review of
-    #243, rounds 18 to 21). So every question and result on that board, and every
-    crash, limit and failed hand-over of the project's, is a card and a push: more
-    cards on a hub, never a silent stall. A manager that is down is its own project's
-    either way, from that project's rows alone (:func:`_needs_manager_down`).
+    It is the one manager the fleet wakes (``fleet.nudge_manager``) for its agents, on
+    whatever board they write: a board write of theirs (``team._nudge_target``), an
+    agent's exit and a usage limit all nudge the manager of the row's own project, which
+    reads the board the rows recorded (review of #259, round 25, 7/10). A row whose
+    session never registered (no aisquare hooks) takes nothing (review of #243, round 24,
+    5/8). A manager session no row holds, or a numbered seat (``manager-2``), is sent
+    nothing. On a board several projects share, as under ``AISQUARE_TEAM_HUB``, an item
+    is the project's whose row posted it (:func:`_needs_board_once`): a post by a session
+    no row holds is a card, more cards on a hub, never a silent stall
+    (:func:`needs_from_board`). A manager that is down is its own project's either way,
+    from that project's rows alone (:func:`_needs_manager_down`).
     """
-    if board_id != project.id or manager is None or manager.ended_at is not None:
+    if manager is None or manager.ended_at is not None:
         return None
     status = next((s for s in listed if s.agent.id == manager.id), None)
     if status is None or status.state in _NEEDS_NOT_ACTING:
@@ -2111,6 +2114,9 @@ class _NeedsProject:
     blind: Mapping[str, Exception]
     """Agent id → the capture of its screen that failed (:class:`_NeedsReads`): that agent's
     own item is not to be used, and every other's is."""
+    posted: frozenset[int] = frozenset()
+    """The seqs of the board's events its rows' sessions posted: its own to judge
+    (:func:`_needs_board_once`)."""
 
 
 _T = TypeVar("_T")
@@ -2207,7 +2213,7 @@ def _needs_scan_project(
     )
     exits = [*board, *_needs_exits(sources, rows, board_id, day, reads)]
     manager = _needs_manager(rows)
-    taking = _needs_nudged(project, board_id, manager, statuses, now)
+    taking = _needs_nudged(manager, statuses, now)
     authors = _needs_board_authors(board, now)
     sessions = (
         reads.needs_read(lambda: sources.board_sessions(board_id, authors), "sessions")
@@ -2263,9 +2269,11 @@ def _needs_scan_project(
             project=project,
             now=now,
             manager_live=taking is not None,
-            stopped=manager.ended_at if own and manager is not None else None,
+            stopped=manager.ended_at if manager is not None else None,
+            own_board=own,
         )
     )
+    posters = {row.session_id for row in rows if row.session_id}
     return _NeedsProject(
         items=items,
         statuses=statuses,
@@ -2274,6 +2282,7 @@ def _needs_scan_project(
         failed=reads.failed,
         failed_read=reads.failed_read,
         blind=reads.blind,
+        posted=frozenset(event.seq for event in board if event.session_id in posters),
     )
 
 
@@ -2743,6 +2752,7 @@ def scan_needs_you(
     items: list[NeedsItem] = []
     projects = sources.list_projects()
     boards = {project.id: _needs_board_of(sources, project) for project in projects}
+    posters: dict[tuple[str, object], str] = {}
     for project in projects:
         scanned: _NeedsProject | None = None
         try:
@@ -2764,12 +2774,13 @@ def scan_needs_you(
         if scanned is not None and scanned.failed is None:
             items.extend(scanned.items)
             items.extend(_needs_blind_kept(scanned, project, kept, memory, seen, failing))
+            posters.update(((boards[project.id], seq), project.id) for seq in scanned.posted)
         else:
             _needs_still_remembered(memory, seen, project)
             items.extend(item for item in kept if item.project_id == project.id)
     for key in [key for key in memory if key not in seen]:
         del memory[key]
-    items = _needs_board_once(items, boards)
+    items = _needs_board_once(items, boards, posters)
     return _needs_ranked([item for item in items if item.id not in dismissed])
 
 
@@ -2837,7 +2848,11 @@ def _needs_read_once(sources: NeedsSources) -> NeedsSources:
     )
 
 
-def _needs_board_once(items: Sequence[NeedsItem], boards: Mapping[str, str]) -> list[NeedsItem]:
+def _needs_board_once(
+    items: Sequence[NeedsItem],
+    boards: Mapping[str, str],
+    posters: Mapping[tuple[str, object], str] | None = None,
+) -> list[NeedsItem]:
     """``items`` with each question or result of a board that several projects write one card.
 
     Under ``AISQUARE_TEAM_HUB`` every project's board is the hub's, so each project's scan
@@ -2846,7 +2861,15 @@ def _needs_board_once(items: Sequence[NeedsItem], boards: Mapping[str, str]) -> 
     that no row asked (a manager started outside the fleet) is the card of the board's
     own project when it is listed, else of the first project that writes the board.
     ``boards`` is each scanned project's board, by its id, in the order scanned.
+
+    ``posters`` is the project whose rows posted each event, by ``(board, seq)``, of the
+    projects scanned in full (``_NeedsProject.posted``). Its verdict is the event's: when
+    its live manager took the post, no other project's scan, which saw no row of the
+    poster's, makes a card of it. Kept by the lowest rank alone, a coder's question to its
+    woken manager was still every other project's card and push (review of #259, round 25,
+    7/10).
     """
+    posters = posters or {}
     writers: dict[str, list[str]] = {}
     for project_id, written in boards.items():
         writers.setdefault(written, []).append(project_id)
@@ -2861,6 +2884,8 @@ def _needs_board_once(items: Sequence[NeedsItem], boards: Mapping[str, str]) -> 
             rest.append(item)
             continue
         key = (board, item.detail.get("seq"))
+        if key in posters and posters[key] != item.project_id:
+            continue  # the poster's project judged it, a card or none
         held = kept.get(key)
         if held is None or _needs_board_rank(item, board, shared[board]) < _needs_board_rank(
             held, board, shared[board]

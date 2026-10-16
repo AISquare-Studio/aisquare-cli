@@ -4612,17 +4612,22 @@ def _seated(
                 _manager_of("gamma"),
                 _Seat("gamma", "coder-3", end="crash"),
             ),
-            [
-                ("board_question", "alpha", "coder-1", 0),
-                ("board_question", "beta", "coder-2", 0),
-                ("crashed", "gamma", "coder-3", 30),
-            ],
-            id="hub, live managers: a card anyway",
+            [("board_question", "beta", "coder-2", 0)],
+            id="hub, a live manager takes its own agents' items, not another project's",
         ),
         pytest.param(
             True,
             (
                 _manager_of("alpha"),
+                _Seat("alpha", "coder-1", asks=True, rowed=False),
+                _Seat("alpha", "coder-2", asks=True),
+            ),
+            [("board_question", "alpha", None, 0)],
+            id="hub, a session no row holds asks: a card, its manager unknown",
+        ),
+        pytest.param(
+            True,
+            (
                 _Seat("alpha", "coder-1", limited=True),
                 _Seat("alpha", "coder-2", end="hand-over"),
             ),
@@ -4631,6 +4636,16 @@ def _seated(
                 ("limited", "alpha", "coder-1", 0),
             ],
             id="hub, a limit and a coder's hand-over that never started its replacement",
+        ),
+        pytest.param(
+            True,
+            (
+                _manager_of("alpha"),
+                _Seat("alpha", "coder-1", limited=True),
+                _Seat("alpha", "coder-2", end="hand-over"),
+            ),
+            [("limited", "alpha", "coder-1", 90)],
+            id="hub, the same with its live manager: its own, as without a hub",
         ),
         pytest.param(
             True,
@@ -4683,7 +4698,7 @@ def _seated(
         ),
     ],
 )
-def test_a_live_manager_keeps_an_item_off_the_phone_only_on_its_projects_own_board(
+def test_a_live_manager_keeps_its_own_agents_items_off_the_phone(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     hub: bool | str,
@@ -4693,12 +4708,14 @@ def test_a_live_manager_keeps_an_item_off_the_phone_only_on_its_projects_own_boa
     """Which manager would handle an item on a board several projects share had no answer
     that held: keyed by the board, the project or the spawner, each left items no card
     showed and no nudge reached (review of #243, rounds 18 to 21; 1/8 of round 21 a
-    silent stall). On its own board a project's live ``manager`` row, the one the fleet's
-    nudge wakes, keeps a question to it and a crash off the phone and holds back a
-    limit's push; nothing else does. A crash of that ``manager`` is ``manager_down``
-    whatever numbered seat runs (round 22, 5/7), and a numbered seat's own crash is a
-    crash like any agent's. Under ``AISQUARE_TEAM_HUB`` every question, result,
-    crash, limit and failed hand-over is a card and a push, and a manager that is down is
+    silent stall). A project's live ``manager`` row, the one the fleet's nudge wakes for
+    its agents on whatever board they write, keeps their question to it and their crash
+    off the phone and holds back a limit's push; nothing else does. Under
+    ``AISQUARE_TEAM_HUB`` that is as without one since the nudge wakes the writer's row's
+    project's manager (review of #259, round 25, 7/10): another project's agents' items,
+    and a post by a session no row holds, are cards, each once. A crash of that
+    ``manager`` is ``manager_down`` whatever numbered seat runs (round 22, 5/7), and a
+    numbered seat's own crash is a crash like any agent's. A manager that is down is
     its own project's, from that project's rows: stopped whatever its crew, which may be
     another project's (round 22, 2/7), the hub's own project's too (round 23, 1/7). Any
     stop but a clean exit is down whatever its crew, with a hub or not (round 23, 3/7;

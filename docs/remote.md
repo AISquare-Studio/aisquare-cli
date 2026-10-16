@@ -318,9 +318,10 @@ hand-over that never started its replacement is a card even when Remote runs
 under another hub than the agent, or none.
 
 A manager is there to handle an item only when the fleet wakes it for that item:
-on a project's own board, the project's `manager` while it runs (not stopped, not
-parked on its usage limit) on a live session aisquare's hooks registered, which a
-coder's board write, an agent's exit and a usage limit all nudge. Once it cannot
+the project's `manager`, for the items of the project's own agents on whatever
+board they write, while it runs (not stopped, not parked on its usage limit) on a
+live session aisquare's hooks registered, which a coder's board write, an
+agent's exit and a usage limit all nudge. Once it cannot
 take them, however it went (an exit, its limit, a kill, a death, a failed
 hand-over, a session that never registered or was ended), a coder's question to
 it that is still unanswered is yours: someone waits on the answer. So is a result
@@ -329,12 +330,11 @@ wakes it, and no card says it is down. A result to a manager that stopped, poste
 before the stop or within a day after it, stays on the board: the `manager_down`
 card is the signal, or it exited cleanly. A manager started outside the
 fleet, or a numbered seat such as `manager-2`, is never nudged, so it keeps
-nothing off the phone. For a
-project whose agents write another project's board (under `AISQUARE_TEAM_HUB` the
-hub's, for a worktree its principal checkout's), no manager is: every question
-and result on that board, and every crash, limit and failed hand-over of its
-agents, is a card and a push. That costs some extra cards, and never leaves one
-that nobody hears of. A stopped manager is `manager_down` whatever its agents
+nothing off the phone. On a board several projects share (under
+`AISQUARE_TEAM_HUB` the hub's), a question or result posted by a session no
+fleet agent holds is a card and a push whatever the managers: which of them it
+woke depends on where it was written. That costs some extra cards, and never
+leaves one that nobody hears of. A stopped manager is `manager_down` whatever its agents
 are doing, on its own board or a shared one. The coder that reports to it goes
 idle right after, so a card that waited on busy agents was gone before anyone
 saw it.

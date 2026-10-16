@@ -593,6 +593,12 @@ all of them, and the fleet cleans up the worktrees it made.**
     spawned under, even when Remote (or `asq`, whose R panel starts it) runs
     under another hub, or none. A coder whose hand-over never started its
     replacement is a card again, and a manager's failed hand-over says so.
+  - Under a hub, a live manager keeps its own agents' questions and results to
+    it, their crashes and their failed hand-overs off the phone, and holds back
+    a usage limit's push, as it does without a hub. Before, each was a card and
+    a push while the manager was already woken for it. Another project's
+    agents' items, and posts by a session no agent row holds, are still cards,
+    each once.
 
 ### Security
 - **One choke point.** Every request and every socket handshake passes the

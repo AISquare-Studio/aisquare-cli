@@ -1198,16 +1198,32 @@ def _socket_dirs(env: Mapping[str, str], configured: str) -> list[Path]:
     return kept
 
 
+#: What holds a Python environment's code under its prefix (a virtualenv, an installation,
+#: a ``bin/``'s parent): its scripts and interpreter, its standard library and
+#: site-packages (whose ``.pth`` files run at every start), Windows' ``Lib`` and ``DLLs``, a
+#: macOS framework build's ``Resources`` (the interpreter's app) and a virtualenv's
+#: ``pyvenv.cfg`` (its base, and whether it loads the system's site). Not the prefix: a
+#: Python built with ``--prefix=$HOME``, or an ``aisquare`` in ``~/bin``, has the home for
+#: one, which holds every project under it (GATE #113 at 303042b0, finding 1).
+ENVIRONMENT_PARTS = ("bin", "Scripts", "lib", "lib64", "Lib", "DLLs", "Resources", "pyvenv.cfg")
+
+
+def _environment(prefix: Path) -> list[Path]:
+    """The parts of the Python environment at ``prefix`` that hold its code
+    (:data:`ENVIRONMENT_PARTS`)."""
+    return [prefix / part for part in ENVIRONMENT_PARTS]
+
+
 def _with_environment(program: Path) -> list[Path]:
     """``program`` and the environment it starts in (a ``bin/`` or ``Scripts/`` parent's
-    parent: its ``.pth`` files, its packages), as named and as resolved: a venv's ``python``
-    is a link to the base interpreter, and only the name it is reached by is in the venv
-    (review r13 of #113, finding 8)."""
+    parent, by the parts that hold its code: its ``.pth`` files, its packages), as named
+    and as resolved: a venv's ``python`` is a link to the base interpreter, and only the
+    name it is reached by is in the venv (review r13 of #113, finding 8)."""
     found: list[Path] = []
     for named in dict.fromkeys((program.absolute(), _resolved(program))):
         found.append(named)
         if named.parent.name in ("bin", "Scripts"):
-            found.append(named.parent.parent)
+            found += _environment(named.parent.parent)
     return found
 
 
@@ -1228,7 +1244,10 @@ def install_paths(
     event, which it stands down for), what the plugin's launcher runs: the ``aisquare`` on
     ``path`` (the launch's ``PATH``) and ``~/.local/bin``'s, or, with neither, the pinned
     release through ``uvx``, from uv's cache (r13, finding 3; r14, finding 2: counted only
-    where it would run). ``PYTHONPATH`` is not here: the interpreters aisquare starts for
+    where it would run). An environment counts by the parts that hold its code
+    (:func:`_environment`) and the site-packages its interpreter loads, wherever they are
+    (Debian's ``/usr/local/lib/python3/dist-packages``), never by its prefix (GATE #113 at
+    303042b0, finding 1). ``PYTHONPATH`` is not here: the interpreters aisquare starts for
     a sandboxed agent ignore it (``selfcli.isolated_argv_for``)."""
     import site
 
@@ -1236,11 +1255,13 @@ def install_paths(
     from aisquare.core import agents
 
     found = [
-        Path(sys.prefix),
-        Path(sys.base_prefix),
+        *_environment(Path(sys.prefix)),
+        *_environment(Path(sys.base_prefix)),
         *_with_environment(Path(sys.executable)),
         Path(aisquare.__file__).parent,
     ]
+    with suppress(Exception):
+        found += [Path(place) for place in site.getsitepackages()]
     with suppress(Exception):
         found.append(Path(agents.current_install()))
     if agent is not None:
@@ -1368,7 +1389,9 @@ def install_inside(writes: SandboxWrites, installs: Sequence[Path]) -> Path | No
     install (that root, named: ``--add-dir <venv>/lib``, a ``writable_roots`` entry in
     site-packages or the package's own directory, ``-C`` into it, a profile's ``write``
     path), where it writes a ``.pth``, which runs at every start of that interpreter,
-    ``-E`` or not, or a module of the package (SMOKE6: one direction was asked)."""
+    ``-E`` or not, or a module of the package (SMOKE6: one direction was asked). An
+    environment is in ``installs`` by its parts, not its prefix (:func:`install_paths`), so
+    a project under a prefix of ``$HOME`` is no root inside an install."""
     real = _resolved_writes(writes)
     for install in (_resolved(path) for path in installs):
         if real.may_write(install):

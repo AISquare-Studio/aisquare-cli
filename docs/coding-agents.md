@@ -511,6 +511,11 @@ tree by these means, and only these:
   else `$XDG_CACHE_HOME/uv`), the uv-managed Python it links to (`$UV_PYTHON_INSTALL_DIR`,
   uv.toml's `python-install-dir`, else `$XDG_DATA_HOME/uv/python`) and the launcher's
   answers.
+  An environment (a virtualenv, an installation, a `bin/`'s parent) is counted by what
+  holds its code, its `bin`, `lib` (Windows' `Scripts`, `Lib` and `DLLs`, a macOS
+  framework's `Resources`), a virtualenv's `pyvenv.cfg` and the site-packages its
+  interpreter loads, never by its prefix: a Python built with `--prefix=$HOME`, or an
+  `aisquare` in `~/bin`, would otherwise hold every project under the home.
   A launch is refused where its sandbox may write one of them or a directory inside one
   (a root under the install, given with `--add-dir`, `-C`, `writable_roots` or a profile's
   `write` path: a `.pth` in its site-packages runs at every start of its interpreter, `-E`

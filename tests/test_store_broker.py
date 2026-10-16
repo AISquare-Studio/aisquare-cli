@@ -1077,9 +1077,10 @@ def test_the_install_check_reads_the_interpreters_whole_startup(
     command = f"{program} hook codex"
     monkeypatch.setattr(agents, "hook_commands", lambda agent, config_dir=None: [command])
     found = store_broker.install_paths(tmp_path / "codex-home", "codex")
-    assert Path(sys.base_prefix).resolve() in found
+    assert (Path(sys.base_prefix) / "lib").resolve() in found
     assert user_site.resolve() in found
-    assert environment.resolve() in found and program.resolve() in found
+    assert (environment / "lib").resolve() in found and program.resolve() in found
+    assert environment.resolve() not in found, "by its parts, not its prefix (GATE #113)"
 
 
 def test_the_install_check_reads_the_install_the_agents_hooks_run(
@@ -1617,7 +1618,8 @@ def test_the_plugin_routes_launcher_is_an_install_the_hooks_run(
 
     monkeypatch.setattr(agents, "plugin_of", lambda agent: Installed())
     found = store_broker.install_paths(beyond_tmp / "codex-home", "codex", str(venv_bin))
-    assert (venv_bin / "aisquare").resolve() in found and (project / ".venv").resolve() in found
+    assert (venv_bin / "aisquare").resolve() in found
+    assert (project / ".venv" / "lib").resolve() in found
     monkeypatch.delenv("TMPDIR", raising=False)
     with pytest.raises(store_broker.LaunchRefused, match=r"\.venv"):
         store_broker.refuse_inside(
@@ -1649,7 +1651,8 @@ def test_a_module_form_hooks_venv_is_an_install_the_hooks_run(
     monkeypatch.setattr(agents, "hook_commands", lambda agent, config_dir=None: [command])
     hook = agents.hook_binary(command)
     assert hook is not None and hook.module_form
-    assert venv.resolve() in store_broker.install_paths(beyond_tmp / "codex-home", "codex")
+    found = store_broker.install_paths(beyond_tmp / "codex-home", "codex")
+    assert (venv / "lib").resolve() in found
 
 
 def test_codex_reads_its_sandbox_from_its_config_and_profile_too(beyond_tmp: Path) -> None:
@@ -2209,3 +2212,68 @@ def test_a_usage_line_under_python_m_names_the_program_aisquare() -> None:
     # Plain text however the runner styles it (CI forces colour: the escapes split the line).
     said = re.sub(r"\x1b\[[0-9;]*m", "", done.stdout + done.stderr)
     assert "Usage: aisquare task" in said and "python -m" not in said, said
+
+
+# --- GATE #113 at 303042b0 ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("case", ["home-prefix", "bin-in-home"])
+def test_an_environment_under_a_home_prefix_holds_no_project_of_it(
+    beyond_tmp: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """GATE #113 at 303042b0, finding 1: since SMOKE6 a root the sandbox may write inside an
+    install is refused, and an environment counted whole, by its prefix: a Python built
+    with ``--prefix=$HOME``, or an ``aisquare`` the hooks run from ``~/bin``, has the home
+    for one, so every sandboxed launch of a project under the home was refused, and the
+    doctor's ``sandbox-install`` row warned in each. An environment counts by the parts
+    that hold its code, which are still refused in either direction, and so is the home."""
+    from aisquare.core import agents
+    from aisquare.services import diagnostics
+
+    monkeypatch.setattr(store_broker, "install_paths", REAL_INSTALL_PATHS)
+    monkeypatch.delenv("TMPDIR", raising=False)
+    home = beyond_tmp / "home"
+    project = home / "proj"
+    site_packages = home / "lib" / "python3.14" / "site-packages"
+    for directory in (project, site_packages, home / "bin"):
+        directory.mkdir(parents=True)
+    _a_codex_project(project, beyond_tmp, monkeypatch)
+    if case == "home-prefix":
+        monkeypatch.setattr(sys, "base_prefix", str(home))
+    else:
+        program = home / "bin" / "aisquare"
+        program.write_text("#!/bin/sh\n", encoding="utf-8")
+        command = f"{program} hook codex"
+        monkeypatch.setattr(agents, "hook_commands", lambda agent, config_dir=None: [command])
+    codex = get_adapter("codex")
+    writes = ["codex", "--sandbox", "workspace-write"]
+    store_broker.refuse_inside(writes, project, codex)
+    assert diagnostics._sandboxed_install_check(project) is None
+    for inside in (site_packages, home / "bin"):
+        with pytest.raises(store_broker.LaunchRefused) as refusal:
+            store_broker.refuse_inside([*writes, "--add-dir", str(inside)], project, codex)
+        assert str(inside) in str(refusal.value)
+    with pytest.raises(store_broker.LaunchRefused, match=re.escape(str(home))):
+        store_broker.refuse_inside(writes, home, codex)  # the home holds the code
+
+
+def test_the_site_packages_an_interpreter_loads_count_outside_its_prefix(
+    beyond_tmp: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GATE #113 at 303042b0, finding 1: an environment counts by its parts, not its prefix,
+    and Debian's system interpreter (prefix ``/usr``) loads
+    ``/usr/local/lib/python3/dist-packages``, in neither its ``bin`` nor its ``lib``: the
+    site-packages it loads count wherever they are."""
+    import site
+
+    monkeypatch.setattr(store_broker, "install_paths", REAL_INSTALL_PATHS)
+    monkeypatch.delenv("TMPDIR", raising=False)
+    dist = beyond_tmp / "usr" / "local" / "lib" / "python3" / "dist-packages"
+    (dist / "extra").mkdir(parents=True)
+    project = beyond_tmp / "proj"
+    project.mkdir()
+    monkeypatch.setattr(site, "getsitepackages", lambda prefixes=None: [str(dist)])
+    assert dist.resolve() in store_broker.install_paths()
+    argv = ["codex", "--sandbox", "workspace-write", "--add-dir", str(dist / "extra")]
+    with pytest.raises(store_broker.LaunchRefused, match=re.escape(str(dist / "extra"))):
+        store_broker.refuse_inside(argv, project, get_adapter("codex"))

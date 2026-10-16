@@ -160,7 +160,9 @@ adapter.**
   spawn` before any window and by a restart, switch or hand-over before it stops
   the agent, where that sandbox may write an aisquare that runs outside it, or a
   directory inside one (`--add-dir <venv>/lib`, a `writable_roots` entry in
-  site-packages), the
+  site-packages; an environment counted by what holds its code, `bin`, `lib` and
+  its site-packages, not its prefix, so a Python built with `--prefix=$HOME`
+  refuses no project under the home), the
   launcher's own install or what the agent's hooks run (their `hooks.json`'s
   program, or what the plugin's launcher finds as its `_find` does, where its hooks
   run: trusted or under `--dangerously-bypass-hook-trust`, its `uvx` route's binary,
@@ -349,6 +351,14 @@ adapter.**
   only when its screen shows its empty prompt, whatever its hooks say, and a
   board note says why. `fleet stop` types no `/exit` into a dialog or a draft: it
   kills the window and says so.
+- A usage error under `python -m aisquare` names the program `aisquare`. A
+  command a sandboxed Codex agent ran through its broker said *Usage: python -m
+  aisquare task …*, which the agent cannot type.
+- `fleet ls` shows the account slot a fleet agent's launch record holds, the one
+  its restart, switch and hand-over run on. It showed the row's own, so a row
+  edited in the store showed a slot the agent was not on until its next restart.
+- The upgrade's hook refresh says *hooks already current* for a hooks file it
+  left unchanged. It said *rewritten* for every one. Its JSON output is as before.
 
 ## [0.8.0] - 2026-10-12
 

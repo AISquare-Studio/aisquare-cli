@@ -3515,8 +3515,10 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
             # (`write_note`): by Remote's own directory a done on B's task woke A's (review of
             # #259, round 26, 6/11). With none named, no pinned project's root: B's task woke
             # A's manager whenever A was pinned, and a done by id read `state.json` and asked
-            # git, which it needs for nothing else (round 27, 3/7).
-            cwd = _resolve_project(project).root if project is not None else None
+            # git, which it needs for nothing else (round 27, 3/7). Nor Remote's own directory,
+            # which is nobody's (`team.NOWHERE`, round 28, 5/10).
+            named = project is not None
+            cwd = _resolve_project(project).root if named else team_service.NOWHERE
             task = team_service.finish_task(found.id, note=note, session_ref=session, cwd=cwd)
         return {"task": task.model_dump(mode="json")}, f"done {task.id} as={session or '-'}"
 

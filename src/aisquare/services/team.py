@@ -13,6 +13,7 @@ so repos that never opted in never see team output.
 
 from __future__ import annotations
 
+import enum
 import json
 import logging
 import os
@@ -25,7 +26,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import EllipsisType
-from typing import NamedTuple
+from typing import Final, NamedTuple
 
 from aisquare.core import brain, harness, insights, orchestrator, workspace
 from aisquare.core import claude_accounts as claude_accounts_core
@@ -593,11 +594,26 @@ def task_key(title: str) -> str:
     return slug[:64] or "task"
 
 
+class _Nowhere(enum.Enum):
+    """The type of :data:`NOWHERE`."""
+
+    NOWHERE = "nowhere"
+
+
+NOWHERE: Final = _Nowhere.NOWHERE
+"""The ``cwd`` of a writer with no directory of its own: the phone's task write that names no
+project. ``None`` is this process's directory, a shell's own; the directory Remote (or
+``asq``) was started in is nobody's, and of several managers on a board it picks none
+(:func:`_reading_manager`). Read as the process's, a done from the phone on a task no row
+works woke the manager of whichever project Remote was started in (review of #259, round
+28, 5/10)."""
+
+
 def _nudge_target(
     store: ContextStore,
     writer: str | None,
     board_id: str,
-    cwd: Path | None = None,
+    cwd: Path | _Nowhere | None = None,
     *,
     task: TeamTask | None = None,
 ) -> str:
@@ -650,11 +666,12 @@ def _task_row(store: ContextStore, task: TeamTask) -> FleetAgent | None:
     return store.fleet_agent_for_session(task.claimed_by)
 
 
-def _reading_manager(store: ContextStore, board_id: str, cwd: Path | None) -> str | None:
+def _reading_manager(store: ContextStore, board_id: str, cwd: Path | _Nowhere | None) -> str | None:
     """The project of the live ``manager`` row whose agent reads board ``board_id``, as its
     spawn recorded (``FleetAgent.board``). Of several, as under a hub, the one whose project's
     root holds the writer's directory, ``cwd`` or this process's (the phone writes a project's
-    note in its root), the deepest root of those that do; of none that holds it, none.
+    note in its root), the deepest root of those that do; of none that holds it, none, and
+    none for a writer with no directory (:data:`NOWHERE`).
 
     The deepest, not the oldest: a project rooted in a sub-folder of another's reads the same
     board, the checkout's, and its directory is inside both roots, so a note to its manager
@@ -668,6 +685,8 @@ def _reading_manager(store: ContextStore, board_id: str, cwd: Path | None) -> st
     ]
     if len(managers) == 1:
         return managers[0].project_id
+    if isinstance(cwd, _Nowhere):
+        return None
     here = (cwd or Path.cwd()).resolve()
     holding = [
         project
@@ -1414,7 +1433,7 @@ def _finish_task(
     note: str | None = None,
     session_ref: str | None = None,
     wakes: bool = True,
-    cwd: Path | None = None,
+    cwd: Path | _Nowhere | None = None,
 ) -> tuple[TeamTask, _Board, str]:
     """Set the task's status with its event; the board, and the project whose manager the
     write wakes (:func:`_nudge_target`): for a writer with no row the task's own row's, else
@@ -1453,11 +1472,16 @@ def _finish_task(
 
 
 def finish_task(
-    ref: str, *, note: str | None = None, session_ref: str | None = None, cwd: Path | None = None
+    ref: str,
+    *,
+    note: str | None = None,
+    session_ref: str | None = None,
+    cwd: Path | _Nowhere | None = None,
 ) -> TeamTask:
     """Mark a task done (``task done``). ``cwd`` is the writer's directory, which picks the
     manager a writer with no row wakes (:func:`_nudge_target`): the phone's is the project's
-    root, as for its note, not the directory Remote runs in."""
+    root, as for its note, not the directory Remote runs in, and :data:`NOWHERE` when it
+    names no project."""
     _require_enabled()
     task, board, manager = _finish_task(
         ref, "done", "task_done", note=note, session_ref=session_ref, cwd=cwd

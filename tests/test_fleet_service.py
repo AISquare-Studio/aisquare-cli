@@ -6048,6 +6048,33 @@ def test_under_a_hub_the_phones_task_done_naming_no_project_wakes_the_tasks_mana
     assert hubbed.woken == [hubbed.fleet.id]
 
 
+def test_under_a_hub_the_phones_done_naming_no_project_picks_no_manager_by_remotes_folder(
+    hubbed: _Hubbed,
+) -> None:
+    """Review of #259, round 28, 5/10: with no ``project``, the phone's ``task done`` passed
+    no directory, and for a task no row works ``_reading_manager`` took this process's: the
+    folder Remote (or ``asq``) was started in, the heuristic round 26, 6/11 rejected. Started
+    in the other project's folder, a done from the phone woke the other's manager, whichever
+    project the task was for. The phone has no directory: of the hub's two managers it picks
+    neither, and the nudge goes to the board's own project, as for a writer outside every
+    root. A shell's done there still picks by its directory."""
+    from aisquare.services.remote_server import live_writes
+
+    other, _ = _another_fleet_on_the_hub(hubbed)
+    loose = _task(hubbed.fleet, "nobody's")
+    shell = _task(hubbed.fleet, "nobody's either")
+    hubbed.monkeypatch.chdir(other.root)  # `asq`, and its Remote, started in the other's
+    hubbed.woken.clear()
+
+    live_writes().handlers["task/done"]({"ref": loose.id})
+
+    assert _task_now(loose.id).status == "done"
+    assert hubbed.woken == [hubbed.hub.id], "no manager by Remote's folder"
+    hubbed.woken.clear()
+    team_service.finish_task(shell.id)  # `task done` from a shell in the other's folder
+    assert hubbed.woken == [other.id]
+
+
 def test_under_a_hub_shutdown_all_keeps_the_pause_it_says_it_kept(hubbed: _Hubbed) -> None:
     """Review of #259, round 26, 1/11: under ``--all``, a project that was not confirmed down
     is named in ``paused_kept``, and another project's pass then cleared the hub's one signal

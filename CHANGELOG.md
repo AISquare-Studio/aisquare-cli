@@ -607,7 +607,9 @@ all of them, and the fleet cleans up the worktrees it made.**
     manager of the agent working the task (the one spawned for it, else the
     one that claimed it). Otherwise, with several managers on one board, it
     wakes the one whose project holds the writer's directory, the innermost
-    when one project is rooted inside another. Before, it woke nobody.
+    when one project is rooted inside another. Before, it woke nobody. The
+    phone's task update that names no project has no directory, and picks
+    none: the folder Remote was started in is not the phone's.
   - Remote's needs feed finds an agent's exit, its failed turns, its
     usage-limit events and its questions and results on the board the agent
     was spawned under, even when Remote (or `asq`, whose R panel starts it)

@@ -163,6 +163,11 @@ _NEEDS_DAY_KINDS = (*_NEEDS_ASKED, "agent_exited", "turn_failed")
 opens a board item or moves on from one, the exits the fleet announces, and the turns that
 died on an API error."""
 
+_NEEDS_ELSEWHERE_KINDS = ("agent_exited", "turn_failed")
+"""The kinds the scan reads of a board the project's rows recorded but the one it reads whole
+(``fleet_since``): the exits the fleet announces of them, and their turns that died on an API
+error. The rest of such a board is its own projects' to scan."""
+
 _NEEDS_ACTIONS: dict[str, tuple[str, ...]] = {
     "permission": ("answer", "open", "dismiss"),
     "question": ("answer", "open", "dismiss"),
@@ -430,10 +435,11 @@ class NeedsSources:
     ended on an API error (``turn_failed``). An item lives for :data:`QUESTION_HORIZON`
     however busy the board is, so it is read by time, not from a window of the newest
     events that 300 notes push it out of."""
-    exits_since: Callable[[str, datetime], list[TeamEvent]]
-    """The board's ``agent_exited`` events written at or after the given time: the exits the
-    fleet announced on a board the project's rows recorded (``FleetAgent.board``) other than
-    the one the scan reads whole (:func:`_needs_exits`)."""
+    fleet_since: Callable[[str, datetime], list[TeamEvent]]
+    """The board's events of :data:`_NEEDS_ELSEWHERE_KINDS` written at or after the given time:
+    the exits the fleet announced, and the turns that failed, on a board the project's rows
+    recorded (``FleetAgent.board``) other than the one the scan reads whole
+    (:func:`_needs_elsewhere`)."""
     board_sessions: Callable[[str, Collection[str]], list[TeamSession]]
     """The project's sessions with the given ids: the authors of the board's open questions."""
     task_status: Callable[[str], str | None]
@@ -451,9 +457,10 @@ class NeedsSources:
     (``FleetAgentStatus.socket_at``): asked only where the listing's states cannot tell
     (:func:`_needs_unheard`)."""
     session_event: Callable[[str, str, str, datetime], TeamEvent | None] = _needs_no_event
-    """A session's newest board event of a kind written at or after the given time, for the
-    facts the window of ``board_events`` no longer holds (:func:`_needs_own_events`). The
-    time bounds what the store walks back through to find none."""
+    """A session's newest event of a kind on the given board written at or after the given
+    time, for the facts the window of ``board_events`` does not hold: no longer, or never, as
+    for a row that recorded another board (:func:`_needs_own_events`). The time bounds what
+    the store walks back through to find none."""
     pane_output: Callable[[FleetAgentStatus], datetime | None] = _needs_no_output
     """When the row's pane last printed (``#{window_activity}``); ``None``: tmux would not
     say. Asked only of an agent whose sub-agent waits on a prompt, or whose question or plan
@@ -2185,11 +2192,13 @@ def _needs_scan_project(
     every session and event is the hub's: read by the fleet project's id, the board
     was empty to the scan, and a manager's question or result, a failed turn and the
     usage-limit dialog's words never became a card or a push, while the Board tab
-    showed them (sweep 4 of #243). The exits the fleet announces are on the board each row
-    recorded at spawn (``fleet._emit_exit``), where its manager reads them, which is in that
-    day when Remote runs under the hub the agents were spawned under; the exits of any other
-    board a row recorded are read apart (:func:`_needs_exits`). No other project's rows are
-    read: whether a manager hears of an item is :func:`_needs_nudged`'s to say.
+    showed them (sweep 4 of #243). What the fleet and the team write of an agent itself, its
+    exit, a turn that failed, its ``limited`` and ``attention`` events, is on the board its row
+    recorded at spawn (``fleet._emit_exit``, its session's board), where its manager reads
+    them, which is in that day when Remote runs under the hub the agents were spawned under;
+    those of any other board a row recorded are read apart (:func:`_needs_elsewhere`,
+    :func:`_needs_own_events`). No other project's rows are read: whether a manager hears of
+    an item is :func:`_needs_nudged`'s to say.
     """
     from aisquare.services.fleet import RECENTLY_ENDED
 
@@ -2211,7 +2220,7 @@ def _needs_scan_project(
     rows = list(
         {row.id: row for row in [*(ended or []), *(status.agent for status in statuses)]}.values()
     )
-    exits = [*board, *_needs_exits(sources, rows, board_id, day, reads)]
+    days = [*board, *_needs_elsewhere(sources, rows, board_id, day, reads)]
     manager = _needs_manager(rows)
     taking = _needs_nudged(manager, statuses, now)
     authors = _needs_board_authors(board, now)
@@ -2232,7 +2241,7 @@ def _needs_scan_project(
             project=project,
             events=[
                 *_needs_own_events(sources, board_id, status, window, reads),
-                *_needs_failures(board, status),
+                *_needs_failures(days, status),
             ],
             now=now,
             # The manager's own items wait on no one: its own limit's nudge goes to itself.
@@ -2250,14 +2259,14 @@ def _needs_scan_project(
         _needs_crashed(
             ended or [],
             rows,
-            exits,
+            days,
             project=project,
             now=now,
             manager_live=taking is not None,
             task_status=lambda ref: reads.needs_read(partial(sources.task_status, ref), "a task"),
         )
     )
-    items.extend(_needs_manager_down(manager, exits, project=project, now=now))
+    items.extend(_needs_manager_down(manager, days, project=project, now=now))
     items.extend(
         _needs_fleet_down(statuses, project=project, now=now, first_seen=first_seen, seen=seen)
     )
@@ -2305,7 +2314,8 @@ def _needs_own_events(
     reads: _NeedsReads,
 ) -> list[TeamEvent]:
     """The board events :func:`needs_from_agent` reads of an agent: its session's newest
-    ``attention`` and ``limited`` events, wherever they are.
+    ``attention`` and ``limited`` events, wherever they are, on the board its row recorded
+    (``fleet._board_of_row``).
 
     ``window`` is the project's newest :data:`NEEDS_BOARD_EVENTS`, read only for a row
     parked on its limit or a session marked ``attention``: no rule reads the events of any
@@ -2317,21 +2327,33 @@ def _needs_own_events(
     Only since the row was created, from the window too: a session's start puts it back
     to ``working``, so the park or the dialog it is in began after its process did, and
     an older event is the process before it's. Asked without that bound, a session with
-    no such event cost every event the project ever had, every scan.
+    no such event cost every event the project ever had, every scan. ``window`` is of
+    ``board_id``, the board the scan reads whole: a row that recorded another board, as when
+    Remote runs without the hub its agents were spawned under, is asked of its own, whose
+    events the window never holds. Asked of ``board_id``, a parked agent's ``limited`` event
+    was not found, and its item, keyed on the attention one, came back as a new one (review
+    of #259, round 26, 3/11).
     """
+    from aisquare.services.fleet import _board_of_row
+
     session = status.session
     if session is None or status.state in ("exited", "unknown", "lost"):
         return []
     if status.state != "limited" and session.state != "attention":
         return []
     born = status.agent.created_at
-    own = [e for e in window() if e.session_id == session.id and e.created_at >= born]
+    recorded = _board_of_row(status.agent)
+    own = (
+        [e for e in window() if e.session_id == session.id and e.created_at >= born]
+        if recorded == board_id
+        else []
+    )
     # A limit names its item by its own event, and falls back on the attention one.
     wanted = ("limited", "attention") if status.state == "limited" else ("attention",)
     for kind in wanted:
         if any(event.kind == kind for event in own):
             break
-        asked = partial(sources.session_event, board_id, session.id, kind, born)
+        asked = partial(sources.session_event, recorded, session.id, kind, born)
         found = reads.needs_read(asked, "events")
         if found is not None:
             own.append(found)
@@ -2339,13 +2361,16 @@ def _needs_own_events(
     return own
 
 
-def _needs_failures(board: Sequence[TeamEvent], status: FleetAgentStatus) -> list[TeamEvent]:
-    """The ``turn_failed`` events of the agent's session in the board's day, which rule 10 of
-    :func:`needs_from_agent` reads: the day is read every scan anyway, for all its kinds."""
+def _needs_failures(days: Sequence[TeamEvent], status: FleetAgentStatus) -> list[TeamEvent]:
+    """The ``turn_failed`` events of the agent's session in ``days``, which rule 10 of
+    :func:`needs_from_agent` reads: the board's day, read every scan anyway for all its kinds,
+    and those of each other board a row recorded (:func:`_needs_elsewhere`). Of the board's
+    day alone, a coder spawned under a hub Remote does not run under had a failed turn on the
+    hub's board, and no card and no push (review of #259, round 26, 3/11)."""
     session = status.session
     if session is None:
         return []
-    return [e for e in board if e.kind == "turn_failed" and e.session_id == session.id]
+    return [e for e in days if e.kind == "turn_failed" and e.session_id == session.id]
 
 
 def _needs_output_of(
@@ -2381,28 +2406,30 @@ def _needs_window(
     return needs_window
 
 
-def _needs_exits(
+def _needs_elsewhere(
     sources: NeedsSources,
     rows: Sequence[FleetAgent],
     board_id: str,
     day: datetime,
     reads: _NeedsReads,
 ) -> list[TeamEvent]:
-    """The exits the fleet announced since ``day`` on each board ``rows`` recorded
-    (``fleet._board_of_row``) but ``board_id``, whose whole day the scan reads already.
+    """The exits the fleet announced and the turns that failed since ``day``
+    (:data:`_NEEDS_ELSEWHERE_KINDS`) on each board ``rows`` recorded (``fleet._board_of_row``)
+    but ``board_id``, whose whole day the scan reads already.
 
     ``board_id`` is the board Remote's own environment resolves (:func:`_needs_board_of`),
-    and an agent's exit is on the board its spawn recorded: Remote (or ``asq``, whose R panel
-    starts it) run without the hub the agents were spawned under, or with one they were not,
-    found no exit, and a coder whose hand-over never started its replacement was no card, a
-    manager's failed hand-over "the manager stopped" (review of #259, round 25, 6/10). Only
-    the exits of those boards: their other kinds are their own projects' to scan.
+    and an agent's exit and failed turns are on the board its spawn recorded: Remote (or
+    ``asq``, whose R panel starts it) run without the hub the agents were spawned under, or
+    with one they were not, found no exit, and a coder whose hand-over never started its
+    replacement was no card, a manager's failed hand-over "the manager stopped" (review of
+    #259, round 25, 6/10); and no failed turn, no card (round 26, 3/11). Only those kinds:
+    the rest of those boards is their own projects' to scan.
     """
     from aisquare.services.fleet import _board_of_row
 
     found: list[TeamEvent] = []
     for other in sorted({_board_of_row(row) for row in rows} - {board_id}):
-        found.extend(reads.needs_read(partial(sources.exits_since, other, day), "exits") or [])
+        found.extend(reads.needs_read(partial(sources.fleet_since, other, day), "events") or [])
     return found
 
 
@@ -2839,7 +2866,7 @@ def _needs_read_once(sources: NeedsSources) -> NeedsSources:
     return replace(
         sources,
         board_since=once("day", sources.board_since),
-        exits_since=once("exits", sources.exits_since),
+        fleet_since=once("elsewhere", sources.fleet_since),
         board_events=once("window", sources.board_events),
         board_sessions=once("sessions", sources.board_sessions),
         tmux_answers=once("tmux", sources.tmux_answers),
@@ -3350,9 +3377,9 @@ def live_needs_sources() -> NeedsSources:
                 project_id, since, kinds=_NEEDS_DAY_KINDS, human_kinds=_NEEDS_REPLIED
             )
 
-    def needs_exits_since(board_id: str, since: datetime) -> list[TeamEvent]:
+    def needs_fleet_since(board_id: str, since: datetime) -> list[TeamEvent]:
         with store_session() as store:
-            return store.team_events_since(board_id, since, kinds=("agent_exited",))
+            return store.team_events_since(board_id, since, kinds=_NEEDS_ELSEWHERE_KINDS)
 
     def needs_board_sessions(project_id: str, ids: Collection[str]) -> list[TeamSession]:
         with store_session() as store:
@@ -3398,7 +3425,7 @@ def live_needs_sources() -> NeedsSources:
         ended_agents=needs_rows_ended,
         board_events=needs_board_events,
         board_since=needs_board_since,
-        exits_since=needs_exits_since,
+        fleet_since=needs_fleet_since,
         board_sessions=needs_board_sessions,
         task_status=needs_task_status,
         transcript_tail=_needs_cached_tail,

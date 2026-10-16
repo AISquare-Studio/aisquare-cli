@@ -313,9 +313,10 @@ aisquare --json remote needs
 The board a project's cards come from is the one `aisquare board` shows in its
 directory: under `AISQUARE_TEAM_HUB` it is the hub's, and a question on a board
 that several projects share is one card, in the project of the agent that asked.
-An agent's exit is read on the board recorded for it when it was spawned, so a
-hand-over that never started its replacement is a card even when Remote runs
-under another hub than the agent, or none.
+An agent's exit, a turn of its that failed and its usage-limit events are read on
+the board recorded for it when it was spawned, so a hand-over that never started
+its replacement, or a failed turn, is a card even when Remote runs under another
+hub than the agent, or none, and a parked agent's limit card keeps its id.
 
 A manager is there to handle an item only when the fleet wakes it for that item:
 the project's `manager`, for the items of the project's own agents on whatever

@@ -1497,10 +1497,10 @@ def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> Needs
         ],
         board_events=board_events,
         board_since=board_since,
-        exits_since=lambda board, since: [
+        fleet_since=lambda board, since: [
             event
             for event in fleet.events
-            if event.kind == "agent_exited" and event.created_at >= since
+            if event.kind in ("agent_exited", "turn_failed") and event.created_at >= since
         ],
         board_sessions=lambda pid, ids: [
             session for session in fleet.sessions if session.id in ids
@@ -4455,6 +4455,49 @@ def test_a_coder_whose_hand_over_never_started_its_replacement_is_reported_under
     ]
 
 
+@pytest.mark.parametrize(
+    ("spawned", "remote"),
+    [("no hub", "no hub"), ("hub", "hub"), ("hub", "no hub"), ("no hub", "hub")],
+    ids=lambda under: under,
+)
+def test_an_agents_limit_and_failed_turn_are_read_on_the_board_it_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spawned: str, remote: str
+) -> None:
+    """Review of #259, round 26, 3/11: round 25 read an agent's exit on the board its row
+    recorded, and its own ``limited`` and ``attention`` events and its ``turn_failed`` were
+    still read on the board Remote's own environment resolves. Remote without the hub the
+    agents were spawned under found no failed turn, so a coder whose turn died on an API
+    error was no card and no push, and no ``limited`` event, so a parked agent's item was
+    keyed on another and came back under a new id. Each is read where the row recorded."""
+    from aisquare.services import team as team_service
+
+    save_config(AppConfig(accounts=AccountsSettings(on_limit="wait")))
+    with store_session() as store:
+        alpha = store.onboard_project(_rooted(tmp_path / "alpha"))
+        hub = _rooted(tmp_path / "hub")
+        store.ensure_project(hub)
+        board = hub if spawned == "hub" else alpha
+        _seat_up(store, _Seat("alpha", "coder-1", limited=True), alpha, board)
+        _seat_up(store, _Seat("alpha", "coder-2", waits=True), alpha, board)
+        limited = team_service._emit(
+            store, board.id, "limited", "coder-1 hit its limit", session_id="ses_alpha_coder-1"
+        )
+        failed = team_service._emit(
+            store, board.id, "turn_failed", "overloaded: busy", session_id="ses_alpha_coder-2"
+        )
+    if remote == "hub":
+        monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub.root))
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+
+    items = scan_needs_you(remote_needs.live_needs_sources(), now=datetime.now(UTC), dismissed=())
+
+    assert sorted((item.kind, item.agent, item.id) for item in items) == [
+        ("failed", "coder-2", needs_item_id(alpha.id, "failed", str(failed.seq))),
+        ("limited", "coder-1", needs_item_id(alpha.id, "limited", str(limited.seq))),
+    ]
+
+
 @dataclass(frozen=True)
 class _Seat:
     """One agent of a board: its fleet project, label and role; whether a fleet row holds it
@@ -4982,7 +5025,7 @@ _READS = (
     "tmux_answers",
     "ended_agents",
     "board_since",
-    "exits_since",
+    "fleet_since",
     "board_sessions",
     "accounts",
     "board_events",
@@ -5012,6 +5055,13 @@ def _every_read() -> tuple[Fleet, NeedsSources]:
     fleet.tasks["tsk_1"] = "doing"
     fleet.sessions.append(asking)
     fleet.events.append(_event(400, "question", "Ship on Friday?", session=asking))
+    # The live ones spawned under the hub recorded its board: what the team writes of each
+    # is in the hub's window and day (review of #259, round 26, 3/11). coder-5, spawned
+    # without it, recorded the project's own, whose exits are read apart.
+    fleet.agents = [
+        status.model_copy(update={"agent": status.agent.model_copy(update={"board": "prj_hub"})})
+        for status in fleet.agents
+    ]
     return fleet, replace(_sources(fleet), board_project=lambda project: "prj_hub")
 
 

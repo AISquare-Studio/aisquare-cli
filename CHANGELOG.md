@@ -597,10 +597,12 @@ all of them, and the fleet cleans up the worktrees it made.**
     wakes the waiting manager that reads that board. Under a hub with several
     managers, it wakes the one whose project holds the writer's directory.
     Before, it woke nobody.
-  - Remote's needs feed finds an agent's exit on the board the agent was
-    spawned under, even when Remote (or `asq`, whose R panel starts it) runs
-    under another hub, or none. A coder whose hand-over never started its
-    replacement is a card again, and a manager's failed hand-over says so.
+  - Remote's needs feed finds an agent's exit, its failed turns and its
+    usage-limit events on the board the agent was spawned under, even when
+    Remote (or `asq`, whose R panel starts it) runs under another hub, or
+    none. A coder whose hand-over never started its replacement, or whose
+    turn failed, is a card again, a manager's failed hand-over says so, and a
+    parked agent's limit card keeps its id.
   - Under a hub, a live manager keeps its own agents' questions and results to
     it, their crashes and their failed hand-overs off the phone, and holds back
     a usage limit's push, as it does without a hub. Before, each was a card and

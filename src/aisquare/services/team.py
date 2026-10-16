@@ -593,8 +593,33 @@ def task_key(title: str) -> str:
     return slug[:64] or "task"
 
 
+def _nudge_target(store: ContextStore, writer: str | None, board_id: str) -> str:
+    """The project whose manager a nudge for session ``writer``'s board write wakes: that of
+    the writer's own live fleet row, else ``board_id``, the board's, as every nudge was.
+
+    Which manager is a fleet question, the news a board one (docs/fleet.md, "Under a hub: one
+    board, many fleet projects"): the nudge types a fixed line into the manager row's pane,
+    and the delta that line wakes it to is read from the manager's session's board. Under
+    ``AISQUARE_TEAM_HUB`` every session is on the hub's board, where no manager has a row, so
+    a coder's ``task done`` or ``task review``, a question to the manager and a manager's own
+    deferred wake reached nobody, or woke the hub directory's own manager. The row is the
+    writer's, in whichever project: a coder's manager is in its own row's project, as round
+    22 spawns it there, and a manager's Stop wakes its own row (review of #259, round 24,
+    4/6). Read in the write's own store session, after the write: it cannot raise, as a
+    read that fails costs the nudge its target, never the write.
+    """
+    if writer is None:
+        return board_id
+    try:
+        row = store.fleet_agent_for_session(writer)
+    except Exception:
+        return board_id
+    return row.project_id if row is not None else board_id
+
+
 def _nudge_manager(project_id: str, *, reason: str) -> None:
-    """Wake the project's WAITING manager after a board write it must act on (§7.3, path 2).
+    """Wake the project's WAITING manager after a board write it must act on (§7.3, path 2);
+    ``project_id`` is :func:`_nudge_target`'s.
 
     Runs inside the writing agent's CLI process, after the write is confirmed, so
     it is an observer of the write: it may never raise, and a fleet that is not
@@ -1111,18 +1136,22 @@ def add_note(
             task_id=task_id,
             to_role=to_role,
         )
+        wakes = kind in ("result", "question") or _addressed_to_manager(to_role)
+        manager = (
+            _nudge_target(store, session.id if session else None, board.id) if wakes else board.id
+        )
     stored = _record_delivery(event, board)
     if kind in distill_service.DISTILL_KINDS:
         distill_service.spawn_drain(root=board.root)
     if kind in ("result", "question"):
-        _nudge_manager(board.id, reason=kind)
+        _nudge_manager(manager, reason=kind)
     elif _addressed_to_manager(to_role):
         # §7.3 path 2 lists `note --to manager` among the writes that wake a
         # waiting manager, and only the KIND was consulted here: a note
         # addressed to the manager reached a waiting one on no path at all —
         # 'note' is not a MANAGER_WAKE_KIND either, so its Stop hook did not
         # deliver it and it sat past the cursor until some unrelated event.
-        _nudge_manager(board.id, reason=f"{kind}_to_manager")
+        _nudge_manager(manager, reason=f"{kind}_to_manager")
     return stored
 
 
@@ -1305,7 +1334,9 @@ def _finish_task(
     *,
     note: str | None = None,
     session_ref: str | None = None,
-) -> tuple[TeamTask, _Board]:
+) -> tuple[TeamTask, _Board, str]:
+    """Set the task's status with its event; the board, and the project whose manager the
+    write wakes (:func:`_nudge_target`)."""
     _DELIVERY.set(None)
     with store_session() as store:
         session = _resolve_session(store, session_ref)
@@ -1327,25 +1358,30 @@ def _finish_task(
             task_id=updated.id,
         )
         board = _board_of(store, updated.project_id)
+        manager = _nudge_target(store, session.id if session else None, board.id)
     _record_delivery(event, board)
-    return updated, board
+    return updated, board, manager
 
 
 def finish_task(ref: str, *, note: str | None = None, session_ref: str | None = None) -> TeamTask:
     """Mark a task done (``task done``)."""
     _require_enabled()
-    task, board = _finish_task(ref, "done", "task_done", note=note, session_ref=session_ref)
+    task, board, manager = _finish_task(
+        ref, "done", "task_done", note=note, session_ref=session_ref
+    )
     distill_service.spawn_drain(root=board.root)
-    _nudge_manager(board.id, reason="task_done")
+    _nudge_manager(manager, reason="task_done")
     return task
 
 
 def review_task(ref: str, *, note: str | None = None, session_ref: str | None = None) -> TeamTask:
     """Send a task to review — done coding, awaiting verification (``task review``)."""
     _require_enabled()
-    task, board = _finish_task(ref, "review", "task_review", note=note, session_ref=session_ref)
+    task, board, manager = _finish_task(
+        ref, "review", "task_review", note=note, session_ref=session_ref
+    )
     distill_service.spawn_drain(root=board.root)
-    _nudge_manager(board.id, reason="task_review")
+    _nudge_manager(manager, reason="task_review")
     return task
 
 
@@ -1372,9 +1408,10 @@ def reopen_task(ref: str, *, reason: str, session_ref: str | None = None) -> Tea
             task_id=reopened.id,
         )
         board = _board_of(store, reopened.project_id)
+        manager = _nudge_target(store, session.id if session else None, board.id)
     _record_delivery(event, board)
     distill_service.spawn_drain(root=board.root)
-    _nudge_manager(board.id, reason="task_reopened")
+    _nudge_manager(manager, reason="task_reopened")
     return reopened
 
 
@@ -1437,16 +1474,18 @@ def next_task(
 def block_task(ref: str, *, reason: str, session_ref: str | None = None) -> TeamTask:
     """Mark a task blocked, with the reason on the pipe (``task block``)."""
     _require_enabled()
-    task, board = _finish_task(ref, "blocked", "task_blocked", note=reason, session_ref=session_ref)
+    task, board, manager = _finish_task(
+        ref, "blocked", "task_blocked", note=reason, session_ref=session_ref
+    )
     distill_service.spawn_drain(root=board.root)
-    _nudge_manager(board.id, reason="task_blocked")
+    _nudge_manager(manager, reason="task_blocked")
     return task
 
 
 def drop_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
     """Drop a task that is no longer worth doing (``task drop``)."""
     _require_enabled()
-    task, _ = _finish_task(ref, "dropped", "task_dropped", session_ref=session_ref)
+    task, _, _ = _finish_task(ref, "dropped", "task_dropped", session_ref=session_ref)
     return task
 
 
@@ -1765,11 +1804,14 @@ def hook_stop(
             return None
         failure: Exception | None = None
         deferred: str | None = None
+        manager = session.project_id
         if session.role == MANAGER_ROLE:
             try:
                 decision = _manager_wakeup(store, session, stop_hook_active=stop_hook_active)
                 if decision is None and stop_hook_active:
                     deferred = _deferred_wake_reason(store, session)
+                    if deferred is not None:  # its own row's project: under a hub, not the board's
+                        manager = _nudge_target(store, session.id, session.project_id)
             except Exception as exc:  # waiting is the contract; the wake-up is the extra
                 failure = exc
             else:
@@ -1782,7 +1824,7 @@ def hook_stop(
     if deferred is not None:
         # After the row says waiting, never before: nudge_manager refuses every
         # other state. Outside the `with` too — it opens its own connection.
-        _nudge_manager(session.project_id, reason=deferred)
+        _nudge_manager(manager, reason=deferred)
     if failure is not None:
         raise ManagerWakeupError(failure)
     return None
@@ -2068,7 +2110,9 @@ def hook_stop_failure(
         # the line named no command and the agent by its short id (review of #259, round 23).
         agent = store.fleet_agent_for_session(session.id)
         label = agent.label if agent is not None else (session.label or short_id(session.id))
+        manager = session.project_id
         if not already_limited:
+            manager = _nudge_target(store, session.id, session.project_id)
             _emit(
                 store,
                 session.project_id,
@@ -2086,11 +2130,8 @@ def hook_stop_failure(
         # After the row says limited, never before, and outside the `with`
         # (it opens its own connection): path 2 types into a WAITING manager;
         # a working one reads the event on its next delta or its own Stop. The manager of
-        # the agent's own project, whose row is beside the agent's: a hub's has none.
-        _nudge_manager(
-            agent.project_id if agent is not None else session.project_id,
-            reason=f"{label} hit its usage limit",
-        )
+        # the agent's own project, whose row is beside the agent's (`_nudge_target`).
+        _nudge_manager(manager, reason=f"{label} hit its usage limit")
     return TurnFailure(refreshed, kind, notice, already_limited=already_limited)
 
 

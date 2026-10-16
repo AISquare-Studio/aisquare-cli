@@ -24,7 +24,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Collection, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -4800,6 +4800,8 @@ class _Hubbed:
     tmux: FakeTmux
     monkeypatch: pytest.MonkeyPatch
     woken: list[str]
+    nudge: Any
+    """``fleet.nudge_manager`` itself, which the fixture replaces with a recorder."""
 
     @property
     def manager_sid(self) -> str:
@@ -4832,6 +4834,7 @@ def hubbed(
     team_service.hook_session_start(coder_sid, project.root, "startup")
     team_service.claim_task(task.id, session_ref=coder_sid)
     woken: list[str] = []
+    real = fleet_service.nudge_manager
 
     def nudge(project_id: str, *, reason: str) -> bool:
         woken.append(project_id)
@@ -4839,7 +4842,7 @@ def hubbed(
 
     monkeypatch.setattr(fleet_service, "nudge_manager", nudge)
     assert task.project_id == hub.id != project.id
-    return _Hubbed(hub, project, manager, coder, task, tmux, monkeypatch, woken)
+    return _Hubbed(hub, project, manager, coder, task, tmux, monkeypatch, woken, real)
 
 
 def _delivered() -> str | None:
@@ -4969,6 +4972,61 @@ def _case_hand_off_entries(w: _Hubbed) -> str | None:
     return _delivered() if "- note: halfway through the router" in prompt else None
 
 
+def _woke(w: _Hubbed, write: Callable[[], object]) -> str | None:
+    """The project of the one manager ``write`` nudged."""
+    w.woken.clear()
+    write()
+    return w.woken[0] if len(w.woken) == 1 else repr(w.woken)
+
+
+def _case_question_wakes(w: _Hubbed) -> str | None:
+    return _woke(
+        w, lambda: team_service.add_note("which branch?", kind="question", session_ref=w.coder_sid)
+    )
+
+
+def _case_result_wakes(w: _Hubbed) -> str | None:
+    return _woke(w, lambda: team_service.add_note("green", kind="result", session_ref=w.coder_sid))
+
+
+def _case_note_to_manager_wakes(w: _Hubbed) -> str | None:
+    return _woke(
+        w, lambda: team_service.add_note("fyi", to_role="manager", session_ref=w.coder_sid)
+    )
+
+
+def _case_done_wakes(w: _Hubbed) -> str | None:
+    return _woke(w, lambda: team_service.finish_task(w.task.id, session_ref=w.coder_sid))
+
+
+def _case_review_wakes(w: _Hubbed) -> str | None:
+    return _woke(w, lambda: team_service.review_task(w.task.id, session_ref=w.coder_sid))
+
+
+def _case_block_wakes(w: _Hubbed) -> str | None:
+    return _woke(
+        w, lambda: team_service.block_task(w.task.id, reason="no spec", session_ref=w.coder_sid)
+    )
+
+
+def _case_reopen_wakes(w: _Hubbed) -> str | None:
+    team_service.review_task(w.task.id, session_ref=w.coder_sid)
+    return _woke(
+        w, lambda: team_service.reopen_task(w.task.id, reason="red", session_ref=w.coder_sid)
+    )
+
+
+def _case_deferred_wake(w: _Hubbed) -> str | None:
+    team_service.add_note(
+        "which branch?", kind="question", to_role="manager", session_ref=w.coder_sid
+    )
+    _become(w.manager, w.tmux, w.monkeypatch, pid=PANE_PID, role="manager")
+    return _woke(
+        w,
+        lambda: team_service.hook_stop(w.manager_sid, w.fleet.root, stop_hook_active=True),
+    )
+
+
 def _case_cycle_project(w: _Hubbed) -> str | None:
     with store_session() as store:
         named = team_service._cycle_project(store, w.hub, w.fleet.root, w.manager_sid, named=None)
@@ -5010,6 +5068,14 @@ _HUB_RULE_CASES: list[tuple[str, str, Any]] = [
     ("fleet", "the cycle's --project", _case_cycle_project),
     ("fleet", "a limited chip's fleet switch", _case_limited_chip),
     ("fleet", "the manager a usage limit wakes", _case_limit_nudge),
+    ("fleet", "the manager a question wakes", _case_question_wakes),
+    ("fleet", "the manager a result wakes", _case_result_wakes),
+    ("fleet", "the manager a note --to manager wakes", _case_note_to_manager_wakes),
+    ("fleet", "the manager task done wakes", _case_done_wakes),
+    ("fleet", "the manager task review wakes", _case_review_wakes),
+    ("fleet", "the manager task block wakes", _case_block_wakes),
+    ("fleet", "the manager task reopen wakes", _case_reopen_wakes),
+    ("fleet", "the manager a deferred Stop wakes", _case_deferred_wake),
 ]
 
 
@@ -5160,6 +5226,40 @@ def test_under_a_hub_a_manager_is_told_its_coder_exited_and_was_restarted(
     assert hubbed.woken and set(hubbed.woken) == {hubbed.fleet.id}, "its own manager"
     with store_session() as store:
         assert not store.recent_events(hubbed.fleet.id), "nothing on a board nobody reads"
+
+
+@pytest.mark.parametrize("writer", ["the coder's task done", "the manager's deferred Stop"])
+def test_under_a_hub_a_waiting_manager_is_woken_by_its_coders_writes_and_its_own_stop(
+    hubbed: _Hubbed, writer: str
+) -> None:
+    """Review of #259, round 24, 4/6: round 23 moved the usage-limit nudge to the row's
+    project, and every other nudge still named the session's board, under a hub the hub's,
+    where no manager has a row: a coder's ``task done``, ``task review`` or question never
+    woke the manager waiting on it, and a Stop that deferred its wake (``stop_hook_active``)
+    lost it, the stall the deferral exists to prevent. Each nudges the manager of the
+    writer's own row's project, and the manager wakes to the hub board's delta."""
+    hubbed.monkeypatch.setattr(fleet_service, "nudge_manager", hubbed.nudge)
+    if writer == "the manager's deferred Stop":
+        team_service.add_note(
+            "which branch?", kind="question", to_role="manager", session_ref=hubbed.coder_sid
+        )
+    hubbed.tmux.set_command(hubbed.manager.pane_id, "claude")
+    with store_session() as store:
+        store.touch_session(hubbed.manager_sid, state="waiting")
+    hubbed.tmux.typed.clear()
+
+    if writer == "the manager's deferred Stop":
+        _become(hubbed.manager, hubbed.tmux, hubbed.monkeypatch, pid=PANE_PID, role="manager")
+        team_service.hook_stop(hubbed.manager_sid, hubbed.fleet.root, stop_hook_active=True)
+    else:
+        team_service.finish_task(hubbed.task.id, session_ref=hubbed.coder_sid)
+
+    assert hubbed.tmux.typed == [
+        (hubbed.manager.pane_id, "literal", NUDGE_TEXT),
+        (hubbed.manager.pane_id, "key", "Enter"),
+    ]
+    delta = team_service.hook_prompt_heartbeat(hubbed.manager_sid, hubbed.fleet.root)
+    assert "which branch?" in delta or hubbed.task.title in delta, delta
 
 
 @pytest.mark.parametrize(

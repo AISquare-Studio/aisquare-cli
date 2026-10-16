@@ -7252,7 +7252,7 @@ def nudge_manager(project_id: str, *, reason: str, board: str | None = None) -> 
     manager that reads another is not woken. The line wakes it to its own board's delta,
     which does not hold the news, and Remote took the crash for handled (review of #259,
     round 26, 4/11). A board write's nudge is asked the same before it is sent
-    (``team._target_of``).
+    (``team._nudge_manager``, which passes ``board``).
 
     Never raises and never touches a manager that is working or needs the
     human: this runs inside sub-agents' CLI processes, where a failure must

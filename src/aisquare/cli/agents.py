@@ -137,6 +137,7 @@ def refresh_hooks(name: AgentName, config_dir: ConfigDir = None) -> None:
     person types. Later releases must keep it, or an upgrade from this one
     cannot refresh hooks.
     """
+    before = _hooks_text(name, config_dir)
     try:
         written = agents_service.refresh_hooks(name, config_dir)
     except KeyError:
@@ -147,7 +148,27 @@ def refresh_hooks(name: AgentName, config_dir: ConfigDir = None) -> None:
         fail(str(exc), error="not_installed", ref=name)
     if not written:
         fail(f"{name} has no hooks for aisquare to write", error="no_hooks", ref=name)
+    # "Rewritten" only for a file that changed: one already current is left as it was, and
+    # said so (SMOKE6).
+    changed = before is None or before != _hooks_text(name, config_dir)
     if get_state().json_output:
+        # As every release has printed it: the upgrade that runs this reads it.
         typer.echo(json.dumps({"name": name, "hooks_installed": True}))
-    else:
+    elif changed:
         stdout_console().print(f"✓ hooks rewritten for {name}")
+    else:
+        stdout_console().print(f"✓ hooks already current for {name}")
+
+
+def _hooks_text(name: str, config_dir: Path | None) -> bytes | None:
+    """The hooks file ``name``'s hooks live in under ``config_dir``, as bytes; ``None`` where
+    there is none or it cannot be read."""
+    from aisquare.core import agents as agent_core
+
+    try:
+        spec = agent_core.spec(name, config_dir)
+        if spec is None or spec.settings_path is None:
+            return None
+        return spec.settings_path.read_bytes()
+    except (OSError, KeyError, ValueError):
+        return None

@@ -901,6 +901,9 @@ def resolve_place(
             "agent": record.agent,
             "label": record.label if record.label is not None else row.label,
             "role": record.role,
+            # The account a replay runs on is the record's, so is the one a listing shows:
+            # a row's slot rewritten in the store showed until a restart (SMOKE6).
+            "account_slot": record.account_slot,
         }
     )
     socket_path = Path(place.socket_path) if place.socket_path is not None else None

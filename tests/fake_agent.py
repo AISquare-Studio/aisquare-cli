@@ -64,6 +64,7 @@ class FakeAgentAdapter:
     accounts = None
     plugin = None
     capabilities = AgentCapabilities(
+        launch_inputs=(".fakeagent",),
         hooks=tuple(
             HookSpec(event, GENERIC_HOOK, 30 if kind in {"session_start", "prompt"} else None)
             for event, kind in EVENTS.items()
@@ -199,10 +200,16 @@ class FakeAgentAdapter:
     def sandbox_writes(
         self, args: Sequence[str], cwd: Path, home: Path | None = None
     ) -> SandboxWrites | None:
-        # Its sandbox writes the workspace and /tmp; with no `--readonly`, none at all.
-        if "--readonly" not in args:
+        # Its sandbox writes the workspace and /tmp under `--write workspace`, nothing but
+        # its `--writable` paths under `--write read_only`, the `--readonly` ones read-only
+        # within; with no `--readonly` (or `--write full`), there is no sandbox at all.
+        if "--readonly" not in args or "full" in option_values(args, "--write"):
             return None
-        return SandboxWrites((cwd, Path("/tmp")))
+        read = tuple(Path(path) for path in option_values(args, "--readonly"))
+        written = tuple(Path(path) for path in option_values(args, "--writable"))
+        if "read_only" in option_values(args, "--write"):
+            return SandboxWrites(written, read)
+        return SandboxWrites((cwd, Path("/tmp"), *written), read, cwd, (Path("/tmp"),))
 
     def broker_access(
         self,

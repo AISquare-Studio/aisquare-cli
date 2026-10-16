@@ -334,6 +334,7 @@ class CodexAdapter:
     accounts = CodexAccounts()
     plugin = CodexPlugin()
     capabilities = AgentCapabilities(
+        launch_inputs=(".codex", ".agents"),
         hooks=(
             HookSpec("SessionStart", "codex", 120),
             HookSpec("UserPromptSubmit", "codex", 120),

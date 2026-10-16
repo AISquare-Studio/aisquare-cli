@@ -7855,6 +7855,22 @@ def test_a_restart_of_a_row_from_before_launch_records_says_why_it_starts_fresh(
     assert why is not None and "spawned before this aisquare kept launch records" in why
 
 
+def test_a_listing_shows_the_account_its_launch_record_runs_it_on(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """SMOKE6, observed: a row's account slot rewritten in the store showed in ``fleet ls``
+    until a restart, though every replay runs on the record's."""
+    agent = _coder(project)
+    with store_session() as store:
+        assert isinstance(store, SqliteStore)
+        store._conn.execute("UPDATE fleet_agent SET account_slot = 7 WHERE id = ?", (agent.id,))
+        store._conn.commit()
+    [listed] = [s for s in fleet_service.list_agents(project) if s.agent.id == agent.id]
+    record = launch_seal.read(agent.id)
+    assert isinstance(record, launch_seal.LaunchRecord)
+    assert listed.agent.account_slot == record.account_slot != 7
+
+
 def test_the_census_is_taken_once_and_never_from_a_store_records_were_kept_beside(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

@@ -193,19 +193,33 @@ def doctor(
         ]
 
 
-def _sandboxed_project(cwd: Path | None) -> Path | None:
-    """The project a Codex agent of this machine, launched here, would write: a real project
-    root (one git or a project marker found, never the directory itself for want of one),
-    never the home or ``/`` (review r13 of #113, finding 2: run from the home, every install
-    under it, the official uv tool's included, read as the project's); ``None`` elsewhere,
-    or with no Codex on ``PATH`` (a Claude-only machine has no sandbox to keep it from)."""
+def _sandboxing_agents(installed: bool = True) -> list[AgentAdapter]:
+    """The registered agents that sandbox their tools (``capabilities.sandboxes_tools``),
+    with ``installed`` only those whose binary is on ``PATH``: what the doctor's sandbox
+    rows ask about, every such agent, never one by name (GATE #113)."""
     import shutil
 
-    from aisquare.core.agent_adapters import get_adapter
+    from aisquare.core.agent_adapters import adapters
+
+    return [
+        adapter
+        for adapter in adapters()
+        if adapter.capabilities.sandboxes_tools
+        and (not installed or shutil.which(adapter.binary) is not None)
+    ]
+
+
+def _sandboxed_project(cwd: Path | None) -> Path | None:
+    """The project an agent that sandboxes its tools, launched here, would write: a real
+    project root (one git or a project marker found, never the directory itself for want
+    of one), never the home or ``/`` (review r13 of #113, finding 2: run from the home,
+    every install under it, the official uv tool's included, read as the project's);
+    ``None`` elsewhere, or with no such agent installed (a Claude-only machine has no
+    sandbox to keep it from)."""
     from aisquare.core.workspace import project_tree
 
     try:
-        if shutil.which(get_adapter("codex").binary) is None:
+        if not _sandboxing_agents():
             return None
         # The checkout itself: a worktree's own tree, outside its repository too (r14, 8).
         return project_tree(cwd or Path.cwd())
@@ -216,9 +230,10 @@ def _sandboxed_project(cwd: Path | None) -> Path | None:
 def _sandboxed_install_check(cwd: Path | None = None) -> DoctorCheck | None:
     """A warning when an aisquare that runs outside a sandboxed agent's sandbox on its behalf
     lives in the tree of the project the doctor runs in (:func:`_sandboxed_project`), which
-    a Codex tester, validator or ui-tester launched there writes (``workspace-write``): this
-    install, or what Codex's aisquare hooks run (review r12 of #113, finding 1; the
-    plugin's launcher too, r13 3). A launch of one is refused
+    such an agent's tester, validator or ui-tester launched there writes
+    (``workspace-write``): this install, or what that agent's aisquare hooks run (review
+    r12 of #113, finding 1; the plugin's launcher too, r13 3), for every agent that
+    sandboxes its tools (GATE #113). A launch of one is refused
     (``store_broker.refuse_inside``; r11, finding 2), which also reads the temporary and
     the added directories this does not. ``None`` outside a real project, and when every
     one lives elsewhere. One word for its name, as the installer reads names (r13, 2); its
@@ -226,56 +241,58 @@ def _sandboxed_install_check(cwd: Path | None = None) -> DoctorCheck | None:
     hooks to it again (r12, finding 6)."""
     import os
 
-    from aisquare.core.agent_adapters import get_adapter
     from aisquare.core.agent_adapters.types import SandboxWrites
     from aisquare.services import store_broker
 
     root = _sandboxed_project(cwd)
     if root is None:
         return None
-    try:
-        codex = get_adapter("codex")
-        hooks = codex.config_dir(agent_core._home(), os.environ)
-        installs = store_broker.install_paths(hooks, codex.id, os.environ.get("PATH"))
-    except Exception:
-        return None
-    inside = store_broker.install_inside(SandboxWrites((root,)), installs)
-    if inside is None:
-        return None
-    return _warn(
-        "sandbox-install",
-        f"aisquare runs from {inside}, in {root.name or root}'s tree, which a sandboxed "
-        "Codex agent launched there may write: such a launch is refused",
-        "install aisquare-cli outside the project (uv tool install aisquare-cli, or pipx "
-        "install aisquare-cli), then connect the Codex hooks again with that install",
-    )
+    for adapter in _sandboxing_agents():
+        try:
+            hooks = adapter.config_dir(agent_core._home(), os.environ)
+            installs = store_broker.install_paths(hooks, adapter.id, os.environ.get("PATH"))
+        except Exception:
+            continue
+        inside = store_broker.install_inside(SandboxWrites((root,)), installs)
+        if inside is None:
+            continue
+        return _warn(
+            "sandbox-install",
+            f"aisquare runs from {inside}, in {root.name or root}'s tree, which a sandboxed "
+            f"{adapter.label} agent launched there may write: such a launch is refused",
+            "install aisquare-cli outside the project (uv tool install aisquare-cli, or "
+            f"pipx install aisquare-cli), then connect the {adapter.label} hooks again with "
+            "that install",
+        )
+    return None
 
 
 def _sandbox_hooks_check() -> DoctorCheck | None:
-    """A warning when Codex's own aisquare hooks (its hooks file in this shell's Codex home)
-    run the console script, whose interpreter reads ``PYTHONPATH`` outside the agent's
-    sandbox, where the agent keeps it for its tools and its sandbox may write a directory
-    it names: hooks a build of this branch connected before review r14 of #113. ``aisquare
-    agents connect codex``, and an upgrade's refresh, write ``<python> -E -P -m aisquare``
-    (``agents.hook_runs_isolated``; r15, finding 1). ``None`` otherwise."""
+    """A warning when an agent that sandboxes its tools runs aisquare hooks (its hooks file in
+    this shell's config dir for it) in the console-script form, whose interpreter reads
+    ``PYTHONPATH`` outside the agent's sandbox, where the agent keeps it for its tools and
+    its sandbox may write a directory it names: Codex hooks a build of this branch connected
+    before review r14 of #113. ``aisquare agents connect <agent>``, and an upgrade's
+    refresh, write ``<python> -E -P -m aisquare`` (``agents.hook_runs_isolated``; r15,
+    finding 1). Every such agent, never one by name (GATE #113). ``None`` otherwise."""
     import os
 
-    from aisquare.core.agent_adapters import get_adapter
-
-    try:
-        home = get_adapter("codex").config_dir(agent_core._home(), os.environ)
-        commands = agent_core.hook_commands("codex", home)
-    except Exception:
-        return None
-    if not commands or all(agent_core.hook_runs_isolated(command) for command in commands):
-        return None
-    return _warn(
-        "sandbox-hooks",
-        f"Codex's aisquare hooks in {home} run the console script, which imports from "
-        "PYTHONPATH outside the agent's sandbox, where its sandbox may write a directory it "
-        "names (direnv's $PWD/src)",
-        "aisquare agents connect codex",
-    )
+    for adapter in _sandboxing_agents(installed=False):
+        try:
+            home = adapter.config_dir(agent_core._home(), os.environ)
+            commands = agent_core.hook_commands(adapter.id, home)
+        except Exception:
+            continue
+        if not commands or all(agent_core.hook_runs_isolated(c) for c in commands):
+            continue
+        return _warn(
+            "sandbox-hooks",
+            f"{adapter.label}'s aisquare hooks in {home} run the console script, which "
+            "imports from PYTHONPATH outside the agent's sandbox, where its sandbox may write "
+            "a directory it names (direnv's $PWD/src)",
+            f"aisquare agents connect {adapter.id}",
+        )
+    return None
 
 
 def _resolved_or_none(place: Path, root: Path) -> bool:
@@ -288,11 +305,12 @@ def _resolved_or_none(place: Path, root: Path) -> bool:
 
 def _sandbox_path_check(cwd: Path | None = None) -> DoctorCheck | None:
     """A warning when ``PATH`` names a directory in the tree of the project the doctor runs
-    in (:func:`_sandboxed_project`: an activated virtualenv, direnv's ``PATH_add``): a
-    sandboxed Codex agent launched there may write it, and Codex itself, and aisquare's
-    hooks and broker, run the ``git`` (``gbrain``, ``tmux``) found there outside the sandbox
-    (review r13 of #113, finding 1; ``store_broker.sandbox_environment`` warns at launch
-    too). ``None`` outside a real project or with no such entry. Amber the installer
+    in (:func:`_sandboxed_project`: an activated virtualenv, direnv's ``PATH_add``): an
+    agent that sandboxes its tools, launched there, may write it, and the agent itself (Codex
+    runs the ``git`` it finds there outside its sandbox, measured on 0.162.1), and
+    aisquare's hooks and broker, run the ``git`` (``gbrain``, ``tmux``) found there outside
+    the sandbox (review r13 of #113, finding 1; ``store_broker.sandbox_environment`` warns at
+    launch too). ``None`` outside a real project or with no such entry. Amber the installer
     expects: it is the shell's state, not the install's."""
     import os
 
@@ -309,12 +327,13 @@ def _sandbox_path_check(cwd: Path | None = None) -> DoctorCheck | None:
     ]
     if not named:
         return None
+    labels = " or ".join(adapter.label for adapter in _sandboxing_agents())
     return _warn(
         "sandbox-path",
         f"PATH names {', '.join(named)}, in {root.name or root}'s tree, which a sandboxed "
-        "Codex agent launched there may write: Codex itself, and aisquare's hooks and store "
-        "broker, run the git found there outside the sandbox",
-        "launch Codex agents from a shell whose PATH names nothing in the project "
+        f"{labels} agent launched there may write: the agent itself, and aisquare's hooks "
+        "and store broker, run the git found there outside its sandbox",
+        f"launch {labels} agents from a shell whose PATH names nothing in the project "
         "(deactivate its virtualenv)",
     )
 

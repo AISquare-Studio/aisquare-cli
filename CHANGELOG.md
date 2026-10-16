@@ -182,6 +182,13 @@ adapter.**
   run, starts in its brain's home, not the tree. A fleet Codex window starts with
   `check_for_update_on_startup=false` unless the operator sets it: its `Update
   available` dialog, whose first choice an Enter picks, runs `npm install -g`.
+  The doctor's `sandbox-hooks` row warns of an agent that sandboxes its tools whose
+  hooks still run the console script (connected by a build before the `-E` form);
+  `agents connect` and an upgrade's refresh write that form. Unmeasured, and so not
+  claimed: macOS Seatbelt and the Windows sandbox (the broker is POSIX only and was
+  measured on Linux bwrap; native Windows has a read-only store and no broker), and
+  `recall` on a real gbrain, which no host or CI job has (its query goes as gbrain's
+  positional, as gbrain's source parses one).
   The transport is a spool directory and a FIFO, not a socket: Codex
   0.162.1's sandbox refuses `connect` on every unix socket (measured). The launch
   records stay as defence in depth: restart, switch, the hand-over and `fleet

@@ -1087,13 +1087,28 @@ def run_broker(directory: Path, env: Mapping[str, str], *, owner: int | None = N
         raise RuntimeError(f"it exited {child.returncode}")
 
 
-#: What a project tree holds that a launch outside any sandbox reads, read-only in a
-#: sandboxed agent's sandbox (review r10 of #113, finding 1): Claude Code's project
-#: settings, hooks and MCP servers (``.claude/``, ``.mcp.json``), Codex's project config
-#: and agents (``.codex/``, ``.agents/``), aisquare's root marker (``.aisquare``), and the
-#: repository (``.git``: its hooks and config run on the fleet's checkouts). ``AGENTS.md``
-#: and ``CLAUDE.md`` are content an agent reads, not what runs: they stay writable.
-LAUNCH_INPUTS = (".claude", ".mcp.json", ".codex", ".agents", ".aisquare", ".git")
+#: What a project tree holds that aisquare's own launches read whatever the agent:
+#: aisquare's root marker (``.aisquare``) and the repository (``.git``: its hooks and
+#: config run on the fleet's checkouts). Each agent's own are its adapter's
+#: (``AgentCapabilities.launch_inputs``), joined in :func:`launch_inputs`.
+OWN_LAUNCH_INPUTS = (".aisquare", ".git")
+
+
+def launch_inputs() -> tuple[str, ...]:
+    """What a project tree holds that a launch outside any sandbox reads, read-only in a
+    sandboxed agent's sandbox (review r10 of #113, finding 1): every registered agent's
+    own (``AgentCapabilities.launch_inputs``: Claude Code's project settings, hooks and MCP
+    servers, ``.claude/`` and ``.mcp.json``; Codex's project config and agents, ``.codex/``
+    and ``.agents/``), each agent's whichever is sandboxed, as a sandboxed Codex in a
+    project could otherwise plant what another agent's next start there runs (GATE #113),
+    and :data:`OWN_LAUNCH_INPUTS`. ``AGENTS.md`` and ``CLAUDE.md`` are content an agent
+    reads, not what runs: they stay writable."""
+    from aisquare.core.agent_adapters import adapters
+
+    names: list[str] = []
+    for adapter in adapters():
+        names += adapter.capabilities.launch_inputs
+    return tuple(dict.fromkeys([*names, *OWN_LAUNCH_INPUTS]))
 
 
 def _tree_top(start: Path) -> Path | None:
@@ -1109,7 +1124,7 @@ def launch_paths(
     env: Mapping[str, str], cwd: Path, given: Sequence[Path] = ()
 ) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
     """What a sandboxed launch keeps read-only outside the store, and what stays writable
-    within it, for ``AgentAdapter.broker_access``. Read-only: :data:`LAUNCH_INPUTS` of
+    within it, for ``AgentAdapter.broker_access``. Read-only: :func:`launch_inputs` of
     every tree the agent's launch touches (its own checkout, its project's principal
     one, its launch record's), every worktree of the project (the fleet's worktree
     directory) but its own, and the directories of the tmux sockets (review r10, finding
@@ -1141,7 +1156,8 @@ def launch_paths(
             if isinstance(record, launch_seal.LaunchRecord):
                 trees += [Path(record.project_root), Path(record.cwd)]
     trees = list(dict.fromkeys(_resolved(tree) for tree in trees))
-    protect: list[Path] = [tree / name for tree in trees for name in LAUNCH_INPUTS]
+    inputs = launch_inputs()
+    protect: list[Path] = [tree / name for tree in trees for name in inputs]
     writable: list[Path] = []
     for tree in trees:
         worktrees = _resolved(tree / fleet.worktree_dir)

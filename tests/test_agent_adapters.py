@@ -2657,3 +2657,14 @@ def test_the_plugin_route_is_an_adapter_slot(claude_home: Path) -> None:
     )
     assert get_adapter("codex").plugin is not None, "plugins/codex: tests/test_codex_plugin*.py"
     assert agent_core.plugin_of("cursor") is None
+
+
+def test_refresh_hooks_says_rewritten_only_when_the_file_changed(
+    runner: CliRunner, claude_home: Path
+) -> None:
+    """SMOKE6, observed: ``refresh-hooks`` printed "rewritten" for a hooks file it left as
+    it was (inode and mtime unchanged). It says so only for one that changed."""
+    first = runner.invoke(app, ["agents", "refresh-hooks", "claude-code"])
+    assert first.exit_code == 0 and "hooks rewritten for claude-code" in first.stdout, first.output
+    again = runner.invoke(app, ["agents", "refresh-hooks", "claude-code"])
+    assert again.exit_code == 0 and "already current" in again.stdout, again.output

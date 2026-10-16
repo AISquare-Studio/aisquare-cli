@@ -798,7 +798,7 @@ def test_launch_paths_hold_the_project_trees_inputs_and_the_tmux_sockets(
     protect, writable = store_broker.launch_paths(env, worktree)
 
     real = root.resolve()
-    for name in store_broker.LAUNCH_INPUTS:
+    for name in store_broker.launch_inputs():
         assert real / name in protect, name
         assert worktree.resolve() / name in protect, name
     assert real / ".aisquare-worktrees" in protect, "the other agents' worktrees"
@@ -1404,7 +1404,7 @@ def test_a_tree_codex_is_given_holds_its_launch_inputs_read_only(
     value = next(arg for arg in launched if arg.startswith(key)).partition("=")[2]
     table: dict[str, str] = tomllib.loads(f"t = {value}")["t"]
     for tree in (launch, workspace, added):
-        for name in store_broker.LAUNCH_INPUTS:
+        for name in store_broker.launch_inputs():
             assert table.get(str(tree.resolve() / name)) == "read", (tree, name)
 
 
@@ -2138,3 +2138,72 @@ def test_a_root_the_sandbox_may_write_inside_an_install_is_refused_in_every_spel
     sibling = root.parent / f"{root.name}-sibling" / "lib"
     sibling.mkdir(parents=True)
     store_broker.refuse_inside([*writes, "--add-dir", str(sibling)], elsewhere, codex)
+
+
+# --- GATE #113 --------------------------------------------------------------------------
+
+
+def test_every_registered_agents_launch_inputs_are_held_read_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GATE #113, finding 2: the launch inputs were a list of Claude Code's and Codex's, so a
+    next agent's project config (a ``.gemini/``) would have been a sandboxed Codex's to
+    plant for that agent's next unsandboxed start. Each adapter declares its own
+    (``capabilities.launch_inputs``), and the profile holds every registered one's."""
+    from aisquare.core.agent_adapters import register, unregister
+    from tests.fake_agent import FakeAgentAdapter
+
+    fake = FakeAgentAdapter()
+    register(fake)
+    try:
+        assert ".fakeagent" in store_broker.launch_inputs()
+        assert {".claude", ".mcp.json", ".codex", ".agents", ".aisquare", ".git"} <= set(
+            store_broker.launch_inputs()
+        )
+        tree = tmp_path / "proj"
+        tree.mkdir()
+        protect, _ = store_broker.launch_paths({}, tree)
+        assert tree.resolve() / ".fakeagent" in protect
+    finally:
+        unregister(fake.id)
+    assert ".fakeagent" not in store_broker.launch_inputs()
+
+
+def test_the_doctors_sandbox_rows_ask_every_agent_that_sandboxes_its_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GATE #113, finding 2: the doctor's sandbox rows asked Codex by name. They ask every
+    registered agent with ``sandboxes_tools`` that is installed, and say which."""
+    from aisquare.core.agent_adapters import register, unregister
+    from aisquare.services import diagnostics
+    from tests.fake_agent import FakeAgentAdapter
+
+    project = tmp_path / "proj"
+    venv_bin = project / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (project / ".aisquare").mkdir()
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    fake_binary = tools / FakeAgentAdapter.binary
+    fake_binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_binary.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{venv_bin}{os.pathsep}{tools}")  # no codex here
+    assert diagnostics._sandbox_path_check(project) is None, "no sandboxing agent installed"
+    fake = FakeAgentAdapter()
+    register(fake)
+    try:
+        row = diagnostics._sandbox_path_check(project)
+        assert row is not None and FakeAgentAdapter.label in row.detail, row
+    finally:
+        unregister(fake.id)
+
+
+def test_a_usage_line_under_python_m_names_the_program_aisquare() -> None:
+    """SMOKE6, observed: a brokered command's usage error named the program ``python -m
+    aisquare``, which the agent cannot type; it is ``aisquare``."""
+    done = subprocess.run(
+        [*selfcli.isolated_argv_for(["task", "no-such-command"])],
+        capture_output=True, text=True, timeout=120, check=False,
+    )  # fmt: skip
+    said = done.stdout + done.stderr
+    assert "Usage: aisquare task" in said and "python -m" not in said, said

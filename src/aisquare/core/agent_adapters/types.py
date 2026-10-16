@@ -160,6 +160,15 @@ class AgentCapabilities:
     first_context_file_only: bool = False
     sandbox_permissions: bool = False
     """``fleet.roles.<role>.sandbox``/``approval_policy``/``approve_for_me`` apply."""
+    launch_inputs: tuple[str, ...] = ()
+    """The paths in a project's tree, relative to it, that THIS agent's launch reads and
+    runs code from: its project settings, hooks, MCP servers, project config, agents
+    (Claude Code's ``.claude``, ``.mcp.json``; Codex's ``.codex``, ``.agents``). A sandboxed
+    agent's profile holds every registered agent's read-only at the tops of its trees
+    (``services.store_broker.launch_inputs``), so a sandboxed Codex in a project cannot
+    plant what another agent's next unsandboxed start there runs (review r10 of #113,
+    finding 1; GATE #113). Every adapter declares its own; the conformance suite fails one
+    that declares none."""
     sandboxes_tools: bool = False
     """The agent runs its tools' commands in an OS sandbox that confines their writes
     (Codex's). Its permission flags make the aisquare store read-only there

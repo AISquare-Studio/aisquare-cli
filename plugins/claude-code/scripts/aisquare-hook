@@ -20,7 +20,8 @@
 #      their own, so both firing would inject the context twice and capture every
 #      prompt twice.
 #   2. Else run the aisquare CLI: on PATH, or in ~/.local/bin, where `uv tool
-#      install` puts it (a session started from a desktop app may lack it on PATH).
+#      install` puts it, or ~/.cargo/bin (a session started from a desktop app may
+#      lack them on PATH).
 #   3. Else run the pinned release with uvx, so a machine with only uv has memory
 #      without an installer.
 #   4. Else do nothing, and say so once, at session start.

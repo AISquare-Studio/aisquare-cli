@@ -90,6 +90,7 @@ class ClaudeCodeAdapter:
     accounts = ClaudeCodeAccounts()
     plugin = ClaudeCodePlugin()
     capabilities = AgentCapabilities(
+        launch_inputs=(".claude", ".mcp.json"),
         hooks=(
             HookSpec("SessionStart", "session-start", 120),
             HookSpec("UserPromptSubmit", "user-prompt-submit", 120),

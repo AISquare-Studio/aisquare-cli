@@ -466,6 +466,49 @@ def test_an_agent_that_sandboxes_its_tools_declares_its_broker(
     assert adapter.broker_access(["--unrelated"], store, inbox) is None
 
 
+def test_an_agent_that_sandboxes_its_tools_says_what_its_sandbox_may_write(
+    adapter: AgentAdapter, tmp_path: Path
+) -> None:
+    """GATE #113, finding 4: ``sandbox_writes`` decides the install refusal
+    (``services.store_broker.refuse_inside``), so an agent that sandboxes its tools answers
+    what a sandboxed launch of its may write, read off its own arguments: under a
+    workspace scope its workspace, under a read-only one none of it, the store never; and
+    ``None`` only where it runs unsandboxed, as an agent without a sandbox always does. An
+    adapter that answered ``None`` for a sandboxed launch would let through every install
+    its sandbox may write."""
+    store = tmp_path / "aisquare-home"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    for write in get_args(WriteScope):
+        try:
+            args = adapter.permission_args(PermissionIntent(write, "never"), "coder")
+        except ValueError:
+            continue
+        args = [*args, *adapter.store_access(write, store)]
+        writes = adapter.sandbox_writes(args, workspace)
+        if not adapter.capabilities.sandboxes_tools or write == "full":
+            assert writes is None, f"{adapter.id} {write}: no sandbox, nothing to answer"
+            continue
+        assert writes is not None, f"{adapter.id} answers nothing for its {write} sandbox"
+        assert not writes.may_write(store / "context.db"), f"{adapter.id}: the store is read-only"
+        assert writes.may_write(workspace) is (write == "workspace"), (adapter.id, write)
+
+
+def test_every_agent_declares_the_launch_inputs_its_start_runs(adapter: AgentAdapter) -> None:
+    """GATE #113, finding 2: what a project's tree holds that an agent's unsandboxed start
+    there reads and runs (its project settings, hooks, MCP servers) is declared by its
+    adapter (``capabilities.launch_inputs``), and every sandboxed agent's profile holds all
+    of them read-only (``store_broker.launch_inputs``): the next agent's config cannot be
+    planted by a sandboxed Codex in the project."""
+    from aisquare.services import store_broker
+
+    inputs = adapter.capabilities.launch_inputs
+    assert inputs, f"{adapter.id} declares no launch inputs"
+    for name in inputs:
+        assert name not in ("", ".", "..") and "/" not in name and "\\" not in name, name
+    assert set(inputs) <= set(store_broker.launch_inputs()), "held read-only in every sandbox"
+
+
 def test_resume_exit_mcp_context_teams_and_telemetry(adapter: AgentAdapter, tmp_path: Path) -> None:
     transcript = tmp_path / "session.jsonl"
     resume = adapter.resume_args("native-1", transcript)

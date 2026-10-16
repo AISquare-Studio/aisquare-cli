@@ -995,21 +995,25 @@ def _git(cwd: Path, *args: str) -> _GitResult:
     non-zero exit is an answer (callers read ``returncode``); a missing git or
     a hang is not, and becomes a :class:`FleetError` with the reason.
 
-    Every command with ``--no-optional-locks``: a ``git status`` that only reads still takes
-    the tree's ``index.lock`` to write back what it refreshed, and a reap's status of an
-    ended agent's tree, asked without the branch lock, made a respawn's ``git checkout`` in
-    that tree fail on the lock it held (77 of 200 overlapping checkouts, review of #259,
-    round 20). A command that must write takes its locks all the same.
+    Every command with ``GIT_OPTIONAL_LOCKS=0``: a ``git status`` that only reads still
+    takes the tree's ``index.lock`` to write back what it refreshed, and a reap's status of
+    an ended agent's tree, asked without the branch lock, made a respawn's ``git checkout``
+    in that tree fail on the lock it held (77 of 200 overlapping checkouts, review of #259,
+    round 20). A command that must write takes its locks all the same. The environment's
+    switch, not ``--no-optional-locks``: a git before 2.15 (CentOS 7's 1.8.3) refuses the
+    flag, so every fleet git command exited 129, a ``--worktree`` spawn failed and a reap
+    read each refusal as an answer, and ignores the variable (round 27, 4/7).
     """
     try:
         completed = subprocess.run(
-            ["git", "--no-optional-locks", "-C", str(cwd), *args],
+            ["git", "-C", str(cwd), *args],
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
             timeout=_GIT_TIMEOUT,
             check=False,
+            env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
         )
     except FileNotFoundError as exc:
         raise FleetError("git is not installed (or not on PATH) — worktrees need it") from exc

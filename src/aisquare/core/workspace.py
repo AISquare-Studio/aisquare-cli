@@ -81,11 +81,11 @@ def git_common_root(start: Path) -> Path | None:
     single project.
 
     Returns ``None`` when git is unavailable or ``start`` is not in a work
-    tree, leaving callers on the marker-based fallback. Without ``--no-optional-locks``,
-    which the fleet's own git commands carry: ``rev-parse`` takes no optional lock, and git
-    before 2.15 refuses the flag, which here read as "not a work tree", so every linked
-    worktree, a fleet agent's included, got a board of its own, with no warning (review of
-    #259, round 26, 11/11). Every hook asks this.
+    tree, leaving callers on the marker-based fallback. Without ``--no-optional-locks``:
+    ``rev-parse`` takes no optional lock, and git before 2.15 refuses the flag, which here
+    read as "not a work tree", so every linked worktree, a fleet agent's included, got a
+    board of its own, with no warning (review of #259, round 26, 11/11). Every hook asks
+    this.
     """
     try:
         result = subprocess.run(

@@ -10223,7 +10223,7 @@ def test_a_reap_asks_what_a_tree_holds_without_writing_its_index(repo: Path) -> 
     """Review of #259, round 20: a reap asks an ended agent's tree what it holds without the
     branch lock, and ``git status`` writes back the index it refreshed, holding the tree's
     ``index.lock`` while it does: a respawn's ``git checkout`` there failed on it (77 of 200
-    overlapping checkouts). Asked with ``--no-optional-locks``, it writes nothing."""
+    overlapping checkouts). Asked with ``GIT_OPTIONAL_LOCKS=0``, it writes nothing."""
     (repo / "file.txt").write_text("committed\n", encoding="utf-8")
     _git("add", "file.txt", cwd=repo)
     _git("commit", "-q", "-m", "file", cwd=repo)
@@ -10242,28 +10242,31 @@ def test_every_git_command_the_fleet_runs_takes_no_optional_lock(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Review of #259, round 20: one seam, so every git command a spawn, a stop and a reap run
-    (status, rev-parse, for-each-ref, worktree list and the rest) carries
-    ``--no-optional-locks``, and a read never holds a lock a write in the same tree needs.
-    But the board's own question, ``rev-parse --git-common-dir`` (``workspace.git_common_root``),
-    which every hook asks too: it takes no lock, and a git before 2.15 refuses the flag
-    (round 26, 11/11)."""
+    (status, rev-parse, for-each-ref, worktree list and the rest) takes no optional lock,
+    and a read never holds a lock a write in the same tree needs. But the board's own
+    question, ``rev-parse --git-common-dir`` (``workspace.git_common_root``), which every
+    hook asks too: it takes no lock (round 26, 11/11). Round 27, 4/7: by
+    ``GIT_OPTIONAL_LOCKS=0``, not ``--no-optional-locks``, which a git before 2.15 refuses
+    (exit 129), so every fleet git command failed there; that git ignores the variable."""
     real = subprocess.run
-    gits: list[list[str]] = []
+    gits: list[tuple[list[str], str | None]] = []
 
-    def watched(argv: Any, *args: Any, **kwargs: Any) -> Any:
+    def before_2_15(argv: Any, *args: Any, **kwargs: Any) -> Any:
         if isinstance(argv, list) and argv and argv[0] == "git":
-            gits.append(argv)
+            gits.append((argv, (kwargs.get("env") or {}).get("GIT_OPTIONAL_LOCKS")))
+            if "--no-optional-locks" in argv:
+                return subprocess.CompletedProcess(argv, 129, "", "unknown option")
         return real(argv, *args, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", watched)
+    monkeypatch.setattr(subprocess, "run", before_2_15)
     agent = fleet_service.spawn(project, "coder", label="coder-1").agent
     (agent.cwd / "work.txt").write_text("not committed\n", encoding="utf-8")
     fleet_service.stop(project, "coder-1", force=True)
     report = fleet_service.reap(project)
 
     assert dict(report.worktrees_kept) == {agent.cwd: "uncommitted changes"}, "status ran"
-    assert {argv[argv.index("-C") + 2] for argv in gits} >= {"status", "worktree", "rev-parse"}
-    rest = [argv for argv in gits if argv[1] != "--no-optional-locks"]
+    assert {argv[argv.index("-C") + 2] for argv, _ in gits} >= {"status", "worktree", "rev-parse"}
+    rest = [argv for argv, locks in gits if locks != "0"]
     assert rest and all(argv[-2:] == ["rev-parse", "--git-common-dir"] for argv in rest), rest
 
 

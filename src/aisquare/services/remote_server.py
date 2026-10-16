@@ -659,16 +659,52 @@ def _remote_board_project(root: Path) -> ProjectInfo:
     return board
 
 
+def _remote_project_board(project: ProjectInfo) -> ProjectInfo:
+    """The board ``project``'s agents read, which its Board and Tasks tabs show, a task number
+    is read on and a note naming no agent or session goes to: the one its rows recorded at
+    spawn (``ContextStore.fleet_board``: its live manager's, else its newest live row's, else
+    its newest manager's, else its newest row's). Else, for a project the fleet never spawned
+    into, or whose board the store does not hold, the one ``asq board`` run in its root
+    shows, under Remote's own environment (:func:`_remote_board_project`).
+
+    Each agent reads the board its row recorded (``fleet._board_of_row``). Resolved from the
+    root under Remote's environment, a Remote started without the hub P's agents were
+    spawned under showed P's checkout board in the Board tab, not the one its manager and
+    coders work on; a claim or a close of a task on the hub by id was a 404, and ``done #12``
+    read #12 on the checkout's board and closed that task if it had one (review of #259,
+    round 29, 3/8).
+    """
+    board = _remote_recorded_board(project)
+    return board if board is not None else _remote_board_project(project.root)
+
+
+def _remote_recorded_board(project: ProjectInfo) -> ProjectInfo | None:
+    """:func:`_remote_project_board` as ``project``'s rows recorded it; ``None`` for a project
+    with none, or whose board the store does not hold."""
+    from aisquare.core.store import store_session
+
+    with store_session() as store:
+        recorded = store.fleet_board(project.id)
+        return store.get_project(recorded) if recorded is not None else None
+
+
 def _remote_boards() -> set[str]:
-    """The boards a phone may reach: each reachable project's (:func:`_remote_board_project`),
-    which its Board and Tasks tabs read, and the project's own id. A task's or a session's
-    ``project_id`` is the board it is on, which is a project's own unless a hub or a
-    worktree makes it another's. A root that cannot be looked at adds its own id alone.
+    """The boards a phone may reach: of each reachable project, its own id, every board one of
+    its rows recorded (``ContextStore.fleet_agent_boards``), one :func:`_remote_project_board`
+    gives, and the one ``asq board`` shows in its root (:func:`_remote_board_project`), where
+    a human's tasks are added from a shell. A task's or a session's ``project_id`` is the
+    board it is on, which is a project's own unless a hub or a worktree makes it another's.
+    A root that cannot be looked at adds no board of the last kind.
 
     Worked out once for each board write, which reads it lazily (:class:`_RemoteReach`)."""
-    reach: set[str] = set()
-    for project in _remote_reachable_projects():
-        reach.add(project.id)
+    from aisquare.core.store import store_session
+
+    projects = _remote_reachable_projects()
+    reach: set[str] = {project.id for project in projects}
+    with store_session() as store:
+        for project in projects:
+            reach.update(store.fleet_agent_boards(project.id))
+    for project in projects:
         with contextlib.suppress(OSError):
             reach.add(_remote_board_project(project.root).id)
     return reach
@@ -759,7 +795,8 @@ def _remote_reply_board(target: ProjectInfo, agent_id: str) -> str:
 def _remote_number_board(session: str | None, project: str | None) -> str:
     """The board a write reads a task number on: the session's, the id of the ``as`` it
     resolved (:func:`_remote_author`, so a board a phone may reach), else the board of
-    ``project`` (:func:`_resolve_project`; the current project for ``None``)."""
+    ``project``'s agents (:func:`_remote_project_board`; :func:`_resolve_project`, the
+    current project for ``None``)."""
     from aisquare.core.store import store_session
 
     if session is not None:
@@ -767,7 +804,7 @@ def _remote_number_board(session: str | None, project: str | None) -> str:
             found = store.get_session(session)
         if found is not None:
             return found.project_id
-    return _remote_board_project(_resolve_project(project).root).id
+    return _remote_project_board(_resolve_project(project)).id
 
 
 @contextlib.contextmanager
@@ -2962,15 +2999,20 @@ def remote_board_payload(project: str | None = None, *, glance: bool = False) ->
     they name (``glance``). ``GET api/board`` still reads the whole board, as ``asq board
     --json`` prints it.
 
+    The board is the one the project's agents read, as their rows recorded it
+    (:func:`_remote_project_board`), and the root's only for a project with none: under
+    Remote's own environment the tab showed another board than its manager's when Remote
+    ran without the hub it was spawned under (review of #259, round 29, 3/8).
+
     #240 fold: pass ``exclude_kinds=team_service.CAPTAIN_AUDIT_KINDS`` here (one line).
     """
     from aisquare.cli.team import board_json
     from aisquare.services import team as team_service
 
-    cwd = _resolve_project(project).root
-    board = _remote_board_project(cwd) if glance else None
+    target = _resolve_project(project)
+    board = _remote_project_board(target)
     return board_json(
-        *team_service.board_data(cwd, events=BOARD_EVENTS, project=board, glance=glance)
+        *team_service.board_data(target.root, events=BOARD_EVENTS, project=board, glance=glance)
     )
 
 
@@ -3013,8 +3055,11 @@ def live_sources() -> Sources:
     def tasks_payload(project: str | None = None) -> object:
         from aisquare.services import team as team_service
 
-        cwd = _resolve_project(project).root  # the current one's as remote_board_payload's
-        return [task.model_dump(mode="json") for task in team_service.list_tasks(None, cwd=cwd)]
+        # The board the Board tab shows (`remote_board_payload`), the current project's for
+        # none.
+        board = _remote_project_board(_resolve_project(project)).id
+        tasks = team_service.list_tasks(None, board_id=board)
+        return [task.model_dump(mode="json") for task in tasks]
 
     def memory_payload(project: str | None = None) -> object:
         from aisquare.core.store import store_session
@@ -3526,9 +3571,9 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
         """A note on a project's board: ``project``'s, or the current one's without it, the
         project keys and an agent action without one go to (:func:`_resolve_project`).
 
-        The board resolves from the project's root exactly as ``asq note`` run
-        there would; with ``as``, the session's own board still wins (the CLI's
-        rule), so a note posted as an agent lands where that agent reads. Only
+        The board is the one the project's agents read, which the Board tab shows (below);
+        with ``as``, the session's own board still wins (the CLI's rule), so a note posted
+        as an agent lands where that agent reads. Only
         the human's kinds (:data:`NOTE_KINDS`): ``kind`` went to the board and the
         audit line as it came, so a phone could forge the fleet's own reports and,
         with a newline in it, a line of the audit trail. The summary records who
@@ -3549,7 +3594,9 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
         ``agent_id``, a card's Reply: the fleet row whose question or result it answers. The
         note goes to the board that row recorded (:func:`_remote_reply_board`), ``as`` or
         not, so it lands where the card was read and the agent reads; a row the project
-        does not hold is a 404, and the page keeps the card.
+        does not hold is a 404, and the page keeps the card. With neither, the note goes to
+        the board the project's agents read, the one the Board tab shows
+        (:func:`_remote_project_board`).
         """
         from aisquare.services import team as team_service
 
@@ -3571,7 +3618,14 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
             with _remote_board_refusals(reach, ("as", author, "session"), ("task", task, "task")):
                 session = _remote_author(author, reach)
                 target = _resolve_project(project)
-                board = None if replying is None else _remote_reply_board(target, replying)
+                board: str | None = None  # `as`: the session's own board, the CLI's rule
+                if replying is not None:
+                    board = _remote_reply_board(target, replying)
+                elif session is None:
+                    # The Board tab's. A project with no rows is resolved in its root as
+                    # `asq note` there does, which refuses a board nobody added.
+                    recorded = _remote_recorded_board(target)
+                    board = None if recorded is None else recorded.id
                 event = team_service.add_note(
                     text,
                     session_ref=session,

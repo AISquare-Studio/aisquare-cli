@@ -1367,6 +1367,7 @@ class ContextStore(Protocol):
     def live_fleet_agents(self) -> list[FleetAgent]: ...
     def fleet_agents_ended_since(self, project_id: str, since: datetime) -> list[FleetAgent]: ...
     def fleet_agent_boards(self, project_id: str) -> list[str]: ...
+    def fleet_board(self, project_id: str) -> str | None: ...
     def fleet_agent_for_session(self, session_id: str) -> FleetAgent | None: ...
     def ui_state(self, key: str) -> str | None: ...
     def set_ui_state(self, key: str, value: str | None) -> None: ...
@@ -3864,6 +3865,23 @@ class SqliteStore:
             (project_id,),
         ).fetchall()
         return [row["board"] for row in rows]
+
+    def fleet_board(self, project_id: str) -> str | None:
+        """The board the project's agents read, as one row recorded it: its live manager's,
+        else its newest live row's, else its newest manager's, else its newest row's;
+        ``None`` before its first spawn.
+
+        Picked in SQL (``services.remote_server``'s ``_remote_project_board``): every spawn,
+        restart and switch adds a row that is never deleted, and :meth:`fleet_agents` builds
+        them all.
+        """
+        row = self._conn.execute(
+            f"SELECT {self._fleet_agent_board} AS board FROM fleet_agent WHERE project_id = ? "
+            "ORDER BY ended_at IS NULL DESC, role = 'manager' DESC, created_at DESC, id DESC "
+            "LIMIT 1",
+            (project_id,),
+        ).fetchone()
+        return None if row is None else str(row["board"])
 
     def fleet_agent_for_session(self, session_id: str) -> FleetAgent | None:
         """The live fleet row recorded against ``session_id``, if there is one, in whichever

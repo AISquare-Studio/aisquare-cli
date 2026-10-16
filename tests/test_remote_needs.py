@@ -4864,6 +4864,117 @@ def test_a_phones_reply_to_a_card_is_posted_on_the_board_its_row_asked_on(
     assert cards() == [], "answered where it was asked"
 
 
+def _hubbed_tasks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remote: str
+) -> tuple[ProjectInfo, ProjectInfo, TeamTask]:
+    """P's manager, spawned under hub H, and Remote run under another hub (``remote``
+    ``"another"``) or none, with a task #1 on each of H (``tsk_hub``), where the manager
+    reads, and the board Remote's own environment gives P: P, H, and the latter task."""
+    now = datetime.now(UTC)
+    with store_session() as store:
+        p = store.onboard_project(_rooted(tmp_path / "p"))
+        hub = _rooted(tmp_path / "hub")
+        store.ensure_project(hub)
+        _seat_up(store, _manager_of("p"), p, hub)
+        other = _rooted(tmp_path / "another")
+        store.ensure_project(other)
+        elsewhere = other if remote == "another" else p
+        on_hub, on_elsewhere = (
+            store.upsert_task(
+                TeamTask(
+                    id=f"tsk_{name}", project_id=board.id, key=name, title=f"on {name}",
+                    created_at=now, updated_at=now,
+                )
+            )[0]
+            for name, board in (("hub", hub), ("elsewhere", elsewhere))
+        )  # fmt: skip
+    if remote == "another":
+        monkeypatch.setenv("AISQUARE_TEAM_HUB", str(other.root))
+    else:
+        monkeypatch.delenv("AISQUARE_TEAM_HUB", raising=False)
+    assert on_hub.number == on_elsewhere.number == 1
+    return p, hub, on_elsewhere
+
+
+def _board_tab(p: ProjectInfo, hub: ProjectInfo) -> str:
+    from aisquare.services.remote_server import live_sources, remote_board_payload
+
+    glance = remote_board_payload(p.id, glance=True)["project"]
+    full = live_sources().board(p.id)
+    assert isinstance(glance, dict) and isinstance(full, dict)
+    assert glance["id"] == full["project"]["id"]
+    return str(glance["id"])
+
+
+def _tasks_tab(p: ProjectInfo, hub: ProjectInfo) -> str:
+    from aisquare.services.remote_server import live_sources
+
+    tasks = live_sources().tasks(p.id)
+    assert isinstance(tasks, list)
+    (board,) = {task["project_id"] for task in tasks}
+    return str(board)
+
+
+def _closed(ref: str, project: str | None, write: str = "task/done") -> str:
+    from aisquare.services.remote_server import live_writes
+
+    body = {"ref": ref} if project is None else {"ref": ref, "project": project}
+    result, _summary = live_writes().handlers[write](body)
+    task = result["task"]
+    assert isinstance(task, dict)
+    return str(task["project_id"])
+
+
+def _claim_by_id(p: ProjectInfo, hub: ProjectInfo) -> str:
+    return _closed("tsk_hub", p.id, "task/claim")
+
+
+def _done_by_id(p: ProjectInfo, hub: ProjectInfo) -> str:
+    return _closed("tsk_hub", None)
+
+
+def _done_by_number(p: ProjectInfo, hub: ProjectInfo) -> str:
+    return _closed("#1", p.id)
+
+
+def _note(p: ProjectInfo, hub: ProjectInfo) -> str:
+    from aisquare.services.remote_server import live_writes
+
+    result, _summary = live_writes().handlers["note"]({"text": "hi", "project": p.id})
+    event = result["event"]
+    assert isinstance(event, dict)
+    with store_session() as store:
+        (posted,) = [
+            board
+            for board in (p.id, hub.id)
+            if any(e.text == "hi" for e in store.recent_events(board, limit=5))
+        ]
+    return posted
+
+
+@pytest.mark.parametrize("remote", ["none", "another"], ids=["no hub", "another hub"])
+@pytest.mark.parametrize(
+    "path",
+    [_board_tab, _tasks_tab, _claim_by_id, _done_by_id, _done_by_number, _note],
+    ids=lambda path: path.__name__.strip("_"),
+)
+def test_remotes_board_and_task_paths_go_to_the_board_the_projects_agents_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: Any, remote: str
+) -> None:
+    """Review of #259, round 29, 3/8: Remote found a project's board from its own environment,
+    while each agent reads the board its row recorded. Started without the hub P's manager was
+    spawned under, or under another, the Board and Tasks tabs showed another board than the
+    manager's, a claim or a close of a task on the hub by id was a 404, ``done #1`` closed
+    the other board's #1, and a note from the Board tab went where the manager does not
+    read. Each goes to the board P's rows recorded."""
+    p, hub, on_elsewhere = _hubbed_tasks(tmp_path, monkeypatch, remote)
+
+    assert path(p, hub) == hub.id
+    with store_session() as store:
+        untouched = store.get_task(on_elsewhere.id)
+    assert untouched is not None and untouched.status == "todo"
+
+
 @dataclass(frozen=True)
 class _Seat:
     """One agent of a board: its fleet project, label and role; whether a fleet row holds it

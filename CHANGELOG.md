@@ -621,6 +621,11 @@ all of them, and the fleet cleans up the worktrees it made.**
     coder's question there is a card unless its manager reads that board.
     The phone's Reply to such a card is posted on that board too, where the
     agent reads it, and the card stays when the reply could not be posted.
+  - Remote's Board and Tasks tabs show the board the project's agents read, as
+    recorded when they were spawned, and a note from the Board tab is posted
+    there, even when Remote runs under another hub, or none. A claim or a
+    close of a task on that board by id finds it, and `done #12` reads #12
+    there, not on another board that happens to have a #12.
   - Under a hub, a live manager keeps its own agents' questions and results to
     it, their crashes and their failed hand-overs off the phone, and holds back
     a usage limit's push, as it does without a hub. Before, each was a card and

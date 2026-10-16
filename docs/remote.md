@@ -177,7 +177,11 @@ The screens, along the bottom bar:
 - **Projects** — each project with its agents' states and how many items need
   you. Inside one: **Fleet** (every agent and its state), **Board** (newest first,
   with a composer for a note, a decision, a question or a result), **Tasks** and
-  **Memory**, both read-only.
+  **Memory**, both read-only. Board and Tasks are the board the project's agents
+  read, as recorded when they were spawned (its running manager's first), even
+  when Remote runs under another `AISQUARE_TEAM_HUB` than they were spawned
+  under, or none; a project with no agent shows the board `aisquare board` shows
+  in its directory.
 - **An agent** — **Live** (its pane, colours included, the cursor where the
   program shows one, with Fit width), **Transcript** (the conversation, wrapped
   to the phone, each turn's time in the phone's own time zone, older pages on
@@ -240,9 +244,10 @@ and turning notifications on or off change only what you are shown, not the
 fleet, and need no write switch. Claiming or finishing a task and switching,
 adding or removing a project are write routes of the API (`api/task/claim`,
 `api/task/done`, `api/project/switch`, `add`, `remove`) that the page itself
-does not offer: Tasks is read-only there. A task's `ref` is its id, or its
-board number (`12` or `#12`), read on the board of the session `as` names, else
-of `project`, else of the current project. `remove` takes a project's name,
+does not offer: Tasks is read-only there. A task's `ref` is its id, on any
+board a project's agents read, or its board number (`12` or `#12`), read on the
+board of the session `as` names, else on the one `project`'s Board tab shows,
+else the current project's. `remove` takes a project's name,
 codename or id, or its absolute path; a relative path is refused, since it would
 be read from wherever the server was started.
 

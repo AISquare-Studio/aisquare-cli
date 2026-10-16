@@ -479,3 +479,40 @@ def test_a_form_left_open_saves_only_what_was_changed_on_it() -> None:
     assert isinstance(after, AppConfig)
     assert overrides(after) == {"fleet": {"max_agents_per_project": 6}}, "the reset stands"
     assert seen["form"] == "f12", "after Save the form shows what the file holds"
+
+
+def test_a_role_added_by_hand_while_the_form_is_open_costs_nothing_on_save() -> None:
+    """Review of #259, round 21: ``[fleet.roles.designer]`` written by hand, then Reload,
+    put ``designer`` in the form's roles with no row on it, and the next Save looked up
+    ``#perm-designer`` unguarded: ``NoMatches`` out of the button handler, and the fleet
+    UI exited. The row is shown after a reopen; until then Save leaves the role as the
+    file has it."""
+    from aisquare.core.config import FleetRoleSettings
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> list[tuple[str, str]]:
+        config = load_config()  # a hand edit, while the form is open
+        config.fleet.roles["designer"] = FleetRoleSettings(permission_mode="plan")
+        save_config(config)
+        host.query_one("#reload-settings", Button).press()
+        await settle(pilot)
+        host.query_one("#perm-coder", Select).value = "acceptEdits"
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+        host.query_one("#max-agents", Input).value = "4"
+        host.query_one("#save-settings", Button).press()  # and again, from the reloaded form
+        await settle(pilot)
+        assert not host.query("#perm-designer")  # no row yet: a reopen shows it
+        return host.notices
+
+    notices = drive(scenario)
+    assert [m for m, severity in notices if severity == "error"] == []
+    assert sum(m.startswith("✓ settings saved") for m, _ in notices) == 2, notices
+    roles = _config_toml()["fleet"]["roles"]
+    assert roles["coder"]["permission_mode"] == "acceptEdits"
+    assert roles["designer"]["permission_mode"] == "plan"  # the hand edit stands
+    assert load_config().fleet.max_agents_per_project == 4
+
+    async def reopened(pilot: Pilot[None], host: AppHost) -> object:
+        return host.query_one("#perm-designer", Select).value
+
+    assert drive(reopened) == "plan"

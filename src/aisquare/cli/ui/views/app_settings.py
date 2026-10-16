@@ -34,12 +34,13 @@ Reached from *⚙ Settings ▸ App settings*: the Settings hub opens
 from __future__ import annotations
 
 import re
-from typing import ClassVar
+from typing import ClassVar, NamedTuple
 
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Select, Static, Switch
 from textual.worker import Worker, WorkerState
@@ -142,6 +143,14 @@ def account_options(accounts: list[ClaudeAccount], current: str | None) -> list[
     if current and current not in {value for _, value in options}:
         options.append((f"{current} (as bound)", current))
     return options
+
+
+class RoleRow(NamedTuple):
+    """The three fields of one role's row: permission mode, worktree, account."""
+
+    permission: Select[str]
+    worktree: Switch
+    account: Select[str]
 
 
 class ConfirmReset(ModalScreen[bool]):
@@ -277,16 +286,32 @@ class AppSettingsView(VerticalScroll):
         set as a value the select would refuse.
         """
         for role in self._roles:
-            try:
-                select = self.query_one(f"#acct-{widget_suffix(role)}", Select)
-            except Exception:  # a role bound since this form was composed; shown after a reopen
+            row = self._role_row(role)
+            if row is None:
                 continue
+            select = row.account
             shown = select.value
             bound = self._account_bindings.get(role)
             options = account_options(self._accounts, bound)
             select.set_options(options)
             offered = {value for _label, value in options}
             select.value = shown if shown in offered else (bound or NO_ACCOUNT)
+
+    def _role_row(self, role: str) -> RoleRow | None:
+        """``role``'s row on the form — or ``None`` for a role the file gained since the
+        form was composed (a ``[fleet.roles.<role>]`` written by hand, then Reload or
+        Save), which a reopen shows. Every reader of a role row goes through here: Save
+        looked such a role's widgets up unguarded, and the ``NoMatches`` it raised out of
+        the button handler took the fleet UI down (review of #259, round 21)."""
+        suffix = widget_suffix(role)
+        try:
+            return RoleRow(
+                self.query_one(f"#perm-{suffix}", Select),
+                self.query_one(f"#worktree-{suffix}", Switch),
+                self.query_one(f"#acct-{suffix}", Select),
+            )
+        except NoMatches:
+            return None
 
     # --- layout ----------------------------------------------------------------------
 
@@ -389,12 +414,12 @@ class AppSettingsView(VerticalScroll):
         record of what they were read with (``_account_bindings``)."""
         values: dict[str, object] = {}
         for role in self._roles:
-            suffix = widget_suffix(role)
-            try:
-                values[f"perm-{suffix}"] = self.query_one(f"#perm-{suffix}", Select).value
-                values[f"worktree-{suffix}"] = self.query_one(f"#worktree-{suffix}", Switch).value
-            except Exception:  # a role bound since this form was composed; shown after a reopen
+            row = self._role_row(role)
+            if row is None:
                 continue
+            suffix = widget_suffix(role)
+            values[f"perm-{suffix}"] = row.permission.value
+            values[f"worktree-{suffix}"] = row.worktree.value
         for wid in _INPUTS:
             values[wid] = self.query_one(f"#{wid}", Input).value
         for wid in _SELECTS:
@@ -437,20 +462,16 @@ class AppSettingsView(VerticalScroll):
         for wid, key in _ACCOUNT_SWITCHES.items():
             self.query_one(f"#{wid}", Switch).value = getattr(self.accounts, key)
         for role in self._roles:
-            settings = self.fleet.roles.get(role, FleetRoleSettings())
-            suffix = widget_suffix(role)
-            try:
-                select = self.query_one(f"#perm-{suffix}", Select)
-                switch = self.query_one(f"#worktree-{suffix}", Switch)
-                account = self.query_one(f"#acct-{suffix}", Select)
-            except Exception:  # a role bound since this form was composed; shown after a reopen
+            row = self._role_row(role)
+            if row is None:
                 continue
-            select.set_options(permission_options(settings.permission_mode))
-            select.value = settings.permission_mode
-            switch.value = settings.worktree
+            settings = self.fleet.roles.get(role, FleetRoleSettings())
+            row.permission.set_options(permission_options(settings.permission_mode))
+            row.permission.value = settings.permission_mode
+            row.worktree.value = settings.worktree
             bound = self._account_bindings.get(role)
-            account.set_options(account_options(self._accounts, bound))
-            account.value = bound or NO_ACCOUNT
+            row.account.set_options(account_options(self._accounts, bound))
+            row.account.value = bound or NO_ACCOUNT
         self._shown = self._field_values()
         self._load_accounts()  # the slots as they are now, off the UI thread
 
@@ -470,13 +491,16 @@ class AppSettingsView(VerticalScroll):
             update["max_agents_per_project"] = max_agents
         roles = dict(current.roles)
         for role in self._roles:
+            row = self._role_row(role)
+            if row is None:
+                continue
             suffix = widget_suffix(role)
             role_update: dict[str, object] = {}
-            value = self.query_one(f"#perm-{suffix}", Select).value
+            value = row.permission.value
             if f"perm-{suffix}" in changed and isinstance(value, str):
                 role_update["permission_mode"] = value
             if f"worktree-{suffix}" in changed:
-                role_update["worktree"] = self.query_one(f"#worktree-{suffix}", Switch).value
+                role_update["worktree"] = row.worktree.value
             if role_update:
                 existing = current.roles.get(role, FleetRoleSettings())
                 roles[role] = existing.model_copy(update=role_update)
@@ -540,7 +564,10 @@ class AppSettingsView(VerticalScroll):
         without a word (final review of #203, accounts F3).
         """
         for role in self._roles:
-            value = self.query_one(f"#acct-{widget_suffix(role)}", Select).value
+            row = self._role_row(role)
+            if row is None:
+                continue
+            value = row.account.value
             chosen = value if isinstance(value, str) and value != NO_ACCOUNT else None
             if chosen == self._account_bindings.get(role):
                 continue  # untouched on the form: the file's binding stands

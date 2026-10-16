@@ -541,6 +541,38 @@ def test_doctors_stop_for_a_captured_rows_agent_names_that_project(
     assert fleet_service.resolve_project(None).id == main.id, "the premise: not the active one"
 
 
+def test_one_helper_names_a_project_in_a_fleet_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 20: the project a fleet command names (its codename, else its id,
+    never its nickname) and the ``fleet stop --project`` line it goes in were built twice, in
+    ``ProjectBusyError`` and in doctor's capture-off line, and the next change to the rule had
+    to be made in both. Both take it from ``project_service.fleet_command``."""
+    from aisquare.services import project as project_service
+
+    named = ProjectInfo(id="prj_named", root=tmp_path / "web", codename="calm-otter", nickname="w")
+    plain = ProjectInfo(id="prj_plain", root=tmp_path / "web")
+    assert project_service.fleet_command("stop", named) == (
+        "aisquare fleet stop --project calm-otter"
+    )
+    assert project_service.fleet_command("reap", plain) == "aisquare fleet reap --project prj_plain"
+
+    asked: list[tuple[str, str]] = []
+
+    def fleet_command(verb: str, project: ProjectInfo) -> str:
+        asked.append((verb, project.id))
+        return f"<{verb} {project.id}>"
+
+    monkeypatch.setattr(project_service, "fleet_command", fleet_command)
+    busy = str(project_service.ProjectBusyError(named, []))
+    said = diagnostics._left_from_before_capture([named], [], {named.id})
+
+    assert "(<stop prj_named> <label>)" in busy and "<reap prj_named>" in busy, busy
+    assert "<shutdown prj_named>" in busy, busy
+    assert "stop its agents first (<stop prj_named> <label>)" in said, said
+    assert ("stop", named.id) in asked and len(asked) == 4
+
+
 # --- the setting, read --------------------------------------------------------------------
 
 

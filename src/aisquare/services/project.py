@@ -186,6 +186,20 @@ def resolve(ref: str) -> ProjectInfo:
         return _one_match(store, ref)
 
 
+def fleet_command(verb: str, project: ProjectInfo) -> str:
+    """``aisquare fleet <verb> --project <ref>`` for ``project``, quoted for this shell (review
+    of #257). Always with the project: alone, a fleet command acts on the active project, not
+    on the one a message is about (review of #259, round 19).
+
+    Named by its codename, else its id, never its nickname: free text that ``find_projects``
+    matches last, so ``--project web`` for a project nicknamed "web" shut down ``/work/web``'s
+    fleet when that was registered too (round 13). Nor its directory's name, which two
+    captured rows share. One place for the rule: :class:`ProjectBusyError` and doctor's
+    capture-off line each built it (round 20)."""
+    ref = project.codename or project.id
+    return install_route.command_line(["aisquare", "fleet", verb, "--project", ref])
+
+
 class ProjectBusyError(Exception):
     """The project has live fleet agents, so forgetting it would strand them."""
 
@@ -195,16 +209,9 @@ class ProjectBusyError(Exception):
         # row on a server it cannot reach, and an operator following that advice
         # after a hand-run `tmux kill-server` reaped nothing, twice. The scoped
         # `fleet shutdown` is the command that can, on their word.
-        # Named by its codename, else its id, never its nickname: free text that
-        # `find_projects` matches last, so `--project web` for a project nicknamed "web"
-        # shut down `/work/web`'s fleet when that was registered too (review of #259,
-        # round 13). Quoted for this shell all the same (review of #257).
-        # The stop and the reap name it too: alone, each acts on the active project, not
-        # on the one `forget` was given (review of #259, round 19).
-        scope = project.codename or project.id
-        shutdown = install_route.command_line(["aisquare", "fleet", "shutdown", "--project", scope])
-        stop = install_route.command_line(["aisquare", "fleet", "stop", "--project", scope])
-        reap = install_route.command_line(["aisquare", "fleet", "reap", "--project", scope])
+        shutdown = fleet_command("shutdown", project)
+        stop = fleet_command("stop", project)
+        reap = fleet_command("reap", project)
         super().__init__(
             f"{display_name(project)} has {len(agents)} live fleet agent(s): {labels} — "
             f"stop them first ({stop} <label>), or run {reap} if they are already gone; if "

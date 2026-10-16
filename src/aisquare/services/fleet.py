@@ -2362,7 +2362,12 @@ def _board_and_hub(
     there, a restart of such an agent with a task stopped it and then refused its
     replacement the task, and without one moved it off its manager's board (round 27, 2/7).
     Else it is read as a window with no hub reads it, from the checkout. A board whose root
-    the store no longer has reads the board this process gives (:func:`_board_for`).
+    the store no longer has reads the board this process gives (:func:`_board_for`). One
+    forgotten since is still held, its tasks and events kept, and still read by the agents
+    whose rows recorded it, as Remote reads it (``remote_server._remote_recorded_board``):
+    taken for one the store does not hold, a hub forgotten to tidy the project list was
+    replaced by the caller's board and hub, a restart with a task on the hub refused it, and
+    one without moved the agent off its manager's board (review of #259, round 31, 3/7).
 
     Asked before the agent is stopped, and the task checked against it then
     (:func:`restart`, :func:`switch`): the replacement's spawn reads the same answer.
@@ -2381,7 +2386,7 @@ def _board_and_hub(
         )
         if not (registered or assigned):
             return checkout, ""
-    known = store.get_project(board)
+    known = store.get_project(board, include_forgotten=True)
     if known is not None:
         return board, str(known.root)
     return _board_for(project), orchestrator.window_team_hub()

@@ -5736,6 +5736,56 @@ def test_a_replacement_that_could_not_take_the_task_is_refused_before_the_stop(
     assert _session_state(agent.session_id or "") == "working", "the session is not marked"
 
 
+@pytest.mark.parametrize("with_task", [True, False], ids=["with a task", "without one"])
+@pytest.mark.parametrize("verb", ["restart", "switch"])
+def test_a_080_agent_spawned_under_a_hub_forgotten_since_is_replaced_on_that_hub(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    verb: str,
+    with_task: bool,
+) -> None:
+    """Review of #259, round 31, 3/7: a row 0.8.0 spawned under hub H keeps no hub in its
+    launch, and the v32 backfill recorded H, its session's board. With H forgotten since
+    (``project forget``, to tidy the list), H counted as a board the store does not hold, so a
+    restart or a switch from a shell without the hub took the caller's board and hub: with a
+    task on H it was refused ("belongs to another project's board"), and without one the
+    replacement read P's checkout board, off the board its manager reads. H's tasks and
+    events are kept and the agent reads it, as Remote reads it since round 30, 2/8."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    (tmp_path / "hub").mkdir()
+    with store_session() as store:
+        hub = store.onboard_project(team_project(tmp_path / "hub"))
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub.root))
+    task = _add_task(hub, "the hub's task") if with_task else None
+    agent = _coder(project, task_id=None if task is None else task.id, account="2")
+    monkeypatch.delenv("AISQUARE_TEAM_HUB")
+    assert agent.launch_spec is not None and agent.board == hub.id
+    legacy = json.loads(agent.launch_spec.model_dump_json())
+    del legacy["hub"]  # as 0.8.0 wrote it; the backfill recorded the board
+    raw = sqlite3.connect(str(paths.db_path()))
+    try:
+        raw.execute(
+            "UPDATE fleet_agent SET launch_spec = ? WHERE id = ?", (json.dumps(legacy), agent.id)
+        )
+        raw.commit()
+    finally:
+        raw.close()
+    with store_session() as store:
+        store.forget_project(hub.id)
+        assert store.get_project(hub.id) is None, "forgotten"
+
+    if verb == "restart":
+        again = fleet_service.restart(project, agent.label).started
+    else:
+        again = fleet_service.switch(project, agent.label).started
+
+    assert (again.board, again.task_id) == (hub.id, None if task is None else task.id)
+    assert _last_window_hub(tmux) == str(hub.root), "the hub that gives that board"
+
+
 def test_a_fleet_row_from_before_v32_reads_its_sessions_board(hubbed: _Hubbed) -> None:
     """v32's backfill: a row recorded before the board was reads the board of the session
     bound to it, where its hooks registered, else its own project's."""

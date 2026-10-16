@@ -183,11 +183,24 @@ def _environment() -> Environment:
     )
 
 
+def _run_id() -> str:
+    """GitHub's run id (+ attempt) on GitHub; a UTC timestamp everywhere else.
+
+    act sets GITHUB_RUN_ID to "1" for every run, so trusting it there would give every
+    local run the same id and make published runs overwrite each other.
+    """
+    stamp = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S")
+    if os.environ.get("E2E_RUNNER") == "github-hosted" and os.environ.get("GITHUB_RUN_ID"):
+        return f"{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}"
+    runner = os.environ.get("E2E_RUNNER", "local")
+    return f"{stamp}-{runner}-{track()}"
+
+
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     if _RECORDER is None:
         return
     run = Run(
-        run_id=os.environ.get("GITHUB_RUN_ID") or datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S"),
+        run_id=_run_id(),
         started_at=_STARTED,
         finished_at=datetime.now(tz=UTC).isoformat(timespec="seconds"),
         verdict=verdict_for(_RECORDER.journeys),

@@ -629,7 +629,12 @@ def _reading_manager(store: ContextStore, board_id: str, cwd: Path | None) -> st
     """The project of the live ``manager`` row whose agent reads board ``board_id``, as its
     spawn recorded (``FleetAgent.board``). Of several, as under a hub, the one whose project's
     root holds the writer's directory, ``cwd`` or this process's (the phone writes a project's
-    note in its root); of none that holds it, none.
+    note in its root), the deepest root of those that do; of none that holds it, none.
+
+    The deepest, not the oldest: a project rooted in a sub-folder of another's reads the same
+    board, the checkout's, and its directory is inside both roots, so a note to its manager
+    from the phone woke the older project's, and its own waited on (review of #259, round 26,
+    5/11).
     """
     managers = [
         row
@@ -639,11 +644,14 @@ def _reading_manager(store: ContextStore, board_id: str, cwd: Path | None) -> st
     if len(managers) == 1:
         return managers[0].project_id
     here = (cwd or Path.cwd()).resolve()
-    for manager in managers:
-        project = store.get_project(manager.project_id)
-        if project is not None and here.is_relative_to(project.root):
-            return project.id
-    return None
+    holding = [
+        project
+        for manager in managers
+        for project in [store.get_project(manager.project_id)]
+        if project is not None and here.is_relative_to(project.root)
+    ]
+    deepest = max(holding, key=lambda project: len(project.root.parts), default=None)
+    return deepest.id if deepest is not None else None
 
 
 def _nudge_manager(project_id: str, *, reason: str, board: str) -> None:

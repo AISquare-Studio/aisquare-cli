@@ -5535,6 +5535,36 @@ def test_a_fleet_row_an_older_build_writes_into_a_v32_store_reads_its_sessions_b
         assert by_session is not None and by_session.board == hubbed.hub.id
 
 
+def test_of_two_managers_on_one_board_a_note_wakes_the_one_whose_root_holds_it_deepest(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 26, 5/11: with no hub, a project rooted at ``repo/api`` reads
+    ``repo``'s board, as ``repo``'s own project does. A writer with no row wakes the manager
+    that reads the board, and of several, the one whose root holds its directory: the oldest
+    of those, so the phone's note to ``api``'s manager, written in ``repo/api``, inside both
+    roots, woke ``repo``'s. The deepest root is the writer's project."""
+    sub = project.root / "api"
+    sub.mkdir()
+    with store_session() as store:
+        below = store.onboard_project(ProjectInfo(id=project_id_for(sub), root=sub))
+    for each in (project, below):  # the outer one first: the older manager
+        manager, sid = _spawned(each, "manager", None, tmux, monkeypatch)
+        team_service.hook_session_start(sid, each.root, "startup")
+        assert _row(manager.id).board == project.id, "the checkout's board, both"
+    woken: list[str] = []
+
+    def nudge(project_id: str, *, reason: str, board: str | None = None) -> bool:
+        woken.append(project_id)
+        return True
+
+    monkeypatch.setattr(fleet_service, "nudge_manager", nudge)
+
+    team_service.add_note("fyi", to_role="manager", cwd=sub)  # the phone's, in api's root
+    team_service.add_note("fyi", to_role="manager", cwd=project.root)
+
+    assert woken == [below.id, project.id]
+
+
 def test_a_nudge_wakes_a_manager_only_for_a_write_on_the_board_it_reads(hubbed: _Hubbed) -> None:
     """Review of #259, round 26, 4/11: a write woke the manager of the writer's row's project
     whatever board that manager reads. Spawned from ``asq`` under the hub, the manager reads

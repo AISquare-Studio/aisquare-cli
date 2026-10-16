@@ -866,9 +866,15 @@ def test_the_word_list_is_512_distinct_common_words_of_3_to_7_letters() -> None:
 #: were in the list until review of #259, round 29, 8/8.
 _NEAR_HOMOPHONES = ("bear", "lava", "cedar", "atom", "ladder", "otter", "pudding")
 
+#: Words with a widely known vulgar slang sense, which the curation keeps out too: the
+#: phrase is read aloud off a terminal. ``beaver`` came in with the round-29 swap and was
+#: replaced in review of #259, round 30, 8/8.
+_SLANG = ("beaver",)
+
 
 def test_the_word_list_holds_no_word_its_curation_keeps_out() -> None:
     assert set(_NEAR_HOMOPHONES) & set(REMOTE_PASSPHRASE_WORDS) == set()
+    assert set(_SLANG) & set(REMOTE_PASSPHRASE_WORDS) == set()
 
 
 def test_a_passphrase_is_four_distinct_words_of_the_list() -> None:

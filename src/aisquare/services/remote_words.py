@@ -28,7 +28,7 @@ REMOTE_PASSPHRASE_WORDS: tuple[str, ...] = (
     "acorn", "almond", "alpine", "amber", "anchor", "anvil", "apple", "apricot", "apron", "arrow",
     "atlas", "attic", "aurora", "autumn", "avocado", "azure", "badge", "badger", "bagel",
     "balcony", "ballet", "bamboo", "banana", "banjo", "banner", "barley", "barn", "barrel",
-    "basil", "basket", "beacon", "beaver", "bench", "birch", "bison", "blanket", "boat", "bobcat",
+    "basil", "basket", "beacon", "bench", "birch", "bison", "blanket", "blossom", "boat", "bobcat",
     "bottle", "brave", "breeze", "bridge", "bright", "bronze", "brook", "bucket", "bugle", "butter",
     "button", "cabbage", "cabin", "cable", "cactus", "calm", "camel", "camera", "canal", "candle",
     "candy", "canoe", "canyon", "carbon", "cargo", "carpet", "cashew", "castle", "cave", "cement",

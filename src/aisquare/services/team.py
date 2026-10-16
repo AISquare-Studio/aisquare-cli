@@ -594,11 +594,17 @@ def task_key(title: str) -> str:
 
 
 def _nudge_target(
-    store: ContextStore, writer: str | None, board_id: str, cwd: Path | None = None
+    store: ContextStore,
+    writer: str | None,
+    board_id: str,
+    cwd: Path | None = None,
+    *,
+    task: TeamTask | None = None,
 ) -> str:
     """The project whose manager a nudge for session ``writer``'s write on board ``board_id``
-    wakes: that of the writer's own live fleet row; with none, that of the manager that reads
-    the board (:func:`_reading_manager`); else ``board_id``'s, as every nudge was.
+    wakes: that of the writer's own live fleet row; with none, for a write on ``task``, that
+    of the task's own row (:func:`_task_row`); else that of the manager that reads the board
+    (:func:`_reading_manager`); else ``board_id``'s, as every nudge was.
 
     Which manager is a fleet question, the news a board one (docs/fleet.md, "Under a hub: one
     board, many fleet projects"): the nudge types a fixed line into the manager row's pane,
@@ -615,14 +621,33 @@ def _nudge_target(
     read that fails costs the nudge its target, never the write. The manager it names is
     woken only when it reads ``board_id`` (``fleet.nudge_manager``'s ``board``, which
     :func:`_nudge_manager` passes).
+
+    A task write knows its project better than the writer's directory does. Asked by the
+    directory, a ``task done`` from ``~`` or through the MCP server, outside every root, woke
+    nobody, and the phone's done with no project, in the pinned one's root, woke that
+    project's manager for another's task (review of #259, round 27, 3/7). ``task`` is the
+    task as it was before the write, so its rows still name it and its claim is still held.
     """
     try:
         row = store.fleet_agent_for_session(writer) if writer is not None else None
+        if row is None and task is not None:
+            row = _task_row(store, task)
         if row is not None:
             return row.project_id
         return _reading_manager(store, board_id, cwd) or board_id
     except Exception:
         return board_id
+
+
+def _task_row(store: ContextStore, task: TeamTask) -> FleetAgent | None:
+    """The live fleet row a task is worked in: the newest spawned for it, else the row of
+    the session that claimed it."""
+    spawned = [row for row in store.live_fleet_agents() if row.task_id == task.id]
+    if spawned:
+        return spawned[-1]
+    if task.claimed_by is None:
+        return None
+    return store.fleet_agent_for_session(task.claimed_by)
 
 
 def _reading_manager(store: ContextStore, board_id: str, cwd: Path | None) -> str | None:
@@ -1392,15 +1417,22 @@ def _finish_task(
     cwd: Path | None = None,
 ) -> tuple[TeamTask, _Board, str]:
     """Set the task's status with its event; the board, and the project whose manager the
-    write wakes (:func:`_nudge_target`), for a writer with no row the one whose root holds
-    ``cwd``. ``wakes=False``, for a status that wakes nobody (``drop``): the board's, with no
-    lookup, as :func:`add_note` does for its quiet kinds (review of #259, round 25, 9/10)."""
+    write wakes (:func:`_nudge_target`): for a writer with no row the task's own row's, else
+    the one whose root holds ``cwd``. Asked before the write, as a closing status retires the
+    rows spawned for the task. ``wakes=False``, for a status that wakes nobody (``drop``):
+    the board's, with no lookup, as :func:`add_note` does for its quiet kinds (review of
+    #259, round 25, 9/10)."""
     _DELIVERY.set(None)
     with store_session() as store:
         session = _resolve_session(store, session_ref)
         task = find_task(store, ref, lambda: _caller_board_id(store, session, None))
         if task is None:
             raise KeyError(ref)
+        manager = (
+            _nudge_target(store, session.id if session else None, task.project_id, cwd, task=task)
+            if wakes
+            else task.project_id
+        )
         updated = store.set_task_status(task.id, status)
         if status in CLOSED_STATUSES:
             # Rule 3 of the fleet-row section: the rows spawned for this task
@@ -1416,11 +1448,6 @@ def _finish_task(
             task_id=updated.id,
         )
         board = _board_of(store, updated.project_id)
-        manager = (
-            _nudge_target(store, session.id if session else None, board.id, cwd)
-            if wakes
-            else board.id
-        )
     _record_delivery(event, board)
     return updated, board, manager
 
@@ -1464,6 +1491,7 @@ def reopen_task(ref: str, *, reason: str, session_ref: str | None = None) -> Tea
         task = find_task(store, ref, lambda: _caller_board_id(store, session, None))
         if task is None:
             raise KeyError(ref)
+        manager = _nudge_target(store, session.id if session else None, task.project_id, task=task)
         reopened = store.reopen_task(task.id)
         event = _emit(
             store,
@@ -1474,7 +1502,6 @@ def reopen_task(ref: str, *, reason: str, session_ref: str | None = None) -> Tea
             task_id=reopened.id,
         )
         board = _board_of(store, reopened.project_id)
-        manager = _nudge_target(store, session.id if session else None, board.id)
     _record_delivery(event, board)
     distill_service.spawn_drain(root=board.root)
     _nudge_manager(manager, reason="task_reopened", board=board.id)

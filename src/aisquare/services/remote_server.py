@@ -3484,11 +3484,13 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
         with _remote_board_refusals(reach, ("ref", ref, "task"), ("as", author, "session")):
             session = _remote_author(author, reach)
             found = _remote_task(ref, reach, session=session, project=project)
-            # In the project's root, as the note is written (`write_note`): of several managers
-            # on a board, the one a write with no row wakes is the one whose root holds it, and
-            # by Remote's own directory a done on B's task woke A's (review of #259, round 26,
-            # 6/11).
-            cwd = _resolve_project(project).root
+            # The manager woken is the task's own row's (`team._nudge_target`). For a task no
+            # row works, in the root of the project named, as the note is written
+            # (`write_note`): by Remote's own directory a done on B's task woke A's (review of
+            # #259, round 26, 6/11). With none named, no pinned project's root: B's task woke
+            # A's manager whenever A was pinned, and a done by id read `state.json` and asked
+            # git, which it needs for nothing else (round 27, 3/7).
+            cwd = _resolve_project(project).root if project is not None else None
             task = team_service.finish_task(found.id, note=note, session_ref=session, cwd=cwd)
         return {"task": task.model_dump(mode="json")}, f"done {task.id} as={session or '-'}"
 

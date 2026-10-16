@@ -600,10 +600,11 @@ all of them, and the fleet cleans up the worktrees it made.**
     not the bare `fleet-paused`, which under a hub is the hub project's own.
   - A board write by a writer with no agent row (a note to the manager from
     the phone, a question from your own shell, an MCP client's task update)
-    wakes the waiting manager that reads that board. With several managers on
-    one board, it wakes the one whose project holds the writer's directory,
-    the innermost when one project is rooted inside another. Before, it woke
-    nobody.
+    wakes the waiting manager that reads that board. A task update wakes the
+    manager of the agent working the task (the one spawned for it, else the
+    one that claimed it). Otherwise, with several managers on one board, it
+    wakes the one whose project holds the writer's directory, the innermost
+    when one project is rooted inside another. Before, it woke nobody.
   - Remote's needs feed finds an agent's exit, its failed turns and its
     usage-limit events on the board the agent was spawned under, even when
     Remote (or `asq`, whose R panel starts it) runs under another hub, or

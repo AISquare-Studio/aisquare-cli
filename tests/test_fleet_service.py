@@ -5856,6 +5856,71 @@ def test_under_a_hub_the_phones_task_done_wakes_the_manager_of_the_project_it_na
     assert hubbed.woken == [hubbed.fleet.id]
 
 
+def test_under_a_hub_a_task_write_with_no_row_wakes_the_manager_of_the_tasks_own_row(
+    hubbed: _Hubbed, tmp_path: Path
+) -> None:
+    """Review of #259, round 27, 3/7: for a writer with no row, the manager a task write
+    woke was picked by the writer's directory alone. Under a hub with two fleet projects,
+    ``task done`` from ``~`` or an MCP client, outside both roots, woke nobody, and from the
+    other project's folder woke the other's manager. A task write wakes the manager of the
+    task's own row: the one spawned for it, else the row of the session that claimed it.
+    The directory still picks for a task no row works."""
+    other, _ = _another_fleet_on_the_hub(hubbed)
+    spawned_for = _task(hubbed.fleet, "spawned for this one")
+    fleet_service.spawn(hubbed.fleet, "coder", task_id=spawned_for.id, worktree=False)
+    claimed = _task(hubbed.fleet, "claimed, then blocked and reopened")
+    team_service.claim_task(claimed.id, session_ref=hubbed.coder_sid)
+    loose = _task(hubbed.fleet, "nobody's")
+    home = tmp_path / "home"
+    home.mkdir()
+
+    hubbed.woken.clear()
+    team_service.finish_task(spawned_for.id, cwd=home)  # `task done 7` from `~`
+    assert hubbed.woken == [hubbed.fleet.id], "the row spawned for it, retired by the done"
+
+    hubbed.monkeypatch.chdir(other.root)  # and from the other project's folder
+    writes: list[Callable[[], TeamTask]] = [
+        lambda: team_service.review_task(hubbed.task.id),
+        lambda: team_service.block_task(claimed.id, reason="needs a key"),
+        lambda: team_service.reopen_task(claimed.id, reason="try again"),
+    ]
+    for write in writes:
+        hubbed.woken.clear()
+        write()
+        assert hubbed.woken == [hubbed.fleet.id], "the claimant's row"
+
+    hubbed.woken.clear()
+    team_service.finish_task(loose.id)
+    assert hubbed.woken == [other.id], "no row works it: the directory's, as for a note"
+
+
+def test_under_a_hub_the_phones_task_done_naming_no_project_wakes_the_tasks_manager(
+    hubbed: _Hubbed,
+) -> None:
+    """Review of #259, round 27, 3/7: with no ``project``, the phone's ``task done`` wrote in
+    the current project's root, the pinned one's else Remote's directory, so a done on B's
+    task woke A's manager while A was pinned, and a done by id read ``state.json`` and asked
+    git, which it needs for nothing else. It wakes the task's own row's manager and asks
+    no current project."""
+    from aisquare.services import remote_server
+    from aisquare.services.remote_server import live_writes
+
+    other, _ = _another_fleet_on_the_hub(hubbed)
+    hubbed.monkeypatch.chdir(other.root)  # the current project: the other one
+
+    def no_current(ref: str | None) -> ProjectInfo:
+        assert ref is not None, "a done by id asks for no current project"
+        raise AssertionError(ref)
+
+    hubbed.monkeypatch.setattr(remote_server, "_resolve_project", no_current)
+    hubbed.woken.clear()
+
+    live_writes().handlers["task/done"]({"ref": hubbed.task.id})
+
+    assert _task_now(hubbed.task.id).status == "done"
+    assert hubbed.woken == [hubbed.fleet.id]
+
+
 def test_under_a_hub_shutdown_all_keeps_the_pause_it_says_it_kept(hubbed: _Hubbed) -> None:
     """Review of #259, round 26, 1/11: under ``--all``, a project that was not confirmed down
     is named in ``paused_kept``, and another project's pass then cleared the hub's one signal

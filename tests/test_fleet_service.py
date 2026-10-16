@@ -10595,6 +10595,41 @@ def test_every_git_command_the_fleet_runs_takes_no_optional_lock(
     assert [argv for argv, locks in gits if locks != "0"] == []
 
 
+def test_a_spawn_asks_git_for_its_board_with_no_store_open(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 29, 5/8: since round 25 a spawn's board is ``_board_for``, which
+    with no hub runs ``git rev-parse`` (a 5 s timeout), and every spawn ran it inside the
+    store session that also held its one-manager and cap checks. It is asked before the
+    store opens."""
+    monkeypatch.delenv("AISQUARE_TEAM_HUB", raising=False)
+    depth = 0
+
+    @contextmanager
+    def counted() -> Iterator[ContextStore]:
+        nonlocal depth
+        depth += 1
+        try:
+            with store_session() as store:
+                yield store
+        finally:
+            depth -= 1
+
+    asked: list[int] = []
+    real = fleet_service._board_for
+
+    def board_for(project: ProjectInfo) -> str:
+        asked.append(depth)
+        return real(project)
+
+    monkeypatch.setattr(fleet_service, "store_session", counted)
+    monkeypatch.setattr(fleet_service, "_board_for", board_for)
+
+    fleet_service.spawn(project, "coder", worktree=False)
+
+    assert asked == [0], "asked once, with no store open"
+
+
 def test_a_reap_or_a_spawn_asks_git_for_the_branch_locks_directory_once(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

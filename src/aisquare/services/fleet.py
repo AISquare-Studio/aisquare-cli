@@ -2630,26 +2630,28 @@ def spawn(
     for ended in _end_dead_rows(live, views, config=config):
         live = [agent for agent in live if agent.id != ended.id]
         rows = [ended if agent.id == ended.id else agent for agent in rows]
-    with store_session() as store:
-        if role == "manager":
-            existing = next((agent for agent in live if agent.role == "manager"), None)
-            if existing is not None:
-                raise FleetError(
-                    f"{_name(project)} already has a manager ({existing.id}) — one per "
-                    f"project; `{project_service.fleet_command('stop', project, 'manager')}` "
-                    "first"
-                )
-        if len(live) >= config.max_agents_per_project:
+    if role == "manager":
+        existing = next((agent for agent in live if agent.role == "manager"), None)
+        if existing is not None:
             raise FleetError(
-                f"{_name(project)} already runs {len(live)} agents "
-                f"(max_agents_per_project = {config.max_agents_per_project}) — stop one, "
-                "or raise the limit in [fleet]"
+                f"{_name(project)} already has a manager ({existing.id}) — one per "
+                f"project; `{project_service.fleet_command('stop', project, 'manager')}` "
+                "first"
             )
-        board, hub = (
-            board_and_hub
-            if board_and_hub is not None
-            else (_board_for(project), orchestrator.window_team_hub())
+    if len(live) >= config.max_agents_per_project:
+        raise FleetError(
+            f"{_name(project)} already runs {len(live)} agents "
+            f"(max_agents_per_project = {config.max_agents_per_project}) — stop one, "
+            "or raise the limit in [fleet]"
         )
+    # Before the store opens: with no hub, `_board_for` runs git (review of #259, round 29,
+    # 5/8), and the refusals above need neither.
+    board, hub = (
+        board_and_hub
+        if board_and_hub is not None
+        else (_board_for(project), orchestrator.window_team_hub())
+    )
+    with store_session() as store:
         task = _task_for(store, board, task_id)
         resolved_task_id = task.id if task is not None else None
         picked = next_label(project, role, wanted=label, task_id=resolved_task_id, store=store)

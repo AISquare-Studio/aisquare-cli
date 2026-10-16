@@ -4886,6 +4886,13 @@ def _case_task_done(w: _Hubbed) -> str | None:
     return _delivered()
 
 
+def _case_spawn_task(w: _Hubbed) -> str | None:
+    task, _ = team_service.add_task("a task to spawn for", role="coder", session_ref=w.manager_sid)
+    row = fleet_service.spawn(w.fleet, "coder", task_id=f"#{task.number}", worktree=False).agent
+    assert row.task_id is not None
+    return _task_now(row.task_id).project_id
+
+
 def _case_cycle_project(w: _Hubbed) -> str | None:
     with store_session() as store:
         named = team_service._cycle_project(store, w.hub, w.fleet.root, w.manager_sid, named=None)
@@ -4916,10 +4923,34 @@ _HUB_RULE_CASES: list[tuple[str, str, Any]] = [
     ("board", "task next --claim", _case_task_next),
     ("board", "task review", _case_task_review),
     ("board", "task done", _case_task_done),
+    ("board", "the task fleet spawn --task gives", _case_spawn_task),
     ("fleet", "the cycle's --project", _case_cycle_project),
     ("fleet", "a limited chip's fleet switch", _case_limited_chip),
     ("fleet", "the manager a usage limit wakes", _case_limit_nudge),
 ]
+
+
+def test_under_a_hub_a_manager_spawns_its_coder_for_a_task_it_added(hubbed: _Hubbed) -> None:
+    """Review of #259, round 24, 2/6: since round 22 a hub manager's cycle spawns its coders
+    in its own row's project, while ``task add`` puts every task on the hub's board, and
+    ``fleet spawn --task`` looked the task up on the project it spawns into: "task … belongs
+    to another project's board" for every task the manager had added, and ``--task 12`` read
+    that project's #12. The task is looked up on the board the agent will read, the hub's;
+    ``restart`` checks the task there too. A task of the fleet project's own board is the
+    one now refused: the agent would never see it."""
+    task, _ = team_service.add_task("the hub's task", role="coder", session_ref=hubbed.manager_sid)
+
+    row = fleet_service.spawn(hubbed.fleet, "coder", task_id=f"#{task.number}", worktree=False)
+
+    assert row.agent.project_id == hubbed.fleet.id and row.agent.task_id == task.id
+    hubbed.tmux.die(row.agent.pane_id, 0)
+    assert fleet_service.restart(hubbed.fleet, row.agent.label).started.task_id == task.id
+    hubbed.monkeypatch.delenv("AISQUARE_TEAM_HUB")
+    stray, _ = team_service.add_task("the fleet project's own task", cwd=hubbed.fleet.root)
+    hubbed.monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hubbed.hub.root))
+    assert stray.project_id == hubbed.fleet.id
+    with pytest.raises(FleetError, match="belongs to another project's board"):
+        fleet_service.spawn(hubbed.fleet, "coder", task_id=stray.id, worktree=False)
 
 
 @pytest.mark.parametrize(

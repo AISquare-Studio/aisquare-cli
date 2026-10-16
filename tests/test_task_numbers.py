@@ -466,7 +466,7 @@ def test_a_number_never_moves_a_task_on_another_projects_board(
             mcp_server.task_update("12", action, note="why")
     with store_session() as store:
         with pytest.raises(fleet_service.FleetError, match=r"no task #12 on this board"):
-            fleet_service._task_for(store, alpha, "12")  # never "belongs to another project"
+            fleet_service._task_for(store, alpha.id, "12")  # never "belongs to another project"
         assert store.get_task(theirs.id) == theirs  # not claimed, not closed, not dropped
         assert store.recent_events(beta.id) == []
 
@@ -561,7 +561,7 @@ def test_fleet_spawn_for_a_task_takes_its_number_on_that_board(
     mine = _add(here, "a")
     _add(there, "x")
     with store_session() as store:
-        assert fleet_service._task_for(store, here, "1") == mine
-        assert fleet_service._task_for(store, here, "#1") == mine
+        assert fleet_service._task_for(store, here.id, "1") == mine
+        assert fleet_service._task_for(store, here.id, "#1") == mine
         with pytest.raises(fleet_service.FleetError, match=r"no task #2 on this board"):
-            fleet_service._task_for(store, here, "#2")
+            fleet_service._task_for(store, here.id, "#2")

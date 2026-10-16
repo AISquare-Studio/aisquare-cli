@@ -70,7 +70,7 @@ from aisquare.core.tmux import (
     WindowInfo,
 )
 from aisquare.core.version import __version__
-from aisquare.core.workspace import active_project
+from aisquare.core.workspace import active_project, project_id_for
 from aisquare.models import (
     CLOSED_STATUSES,
     FleetAgent,
@@ -2295,19 +2295,34 @@ def _require_role(role: str) -> None:
         )
 
 
-def _task_for(store: ContextStore, project: ProjectInfo, task_id: str | None) -> TeamTask | None:
-    """The board task an agent is spawned for — on THIS project's board, or refused."""
+def _board_for(project: ProjectInfo) -> str:
+    """The board an agent this process spawns into ``project`` reads: the hub's when this
+    process honours one, as its window is given (:func:`orchestrator.window_team_hub`),
+    else ``project``'s own.
+
+    A task is the board's (docs/fleet.md, "Under a hub: one board, many fleet projects").
+    Looked up on the row's project, the task ``fleet spawn --task`` names was refused under a
+    hub for every task the manager had added, as ``task add`` puts each on the hub's board,
+    and ``--task 12`` read another board's #12 (review of #259, round 24, 2/6).
+    """
+    hub = orchestrator.team_hub()
+    return project_id_for(hub) if hub is not None else project.id
+
+
+def _task_for(store: ContextStore, board_id: str, task_id: str | None) -> TeamTask | None:
+    """The board task an agent is spawned for — on the board it will read
+    (:func:`_board_for`), or refused."""
     if task_id is None:
         return None
     try:
-        task: TeamTask | None = _team().find_task(store, task_id, project.id)  # `12`, `#12`
+        task: TeamTask | None = _team().find_task(store, task_id, board_id)  # `12`, `#12`
     except AmbiguousIdError as exc:
         raise FleetError(f"task {task_id!r} is ambiguous — use more of the id") from exc
     except _team().NoSuchTaskNumber as exc:
         raise FleetError(str(exc)) from exc
     if task is None:
         raise FleetError(f"no task matches {task_id!r}")
-    if task.project_id != project.id:
+    if task.project_id != board_id:
         raise FleetError(f"task {task_id!r} belongs to another project's board")
     if task.status in CLOSED_STATUSES:
         # Harmless when the id only named a label; now it reaches the agent as
@@ -2547,7 +2562,7 @@ def spawn(
                 f"(max_agents_per_project = {config.max_agents_per_project}) — stop one, "
                 "or raise the limit in [fleet]"
             )
-        task = _task_for(store, project, task_id)
+        task = _task_for(store, _board_for(project), task_id)
         resolved_task_id = task.id if task is not None else None
         picked = next_label(project, role, wanted=label, task_id=resolved_task_id, store=store)
     if label is not None and picked != label:
@@ -5958,7 +5973,7 @@ def switch(
         # agent stopped and nothing started: a row spawned before rule 3 still names
         # its closed task until its next briefing, and switching one always lost it
         # (review of #203, final round, FLEET-3).
-        task = _task_for(store, project, agent.task_id)
+        task = _task_for(store, _board_for(project), agent.task_id)
         # The session's own newest entries (oldest first), not the project's last
         # 60 filtered down: on a busy board those all belonged to other agents
         # and the prompt lost its "last board entries" (review of #205, third round).
@@ -6374,7 +6389,7 @@ def restart(
             raise _in_hand_over(project, "restart", label)
         try:
             # `spawn`'s refusal for the task (done, dropped, gone from the board).
-            task = _task_for(store, project, agent.task_id)
+            task = _task_for(store, _board_for(project), agent.task_id)
         except FleetError as exc:
             raise FleetError(f"cannot restart {label!r}: {exc}") from exc
         # The session's own newest entries, as `switch` reads them: the project's

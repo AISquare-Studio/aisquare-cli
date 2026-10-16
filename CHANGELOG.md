@@ -584,8 +584,10 @@ all of them, and the fleet cleans up the worktrees it made.**
     board, where that project's manager and sessions add tasks.
   - `fleet pause` and `fleet resume` set the `fleet-paused` signal on the
     board the project's agents read, where its manager looks for it, and
-    `fleet shutdown` clears it there. Under a hub that is the hub's board,
-    so a pause holds every manager on the hub.
+    `fleet shutdown` clears it there. On a board other projects read too
+    (the hub's, under a hub) the signal is the project's own,
+    `fleet-paused.<project id>`, and its manager's cycle names it, so pausing,
+    resuming or shutting down one project leaves the others' managers alone.
   - A board write by a writer with no agent row (a note to the manager from
     the phone, a question from your own shell, an MCP client's task update)
     wakes the waiting manager that reads that board. Under a hub with several

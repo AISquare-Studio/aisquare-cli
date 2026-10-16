@@ -887,16 +887,40 @@ whose human pinned another project in some shell spawned, stopped and reaped the
 of #259, round 21). A callable, because the command's quoting is the services' to make."""
 
 
-def role_cycle(role: str, session_short_id: str, *, fleet: FleetCommand) -> list[str]:
+PAUSE_SIGNAL = "fleet-paused"
+"""The board signal ``fleet pause`` sets: while it is on, the manager spawns nothing."""
+
+
+def pause_signal(project_id: str, board: str) -> str:
+    """The name of fleet project ``project_id``'s pause on ``board``, a board its agents read:
+    :data:`PAUSE_SIGNAL` on the project's own board, else ``fleet-paused.<project id>``.
+
+    A signal is its board's, and several projects can read one board: under
+    ``AISQUARE_TEAM_HUB`` every fleet project's agents read the hub's, and a project rooted in
+    a sub-folder of its repository reads the checkout's. One name there was one pause for
+    every manager on it: ``fleet pause -P a`` paused ``b`` too, and ``fleet shutdown -P a``
+    cleared the pause ``b``'s manager was still obeying (review of #259, round 26, 1/11).
+    Each manager is told its own project's name (:func:`role_cycle`).
+    """
+    if board == project_id:
+        return PAUSE_SIGNAL
+    return f"{PAUSE_SIGNAL}.{project_id.lower().replace('_', '-')}"
+
+
+def role_cycle(
+    role: str, session_short_id: str, *, fleet: FleetCommand, paused: str = PAUSE_SIGNAL
+) -> list[str]:
     """The standing work cycle injected for ``role`` (empty for unknown roles).
 
     Keyed on :func:`base_role`, so a numbered seat (``coder1``) is briefed as
     the role it is a seat of — the number is an identity, not a new role. Every
     first-class cycle ends with :func:`_lane_rule`; an unknown role has no
     cycle and therefore no lane either. The role is normalised once, here.
+    ``paused`` is the name of the session's project's pause on its board
+    (:func:`pause_signal`), which a manager obeys.
     """
     role = base_role(role)
-    core = _role_cycle_core(role, session_short_id, fleet=fleet)
+    core = _role_cycle_core(role, session_short_id, fleet=fleet, paused=paused)
     if not core:
         return []
     if role in _CLEANS_UP:
@@ -905,7 +929,9 @@ def role_cycle(role: str, session_short_id: str, *, fleet: FleetCommand) -> list
     return [*core, *_lane_rule(role, session_short_id, merge_said=merge_said, fleet=fleet)]
 
 
-def _role_cycle_core(role: str, session_short_id: str, *, fleet: FleetCommand) -> list[str]:
+def _role_cycle_core(
+    role: str, session_short_id: str, *, fleet: FleetCommand, paused: str = PAUSE_SIGNAL
+) -> list[str]:
     """The role-specific half of the cycle for an already-normalised ``role``;
     see :func:`role_cycle`."""
     sid = session_short_id
@@ -984,7 +1010,7 @@ def _role_cycle_core(role: str, session_short_id: str, *, fleet: FleetCommand) -
             f"`{spawn} reviewer` once a PR exists, `{spawn} validator`",
             "once every task is done. Board updates reach you every turn: reopen with reasons,",
             f'`{fleet("tell")} <label> "…"` to steer, re-spec or split what bounces. Spawn',
-            "nothing while the `fleet-paused` signal is set. An agent that hits its Claude usage",
+            f"nothing while the `{paused}` signal is set. An agent that hits its Claude usage",
             f"limit shows `limited` on the board and wakes you: `{fleet('switch')} <label>",
             f"--as {sid}` moves it to the account with the most headroom and resumes its session;",
             "if nothing has headroom, leave it — it continues by itself at the reset the event",

@@ -3159,13 +3159,16 @@ def _role_cycle(me: TeamSession, project: ProjectInfo | None) -> list[str]:
     name a ``<project>`` placeholder, and a line above the cycle says to fill it in. Never
     bare: alone, a fleet command acts on the active project, the machine-wide pin before
     the working directory (round 21 of the review of #259), and a bare one came back for
-    every hand-launched session under a hub (round 23).
+    every hand-launched session under a hub (round 23). A manager's pause is its project's on
+    the session's board (:func:`harness.pause_signal`), and a session whose project could not be
+    told is told the board's own name.
     """
     if project is not None:
         return harness.role_cycle(
             base_role(me.role),
             short_id(me.id),
             fleet=lambda verb: project_service.fleet_command(verb, project),
+            paused=harness.pause_signal(project.id, me.project_id),
         )
     cycle = harness.role_cycle(
         base_role(me.role),

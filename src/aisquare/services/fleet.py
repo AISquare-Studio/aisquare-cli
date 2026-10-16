@@ -97,7 +97,7 @@ LABEL = re.compile(r"^[a-z][a-z0-9-]{1,23}$")
 """An agent label: ≤ 24 chars, no ``.``, ``:`` or spaces (tmux target separators)."""
 
 SESSION_PREFIX = "asq-"
-PAUSE_SIGNAL = "fleet-paused"
+PAUSE_SIGNAL = harness.PAUSE_SIGNAL
 TASK_SHORT = 8
 """Characters of a task id (after ``tsk_``) that name it in a branch — the same
 width ``services.team.short_id`` uses for sessions."""
@@ -5635,8 +5635,9 @@ def _reconcile_pauses(
         if project.id not in visible:
             continue
         try:
-            # The boards its manager read, of the rows this shutdown found live (`_pause_boards`).
-            paused = _paused_boards(store, _pause_boards(store, project, live))
+            # Its own pause on each board its manager read, of the rows this shutdown found
+            # live (`_pause_signals`): under a hub, never another project's on the same board.
+            paused = _paused_signals(store, _pause_signals(store, project, live))
         except team.TeamDisabledError:
             return failures  # no board, no signals: nothing is paused anywhere
         except Exception as exc:
@@ -7033,10 +7034,12 @@ def rename(project: ProjectInfo, codename: str, *, notes: list[str] | None = Non
 
 
 def pause(project: ProjectInfo, *, session_ref: str | None = None) -> None:
-    """Set the ``fleet-paused`` board signal — the manager spawns nothing while it is on.
+    """Set the project's ``fleet-paused`` board signal — its manager spawns nothing while it
+    is on.
 
-    On the board the project's manager reads (:func:`_pause_boards`): under a hub, the
-    hub's, which pauses every manager whose agents read it."""
+    On the board the project's manager reads, by the project's own name there
+    (:func:`_pause_signals`): under a hub the hub's board, where every other fleet project's
+    manager reads its own project's pause, not this one."""
     _set_pause(project, "on", session_ref)
 
 
@@ -7047,12 +7050,13 @@ def resume(project: ProjectInfo, *, session_ref: str | None = None) -> None:
 def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> None:
     team = _team()
     try:
-        boards = [project.id]  # the team off: `set_signal` refuses before any store opens
+        # The team off: `set_signal` refuses before any store opens.
+        signals = [(project.id, PAUSE_SIGNAL)]
         if orchestrator.team_enabled():
             with store_session() as store:
-                boards = _pause_boards(store, project)
-        for board in boards:
-            team.set_signal(PAUSE_SIGNAL, value, session_ref=session_ref, project_id=board)
+                signals = _pause_signals(store, project)
+        for board, name in signals:
+            team.set_signal(name, value, session_ref=session_ref, project_id=board)
     except team.TeamDisabledError as exc:
         raise FleetError(f"cannot set the pause signal: {exc}") from exc
     except KeyError as exc:
@@ -7079,7 +7083,7 @@ def _pause_boards(
     and the manager asks its own session's board, as its cycle line tells it to. Set, read
     and cleared on the project's own board, under a hub a paused fleet's manager kept
     spawning, and a pause set where it does read was never cleared by ``fleet shutdown``
-    (review of #259, round 25, 2/10).
+    (review of #259, round 25, 2/10). By what name: :func:`_pause_signals`.
     """
     rows = store.fleet_agents(project.id, live_only=False)
     if live is None:
@@ -7090,32 +7094,50 @@ def _pause_boards(
     return [_board_of_row(newest) if newest is not None else _board_for(project)]
 
 
+def _pause_signals(
+    store: ContextStore, project: ProjectInfo, live: Sequence[FleetAgent] | None = None
+) -> list[tuple[str, str]]:
+    """``project``'s pause: each board its manager reads (:func:`_pause_boards`), with the name
+    of the project's ``fleet-paused`` signal there (:func:`harness.pause_signal`).
+
+    The project's own, on a board other projects read too: under a hub, ``fleet pause -P a``
+    paused every manager on the hub, and ``fleet shutdown -P a`` cleared the pause ``b``'s
+    manager still obeyed (review of #259, round 26, 1/11).
+    """
+    return [
+        (board, harness.pause_signal(project.id, board))
+        for board in _pause_boards(store, project, live)
+    ]
+
+
 def _pause_is_on(store: ContextStore, project: ProjectInfo) -> bool:
     """Whether ``project``'s ``fleet-paused`` signal reads ON, through ``store``: on any of
-    the boards its manager reads (:func:`_pause_boards`)."""
-    return bool(_paused_boards(store, _pause_boards(store, project)))
+    the boards its manager reads (:func:`_pause_signals`)."""
+    return bool(_paused_signals(store, _pause_signals(store, project)))
 
 
-def _paused_boards(store: ContextStore, boards: Sequence[str]) -> list[str]:
-    """Those of ``boards`` whose ``fleet-paused`` signal reads ON, through ``store``.
+def _paused_signals(
+    store: ContextStore, signals: Sequence[tuple[str, str]]
+) -> list[tuple[str, str]]:
+    """Those of ``signals`` (board, name) that read ON, through ``store``.
 
     The read half of the pause, id-addressed and on a caller's connection, so
     ``shutdown``'s pass over every project pays one open (review of #203,
     round 4). Raises ``TeamDisabledError`` when there is no board to ask.
     """
-    paused: list[str] = []
-    for board in boards:
-        state = _team().read_signal_in(store, board, PAUSE_SIGNAL)
+    paused: list[tuple[str, str]] = []
+    for board, name in signals:
+        state = _team().read_signal_in(store, board, name)
         if state is not None and state.value == "on":
-            paused.append(board)
+            paused.append((board, name))
     return paused
 
 
-def _clear_pause_signal(store: ContextStore, boards: Sequence[str]) -> None:
-    """Set the ``fleet-paused`` signal of each of ``boards`` OFF through ``store`` — the
-    write half of the pause for the same pass; ``resume`` is the command's own door."""
-    for board in boards:
-        _team().set_signal_in(store, board, PAUSE_SIGNAL, "off")
+def _clear_pause_signal(store: ContextStore, signals: Sequence[tuple[str, str]]) -> None:
+    """Set each of ``signals`` (board, name) OFF through ``store`` — the write half of the
+    pause for the same pass; ``resume`` is the command's own door."""
+    for board, name in signals:
+        _team().set_signal_in(store, board, name, "off")
 
 
 def nudge_manager(project_id: str, *, reason: str) -> bool:

@@ -82,7 +82,6 @@ from aisquare.services.explainability import PIPELINE_ID_ENV_VAR
 from aisquare.services.fleet import (
     ACTIVITY_WINDOW,
     NUDGE_TEXT,
-    PAUSE_SIGNAL,
     PROMPT_TIMEOUT,
     TRUST_PROMPT,
     FleetError,
@@ -5137,13 +5136,17 @@ def _case_exited_under_the_hub_of_a_row_without(w: _Hubbed) -> str | None:
     return _fed_to(w, "agent_exited")
 
 
-def _paused_on(w: _Hubbed) -> list[str]:
-    """The boards, of the hub's and the fleet's, whose ``fleet-paused`` signal reads ON."""
+def _paused_on(w: _Hubbed, project: ProjectInfo | None = None) -> list[str]:
+    """The boards, of the hub's and the fleet's, where the ``fleet-paused`` signal of
+    ``project`` (the fleet's by default) reads ON, by its name there
+    (``harness.pause_signal``)."""
+    paused = project or w.fleet
     with store_session() as store:
         return [
-            project.id
-            for project in (w.hub, w.fleet)
-            for state in [team_service.read_signal_in(store, project.id, PAUSE_SIGNAL)]
+            board.id
+            for board in (w.hub, w.fleet)
+            for name in [harness.pause_signal(paused.id, board.id)]
+            for state in [team_service.read_signal_in(store, board.id, name)]
             if state is not None and state.value == "on"
         ]
 
@@ -5162,9 +5165,17 @@ def _case_pause_without_the_hub(w: _Hubbed) -> str | None:
     return _case_pause(w)
 
 
+def _case_pause_is_its_projects(w: _Hubbed) -> str | None:
+    fleet_service.pause(w.fleet)
+    paused = [project.id for project in (w.hub, w.fleet) if fleet_service.is_paused(project)]
+    return paused[0] if len(paused) == 1 else repr(paused)
+
+
 def _case_shutdown_clears_the_pause(w: _Hubbed) -> str | None:
-    # Set by the manager itself, `team signal fleet-paused on`, where its cycle reads it.
-    team_service.set_signal(PAUSE_SIGNAL, "on", session_ref=w.manager_sid)
+    # Set by the manager itself, `team signal <its pause> on`, where its cycle reads it.
+    team_service.set_signal(
+        harness.pause_signal(w.fleet.id, w.hub.id), "on", session_ref=w.manager_sid
+    )
     (paused,) = _paused_on(w)
     report = fleet_service.shutdown(w.fleet)
     assert _paused_on(w) == [] and report.paused_cleared, report
@@ -5194,6 +5205,7 @@ _HUB_RULE_CASES: list[tuple[str, str, Any]] = [
     ("board", "fleet pause and resume", _case_pause),
     ("board", "fleet pause from a caller without the hub", _case_pause_without_the_hub),
     ("board", "the pause fleet shutdown clears", _case_shutdown_clears_the_pause),
+    ("fleet", "the project a pause on the hub's board pauses", _case_pause_is_its_projects),
     (
         "fleet",
         "a restart under the hub of a row without",
@@ -5563,6 +5575,77 @@ def test_under_a_hub_each_read_and_write_goes_where_the_rule_says(
     expected = hubbed.hub.id if where == "board" else hubbed.fleet.id
 
     assert case(hubbed) == expected
+
+
+def _another_fleet_on_the_hub(w: _Hubbed, name: str = "other") -> tuple[ProjectInfo, str]:
+    """A second fleet project whose manager, spawned under the hub, reads the hub's board as
+    ``w.fleet``'s does; returns it and its manager's session."""
+    root = w.fleet.root.parent / name
+    root.mkdir()
+    with store_session() as store:
+        other = store.onboard_project(ProjectInfo(id=project_id_for(root), root=root))
+    _, sid = _spawned(other, "manager", None, w.tmux, w.monkeypatch)
+    team_service.hook_session_start(sid, root, "startup")
+    return other, sid
+
+
+def _manager_cycle(session_id: str, project: ProjectInfo) -> str:
+    """The standing cycle a manager session is briefed with, as one text."""
+    with store_session() as store:
+        me = store.get_session(session_id)
+    assert me is not None
+    return "\n".join(team_service._role_cycle(me, project))
+
+
+def test_under_a_hub_each_fleet_project_pauses_and_resumes_alone(hubbed: _Hubbed) -> None:
+    """Review of #259, round 26, 1/11: since round 25 a hub project's ``fleet-paused`` signal
+    is on the hub's board, which every fleet project under the hub reads, by one name. So
+    ``fleet pause -P a`` paused ``b``'s manager too, and ``fleet shutdown -P a`` cleared the
+    pause ``b``'s manager was still obeying, with ``--all`` saying ``b`` kept it. Each project's
+    pause is its own signal on the shared board, and each manager is told its own's name."""
+    other, other_sid = _another_fleet_on_the_hub(hubbed)
+    mine = harness.pause_signal(hubbed.fleet.id, hubbed.hub.id)
+    theirs = harness.pause_signal(other.id, hubbed.hub.id)
+    assert mine != theirs and fleet_service.PAUSE_SIGNAL not in (mine, theirs)
+    assert f"`{mine}`" in _manager_cycle(hubbed.manager_sid, hubbed.fleet)
+    assert f"`{theirs}`" in _manager_cycle(other_sid, other)
+
+    fleet_service.pause(other)
+
+    assert fleet_service.is_paused(other) and not fleet_service.is_paused(hubbed.fleet)
+    assert _paused_on(hubbed, other) == [hubbed.hub.id] and _paused_on(hubbed) == []
+    fleet_service.pause(hubbed.fleet)
+    fleet_service.resume(hubbed.fleet)
+    assert fleet_service.is_paused(other), "a resume of one is not the other's"
+    fleet_service.pause(hubbed.fleet)
+
+    report = fleet_service.shutdown(hubbed.fleet)
+
+    assert report.paused_cleared == [fleet_service._name(hubbed.fleet)], report
+    assert not fleet_service.is_paused(hubbed.fleet)
+    assert fleet_service.is_paused(other), "the other project's manager still obeys its pause"
+
+
+def test_under_a_hub_shutdown_all_keeps_the_pause_it_says_it_kept(hubbed: _Hubbed) -> None:
+    """Review of #259, round 26, 1/11: under ``--all``, a project that was not confirmed down
+    is named in ``paused_kept``, and another project's pass then cleared the hub's one signal
+    anyway. Each pass clears its own project's pause alone."""
+    other, _ = _another_fleet_on_the_hub(hubbed)
+    fleet_service.pause(other)
+    fleet_service.pause(hubbed.fleet)
+    real = fleet_service._clear_pause
+
+    def other_left_up(targets: Any, report: Any) -> None:
+        report.incomplete_projects.append(other.id)  # a survivor: not confirmed down
+        real(targets, report)
+
+    hubbed.monkeypatch.setattr(fleet_service, "_clear_pause", other_left_up)
+    report = fleet_service.shutdown(force=True)
+
+    assert report.paused_kept == [fleet_service._name(other)], report
+    assert fleet_service.is_paused(other), "kept, as the report says"
+    assert report.paused_cleared == [fleet_service._name(hubbed.fleet)]
+    assert not fleet_service.is_paused(hubbed.fleet)
 
 
 def test_task_next_prefers_the_callers_assigned_task_over_the_oldest(
@@ -8909,7 +8992,7 @@ def test_shutdown_reports_a_pause_signal_it_could_not_read_or_clear(
     spawn nothing, and nothing in the report saying so. Both failures are surfaced
     the way the visible-projects lookup already is, and the report is preserved.
     """
-    real_read = fleet_service._paused_boards
+    real_read = fleet_service._paused_signals
     real_clear = fleet_service._clear_pause_signal
 
     def refuse(*args: object, **kwargs: object) -> bool:
@@ -8919,9 +9002,9 @@ def test_shutdown_reports_a_pause_signal_it_could_not_read_or_clear(
     fleet_service.pause(project)
     name = fleet_service._name(project)
 
-    monkeypatch.setattr(fleet_service, "_paused_boards", refuse)  # the READ fails
+    monkeypatch.setattr(fleet_service, "_paused_signals", refuse)  # the READ fails
     report = fleet_service.shutdown(project, force=True)
-    monkeypatch.setattr(fleet_service, "_paused_boards", real_read)
+    monkeypatch.setattr(fleet_service, "_paused_signals", real_read)
 
     assert len(report.stopped) == 1, "the report is preserved, not discarded"
     assert report.pause_scan_failed is not None and "locked" in report.pause_scan_failed

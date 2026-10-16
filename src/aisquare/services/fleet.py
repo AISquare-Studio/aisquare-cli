@@ -1002,9 +1002,13 @@ def _git(cwd: Path, *args: str) -> _GitResult:
     an ended agent's tree, asked without the branch lock, made a respawn's ``git checkout``
     in that tree fail on the lock it held (77 of 200 overlapping checkouts, review of #259,
     round 20). A command that must write takes its locks all the same. The environment's
-    switch, not ``--no-optional-locks``: a git before 2.15 (CentOS 7's 1.8.3) refuses the
-    flag, so every fleet git command exited 129, a ``--worktree`` spawn failed and a reap
-    read each refusal as an answer, and ignores the variable (round 27, 4/7).
+    switch, not ``--no-optional-locks``: the flag came in git 2.15, and a git from 2.5 to
+    2.14 refused it, so every fleet git command exited 129, a ``--worktree`` spawn failed
+    and a reap read each refusal as an answer; such a git ignores the variable (round 27,
+    4/7). That is all the switch buys an old git. Fleet worktrees need git 2.20, the floor
+    docs/fleet.md names; below 2.5 there is no ``git worktree`` or ``--git-common-dir``, and
+    below 1.8.5 no ``git -C``, so every command here fails whatever the switch (round 28,
+    6/10).
     """
     try:
         completed = subprocess.run(

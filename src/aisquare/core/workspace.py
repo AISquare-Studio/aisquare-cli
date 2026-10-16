@@ -87,6 +87,12 @@ def git_common_root(start: Path) -> Path | None:
     read as "not a work tree", so every linked worktree, a fleet agent's included, got a
     board of its own, with no warning (review of #259, round 26, 11/11). Every hook asks
     this.
+
+    A git before 2.5 has no linked worktrees and no ``--git-common-dir``, so the marker walk
+    is right for it, and it is left there. Before 1.8.5 it does not know ``-C`` and exits
+    129; from 1.8.5 to 2.4, ``rev-parse`` echoes the option it does not know and exits 0,
+    and ``<start>/--git-common-dir`` was every project's root (review of #259, round 28,
+    6/10).
     """
     try:
         result = subprocess.run(
@@ -104,7 +110,7 @@ def git_common_root(start: Path) -> Path | None:
     if result.returncode != 0:
         return None
     common = result.stdout.strip()
-    if not common:
+    if not common or common == "--git-common-dir":  # the option echoed: git 1.8.5 to 2.4
         return None
     common_dir = Path(common)
     if not common_dir.is_absolute():

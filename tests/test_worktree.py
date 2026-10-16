@@ -187,6 +187,29 @@ def test_a_worktree_resolves_on_a_git_that_does_not_know_no_optional_locks(
     assert team_project(worktree).root == repo.resolve()
 
 
+def test_a_git_before_2_5_that_echoes_the_option_leaves_the_root_to_the_markers(
+    repo_with_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 28, 6/10: from git 1.8.5 to 2.4, ``rev-parse`` does not know
+    ``--git-common-dir`` and echoes it back, exit 0, so ``git_common_root`` returned
+    ``<start>/--git-common-dir``, a directory that is not there, as the root of every project
+    every hook resolved. Such a git has no linked worktrees: the root is the marker walk's."""
+    repo, _worktree = repo_with_worktree
+    start = repo / "src"
+    start.mkdir()
+    real = subprocess.run
+
+    def before_2_5(argv: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(argv, list) and argv[:1] == ["git"] and "--git-common-dir" in argv:
+            return subprocess.CompletedProcess(argv, 0, "--git-common-dir\n", "")
+        return real(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", before_2_5)
+
+    assert workspace.git_common_root(start) is None
+    assert find_project_root(start) == repo.resolve()
+
+
 def test_a_plain_repo_is_still_its_own_root(tmp_path: Path) -> None:
     repo = tmp_path / "plain"
     (repo / "src").mkdir(parents=True)

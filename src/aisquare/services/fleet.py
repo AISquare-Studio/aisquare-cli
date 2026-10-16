@@ -5717,8 +5717,11 @@ def _reconcile_pauses(
     for project in projects:
         if project.id not in visible:
             continue
-        homes = _pause_homes(project)
         try:
+            # Its homes ask git and the filesystem: a root that cannot be looked at (one that
+            # cannot be searched is a `PermissionError` on Python 3.11 and 3.12) is this
+            # project's failure, not every project's (review of #259, round 30, 4/8).
+            homes = _pause_homes(project)
             # Its own pause on each board it lives on (`_pause_signals`), whichever rows were
             # live: under a hub, never another project's on the same board.
             paused = _paused_signals(store, _pause_signals(store, project, homes))

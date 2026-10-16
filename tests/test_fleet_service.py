@@ -9086,6 +9086,47 @@ def test_the_pause_pass_asks_git_once_for_each_visible_project_and_never_with_th
     assert (asked, opens, report.pause_scan_failed, report.pause_unsettled) == ([], 0, None, [])
 
 
+def test_a_root_the_pause_pass_cannot_look_at_fails_that_project_alone(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    plain_project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 30, 4/8: every project's homes (``fleet._pause_homes``) were worked
+    out in one comprehension under the pass's outer ``try``, so one root that could not be
+    looked at (``Path.exists`` raises ``PermissionError`` for a directory that cannot be
+    searched, on Python 3.11 and 3.12) failed the pass for all: no pause was cleared, and
+    with ``pause_unsettled`` empty the ``--all`` line named no ``fleet resume``. It is that
+    project's failure now, as a signal it could not read is."""
+    from aisquare.core import orchestrator
+
+    fleet_service.pause(project)
+    fleet_service.pause(plain_project)
+    real = orchestrator.directory_project
+
+    def unsearchable(cwd: Path | None = None) -> ProjectInfo:
+        if cwd is not None and cwd.resolve() == project.root.resolve():
+            raise PermissionError(13, "Permission denied", str(cwd))
+        return real(cwd)
+
+    monkeypatch.setattr(orchestrator, "directory_project", unsearchable)
+    report = fleet_service.ShutdownReport()
+
+    fleet_service._clear_pause([project, plain_project], report)
+    monkeypatch.setattr(orchestrator, "directory_project", real)
+
+    assert report.paused_cleared == [fleet_service._name(plain_project)]
+    assert not fleet_service.is_paused(plain_project)
+    assert [p.id for p in report.pause_unsettled] == [project.id], "its resume is named"
+    assert report.pause_scan_failed is not None
+    assert report.pause_scan_failed.startswith(
+        f"{fleet_service._name(project)}: could not be read (PermissionError"
+    ), report.pause_scan_failed
+    assert report.incomplete_projects == [project.id]
+    assert fleet_service.is_paused(project), "kept, and said so"
+
+
 def test_the_pause_builds_no_row(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

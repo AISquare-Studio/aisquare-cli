@@ -1159,6 +1159,7 @@ class ContextStore(Protocol):
     def entries(
         self, pool: Pool | None = None, *, project_id: str | None = None
     ) -> list[ContextEntry]: ...
+    def has_entries(self, project_id: str) -> bool: ...
     def search(
         self, query: str, *, pool: Pool | None = None, project_id: str | None = None
     ) -> list[ContextEntry]: ...
@@ -1731,6 +1732,16 @@ class SqliteStore:
             f"SELECT {_COLUMNS} FROM entry WHERE {where} ORDER BY id", params
         ).fetchall()
         return [_row_to_entry(row) for row in rows]
+
+    def has_entries(self, project_id: str) -> bool:
+        """Whether ``entries("project", project_id=project_id)`` would list any: one row asked
+        for, none built. Doctor asks it of every captured row on each run, and loaded every
+        entry of the rows that hold context to learn that one existed (review of #259,
+        round 19)."""
+        clauses, params = _scope_filter("project", project_id)
+        where = " AND ".join(["deleted_at IS NULL", *clauses])
+        found = self._conn.execute(f"SELECT 1 FROM entry WHERE {where} LIMIT 1", params)
+        return found.fetchone() is not None
 
     def search(
         self, query: str, *, pool: Pool | None = None, project_id: str | None = None

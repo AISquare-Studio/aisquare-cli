@@ -298,7 +298,11 @@ def forget_project(project: ProjectInfo, *, purge: bool = False) -> ProjectForge
 
 
 def prune_candidates(
-    *, missing: bool, worktrees: bool, captured_older_than: int | None = None
+    *,
+    missing: bool,
+    worktrees: bool,
+    captured_older_than: int | None = None,
+    store: ContextStore | None = None,
 ) -> list[PruneCandidate]:
     """The registrations ``project prune`` would drop, and why — nothing is changed.
 
@@ -318,9 +322,10 @@ def prune_candidates(
     rows alone on every run, and got a live-agent query for every project and a ``stat`` of
     every root, some on network mounts (review of #259, round 18). A root that cannot be
     asked (``EACCES``, a mount's ``EIO``) is not called missing, and fails no plan
-    (:func:`_is_dir`).
+    (:func:`_is_dir`). In ``store`` when the caller has one open (doctor, round 19).
     """
-    with store_session() as store:
+
+    def plan(store: ContextStore) -> list[PruneCandidate]:
         projects = store.list_projects(all=True)
         by_root = {project.root: project for project in projects}
         activity = store.project_activity() if captured_older_than is not None else {}
@@ -346,7 +351,7 @@ def prune_candidates(
                 cutoff is not None
                 and project.onboarded_at is None
                 and activity.get(project.id, "") < cutoff
-                and not store.entries("project", project_id=project.id)
+                and not store.has_entries(project.id)
             ):
                 candidate(project, "captured")
                 continue
@@ -366,7 +371,12 @@ def prune_candidates(
             )
             if principal is not None and principal.id != project.id:
                 candidate(project, "worktree", principal=principal)
-    return found
+        return found
+
+    if store is not None:
+        return plan(store)
+    with store_session() as opened:
+        return plan(opened)
 
 
 #: What ``stat`` says of a root that is gone: nothing there, a file where a directory on its

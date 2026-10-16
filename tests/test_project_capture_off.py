@@ -331,6 +331,67 @@ def test_doctor_asks_only_the_captured_rows_and_no_root(
     assert [c.project.id for c in plan] == ["prj_scratch"], "a root it cannot ask is not missing"
 
 
+def test_doctor_asks_whether_a_captured_row_holds_context_without_loading_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 19: the prune plan loaded and built every entry of each captured
+    row to learn whether one existed, on every doctor run with capture off, and the line
+    opened three store sessions and read the setting twice. One row asked for, in one
+    session, the setting read once."""
+    import contextlib
+    from collections.abc import Iterator
+
+    from aisquare.core import store as store_core
+    from aisquare.core.store import SqliteStore
+    from aisquare.services import project as project_service
+
+    with store_session() as store:
+        for name in ("scratch", "notes", "gone"):
+            store.ensure_project(ProjectInfo(id=f"prj_{name}", root=tmp_path / name))
+        store.add(new_entry("a fact", "project", "prj_notes", [], "cli"))
+        store.add(new_entry("a fact", "project", "prj_gone", [], "cli"))
+        store.add(new_entry("for everyone", "user", None, [], "cli"))
+        store.forget_project("prj_gone")
+        assert [store.has_entries(f"prj_{n}") for n in ("scratch", "notes", "gone")] == [
+            False,
+            True,
+            False,
+        ], "as entries('project') lists them"
+
+    loaded: list[str | None] = []
+    real_entries, real_session = SqliteStore.entries, store_core.store_session
+    sessions: list[int] = []
+    settings: list[int] = []
+    capture_on = project_service.capture_on
+
+    def entries(self: SqliteStore, *args: Any, **kwargs: Any) -> Any:
+        loaded.append(kwargs.get("project_id"))
+        return real_entries(self, *args, **kwargs)
+
+    @contextlib.contextmanager
+    def counted() -> Iterator[Any]:
+        sessions.append(1)
+        with real_session() as store:
+            yield store
+
+    def setting() -> bool:
+        settings.append(1)
+        return capture_on()
+
+    monkeypatch.setattr(SqliteStore, "entries", entries)
+    monkeypatch.setattr(diagnostics, "store_session", counted)
+    monkeypatch.setattr(project_service, "store_session", counted)
+    monkeypatch.setattr(project_service, "capture_on", setting)
+
+    [check] = diagnostics._check_captured_projects()
+
+    said = " ".join(check.detail.split())
+    assert said.startswith("1 captured directory left from before project capture"), said
+    assert "1 more holds saved context, which that prune keeps: notes" in said
+    assert loaded == [], "entries were loaded"
+    assert (len(sessions), len(settings)) == (1, 1)
+
+
 def _captured_rows(tmp_path: Path, prefix: str, count: int) -> list[ProjectInfo]:
     return [
         ProjectInfo(id=f"prj_{prefix}{n}", root=tmp_path / f"{prefix}{n}") for n in range(count)

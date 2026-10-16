@@ -1455,16 +1455,18 @@ def _check_captured_projects() -> list[DoctorCheck]:
     if _uncreated_home("projects") is not None:
         return []
     try:
-        with store_session() as store:
-            captured = store.captured_projects()
+        # One store session and one read of the setting: three sessions and two reads were
+        # opened for one line (review of #259, round 19).
+        capture = project_service.capture_on()
         plan: list[PruneCandidate] = []
         busy: set[str] = set()
-        if captured and not project_service.capture_on():
-            plan = project_service.prune_candidates(
-                missing=False, worktrees=False, captured_older_than=0
-            )
-            planned = {c.project.id for c in plan}
-            with store_session() as store:
+        with store_session() as store:
+            captured = store.captured_projects()
+            if captured and not capture:
+                plan = project_service.prune_candidates(
+                    missing=False, worktrees=False, captured_older_than=0, store=store
+                )
+                planned = {c.project.id for c in plan}
                 busy = {c.project.id for c in plan if c.live_agents} | {
                     p.id
                     for p in captured
@@ -1474,7 +1476,7 @@ def _check_captured_projects() -> list[DoctorCheck]:
         return []
     if not captured:
         return []
-    if not project_service.capture_on():
+    if not capture:
         return [_ok("projects", _left_from_before_capture(captured, plan, busy))]
     noun = "directory" if len(captured) == 1 else "directories"
     return [

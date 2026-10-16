@@ -78,7 +78,7 @@ retry and is raised at once."""
 _POLL_S = 0.01
 
 
-def open_lock_file(path: Path, *, mode: int = 0o644) -> int:
+def open_lock_file(path: Path, *, mode: int = 0o644, create: bool = True) -> int:
     """``path`` opened to be locked, as a descriptor the caller closes.
 
     For writing first — on NFS an exclusive ``flock`` is emulated with a byte-range lock and
@@ -86,9 +86,13 @@ def open_lock_file(path: Path, *, mode: int = 0o644) -> int:
     refused, which serves everywhere else (a lock file another user left behind, ``0o644``
     for that reason). With no lock file yet and writing refused, the read-only retry has no
     file to open, and what is raised is the permission problem, not its ``ENOENT``.
+
+    ``create=False`` for a reader that asks whether another process holds the lock and may
+    make nothing: none there raises ``FileNotFoundError``. The same rule otherwise, so the
+    one that asks opens the file the holder could (review of #259, round 19).
     """
     try:
-        return os.open(path, os.O_RDWR | os.O_CREAT, mode)
+        return os.open(path, os.O_RDWR | (os.O_CREAT if create else 0), mode)
     except PermissionError as denied:
         try:
             return os.open(path, os.O_RDONLY)

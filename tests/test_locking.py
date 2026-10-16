@@ -134,3 +134,34 @@ def test_whether_another_process_serves_remote_is_asked_once_through_the_one_loo
     assert remote_server.remote_served_elsewhere() is True
     assert remote_server.remote_served_elsewhere() is False
     assert len(asked) == 2, "once each"
+
+
+def test_a_lock_file_this_user_may_not_write_still_says_another_process_serves(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 19: the claim of the home opens its lock file read-only when it
+    may not be written (``0400``, or left by a ``sudo aisquare remote serve``), and the look
+    at whether another process serves opened it read-write only, and said nobody did. Both
+    open it by the one rule, and the look still makes no file."""
+    isolated_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(remote_server, "_home_claim", None)
+
+    def held(fd: int) -> None:
+        raise OSError(errno.EACCES, "held")
+
+    monkeypatch.setattr(locking, "lock_exclusive", held)
+    lock = isolated_home / "remote-serve.lock"
+    assert remote_server.remote_served_elsewhere() is False
+    assert not lock.exists(), "the look made a lock file"
+    lock.touch()
+    lock.chmod(0o400)
+    try:
+        try:
+            os.close(os.open(lock, os.O_RDWR))
+        except PermissionError:
+            pass
+        else:
+            pytest.skip("this user writes a 0400 file (root)")
+        assert remote_server.remote_served_elsewhere() is True
+    finally:
+        lock.chmod(0o600)

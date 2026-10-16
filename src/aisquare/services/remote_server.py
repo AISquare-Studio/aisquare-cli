@@ -6836,6 +6836,11 @@ def remote_served_elsewhere() -> bool:
     which every status read takes: on NFS a lock call can block however non-blocking. So
     :data:`_home_claim` is read without it: a claim, which sets it, holds :data:`_claiming`,
     and a release that lands meanwhile leaves nobody serving, which is what this says then.
+
+    Opened as :func:`_claim_remote_home` opens it, read-only when it may not be written: a
+    lock file this user cannot write (``0400``, or left by a ``sudo aisquare remote serve``)
+    was claimed through a read-only descriptor and opened here read-write only, so this
+    said nobody served while a Remote did (review of #259, round 19).
     """
     path = remote_state_path().with_name(SERVE_LOCK_NAME)
     with _claiming:
@@ -6843,7 +6848,7 @@ def remote_served_elsewhere() -> bool:
         if claim is not None and claim[0] == path:
             return False
         try:
-            fd = os.open(path, os.O_RDWR)
+            fd = open_lock_file(path, create=False)
         except OSError:
             return False
         try:

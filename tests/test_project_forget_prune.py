@@ -19,6 +19,7 @@ import itertools
 import json
 import shutil
 import sqlite3
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,7 @@ from aisquare.core.state_file import StateUnwritableError, read_state
 from aisquare.core.store import SqliteStore, store_session
 from aisquare.core.workspace import pinned_project_id, project_id_for, worktree_principal
 from aisquare.models import FleetAgent, ProjectInfo, TeamEvent, TeamSession, TeamTask
+from tests.fsperms import can_deny_reads
 from tests.test_worktree import _git
 
 
@@ -584,6 +586,29 @@ def test_prune_missing_is_a_dry_run_until_yes(
     assert dropped.exit_code == 0, dropped.output
     assert "forgot 1 registration" in dropped.stdout
     assert _listed(runner) == {alpha}
+
+
+def test_prune_never_calls_a_root_it_may_not_search_missing(tmp_path: Path) -> None:
+    """Review of #259, round 19: a root ``Path.is_dir`` could not ask was not missing, as it
+    raised ``EACCES``; from Python 3.14 it says False instead, and ``prune --missing``
+    dropped a project whose directory was there, under a folder this user may not search.
+    Asked of a real such folder, on whichever interpreter runs this."""
+    from aisquare.services import project as project_service
+
+    if sys.platform == "win32" or not can_deny_reads():
+        pytest.skip("needs a folder this user cannot search")
+    locked = tmp_path / "locked"
+    (locked / "there").mkdir(parents=True)
+    with store_session() as store:
+        for name, root in (("there", locked / "there"), ("gone", tmp_path / "gone")):
+            store.onboard_project(ProjectInfo(id=f"prj_{name}", root=root))
+    locked.chmod(0)
+    try:
+        plan = project_service.prune_candidates(missing=True, worktrees=False)
+    finally:
+        locked.chmod(0o700)
+
+    assert [(c.project.id, c.reason) for c in plan] == [("prj_gone", "missing")]
 
 
 def test_prune_with_nothing_to_drop_says_so(runner: CliRunner) -> None:

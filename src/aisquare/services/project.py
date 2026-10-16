@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import errno
+import os
 import shlex
 import shutil
+import stat
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -314,7 +317,8 @@ def prune_candidates(
     root's ``stat`` only for ``missing`` or ``worktrees``. Doctor asks for the captured
     rows alone on every run, and got a live-agent query for every project and a ``stat`` of
     every root, some on network mounts (review of #259, round 18). A root that cannot be
-    asked (``EACCES``, which ``is_dir`` raises) is not called missing, and fails no plan.
+    asked (``EACCES``, a mount's ``EIO``) is not called missing, and fails no plan
+    (:func:`_is_dir`).
     """
     with store_session() as store:
         projects = store.list_projects(all=True)
@@ -365,12 +369,22 @@ def prune_candidates(
     return found
 
 
+#: What ``stat`` says of a root that is gone: nothing there, a file where a directory on its
+#: path was, or a link that can never reach one.
+_GONE = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ELOOP})
+
+
 def _is_dir(root: Path) -> bool:
-    """Whether ``root`` is a directory; one that cannot be asked is taken to be one."""
+    """Whether ``root`` is a directory; one that cannot be asked is taken to be one.
+
+    ``os.stat``, not ``Path.is_dir``: that raised for ``EACCES`` up to Python 3.13, and from
+    3.14 it is ``os.path.isdir``, which says False for any ``OSError``. On 3.14 a root under
+    a folder this user may not search, or on a mount that answered ``EIO``, was called
+    missing, and ``prune --missing`` dropped it (review of #259, round 19)."""
     try:
-        return root.is_dir()
-    except OSError:
-        return True
+        return stat.S_ISDIR(os.stat(root).st_mode)
+    except OSError as exc:
+        return exc.errno not in _GONE
 
 
 def prune_plan(candidates: list[PruneCandidate], *, purge: bool) -> ProjectPruneReport:

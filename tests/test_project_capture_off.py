@@ -9,7 +9,9 @@ tests/test_fleet_service.py, the MCP server in tests/test_serve.py.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
@@ -287,12 +289,14 @@ def test_doctor_asks_only_the_captured_rows_and_no_root(
         store.onboard_project(added)
         store.ensure_project(ProjectInfo(id="prj_scratch", root=tmp_path / "scratch"))
 
-    locked, is_dir = tmp_path / "locked", Path.is_dir
+    locked, real_stat = tmp_path / "locked", os.stat
 
-    def no_stat(self: Path) -> bool:
-        if self.is_relative_to(locked):  # under a directory this user may not search
-            raise PermissionError(13, "Permission denied", str(self))
-        return is_dir(self)
+    def no_search(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        # Under a directory this user may not search: ``Path.is_dir`` raised for it up to
+        # Python 3.13, and from 3.14 says False (round 19).
+        if isinstance(path, (str, os.PathLike)) and Path(path).is_relative_to(locked):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_stat(path, *args, **kwargs)
 
     asked: list[str] = []
     real = SqliteStore.fleet_agents
@@ -301,7 +305,7 @@ def test_doctor_asks_only_the_captured_rows_and_no_root(
         asked.append(project_id)
         return real(self, project_id, **kwargs)
 
-    monkeypatch.setattr(Path, "is_dir", no_stat)
+    monkeypatch.setattr(os, "stat", no_search)
     monkeypatch.setattr(SqliteStore, "fleet_agents", counted)
 
     [check] = diagnostics._check_captured_projects()

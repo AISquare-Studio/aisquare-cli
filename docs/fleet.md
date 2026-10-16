@@ -895,16 +895,21 @@ tree the agent may write: what the user's own tools run from it (git hooks in th
 and git config the repository includes from it, a project venv, a subdirectory's
 settings, what `aisquare project onboard` packs it with, `CLAUDE.md`) is the agent's to
 write, as on Claude Code, and so is the window's `PATH`, where Codex itself and aisquare's
-hooks find `git`: a launch whose `PATH` names a directory its sandbox may write is warned.
+hooks find `git`: a launch whose `PATH` names a directory its sandbox may write (an empty
+entry is the directory a process runs in) is warned; the restart and spawn checks read
+the `PATH` the window will have, the fleet server's.
 Whatever its sandbox, a launch is refused, by `fleet spawn` before any window, by a
 restart, switch or hand-over before it stops the agent, and by `aisquare launch`, where
 that sandbox may write an aisquare that runs outside it, the launcher's own install or
 what the agent's hooks run (their `hooks.json`'s program, the plugin's launcher), with
-its environment, as read from Codex's config, its `-p` profile and its arguments (the
+its environment, as read from Codex's system and user config, its `-p` profile and its
+arguments (the
 workspace, `-C`, `--add-dir`, `writable_roots`, `/tmp`; none of them for a `read-only`
 seat): install `aisquare-cli` outside the project (`uv tool install aisquare-cli`) and
-connect the hooks with it. A `PYTHONPATH` entry it may write is dropped from the
-launch's environment, which the hooks and the broker inherit. A fleet Codex window
+connect the hooks with it. The agent keeps `PYTHONPATH` and `PYTHONHOME` as you set them,
+for its own tools; every Python aisquare starts for it ignores them (`-E`): the window's
+`aisquare launch`, its hooks as `agents connect codex` writes them, the plugin's launcher,
+its broker and what the broker runs, the hand-over. A fleet Codex window
 starts with `check_for_update_on_startup=false` unless your config sets it: an `Update
 available` dialog in a starting pane takes an Enter as `npm install -g @openai/codex`
 ([the trust boundary](coding-agents.md#the-sandbox-and-the-aisquare-store)). The launch records stay as defence

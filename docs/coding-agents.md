@@ -472,11 +472,15 @@ repomix`, run in the project's directory, reads its config and `node_modules` th
 Code). So is the launch's `PATH`, the user's shell's: Codex itself runs the `git` it finds
 there outside its sandbox (for its git info), as aisquare's hooks and broker run the
 `git`, `gbrain` and `tmux` they find there. A launch whose `PATH` names a directory its
-sandbox may write (an activated project virtualenv, direnv's `PATH_add`) is warned of it,
-and `aisquare doctor` run in a project whose tree `PATH` names warns (`sandbox-path`):
-launch from a shell whose `PATH` names nothing the agent may write. What aisquare itself
-runs or reads outside the sandbox on the agent's behalf, from its hooks and its broker,
-is kept from that tree by these means, and only these:
+sandbox may write (an activated project virtualenv, direnv's `PATH_add`, an empty or a
+relative entry, which is the directory a process runs in) is warned of it, and `aisquare
+doctor` run in a project whose tree `PATH` names warns (`sandbox-path`): launch from a
+shell whose `PATH` names nothing the agent may write. So is an unsandboxed agent's own
+environment, which its hooks run in as its tools do: a Claude Code agent's hooks read its
+`PYTHONPATH`, as every Python it starts there does. What aisquare itself runs or reads
+outside the sandbox on a sandboxed agent's behalf (its hooks, its broker and the commands
+it runs) and for the fleet (a window's `aisquare launch`, a hand-over) is kept from that
+tree by these means, and only these:
 
 - under the store's profile (below; a native `--sandbox` the operator picks replaces it,
   and these paths with it), the aisquare store, its launch records first, read-only in
@@ -496,8 +500,9 @@ is kept from that tree by these means, and only these:
   `fleet spawn` before any window is made, and by `fleet restart`, `switch` and the
   usage-limit hand-over before they stop the agent (under the home the replacement
   starts with: a switch's target slot), naming the remedy (`store_broker.refuse_inside`).
-  What the sandbox may write is read as Codex layers its settings, `config.toml`, the
-  `-p` profile beside it, then the launch's arguments (`AgentAdapter.sandbox_writes`,
+  What the sandbox may write is read as Codex layers its settings, the system's
+  `/etc/codex/config.toml`, the user's `config.toml`, the `-p` profile beside it, then the
+  launch's arguments (`AgentAdapter.sandbox_writes`,
   measured on 0.162.1): the sandbox is `--sandbox`, else `-c sandbox_mode`, else the
   store's profile, which holds over a `sandbox_mode` in the files, else the files'
   `sandbox_mode`; under `workspace-write` (the store's profile over `:workspace`,
@@ -516,10 +521,15 @@ is kept from that tree by these means, and only these:
   `aisquare doctor` run in a project (a git root or a project marker, never the home or
   `/`) on a machine with Codex warns of an install in that project's tree
   (`sandbox-install`);
-- a `PYTHONPATH` (or `PYTHONHOME`) entry the sandbox may write: dropped from the launch's
-  environment, which the agent, its hooks and its broker inherit, with a line saying so,
-  as the hooks' and the broker's Python would import from it before the standard library
-  (a module of its name, a `sitecustomize`). A tool that needs it sets it in its command;
+- `PYTHONPATH` and `PYTHONHOME`, which a Python reads before the standard library (a
+  module of its name, a `sitecustomize`; an empty entry is the directory it runs in): the
+  agent keeps them as the operator set them, as its own tools need them (direnv's
+  `PYTHONPATH=$PWD/src`), and every Python aisquare starts for it ignores them (`-E`,
+  `selfcli.isolated_argv_for`): its hooks as `aisquare agents connect codex` writes them
+  (`<python> -E -P -m aisquare hook codex`), the plugin's launcher, which unsets them, its
+  broker and the commands it runs, the fleet window's `aisquare launch`, the hand-over and
+  the distiller. Hooks connected by an older aisquare read them: a launch warns where one
+  names a directory the sandbox may write, and `agents connect codex` again fixes it;
 - every git aisquare runs (`core.workspace.git_argv`: the fleet's worktrees, the CI turn
   snapshot's `stash create`, which the agent's own hooks run, the project root's lookup):
   no hook and no fsmonitor of the repository's (`core.hooksPath` at the null device,

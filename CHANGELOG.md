@@ -149,22 +149,30 @@ adapter.**
   project venv, a subdirectory's settings, what `aisquare project onboard` packs it
   with, `CLAUDE.md`) stays its to write, and so does the launch's `PATH`, where
   Codex itself and aisquare's hooks and broker find `git`: a launch whose `PATH`
-  names a directory its sandbox may write is warned, and so is a doctor run in a
-  project whose tree `PATH` names (`sandbox-path`, amber the installer expects).
-  What aisquare itself runs outside the sandbox on its behalf is kept from that
-  tree: whatever its sandbox, a launch is refused, by `aisquare launch`, by `fleet
+  names a directory its sandbox may write (an empty entry is the directory a
+  process runs in) is warned, and so is a doctor run in a project whose tree
+  `PATH` names (`sandbox-path`, amber the installer expects); and so does an
+  unsandboxed agent's own environment, which its hooks run in as its tools do (a
+  Claude Code agent's hooks read its `PYTHONPATH`). What aisquare itself runs
+  outside the sandbox on a sandboxed agent's behalf, and for the fleet's launches
+  and hand-overs, is kept from that tree: whatever its sandbox, a launch is
+  refused, by `aisquare launch`, by `fleet
   spawn` before any window and by a restart, switch or hand-over before it stops
   the agent, where that sandbox may write an aisquare that runs outside it, the
   launcher's own install or what the agent's hooks run (their `hooks.json`'s
   program, the plugin's launcher), each with its environment, as read from Codex's
-  config, its `-p` profile and the arguments (the workspace, `-C`, `--add-dir`,
+  system and user config, its `-p` profile and the arguments (the workspace, `-C`,
+  `--add-dir`,
   `writable_roots`, `/tmp`; none for a `read-only` seat), with the remedy for how
   the sandbox reaches it (`uv tool install aisquare-cli` for one in the project)
   and a doctor warning in a project (`sandbox-install`; never from the home or
   `/`, where the doctor found every install under it "in the project" and the
-  installer run from the home exited 2); a `PYTHONPATH` entry the sandbox may
-  write is dropped from the launch's environment, which the hooks and the broker
-  inherit; every git aisquare runs runs no hook and no fsmonitor of the
+  installer run from the home exited 2); the agent keeps `PYTHONPATH` and
+  `PYTHONHOME` as the operator set them, for its own tools, and every Python
+  aisquare starts for it ignores them (`-E`: its hooks as `agents connect codex`
+  writes them, the plugin's launcher, its broker and what the broker runs, the
+  fleet window's `aisquare launch`, the hand-over); every git aisquare runs runs no
+  hook and no fsmonitor of the
   repository's (the fleet's worktrees, the CI turn snapshot's `stash create` from
   the agent's hooks); and gbrain, which a brokered `recall` and a note's distill
   run, starts in its brain's home, not the tree. A fleet Codex window starts with

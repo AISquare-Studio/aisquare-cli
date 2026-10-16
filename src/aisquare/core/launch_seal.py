@@ -8,11 +8,15 @@ from it, a project's own venv, a subdirectory's settings, what the user's own ``
 project onboard`` packs it with, ``CLAUDE.md``/``AGENTS.md``), and so is the launch
 environment's ``PATH``: the ``git`` Codex itself runs outside its sandbox, and the
 ``git``, ``gbrain`` and ``tmux`` aisquare's hooks and broker run there, are the first
-``PATH`` names, and a launch whose ``PATH`` names a directory its sandbox may write is
-warned of it (``store_broker.sandbox_environment``), as is a doctor run in a project whose
-tree ``PATH`` names (review r13 of #113, finding 1). What aisquare itself runs or reads
-outside the sandbox on the agent's behalf, from its hooks and its broker, is kept from
-that tree by these means, and only these: in the store's profile, which every sandboxed
+``PATH`` names, and a launch whose ``PATH`` names a directory its sandbox may write (an
+empty or relative entry is the directory a process runs in) is warned of it
+(``store_broker.sandbox_environment``), as is a doctor run in a project whose tree ``PATH``
+names (review r13 of #113, finding 1; r14, finding 3). So is an unsandboxed agent's own
+environment, which its hooks run in as its tools do: a Claude Code agent's hooks read its
+``PYTHONPATH``, as every Python it runs does. What aisquare itself runs or reads outside
+the sandbox on a sandboxed agent's behalf (its hooks, its broker and the commands it
+runs) and for the fleet (a window's ``aisquare launch``, a hand-over) is kept from that
+tree by these means, and only these: in the store's profile, which every sandboxed
 launch of aisquare's runs under unless the operator picks a native ``--sandbox`` (which
 replaces it, and these paths with it), the store and these launch records are read-only,
 all of it but the launch's broker inbox
@@ -23,10 +27,12 @@ refused, by ``aisquare launch``, by ``fleet spawn`` before any window, and by a 
 switch or hand-over before it stops the agent, where its sandbox may write an aisquare
 that runs outside it (the launcher's own, or what its hooks run: their config's program
 or the plugin's launcher), with that aisquare's environment, as read from what that
-sandbox may write (the agent's config, its profile, its arguments:
-``store_broker.refuse_inside``, ``AgentAdapter.sandbox_writes``); a ``PYTHONPATH`` (or
-``PYTHONHOME``) entry the sandbox may write is dropped from the launch's environment,
-which the hooks and the broker inherit; every git aisquare runs runs no hook and no
+sandbox may write (the system's and the user's config, its profile, its arguments:
+``store_broker.refuse_inside``, ``AgentAdapter.sandbox_writes``); its Python ignores
+``PYTHONPATH`` and ``PYTHONHOME`` (``-E``: ``selfcli.isolated_argv_for``, and the hooks
+``agents.install_hooks`` writes for an agent that sandboxes its tools, and the plugin's
+launcher, which unsets them), while the agent keeps them as the operator set them for its
+own tools (r14, finding 1, by the manager's decision); every git aisquare runs runs no hook and no
 fsmonitor of the repository's (``core.workspace.git_argv``); gbrain starts in its brain's
 home, never in the tree (``core.brain``); and the agent's board calls go through its
 launch's broker (``services.store_broker``).

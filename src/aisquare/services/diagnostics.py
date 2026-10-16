@@ -1533,12 +1533,11 @@ def _left_from_before_capture(
         then = "" if parts else f"{listed}; "
         it = "it" if one else "them"
         if agents:
-            # With the project named, as `ProjectBusyError` names it (review of #259, round 19).
-            stop = (
-                project_service.fleet_command("stop", kept[0]) + " <label>"
-                if one
-                else "aisquare fleet stop --project <name> <label>, for each"
-            )
+            # With the project named, as `ProjectBusyError` names it (review of #259, round 19):
+            # each row's own, every row. Said once "--project <name>, for each" beside names
+            # shown by directory, two rows called scratch had no name to pass, and a fourth
+            # row none at all, past "+1 more" (round 20).
+            stop = "; ".join(project_service.fleet_command("stop", p) + " <label>" for p in kept)
             what = (
                 f"{'has a fleet agent' if one else 'have fleet agents'} still running, which "
                 f"{prune} keeps and aisquare project forget refuses: {names} — {then}stop "

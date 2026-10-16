@@ -495,9 +495,9 @@ def test_doctor_names_the_captured_rows_with_a_live_agent_apart_from_what_forget
     assert "; 1 more holds saved context, which that prune keeps: notes — drop it with " in said
     assert (
         "; 2 more have fleet agents still running, which that prune keeps and aisquare project "
-        "forget refuses: both, busy — stop their agents first (aisquare fleet stop --project "
-        "<name> <label>, for each), then drop them with aisquare project forget <directory>, "
-        "for each"
+        f"forget refuses: both, busy — stop their agents first (aisquare fleet stop --project "
+        f"{rows['both'].id} <label>; aisquare fleet stop --project {rows['busy'].id} <label>), "
+        "then drop them with aisquare project forget <directory>, for each"
     ) in said, said
     refused = runner.invoke(app, ["--json", "project", "forget", str(tmp_path / "busy")])
     assert json.loads(refused.stdout)["error"] == "project_busy", "the premise"
@@ -539,6 +539,44 @@ def test_doctors_stop_for_a_captured_rows_agent_names_that_project(
     assert argv[:4] == ["aisquare", "fleet", "stop", "--project"], said
     assert fleet_service.resolve_project(argv[4]).id == busy.id, "the captured row's"
     assert fleet_service.resolve_project(None).id == main.id, "the premise: not the active one"
+
+
+def test_doctors_stop_names_each_busy_captured_row_by_a_ref_of_its_own(tmp_path: Path) -> None:
+    """Review of #259, round 20: with several captured rows holding live agents, the line said
+    ``aisquare fleet stop --project <name> <label>, for each`` beside the rows' directory names,
+    three at most. ``/a/scratch`` and ``/b/scratch`` both read "scratch", which ``--project``
+    refuses as matching several projects, and a fourth row was only "+1 more". Each row gets
+    its own stop, every row, naming it as the single row's does."""
+    from datetime import UTC, datetime
+
+    from aisquare.core.ids import new_agent_id
+    from aisquare.services import fleet as fleet_service
+    from aisquare.services import install_route
+
+    rows: list[ProjectInfo] = []
+    for parent, name in (("a", "scratch"), ("b", "scratch"), ("c", "tools"), ("d", "web")):
+        (tmp_path / parent / name).mkdir(parents=True)
+        rows.append(team_project(tmp_path / parent / name))
+    with store_session() as store:
+        for row in rows:
+            store.ensure_project(row)  # 0.8.0's capture
+            store.upsert_fleet_agent(
+                FleetAgent(
+                    id=new_agent_id(), project_id=row.id, label="coder-1", role="coder",
+                    pane_id="%1", cwd=row.root, created_at=datetime.now(tz=UTC),
+                )
+            )  # fmt: skip
+
+    [check] = diagnostics._check_captured_projects()
+
+    said = " ".join(check.detail.split())
+    stops = said.split("stop their agents first (", 1)[1].split("), then", 1)[0].split("; ")
+    named: list[str] = []
+    for stop in stops:
+        argv = install_route.split_line(stop.removesuffix(" <label>"))
+        assert argv[:4] == ["aisquare", "fleet", "stop", "--project"], said
+        named.append(fleet_service.resolve_project(argv[4]).id)
+    assert sorted(named) == sorted(row.id for row in rows), said
 
 
 def test_one_helper_names_a_project_in_a_fleet_command(

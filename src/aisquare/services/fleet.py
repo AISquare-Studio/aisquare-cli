@@ -5730,8 +5730,9 @@ def _reconcile_pauses(
     """
     failures: list[str] = []
     unread: Exception | None = None
+    unreadable: list[tuple[str, str]] = []
     try:
-        signals = team.board_signals_in(store)
+        signals = team.board_signals_in(store, unreadable=unreadable)
     except team.TeamDisabledError:
         return failures  # no board, no signals: nothing is paused anywhere
     except Exception as exc:
@@ -5745,6 +5746,15 @@ def _reconcile_pauses(
             # and neither `paused_kept` nor `paused_cleared` claims anything.
             why = f"{type(unread).__name__}: {unread}"
             failures.append(f"{_name(project)}: could not be read ({why})")
+            report.pause_unsettled.append(project)
+            _not_down(report, project.id)
+            continue
+        # A blob of its own pause that does not parse: whether it is on is not known. Another
+        # project's is no concern of this one's (review of #259, round 32, 6/9).
+        broken = _pause_where_on(project, unreadable)
+        if broken:
+            named = ", ".join(f"{name} on {board}" for board, name in broken)
+            failures.append(f"{_name(project)}: could not be read ({named})")
             report.pause_unsettled.append(project)
             _not_down(report, project.id)
             continue
@@ -7169,6 +7179,10 @@ def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> Non
     """Set ``project``'s pause to ``value``: ``on`` on every board it lives on
     (:func:`_pause_signals`), ``off`` wherever it reads on (:func:`_pause_where_on`).
 
+    A resume whose own pause does not parse on some board is refused, naming it, and nothing
+    is written: the write reads the value it replaces. Another project's that does not parse
+    is no concern of this one's (:func:`team.board_signals_in`).
+
     Each write is a ``signal`` event in the delta of every session on that board. Off on
     every board one of the project's rows ever recorded, ``fleet resume -P a`` put
     ``fleet-paused.a: off`` in the next prompt of every agent on every hub ``a`` ever ran
@@ -7187,10 +7201,17 @@ def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> Non
             with store_session() as store:
                 signals = _pause_signals(store, project, homes)
         elif orchestrator.team_enabled():
+            unreadable: list[tuple[str, str]] = []
             with store_session() as store:
-                signals = _pause_where_on(project, team.board_signals_in(store))
+                signals = _pause_where_on(
+                    project, team.board_signals_in(store, unreadable=unreadable)
+                )
                 if session_ref is not None and store.get_session(session_ref) is None:
                     raise KeyError(session_ref)
+            broken = _pause_where_on(project, unreadable)
+            if broken:
+                named = ", ".join(f"{name} on {board}" for board, name in broken)
+                raise FleetError(f"cannot clear the pause: {named} could not be read")
         for board, name in signals:
             team.set_signal(name, value, session_ref=session_ref, project_id=board)
     except team.TeamDisabledError as exc:
@@ -7202,7 +7223,8 @@ def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> Non
 
 
 def is_paused(project: ProjectInfo) -> bool:
-    """Whether ``project``'s pause reads on, on any board (:func:`_pause_where_on`)."""
+    """Whether ``project``'s pause reads on, on any board (:func:`_pause_where_on`); a blob
+    that does not parse reads as none (:func:`team.board_signals_in`)."""
     if not orchestrator.team_enabled():
         return False  # a disabled board holds no signals: nothing can be paused — and no store
     with store_session() as store:
@@ -7267,11 +7289,12 @@ def _pause_signals(
 
 
 def _pause_where_on(
-    project: ProjectInfo, signals: Mapping[tuple[str, str], Any]
+    project: ProjectInfo, signals: Mapping[tuple[str, str], Any] | Sequence[tuple[str, str]]
 ) -> list[tuple[str, str]]:
     """``project``'s pause where it reads ON: each (board, name) of ``signals``, every board's
     named states (``team.board_signals_in``, read once on a caller's connection), that is the
-    project's ``fleet-paused`` there (:func:`harness.pause_signal`).
+    project's ``fleet-paused`` there (:func:`harness.pause_signal`). Of a sequence of (board,
+    name), as ``board_signals_in`` lists those it could not read, each that is the project's.
 
     The read half of the pause. A signal's name says whose pause it is, on whichever board:
     ``fleet-paused`` on the project's own, ``fleet-paused.<id>`` on any other. Found from the
@@ -7280,11 +7303,18 @@ def _pause_where_on(
     ``git`` for a pause they almost never found (review of #259, round 31, 5/7); now they
     run none, and a pause on a board no row of the project names any more is found too.
     """
+    if not isinstance(signals, Mapping):
+        return [(board, name) for board, name in signals if _is_pause_of(project, board, name)]
     return [
         (board, name)
         for (board, name), state in sorted(signals.items())
-        if state.value == "on" and name == harness.pause_signal(project.id, board)
+        if state.value == "on" and _is_pause_of(project, board, name)
     ]
+
+
+def _is_pause_of(project: ProjectInfo, board: str, name: str) -> bool:
+    """Whether ``name`` on ``board`` is ``project``'s pause (:func:`harness.pause_signal`)."""
+    return name == harness.pause_signal(project.id, board)
 
 
 def _clear_pause_signal(store: ContextStore, signals: Sequence[tuple[str, str]]) -> None:

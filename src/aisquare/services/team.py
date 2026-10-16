@@ -1164,17 +1164,29 @@ def read_signal_in(store: ContextStore, project_id: str, name: str) -> SignalSta
     return _read_signal(store, project_id, name)
 
 
-def board_signals_in(store: ContextStore) -> dict[tuple[str, str], SignalState]:
+def board_signals_in(
+    store: ContextStore, *, unreadable: list[tuple[str, str]] | None = None
+) -> dict[tuple[str, str], SignalState]:
     """Every board's named states, by (board id, name), through a store the CALLER holds open
     (see :func:`set_signal_in`): one read of them all, for a caller that looks a name up on
     whichever boards hold it. A fleet project's pause is named for its project on each board
     (``harness.pause_signal``), so the boards it is on are those that hold it by that name
-    (``fleet._pause_where_on``)."""
+    (``fleet._pause_where_on``).
+
+    A state whose blob does not parse is left out, and its (board id, name) added to
+    ``unreadable`` when the caller gives one, to say whose it was. Read with the rest, one
+    malformed blob on any board raised for every caller: ``fleet resume`` of any project
+    ended in a traceback, and ``fleet shutdown --all`` confirmed no project down (review of
+    #259, round 32, 6/9)."""
     _require_enabled()
     states: dict[tuple[str, str], SignalState] = {}
     for key, blob in store.list_meta(_SIGNALS).items():
         board, _, name = key.removeprefix(_SIGNALS).partition("/")
-        states[(board, name)] = _signal_state(name, blob)
+        try:
+            states[(board, name)] = _signal_state(name, blob)
+        except (ValueError, TypeError, AttributeError):  # not JSON, not an object, a bad field
+            if unreadable is not None:
+                unreadable.append((board, name))
     return states
 
 

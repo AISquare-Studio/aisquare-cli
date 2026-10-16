@@ -9833,6 +9833,51 @@ def test_shutdown_reports_a_session_it_could_not_recheck_after_a_late_pane_exite
     assert report.incomplete_projects == [project.id], "an unverified session is not down"
 
 
+@pytest.mark.parametrize(
+    "blob",
+    ["not json", "[1, 2]", '{"value": "on", "seq": "x"}', '{"value": "on", "updated_at": 7}'],
+    ids=["not JSON", "not an object", "a bad seq", "a bad updated_at"],
+)
+def test_a_signal_that_does_not_parse_holds_up_only_the_project_whose_pause_it_is(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    runner: CliRunner,
+    blob: str,
+) -> None:
+    """Review of #259, round 32, 6/9: since round 31 every board's signals are read in one
+    pass, and one blob that did not parse raised for every caller: ``fleet resume`` of any
+    project ended in a traceback, and the shutdown pass put every visible project in
+    ``pause_unsettled``, none confirmed down. Another project's blob that does not parse is
+    left out; the project whose pause it is gets a refusal that names it."""
+    root = tmp_path / "other"
+    root.mkdir()
+    with store_session() as store:
+        other = store.onboard_project(ProjectInfo(id=project_id_for(root), root=root))
+        theirs = harness.pause_signal(other.id, other.id)
+        store.set_meta(f"signal/{other.id}/{theirs}", blob)
+        store.set_meta("signal/prj_elsewhere/deploy", blob)  # nobody's pause
+    fleet_service.pause(project)
+    assert fleet_service.is_paused(project) and not fleet_service.is_paused(other)
+
+    resumed = runner.invoke(app, ["--json", "fleet", "resume", "-P", project.id])
+
+    assert resumed.exit_code == 0, resumed.output
+    assert not fleet_service.is_paused(project)
+    with pytest.raises(FleetError) as refused:
+        fleet_service.resume(other)
+    assert str(refused.value) == f"cannot clear the pause: {theirs} on {other.id} could not be read"
+    fleet_service.pause(project)
+    report = fleet_service.ShutdownReport()
+    fleet_service._clear_pause([project, other], report)
+    assert report.paused_cleared == [fleet_service._name(project)], report
+    assert [p.id for p in report.pause_unsettled] == [other.id]
+    name = fleet_service._name(other)
+    assert report.pause_scan_failed == f"{name}: could not be read ({theirs} on {other.id})"
+    assert other.id in report.incomplete_projects and project.id not in report.incomplete_projects
+
+
 def test_shutdown_reports_a_pause_signal_it_could_not_read_or_clear(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -214,3 +214,30 @@ def test_j04_agent_pane(term: TerminalSession, recorder: Recorder) -> None:
             term.press("w")
             screen = term.wait_for(r"Your fleet is up", timeout=30)
             s.check("Welcome is back and still says the fleet is up", True)
+
+
+J06 = (
+    "J06",
+    "Doctor and Accounts pages",
+    "From the sidebar I open the Doctor to see the machine is healthy, then Accounts to see "
+    "which Claude logins aisquare knows, and w takes me back to Welcome.",
+)
+
+
+def test_j06_pages(term: TerminalSession, recorder: Recorder) -> None:
+    _require(recorder, "J02", J06)
+    with recorder.journey(*J06, terminal=term) as j:
+        with j.step("S01", "Open the Doctor from the sidebar", slug="doctor") as s:
+            term.click_text(r"^ ?Doctor\b", cols=SIDEBAR)
+            screen = term.wait_for(r"claude-code", timeout=60)
+            s.check("the doctor lists the Claude Code connection", "claude-code" in screen.text)
+            s.check("the sidebar's doctor summary shows no failures", "✗ 0" in screen.text)
+        with j.step("S02", "Open Accounts from the sidebar", slug="accounts") as s:
+            term.click_text(r"^ ?Accounts\b", cols=SIDEBAR)
+            screen = term.wait_for(r"Add Claude account", timeout=30)
+            s.check("Accounts offers to add a Claude account", True)
+            s.check("Accounts shows the AISquare sign-in section", "AISquare" in screen.text)
+        with j.step("S03", "w: back to Welcome", slug="back-to-welcome") as s:
+            term.press("w")
+            term.wait_for(r"Your fleet is up", timeout=30)
+            s.check("Welcome is back", True)

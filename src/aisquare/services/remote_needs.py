@@ -2970,10 +2970,16 @@ def _needs_board_once(
 
 def _needs_board_rank(item: NeedsItem, board: str, writers: Sequence[str]) -> tuple[int, int]:
     """Which project's card a shared board's item is: the asker's row's, the board's own, the
-    first writer's, in that order."""
+    first writer's, in that order, and a project that does not write the board after them.
+
+    A project reads a board it does not write when one of its rows recorded it
+    (:func:`_needs_elsewhere`), and its failed scan keeps its last cards. Ranked by its index
+    among the writers, such a card on a shared board raised ``ValueError``, so every scan
+    failed while that project's did, and every project's feed stood still (review of #259,
+    round 28, 1/10)."""
     return (
         0 if item.agent_id is not None else 1 if item.project_id == board else 2,
-        writers.index(item.project_id),
+        writers.index(item.project_id) if item.project_id in writers else len(writers),
     )
 
 

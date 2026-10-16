@@ -4604,6 +4604,47 @@ def test_a_question_read_on_a_board_another_project_reads_whole_is_one_card(
     ]
 
 
+def test_a_failed_scans_card_on_a_board_others_share_leaves_every_feed_standing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 28, 1/10: R and Q both read board H whole, R being H's own
+    project and Q one rooted below it. P's manager, spawned under H, asks there, and P's scan
+    reads H apart. When P's scan failed, its last card stood, met R's and Q's copies of the
+    same question on H, and was ranked by its index among H's writers, which P is not one of:
+    ``ValueError``, so every scan raised and no project's feed changed until P's scan worked
+    again. P's card is the one card, and Q's own question still renders beside it."""
+    import sqlite3
+
+    with store_session() as store:
+        r = store.onboard_project(_rooted(tmp_path / "repo"))
+        q = store.onboard_project(_rooted(tmp_path / "api"))
+        p = store.onboard_project(_rooted(tmp_path / "p"))
+        _seat_up(store, _manager_of("p", asks=True), p, r)
+        _seat_up(store, _Seat("q", "coder-1", asks=True), q, r)
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    live = remote_needs.live_needs_sources()
+    shared = replace(
+        live, board_project=lambda project: r.id if project.id in (r.id, q.id) else project.id
+    )
+
+    def ended(project_id: str, since: datetime) -> list[FleetAgent]:
+        if project_id == p.id:
+            raise sqlite3.OperationalError("database is locked")
+        return shared.ended_agents(project_id, since)
+
+    now = datetime.now(UTC)
+    first = scan_needs_you(shared, now=now, dismissed=())
+    cards = sorted((item.kind, item.project_id, item.agent) for item in first)
+    assert cards == sorted(
+        [("board_question", p.id, "manager"), ("board_question", q.id, "coder-1")]
+    ), cards
+
+    again = scan_needs_you(replace(shared, ended_agents=ended), now=now, dismissed=(), kept=first)
+
+    assert sorted(item.id for item in again) == sorted(item.id for item in first)
+
+
 @dataclass(frozen=True)
 class _Seat:
     """One agent of a board: its fleet project, label and role; whether a fleet row holds it

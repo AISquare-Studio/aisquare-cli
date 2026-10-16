@@ -897,12 +897,14 @@ settings, what `aisquare project onboard` packs it with, `CLAUDE.md`) is the age
 write, as on Claude Code, and so is the window's `PATH`, where Codex itself and aisquare's
 hooks find `git`: a launch whose `PATH` names a directory its sandbox may write (an empty
 entry is the directory a process runs in) is warned; the restart and spawn checks read
-the `PATH` the window will have, the fleet server's.
+the `PATH` the window will have: the role binding's where it sets one, else the fleet
+server's.
 Whatever its sandbox, a launch is refused, by `fleet spawn` before any window, by a
 restart, switch or hand-over before it stops the agent, and by `aisquare launch`, where
 that sandbox may write an aisquare that runs outside it, the launcher's own install or
-what the agent's hooks run (their `hooks.json`'s program, the plugin's launcher), with
-its environment, as read from Codex's system and user config, its `-p` profile and its
+what the agent's hooks run (their `hooks.json`'s program, or what the plugin's launcher
+finds as its own `_find` does, where its hooks run), with its environment, as read from
+Codex's system, user and managed config, its `-p` profile and its
 arguments (the
 workspace, `-C`, `--add-dir`, `writable_roots`, `/tmp`; none of them for a `read-only`
 seat): install `aisquare-cli` outside the project (`uv tool install aisquare-cli`) and

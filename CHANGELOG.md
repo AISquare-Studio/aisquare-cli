@@ -160,9 +160,11 @@ adapter.**
   spawn` before any window and by a restart, switch or hand-over before it stops
   the agent, where that sandbox may write an aisquare that runs outside it, the
   launcher's own install or what the agent's hooks run (their `hooks.json`'s
-  program, the plugin's launcher), each with its environment, as read from Codex's
-  system and user config, its `-p` profile and the arguments (the workspace, `-C`,
-  `--add-dir`,
+  program, or what the plugin's launcher finds as its `_find` does, where its hooks
+  run: trusted or under `--dangerously-bypass-hook-trust`, its `uvx` route's binary,
+  cache and Python included), each with its environment and the user site an `-E`
+  interpreter loads, as read from Codex's system, user and managed config, its `-p`
+  profile and the arguments (the workspace, `-C`, `--add-dir`,
   `writable_roots`, `/tmp`; none for a `read-only` seat), with the remedy for how
   the sandbox reaches it (`uv tool install aisquare-cli` for one in the project)
   and a doctor warning in a project (`sandbox-install`; never from the home or

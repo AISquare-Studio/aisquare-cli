@@ -489,20 +489,30 @@ tree by these means, and only these:
   other agents' worktrees and the fleet's tmux sockets;
 - whatever the sandbox, the aisquare that runs outside it: the launcher's own install,
   which the broker runs (its interpreter and the installation that comes from, its
-  environment and the user site it loads, whose `.pth` files run at every start, its
-  package, an editable install's source tree), and what the agent's aisquare hooks run,
-  each with its environment: the program its `hooks.json` names (hooks connected from
-  another install keep running that one; a `python -m aisquare` hook's virtualenv by the
-  name it is reached by, not the interpreter it links to), and, where the plugin is
-  installed for that home, what the plugin's launcher runs (the `aisquare` on the launch's
-  `PATH`, else `~/.local/bin`'s, else the pinned release through `uvx`, from uv's cache).
+  environment and the user site, which an `-E` interpreter loads whatever
+  `PYTHONNOUSERSITE` says, unless a virtualenv keeps the system's site out, whose `.pth`
+  files run at every start, its package, an editable install's source tree), and what the
+  agent's aisquare hooks run, each with its environment: the program its `hooks.json`
+  names (hooks connected from another install keep running that one; a `python -m
+  aisquare` hook's virtualenv by the name it is reached by, not the interpreter it links
+  to), and, where the plugin is installed for that home, its hooks trusted or the launch
+  bypassing hook trust (`--dangerously-bypass-hook-trust`, under which Codex runs them),
+  and the launcher not standing down beside a hook of ours whose program can start, what
+  the launcher finds as its own `_find` does: the first `aisquare` that can start on the
+  launch's `PATH`, in `~/.local/bin` or in `~/.cargo/bin`, or, with none, its `uvx` (found
+  the same way) and what that runs: uv's cache (`$UV_CACHE_DIR`, uv.toml's `cache-dir`,
+  else `$XDG_CACHE_HOME/uv`), the uv-managed Python it links to (`$UV_PYTHON_INSTALL_DIR`,
+  uv.toml's `python-install-dir`, else `$XDG_DATA_HOME/uv/python`) and the launcher's
+  answers.
   A launch is refused where its sandbox may write one of them, by `aisquare launch`, by
   `fleet spawn` before any window is made, and by `fleet restart`, `switch` and the
   usage-limit hand-over before they stop the agent (under the home the replacement
   starts with: a switch's target slot), naming the remedy (`store_broker.refuse_inside`).
   What the sandbox may write is read as Codex layers its settings, the system's
-  `/etc/codex/config.toml`, the user's `config.toml`, the `-p` profile beside it, then the
-  launch's arguments (`AgentAdapter.sandbox_writes`,
+  `/etc/codex/config.toml`, the user's `config.toml`, the `-p` profile beside it, the
+  administrator's `/etc/codex/managed_config.toml` over them (its `requirements.toml` only
+  narrows what may be chosen; macOS's MDM and cloud-managed layers are not files and are
+  not read), then the launch's arguments (`AgentAdapter.sandbox_writes`,
   measured on 0.162.1): the sandbox is `--sandbox`, else `-c sandbox_mode`, else the
   store's profile, which holds over a `sandbox_mode` in the files, else the files'
   `sandbox_mode`; under `workspace-write` (the store's profile over `:workspace`,
@@ -536,7 +546,10 @@ tree by these means, and only these:
   `core.fsmonitor=false`);
 - gbrain, which a brokered `recall` and a note's distill run: it starts in its brain's
   home, never in the tree, as a runtime may read its configuration from the directory it
-  starts in (Bun, gbrain's, reads `bunfig.toml` and `.env` there).
+  starts in (Bun, gbrain's, reads `bunfig.toml` and `.env` there). Recall passes its query
+  as gbrain's positional, as gbrain's source parses one; that is unmeasured live: no host
+  this was built on, nor any CI job, has gbrain (`tests/test_brain.py`'s real-gbrain test
+  runs where one is installed).
 
 The aisquare store (the aisquare home: `context.db`, the launch records, the config,
 the account homes, the caches) is **read-only in a Codex agent's sandbox, all of it**

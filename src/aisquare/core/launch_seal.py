@@ -25,9 +25,12 @@ inputs at the tops of its trees, ``.git``, the other agents' worktrees and the t
 sockets (``services.store_broker.launch_paths``); whatever the sandbox, a launch is
 refused, by ``aisquare launch``, by ``fleet spawn`` before any window, and by a restart,
 switch or hand-over before it stops the agent, where its sandbox may write an aisquare
-that runs outside it (the launcher's own, or what its hooks run: their config's program
-or the plugin's launcher), with that aisquare's environment, as read from what that
-sandbox may write (the system's and the user's config, its profile, its arguments:
+that runs outside it (the launcher's own, or what its hooks run: their config's program,
+or what the plugin's launcher finds as its own ``_find`` does, where its hooks run at
+all: trusted, or under ``--dangerously-bypass-hook-trust``), with that aisquare's
+environment and the user site an ``-E`` interpreter loads, as read from what that
+sandbox may write (the system's, the user's and the managed config, its profile, its
+arguments:
 ``store_broker.refuse_inside``, ``AgentAdapter.sandbox_writes``); its Python ignores
 ``PYTHONPATH`` and ``PYTHONHOME`` (``-E``: ``selfcli.isolated_argv_for``, and the hooks
 ``agents.install_hooks`` writes for an agent that sandboxes its tools, and the plugin's

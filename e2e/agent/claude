@@ -1,0 +1,57 @@
+#!/bin/sh
+# The e2e stand-in for Claude Code: no network, no account, NO LLM.
+#
+# It sits first on the test machine's PATH as `claude`, so aisquare treats it as
+# Claude Code (the Claude-only paths run: version read, --session-id, "Claude
+# Code" wording) while nothing calls a model. It is the docs/demo/stand-in agent
+# plus the two subcommands the one-line installer calls on an existing Claude Code
+# (`--version`, `update`), so a fresh-machine install doesn't hang on it.
+#
+# In a fleet pane it prints a banner that says what it is, then `exec cat`: the
+# pane's foreground process becomes `cat`, which the fleet's agent detection
+# accepts (services/fleet.py `_agent_running` rejects shells, tmux and python*),
+# and anything typed at it is echoed back — visible proof the keys arrived.
+#
+# The scripted agent of e2e/PLAN.md §6 (hooks, transcripts, tasks) replaces this.
+
+case "${1:-}" in
+--version | -v)
+    echo "2.1.281 (Claude Code) · e2e stand-in, no LLM"
+    exit 0
+    ;;
+update)
+    echo "Claude Code is up to date (e2e stand-in — nothing to update)"
+    exit 0
+    ;;
+esac
+
+if [ ! -t 0 ]; then
+    echo "e2e stand-in: no terminal attached, so there is nothing to answer"
+    exit 0
+fi
+
+name=
+previous=
+for arg in "$@"; do
+    [ "$previous" = "--name" ] && name=$arg
+    previous=$arg
+done
+name=${name:-${AISQUARE_ROLE:-agent}}
+
+where=$PWD
+case "$where" in
+"$HOME"/*) where="~${where#"$HOME"}" ;;
+esac
+
+line() { printf '│ %-56s │\n' "$1"; }
+printf '╭──────────────────────────────────────────────────────────╮\n'
+line "e2e stand-in agent: $name"
+line ""
+line "Nightly E2E runs this where Claude Code would run. No"
+line "model is called; it echoes what you type, so the test"
+line "can see keystrokes arrive. Real agents plug in later."
+line ""
+line "cwd: $where"
+printf '╰──────────────────────────────────────────────────────────╯\n'
+
+exec cat

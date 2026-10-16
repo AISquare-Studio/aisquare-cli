@@ -8742,47 +8742,61 @@ def test_a_reap_or_a_spawn_asks_git_for_the_branch_locks_directory_once(
     assert asked.count(("rev-parse", "--git-common-dir")) == 1
 
 
+@pytest.mark.parametrize("moving", [True, False], ids=["moving", "silent"])
 def test_a_waiter_on_the_branch_lock_waits_while_its_holder_moves_on(
-    repo: Path, monkeypatch: pytest.MonkeyPatch
+    repo: Path, monkeypatch: pytest.MonkeyPatch, moving: bool
 ) -> None:
     """Review of #259, round 18: the wait on one holder was sized for "at most four git
     commands", and a spawn now holds the lock through its tree, its window and its row; on a
     large repo a holder still working went past it, and a restart, its agent stopped, was
-    refused as behind a stuck one. A holder says it moved on after each git command it runs
-    under the lock, and the waiter's patience is for one step. One that says nothing for
-    the wait is still called stuck."""
-    monkeypatch.setattr(fleet_service, "_HOLDER_LOOK", 0.05)
+    refused as behind a stuck one. A holder says it moved on as it works, and the waiter's
+    patience is for one step. One that says nothing for the wait is still called stuck.
+
+    Driven by events, not by sleeps against the waiter's patience (round 19): the holder
+    says it moved on each time the waiter looks, and lets go once the waiter has looked
+    more times than its patience lasts; saying nothing, it holds until the waiter gave up.
+    A slow runner only makes each look later."""
+    monkeypatch.setattr(fleet_service, "_HOLDER_LOOK", 0.01)
     common = fleet_service._git_common_dir(repo)
-    holding, released = threading.Event(), threading.Event()
+    lock = common / "aisquare-fleet-branches.lock"
+    real_look = fleet_service._lock_holder
+    looks: list[str] = []
+    holding, let_go = threading.Event(), threading.Event()
 
-    def a_holder(steps: bool) -> None:
-        """Holds the lock 1 s, through a git command every 0.2 s when it ``steps``."""
-        with fleet_service._branches_locked(common, wait=5):
+    def look(at: Path) -> str:
+        if moving and holding.is_set():
+            # The holder's next step, said with a word of its own: a waiter that kept its
+            # patience from the first word would be past it by the fifth look.
+            fleet_service._holder_file(at).write_text(f"step {len(looks)}\n")
+            if len(looks) >= 10:
+                let_go.set()
+        looks.append(real_look(at))
+        return looks[-1]
+
+    def a_holder() -> None:
+        with locking.holding(lock, wait_s=5):
+            fleet_service._announce_holder(common)
             holding.set()
-            for _step in range(5):
-                time.sleep(0.2)
-                if steps:
-                    fleet_service._git(repo, "rev-parse", "HEAD")
-        released.set()
+            let_go.wait(30)
 
-    for steps in (True, False):
-        holding.clear()
-        released.clear()
-        holder = threading.Thread(target=a_holder, args=(steps,))
-        holder.start()
-        try:
-            assert holding.wait(5)
-            if steps:
-                with fleet_service._branches_locked(common, wait=0.5):
-                    assert released.is_set(), "taken once the holder let go"
-            else:
-                with (
-                    pytest.raises(FleetError, match="may be stuck"),
-                    fleet_service._branches_locked(common, wait=0.5),
-                ):
-                    pass
-        finally:
-            holder.join(5)
+    monkeypatch.setattr(fleet_service, "_lock_holder", look)
+    holder = threading.Thread(target=a_holder)
+    holder.start()
+    try:
+        assert holding.wait(30)
+        if moving:
+            with fleet_service._branches_locked(common, wait=0.05):
+                assert let_go.is_set(), "taken once the holder let go"
+            assert len(looks) > 10, "waited through more looks than its patience lasts"
+        else:
+            with (
+                pytest.raises(FleetError, match="may be stuck"),
+                fleet_service._branches_locked(common, wait=0.05),
+            ):
+                pass
+    finally:
+        let_go.set()
+        holder.join(30)
 
 
 def test_a_spawn_says_it_moved_on_once_its_window_is_up(

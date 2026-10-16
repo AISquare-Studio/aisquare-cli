@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import errno
 import os
-import shlex
 import shutil
 import stat
 import subprocess
@@ -106,12 +105,16 @@ def capture(store: ContextStore, project: ProjectInfo) -> None:
 
 
 class NotAdded(RuntimeError):
-    """A deliberate action needs a project row, capture is off, and nobody added this one."""
+    """A deliberate action needs a project row, capture is off, and nobody added this one.
+
+    The command it names is quoted for this shell (``install_route.command_line``):
+    ``shlex.quote`` wrapped a Windows path in single quotes, which cmd.exe passes on as part
+    of the path."""
 
     def __init__(self, project: ProjectInfo) -> None:
+        onboard = install_route.command_line(["aisquare", "project", "onboard", str(project.root)])
         super().__init__(
-            f"{display_name(project)} is not one of your projects — add it first: "
-            f"aisquare project onboard {shlex.quote(str(project.root))}"
+            f"{display_name(project)} is not one of your projects — add it first: {onboard}"
         )
         self.project = project
 

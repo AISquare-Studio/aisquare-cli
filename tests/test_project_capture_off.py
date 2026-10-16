@@ -74,6 +74,24 @@ def test_the_refusal_says_what_to_run_where_a_person_reads_it(
     )
 
 
+def test_the_refusal_quotes_the_onboard_for_this_shell(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The onboard the refusal names was ``shlex.quote``d: on Windows a path came out in
+    single quotes, which cmd.exe passes on as part of the path, and the refusal tests failed
+    on every windows-latest run (CI gate of #259). It is quoted for this shell, and reads
+    back as the one command."""
+    import sys
+
+    from aisquare.services import install_route
+    from aisquare.services import project as project_service
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    root = Path("C:/Users/me/My Repo")
+    said = str(project_service.NotAdded(ProjectInfo(id="prj_x", root=root)))
+    onboard = said.split("add it first: ", 1)[1]
+
+    assert install_route.split_line(onboard) == ["aisquare", "project", "onboard", str(root)]
+
+
 def test_a_board_read_where_nothing_was_added_is_empty_and_adds_nothing(
     runner: CliRunner,
 ) -> None:

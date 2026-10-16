@@ -9936,7 +9936,10 @@ def test_every_git_command_the_fleet_runs_takes_no_optional_lock(
 ) -> None:
     """Review of #259, round 20: one seam, so every git command a spawn, a stop and a reap run
     (status, rev-parse, for-each-ref, worktree list and the rest) carries
-    ``--no-optional-locks``, and a read never holds a lock a write in the same tree needs."""
+    ``--no-optional-locks``, and a read never holds a lock a write in the same tree needs.
+    But the board's own question, ``rev-parse --git-common-dir`` (``workspace.git_common_root``),
+    which every hook asks too: it takes no lock, and a git before 2.15 refuses the flag
+    (round 26, 11/11)."""
     real = subprocess.run
     gits: list[list[str]] = []
 
@@ -9953,7 +9956,8 @@ def test_every_git_command_the_fleet_runs_takes_no_optional_lock(
 
     assert dict(report.worktrees_kept) == {agent.cwd: "uncommitted changes"}, "status ran"
     assert {argv[argv.index("-C") + 2] for argv in gits} >= {"status", "worktree", "rev-parse"}
-    assert [argv for argv in gits if argv[1] != "--no-optional-locks"] == []
+    rest = [argv for argv in gits if argv[1] != "--no-optional-locks"]
+    assert rest and all(argv[-2:] == ["rev-parse", "--git-common-dir"] for argv in rest), rest
 
 
 def test_a_reap_or_a_spawn_asks_git_for_the_branch_locks_directory_once(

@@ -11,11 +11,13 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
+from aisquare.core import workspace
 from aisquare.core.orchestrator import team_project
 from aisquare.core.workspace import find_project_root
 
@@ -143,7 +145,7 @@ def test_a_worktree_git_gives_no_principal_is_its_own_root(
     are each their own root, whether git answers or not: a checkout, which ``serve
     --stdio`` activates in, never git's bookkeeping or a directory that is not there
     (review of #243, round 13, 1/4)."""
-    from aisquare.core import orchestrator, workspace
+    from aisquare.core import orchestrator
 
     repo, worktree = repo_with_worktree
     _, sub = repo_with_submodule
@@ -162,6 +164,27 @@ def test_a_worktree_git_gives_no_principal_is_its_own_root(
     monkeypatch.setattr(orchestrator, "git_common_root", lambda start: None)
     assert find_project_root(start) == start.resolve(), "with git failing"
     assert team_project(start).root == start.resolve()
+
+
+def test_a_worktree_resolves_on_a_git_that_does_not_know_no_optional_locks(
+    repo_with_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 26, 11/11: ``--no-optional-locks`` on ``rev-parse`` changed
+    nothing, as ``rev-parse`` takes no optional lock, and git before 2.15 exits 129 on it,
+    which read as "not a work tree": every linked worktree, a fleet agent's among them, had
+    a board of its own. Asked without it, a git that does not know the flag still answers."""
+    repo, worktree = repo_with_worktree
+    real = subprocess.run
+
+    def before_2_15(argv: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(argv, list) and argv[:1] == ["git"] and "--no-optional-locks" in argv:
+            return subprocess.CompletedProcess(argv, 129, "", "unknown option: --no-optional-locks")
+        return real(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", before_2_15)
+
+    assert workspace.git_common_root(worktree) == repo.resolve()
+    assert team_project(worktree).root == repo.resolve()
 
 
 def test_a_plain_repo_is_still_its_own_root(tmp_path: Path) -> None:

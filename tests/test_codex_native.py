@@ -207,7 +207,9 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
         monkeypatch.setenv("AISQUARE_ROLE", "coder")
         monkeypatch.setenv("AISQUARE_TEAM", "1")
         monkeypatch.setenv("AISQUARE_LAUNCH_ID", "native-fixture")
-        monkeypatch.setattr(agents, "_aisquare_command", lambda: shlex.join(selfcli.argv_for([])))
+        monkeypatch.setattr(
+            agents, "_aisquare_command", lambda *args, **kwargs: shlex.join(selfcli.argv_for([]))
+        )
         agents.install_hooks("codex", native_home)
         with store_session() as store:
             store.add(new_entry("LOCAL_CONTEXT_MARKER_4851", "user", None, [], "test"))
@@ -563,7 +565,9 @@ def test_real_codex_panes_take_a_told_line_before_any_hook_and_the_managers_nudg
             if key.startswith(("OPENAI_", "ANTHROPIC_", "CODEX_")):
                 monkeypatch.delenv(key)
         monkeypatch.setenv("CODEX_HOME", str(native_home))
-        monkeypatch.setattr(agents, "_aisquare_command", lambda: shlex.join(selfcli.argv_for([])))
+        monkeypatch.setattr(
+            agents, "_aisquare_command", lambda *args, **kwargs: shlex.join(selfcli.argv_for([]))
+        )
         agents.install_hooks("codex", native_home)
         config = load_config()
         config.fleet.tmux_socket = f"asq-codex-panes-{os.getpid()}"
@@ -783,7 +787,9 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
         monkeypatch.delenv("TMPDIR", raising=False)
         monkeypatch.setenv("AISQUARE_HOME", str(store))
         monkeypatch.setenv("CODEX_HOME", str(native_home))
-        monkeypatch.setattr(agents, "_aisquare_command", lambda: shlex.join(selfcli.argv_for([])))
+        monkeypatch.setattr(
+            agents, "_aisquare_command", lambda *args, **kwargs: shlex.join(selfcli.argv_for([]))
+        )
         agents.install_hooks("codex", native_home)
         config = load_config()
         config.fleet.tmux_socket = f"asq-codex-sandbox-{os.getpid()}"
@@ -1436,7 +1442,9 @@ def test_real_codex_at_its_usage_limit_reaches_the_board_with_no_stop(
             if key.startswith(("OPENAI_", "ANTHROPIC_", "CODEX_")):
                 monkeypatch.delenv(key)
         monkeypatch.setenv("CODEX_HOME", str(native_home))
-        monkeypatch.setattr(agents, "_aisquare_command", lambda: shlex.join(selfcli.argv_for([])))
+        monkeypatch.setattr(
+            agents, "_aisquare_command", lambda *args, **kwargs: shlex.join(selfcli.argv_for([]))
+        )
         agents.install_hooks("codex", native_home)
         config = load_config()
         config.fleet.tmux_socket = f"asq-codex-limit-{os.getpid()}"
@@ -1593,7 +1601,9 @@ def test_real_codex_fleet_from_before_launch_records_and_rows_its_sandbox_rewrot
         monkeypatch.delenv("TMPDIR", raising=False)
         monkeypatch.setenv("AISQUARE_HOME", str(store))
         monkeypatch.setenv("CODEX_HOME", str(native_home))
-        monkeypatch.setattr(agents, "_aisquare_command", lambda: shlex.join(selfcli.argv_for([])))
+        monkeypatch.setattr(
+            agents, "_aisquare_command", lambda *args, **kwargs: shlex.join(selfcli.argv_for([]))
+        )
         agents.install_hooks("codex", native_home)
         config = load_config()
         config.fleet.tmux_socket = socket
@@ -1791,7 +1801,9 @@ def test_real_codex_under_a_hub_in_a_worktree_reaches_its_board_and_leaves_no_pl
         monkeypatch.delenv("TMPDIR", raising=False)
         monkeypatch.setenv("AISQUARE_HOME", str(store))
         monkeypatch.setenv("CODEX_HOME", str(native_home))
-        monkeypatch.setattr(agents, "_aisquare_command", lambda: shlex.join(selfcli.argv_for([])))
+        monkeypatch.setattr(
+            agents, "_aisquare_command", lambda *args, **kwargs: shlex.join(selfcli.argv_for([]))
+        )
         agents.install_hooks("codex", native_home)
         config = load_config()
         config.fleet.tmux_socket = socket
@@ -1861,7 +1873,9 @@ def test_real_codex_under_a_hub_in_a_worktree_reaches_its_board_and_leaves_no_pl
             in_tree.parent.mkdir(parents=True)
             in_tree.write_text(f'#!/bin/sh\nexec {cli} "$@"\n', encoding="utf-8")
             in_tree.chmod(0o755)
-            monkeypatch.setattr(agents, "_aisquare_command", lambda: shlex.quote(str(in_tree)))
+            monkeypatch.setattr(
+                agents, "_aisquare_command", lambda *args, **kwargs: shlex.quote(str(in_tree))
+            )
             agents.install_hooks("codex", native_home)
             # The suite answers that aisquare lives outside every tree (conftest); this is
             # the real answer.
@@ -1912,6 +1926,109 @@ def test_real_codex_under_a_hub_in_a_worktree_reaches_its_board_and_leaves_no_pl
             )
             assert launched.returncode != 0, launched.stdout + launched.stderr
             assert "uv tool install aisquare-cli" in launched.stdout + launched.stderr
+        finally:
+            subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True, check=False)
+            server.shutdown()
+            thread.join(timeout=2)
+            shutil.rmtree(outside, ignore_errors=True)
+
+
+@pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
+def test_real_codex_in_a_direnv_project_keeps_its_pythonpath_and_aisquare_imports_none_of_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r14 of #113, findings 1, 3 and 4, on the real Codex with only loopback: a
+    project on ``PYTHONPATH=$PWD/src`` (direnv's ``layout``), set where the fleet's tmux
+    server starts, as an operator's shell sets it. The agent's own tool imports the
+    project's package from it; its note goes through its broker; and the ``sitecustomize``
+    in ``src``, which can leave a mark only from outside the sandbox, is imported by no
+    process aisquare runs there: the window's ``aisquare launch``, the agent's hooks, its
+    broker and the command the broker runs all ignore ``PYTHONPATH`` (``-E``)."""
+    binary = shutil.which("codex")
+    assert binary, "AISQUARE_TEST_CODEX requires an installed Codex"
+    refused = _sandbox_refused(binary, tmp_path)
+    if refused is not None:
+        pytest.skip(f"Codex's sandbox cannot start a command on this host: {refused}")
+    outside = Path(tempfile.mkdtemp(prefix="asq-", dir="/var/tmp"))
+    store, native_home, marks = outside / "h", outside / "c", outside / "marks"
+    native_home.mkdir()
+    marks.mkdir()
+    workspace = outside / "w"
+    (workspace / "src" / "probe_pkg").mkdir(parents=True)
+    (workspace / "src" / "probe_pkg" / "__init__.py").write_text("OK = 'probe-ok'\n", "utf-8")
+    (workspace / "src" / "sitecustomize.py").write_text(
+        "import os, sys\n"
+        "try:\n"
+        f"    with open(os.path.join({str(marks)!r}, str(os.getpid())), 'w') as mark:\n"
+        "        mark.write(' '.join(sys.argv))\n"
+        "except OSError:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    git = ["git", "-C", str(workspace), "-c", "user.email=a@b", "-c", "user.name=t"]
+    subprocess.run([*git, "init", "-q"], check=True)
+    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+    cli = shlex.join(selfcli.argv_for([]))
+    socket = f"asq-codex-direnv-{os.getpid()}"
+    with ThreadingHTTPServer(("127.0.0.1", 0), _Scripted) as server:
+        server.requests = []  # type: ignore[attr-defined]
+        requests: list[dict[str, Any]] = server.requests  # type: ignore[attr-defined]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        (native_home / "config.toml").write_text(
+            'model = "local-fixture"\nmodel_provider = "local"\n'
+            '[model_providers.local]\nname = "Local fixture"\nwire_api = "responses"\n'
+            f'base_url = "http://127.0.0.1:{server.server_port}/v1"\n'
+            "requires_openai_auth = false\n"
+            f'[projects.{json.dumps(str(workspace))}]\ntrust_level = "trusted"\n',
+            encoding="utf-8",
+        )
+        for key in tuple(os.environ):
+            if key.startswith(("OPENAI_", "ANTHROPIC_", "CODEX_")):
+                monkeypatch.delenv(key)
+        monkeypatch.delenv("TMPDIR", raising=False)
+        monkeypatch.setenv("AISQUARE_HOME", str(store))
+        monkeypatch.setenv("CODEX_HOME", str(native_home))
+        # The hooks as this version connects them for Codex: `<python> -E -P -m aisquare`.
+        agents.install_hooks("codex", native_home)
+        assert all(agents.hook_runs_isolated(c) for c in agents.hook_commands("codex", native_home))
+        config = load_config()
+        config.fleet.tmux_socket = socket
+        save_config(config)
+        project = team.activate(workspace)
+
+        def outputs() -> list[str]:
+            found: dict[str, str] = {}
+            for request in list(requests):
+                for item in request.get("input", []):
+                    if item.get("type") == "function_call_output":
+                        found.setdefault(str(item.get("call_id")), str(item.get("output")))
+            return list(found.values())
+
+        try:
+            # Set before the fleet's server starts, which every window inherits.
+            monkeypatch.setenv("PYTHONPATH", str(workspace / "src"))
+            seen = len(outputs())
+            fleet.spawn(
+                project, "coder", label="coder-direnv", agent="codex", worktree=False,
+                prompt=(
+                    "RUN python3 -c 'import probe_pkg; print(probe_pkg.OK)'; "
+                    f"{cli} note 'note from a direnv project'"
+                ),
+                agent_args=["--dangerously-bypass-hook-trust", "--no-alt-screen"],
+            )  # fmt: skip
+            deadline = time.monotonic() + 60
+            while len(outputs()) <= seen:
+                assert time.monotonic() < deadline, f"the command ran: {outputs()[-2:]}"
+                time.sleep(0.2)
+            said = outputs()[-1]
+            assert "probe-ok" in said, said
+            assert "shared (note): note from a direnv project" in said, said
+            with store_session() as handle:
+                texts = [event.text for event in handle.recent_events(project.id, limit=50)]
+            assert "note from a direnv project" in texts
+            imported = {mark.name: mark.read_text(encoding="utf-8") for mark in marks.iterdir()}
+            assert imported == {}, f"aisquare imported the tree's sitecustomize: {imported}"
         finally:
             subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True, check=False)
             server.shutdown()

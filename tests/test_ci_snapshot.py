@@ -344,44 +344,62 @@ def test_the_snapshots_git_runs_no_hook_of_the_repository(tmp_path: Path) -> Non
     assert marker.exists(), "the repository's own git still runs it"
 
 
+#: What runs a program, by the name it is called by however it was imported: subprocess's,
+#: os's, asyncio's and shutil.which.
+_RUNNERS = frozenset(
+    {
+        "run", "Popen", "call", "check_call", "check_output", "getoutput", "getstatusoutput",
+        "system", "popen", "execv", "execve", "execvp", "execvpe", "execl", "execlp",
+        "execle", "execlpe", "spawnv", "spawnve", "spawnvp", "spawnvpe", "posix_spawn",
+        "posix_spawnp", "create_subprocess_exec", "create_subprocess_shell", "which",
+    }
+)  # fmt: skip
+
+
+def _names_git(node: ast.AST | None) -> bool:
+    """A string that is ``git`` or starts a git command line (``"git status"``, an
+    f-string ``f"git {x}"``)."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value == "git" or node.value.startswith("git ")
+    if isinstance(node, ast.JoinedStr) and node.values:
+        return _names_git(node.values[0])
+    return False
+
+
 def _git_programs(tree: ast.AST) -> list[ast.AST]:
-    """Each place in ``tree`` that names git as a program to run: the string ``"git"`` as
-    the first element of a list or tuple (however it is laid out, ``["git"] + args`` and
-    ``("git",)`` included), as an argument of a ``subprocess``/``os.exec*``/``shutil.which``
-    call, or bound to a name (``GIT = "git"``)."""
-
-    def is_git(node: ast.AST) -> bool:
-        return isinstance(node, ast.Constant) and node.value == "git"
-
+    """Each place in ``tree`` that names git as a program to run, in these shapes: the
+    first element of a list or tuple (however it is laid out, ``["git"] + args`` and
+    ``("git",)`` included); an argument of a call that runs a program (:data:`_RUNNERS`:
+    ``subprocess.*``, ``os.system``/``os.exec*``, a ``shell=True`` string, ``which`` however
+    imported, ``asyncio.create_subprocess_*``), a string or an f-string starting
+    ``git``; a parameter's default; a name bound to it (``GIT = "git"``)."""
     found: list[ast.AST] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.List | ast.Tuple) and node.elts and is_git(node.elts[0]):
+        if isinstance(node, ast.List | ast.Tuple) and node.elts and _names_git(node.elts[0]):
             found.append(node)
         elif isinstance(node, ast.Call):
             func = node.func
-            owner = (
-                func.value.id
-                if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
-                else None
-            )
             name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-            runs = owner in {"subprocess", "os", "shutil"} and (
-                owner != "shutil" or name == "which"
-            )
-            if runs and any(is_git(arg) for arg in [*node.args, *(k.value for k in node.keywords)]):
+            if name in _RUNNERS and any(
+                _names_git(arg) for arg in [*node.args, *(k.value for k in node.keywords)]
+            ):
                 found.append(node)
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+            defaults = [*node.args.defaults, *node.args.kw_defaults]
+            found += [d for d in defaults if d is not None and _names_git(d)]
         elif (
             isinstance(node, ast.Assign | ast.AnnAssign)
             and node.value is not None
-            and is_git(node.value)
+            and _names_git(node.value)
         ):
             found.append(node)
     return found
 
 
 def test_the_git_guard_sees_every_shape_of_a_git_argv() -> None:
-    """Review r13 of #113, finding 11: the guard was a one-line regex, blind to ruff's one
-    element per line, ``["git"] + args``, ``("git",)`` and a ``GIT = "git"`` constant."""
+    """Review r13 of #113, finding 11, and r14, finding 10: the guard was a one-line regex,
+    then blind to a command line in a string, an f-string, ``which`` imported by name,
+    asyncio's runners and a parameter's default. Each shape it reads is here."""
     shapes = [
         'run(\n    [\n        "git",\n        "status",\n    ]\n)',
         'run(["git"] + args)',
@@ -389,10 +407,17 @@ def test_the_git_guard_sees_every_shape_of_a_git_argv() -> None:
         'GIT = "git"',
         'subprocess.run(argv, executable="git")',
         'shutil.which("git")',
+        'os.system("git status")',
+        'subprocess.run("git status --porcelain", shell=True)',
+        'subprocess.run(f"git -C {root} status", shell=True)',
+        'from shutil import which\nwhich("git")',
+        'await asyncio.create_subprocess_exec("git", "status")',
+        'def run_git(program="git"): ...',
     ]
     for shape in shapes:
         assert _git_programs(ast.parse(shape)), shape
-    assert not _git_programs(ast.parse('KEYS = ("editable", "git", "url")'))
+    for innocent in ('KEYS = ("editable", "git", "url")', 'raise Error("git is not installed")'):
+        assert not _git_programs(ast.parse(innocent)), innocent
 
 
 def test_every_git_aisquare_runs_is_its_own_hookless_one() -> None:

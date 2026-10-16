@@ -2972,9 +2972,11 @@ def _cycle_project(store: ContextStore, board: ProjectInfo) -> ProjectInfo | Non
     stored, codename and all.
 
     A session with no live row is named by the board when no hub is set: the board is then
-    its directory's project. Under a hub it is ``None``, and the commands are left bare.
-    Fail-open, like the assignment: a row that cannot be read costs the project, never
-    the board.
+    its directory's project. Read stored too: the board ``orchestrator.team_project`` builds
+    carries no codename, so every cycle named its project by its raw id, unlike ``fleet
+    ls``, the sidebar and every receipt (round 22). Under a hub it is ``None``, and the
+    commands are left bare. Fail-open, like the assignment: a row that cannot be read
+    costs the project, never the board.
     """
     agent_id = orchestrator.env_fleet_agent()
     if agent_id is not None:
@@ -2990,7 +2992,9 @@ def _cycle_project(store: ContextStore, board: ProjectInfo) -> ProjectInfo | Non
                 exc,
             )
             return None
-    return None if orchestrator.team_hub() is not None else board
+    if orchestrator.team_hub() is not None:
+        return None
+    return store.get_project(board.id) or board
 
 
 def event_line(

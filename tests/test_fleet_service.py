@@ -4541,6 +4541,29 @@ def test_a_fleet_agents_cycle_names_its_own_project_under_a_hub(
     assert bare and not any("--project" in command for command in bare), bare
 
 
+def test_a_cycle_with_no_fleet_row_names_its_project_by_its_codename(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 22, 6/9: the session-start hook and the prompt heartbeat build
+    the board from ``orchestrator.team_project``, which carries no codename, and the cycle
+    named its fleet commands by it: ``--project prj_<24 hex>`` in every manager's and
+    coder's briefing, for a project ``fleet ls``, the sidebar and every receipt call by its
+    codename. The stored project is named, as ``fleet_command`` says."""
+    with store_session() as store:
+        named = store.onboard_project(project, codename="calm-otter")
+    assert named.codename == "calm-otter"
+    _stranger(monkeypatch, "manager")
+
+    started = team_service.hook_session_start("sess-plain-6", project.root, "startup")
+    _stranger(monkeypatch, "coder")
+    joined = team_service.hook_prompt_heartbeat("sess-late-6", project.root)
+
+    for board in (started, joined):
+        commands = re.findall(r"aisquare fleet [a-z]+(?: --project [\w.-]+)?", board)
+        assert commands and all(c.endswith("--project calm-otter") for c in commands), board
+        assert project.id not in board
+
+
 def test_the_boards_limited_chip_names_the_agents_own_project_under_a_hub(
     tmux: FakeTmux,
     claude_on_path: Path,

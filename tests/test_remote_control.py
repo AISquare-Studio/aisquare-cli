@@ -43,6 +43,7 @@ from aisquare.cli.ui.remote_control import (
     load_remote_state,
 )
 from aisquare.cli.watch import _load_saved_theme
+from aisquare.core import locking as locking_core
 from aisquare.core import paths
 from aisquare.core.locking import lock_exclusive, unlock
 from aisquare.core.state_file import read_state, update_state
@@ -3677,7 +3678,7 @@ def test_a_look_at_who_serves_this_home_never_overlaps_this_processs_own_claim(
         calls.append(f"unlock by {threading.current_thread().name}")
         unlock(fd)
 
-    monkeypatch.setattr(remote_server, "lock_exclusive", locking)
+    monkeypatch.setattr(locking_core, "lock_exclusive", locking)  # core.locking's one loop
     monkeypatch.setattr(remote_server, "unlock", unlocking)
     answers: dict[str, object] = {}
 

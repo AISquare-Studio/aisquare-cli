@@ -71,7 +71,6 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import dataclasses
-import errno
 import functools
 import hashlib
 import hmac
@@ -91,7 +90,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from aisquare.core.atomic import Replacement, replacement, write_replacing
-from aisquare.core.locking import lock_exclusive, unlock
+from aisquare.core.locking import acquire, open_lock_file, unlock
 from aisquare.core.paths import (
     despite_windows_contention,
     ensure_home,
@@ -165,8 +164,6 @@ TUI's ``enforce_auto_off`` does every 30 s (:class:`_AutoOffTimer`)."""
 STATE_VERSION = 2
 """``remote.json``'s format: 2 holds devices by id and cookie digest (SPEC §2.3)."""
 STATE_LOCK_WAIT_SECONDS = 2.0
-_LOCK_HELD = frozenset({errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES})
-"""What ``flock`` and Windows' ``locking`` say when another process holds the lock."""
 WS_CLOSE_UNAUTHORIZED = 4401
 """Close code the page keys on: after it the adapter routes to /unlock."""
 WS_CLOSE_BAD_ORIGIN = 4403
@@ -1100,30 +1097,27 @@ def _encoded_state(state: _State) -> bytes:
 def _lock_state_file(path: Path) -> int | None:
     """``<path>.lock`` held exclusively, as a descriptor; ``None`` when it could not be had.
 
-    Waits at most :data:`STATE_LOCK_WAIT_SECONDS`, polling, as ``core.state_file`` does.
-    Past that, or when the lock file cannot be opened at all (a read-only home), the
-    write goes ahead without it, logged: a write is an atomic rename, so the file is
-    never torn, and what the lock prevents is one healthy writer undoing another; a
-    holder stalled that long is not one, and refusing would turn its stall into a
-    failed unlock or a crashed TUI.
+    Waits at most :data:`STATE_LOCK_WAIT_SECONDS`, polling, in ``core.locking``'s one loop
+    (:func:`~aisquare.core.locking.acquire`), as ``core.state_file`` does: a copy of the
+    loop here missed what was fixed there (review of #259, round 18). Past that, or when
+    the lock file cannot be opened at all (a read-only home), the write goes ahead without
+    it, logged: a write is an atomic rename, so the file is never torn, and what the lock
+    prevents is one healthy writer undoing another; a holder stalled that long is not one,
+    and refusing would turn its stall into a failed unlock or a crashed TUI.
     """
     lock_path = path.with_name(f"{path.name}.lock")
     try:
-        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        fd = open_lock_file(lock_path, mode=0o600)
     except OSError as exc:
         log.debug("remote: %s could not be opened (%s); writing without it", lock_path, exc)
         return None
-    deadline = time.monotonic() + STATE_LOCK_WAIT_SECONDS
-    while True:
-        try:
-            lock_exclusive(fd)
-            return fd
-        except OSError as exc:
-            if exc.errno not in _LOCK_HELD or time.monotonic() >= deadline:
-                os.close(fd)
-                log.warning("remote: %s not taken (%s); writing without it", lock_path, exc)
-                return None
-            time.sleep(0.01)
+    try:
+        acquire(fd, wait_s=STATE_LOCK_WAIT_SECONDS)
+    except OSError as exc:  # TimeoutError too: held past the wait
+        os.close(fd)
+        log.warning("remote: %s not taken (%s); writing without it", lock_path, exc)
+        return None
+    return fd
 
 
 _WRITE_ARRIVED: contextvars.ContextVar[float | None] = contextvars.ContextVar(
@@ -6754,24 +6748,19 @@ def _claim_remote_home(state: Runtime, *, by: str, port: int) -> bool:
         return False
     with _claiming:
         try:
-            fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+            fd = open_lock_file(path, mode=0o600)
         except OSError as exc:
             log.warning("remote: %s could not be opened (%s); serving without it", path, exc)
             return False
-        patience = time.monotonic() + CLAIM_PATIENCE_SECONDS
-        while True:
-            try:
-                lock_exclusive(fd)
-                break
-            except OSError as exc:
-                if exc.errno in _LOCK_HELD and time.monotonic() < patience:
-                    time.sleep(0.005)
-                    continue
-                os.close(fd)
-                if exc.errno in _LOCK_HELD:
-                    raise RemoteAlreadyOn(REMOTE_ALREADY_ON) from None
-                log.warning("remote: %s could not be locked (%s); serving without it", path, exc)
-                return False
+        try:
+            acquire(fd, wait_s=CLAIM_PATIENCE_SECONDS)  # core.locking's one loop
+        except TimeoutError:
+            os.close(fd)
+            raise RemoteAlreadyOn(REMOTE_ALREADY_ON) from None
+        except OSError as exc:
+            os.close(fd)
+            log.warning("remote: %s could not be locked (%s); serving without it", path, exc)
+            return False
         previous, _home_claim = _home_claim, (path, fd)
     if previous is not None:  # another home's, which this process serves no more
         _release_remote_claim(previous)
@@ -6858,9 +6847,11 @@ def remote_served_elsewhere() -> bool:
         except OSError:
             return False
         try:
-            lock_exclusive(fd)
-        except OSError as exc:
-            return exc.errno in _LOCK_HELD
+            acquire(fd, wait_s=0)
+        except TimeoutError:
+            return True  # held: another process serves
+        except OSError:
+            return False
         else:
             with contextlib.suppress(OSError):
                 unlock(fd)

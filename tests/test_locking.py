@@ -3,19 +3,24 @@
 ``state.json``'s, the credentials file's and a brain's each had their own copy of the
 open-then-poll loop, and the fleet's branch lock a fourth (review of #259, round 17, 11/12).
 The copies had drifted: a brain read every ``OSError`` as "held" and waited out its whole
-``wait_s`` for an error no retry clears.
+``wait_s`` for an error no retry clears. Remote's ``remote.json`` lock and its claim of the
+home were two more (round 18, 8/12).
 """
 
 from __future__ import annotations
 
 import errno
+import os
 import time
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
 from aisquare.core import brain, credentials, locking, state_file
+from aisquare.services import remote_server
 
 
 def _state(home: Path) -> None:
@@ -32,10 +37,28 @@ def _brain(home: Path) -> None:
         assert won
 
 
+def _remote_json(home: Path) -> None:
+    fd = remote_server._lock_state_file(home / "remote.json")
+    assert fd is not None, "taken"
+    locking.unlock(fd)
+    os.close(fd)
+
+
+def _remote_claim(home: Path) -> None:
+    """Remote's claim of its home, whose patience (50 ms) two "held" answers fit in."""
+    state = cast(Any, SimpleNamespace(_state_path=home / "remote.json"))
+    try:
+        assert remote_server._claim_remote_home(state, by="serve", port=8750) is True
+    finally:
+        remote_server._release_remote_home()
+
+
 TAKERS: dict[str, Callable[[Path], None]] = {
     "state.json": _state,
     "credentials": _credentials,
     "brain": _brain,
+    "remote.json": _remote_json,
+    "remote claim": _remote_claim,
 }
 
 
@@ -90,3 +113,24 @@ def test_holding_raises_timeout_past_its_wait_and_the_block_runs_once_free(
         pytest.fail("a second holder got in")
     with locking.holding(path, wait_s=0):
         pass
+
+
+def test_whether_another_process_serves_remote_is_asked_once_through_the_one_loop(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Remote's look at whether another process serves its home asks the lock once: "held"
+    is another Remote; any other answer is no evidence of one."""
+    isolated_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(remote_server, "_home_claim", None)
+    (isolated_home / "remote-serve.lock").touch()
+    answers = [OSError(errno.EACCES, "held"), OSError(errno.ENOLCK, "No locks available")]
+    asked: list[int] = []
+
+    def answer(fd: int) -> None:
+        asked.append(fd)
+        raise answers.pop(0)
+
+    monkeypatch.setattr(locking, "lock_exclusive", answer)
+    assert remote_server.remote_served_elsewhere() is True
+    assert remote_server.remote_served_elsewhere() is False
+    assert len(asked) == 2, "once each"

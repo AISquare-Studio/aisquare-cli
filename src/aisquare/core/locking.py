@@ -2,12 +2,14 @@
 
 ``core.brain`` guards a brain's directory with it, ``core.state_file``
 guards ``state.json``'s read-modify-write and ``core.credentials`` the
-credentials file's. Each takes the lock on a small file that exists only to be
-locked, never on the data file itself: the data file is replaced by rename, so
-a lock on its inode would not exclude a writer that opened the new one.
+credentials file's; Remote guards ``remote.json``'s and claims its home with it
+(``services.remote_server``). Each takes the lock on a small file that exists
+only to be locked, never on the data file itself: the data file is replaced by
+rename, so a lock on its inode would not exclude a writer that opened the new one.
 :func:`holding` is the one bounded wait, for every caller, and each words its
 own refusals (the fleet's lock over a repo's branches too); :func:`open_lock_file`
-and :func:`held` are its two steps, for a caller that words them apart.
+and :func:`held` are its two steps, for a caller that words them apart, and
+:func:`acquire` is the wait itself, for a lock held past any one block.
 
 Non-blocking on purpose. ``flock`` with ``LOCK_EX`` waits forever and
 Windows' ``LK_LOCK`` for about ten seconds, so a holder stalled inside its
@@ -94,26 +96,35 @@ def open_lock_file(path: Path, *, mode: int = 0o644) -> int:
             raise denied from None
 
 
-@contextlib.contextmanager
-def held(fd: int, *, wait_s: float) -> Iterator[None]:
-    """Lock the open lock file ``fd`` exclusively for the block, polling for at most ``wait_s``.
+def acquire(fd: int, *, wait_s: float) -> None:
+    """Lock the open lock file ``fd`` exclusively, polling for at most ``wait_s``; the caller
+    lets it go (:func:`unlock`, or closing ``fd``).
 
     THE poll loop: only "held" (:data:`_HELD`) is retried, so a holder stalled inside its
     critical section costs a bounded wait, not a hang. Raises :class:`TimeoutError` when
     another holder keeps the lock past ``wait_s`` (``0`` asks once), and any other
     ``OSError`` from the primitive at once. The OS drops the lock if the process dies.
+    :func:`held` is it for a block; Remote's claim of its home holds it for as long as it
+    serves, and asks with it whether another process does.
     """
     deadline = time.monotonic() + wait_s
     while True:
         try:
             lock_exclusive(fd)
-            break
+            return
         except OSError as exc:
             if exc.errno not in _HELD:
                 raise
             if time.monotonic() >= deadline:
                 raise TimeoutError(errno.ETIMEDOUT, "held by another process") from exc
             time.sleep(_POLL_S)
+
+
+@contextlib.contextmanager
+def held(fd: int, *, wait_s: float) -> Iterator[None]:
+    """Lock the open lock file ``fd`` exclusively for the block, polling for at most ``wait_s``
+    (:func:`acquire`, which says what it raises)."""
+    acquire(fd, wait_s=wait_s)
     try:
         yield
     finally:

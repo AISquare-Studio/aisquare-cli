@@ -26,7 +26,7 @@ import threading
 import time
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -4774,6 +4774,166 @@ def test_a_limited_chips_switch_that_cannot_be_read_is_logged_not_swallowed(
     [record] = [r for r in caplog.records if r.name == "aisquare.services.team"]
     assert "could not be read" in record.getMessage()
     assert "OperationalError: no such column: session_id" in record.getMessage()
+
+
+# --- under a hub: one board, many fleet projects ------------------------------------------
+#
+# docs/fleet.md's rule ("Under a hub: one board, many fleet projects"): what the team reads
+# and writes goes to the session's board, the hub's under one; what finds an agent goes to
+# its row's own project and never asks the board. Without a hub the two are one project, so
+# every call site that asked the wrong one passed every other test (review of #259, rounds
+# 21 to 24). Each case below runs under a hub whose fleet project is another, and names the
+# project where it landed.
+
+
+@dataclass(frozen=True)
+class _Hubbed:
+    """A hub's board and a fleet project that is another: a manager and a coder spawned
+    into ``fleet``, both started on ``hub``'s board, the coder holding ``task``, its process
+    the one this test runs as. ``woken`` is the project of each manager a nudge went to."""
+
+    hub: ProjectInfo
+    fleet: ProjectInfo
+    manager: FleetAgent
+    coder: FleetAgent
+    task: TeamTask
+    tmux: FakeTmux
+    monkeypatch: pytest.MonkeyPatch
+    woken: list[str]
+
+    @property
+    def manager_sid(self) -> str:
+        assert self.manager.session_id is not None
+        return self.manager.session_id
+
+    @property
+    def coder_sid(self) -> str:
+        assert self.coder.session_id is not None
+        return self.coder.session_id
+
+
+@pytest.fixture
+def hubbed(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> _Hubbed:
+    hub_root = tmp_path / "hub"
+    hub_root.mkdir()
+    with store_session() as store:
+        hub = store.onboard_project(team_project(hub_root))
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub_root))
+    manager, manager_sid = _spawned(project, "manager", None, tmux, monkeypatch)
+    team_service.hook_session_start(manager_sid, project.root, "startup")
+    task = _task(project, "the coder's task, on the hub's board")
+    coder, coder_sid = _spawned(project, "coder", None, tmux, monkeypatch)
+    team_service.hook_session_start(coder_sid, project.root, "startup")
+    team_service.claim_task(task.id, session_ref=coder_sid)
+    woken: list[str] = []
+
+    def nudge(project_id: str, *, reason: str) -> bool:
+        woken.append(project_id)
+        return True
+
+    monkeypatch.setattr(fleet_service, "nudge_manager", nudge)
+    assert task.project_id == hub.id != project.id
+    return _Hubbed(hub, project, manager, coder, task, tmux, monkeypatch, woken)
+
+
+def _delivered() -> str | None:
+    """The board the last attributed write was delivered to."""
+    delivery = team_service.last_delivery()
+    return delivery.board_id if delivery is not None else None
+
+
+def _named_by(command: str, w: _Hubbed) -> str | None:
+    """The id of the project ``command``'s ``--project`` names, of the hub and the fleet's."""
+    named = re.search(r"--project (\S+)", command)
+    with store_session() as store:
+        for project in (w.hub, w.fleet):
+            stored = store.get_project(project.id) or project
+            if named is not None and named.group(1) in (stored.codename, stored.id):
+                return project.id
+    return None
+
+
+def _case_task_add(w: _Hubbed) -> str | None:
+    task, _ = team_service.add_task("another task", session_ref=w.manager_sid)
+    return task.project_id
+
+
+def _case_note(w: _Hubbed) -> str | None:
+    team_service.add_note("which branch?", kind="question", session_ref=w.coder_sid)
+    return _delivered()
+
+
+def _case_task_next(w: _Hubbed) -> str | None:
+    team_service.add_task("a task for the pool", role="coder", session_ref=w.manager_sid)
+    picked = team_service.next_task(role="coder", claim=True, session_ref=w.coder_sid)
+    assert picked is not None
+    return picked.project_id
+
+
+def _case_task_review(w: _Hubbed) -> str | None:
+    team_service.review_task(w.task.id, note="green", session_ref=w.coder_sid)
+    return _delivered()
+
+
+def _case_task_done(w: _Hubbed) -> str | None:
+    team_service.finish_task(w.task.id, session_ref=w.coder_sid)
+    return _delivered()
+
+
+def _case_cycle_project(w: _Hubbed) -> str | None:
+    with store_session() as store:
+        named = team_service._cycle_project(store, w.hub, w.fleet.root, w.manager_sid, named=None)
+    return named.id if named is not None else None
+
+
+def _case_limited_chip(w: _Hubbed) -> str | None:
+    with store_session() as store:
+        store.mark_limited(w.coder_sid, None)
+        session = store.get_session(w.coder_sid)
+        assert session is not None
+        switches = team_service.fleet_switches(store, [session])
+    return _named_by(switches[w.coder_sid], w)
+
+
+def _case_limit_nudge(w: _Hubbed) -> str | None:
+    team_service.hook_stop_failure(
+        w.coder_sid, error="rate_limit", message="You've hit your session limit", details=None
+    )
+    (woken,) = w.woken
+    return woken
+
+
+#: Each case: which of the rule's two places it goes to, what it is, and how to run it.
+_HUB_RULE_CASES: list[tuple[str, str, Any]] = [
+    ("board", "task add", _case_task_add),
+    ("board", "a question on the feed", _case_note),
+    ("board", "task next --claim", _case_task_next),
+    ("board", "task review", _case_task_review),
+    ("board", "task done", _case_task_done),
+    ("fleet", "the cycle's --project", _case_cycle_project),
+    ("fleet", "a limited chip's fleet switch", _case_limited_chip),
+    ("fleet", "the manager a usage limit wakes", _case_limit_nudge),
+]
+
+
+@pytest.mark.parametrize(
+    ("where", "case"),
+    [pytest.param(where, run, id=f"{where}: {name}") for where, name, run in _HUB_RULE_CASES],
+)
+def test_under_a_hub_each_read_and_write_goes_where_the_rule_says(
+    hubbed: _Hubbed, where: str, case: Any
+) -> None:
+    """docs/fleet.md, "Under a hub: one board, many fleet projects": a board write lands on
+    the hub's board, a fleet lookup on the row's own project, and neither on the other."""
+    expected = hubbed.hub.id if where == "board" else hubbed.fleet.id
+
+    assert case(hubbed) == expected
 
 
 def test_task_next_prefers_the_callers_assigned_task_over_the_oldest(

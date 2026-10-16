@@ -507,4 +507,6 @@ whose hooks went missing is named rather than hidden behind a healthy ✓.
 
 For executions spanning multiple repositories, set
 `AISQUARE_TEAM_HUB=/path/to/hub` in every session; git worktrees already
-share their principal repo's board automatically.
+share their principal repo's board automatically. Fleet agents keep their rows
+in their own projects under a hub; which of the two each read and write goes to
+is one rule, in [the fleet guide](fleet.md#what-runs-where).

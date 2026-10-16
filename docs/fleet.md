@@ -1223,6 +1223,27 @@ as a running agent's exit and ended its row. A row from before 0.8.0 recorded
 no socket and is asked by name. The Manager tab's attach line names the
 server the same way.
 
+**Under a hub: one board, many fleet projects.** With `AISQUARE_TEAM_HUB` set,
+every session is on the hub's board (`fleet spawn` sets the hub on each window
+it starts), while each fleet row stays in the project it was spawned into,
+beside its manager's. So an agent lives in two places, and each read and write
+goes to one of them by one rule: **what the team reads and writes goes to the
+board; what finds an agent goes to its row's project and never asks the
+board.** A task is the one thing looked up on the board.
+
+| On the session's board (the hub's, under one) | On the row's fleet project (whatever the board) |
+|---|---|
+| Tasks: `task add`, `next`, `claim`, `review`, `done`, `block` and `reopen`. Also the task `fleet spawn --task` gives an agent, looked up (`12`, `#12` or an id) on the board that agent will read; `switch` and `restart` check it there too | Finding a session's row: the hand-over and the `/clear` that keep its claims for the id that follows, and the adoption of that id onto the row, whatever project the row is in |
+| Notes, questions, results and every other feed line | The panes, tmux, and the row's label and state |
+| The fleet's own lines, `agent_exited`, `switched` and `restarted`, on the board the row's session reads; and the entries a replacement's hand-off prompt quotes | `--project` in every hint and cycle command, and the project `fleet spawn`, `stop`, `tell`, `switch` and `restart` act on |
+| The claims a session holds, released or kept when it ends | Which manager a nudge wakes: the manager row in the writer's own row's project (a session with no row: in the board's). The deferred wake of a manager's own Stop wakes its own row |
+| What a nudge delivers: the delta of the board the woken manager reads | |
+
+Without a hub the two are one project, so a call site that asks the wrong one
+passes every test that sets none. `tests/test_fleet_service.py` runs each row
+of this table under a hub whose fleet project is another
+(`test_under_a_hub_each_read_and_write_goes_where_the_rule_says`).
+
 **What the UI remembers.** The view that was open — a project, an agent, the
 Settings hub or a page under it — comes back at the next launch if its row is still
 there (an agent that has gone falls back to its project), and so does the

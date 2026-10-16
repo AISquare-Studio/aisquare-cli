@@ -4565,6 +4565,36 @@ def test_a_cycle_with_no_fleet_row_names_its_project_by_its_codename(
         assert project.id not in board
 
 
+def test_a_cycle_whose_project_cannot_be_read_still_gets_its_board(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review of #259, round 23, 6/10: ``_cycle_project`` guarded the fleet row's read and
+    not the stored board's, so a ``get_project`` that raised there (a locked database, a
+    schema regression) went out of ``hook_session_start`` and the heartbeat, and the session
+    lost its whole ``<aisquare-team>`` injection. The read is guarded and logged, and the
+    cycle names the board it already holds."""
+    real = SqliteStore.get_project
+
+    def flaky(self: SqliteStore, project_id: str) -> ProjectInfo | None:
+        if sys._getframe(1).f_code.co_name == "_cycle_project":
+            raise sqlite3.OperationalError("database is locked")
+        return real(self, project_id)
+
+    monkeypatch.setattr(SqliteStore, "get_project", flaky)
+    _stranger(monkeypatch, "manager")
+
+    with caplog.at_level(logging.WARNING, logger="aisquare.services.team"):
+        started = team_service.hook_session_start("sess-plain-r23", project.root, "startup")
+        joined = team_service.hook_prompt_heartbeat("sess-late-r23", project.root)
+
+    for board in (started, joined):
+        assert "Your standing cycle (manager)" in board
+        commands = re.findall(r"aisquare fleet [a-z]+(?: --project [\w.-]+)?", board)
+        assert commands and all(c.endswith(f"--project {project.id}") for c in commands), board
+    warned = [r.getMessage() for r in caplog.records if r.name == "aisquare.services.team"]
+    assert len(warned) == 2 and all("OperationalError: database is locked" in w for w in warned)
+
+
 def test_the_boards_limited_chip_names_the_agents_own_project_under_a_hub(
     tmux: FakeTmux,
     claude_on_path: Path,

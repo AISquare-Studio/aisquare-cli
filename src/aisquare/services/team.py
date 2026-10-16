@@ -3040,26 +3040,32 @@ def _cycle_project(store: ContextStore, board: ProjectInfo) -> ProjectInfo | Non
     its directory's project. Read stored too: the board ``orchestrator.team_project`` builds
     carries no codename, so every cycle named its project by its raw id, unlike ``fleet
     ls``, the sidebar and every receipt (round 22). Under a hub it is ``None``, and the
-    commands are left bare. Fail-open, like the assignment: a row that cannot be read
-    costs the project, never the board.
+    commands are left bare. Fail-open, like the assignment: a read that fails costs the
+    project, never the board, and is logged. Every read, the stored board's too: outside
+    the guard, a ``get_project`` that raised took the session's whole ``<aisquare-team>``
+    injection with it (round 23). Without a hub the board, as it is, is still this
+    session's project; under one, no project is.
     """
+    hub = orchestrator.team_hub() is not None
     agent_id = orchestrator.env_fleet_agent()
-    if agent_id is not None:
-        try:
+    try:
+        if agent_id is not None:
             agent = store.get_fleet_agent(agent_id)
             if agent is not None and agent.ended_at is None:
                 return store.get_project(agent.project_id)
-        except Exception as exc:
-            _log.warning(
-                "the fleet row %s could not be read, so the cycle names no project (%s: %s)",
-                agent_id,
-                type(exc).__name__,
-                exc,
-            )
+        if hub:
             return None
-    if orchestrator.team_hub() is not None:
-        return None
-    return store.get_project(board.id) or board
+        return store.get_project(board.id) or board
+    except Exception as exc:
+        _log.warning(
+            "the project of this session's cycle could not be read (fleet row %s), so it "
+            "names %s (%s: %s)",
+            agent_id or "none",
+            "no project" if hub else "the board's",
+            type(exc).__name__,
+            exc,
+        )
+        return None if hub else board
 
 
 def event_line(

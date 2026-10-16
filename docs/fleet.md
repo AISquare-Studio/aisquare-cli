@@ -552,9 +552,9 @@ manager's cycle respects: while it is on, the manager spawns nothing. Running
 agents are not touched. Both take `--as SESSION`. The signal goes on every board
 the project's agents read, as each was recorded at spawn, whether it still runs
 or not, on the project's checkout's board and on the one a spawn from here would
-give; `fleet resume` and `fleet shutdown` clear it on the same boards, from `asq`
-under a hub or a plain shell alike, writing only where it is on, so a resume puts
-no `off` in the prompts of agents on boards it was never paused on. On a board other
+give; `fleet resume` and `fleet shutdown` clear it wherever it is on under the
+project's name, from `asq` under a hub or a plain shell alike, and only there, so a
+resume puts no `off` in the prompts of agents on boards it was never paused on. On a board other
 projects read too (the hub's under `AISQUARE_TEAM_HUB`, or the checkout's for a
 project rooted in a sub-folder of its repository) it is named after the project,
 `fleet-paused.<project id>`, and the manager's cycle names it: a pause, a resume

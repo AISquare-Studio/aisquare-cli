@@ -1008,8 +1008,12 @@ class SignalState:
     updated_at: datetime | None
 
 
+_SIGNALS = "signal/"
+"""The ``team_meta`` prefix every board's named states are kept under (:func:`_signal_key`)."""
+
+
 def _signal_key(project_id: str, name: str) -> str:
-    return f"signal/{project_id}/{name}"
+    return f"{_SIGNALS}{project_id}/{name}"
 
 
 def _signal_state(name: str, blob: str) -> SignalState:
@@ -1158,6 +1162,20 @@ def read_signal_in(store: ContextStore, project_id: str, name: str) -> SignalSta
     (see :func:`set_signal_in` for why)."""
     _require_enabled()
     return _read_signal(store, project_id, name)
+
+
+def board_signals_in(store: ContextStore) -> dict[tuple[str, str], SignalState]:
+    """Every board's named states, by (board id, name), through a store the CALLER holds open
+    (see :func:`set_signal_in`): one read of them all, for a caller that looks a name up on
+    whichever boards hold it. A fleet project's pause is named for its project on each board
+    (``harness.pause_signal``), so the boards it is on are those that hold it by that name
+    (``fleet._pause_where_on``)."""
+    _require_enabled()
+    states: dict[tuple[str, str], SignalState] = {}
+    for key, blob in store.list_meta(_SIGNALS).items():
+        board, _, name = key.removeprefix(_SIGNALS).partition("/")
+        states[(board, name)] = _signal_state(name, blob)
+    return states
 
 
 def _read_signal(store: ContextStore, project_id: str, name: str) -> SignalState | None:

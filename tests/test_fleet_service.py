@@ -9086,7 +9086,7 @@ def test_the_pause_pass_reads_and_clears_every_signal_through_one_store(
     assert not fleet_service.is_paused(project) and not fleet_service.is_paused(plain_project)
 
 
-def test_the_pause_pass_asks_git_once_for_each_visible_project_and_never_with_the_board_off(
+def test_the_pause_pass_asks_git_for_no_project_and_opens_no_store_with_the_board_off(
     tmux: FakeTmux,
     claude_on_path: Path,
     project: ProjectInfo,
@@ -9098,8 +9098,9 @@ def test_the_pause_pass_asks_git_once_for_each_visible_project_and_never_with_th
     (``fleet._pause_homes``, a ``git rev-parse`` with a 5 s timeout) before the store opened:
     a forgotten project's too, which the pass then skips, and all of them with the board off,
     where it stops at the first. ``directory_project`` asked git twice for a root that is not
-    a checkout. Now git is asked once for each visible project, and not at all with the board
-    off, where no store is opened either."""
+    a checkout. Then git was asked once for each visible project, and not at all with the
+    board off, where no store is opened either. Since round 31, 5/7 the pass finds each pause
+    by its name and asks git for none."""
     from aisquare.core import workspace
 
     (tmp_path / "gone").mkdir()
@@ -9117,10 +9118,12 @@ def test_the_pause_pass_asks_git_once_for_each_visible_project_and_never_with_th
     monkeypatch.setattr(workspace, "git_common_root", counted_git)
     targets = [project, plain_project, forgotten]
 
-    fleet_service._clear_pause(targets, fleet_service.ShutdownReport())
-    assert sorted(asked) == sorted([project.root.resolve(), plain_project.root.resolve()])
-
+    fleet_service.pause(project)
     asked.clear()
+    report = fleet_service.ShutdownReport()
+    fleet_service._clear_pause(targets, report)
+    assert (asked, report.paused_cleared) == ([], [fleet_service._name(project)])
+
     opens = 0
     real_open = core_store.open_store
 
@@ -9136,7 +9139,7 @@ def test_the_pause_pass_asks_git_once_for_each_visible_project_and_never_with_th
     assert (asked, opens, report.pause_scan_failed, report.pause_unsettled) == ([], 0, None, [])
 
 
-def test_a_root_the_pause_pass_cannot_look_at_fails_that_project_alone(
+def test_a_root_the_pause_pass_cannot_look_at_is_cleared_like_any_other(
     tmux: FakeTmux,
     claude_on_path: Path,
     project: ProjectInfo,
@@ -9147,8 +9150,9 @@ def test_a_root_the_pause_pass_cannot_look_at_fails_that_project_alone(
     out in one comprehension under the pass's outer ``try``, so one root that could not be
     looked at (``Path.exists`` raises ``PermissionError`` for a directory that cannot be
     searched, on Python 3.11 and 3.12) failed the pass for all: no pause was cleared, and
-    with ``pause_unsettled`` empty the ``--all`` line named no ``fleet resume``. It is that
-    project's failure now, as a signal it could not read is."""
+    with ``pause_unsettled`` empty the ``--all`` line named no ``fleet resume``. It was that
+    project's failure then. Since round 31, 5/7 the pass looks at no root: a pause is found
+    by its name, and both are cleared."""
     from aisquare.core import orchestrator
 
     fleet_service.pause(project)
@@ -9166,15 +9170,11 @@ def test_a_root_the_pause_pass_cannot_look_at_fails_that_project_alone(
     fleet_service._clear_pause([project, plain_project], report)
     monkeypatch.setattr(orchestrator, "directory_project", real)
 
-    assert report.paused_cleared == [fleet_service._name(plain_project)]
-    assert not fleet_service.is_paused(plain_project)
-    assert [p.id for p in report.pause_unsettled] == [project.id], "its resume is named"
-    assert report.pause_scan_failed is not None
-    assert report.pause_scan_failed.startswith(
-        f"{fleet_service._name(project)}: could not be read (PermissionError"
-    ), report.pause_scan_failed
-    assert report.incomplete_projects == [project.id]
-    assert fleet_service.is_paused(project), "kept, and said so"
+    names = [fleet_service._name(p) for p in (project, plain_project)]
+    assert sorted(report.paused_cleared) == sorted(names)
+    assert not fleet_service.is_paused(plain_project) and not fleet_service.is_paused(project)
+    assert (report.pause_unsettled, report.pause_scan_failed) == ([], None)
+    assert report.incomplete_projects == []
 
 
 def test_the_pause_builds_no_row(
@@ -9274,6 +9274,55 @@ def test_a_pause_or_resume_as_a_prefix_of_two_sessions_is_refused_as_ambiguous(
     result = runner.invoke(app, ["--json", "fleet", "resume", "-P", project.id, "--as", "ses_aa"])
     assert result.exit_code == 1, result.exception
     assert json.loads(result.stdout) == {"error": "fleet_error", "detail": ambiguous}
+
+
+def test_a_pause_is_read_and_cleared_by_its_name_on_any_board_with_no_git(
+    hubbed: _Hubbed, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 31, 5/7: reading or clearing a pause worked out its boards from
+    the project's rows and homes (``fleet._pause_homes``, a ``git rev-parse`` with a 5 s
+    timeout), for ``fleet resume``, ``is_paused`` and each visible project of ``fleet
+    shutdown --all``, every directory 0.8.0 captured included. A signal's name says whose
+    pause it is (``harness.pause_signal``), so it is found by that name on whichever board
+    holds it, one read of the store and no git: on a board no row of the project names too,
+    and never another project's pause on the same board."""
+    from aisquare.core import workspace
+
+    w = hubbed
+    root = tmp_path / "elsewhere"
+    root.mkdir()
+    with store_session() as store:
+        elsewhere = store.onboard_project(ProjectInfo(id=project_id_for(root), root=root))
+        assert elsewhere.id not in store.fleet_agent_boards(w.fleet.id)
+    for board in (w.hub.id, elsewhere.id):
+        team_service.set_signal(harness.pause_signal(w.fleet.id, board), "on", project_id=board)
+    team_service.set_signal(harness.PAUSE_SIGNAL, "on", project_id=w.hub.id)  # the hub's own
+    asked: list[Path] = []
+    real_git = workspace.git_common_root
+
+    def counted_git(start: Path) -> Path | None:
+        asked.append(start)
+        return real_git(start)
+
+    monkeypatch.setattr(workspace, "git_common_root", counted_git)
+
+    assert fleet_service.is_paused(w.fleet)
+    assert not fleet_service.is_paused(elsewhere), "the fleet's pause there is not its own"
+    fleet_service.resume(w.fleet)
+    assert not fleet_service.is_paused(w.fleet)
+    with store_session() as store:
+        name = harness.pause_signal(w.fleet.id, elsewhere.id)
+        there = team_service.read_signal_in(store, elsewhere.id, name)
+    assert there is not None and there.value == "off", "off on the unrecorded board too"
+    for board in (w.hub.id, elsewhere.id):
+        team_service.set_signal(harness.pause_signal(w.fleet.id, board), "on", project_id=board)
+    report = fleet_service.ShutdownReport()
+    fleet_service._clear_pause([w.fleet, elsewhere], report)
+
+    assert asked == [], "no git"
+    assert report.paused_cleared == [fleet_service._name(w.fleet)]
+    assert not fleet_service.is_paused(w.fleet)
+    assert fleet_service.is_paused(w.hub), "the hub's own pause, on the same board, is kept"
 
 
 def test_shutdown_clears_the_fleet_paused_signal(
@@ -9749,7 +9798,7 @@ def test_shutdown_reports_a_pause_signal_it_could_not_read_or_clear(
     spawn nothing, and nothing in the report saying so. Both failures are surfaced
     the way the visible-projects lookup already is, and the report is preserved.
     """
-    real_read = fleet_service._paused_signals
+    real_read = team_service.board_signals_in
     real_clear = fleet_service._clear_pause_signal
 
     def refuse(*args: object, **kwargs: object) -> bool:
@@ -9759,9 +9808,9 @@ def test_shutdown_reports_a_pause_signal_it_could_not_read_or_clear(
     fleet_service.pause(project)
     name = fleet_service._name(project)
 
-    monkeypatch.setattr(fleet_service, "_paused_signals", refuse)  # the READ fails
+    monkeypatch.setattr(team_service, "board_signals_in", refuse)  # the READ fails
     report = fleet_service.shutdown(project, force=True)
-    monkeypatch.setattr(fleet_service, "_paused_signals", real_read)
+    monkeypatch.setattr(team_service, "board_signals_in", real_read)
 
     assert len(report.stopped) == 1, "the report is preserved, not discarded"
     assert report.pause_scan_failed is not None and "locked" in report.pause_scan_failed

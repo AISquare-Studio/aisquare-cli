@@ -5669,16 +5669,15 @@ def _clear_pause(projects: Sequence[ProjectInfo], report: ShutdownReport) -> Non
     open their own — connect, WAL switch, migrations — so an ``--all`` shutdown
     paid two opens per project here on top of the rows'; the signals are read
     and cleared through the store this holds, by project id
-    (:func:`services.team.read_signal_in`, :func:`services.team.set_signal_in`),
+    (:func:`services.team.board_signals_in`, :func:`services.team.set_signal_in`),
     which also keeps the shutdown from contending with the hooks of the agents
     it is still stopping (review of #203, round 4).
 
-    Each project's homes (:func:`_pause_homes`, which asks git) are worked out in that pass,
-    for a visible project only, and not at all with the board off. Worked out before the
-    store opened, git ran for every target, forgotten ones included, and for every one with
-    the board off, where the pass stops at the first: serially, at the end of ``shutdown
-    --all``, with a 5 s timeout on each call (review of #259, round 30, 7/8). The connection
-    holds no transaction between statements, so a writer is not kept waiting on git.
+    The signals are read once for the pass, and each project's pause is found among them by
+    its name (:func:`_pause_where_on`), so no ``git`` runs. Its boards were worked out per
+    project from its checkout's (:func:`_pause_homes`, a ``git rev-parse`` with a 5 s
+    timeout), serially, for every visible project, every directory 0.8.0 captured included,
+    each for a pause it almost never has (review of #259, round 30, 7/8, and round 31, 5/7).
     """
     if not orchestrator.team_enabled():
         return  # no board, no signals: nothing is paused anywhere
@@ -5717,10 +5716,11 @@ def _reconcile_pauses(
     visible: Collection[str],
     report: ShutdownReport,
 ) -> list[str]:
-    """The per-project half of :func:`_clear_pause`, of each visible project, with its
-    :func:`_pause_homes`; returns what could not be done.
+    """The per-project half of :func:`_clear_pause`, of each visible project, its pause found
+    by name among the signals read once for the pass (:func:`_pause_where_on`); returns what
+    could not be done.
 
-    Per-project read/write failures are surfaced the way the lookup's is. A
+    Read/write failures are surfaced the way the lookup's is. A
     blanket ``suppress(Exception)`` here left the signal ON with
     ``paused_kept=[]``, ``pause_scan_failed=null`` and exit 0 — the next manager
     still under orders to spawn nothing, and nothing in the report saying so
@@ -5729,27 +5729,27 @@ def _reconcile_pauses(
     run on a project with no board still reports clean.
     """
     failures: list[str] = []
+    unread: Exception | None = None
+    try:
+        signals = team.board_signals_in(store)
+    except team.TeamDisabledError:
+        return failures  # no board, no signals: nothing is paused anywhere
+    except Exception as exc:
+        signals, unread = {}, exc
     for project in projects:
         if project.id not in visible:
             continue
-        try:
-            # Its homes ask git and the filesystem: a root that cannot be looked at (one that
-            # cannot be searched is a `PermissionError` on Python 3.11 and 3.12) is this
-            # project's failure, not every project's (review of #259, round 30, 4/8).
-            homes = _pause_homes(project)
-            # Its own pause on each board it lives on (`_pause_signals`), whichever rows were
-            # live: under a hub, never another project's on the same board.
-            paused = _paused_signals(store, _pause_signals(store, project, homes))
-        except team.TeamDisabledError:
-            return failures  # no board, no signals: nothing is paused anywhere
-        except Exception as exc:
-            # The signal could not even be READ, so nothing is known about it:
-            # the failure is named and the project is not confirmed down, and
-            # neither `paused_kept` nor `paused_cleared` claims anything.
-            failures.append(f"{_name(project)}: could not be read ({type(exc).__name__}: {exc})")
+        if unread is not None:
+            # The signals could not even be READ, so nothing is known about this
+            # project's: the failure is named and the project is not confirmed down,
+            # and neither `paused_kept` nor `paused_cleared` claims anything.
+            why = f"{type(unread).__name__}: {unread}"
+            failures.append(f"{_name(project)}: could not be read ({why})")
             report.pause_unsettled.append(project)
             _not_down(report, project.id)
             continue
+        # Its own pause wherever it is on: under a hub, never another project's on the board.
+        paused = _pause_where_on(project, signals)
         if not paused:
             continue
         if project.id in report.incomplete_projects:
@@ -7166,8 +7166,8 @@ def resume(project: ProjectInfo, *, session_ref: str | None = None) -> None:
 
 
 def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> None:
-    """Set ``project``'s pause to ``value`` on the boards it lives on (:func:`_pause_signals`):
-    ``on`` on every one, ``off`` only where it reads on (:func:`_paused_signals`).
+    """Set ``project``'s pause to ``value``: ``on`` on every board it lives on
+    (:func:`_pause_signals`), ``off`` wherever it reads on (:func:`_pause_where_on`).
 
     Each write is a ``signal`` event in the delta of every session on that board. Off on
     every board one of the project's rows ever recorded, ``fleet resume -P a`` put
@@ -7182,14 +7182,15 @@ def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> Non
     try:
         # The team off: `set_signal` refuses before any store opens.
         signals = [(project.id, PAUSE_SIGNAL)]
-        if orchestrator.team_enabled():
+        if orchestrator.team_enabled() and value == "on":
             homes = _pause_homes(project)
             with store_session() as store:
                 signals = _pause_signals(store, project, homes)
-                if value == "off":
-                    signals = _paused_signals(store, signals)
-                    if session_ref is not None and store.get_session(session_ref) is None:
-                        raise KeyError(session_ref)
+        elif orchestrator.team_enabled():
+            with store_session() as store:
+                signals = _pause_where_on(project, team.board_signals_in(store))
+                if session_ref is not None and store.get_session(session_ref) is None:
+                    raise KeyError(session_ref)
         for board, name in signals:
             team.set_signal(name, value, session_ref=session_ref, project_id=board)
     except team.TeamDisabledError as exc:
@@ -7201,11 +7202,11 @@ def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> Non
 
 
 def is_paused(project: ProjectInfo) -> bool:
+    """Whether ``project``'s pause reads on, on any board (:func:`_pause_where_on`)."""
     if not orchestrator.team_enabled():
         return False  # a disabled board holds no signals: nothing can be paused — and no store
-    homes = _pause_homes(project)
     with store_session() as store:
-        return _pause_is_on(store, project, homes)
+        return bool(_pause_where_on(project, _team().board_signals_in(store)))
 
 
 def _pause_homes(project: ProjectInfo) -> set[str]:
@@ -7213,29 +7214,26 @@ def _pause_homes(project: ProjectInfo) -> set[str]:
     (:func:`_pause_boards`): its checkout's, where a spawn from a caller without a hub reads,
     and the one a spawn from here gives (:func:`_board_for`), the hub's under one.
 
-    Asks git: ``fleet pause``, ``fleet resume`` and ``is_paused`` ask it before their store
-    opens, and ``fleet shutdown``'s pass of each visible project in turn
-    (:func:`_clear_pause`).
+    Asks git, before the store opens, and only to set the pause: reading or clearing it
+    finds it by name (:func:`_pause_where_on`).
     """
     checkout = orchestrator.directory_project(project.root).id
     return {checkout, _board_for(project)} if orchestrator.team_hub() is not None else {checkout}
 
 
 def _pause_boards(store: ContextStore, project: ProjectInfo, homes: Collection[str]) -> list[str]:
-    """The boards ``project``'s ``fleet-paused`` signal lives on: every board one of its rows
+    """The boards ``project``'s ``fleet-paused`` signal is set on: every board one of its rows
     recorded, live or ended (:meth:`ContextStore.fleet_agent_boards`, :func:`_board_of_row`),
     and ``homes`` (:func:`_pause_homes`), where the next manager a spawn gives reads.
 
-    The same set for ``fleet pause``, ``fleet resume``, ``is_paused`` and ``fleet shutdown``,
-    whichever rows are live when each asks and whether it exports the hub or not. Taken from
-    the rows live at the moment, a pause set on a hub where the manager read was left on
-    there once that manager stopped: the shutdown and the resume asked only the boards still
-    live, or the newest row's, a coder's on the checkout's board, and the next manager
-    spawned under the hub came up staffing nothing (review of #259, round 29, 1/8). The
-    checkout's board is in it from a caller under a hub too, so a pause set from a plain
-    shell is cleared from ``asq``. One ``SELECT DISTINCT``, so no row is built: every
-    spawn, restart and switch adds a row that is never deleted, and ``fleet shutdown --all``
-    asks this of every visible project (round 26, 10/11).
+    Whichever rows are live and whether the caller exports the hub or not. Taken from the
+    rows live at the moment, a pause set on a hub where the manager read was left on there
+    once that manager stopped: the shutdown and the resume asked only the boards still live,
+    or the newest row's, a coder's on the checkout's board, and the next manager spawned
+    under the hub came up staffing nothing (review of #259, round 29, 1/8). ``fleet
+    resume``, ``is_paused`` and ``fleet shutdown`` now find the pause wherever it is on, by
+    its name (:func:`_pause_where_on`). One ``SELECT DISTINCT``, so no row is built: every
+    spawn, restart and switch adds a row that is never deleted (round 26, 10/11).
 
     A signal is the board's (docs/fleet.md, "Under a hub: one board, many fleet projects"),
     and the manager asks its own session's board, as its cycle line tells it to. Set, read
@@ -7262,27 +7260,25 @@ def _pause_signals(
     ]
 
 
-def _pause_is_on(store: ContextStore, project: ProjectInfo, homes: Collection[str]) -> bool:
-    """Whether ``project``'s ``fleet-paused`` signal reads ON, through ``store``: on any of
-    the boards it lives on (:func:`_pause_signals`)."""
-    return bool(_paused_signals(store, _pause_signals(store, project, homes)))
-
-
-def _paused_signals(
-    store: ContextStore, signals: Sequence[tuple[str, str]]
+def _pause_where_on(
+    project: ProjectInfo, signals: Mapping[tuple[str, str], Any]
 ) -> list[tuple[str, str]]:
-    """Those of ``signals`` (board, name) that read ON, through ``store``.
+    """``project``'s pause where it reads ON: each (board, name) of ``signals``, every board's
+    named states (``team.board_signals_in``, read once on a caller's connection), that is the
+    project's ``fleet-paused`` there (:func:`harness.pause_signal`).
 
-    The read half of the pause, id-addressed and on a caller's connection, so
-    ``shutdown``'s pass over every project pays one open (review of #203,
-    round 4). Raises ``TeamDisabledError`` when there is no board to ask.
+    The read half of the pause. A signal's name says whose pause it is, on whichever board:
+    ``fleet-paused`` on the project's own, ``fleet-paused.<id>`` on any other. Found from the
+    boards its rows recorded and its homes (:func:`_pause_boards`, :func:`_pause_homes`),
+    ``fleet resume``, ``is_paused`` and each visible project of ``fleet shutdown --all`` ran
+    ``git`` for a pause they almost never found (review of #259, round 31, 5/7); now they
+    run none, and a pause on a board no row of the project names any more is found too.
     """
-    paused: list[tuple[str, str]] = []
-    for board, name in signals:
-        state = _team().read_signal_in(store, board, name)
-        if state is not None and state.value == "on":
-            paused.append((board, name))
-    return paused
+    return [
+        (board, name)
+        for (board, name), state in sorted(signals.items())
+        if state.value == "on" and name == harness.pause_signal(project.id, board)
+    ]
 
 
 def _clear_pause_signal(store: ContextStore, signals: Sequence[tuple[str, str]]) -> None:

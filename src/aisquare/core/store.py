@@ -3855,7 +3855,7 @@ class SqliteStore:
         """Every board one of the project's rows recorded, live or ended, sorted; ``[]``
         before its first spawn.
 
-        The boards a project's pause lives on, whichever of its rows are live when it is
+        The boards a project's pause is set on, whichever of its rows are live when it is
         asked (``services.fleet._pause_boards``). Distinct in SQL: every spawn, restart and
         switch adds a row that is never deleted, and :meth:`fleet_agents` builds them all.
         """

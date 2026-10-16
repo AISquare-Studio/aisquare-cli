@@ -8661,6 +8661,42 @@ def test_a_reap_inside_a_spawn_never_removes_the_tree_it_reused_before_its_row(
     assert fleet_service.reap(project).worktrees_removed == [], "a live agent's, from now on"
 
 
+def test_a_reap_says_why_it_keeps_a_tree_while_a_spawn_holds_the_branch_lock(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 19: a reap took the branch lock before it asked what a tree
+    held. While a spawn held it, a tree with uncommitted work was reported as "another
+    aisquare holds … — try again", not as what to commit; and each reap held the lock
+    through ``git status`` and the push check of every tree it kept, a spawn queued behind.
+    What a tree holds is asked without the lock, and said whoever holds it."""
+    agent = fleet_service.spawn(project, "coder", label="coder-dirty").agent
+    (agent.cwd / "work.txt").write_text("not committed\n", encoding="utf-8")
+    fleet_service.stop(project, "coder-dirty", force=True)
+    lock = fleet_service._git_common_dir(project.root) / "aisquare-fleet-branches.lock"
+
+    with locking.holding(lock, wait_s=0):  # a spawn, mid `git worktree add`
+        during = fleet_service.reap(project)
+
+    real = fleet_service._why_kept
+    free: list[bool] = []
+
+    def asked(root: Path, tree: Path, default: str) -> str | None:
+        try:
+            with locking.holding(lock, wait_s=0):
+                free.append(True)
+        except TimeoutError:
+            free.append(False)
+        return real(root, tree, default)
+
+    monkeypatch.setattr(fleet_service, "_why_kept", asked)
+    after = fleet_service.reap(project)
+
+    assert dict(during.worktrees_kept) == {agent.cwd: "uncommitted changes"}
+    assert dict(after.worktrees_kept) == {agent.cwd: "uncommitted changes"}
+    assert free == [True], "asked without the lock"
+    assert agent.cwd.is_dir()
+
+
 def test_a_reap_or_a_spawn_asks_git_for_the_branch_locks_directory_once(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

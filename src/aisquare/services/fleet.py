@@ -1558,9 +1558,20 @@ def _reap_tree(
     recorded, then named by no row, was never swept, and a restart of a gone tree was made
     on the spawn's (round 18). Never waited for: a spawn holds the lock through a ``git
     worktree add`` and a window, and the next reap asks again.
+
+    What the tree holds (:func:`_why_kept`) is asked first, without the lock: it only says
+    whether to try. Asked under it, a reap held the lock through ``git status`` and the push
+    check of every tree it kept, and while a spawn held it, a tree with uncommitted work was
+    reported as "try again" rather than as what to commit (review of #259, round 19). So a
+    tree that holds something is said to, held lock or not; one that looked removable is
+    removed only once the rows say, under the lock, that no other agent took it.
     """
     tree = agent.cwd
     here = tree.resolve()
+    try:
+        kept = _why_kept(project.root, tree, default)
+    except FleetError as exc:
+        kept = f"git could not be asked ({exc})"
     try:
         with _branches_locked(common, wait=0):
             since = [
@@ -1570,15 +1581,11 @@ def _reap_tree(
             if any(row.id != agent.id and row.cwd.resolve() == here for row in since):
                 return False, None
             _record_the_branch(store, agent)
-            try:
-                kept = _why_kept(project.root, tree, default)
-            except FleetError as exc:
-                kept = f"git could not be asked ({exc})"
             if kept is not None:
                 return False, kept
             removal = _git(project.root, "worktree", "remove", str(tree))
     except FleetError as exc:
-        return False, f"not removed now: {exc}"
+        return False, kept or f"not removed now: {exc}"
     if removal.returncode != 0:
         return False, f"git worktree remove refused: {removal.stderr.strip() or 'no reason'}"
     return True, None

@@ -1122,11 +1122,25 @@ def test_shutdown_all_names_a_resume_for_each_project_whose_pause_was_not_settle
     ) in out, out
     assert resolved.calls == []
 
+    # Round 23, 7/10: `--json` names them too, as projects a script can resume: the display
+    # names `pause_scan_failed` joins are no `--project` reference.
+    payload = json.loads(
+        runner.invoke(app, ["--json", "fleet", "shutdown", "--all", "--yes"]).stdout
+    )
+    assert [(p["codename"], p["project"]["id"]) for p in payload["pause_unsettled"]] == [
+        ("amber-otter", PROJECT.id),
+        (None, UNNAMED.id),
+    ]
+
     _install(monkeypatch, "shutdown", _report(pause_scan_failed="OperationalError: locked"))
     whole = " ".join(
         _plain(runner.invoke(app, ["fleet", "shutdown", "--all", "--yes"]).stdout).split()
     )
     assert "re-run once the store answers" in whole and "fleet resume" not in whole, whole
+    payload = json.loads(
+        runner.invoke(app, ["--json", "fleet", "shutdown", "--all", "--yes"]).stdout
+    )
+    assert payload["pause_unsettled"] == [], "a lookup that failed whole asked no project"
 
 
 def test_shutdown_json_carries_every_group_and_the_reasons(
@@ -1160,6 +1174,7 @@ def test_shutdown_json_carries_every_group_and_the_reasons(
         "incomplete_projects",
         "late_scan_failed",
         "pause_scan_failed",
+        "pause_unsettled",
     }
     assert payload["stopped"][0]["label"] == "coder-auth"
     assert payload["recorded"] == [

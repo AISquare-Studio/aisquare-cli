@@ -618,6 +618,10 @@ def _emit_shutdown(report: fleet_service.ShutdownReport, target: ProjectInfo | N
                     "incomplete_projects": report.incomplete_projects,
                     "late_scan_failed": report.late_scan_failed,
                     "pause_scan_failed": report.pause_scan_failed,
+                    # The projects themselves, codename and id: `pause_scan_failed` names them
+                    # by display name, which `--project` does not take, so a script could not
+                    # tell which to `fleet resume` (review of #259, round 23).
+                    "pause_unsettled": [_project_json(p) for p in report.pause_unsettled],
                 }
             )
         )

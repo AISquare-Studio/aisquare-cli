@@ -956,17 +956,20 @@ def one_load() -> Iterator[None]:
 
 _LAST_PARSE: tuple[Path, bytes, AppConfig] | None = None
 """The last file :func:`load_config` parsed: its path, its bytes, and what they validated to,
-which no caller is handed (each gets a copy)."""
+which no caller that may change it is handed (each gets a copy; ``copy=False`` reads it)."""
 
 
-def load_config(path: Path | None = None) -> AppConfig:
+def load_config(path: Path | None = None, *, copy: bool = True) -> AppConfig:
     """Load configuration from ``path`` (default: the standard location).
 
     The file is laid over the system defaults (:func:`_overlay`): what it sets wins, and
     whatever it leaves out is the default. A missing file yields the defaults alone.
     Within :func:`one_load`, a file loaded already is not read again.
 
-    Parsed again only when its bytes change (:func:`_parsed`).
+    Parsed again only when its bytes change (:func:`_parsed`). ``copy=False`` for a reader
+    that only reads, and never changes or saves what it is handed: the kept parse itself,
+    not a deep copy of it. ``capture_on()`` copied the whole model for one bool, several
+    times a session start and on asq's every refresh tick (review of #259, round 19).
     """
     target = path or paths.config_path()
     loaded = _ONE_LOAD.get()
@@ -975,16 +978,17 @@ def load_config(path: Path | None = None) -> AppConfig:
     if not target.exists():
         config = AppConfig()
     else:
-        config = _parsed(target, despite_windows_contention(target.read_bytes))
+        config = _parsed(target, despite_windows_contention(target.read_bytes), copy=copy)
     if loaded is not None:
         loaded[target] = config
     return config
 
 
-def _parsed(target: Path, raw: bytes) -> AppConfig:
+def _parsed(target: Path, raw: bytes, *, copy: bool = True) -> AppConfig:
     """``raw``, the bytes of the config file at ``target``, as an :class:`AppConfig` the caller
     may change: a copy of the last parse when the bytes are that parse's, else parsed,
-    migrated and validated, and kept.
+    migrated and validated, and kept. Without ``copy``, the kept parse, which the caller
+    must not change.
 
     asq's refresh tick asked the file for ``[projects] capture``, the fleet's settings once
     per project, the roles' and the accounts' settings, and each ask read, parsed and
@@ -1000,11 +1004,11 @@ def _parsed(target: Path, raw: bytes) -> AppConfig:
     global _LAST_PARSE
     last = _LAST_PARSE
     if last is not None and last[0] == target and last[1] == raw:
-        return last[2].model_copy(deep=True)
+        return last[2].model_copy(deep=True) if copy else last[2]
     data = _parse_toml(raw)
     _migrate(data)
     config = AppConfig.model_validate(_overlay(system_defaults(), data))
-    _LAST_PARSE = (target, raw, config.model_copy(deep=True))
+    _LAST_PARSE = (target, raw, config.model_copy(deep=True) if copy else config)
     return config
 
 

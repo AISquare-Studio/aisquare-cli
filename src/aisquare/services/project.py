@@ -74,7 +74,7 @@ def capture_on() -> bool:
     Asked twice a SessionStart, once a prompt, and on asq's UI thread every refresh tick:
     :func:`~aisquare.core.config.load_config` parses the file again only when it changed."""
     try:
-        return load_config(paths.config_path()).projects.capture
+        return load_config(paths.config_path(), copy=False).projects.capture
     except Exception:
         return ProjectsSettings().capture
 

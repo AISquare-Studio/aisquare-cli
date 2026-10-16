@@ -569,10 +569,10 @@ def test_a_read_of_the_setting_that_failed_is_asked_again(
     real = config_core.load_config
     failures = [OSError(5, "Input/output error")]
 
-    def flaky(path: Path | None = None) -> config_core.AppConfig:
+    def flaky(path: Path | None = None, **kwargs: bool) -> config_core.AppConfig:
         if failures:
             raise failures.pop()
-        return real(path)
+        return real(path, **kwargs)
 
     monkeypatch.setattr(project_service, "load_config", flaky)
     config = paths.config_path()

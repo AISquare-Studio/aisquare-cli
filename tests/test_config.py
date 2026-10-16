@@ -86,6 +86,35 @@ def test_each_load_hands_out_its_own_config(tmp_path: Path) -> None:
     assert second is not first and second.fleet is not first.fleet
 
 
+def test_a_reader_that_only_reads_is_handed_the_kept_parse_uncopied(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 19: every load deep-copied the kept parse, so ``capture_on()``
+    copied the whole model for one bool, several times a session start and on asq's every
+    refresh tick. A reader that only reads (``copy=False``) is handed the kept parse; a
+    caller that may change what it loads still gets its own."""
+    from aisquare.core import config as config_core
+    from aisquare.services import project as project_service
+
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("[projects]\ncapture = true\n", encoding="utf-8")
+    real = AppConfig.model_copy
+    copies: list[int] = []
+
+    def counted(self: AppConfig, *args: object, **kwargs: object) -> AppConfig:
+        copies.append(1)
+        return real(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(config_core.AppConfig, "model_copy", counted)
+
+    assert [project_service.capture_on() for _ in range(3)] == [True, True, True]
+    assert copies == [], "copied for a read"
+    assert load_config(path, copy=False) is load_config(path, copy=False)
+    mine = load_config(path)
+    assert mine is not load_config(path, copy=False) and copies
+
+
 def test_a_file_that_will_not_parse_is_read_again_each_load(tmp_path: Path) -> None:
     """Nothing is kept of a load that raised: the next load reads the file again, and a
     broken file after a good one raises rather than handing out the good one."""

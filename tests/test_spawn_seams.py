@@ -221,6 +221,26 @@ def test_every_ruling_is_one_of_the_two() -> None:
         assert not (seam.decision == TRACED and seam.strips_identity), key
 
 
+def test_every_seam_that_runs_in_the_git_environment_is_ruled_stripped() -> None:
+    """Review of #259, round 29, 6/8: b92c0380 moved ``fleet._git`` onto :func:`git_env`,
+    which strips the tracing identity, and its ruling still said otherwise: no
+    ``strips_identity``, and its docstring said "not stripped". Every seam that runs git in
+    that environment is ruled as stripping it."""
+    import importlib
+    import inspect
+
+    in_git_env = []
+    for key in SEAMS:
+        path, name = key.split("::")
+        module = importlib.import_module(path.removesuffix(".py").replace("/", "."))
+        function = getattr(module, name, None)
+        if function is not None and "env=git_env()" in inspect.getsource(function):
+            in_git_env.append(key)
+
+    assert len(in_git_env) == 4, in_git_env
+    assert [key for key in in_git_env if not SEAMS[key].strips_identity] == []
+
+
 def test_tracing_vars_agree_with_the_wiring_that_sets_them() -> None:
     """The two lists are separate only because ``core`` must not import
     ``services``. They describe the same thing, so they may not drift: a third

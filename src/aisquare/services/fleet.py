@@ -991,10 +991,10 @@ class _GitResult:
 def _git(cwd: Path, *args: str) -> _GitResult:
     """THE git seam: worktree add/remove/list and the branch queries behind ``reap``.
 
-    Registered in ``core.spawn.SEAMS`` as EXCLUDED and not stripped — git starts
-    no model process, exactly like the ``rev-parse`` seams in ``core``. A
-    non-zero exit is an answer (callers read ``returncode``); a missing git or
-    a hang is not, and becomes a :class:`FleetError` with the reason.
+    Registered in ``core.spawn.SEAMS`` as EXCLUDED and stripped, as every git seam is: git
+    starts no model process, exactly like the ``rev-parse`` seams in ``core``. A non-zero
+    exit is an answer (callers read ``returncode``); a missing git or a hang is not, and
+    becomes a :class:`FleetError` with the reason.
 
     Every command runs in every git's environment (``core.spawn.git_env``), the identity
     stripped and ``GIT_OPTIONAL_LOCKS=0``: a ``git status`` that only reads still

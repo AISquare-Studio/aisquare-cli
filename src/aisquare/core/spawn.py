@@ -337,6 +337,7 @@ SEAMS: dict[str, Seam] = {
         "`git worktree add/remove/list` and `git branch --merged` for the fleet's "
         "per-coder worktrees (docs/plans/fleet-tui.md §3.5). No model process; "
         "stripped, as every git seam is (`git_env()`)",
+        strips_identity=True,
     ),
     "aisquare/core/tmux.py::_sysctl": Seam(
         EXCLUDED,

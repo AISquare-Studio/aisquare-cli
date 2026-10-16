@@ -516,3 +516,35 @@ def test_a_role_added_by_hand_while_the_form_is_open_costs_nothing_on_save() -> 
         return host.query_one("#perm-designer", Select).value
 
     assert drive(reopened) == "plan"
+
+
+def test_two_roles_whose_names_differ_only_in_punctuation_keep_their_own_rows() -> None:
+    """Review of #259, round 22, 3/9: a widget id turned every character outside
+    ``[A-Za-z0-9_-]`` into ``-``, so ``qa.ui`` and ``qa-ui`` shared one id. Each role's
+    widgets sit in their own row, so Textual raised nothing; every lookup found the first
+    row's. The second row was shown and never read, and Save wrote the first row's values
+    to both roles. Each role has its own id now, and Save changes the row it was asked to."""
+    from aisquare.cli.ui.views.app_settings import widget_suffix
+    from aisquare.core.config import FleetRoleSettings
+
+    names = ["qa.ui", "qa-ui", "qa_ui", "qa_2e_ui", "测试", "审查", "coder", "ui-tester"]
+    assert len({widget_suffix(name) for name in names}) == len(names)
+    assert widget_suffix("coder") == "coder" and widget_suffix("ui-tester") == "ui-tester"
+
+    config = load_config()
+    config.fleet.roles["qa.ui"] = FleetRoleSettings(permission_mode="plan", worktree=True)
+    config.fleet.roles["qa-ui"] = FleetRoleSettings(permission_mode="default", worktree=True)
+    save_config(config)
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> list[object]:
+        dotted, dashed = (f"#perm-{widget_suffix(role)}" for role in ("qa.ui", "qa-ui"))
+        shown = [host.query_one(dotted, Select).value, host.query_one(dashed, Select).value]
+        host.query_one(f"#worktree-{widget_suffix('qa-ui')}", Switch).value = False
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+        return shown
+
+    assert drive(scenario) == ["plan", "default"], "each row shows its own role"
+    roles = load_config().fleet.roles
+    assert (roles["qa.ui"].permission_mode, roles["qa.ui"].worktree) == ("plan", True)
+    assert (roles["qa-ui"].permission_mode, roles["qa-ui"].worktree) == ("default", False)

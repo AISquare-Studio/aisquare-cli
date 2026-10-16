@@ -80,7 +80,8 @@ ON_LIMIT_MODES: tuple[tuple[str, str], ...] = (
     ("switch to the account with headroom", "switch"),
 )
 """``[accounts] on_limit``: what the fleet does when an agent's turn ends on a usage limit."""
-_ID_SAFE = re.compile(r"[^A-Za-z0-9_-]")
+_ID_KEPT = re.compile(r"[A-Za-z0-9-]")
+"""The characters of a role name its widget ids keep as they are (:func:`widget_suffix`)."""
 ACCOUNTS_WORKER = "app-settings-accounts"
 """The worker that reads the slots the account selects offer."""
 _INPUTS = (
@@ -110,8 +111,14 @@ def role_order(fleet: FleetSettings) -> list[str]:
 
 
 def widget_suffix(role: str) -> str:
-    """A role name as the tail of a widget id (ids allow ``[A-Za-z0-9_-]`` only)."""
-    return _ID_SAFE.sub("-", role)
+    """A role name as the tail of a widget id, one to one. Ids allow ``[A-Za-z0-9_-]`` only,
+    so any other character, and ``_`` itself, is written ``_<code point in hex>_``.
+
+    Each such character was ``-``, so ``qa.ui`` and ``qa-ui`` had one id, and so did
+    ``测试`` and ``审查``. Every lookup found the first row's widgets: the second row was
+    shown and never read, and Save wrote the first row's values to both roles (review of
+    #259, round 22)."""
+    return "".join(ch if _ID_KEPT.fullmatch(ch) else f"_{ord(ch):x}_" for ch in role)
 
 
 def permission_options(current: str) -> list[tuple[str, str]]:

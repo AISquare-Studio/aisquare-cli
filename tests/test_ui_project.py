@@ -1070,7 +1070,7 @@ def test_settings_holds_the_nickname_and_shows_the_codename_without_a_rename(
         line = shown(form.query_one("#fleet-id", Static))
         machine = [
             wid
-            for wid in ("#codename", "#rename-codename", "#perm-coder", "#accounts-pick")
+            for wid in ("#codename", "#rename-codename", "#role-perm-coder", "#accounts-pick")
             if form.query(wid)
         ]
         note = shown(form.query_one("#settings-note", Static))

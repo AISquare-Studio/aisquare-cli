@@ -89,7 +89,7 @@ def test_settings_saves_a_changed_permission_mode_to_config_toml() -> None:
 
     async def scenario(pilot: Pilot[None], host: AppHost) -> list[tuple[str, str]]:
         await pilot.pause()
-        host.query_one("#perm-coder", Select).value = "plan"
+        host.query_one("#role-perm-coder", Select).value = "plan"
         host.query_one("#worktree-dir", Input).value = ".fleet-trees"
         host.query_one("#save-settings", Button).press()
         await settle(pilot)
@@ -132,7 +132,7 @@ def test_settings_binds_an_account_per_role_and_a_cleared_one_leaves_no_empty_pr
         pilot: Pilot[None], host: AppHost
     ) -> tuple[list[str], list[tuple[str, str]]]:
         await settle(pilot)  # the slots arrive from a worker
-        select = host.query_one("#acct-coder", Select)
+        select = host.query_one("#role-acct-coder", Select)
         labels = [str(label) for label, _value in select._options]
         select.value = "2"
         host.query_one("#save-settings", Button).press()
@@ -149,7 +149,7 @@ def test_settings_binds_an_account_per_role_and_a_cleared_one_leaves_no_empty_pr
 
     async def clear(pilot: Pilot[None], host: AppHost) -> str | None:
         await settle(pilot)
-        select = host.query_one("#acct-coder", Select)
+        select = host.query_one("#role-acct-coder", Select)
         shown_value = select.value
         select.value = ""
         host.query_one("#save-settings", Button).press()
@@ -177,7 +177,7 @@ def test_settings_clearing_an_account_keeps_a_binding_that_still_reads_a_file(
 
     async def clear(pilot: Pilot[None], host: AppHost) -> None:
         await settle(pilot)
-        host.query_one("#acct-coder", Select).value = ""
+        host.query_one("#role-acct-coder", Select).value = ""
         host.query_one("#save-settings", Button).press()
         await settle(pilot)
 
@@ -208,7 +208,7 @@ def test_settings_save_leaves_the_bindings_it_did_not_change_as_the_file_has_the
         notes: list[str] = []
         accounts_service.remove(removed, notes=notes)  # the Accounts page's Remove
         settings_service.bind_role("reviewer", account="3")  # `team bind` in another shell
-        host.query_one("#acct-tester", Select).value = "3"  # the one change made here
+        host.query_one("#role-acct-tester", Select).value = "3"  # the one change made here
         host.query_one("#max-agents", Input).value = "7"
         host.query_one("#save-settings", Button).press()
         await settle(pilot)
@@ -264,7 +264,7 @@ def test_the_settings_form_reads_its_file_once_and_the_slots_off_the_ui_thread(
 
     async def scenario(pilot: Pilot[None], host: AppHost) -> tuple[list[str], str]:
         await settle(pilot)
-        select = host.query_one("#acct-coder", Select)
+        select = host.query_one("#role-acct-coder", Select)
         return [str(label) for label, _value in select._options], str(select.value)
 
     labels, value = drive(scenario)
@@ -287,7 +287,7 @@ def test_a_slot_removed_between_two_reads_falls_back_to_the_binding_on_the_form(
 
     async def scenario(pilot: Pilot[None], host: AppHost) -> tuple[str, list[str]]:
         await settle(pilot)
-        select = host.query_one("#acct-coder", Select)
+        select = host.query_one("#role-acct-coder", Select)
         select.value = "3"
         shutil.rmtree(third.config_dir)
         host.query_one(AppSettingsView)._load_accounts()
@@ -495,13 +495,13 @@ def test_a_role_added_by_hand_while_the_form_is_open_costs_nothing_on_save() -> 
         save_config(config)
         host.query_one("#reload-settings", Button).press()
         await settle(pilot)
-        host.query_one("#perm-coder", Select).value = "acceptEdits"
+        host.query_one("#role-perm-coder", Select).value = "acceptEdits"
         host.query_one("#save-settings", Button).press()
         await settle(pilot)
         host.query_one("#max-agents", Input).value = "4"
         host.query_one("#save-settings", Button).press()  # and again, from the reloaded form
         await settle(pilot)
-        assert not host.query("#perm-designer")  # no row yet: a reopen shows it
+        assert not host.query("#role-perm-designer")  # no row yet: a reopen shows it
         return host.notices
 
     notices = drive(scenario)
@@ -513,7 +513,7 @@ def test_a_role_added_by_hand_while_the_form_is_open_costs_nothing_on_save() -> 
     assert load_config().fleet.max_agents_per_project == 4
 
     async def reopened(pilot: Pilot[None], host: AppHost) -> object:
-        return host.query_one("#perm-designer", Select).value
+        return host.query_one("#role-perm-designer", Select).value
 
     assert drive(reopened) == "plan"
 
@@ -537,9 +537,9 @@ def test_two_roles_whose_names_differ_only_in_punctuation_keep_their_own_rows() 
     save_config(config)
 
     async def scenario(pilot: Pilot[None], host: AppHost) -> list[object]:
-        dotted, dashed = (f"#perm-{widget_suffix(role)}" for role in ("qa.ui", "qa-ui"))
+        dotted, dashed = (f"#role-perm-{widget_suffix(role)}" for role in ("qa.ui", "qa-ui"))
         shown = [host.query_one(dotted, Select).value, host.query_one(dashed, Select).value]
-        host.query_one(f"#worktree-{widget_suffix('qa-ui')}", Switch).value = False
+        host.query_one(f"#role-worktree-{widget_suffix('qa-ui')}", Switch).value = False
         host.query_one("#save-settings", Button).press()
         await settle(pilot)
         return shown
@@ -548,3 +548,46 @@ def test_two_roles_whose_names_differ_only_in_punctuation_keep_their_own_rows() 
     roles = load_config().fleet.roles
     assert (roles["qa.ui"].permission_mode, roles["qa.ui"].worktree) == ("plan", True)
     assert (roles["qa-ui"].permission_mode, roles["qa-ui"].worktree) == ("default", False)
+
+
+def test_a_role_named_like_a_fixed_field_neither_takes_its_id_nor_takes_the_form_down() -> None:
+    """Review of #259, round 23, 2/10: ``[fleet.roles.dir]`` gave its worktree switch the id
+    ``worktree-dir``, the worktree root's ``Input``. The two sit in different rows, so
+    Textual raised no ``DuplicateIds``, and ``query_one("#worktree-dir", Input)`` found the
+    role's ``Switch`` first: ``WrongType`` out of ``on_mount``, and the fleet UI went down
+    at App settings. Role names are free TOML keys, so every per-role id sits under a
+    prefix no fixed id has, and each field still saves what it shows."""
+    from aisquare.cli.ui.views.app_settings import role_order
+    from aisquare.core.config import FleetRoleSettings
+
+    config = load_config()
+    for role in ("dir", "qa.ui", "qa-ui", "max-agents"):
+        config.fleet.roles[role] = FleetRoleSettings(permission_mode="plan", worktree=True)
+    save_config(config)
+    roles = role_order(load_config().fleet)
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> list[str]:
+        form = host.query_one(AppSettingsView)
+        fields = form.query("Input, Select, Switch, Button")
+        ids = [str(widget.id) for widget in fields if widget.id]
+        host.query_one("#worktree-dir", Input).value = ".trees"
+        from aisquare.cli.ui.views.app_settings import role_widget_id  # the fix's own name
+
+        host.query_one(f"#{role_widget_id('worktree', 'dir')}", Switch).value = False
+        host.query_one(f"#{role_widget_id('perm', 'qa-ui')}", Select).value = "acceptEdits"
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+        return ids
+
+    ids = drive(scenario)
+    from aisquare.cli.ui.views.app_settings import ROLE_ID_PREFIX, role_widget_id
+
+    assert len(ids) == len(set(ids)), "one field per id, on the whole form"
+    assert {wid for wid in ids if wid.startswith(ROLE_ID_PREFIX)} == {
+        role_widget_id(kind, role) for kind in ("perm", "worktree", "acct") for role in roles
+    }, "the prefix is the roles' alone"
+    saved = load_config().fleet
+    assert saved.worktree_dir == ".trees"
+    assert (saved.roles["dir"].permission_mode, saved.roles["dir"].worktree) == ("plan", False)
+    assert saved.roles["qa-ui"].permission_mode == "acceptEdits"
+    assert saved.roles["qa.ui"].permission_mode == "plan"

@@ -121,6 +121,23 @@ def widget_suffix(role: str) -> str:
     return "".join(ch if _ID_KEPT.fullmatch(ch) else f"_{ord(ch):x}_" for ch in role)
 
 
+ROLE_ID_PREFIX = "role-"
+"""What every per-role widget id starts with, and no other id on the form does."""
+
+
+def role_widget_id(kind: str, role: str) -> str:
+    """The id of ``role``'s ``kind`` widget (``perm``, ``worktree``, ``acct``):
+    ``role-<kind>-<suffix>``, :func:`widget_suffix` making the role part one to one.
+
+    Under :data:`ROLE_ID_PREFIX`, so no role name can spell a fixed id. Written
+    ``<kind>-<suffix>``, a role named ``dir`` gave its worktree switch the id
+    ``worktree-dir``, the worktree root's ``Input``. The two sit in different rows, so
+    Textual raised no ``DuplicateIds``, and ``query_one("#worktree-dir", Input)`` found
+    the role's ``Switch`` first: ``WrongType`` out of ``on_mount``, and the fleet UI went
+    down at App settings (review of #259, round 23)."""
+    return f"{ROLE_ID_PREFIX}{kind}-{widget_suffix(role)}"
+
+
 def permission_options(current: str) -> list[tuple[str, str]]:
     """The mode list, with a value the list does not know appended so it still shows."""
     options = list(PERMISSION_MODES)
@@ -310,12 +327,11 @@ class AppSettingsView(VerticalScroll):
         Save), which a reopen shows. Every reader of a role row goes through here: Save
         looked such a role's widgets up unguarded, and the ``NoMatches`` it raised out of
         the button handler took the fleet UI down (review of #259, round 21)."""
-        suffix = widget_suffix(role)
         try:
             return RoleRow(
-                self.query_one(f"#perm-{suffix}", Select),
-                self.query_one(f"#worktree-{suffix}", Switch),
-                self.query_one(f"#acct-{suffix}", Select),
+                self.query_one(f"#{role_widget_id('perm', role)}", Select),
+                self.query_one(f"#{role_widget_id('worktree', role)}", Switch),
+                self.query_one(f"#{role_widget_id('acct', role)}", Select),
             )
         except NoMatches:
             return None
@@ -327,23 +343,22 @@ class AppSettingsView(VerticalScroll):
         yield Static(self.ROLE_SECTION, classes="section")
         for role in self._roles:
             settings = self.fleet.roles.get(role, FleetRoleSettings())
-            suffix = widget_suffix(role)
             with Horizontal(classes="row"):
                 yield Label(role)
                 yield Select(
                     permission_options(settings.permission_mode),
                     value=settings.permission_mode,
                     allow_blank=False,
-                    id=f"perm-{suffix}",
+                    id=role_widget_id("perm", role),
                 )
                 yield Label("worktree", classes="worktree-label")
-                yield Switch(settings.worktree, id=f"worktree-{suffix}")
+                yield Switch(settings.worktree, id=role_widget_id("worktree", role))
                 bound = self._account_bindings.get(role)
                 yield Select(
                     account_options(self._accounts, bound),
                     value=bound or NO_ACCOUNT,
                     allow_blank=False,
-                    id=f"acct-{suffix}",
+                    id=role_widget_id("acct", role),
                     classes="account-select",
                 )
         yield Static("fleet", classes="section")
@@ -424,9 +439,8 @@ class AppSettingsView(VerticalScroll):
             row = self._role_row(role)
             if row is None:
                 continue
-            suffix = widget_suffix(role)
-            values[f"perm-{suffix}"] = row.permission.value
-            values[f"worktree-{suffix}"] = row.worktree.value
+            values[role_widget_id("perm", role)] = row.permission.value
+            values[role_widget_id("worktree", role)] = row.worktree.value
         for wid in _INPUTS:
             values[wid] = self.query_one(f"#{wid}", Input).value
         for wid in _SELECTS:
@@ -501,12 +515,11 @@ class AppSettingsView(VerticalScroll):
             row = self._role_row(role)
             if row is None:
                 continue
-            suffix = widget_suffix(role)
             role_update: dict[str, object] = {}
             value = row.permission.value
-            if f"perm-{suffix}" in changed and isinstance(value, str):
+            if role_widget_id("perm", role) in changed and isinstance(value, str):
                 role_update["permission_mode"] = value
-            if f"worktree-{suffix}" in changed:
+            if role_widget_id("worktree", role) in changed:
                 role_update["worktree"] = row.worktree.value
             if role_update:
                 existing = current.roles.get(role, FleetRoleSettings())

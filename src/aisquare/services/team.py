@@ -1594,10 +1594,13 @@ def hook_prompt_heartbeat(
             project = orchestrator.team_project(cwd)
             if not project_service.tracked(store, project):
                 return ""  # as at session start: nothing on a board nobody added
-            project_service.capture(store, project)
             role = orchestrator.env_role()
             if not store.team_active(project.id) and role is None:
                 return ""
+            # Only now, as at session start: before the board was asked, every prompt of a
+            # session on no board took the store's write lock again, for a directory
+            # `capture_prompt` had captured already (review of #259, round 19).
+            project_service.capture(store, project)
             now = _now()
             session = store.upsert_session(
                 TeamSession(

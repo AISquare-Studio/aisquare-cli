@@ -145,6 +145,19 @@ def test_a_session_start_with_no_board_to_join_writes_nothing(
         assert store.get_session(session) is not None
 
 
+def test_a_prompt_with_no_board_to_join_writes_no_project(
+    work_dir: Path, project_capture: None
+) -> None:
+    """Review of #259, round 19: the prompt's team hook still captured the directory before
+    it asked whether a board was active or a role set, as the session start's did until
+    round 18: with capture on, every prompt of a session on no board took the store's write
+    lock a second time. It captures only for a session row it writes."""
+    session = "ffff6666-0000-0000-0000-000000000000"
+
+    assert team_service.hook_prompt_heartbeat(session, work_dir) == ""
+    assert _rows() == []
+
+
 def test_team_spawn_adds_its_project_when_it_starts_the_session_not_when_it_prints(
     runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

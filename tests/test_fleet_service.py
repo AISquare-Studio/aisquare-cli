@@ -8687,7 +8687,12 @@ def test_a_reap_says_why_it_keeps_a_tree_while_a_spawn_holds_the_branch_lock(
     held. While a spawn held it, a tree with uncommitted work was reported as "another
     aisquare holds … — try again", not as what to commit; and each reap held the lock
     through ``git status`` and the push check of every tree it kept, a spawn queued behind.
-    What a tree holds is asked without the lock, and said whoever holds it."""
+    What a tree holds is asked without the lock, and said whoever holds it.
+
+    Round 20: said while the lock is busy, it is what the tree held when asked, beside "not
+    removed now", not a settled reason to keep it. The holder may be a spawn reusing this
+    very tree, mid-checkout: a reap during a respawn said the new agent's tree was kept for
+    the ended one's uncommitted changes."""
     agent = fleet_service.spawn(project, "coder", label="coder-dirty").agent
     (agent.cwd / "work.txt").write_text("not committed\n", encoding="utf-8")
     fleet_service.stop(project, "coder-dirty", force=True)
@@ -8710,7 +8715,10 @@ def test_a_reap_says_why_it_keeps_a_tree_while_a_spawn_holds_the_branch_lock(
     monkeypatch.setattr(fleet_service, "_why_kept", asked)
     after = fleet_service.reap(project)
 
-    assert dict(during.worktrees_kept) == {agent.cwd: "uncommitted changes"}
+    [(path, why)] = during.worktrees_kept
+    assert path == agent.cwd
+    assert why.startswith("not removed now: another aisquare (a spawn or a reap) holds "), why
+    assert why.endswith("; when asked just before, it held: uncommitted changes"), why
     assert dict(after.worktrees_kept) == {agent.cwd: "uncommitted changes"}
     assert free == [True], "asked without the lock"
     assert agent.cwd.is_dir()

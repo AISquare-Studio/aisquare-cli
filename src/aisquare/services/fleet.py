@@ -1583,6 +1583,12 @@ def _reap_tree(
     reported as "try again" rather than as what to commit (review of #259, round 19). So a
     tree that holds something is said to, held lock or not; one that looked removable is
     removed only once the rows say, under the lock, that no other agent took it.
+
+    With the lock busy, what the tree held is said as what it held when asked, beside "not
+    removed now", never as a settled reason to keep it: the holder may be a spawn reusing
+    this very tree, mid-checkout, which the rows read under the lock would have left unsaid
+    as another agent's. Said as the reason, a reap during a respawn reported the new agent's
+    half-checked-out tree as kept for the ended one's uncommitted changes (round 20).
     """
     tree = agent.cwd
     here = tree.resolve()
@@ -1603,7 +1609,8 @@ def _reap_tree(
                 return False, kept
             removal = _git(project.root, "worktree", "remove", str(tree))
     except FleetError as exc:
-        return False, kept or f"not removed now: {exc}"
+        held = f"; when asked just before, it held: {kept}" if kept is not None else ""
+        return False, f"not removed now: {exc}{held}"
     if removal.returncode != 0:
         return False, f"git worktree remove refused: {removal.stderr.strip() or 'no reason'}"
     return True, None

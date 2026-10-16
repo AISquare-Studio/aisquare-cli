@@ -93,10 +93,17 @@ def git_common_root(start: Path) -> Path | None:
     129; from 1.8.5 to 2.4, ``rev-parse`` echoes the option it does not know and exits 0,
     and ``<start>/--git-common-dir`` was every project's root (review of #259, round 28,
     6/10).
+
+    From 2.5 to 2.12, a relative answer is relative to the top level of the work tree, not
+    to ``start`` (2.13 made it ``start``'s): from ``repo/api`` it is ``.git``, and
+    ``repo/api`` was taken for the root, recorded on every row spawned there, and a session
+    in ``repo/api`` read another board than one at ``repo`` (review of #259, round 29, 4/8).
+    So the same call asks ``--show-cdup``, the way from ``start`` up to that top level, and
+    a relative answer that names nothing from ``start`` is read from there.
     """
     try:
         result = subprocess.run(
-            ["git", "-C", str(start), "rev-parse", "--git-common-dir"],
+            ["git", "-C", str(start), "rev-parse", "--git-common-dir", "--show-cdup"],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -109,12 +116,17 @@ def git_common_root(start: Path) -> Path | None:
         return None
     if result.returncode != 0:
         return None
-    common = result.stdout.strip()
+    # The common dir, then the way up, blank at the top level; none where there is no work
+    # tree (a bare repository, or inside `.git`).
+    lines = result.stdout.splitlines()
+    common = lines[0].strip() if lines else ""
+    up = lines[1].strip() if len(lines) > 1 else ""
     if not common or common == "--git-common-dir":  # the option echoed: git 1.8.5 to 2.4
         return None
     common_dir = Path(common)
     if not common_dir.is_absolute():
-        common_dir = (start / common_dir).resolve()
+        here = start / common_dir
+        common_dir = (here if here.exists() or not up else start / up / common_dir).resolve()
     if common_dir.name != ".git" and ".git" in common_dir.parts:
         # A submodule's common dir is <super>/.git/modules/<name> (deeper when
         # nested) — git bookkeeping, not anyone's project root. Bail to the

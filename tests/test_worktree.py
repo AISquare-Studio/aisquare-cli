@@ -210,6 +210,34 @@ def test_a_git_before_2_5_that_echoes_the_option_leaves_the_root_to_the_markers(
     assert find_project_root(start) == repo.resolve()
 
 
+@pytest.mark.parametrize("git", ["this git", "2.5 to 2.12"])
+def test_a_subdirectory_of_the_checkout_resolves_to_the_checkout(
+    repo_with_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, git: str
+) -> None:
+    """Review of #259, round 29, 4/8: from git 2.5 to 2.12, ``rev-parse --git-common-dir``
+    run in a subdirectory answers relative to the top level (``.git``), not to where it ran
+    (``../../.git``, git 2.13 on). Joined to the subdirectory, ``repo/api/x`` was its own
+    root, whatever markers ``repo/api`` held, and read another board than ``repo``. The way
+    up to the top level, asked in the same call, finds the checkout."""
+    repo, _worktree = repo_with_worktree
+    start = repo / "api" / "x"
+    start.mkdir(parents=True)
+    (repo / "api" / "pyproject.toml").write_text("", encoding="utf-8")  # a marker below repo
+    real = subprocess.run
+
+    def before_2_13(argv: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(argv, list) and argv[:1] == ["git"] and "--git-common-dir" in argv:
+            return subprocess.CompletedProcess(argv, 0, ".git\n../../\n", "")
+        return real(argv, *args, **kwargs)
+
+    if git == "2.5 to 2.12":
+        monkeypatch.setattr(subprocess, "run", before_2_13)
+
+    assert workspace.git_common_root(start) == repo.resolve()
+    assert find_project_root(start) == repo.resolve()
+    assert team_project(start).root == repo.resolve()
+
+
 def test_a_plain_repo_is_still_its_own_root(tmp_path: Path) -> None:
     repo = tmp_path / "plain"
     (repo / "src").mkdir(parents=True)

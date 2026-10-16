@@ -477,7 +477,9 @@ def test_every_git_seam_runs_in_the_one_git_environment(
     workspace.git_common_root(tmp_path)
     snapshot.head_sha(tmp_path)
 
-    asked = ["rev-parse --git-common-dir", "rev-parse HEAD", "stash create", "status --porcelain"]
+    asked = [
+        "--git-common-dir --show-cdup", "rev-parse HEAD", "stash create", "status --porcelain"
+    ]  # fmt: skip
     assert sorted(seen) == asked, seen
     for argv, env in seen.items():
         assert env == git_env(), argv

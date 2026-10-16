@@ -138,26 +138,32 @@ def role_widget_id(kind: str, role: str) -> str:
     return f"{ROLE_ID_PREFIX}{kind}-{widget_suffix(role)}"
 
 
-def permission_options(current: str) -> list[tuple[str, str]]:
-    """The mode list, with a value the list does not know appended so it still shows."""
+def permission_options(current: str) -> list[tuple[Text, str]]:
+    """The mode list, with a value the list does not know appended so it still shows.
+
+    Each prompt is :class:`Text`: a mode written by hand is free text, and a ``str`` prompt
+    is read as markup, so ``x[/y]`` raised ``MarkupError`` when the row rendered (review of
+    #259, round 23), as the role's own name did."""
     options = list(PERMISSION_MODES)
     if current not in {value for _, value in options}:
         options.append((f"{current} (custom)", current))
-    return options
+    return [(Text(label), value) for label, value in options]
 
 
 NO_ACCOUNT = ""
 """The select's value for "this role expresses no preference" — the binding's ``account = None``."""
 
 
-def account_options(accounts: list[ClaudeAccount], current: str | None) -> list[tuple[str, str]]:
+def account_options(accounts: list[ClaudeAccount], current: str | None) -> list[tuple[Text, str]]:
     """``(label, value)`` per account, plus the no-binding row first; ``current`` always shows.
 
     Values are SLOT NUMBERS as strings: the binding stores a reference the
     resolver reads, and the slot is the one spelling that cannot be renamed
     out from under it. A binding written by hand as an alias or an email is
     shown as its own row (``work (as bound)``) so the form never silently
-    rewrites what the operator typed just by being opened and saved.
+    rewrites what the operator typed just by being opened and saved. Prompts are
+    :class:`Text`, as :func:`permission_options`' are: an alias and a binding written by
+    hand are free text.
     """
     options: list[tuple[str, str]] = [("(no account binding)", NO_ACCOUNT)]
     for account in accounts:
@@ -166,7 +172,7 @@ def account_options(accounts: list[ClaudeAccount], current: str | None) -> list[
         options.append((f"{account.slot} · {accounts_core.label(account)}{who}", str(account.slot)))
     if current and current not in {value for _, value in options}:
         options.append((f"{current} (as bound)", current))
-    return options
+    return [(Text(label), value) for label, value in options]
 
 
 class RoleRow(NamedTuple):
@@ -344,7 +350,9 @@ class AppSettingsView(VerticalScroll):
         for role in self._roles:
             settings = self.fleet.roles.get(role, FleetRoleSettings())
             with Horizontal(classes="row"):
-                yield Label(role)
+                # Not markup: role names are free TOML keys, `qa[x]` showed as `qa` and
+                # `a[/b]c` raised MarkupError out of the render (review of #259, round 23).
+                yield Label(role, markup=False)
                 yield Select(
                     permission_options(settings.permission_mode),
                     value=settings.permission_mode,

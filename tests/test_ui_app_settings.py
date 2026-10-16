@@ -591,3 +591,41 @@ def test_a_role_named_like_a_fixed_field_neither_takes_its_id_nor_takes_the_form
     assert (saved.roles["dir"].permission_mode, saved.roles["dir"].worktree) == ("plan", False)
     assert saved.roles["qa-ui"].permission_mode == "acceptEdits"
     assert saved.roles["qa.ui"].permission_mode == "plan"
+
+
+def test_role_names_modes_and_bindings_written_by_hand_are_shown_as_text_not_markup() -> None:
+    """Review of #259, round 23, 4/10: ``Label(role)`` read the role's name as Textual
+    markup, and role names are free TOML keys. ``[fleet.roles."qa[x]"]`` showed as ``qa``,
+    and ``[fleet.roles."a[/b]c"]`` raised ``MarkupError`` when its row rendered, which took
+    the fleet UI down at App settings. The same row's selects read a mode and an account
+    binding written by hand as markup too. Each is shown as it is written."""
+    from textual.widgets import Label
+
+    from aisquare.core.config import FleetRoleSettings, RoleLaunchProfile
+
+    config = load_config()
+    config.fleet.roles["a[/b]c"] = FleetRoleSettings(permission_mode="x[/y]")
+    config.fleet.roles["qa[x]"] = FleetRoleSettings(permission_mode="plan")
+    config.team.profiles["a[/b]c"] = RoleLaunchProfile(account="w[/z]")
+    save_config(config)
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> tuple[list[str], list[str]]:
+        await settle(pilot)
+        form = host.query_one(AppSettingsView)
+        names = [str(label.render()) for label in form.query(Label)]
+        prompts = [
+            str(prompt) for select in form.query(Select) for prompt, _value in select._options
+        ]
+        host.query_one("#max-agents", Input).value = "5"
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+        return names, prompts
+
+    names, prompts = drive(scenario)
+
+    assert "a[/b]c" in names and "qa[x]" in names, names
+    assert "x[/y] (custom)" in prompts and "w[/z] (as bound)" in prompts, prompts
+    saved = load_config()
+    assert saved.fleet.max_agents_per_project == 5
+    assert saved.fleet.roles["a[/b]c"].permission_mode == "x[/y]", "the hand edit stands"
+    assert saved.team.profiles["a[/b]c"].account == "w[/z]"

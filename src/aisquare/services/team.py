@@ -1389,7 +1389,17 @@ def list_tasks(
     _require_enabled()
     with store_session() as store:
         board = board_id if board_id is not None else _project(store, cwd).id
-        return store.team_tasks(board, status=status)
+        return list_tasks_in(store, board, status=status)
+
+
+def list_tasks_in(
+    store: ContextStore, board_id: str, *, status: TaskStatus | None = None
+) -> list[TeamTask]:
+    """:func:`list_tasks` of ``board_id`` through a store the CALLER holds open: Remote's
+    Tasks tab, which finds the board it shows in that store first (``remote_server``'s
+    ``tasks_payload``)."""
+    _require_enabled()
+    return store.team_tasks(board_id, status=status)
 
 
 def show_task(ref: str, *, session_ref: str | None = None, cwd: Path | None = None) -> TeamTask:

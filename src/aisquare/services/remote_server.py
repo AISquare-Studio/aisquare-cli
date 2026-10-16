@@ -808,8 +808,8 @@ def _remote_task(
 
     number = team_service.task_number_of(ref)
     if number is not None:
-        on = board if board is not None else _remote_number_board(session, project)
         with store_session() as store:
+            on = board if board is not None else _remote_number_board(store, session, project)
             task = store.task_by_number(on, number)
     else:
         boards = reach()
@@ -863,19 +863,18 @@ def _remote_card_board(board: str, reach: Callable[[], set[str]]) -> str:
     return board
 
 
-def _remote_number_board(session: str | None, project: str | None) -> str:
+def _remote_number_board(store: ContextStore, session: str | None, project: str | None) -> str:
     """The board a write reads a task number on: the session's, the id of the ``as`` it
     resolved (:func:`_remote_author`, so a board a phone may reach), else the board of
     ``project``'s agents (:func:`_remote_project_board`; :func:`_resolve_project`, the
-    current project for ``None``)."""
-    from aisquare.core.store import store_session
-
+    current project for ``None``). Through ``store``, which :func:`_remote_task` then reads
+    the number in: a store each, ``done #12`` opened two before the write opened its own
+    (review of #259, round 32, 9/9)."""
     if session is not None:
-        with store_session() as store:
-            found = store.get_session(session)
+        found = store.get_session(session)
         if found is not None:
             return found.project_id
-    return _remote_project_board(_resolve_project(project)).id
+    return _remote_project_board(_resolve_project(project), store).id
 
 
 @contextlib.contextmanager
@@ -3136,12 +3135,18 @@ def live_sources() -> Sources:
         return agents_json(target, fleet_service.list_agents(target, live_only=True))
 
     def tasks_payload(project: str | None = None) -> object:
+        from aisquare.core.store import store_session
         from aisquare.services import team as team_service
 
         # The board the Board tab shows (`remote_board_payload`), the current project's for
-        # none.
-        board = _remote_project_board(_resolve_project(project)).id
-        tasks = team_service.list_tasks(None, board_id=board)
+        # none, found in the store its tasks are read through: a store each, every Tasks tab
+        # read opened two (review of #259, round 32, 9/9). Refused with the board off before
+        # that store opens, as `list_tasks` refuses.
+        target = _resolve_project(project)
+        team_service._require_enabled()
+        with store_session() as store:
+            board = _remote_project_board(target, store).id
+            tasks = team_service.list_tasks_in(store, board)
         return [task.model_dump(mode="json") for task in tasks]
 
     def memory_payload(project: str | None = None) -> object:

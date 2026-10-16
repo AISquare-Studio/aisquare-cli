@@ -5216,6 +5216,45 @@ def test_a_board_frame_opens_one_store_for_its_board_and_its_events(
     assert project["id"] == (hub.id if end is None else on_elsewhere.project_id)
 
 
+@pytest.mark.parametrize("end", [None, "exit"], ids=["a manager running", "none running"])
+def test_the_tasks_tab_and_a_task_number_open_one_store_for_the_board_and_the_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, end: str | None
+) -> None:
+    """Review of #259, round 32, 9/9: the Tasks tab found its board in one store
+    (``_remote_project_board``) and read the tasks in another (``list_tasks``), and a task
+    number did the same (``_remote_number_board``, then ``task_by_number``), each open a
+    connect, a WAL switch and a migration check. Both find the board in the store they read
+    through, as the Board frame does."""
+    from aisquare.core import store as core_store
+    from aisquare.services import remote_server
+
+    p, hub, on_elsewhere = _hubbed_tasks(tmp_path, monkeypatch, "none", end=end)
+    remote_server._resolve_project(p.id)  # `_remote_board_project` keeps P's root's board
+    remote_server._remote_board_project(p.root)
+    opens = 0
+    real_open = core_store.open_store
+
+    def counting_open() -> Any:
+        nonlocal opens
+        opens += 1
+        return real_open()
+
+    monkeypatch.setattr(core_store, "open_store", counting_open)
+    remote_server._resolve_project(p.id)
+    resolving = opens
+    expected = hub.id if end is None else on_elsewhere.project_id
+
+    opens = 0
+    tasks = remote_server.live_sources().tasks(p.id)
+    assert opens == resolving + 1, f"the project's lookup and one store, not {opens}"
+    assert isinstance(tasks, list) and {task["project_id"] for task in tasks} == {expected}
+
+    opens = 0
+    task = remote_server._remote_task("#1", set, session=None, project=p.id)
+    assert opens == resolving + 1, f"the project's lookup and one store, not {opens}"
+    assert task.project_id == expected
+
+
 def test_a_board_frame_with_the_board_off_opens_no_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -99,8 +99,13 @@ def capture(store: ContextStore, project: ProjectInfo) -> None:
     """CAPTURE ``project`` while ``[projects] capture`` is on, as #139 did
     (:meth:`~aisquare.core.store.SqliteStore.ensure_project`): a live, unlisted row for the
     rows an automatic path is about to write. Off, nothing: the caller asked
-    :func:`tracked` first, and only an added project gets that far."""
-    if capture_on():
+    :func:`tracked` first, and only an added project gets that far.
+
+    A live row there already is left unwritten: ``ensure_project`` is an upsert and a commit
+    whatever it finds, and a session start with a board and CI took the store's write lock
+    for it twice, the team hook's and CI's, as a fleet started its agents (review of #259,
+    round 20). A forgotten row reads as none, and is revived."""
+    if capture_on() and store.get_project(project.id) is None:
         store.ensure_project(project)
 
 

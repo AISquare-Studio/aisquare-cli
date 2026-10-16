@@ -239,6 +239,52 @@ def test_a_session_start_that_records_its_turn_captures_its_directory_first(
     assert row is not None and row.onboarded_at is None, "captured, not added"
 
 
+def test_a_session_start_with_a_board_and_ci_captures_its_directory_once(
+    wired: StubCI, isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 20: ``_session_start_ci`` opened a store session of its own and
+    captured the directory, an upsert and a commit, on every session start with CI on, the
+    team hook's capture of the same directory moments earlier included. A fleet starting its
+    agents took the store's write lock twice for each. The directory is written once, by
+    whichever captures it first, and not at all once its row is there; nor does CI open a
+    session of its own then."""
+    import contextlib
+
+    from aisquare.core.store import SqliteStore, store_session
+
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")  # a board: the team hook captures first
+    real_write, real_session = SqliteStore.ensure_project, store_session
+    writes: list[str] = []
+    sessions: list[int] = []
+
+    def ensure_project(self: SqliteStore, project: ProjectInfo) -> None:
+        writes.append(project.id)
+        real_write(self, project)
+
+    @contextlib.contextmanager
+    def session() -> Iterator[Any]:
+        sessions.append(1)
+        with real_session() as store:
+            yield store
+
+    monkeypatch.setattr(SqliteStore, "ensure_project", ensure_project)
+    monkeypatch.setattr(hooks_service, "store_session", session)
+
+    hooks_service.session_start_context(tmp_path, session_id=SESSION)
+
+    start = _turn()
+    with store_session() as store:
+        assert store.team_sessions(start.project_id), "the premise: the team hook wrote"
+    assert writes == [start.project_id], "captured once"
+    writes.clear()
+    sessions.clear()
+
+    hooks_service.session_start_context(tmp_path, session_id=SESSION, source="resume")
+
+    assert writes == [], "its row is there: nothing to capture"
+    assert len(sessions) == 1, "CI asked the store again"
+
+
 def test_with_capture_off_only_a_project_added_on_purpose_consults_or_records(
     wired: StubCI, isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

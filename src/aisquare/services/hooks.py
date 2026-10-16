@@ -91,6 +91,7 @@ def session_start_context(
         entries = store.entries(project_id=project.id)
         has_prompts = bool(store.recent_prompts(project.id, limit=1))
         recorded = project_service.tracked(store, project)
+        stored = store.get_project(project.id) is not None
     directive = _directive(project.id, has_prompts=has_prompts)
     block = build_block(entries, project) if entries else ""
     team_block = (
@@ -106,7 +107,9 @@ def session_start_context(
     # directory nobody added while capture is off: its row would be a turn
     # tied to a project that does not exist.
     instruction, retrieved = (
-        _session_start_ci(project, session_id, cwd, began=began) if recorded else ("", "")
+        _session_start_ci(project, session_id, cwd, began=began, stored=stored)
+        if recorded
+        else ("", "")
     )
     return "\n\n".join(
         part for part in (directive, block, team_block, instruction, retrieved) if part
@@ -114,7 +117,12 @@ def session_start_context(
 
 
 def _session_start_ci(
-    project: ProjectInfo, session_id: str | None, cwd: Path | None, *, began: datetime
+    project: ProjectInfo,
+    session_id: str | None,
+    cwd: Path | None,
+    *,
+    began: datetime,
+    stored: bool,
 ) -> tuple[str, str]:
     """Consult CI at session start and RECORD the outcome; never raises.
 
@@ -130,6 +138,9 @@ def _session_start_ci(
     it for them until it captured only for a board (review of #259, round 18), and a
     session start in a directory with no board then wrote a turn and an insights row for
     a project with no row, which ``metrics show --project`` could not reach (round 19).
+    Not when the hook found its row there already (``stored``): a store session and a write
+    of its own on every session start, the team hook's capture moments before included, was
+    a second write lock as a fleet started its agents (round 20).
     """
     try:
         augmentation = ci_augment.for_session_start(
@@ -137,8 +148,9 @@ def _session_start_ci(
         )
         if not augmentation.configured:
             return "", ""
-        with store_session() as store:
-            project_service.capture(store, project)
+        if not stored:
+            with store_session() as store:
+                project_service.capture(store, project)
         metrics_service.open_turn(augmentation.metric(project.id, session_id, closed=True))
         if augmentation.run_id:
             insights.record_turn(

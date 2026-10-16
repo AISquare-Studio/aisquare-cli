@@ -160,7 +160,10 @@ packages = ["src/aisquare"]
 [tool.hatch.build.targets.sdist]
 # The demo's renders (docs/demo.tape) are pictures for the README and the
 # release notes, re-rendered rather than built from; no build reads them.
-exclude = ["/docs/demo.gif", "/docs/demo/*.png"]
+# e2e/ is the nightly real-user suite (e2e/README.md): it drives an installed
+# aisquare from outside, through ttyd and a browser, so nothing builds or tests
+# the package from it, and its vendored terminal and fonts would only add weight.
+exclude = ["/docs/demo.gif", "/docs/demo/*.png", "/e2e"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

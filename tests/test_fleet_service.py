@@ -3408,7 +3408,8 @@ def test_the_exited_note_tells_a_forgotten_projects_rows_to_add_it_back_first(
 ) -> None:
     """Review of #259, round 21: the note names rows of forgotten projects too, which neither
     ``reap --all`` nor ``restart --project`` reaches: a restart for one was refused as no
-    such project. Such a row gets no restart, and its project is said to need adding back."""
+    such project. Such a row gets no restart, and its project is said to need adding back.
+    Round 23, 5/10: nor is ``reap --all`` said to record it, which it never walks."""
     ours = fleet_service.spawn(project, "manager").agent
     theirs = fleet_service.spawn(plain_project, "manager").agent
     with store_session() as store:
@@ -3423,6 +3424,12 @@ def test_the_exited_note_tells_a_forgotten_projects_rows_to_add_it_back_first(
     assert said.count("aisquare fleet restart") == 1, said
     onboard = project_service.onboard_command(plain_project.root)
     assert f"{plain_project.root.name} is forgotten: {onboard} adds it back first" in said
+    # Round 23, 5/10: `reap --all` walks the projects it reaches, so it records the one row
+    # of a live project, "it", and never the forgotten project's alone.
+    assert "(`aisquare fleet reap --all` records it; " in said, said
+    alone = fleet_service._exited_note(tmux, [theirs])
+    assert "reap --all" not in alone and "aisquare fleet restart" not in alone, alone
+    assert f"({plain_project.root.name} is forgotten: {onboard} adds it back first)" in alone
 
 
 def test_rows_in_no_recorded_project_are_said_to_be_out_of_reach_not_left_mid_sentence(

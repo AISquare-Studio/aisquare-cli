@@ -3167,8 +3167,6 @@ class _RowProjects:
     forgotten: list[str]
     """For each forgotten project of the rows, in row order: ``<name> is forgotten: <onboard>
     adds it back first``, which the commands for its rows wait on."""
-    unrecorded: int
-    """How many of the rows are in a project with no record at all, not even forgotten."""
     unreached: str | None
     """For those rows, that no fleet command reaches them; ``None`` when there are none."""
 
@@ -3210,7 +3208,6 @@ def _row_projects(store: ContextStore, rows: Sequence[FleetAgent]) -> _RowProjec
             for each in theirs
             if each in known and each not in live
         ],
-        unrecorded=len(orphans),
         unreached=unreached,
     )
 
@@ -3352,19 +3349,21 @@ def _exited_note(srv: TmuxServer, exited: Sequence[FleetAgent]) -> str:
     and a ``restart`` naming each row's project (:func:`project_service.fleet_command`).
     ``aisquare fleet reap`` alone walked the active project's rows, and a ``restart`` with
     no label is a usage error (review of #259, round 21). A forgotten project is reached by
-    neither until it is added back, so its rows are told that instead."""
+    neither until it is added back, so its rows are told that instead. ``reap --all`` is
+    offered for the rows it walks, those in a project it reaches (``projects.reached``): it
+    was offered for every row with any record, and said to record a forgotten project's
+    rows (round 23)."""
     one = len(exited) == 1
     with store_session() as store:
         projects = _row_projects(store, exited)
+    reached = [row for row in exited if row.project_id in projects.reached]
     restarts = [
         f"`{project_service.fleet_command('restart', projects.reached[row.project_id], row.label)}`"
-        for row in exited
-        if row.project_id in projects.reached
+        for row in reached
     ]
-    recorded = len(exited) - projects.unrecorded
     ways = (
-        [f"`aisquare fleet reap --all` records {'it' if recorded == 1 else 'them'}"]
-        if recorded
+        [f"`aisquare fleet reap --all` records {'it' if len(reached) == 1 else 'them'}"]
+        if reached
         else []
     )
     if restarts:

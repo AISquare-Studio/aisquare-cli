@@ -92,6 +92,38 @@ def test_the_refusal_quotes_the_onboard_for_this_shell(monkeypatch: pytest.Monke
     assert install_route.split_line(onboard) == ["aisquare", "project", "onboard", str(root)]
 
 
+@pytest.mark.parametrize(
+    "root",
+    [r"C:\Users\jo\$scratch", r"C:\Users\jo\`tmp", r"C:\Users\%USERNAME%\work", r"C:\it's $x"],
+    ids=["dollar", "backtick", "percent", "quote-and-dollar"],
+)
+def test_a_windows_path_a_shell_would_expand_is_quoted_for_powershell(
+    monkeypatch: pytest.MonkeyPatch, root: str
+) -> None:
+    """Review of #259, round 21: on Windows a word was double-quoted, but PowerShell, the
+    default shell there, expands ``$name`` and backtick escapes inside double quotes, and
+    cmd.exe expands ``%NAME%``. So ``project onboard "C:\\Users\\jo\\$scratch"`` onboarded
+    ``C:\\Users\\jo\\``. Such a word is now in PowerShell's single quotes, which it reads
+    literally (cmd.exe passes them on, so there the command fails rather than acting on
+    another directory), and it reads back as the one command."""
+    import sys
+
+    from aisquare.services import install_route
+    from aisquare.services import project as project_service
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    onboard = project_service.onboard_command(Path(root))
+
+    word = onboard.removeprefix("aisquare project onboard ")
+    assert word == "'" + root.replace("'", "''") + "'", onboard  # nothing PowerShell expands
+    assert install_route.split_line(onboard) == ["aisquare", "project", "onboard", root]
+    # A word with none of them keeps the double quotes both shells read literally.
+    plain = install_route.command_line(["aisquare", "project", "onboard", r"C:\My Repo"])
+    assert plain == r'aisquare project onboard "C:\My Repo"'
+    with pytest.raises(ValueError, match="no closing quotation"):
+        install_route.split_line("aisquare project onboard 'C:\\x")
+
+
 def test_a_board_read_where_nothing_was_added_is_empty_and_adds_nothing(
     runner: CliRunner,
 ) -> None:

@@ -4645,6 +4645,41 @@ def test_a_failed_scans_card_on_a_board_others_share_leaves_every_feed_standing(
     assert sorted(item.id for item in again) == sorted(item.id for item in first)
 
 
+def test_a_question_read_apart_is_one_card_while_its_posters_scan_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 28, 3/10: Remote runs with no hub, and the hub's project is
+    listed. P's manager, spawned under the hub, asks on the hub's board, which P's scan reads
+    apart and the hub's own reads whole. Only a scan that succeeds names its posts, so while
+    P's scan failed, P's last card stood beside the hub project's copy, a second card with an
+    id of its own, pushed as new. P's card is still the one card."""
+    import sqlite3
+
+    monkeypatch.delenv("AISQUARE_TEAM_HUB", raising=False)
+    with store_session() as store:
+        hub = store.onboard_project(_rooted(tmp_path / "hub"))
+        p = store.onboard_project(_rooted(tmp_path / "p"))
+        _seat_up(store, _manager_of("p", asks=True), p, hub)
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    live = remote_needs.live_needs_sources()
+
+    def ended(project_id: str, since: datetime) -> list[FleetAgent]:
+        if project_id == p.id:
+            raise sqlite3.OperationalError("database is locked")
+        return live.ended_agents(project_id, since)
+
+    now = datetime.now(UTC)
+    first = scan_needs_you(live, now=now, dismissed=())
+    assert [(item.kind, item.project_id, item.agent) for item in first] == [
+        ("board_question", p.id, "manager")
+    ]
+
+    again = scan_needs_you(replace(live, ended_agents=ended), now=now, dismissed=(), kept=first)
+
+    assert [item.id for item in again] == [first[0].id]
+
+
 @dataclass(frozen=True)
 class _Seat:
     """One agent of a board: its fleet project, label and role; whether a fleet row holds it

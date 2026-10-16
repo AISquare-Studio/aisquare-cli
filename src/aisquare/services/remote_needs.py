@@ -2941,35 +2941,37 @@ def _needs_board_once(
     (:func:`_needs_elsewhere`), while another's scan read it whole: an item is of the board
     it was read on (``NeedsItem.board``), and its poster's card is the one card (round 27,
     1/7).
+
+    Only a scan that read all it needs names its posts, and a project whose scan failed keeps
+    its last cards. So every board's items are one card by ``(board, seq)``, the main board of
+    one project or of several, ranked by :func:`_needs_board_rank`: the poster's kept card,
+    its row's, is still the one. Ranked only on a board two projects write, a question on a
+    board the poster's project read apart, which one other project reads whole, was two cards
+    while the poster's scan failed, and the other's copy was pushed as new (round 28, 3/10).
     """
     posters = posters or {}
     writers: dict[str, list[str]] = {}
     for project_id, written in boards.items():
         writers.setdefault(written, []).append(project_id)
-    shared = {board: ids for board, ids in writers.items() if len(ids) > 1}
     kept: dict[tuple[str, object], NeedsItem] = {}
     rest: list[NeedsItem] = []
     for item in items:
-        if item.kind not in _NEEDS_BOARD_KINDS:
+        board = item.board or boards.get(item.project_id)
+        if item.kind not in _NEEDS_BOARD_KINDS or board is None:
             rest.append(item)
             continue
-        board = item.board or boards.get(item.project_id)
-        key = (board or "", item.detail.get("seq"))
+        key = (board, item.detail.get("seq"))
         if key in posters and posters[key] != item.project_id:
             continue  # the poster's project judged it, a card or none
-        if board not in shared:
-            rest.append(item)
-            continue
+        on = writers.get(board, [])
         held = kept.get(key)
-        if held is None or _needs_board_rank(item, board, shared[board]) < _needs_board_rank(
-            held, board, shared[board]
-        ):
+        if held is None or _needs_board_rank(item, board, on) < _needs_board_rank(held, board, on):
             kept[key] = item
     return [*rest, *kept.values()]
 
 
 def _needs_board_rank(item: NeedsItem, board: str, writers: Sequence[str]) -> tuple[int, int]:
-    """Which project's card a shared board's item is: the asker's row's, the board's own, the
+    """Which project's card a board's item is: the asker's row's, the board's own, the
     first writer's, in that order, and a project that does not write the board after them.
 
     A project reads a board it does not write when one of its rows recorded it

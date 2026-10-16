@@ -24,6 +24,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import EllipsisType
 from typing import NamedTuple
 
 from aisquare.core import brain, harness, insights, orchestrator, workspace
@@ -2668,7 +2669,9 @@ def _fleet_row(
     return store.fleet_agent_for_session(session_id)
 
 
-def _fleet_row_for(store: ContextStore, session_id: str) -> FleetAgent | None:
+def _fleet_row_for(
+    store: ContextStore, session_id: str, *, named: FleetAgent | EllipsisType | None = ...
+) -> FleetAgent | None:
     """The live fleet row a session *is* — the row already bound to that session.
 
     The name in the environment is accepted only when the row it names records
@@ -2682,10 +2685,13 @@ def _fleet_row_for(store: ContextStore, session_id: str) -> FleetAgent | None:
     — but it is logged: swallowed silently, a regression here (a renamed store
     method, a migrated column) put every spawned agent back on oldest-first with
     nothing anywhere saying the preference had stopped working (review of #116,
-    round 5).
+    round 5). ``named`` is the row a hook has read already (:func:`_hook_named_row`); left
+    out, it is read here.
     """
     try:
-        return _fleet_row(store, session_id, named=_named_fleet_row(store), allow_unbound=False)
+        if named is ...:
+            named = _named_fleet_row(store)
+        return _fleet_row(store, session_id, named=named, allow_unbound=False)
     except Exception as exc:
         _log.warning(
             "the fleet row of session %s could not be read, so it has none (%s: %s)",
@@ -2862,12 +2868,18 @@ def _late_assignment(store: ContextStore, session: TeamSession) -> Assignment | 
     worst, and the ASSIGNED TO YOU block it was owed comes with it. A child
     that inherited the variable pays one ``display-message`` per prompt to be
     refused, exactly as it is at its start.
+
+    The named row is read once and handed to both lookups: read again for the
+    assignment, every prompt of every fleet agent paid for two GLOB lookups on its id
+    (review of #259, round 24, 6/6). With no live row named, nothing can be bound here:
+    a row of the session's own is bound already, and no other is taken.
     """
     if orchestrator.env_fleet_agent() is None:
         return None
-    if _fleet_row_for(store, session.id) is not None:
+    named = _hook_named_row(store)
+    if named is None or _fleet_row_for(store, session.id, named=named) is not None:
         return None
-    return _assignment(store, session.id, session.project_id, named=_hook_named_row(store))
+    return _assignment(store, session.id, session.project_id, named=named)
 
 
 def _resolve_assignment(

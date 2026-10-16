@@ -5061,6 +5061,29 @@ def test_under_a_hub_the_briefing_names_no_task_of_another_board(hubbed: _Hubbed
     assert found is not None and found.id == row.id
 
 
+def test_a_prompt_under_a_fleet_window_reads_the_row_it_names_once(hubbed: _Hubbed) -> None:
+    """Review of #259, round 24, 6/6: ``_late_assignment``, on every prompt of a session
+    under a fleet window that no row is bound to, read the row ``AISQUARE_FLEET_AGENT``
+    names twice, a GLOB on its id each time: once to ask whether the session is bound,
+    and again for the assignment. Read once, it is handed to both. A child of the agent,
+    which inherits the variable and is refused the row, is that session at every prompt."""
+    _become(hubbed.coder, hubbed.tmux, hubbed.monkeypatch, pid=CHILD_PID, role="coder")
+    team_service.hook_session_start("sess-child", hubbed.fleet.root, "startup")
+    reads: list[str] = []
+    real = SqliteStore.get_fleet_agent
+
+    def counted(self: SqliteStore, agent_id: str) -> FleetAgent | None:
+        reads.append(agent_id)
+        return real(self, agent_id)
+
+    hubbed.monkeypatch.setattr(SqliteStore, "get_fleet_agent", counted)
+
+    team_service.hook_prompt_heartbeat("sess-child", hubbed.fleet.root)
+
+    assert reads == [hubbed.coder.id]
+    assert _row(hubbed.coder.id).session_id == hubbed.coder_sid, "the child is refused it"
+
+
 @pytest.mark.parametrize(
     ("where", "case"),
     [pytest.param(where, run, id=f"{where}: {name}") for where, name, run in _HUB_RULE_CASES],

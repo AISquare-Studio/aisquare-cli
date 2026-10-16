@@ -989,10 +989,16 @@ def _git(cwd: Path, *args: str) -> _GitResult:
     no model process, exactly like the ``rev-parse`` seams in ``core``. A
     non-zero exit is an answer (callers read ``returncode``); a missing git or
     a hang is not, and becomes a :class:`FleetError` with the reason.
+
+    Every command with ``--no-optional-locks``: a ``git status`` that only reads still takes
+    the tree's ``index.lock`` to write back what it refreshed, and a reap's status of an
+    ended agent's tree, asked without the branch lock, made a respawn's ``git checkout`` in
+    that tree fail on the lock it held (77 of 200 overlapping checkouts, review of #259,
+    round 20). A command that must write takes its locks all the same.
     """
     try:
         completed = subprocess.run(
-            ["git", "-C", str(cwd), *args],
+            ["git", "--no-optional-locks", "-C", str(cwd), *args],
             capture_output=True,
             text=True,
             encoding="utf-8",

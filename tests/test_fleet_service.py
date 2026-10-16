@@ -8716,6 +8716,50 @@ def test_a_reap_says_why_it_keeps_a_tree_while_a_spawn_holds_the_branch_lock(
     assert agent.cwd.is_dir()
 
 
+def test_a_reap_asks_what_a_tree_holds_without_writing_its_index(repo: Path) -> None:
+    """Review of #259, round 20: a reap asks an ended agent's tree what it holds without the
+    branch lock, and ``git status`` writes back the index it refreshed, holding the tree's
+    ``index.lock`` while it does: a respawn's ``git checkout`` there failed on it (77 of 200
+    overlapping checkouts). Asked with ``--no-optional-locks``, it writes nothing."""
+    (repo / "file.txt").write_text("committed\n", encoding="utf-8")
+    _git("add", "file.txt", cwd=repo)
+    _git("commit", "-q", "-m", "file", cwd=repo)
+    index = repo / ".git" / "index"
+    later = index.stat().st_mtime_ns + 5_000_000_000
+    os.utime(repo / "file.txt", ns=(later, later))  # the same bytes, a stat to refresh
+    before = index.stat()
+
+    assert fleet_service._why_kept(repo, repo, "main") is None, "the premise: clean, merged"
+
+    after = index.stat()
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+
+
+def test_every_git_command_the_fleet_runs_takes_no_optional_lock(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 20: one seam, so every git command a spawn, a stop and a reap run
+    (status, rev-parse, for-each-ref, worktree list and the rest) carries
+    ``--no-optional-locks``, and a read never holds a lock a write in the same tree needs."""
+    real = subprocess.run
+    gits: list[list[str]] = []
+
+    def watched(argv: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(argv, list) and argv and argv[0] == "git":
+            gits.append(argv)
+        return real(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", watched)
+    agent = fleet_service.spawn(project, "coder", label="coder-1").agent
+    (agent.cwd / "work.txt").write_text("not committed\n", encoding="utf-8")
+    fleet_service.stop(project, "coder-1", force=True)
+    report = fleet_service.reap(project)
+
+    assert dict(report.worktrees_kept) == {agent.cwd: "uncommitted changes"}, "status ran"
+    assert {argv[argv.index("-C") + 2] for argv in gits} >= {"status", "worktree", "rev-parse"}
+    assert [argv for argv in gits if argv[1] != "--no-optional-locks"] == []
+
+
 def test_a_reap_or_a_spawn_asks_git_for_the_branch_locks_directory_once(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

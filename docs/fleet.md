@@ -555,7 +555,10 @@ projects read too (the hub's under `AISQUARE_TEAM_HUB`, or the checkout's for a
 project rooted in a sub-folder of its repository) it is named after the project,
 `fleet-paused.<project id>`, and the manager's cycle names it: a pause, a resume
 or a shutdown of one project leaves every other project's manager on that board
-alone.
+alone. A manager whose project could not be told (one launched by hand in a
+folder nobody registered, under a hub) is told `fleet-paused.<project id>` to
+fill in, with the project's ID, not its codename, beside the `<project>` its
+fleet commands name.
 
 ### `ui`
 

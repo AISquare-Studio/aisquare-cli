@@ -3204,8 +3204,10 @@ def _role_cycle(me: TeamSession, project: ProjectInfo | None) -> list[str]:
     bare: alone, a fleet command acts on the active project, the machine-wide pin before
     the working directory (round 21 of the review of #259), and a bare one came back for
     every hand-launched session under a hub (round 23). A manager's pause is its project's on
-    the session's board (:func:`harness.pause_signal`), and a session whose project could not be
-    told is told the board's own name.
+    the session's board (:func:`harness.pause_signal`). A session whose project could not be
+    told gets a placeholder for that too, and a line says how to fill it in. Told the bare
+    name, under a hub the hub project's own pause, a manager kept spawning in the project the
+    human then named while ``fleet pause`` paused that one (review of #259, round 27, 6/7).
     """
     if project is not None:
         return harness.role_cycle(
@@ -3221,19 +3223,30 @@ def _role_cycle(me: TeamSession, project: ProjectInfo | None) -> list[str]:
             install_route.command_line(["aisquare", "fleet", verb, "--project"])
             + f" {_NO_CYCLE_PROJECT}"
         ),
+        paused=_NO_CYCLE_PAUSE,
     )
     if not any(_NO_CYCLE_PROJECT in line for line in cycle):
         return cycle
-    return [
+    told = [
         f"The fleet commands below name {_NO_CYCLE_PROJECT}: this session's own project "
         "could not be told, so put in the codename of the one they are for (`aisquare "
-        "project list` names them).",
-        *cycle,
+        "project list` names them)."
     ]
+    if any(_NO_CYCLE_PAUSE in line for line in cycle):
+        told.append(
+            f"Its pause is `{_NO_CYCLE_PAUSE}`: that project's ID, not its codename, in lower "
+            "case with `_` as `-` (`prj_ab12` → "
+            f"`{harness.pause_signal('prj_ab12', me.project_id)}`); `{harness.PAUSE_SIGNAL}` "
+            f"alone when it is this board's own project ({me.project_id})."
+        )
+    return [*told, *cycle]
 
 
 _NO_CYCLE_PROJECT = "<project>"
 """What a cycle's fleet commands name when :func:`_cycle_project` has no project."""
+_NO_CYCLE_PAUSE = f"{harness.PAUSE_SIGNAL}.<project id>"
+"""The pause a cycle names when :func:`_cycle_project` has no project: that project's on a
+board it does not own (:func:`harness.pause_signal`)."""
 
 
 def _cycle_project(

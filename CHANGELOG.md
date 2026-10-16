@@ -596,6 +596,8 @@ all of them, and the fleet cleans up the worktrees it made.**
     (the hub's, under a hub) the signal is the project's own,
     `fleet-paused.<project id>`, and its manager's cycle names it, so pausing,
     resuming or shutting down one project leaves the others' managers alone.
+    A manager whose project could not be told is given that name to fill in,
+    not the bare `fleet-paused`, which under a hub is the hub project's own.
   - A board write by a writer with no agent row (a note to the manager from
     the phone, a question from your own shell, an MCP client's task update)
     wakes the waiting manager that reads that board. With several managers on

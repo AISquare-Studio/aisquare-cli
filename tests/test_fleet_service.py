@@ -4587,6 +4587,44 @@ def test_under_a_hub_a_session_with_no_fleet_row_names_its_own_directorys_projec
     assert not re.search(r"aisquare fleet [a-z]+(?! --project)\b", loose), loose
 
 
+def test_under_a_hub_a_session_with_no_project_is_told_a_pause_to_fill_in_not_the_hubs(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 27, 6/7: a session whose project could not be told names a
+    ``<project>`` in its fleet commands, but was told the bare ``fleet-paused``: under a hub,
+    the hub project's own pause. Filled in with ``app``, the manager spawned there and kept
+    spawning while ``fleet pause -P app`` set ``app``'s on the hub's board. It is told a
+    ``fleet-paused.<project id>`` to fill in, and how: the ID, not the codename."""
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    with store_session() as store:
+        board = store.onboard_project(team_project(hub))
+        app = store.onboard_project(project, codename="calm-otter")
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))
+    _stranger(monkeypatch, "manager")
+    elsewhere = tmp_path / "unregistered"
+    elsewhere.mkdir()
+
+    loose = team_service.hook_session_start("sess-loose", elsewhere, "startup")
+
+    assert "Spawn\nnothing while the `fleet-paused.<project id>` signal is set." in loose, loose
+    assert "`fleet-paused` signal" not in loose, "the hub project's own pause"
+    told = next(line for line in loose.splitlines() if line.startswith("Its pause is "))
+    assert "that project's ID, not its codename," in told, told
+    assert "(`prj_ab12` → `fleet-paused.prj-ab12`)" in told, told
+    assert f"`fleet-paused` alone when it is this board's own project ({board.id})" in told
+
+    fleet_service.pause(app)  # what the human runs once the manager is spawning in `app`
+    filled = "fleet-paused." + app.id.lower().replace("_", "-")
+    with store_session() as store:
+        state = team_service.read_signal_in(store, board.id, filled)
+    assert state is not None and state.value == "on", "the name filled in is the one set"
+
+
 def test_a_cycle_with_no_fleet_row_names_its_project_by_its_codename(
     project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

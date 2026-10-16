@@ -1174,15 +1174,30 @@ _TASK_COLUMNS = (
     "claimed_by, claim_expires_at, created_by, created_at, updated_at"
 )
 _EVENT_COLUMNS = "seq, id, project_id, session_id, kind, text, task_id, to_role, created_at"
-_FLEET_AGENT_COLUMNS = (
-    "id, project_id, label, role, binary, tmux_socket, pane_id, session_id, cwd, worktree, "
-    "task_id, spawned_by, created_at, ended_at, exit_status, account_slot, launch_spec, "
-    "socket_path, boot_id, server_started_at, branch, board"
-)
+_FLEET_AGENT_FIELDS = (
+    "id", "project_id", "label", "role", "binary", "tmux_socket", "pane_id", "session_id",
+    "cwd", "worktree", "task_id", "spawned_by", "created_at", "ended_at", "exit_status",
+    "account_slot", "launch_spec", "socket_path", "boot_id", "server_started_at", "branch",
+    "board",
+)  # fmt: skip
+_FLEET_AGENT_COLUMNS = ", ".join(_FLEET_AGENT_FIELDS)
+
+
+def _read_list(fields: Sequence[str], reads: Mapping[str, str]) -> str:
+    """``fields`` as a SELECT list, in their order: each as stored, or as its expression
+    in ``reads`` under its own name.
+
+    One tuple for the columns a row is written with and read back as. Derived from the
+    written list's text, the read list depended on ``board`` being its last name, and the
+    next column appended after it would have made every fleet read invalid SQL (review of
+    #259, round 27, 7/7)."""
+    return ", ".join(f"{reads[field]} AS {field}" if field in reads else field for field in fields)
+
+
 #: :data:`_FLEET_AGENT_COLUMNS` as a row is read: a ``board`` it never recorded is its
 #: session's, as the v32 backfill gives it (:data:`_UNRECORDED_BOARD`).
-_FLEET_AGENT_READ = _FLEET_AGENT_COLUMNS.removesuffix("board") + (
-    f"COALESCE(board, {_UNRECORDED_BOARD}) AS board"
+_FLEET_AGENT_READ = _read_list(
+    _FLEET_AGENT_FIELDS, {"board": f"COALESCE(board, {_UNRECORDED_BOARD})"}
 )
 _CLAUDE_ACCOUNT_COLUMNS = "slot, config_dir, alias, position, is_default, disabled, created_at"
 

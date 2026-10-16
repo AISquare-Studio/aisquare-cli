@@ -2404,3 +2404,21 @@ def test_ui_state_is_a_key_value_memory(store: ContextStore) -> None:
     assert store.ui_state("fleet.selected") == "agent:prj_test/agt_1"
     store.set_ui_state("fleet.selected", None)
     assert store.ui_state("fleet.selected") is None
+
+
+def test_a_fleet_row_is_read_as_the_columns_it_is_written_with_whatever_follows_board(
+    store: ContextStore,
+) -> None:
+    """Review of #259, round 27, 7/7: the read list was the written one's text with
+    ``board`` cut off its end, so a column appended after it made every fleet read invalid
+    SQL. Both lists come from one tuple, and a read names each column as it is written."""
+    later = (*store_module._FLEET_AGENT_FIELDS, "later")
+    read = store_module._read_list(later, {"board": "COALESCE(board, project_id)"})
+    assert read.endswith(", COALESCE(board, project_id) AS board, later"), read
+
+    cursor = store._conn.execute(  # type: ignore[attr-defined]
+        f"SELECT {store_module._FLEET_AGENT_READ} FROM fleet_agent LIMIT 0"
+    )
+    named = tuple(column[0] for column in cursor.description)
+    assert named == store_module._FLEET_AGENT_FIELDS, named
+    assert ", ".join(named) == store_module._FLEET_AGENT_COLUMNS

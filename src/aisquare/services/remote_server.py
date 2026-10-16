@@ -773,17 +773,26 @@ class _RemoteReach:
 
 
 def _remote_task(
-    ref: str, reach: Callable[[], set[str]], *, session: str | None, project: str | None
+    ref: str,
+    reach: Callable[[], set[str]],
+    *,
+    session: str | None,
+    project: str | None,
+    board: str | None = None,
 ) -> TeamTask:
     """The task a phone's ``ref`` names: ``KeyError(ref)`` for none, as the board's services
     raise it, and ``AmbiguousIdError`` for several there (:func:`_remote_board_refusals`).
 
-    A board number, ``12`` or ``#12``, as every board line shows it, is read on one board
-    (:func:`_remote_number_board`): ``session``'s, the id of the write's ``as``, else
+    A board number, ``12`` or ``#12``, as every board line shows it, is read on one board:
+    ``board``, the one the write goes to where the caller has worked it out (a note's), else
+    (:func:`_remote_number_board`) ``session``'s, the id of the write's ``as``, else
     ``project``'s, else the current project's, as ``asq task done 12`` reads it on its
     ``--as``'s board or its directory's (``team.find_task``). Read as an id like any other
     ref, ``12`` closed whichever reachable task's id ended in ``12``, on any board, and
-    ``#12`` was a 404 (review of #259, round 13).
+    ``#12`` was a 404 (review of #259, round 13). Read on the Board tab's board while a note
+    to a running agent's label, or a card's Reply, went to the board that agent reads, a
+    ``#1`` named a task of another board than the note's, and the note was refused (round
+    31, 1/7): ``asq note --task 1`` reads it on the board the note is written to.
 
     Anything else is an id, an id prefix or an id tail among the tasks on a board the phone
     may reach (``reach``, :class:`_RemoteReach`). The services read one across every board,
@@ -796,9 +805,9 @@ def _remote_task(
 
     number = team_service.task_number_of(ref)
     if number is not None:
-        board = _remote_number_board(session, project)
+        on = board if board is not None else _remote_number_board(session, project)
         with store_session() as store:
-            task = store.task_by_number(board, number)
+            task = store.task_by_number(on, number)
     else:
         boards = reach()
         with store_session() as store:
@@ -3647,7 +3656,8 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
         does not hold is a 404, and the page keeps the card. With neither, the note goes to
         the board its ``to`` reads, when that is the label of one of the project's running
         agents, else to the board the project's agents read, the one the Board tab shows
-        (:func:`_remote_note_board`).
+        (:func:`_remote_note_board`). A ``task`` number is read on the board the note goes to
+        (:func:`_remote_task`).
         """
         from aisquare.services import team as team_service
 
@@ -3683,7 +3693,9 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
                     task_ref=(
                         None
                         if task is None
-                        else _remote_task(task, reach, session=session, project=project).id
+                        else _remote_task(
+                            task, reach, session=session, project=project, board=board
+                        ).id
                     ),
                     to_role=to,
                     kind=kind,

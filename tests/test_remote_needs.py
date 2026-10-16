@@ -5042,6 +5042,47 @@ def test_a_board_tab_note_to_a_running_agent_goes_to_the_board_it_reads(
     assert posted == {expected}
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        ("to", "coder-1", ("p", "tsk_elsewhere")),
+        ("agent_id", "agt_p_coder-1", ("p", "tsk_elsewhere")),
+        ("to", "manager", ("hub", "tsk_hub")),
+        ("agent_id", "agt_p_manager", ("hub", "tsk_hub")),
+    ],
+    ids=["to a coder", "a coder's card", "to the manager", "the manager's card"],
+)
+def test_a_notes_task_number_is_read_on_the_board_the_note_goes_to(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, value: str, expected: Any
+) -> None:
+    """Review of #259, round 31, 1/7: a note to a running agent's label, or a card's Reply,
+    goes to the board that agent reads (round 30, 3/8), but its ``#1`` was read on the Board
+    tab's board. ``coder-1``, spawned from a plain shell, reads P's checkout board while the
+    manager reads hub H: ``#1`` named H's task, the note went to P's board, and it was
+    refused as "a task of another project's board". A number is read on the board the note
+    goes to, as ``asq note --task 1`` reads it."""
+    from aisquare.services.remote_server import live_writes
+
+    p, hub, _ = _hubbed_tasks(tmp_path, monkeypatch, "none")
+    with store_session() as store:
+        _seat_up(store, _Seat("p", "coder-1"), p, p)
+    boards = {p.id: "p", hub.id: "hub"}
+    body = {"text": "look at #1", "project": p.id, "task": "#1", field: value}
+
+    result, _summary = live_writes().handlers["note"](body)
+
+    event = result["event"]
+    assert isinstance(event, dict)
+    with store_session() as store:
+        (posted,) = [
+            (boards[board], e.task_id)
+            for board in boards
+            for e in store.recent_events(board, limit=9)
+            if e.kind == "note" and e.text == "look at #1"
+        ]
+    assert posted == expected
+
+
 @pytest.mark.parametrize("end", [None, "exit"], ids=["a manager running", "none running"])
 def test_a_board_frame_opens_one_store_for_its_board_and_its_events(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, end: str | None

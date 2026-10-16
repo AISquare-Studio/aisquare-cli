@@ -5390,6 +5390,31 @@ def test_under_a_hub_a_write_with_no_row_wakes_the_manager_of_the_writers_projec
         assert hubbed.woken == woken, where
 
 
+def test_a_usage_limit_reads_the_agents_row_once(hubbed: _Hubbed) -> None:
+    """Review of #259, round 25, 8/10: ``hook_stop_failure`` read the session's row for the
+    limit line's label and command, then ``_nudge_target`` read the same row again for the
+    manager to wake. The row read once names both; a re-fire of the limit nudges nobody."""
+    reads: list[str] = []
+    real = SqliteStore.fleet_agent_for_session
+
+    def counted(self: SqliteStore, session_id: str) -> FleetAgent | None:
+        reads.append(session_id)
+        return real(self, session_id)
+
+    hubbed.monkeypatch.setattr(SqliteStore, "fleet_agent_for_session", counted)
+    limit = "You've hit your session limit · resets 12:30am"
+
+    team_service.hook_stop_failure(
+        hubbed.coder_sid, error="rate_limit", message=limit, details=None
+    )
+    team_service.hook_stop_failure(
+        hubbed.coder_sid, error="rate_limit", message=limit, details=None
+    )
+
+    assert reads == [hubbed.coder_sid, hubbed.coder_sid], "once a call"
+    assert hubbed.woken == [hubbed.fleet.id], "its own manager, once"
+
+
 @pytest.mark.parametrize("nested", ["a sub-folder", "a linked worktree"])
 def test_a_project_rooted_below_its_checkout_spawns_for_a_task_on_the_checkouts_board(
     tmux: FakeTmux,

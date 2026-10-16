@@ -2139,9 +2139,15 @@ def hook_stop_failure(
         # the line named no command and the agent by its short id (review of #259, round 23).
         agent = store.fleet_agent_for_session(session.id)
         label = agent.label if agent is not None else (session.label or short_id(session.id))
-        manager = session.project_id
+        manager: str | None = None
         if not already_limited:
-            manager = _nudge_target(store, session.id, session.project_id)
+            # The row just read names the manager's project (`_nudge_target`'s rule); asked
+            # again there, the same row was read twice (review of #259, round 25, 8/10).
+            manager = (
+                agent.project_id
+                if agent is not None
+                else _nudge_target(store, None, session.project_id)
+            )
             _emit(
                 store,
                 session.project_id,
@@ -2155,7 +2161,7 @@ def hook_stop_failure(
                 session_id=session.id,
             )
         refreshed = store.get_session(session.id) or session
-    if not already_limited:
+    if manager is not None:  # not already limited
         # After the row says limited, never before, and outside the `with`
         # (it opens its own connection): path 2 types into a WAITING manager;
         # a working one reads the event on its next delta or its own Stop. The manager of

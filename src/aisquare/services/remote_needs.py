@@ -1978,7 +1978,9 @@ def needs_from_board(
     (``stopped``, when): posted before the stop, or within ``RECENTLY_ENDED`` after it, a
     result stays on the board, news, not a question, while the stop is a card of its own or
     a clean exit. Judged by the result's own time, it is the same card every scan of its
-    day (review of #243, rounds 22 to 25).
+    day (review of #243, rounds 22 to 25). ``stopped`` is given only for the board that
+    manager read: on another it never took the result, which stays a card (review of #259,
+    round 28, 4/10).
 
     The manager is the project's, so it takes the items its own agents (``agents``) post,
     which nudge it (``team._nudge_target``), while it reads this board: ``manager_live`` is
@@ -2297,6 +2299,9 @@ def _needs_scan_project(
     items.extend(
         _needs_fleet_down(statuses, project=project, now=now, first_seen=first_seen, seen=seen)
     )
+    # A result to a manager that stopped is news only where it read: on another board no
+    # manager took it, and it is still a card (review of #259, round 28, 4/10).
+    read_by = None if manager is None else _board_of_row(manager)
     for on, read in asked:
         items.extend(
             needs_from_board(
@@ -2306,7 +2311,7 @@ def _needs_scan_project(
                 project=project,
                 now=now,
                 manager_live=hears == on,
-                stopped=manager.ended_at if manager is not None else None,
+                stopped=manager.ended_at if manager is not None and read_by == on else None,
                 own_board=own and on == board_id,
                 board=on,
             )

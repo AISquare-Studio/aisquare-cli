@@ -4680,6 +4680,42 @@ def test_a_question_read_apart_is_one_card_while_its_posters_scan_fails(
     assert [item.id for item in again] == [first[0].id]
 
 
+def test_a_result_on_a_board_the_stopped_manager_never_read_stays_a_card(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 28, 4/10: a result to a manager that stopped is news, not a
+    card, on the premise that the manager took it while it lived. P's manager reads P's
+    board, and coder-1, spawned under a hub, reports to it on the hub's: a card, as no
+    manager reads there. Once the manager stopped, the stop's time was passed for every
+    board the scan read, so the result left the phone, though no manager ever read it."""
+    from aisquare.services import team as team_service
+
+    monkeypatch.delenv("AISQUARE_TEAM_HUB", raising=False)
+    with store_session() as store:
+        p = store.onboard_project(_rooted(tmp_path / "p"))
+        hub = _rooted(tmp_path / "hub")
+        store.ensure_project(hub)
+        _seat_up(store, _manager_of("p"), p, p)
+        _seat_up(store, _Seat("p", "coder-1"), p, hub)
+        team_service._emit(
+            store, hub.id, "result", "tests pass", session_id="ses_p_coder-1", to_role="manager"
+        )
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+
+    def results() -> list[tuple[str, str | None]]:
+        items = scan_needs_you(
+            remote_needs.live_needs_sources(), now=datetime.now(UTC), dismissed=()
+        )
+        return [(item.kind, item.agent) for item in items if item.kind == "board_result"]
+
+    assert results() == [("board_result", "coder-1")], "no manager reads the hub's board"
+    with store_session() as store:
+        store.end_fleet_agent("agt_p_manager")
+
+    assert results() == [("board_result", "coder-1")]
+
+
 @dataclass(frozen=True)
 class _Seat:
     """One agent of a board: its fleet project, label and role; whether a fleet row holds it

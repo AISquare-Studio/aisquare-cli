@@ -1,7 +1,8 @@
 # Nightly real-user E2E: working brief for the fleet that builds it
 
-> **Status:** working brief. Move the design into `docs/nightly-e2e.md` and drop this file before any PR.
-> **Branch:** `feat/e2e-nightly`. Nothing leaves this machine without the human's go-ahead.
+> **Status:** working brief, in review on a draft PR. Before merge, the design moves into
+> `docs/nightly-e2e.md` and this file goes. Agents working from it: never push or open PRs yourselves;
+> the human driving the fleet does.
 
 ## 0. Status (updated 2026-10-16)
 A first slice is built and green locally (macOS):
@@ -197,7 +198,7 @@ It replaces only the model. Fidelity contract:
 OSC 133); UTF-8 locale; socket path length; reachability of PyPI, astral, GitHub and claude.ai.
 
 **Watchlist** (reported, never red): about 20 findings from the 0.8.0 QA report
-(`~/Desktop/Claude Files/aisquare-cli-0.8.0-QA/REPORT.md` on this machine), each `@pytest.mark.known_bug("QA-xx")`:
+(shared with the team separately), each `@pytest.mark.known_bug("QA-xx")`:
 - QA-01 forget pin, QA-04 idle "working", QA-05 switch/unpin;
 - QA-06/07 home onboarding, QA-08/09 capture and redaction, QA-10 CLAUDE.md re-import, QA-12 relative config dir;
 - QA-13 task keys, QA-19 FTS crash, QA-24 forget undone, QA-37/38/39, and others.

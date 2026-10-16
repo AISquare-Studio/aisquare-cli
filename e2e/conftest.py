@@ -191,7 +191,10 @@ def _run_id() -> str:
     """
     stamp = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S")
     if os.environ.get("E2E_RUNNER") == "github-hosted" and os.environ.get("GITHUB_RUN_ID"):
-        return f"{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}"
+        # The track too: a nightly runs both tracks in ONE workflow run, and each leg's
+        # evidence is published under its own id (e2e/report/ci_publish.py).
+        run, attempt = os.environ["GITHUB_RUN_ID"], os.environ.get("GITHUB_RUN_ATTEMPT", "1")
+        return f"{run}-{attempt}-{track()}"
     runner = os.environ.get("E2E_RUNNER", "local")
     return f"{stamp}-{runner}-{track()}"
 

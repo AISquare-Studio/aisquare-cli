@@ -65,6 +65,18 @@ The report is built by `python -m e2e.report.build out/e2e/local-main`.
   because that is part of what is tested.
 - **Locally:** `e2e/ci/act-run.sh` runs the same workflow with
   [act](https://github.com/nektos/act).
+- **On a PR** labelled `e2e`, the workflow posts the run as **one comment** and edits it in
+  place on every push: the verdict, the journeys, the watchlist and every screenshot.
+  - **How images are hosted:** the `publish` job (the only job with a write token) pushes
+    the run's screenshots as one orphan commit to its own ref, `refs/e2e/runs/<run-id>`.
+    The comment shows them from that commit by SHA.
+  - **Why a ref and not a branch:** default clones and fetches never download screenshots.
+  - **What it needs:** only the workflow's `GITHUB_TOKEN`, with `contents: write` and
+    `pull-requests: write`.
+  - **Fork PRs:** they get a read-only token by GitHub's design, so they keep the artifact
+    and the job summary but no comment.
+- **Nightly:** the same summary, with images, goes to the job summary, and to the issue
+  numbered in the repository variable `E2E_NIGHTLY_ISSUE` when one is set.
 
 ## How it works (one paragraph)
 

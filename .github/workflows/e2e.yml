@@ -255,6 +255,81 @@ jobs:
             exit 1
           fi
 
+  # WHERE A REVIEWER SEES IT. The linux job holds a read-only token and runs the
+  # product under test (with sudo); this job holds the write token and runs only
+  # e2e/report/ci_publish.py on the uploaded evidence. Splitting them is the
+  # point: nothing the product does can reach a token that writes.
+  #
+  # What it writes, and why that needs no secret beyond the GITHUB_TOKEN:
+  #   contents: write      the run's screenshots, as one orphan commit on its own
+  #                        ref, refs/e2e/runs/<run-id>. Not a branch, so default
+  #                        clones and fetches never download them; the comment's
+  #                        images are served from that commit by SHA.
+  #   pull-requests: write one sticky comment per PR and track, edited on every
+  #                        run (a hidden marker finds it).
+  # On a nightly, the summary (with images) goes to the job summary, and to the
+  # tracking issue in the repository variable E2E_NIGHTLY_ISSUE when one is set.
+  #
+  # NOT FOR PULL REQUESTS FROM FORKS: GitHub gives their runs a read-only token
+  # by design, and pull_request_target is never used here (PLAN §10). Their
+  # evidence is still in the artifact and the step summary; a workflow_run
+  # publisher, once this file is on the default branch, is the way to post them.
+  publish:
+    name: publish the evidence
+    needs: linux
+    if: >-
+      always()
+      && contains(fromJSON('["success", "failure"]'), needs.linux.result)
+      && !inputs.smoke
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Download the evidence
+        uses: actions/download-artifact@v8
+        with:
+          pattern: e2e-linux-*
+          path: evidence
+
+      - name: Publish the screenshots and the PR comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Through the environment, never spliced into the script.
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          NIGHTLY_ISSUE: ${{ vars.E2E_NIGHTLY_ISSUE }}
+        run: |
+          shopt -s nullglob
+          found=0
+          for dir in evidence/*/; do
+            found=1
+            set -- "${dir%/}" --repo "$GITHUB_REPOSITORY" --summary-file "$GITHUB_STEP_SUMMARY"
+            if [ -n "$PR_NUMBER" ]; then
+              set -- "$@" --pr "$PR_NUMBER"
+            elif [ "$GITHUB_EVENT_NAME" = schedule ] && [ -n "$NIGHTLY_ISSUE" ]; then
+              set -- "$@" --issue "$NIGHTLY_ISSUE"
+            fi
+            python -m e2e.report.ci_publish "$@"
+          done
+          if [ "$found" = 0 ]; then
+            echo "::warning::no e2e evidence was uploaded, so there is nothing to publish"
+          fi
+
   # THE macOS LEG (PLAN §11, L3 and L4) IS NOT BUILT YET. This placeholder keeps
   # its shape in review beside the Linux leg, so building it is a diff to this
   # job rather than a new file. Expect three differences from Linux: ttyd from

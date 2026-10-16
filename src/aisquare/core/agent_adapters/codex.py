@@ -344,7 +344,10 @@ class CodexAdapter:
         positional_prompt=True,
         idle_prompt_mark=IDLE_PROMPT_MARK,
         idle_on_screen=idle_on_screen,
-        fleet_settings=("notice.hide_rate_limit_model_nudge=true",),
+        fleet_settings=(
+            "notice.hide_rate_limit_model_nudge=true",
+            "check_for_update_on_startup=false",
+        ),
         first_context_file_only=True,
         sandbox_permissions=True,
         sandboxes_tools=True,

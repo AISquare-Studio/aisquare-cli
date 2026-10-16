@@ -848,12 +848,47 @@ def test_the_fleets_codex_setting_yields_to_any_layer_of_the_operators(
     )
     selected = agent_launch.resolve(agent="codex")
     window = {"CODEX_HOME": str(home), "AISQUARE_FLEET_AGENT": "agt-1"}
-    expected = ["-c", "notice.hide_rate_limit_model_nudge=true"] if added else []
-    assert agent_launch.fleet_settings_args(selected, window, args) == expected
+    given = agent_launch.fleet_settings_args(selected, window, args)
+    assert (["-c", "notice.hide_rate_limit_model_nudge=true"] in _pairs(given)) is added
+    if config is None:
+        assert given == [], "a layer that cannot be read may set any of them"
     # Outside a fleet window the human answers Codex's dialogs, and nothing is added.
     assert agent_launch.fleet_settings_args(selected, {"CODEX_HOME": str(home)}, args) == []
     claude = agent_launch.resolve(agent="claude-code")
     assert agent_launch.fleet_settings_args(claude, window, args) == []
+
+
+def _pairs(argv: list[str]) -> list[list[str]]:
+    return [argv[at : at + 2] for at in range(0, len(argv), 2)]
+
+
+@pytest.mark.parametrize(
+    ("config", "args", "added"),
+    [
+        pytest.param("", [], True, id="none"),
+        pytest.param("check_for_update_on_startup = true\n", [], False, id="user"),
+        pytest.param("", ["-c", "check_for_update_on_startup=true"], False, id="override"),
+        pytest.param("", ["-p", "updating"], False, id="profile"),
+    ],
+)
+def test_a_fleet_codex_window_starts_with_no_update_dialog_unless_the_operator_asks(
+    tmp_path: Path, config: str, args: list[str], added: bool
+) -> None:
+    """Codex 0.162.1, npm-installed, opened ``Update available · 0.162.1 → 0.163.0`` in a
+    starting pane once 0.163.0 was out (CI on 72a88fc0): its first choice, which an Enter
+    picks, runs ``npm install -g @openai/codex``, and the agent waits on it. A fleet
+    window launches with ``check_for_update_on_startup=false`` unless a layer of the
+    operator's sets it."""
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    (home / "config.toml").write_text(config, encoding="utf-8")
+    (home / "updating.config.toml").write_text(
+        "check_for_update_on_startup = true\n", encoding="utf-8"
+    )
+    selected = agent_launch.resolve(agent="codex")
+    window = {"CODEX_HOME": str(home), "AISQUARE_FLEET_AGENT": "agt-1"}
+    given = agent_launch.fleet_settings_args(selected, window, args)
+    assert (["-c", "check_for_update_on_startup=false"] in _pairs(given)) is added
 
 
 def _waiting_manager_on(

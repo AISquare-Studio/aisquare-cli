@@ -114,7 +114,11 @@ class AgentCapabilities:
     (``services.agent_launch.fleet_settings_args``): Codex's
     ``notice.hide_rate_limit_model_nudge=true``, which keeps its ``Switch to gpt-6-luna
     for lower credit usage?`` dialog, opened past a turn near the five-hour limit while
-    its hooks say waiting, out of a pane the fleet types into (measured on 0.162.1)."""
+    its hooks say waiting, out of a pane the fleet types into (measured on 0.162.1), and
+    ``check_for_update_on_startup=false``, which keeps its ``Update available`` dialog
+    out of a starting pane: an npm-installed 0.162.1 opened it once 0.163.0 was out
+    (CI on 72a88fc0), its first choice, which an Enter picks, running ``npm install
+    -g @openai/codex``."""
     start_dialog_mark: str | None = None
     """What starts the last line of the agent's screen while a dialog it puts up before its
     start holds it for the human, where an Enter answers it: Claude Code's ``Enter to

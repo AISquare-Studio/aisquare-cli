@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import inspect
 import os
+import re
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -356,13 +357,26 @@ _RUNNERS = frozenset(
 )  # fmt: skip
 
 
+#: A call whose name says it runs or splits a command, as a helper's often does
+#: (``_run``, ``run_git``, ``_exec``, ``shlex.split``): matched on its name's words.
+_RUNNER_WORDS = re.compile(r"(?:^|_)(?:run|call|exec\w*|spawn\w*|popen|system|split|git)(?:_|$)")
+
+
 def _names_git(node: ast.AST | None) -> bool:
-    """A string that is ``git`` or starts a git command line (``"git status"``, an
-    f-string ``f"git {x}"``)."""
+    """A string that is ``git`` or starts a git command line (``"git status"``), however it
+    is built: an f-string, ``"git " + args``, ``"git %s" % args``, ``"git {}".format(args)``."""
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value == "git" or node.value.startswith("git ")
     if isinstance(node, ast.JoinedStr) and node.values:
         return _names_git(node.values[0])
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add | ast.Mod):
+        return _names_git(node.left)
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "format"
+    ):
+        return _names_git(node.func.value)
     return False
 
 
@@ -380,7 +394,7 @@ def _git_programs(tree: ast.AST) -> list[ast.AST]:
         elif isinstance(node, ast.Call):
             func = node.func
             name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-            if name in _RUNNERS and any(
+            if (name in _RUNNERS or _RUNNER_WORDS.search(name)) and any(
                 _names_git(arg) for arg in [*node.args, *(k.value for k in node.keywords)]
             ):
                 found.append(node)
@@ -396,10 +410,12 @@ def _git_programs(tree: ast.AST) -> list[ast.AST]:
     return found
 
 
-def test_the_git_guard_sees_every_shape_of_a_git_argv() -> None:
-    """Review r13 of #113, finding 11, and r14, finding 10: the guard was a one-line regex,
-    then blind to a command line in a string, an f-string, ``which`` imported by name,
-    asyncio's runners and a parameter's default. Each shape it reads is here."""
+def test_the_git_guard_sees_each_shape_it_lists() -> None:
+    """Review r13 of #113, finding 11, r14, finding 10, and r15, finding 10: the guard was a
+    one-line regex, then blind to a command line in a string, an f-string, ``which``
+    imported by name, asyncio's runners, a parameter's default, a helper of its own
+    (``_run("git", ...)``), ``shlex.split`` and a command built by ``+``, ``%`` or
+    ``.format``. Each shape it reads is here, and only these are claimed."""
     shapes = [
         'run(\n    [\n        "git",\n        "status",\n    ]\n)',
         'run(["git"] + args)',
@@ -413,6 +429,12 @@ def test_the_git_guard_sees_every_shape_of_a_git_argv() -> None:
         'from shutil import which\nwhich("git")',
         'await asyncio.create_subprocess_exec("git", "status")',
         'def run_git(program="git"): ...',
+        '_run("git", "status")',
+        'run_git("git", "status")',
+        'shlex.split("git status --porcelain")',
+        'subprocess.run("git -C " + str(root) + " status", shell=True)',
+        'os.system("git %s" % args)',
+        'subprocess.run("git {}".format(args), shell=True)',
     ]
     for shape in shapes:
         assert _git_programs(ast.parse(shape)), shape

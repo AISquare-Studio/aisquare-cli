@@ -859,6 +859,18 @@ def test_the_word_list_is_512_distinct_common_words_of_3_to_7_letters() -> None:
     assert all(re.fullmatch(r"[a-z]{3,7}", word) for word in REMOTE_PASSPHRASE_WORDS)
 
 
+#: Words the list's curation keeps out (``services/remote_words.py``): each has a common
+#: near-homophone, so a phrase read aloud with it can be typed the other way, and each wrong
+#: try spends the global unlock budget. The last five sound like ``seeder``, ``Adam``,
+#: ``latter``, ``odder`` and ``putting`` through the American flapped t/d, and the last three
+#: were in the list until review of #259, round 29, 8/8.
+_NEAR_HOMOPHONES = ("bear", "lava", "cedar", "atom", "ladder", "otter", "pudding")
+
+
+def test_the_word_list_holds_no_word_its_curation_keeps_out() -> None:
+    assert set(_NEAR_HOMOPHONES) & set(REMOTE_PASSPHRASE_WORDS) == set()
+
+
 def test_a_passphrase_is_four_distinct_words_of_the_list() -> None:
     for _ in range(50):
         words = remote_server.new_password().split("-")

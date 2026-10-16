@@ -10,9 +10,11 @@ Curated by hand, for a phrase read off a terminal and typed on a phone:
 
 * common, concrete words a phone keyboard already knows, 3 to 7 lower-case letters;
 * no word with a common homophone or near-homophone in a widespread accent (no
-  ``bear``/``bare``, ``cedar``/``seeder``, ``atom``/``Adam``, ``lava``/``larva``), and no
-  word with a second accepted spelling (``harbor``/``harbour``, ``yogurt``/``yoghurt``),
-  so a phrase read aloud is typed the one way it was written;
+  ``bear``/``bare``, ``lava``/``larva``, nor through the American flapped *t*/*d*
+  ``cedar``/``seeder``, ``atom``/``Adam``, ``ladder``/``latter``, ``otter``/``odder`` or
+  ``pudding``/``putting``), and no word with a second accepted spelling
+  (``harbor``/``harbour``, ``yogurt``/``yoghurt``), so a phrase read aloud is typed the one
+  way it was written;
 * nothing offensive, and no slang sense a person would not want to read out.
 
 ``normalize_passphrase`` in :mod:`aisquare.services.remote_server` lowercases what the
@@ -26,8 +28,8 @@ REMOTE_PASSPHRASE_WORDS: tuple[str, ...] = (
     "acorn", "almond", "alpine", "amber", "anchor", "anvil", "apple", "apricot", "apron", "arrow",
     "atlas", "attic", "aurora", "autumn", "avocado", "azure", "badge", "badger", "bagel",
     "balcony", "ballet", "bamboo", "banana", "banjo", "banner", "barley", "barn", "barrel",
-    "basil", "basket", "beacon", "bench", "birch", "bison", "blanket", "boat", "bobcat", "bottle",
-    "brave", "breeze", "bridge", "bright", "bronze", "brook", "bucket", "bugle", "butter",
+    "basil", "basket", "beacon", "beaver", "bench", "birch", "bison", "blanket", "boat", "bobcat",
+    "bottle", "brave", "breeze", "bridge", "bright", "bronze", "brook", "bucket", "bugle", "butter",
     "button", "cabbage", "cabin", "cable", "cactus", "calm", "camel", "camera", "canal", "candle",
     "candy", "canoe", "canyon", "carbon", "cargo", "carpet", "cashew", "castle", "cave", "cement",
     "chair", "chalk", "chapel", "cherry", "chess", "chorus", "chrome", "cider", "circus",
@@ -41,24 +43,24 @@ REMOTE_PASSPHRASE_WORDS: tuple[str, ...] = (
     "fork", "frost", "funnel", "gadget", "galaxy", "garage", "garden", "garlic", "garnet",
     "gecko", "gentle", "giant", "ginger", "giraffe", "glacier", "glade", "glider", "globe",
     "glove", "goblet", "golden", "goose", "granite", "grape", "gravity", "guava", "guitar",
-    "gulf", "hallway", "hammer", "happy", "harp", "hazel", "helmet", "heron", "hill", "hinge",
-    "honey", "hornet", "humble", "husky", "igloo", "indigo", "inlet", "iron", "island", "ivory",
-    "jacket", "jade", "jaguar", "jar", "jasper", "jazz", "jelly", "jigsaw", "jolly", "jungle",
-    "juniper", "kale", "karate", "kayak", "kestrel", "kettle", "kitchen", "kite", "kitten",
-    "kiwi", "koala", "ladder", "ladle", "lagoon", "lake", "lamp", "lantern", "laptop", "laser",
+    "gulf", "hallway", "hammer", "hamster", "happy", "harp", "hazel", "helmet", "heron", "hill",
+    "hinge", "honey", "hornet", "humble", "husky", "igloo", "indigo", "inlet", "iron", "island",
+    "ivory", "jacket", "jade", "jaguar", "jar", "jasper", "jazz", "jelly", "jigsaw", "jolly",
+    "jungle", "juniper", "kale", "karate", "kayak", "kestrel", "kettle", "kitchen", "kite",
+    "kitten", "kiwi", "koala", "ladle", "lagoon", "lake", "lamp", "lantern", "laptop", "laser",
     "lasso", "latch", "leather", "lemon", "lentil", "lever", "library", "lilac", "lily", "lime",
     "linen", "lively", "lizard", "lobby", "lobster", "locket", "lotus", "lucky", "lunar", "lyric",
     "magnet", "magpie", "mammoth", "mango", "mansion", "maple", "marble", "maroon", "marsh",
     "matrix", "meadow", "mellow", "melody", "melon", "mesa", "meteor", "mighty", "mint", "mirror",
     "mitten", "monkey", "moon", "mosaic", "moth", "motor", "mouse", "muffin", "napkin", "navy",
     "nebula", "nectar", "needle", "neon", "nimble", "noble", "nutmeg", "oasis", "oatmeal",
-    "olive", "onion", "onyx", "opal", "opera", "orange", "orchard", "orchid", "otter", "oven",
+    "olive", "onion", "onyx", "opal", "opera", "orange", "orchard", "orchid", "oven",
     "owl", "oxygen", "oyster", "paddle", "palace", "panther", "pantry", "papaya", "parade",
     "park", "parrot", "parsley", "pasta", "pasture", "peach", "peanut", "pebble", "pecan",
     "pelican", "pencil", "penguin", "pepper", "pewter", "photon", "piano", "pickle", "picnic",
     "piglet", "pillow", "pilot", "pixel", "pizza", "planet", "plank", "plasma", "plaza", "pocket",
     "poem", "polar", "pond", "pony", "poodle", "popcorn", "poppy", "porch", "potato", "pretzel",
-    "prism", "proton", "proud", "pudding", "puffin", "pulse", "puma", "pumpkin", "puppet",
+    "prism", "proton", "proud", "puffin", "pulse", "puma", "pumpkin", "puppet",
     "puzzle", "python", "quail", "quantum", "quarry", "quick", "quiet", "quilt", "rabbit",
     "radar", "radio", "radish", "raft", "rainbow", "raisin", "rapid", "raven", "ravine", "rhino",
     "ribbon", "rice", "ridge", "river", "robin", "robot", "rocket", "rodeo", "rudder", "rust",
@@ -67,7 +69,7 @@ REMOTE_PASSPHRASE_WORDS: tuple[str, ...] = (
     "shovel", "shrimp", "signal", "silent", "silk", "silver", "simple", "sketch", "sky", "slate",
     "sled", "sleepy", "sleet", "slope", "sloth", "smooth", "snail", "snow", "snowy", "socket",
     "sofa", "solar", "sonar", "sonnet", "sparrow", "spider", "spinach", "spiral", "sponge",
-    "spoon", "spring", "sprout", "squash", "squid", "stamp", "statue", "storm", "stream",
+    "spoon", "spring", "sprout", "spruce", "squash", "squid", "stamp", "statue", "storm", "stream",
     "string", "studio", "sturdy", "subway", "sugar", "summit", "swamp", "swan", "sweater",
     "swift", "table", "tablet", "taco", "tango", "taxi", "teal", "teapot", "temple", "tempo",
     "thimble", "thunder", "ticket", "tidy", "tiger", "tin", "tiny", "toast", "toaster", "tomato",

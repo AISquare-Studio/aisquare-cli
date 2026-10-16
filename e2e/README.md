@@ -71,8 +71,11 @@ The report is built by `python -m e2e.report.build out/e2e/local-main`.
     the run's screenshots as one orphan commit to its own ref, `refs/e2e/runs/<run-id>`.
     The comment shows them from that commit by SHA.
   - **Why a ref and not a branch:** default clones and fetches never download screenshots.
-  - **What it needs:** only the workflow's `GITHUB_TOKEN`, with `contents: write` and
-    `pull-requests: write`.
+  - **What it needs:** no secrets, only the workflow's `GITHUB_TOKEN`, with
+    `contents: write` and `pull-requests: write`, plus `issues: write` for the nightly's
+    tracking issue.
+  - **Re-running the publish job is safe:** the same run always makes the same commit,
+    so nothing is pushed twice, and a run's ref is never repointed.
   - **Fork PRs:** they get a read-only token by GitHub's design, so they keep the artifact
     and the job summary but no comment.
 - **Nightly:** the same summary, with images, goes to the job summary, and to the issue

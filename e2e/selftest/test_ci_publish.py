@@ -18,12 +18,42 @@ from e2e.report import ci_publish
 from e2e.report.ci_publish import GitHub, PublishError, find_sticky, ref_for, sticky_marker
 from e2e.selftest import fake_run
 
+REF = "refs/e2e/runs/1-1-main"
+DATE = "@1760600000 +0000"
+
 
 @pytest.fixture
 def run_dir(tmp_path: Path) -> Path:
     target = tmp_path / "run"
     fake_run.main([str(target), "--scenario", "passed"])
     return target
+
+
+def _fake(target: Path, run_id: str, track: str = "main") -> Path:
+    """A fake run with this id and track (fake_run always writes ``main``)."""
+    fake_run.main([str(target), "--scenario", "passed", "--run-id", run_id])
+    if track != "main":
+        record = json.loads((target / "run.json").read_text(encoding="utf-8"))
+        record["env"]["track"] = track
+        (target / "run.json").write_text(json.dumps(record), encoding="utf-8")
+    return target
+
+
+def _bare(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    """A local bare repository standing in for GitHub, and the env that points pushes at it."""
+    bare = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+    env = {
+        "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+        "E2E_PUBLISH_REMOTE": str(bare),
+    }
+    return bare, env
+
+
+def _git_out(bare: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "--git-dir", str(bare), *args], capture_output=True, text=True, check=True
+    ).stdout
 
 
 # --- finding the comment to edit ------------------------------------------------------------
@@ -86,37 +116,96 @@ def test_a_credential_in_the_run_refuses_to_publish(run_dir: Path) -> None:
     assert caught.value.code == 3
 
 
+def test_a_malformed_run_json_is_refused_not_a_traceback(run_dir: Path) -> None:
+    (run_dir / "run.json").write_text("{not json", encoding="utf-8")
+    with pytest.raises(PublishError) as caught:
+        ci_publish.run([str(run_dir), "--repo", "o/r", "--dry-run"], {}, io.StringIO())
+    assert caught.value.code == 2
+
+
+@pytest.mark.parametrize("track", ["main -->", "Main", "", "a b"])
+def test_a_track_unsafe_in_the_sticky_marker_is_refused(tmp_path: Path, track: str) -> None:
+    run_dir = _fake(tmp_path / "run", "1-1-x", track=track)
+    with pytest.raises(PublishError) as caught:
+        ci_publish.run([str(run_dir), "--repo", "o/r", "--dry-run"], {}, io.StringIO())
+    assert caught.value.code == 2
+
+
+# --- the runs in a download -----------------------------------------------------------------
+
+
+def test_a_lone_artifact_is_one_run_not_a_directory_of_them(run_dir: Path) -> None:
+    # download-artifact extracts a single pattern match straight into its path, so the
+    # run's own shots/, text/ and logs/ sit where artifacts would; none is a run.
+    assert any(child.is_dir() for child in run_dir.iterdir())
+    assert ci_publish.runs_in(run_dir) == [run_dir]
+
+
+def test_several_artifacts_are_one_run_each(tmp_path: Path) -> None:
+    main = _fake(tmp_path / "evidence" / "e2e-linux-main", "9-1-main")
+    release = _fake(tmp_path / "evidence" / "e2e-linux-release", "9-1-release", track="release")
+    assert ci_publish.runs_in(tmp_path / "evidence") == [main, release]
+
+
+def test_evidence_without_a_run_json_refuses(tmp_path: Path) -> None:
+    (tmp_path / "evidence" / "logs").mkdir(parents=True)
+    with pytest.raises(PublishError) as caught:
+        ci_publish.run(
+            [str(tmp_path / "evidence"), "--repo", "o/r", "--dry-run"], {}, io.StringIO()
+        )
+    assert caught.value.code == 2
+
+
+# --- the evidence ref -------------------------------------------------------------------------
+
+
 def test_evidence_is_pushed_to_its_own_ref_as_one_orphan_commit(
     run_dir: Path, tmp_path: Path
 ) -> None:
-    bare = tmp_path / "remote.git"
-    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
-    env = {
-        "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
-        "E2E_PUBLISH_REMOTE": str(bare),
-    }
-    sha = ci_publish.push_evidence(run_dir, "o/r", "refs/e2e/runs/1-1-main", env)
-    show = subprocess.run(
-        ["git", "--git-dir", str(bare), "ls-tree", "-r", "--name-only", "refs/e2e/runs/1-1-main"],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.split()
+    bare, env = _bare(tmp_path)
+    sha = ci_publish.push_evidence(run_dir, "o/r", REF, env, date=DATE)
+    show = _git_out(bare, "ls-tree", "-r", "--name-only", REF).split()
     assert "run.json" in show and any(name.startswith("shots/") for name in show)
-    parents = subprocess.run(
-        ["git", "--git-dir", str(bare), "rev-list", "--parents", "-n", "1", sha],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.split()
+    parents = _git_out(bare, "rev-list", "--parents", "-n", "1", sha).split()
     assert parents == [sha]  # an orphan: no history to drag along
-    branches = subprocess.run(
-        ["git", "--git-dir", str(bare), "for-each-ref", "refs/heads", "refs/tags"],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
+    branches = _git_out(bare, "for-each-ref", "refs/heads", "refs/tags")
     assert branches == ""  # nothing a default clone would fetch
+
+
+def test_publishing_a_run_again_pushes_the_same_commit(run_dir: Path, tmp_path: Path) -> None:
+    # What re-running a failed publish job does: no new commit, and no rejected push.
+    bare, env = _bare(tmp_path)
+    first = ci_publish.push_evidence(run_dir, "o/r", REF, env, date=DATE)
+    assert ci_publish.push_evidence(run_dir, "o/r", REF, env, date=DATE) == first
+    # Dated by the caller, not the clock: otherwise only pushes in the same second match.
+    assert _git_out(bare, "log", "-1", "--format=%at %ct", REF).split() == ["1760600000"] * 2
+
+
+def test_a_ref_holding_other_evidence_is_never_overwritten(run_dir: Path, tmp_path: Path) -> None:
+    bare, env = _bare(tmp_path)
+    first = ci_publish.push_evidence(run_dir, "o/r", REF, env, date=DATE)
+    with pytest.raises(PublishError):
+        ci_publish.push_evidence(run_dir, "o/r", REF, env, date="@1000 +0000")
+    assert _git_out(bare, "rev-parse", REF).strip() == first
+
+
+def test_a_nightly_publishes_each_track_naming_its_own_artifact(tmp_path: Path) -> None:
+    evidence = tmp_path / "evidence"
+    _fake(evidence / "e2e-linux-main", "9-1-main")
+    _fake(evidence / "e2e-linux-release", "9-1-release", track="release")
+    bare, env = _bare(tmp_path)
+    env |= {"GH_TOKEN": "unused-by-a-local-remote", "GITHUB_REPOSITORY": "o/r"}
+    summary = tmp_path / "step-summary.md"
+    argv = [str(evidence), "--repo", "o/r", "--artifact", "e2e-linux-{track}"]
+    code = ci_publish.run([*argv, "--summary-file", str(summary)], env, io.StringIO())
+    assert code == 0
+    text = summary.read_text(encoding="utf-8")
+    for track in ("main", "release"):
+        sha = _git_out(bare, "rev-parse", f"refs/e2e/runs/9-1-{track}").strip()
+        assert sticky_marker(track) in text
+        assert f"<code>e2e-linux-{track}</code>" in text
+        assert f"https://raw.githubusercontent.com/o/r/{sha}/shots/" in text
+    assert "<code>e2e-report</code>" not in text  # the default, which no workflow uploads
 
 
 # --- the comments API, against a fake GitHub ------------------------------------------------

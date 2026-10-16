@@ -267,8 +267,9 @@ jobs:
   #                        images are served from that commit by SHA.
   #   pull-requests: write one sticky comment per PR and track, edited on every
   #                        run (a hidden marker finds it).
-  # On a nightly, the summary (with images) goes to the job summary, and to the
-  # tracking issue in the repository variable E2E_NIGHTLY_ISSUE when one is set.
+  #   issues: write        the same comment on a nightly's tracking issue: the
+  #                        repository variable E2E_NIGHTLY_ISSUE, when one is set.
+  # Every run's summary, with its images, also goes to this job's summary.
   #
   # NOT FOR PULL REQUESTS FROM FORKS: GitHub gives their runs a read-only token
   # by design, and pull_request_target is never used here (PLAN §10). Their
@@ -288,6 +289,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      issues: write
     defaults:
       run:
         shell: bash
@@ -307,6 +309,10 @@ jobs:
           pattern: e2e-linux-*
           path: evidence
 
+      # evidence/ is one run (a lone artifact is extracted straight into it) or
+      # one directory per artifact (a nightly's two tracks); ci_publish.runs_in
+      # reads both. --artifact is the linux job's E2E_ARTIFACT_NAME, with the
+      # track left for ci_publish to fill in from each run.json.
       - name: Publish the screenshots and the PR comment
         env:
           GH_TOKEN: ${{ github.token }}
@@ -314,21 +320,18 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           NIGHTLY_ISSUE: ${{ vars.E2E_NIGHTLY_ISSUE }}
         run: |
-          shopt -s nullglob
-          found=0
-          for dir in evidence/*/; do
-            found=1
-            set -- "${dir%/}" --repo "$GITHUB_REPOSITORY" --summary-file "$GITHUB_STEP_SUMMARY"
-            if [ -n "$PR_NUMBER" ]; then
-              set -- "$@" --pr "$PR_NUMBER"
-            elif [ "$GITHUB_EVENT_NAME" = schedule ] && [ -n "$NIGHTLY_ISSUE" ]; then
-              set -- "$@" --issue "$NIGHTLY_ISSUE"
-            fi
-            python -m e2e.report.ci_publish "$@"
-          done
-          if [ "$found" = 0 ]; then
+          if [ ! -d evidence ]; then
             echo "::warning::no e2e evidence was uploaded, so there is nothing to publish"
+            exit 0
           fi
+          set -- evidence --repo "$GITHUB_REPOSITORY" --artifact 'e2e-linux-{track}' \
+            --summary-file "$GITHUB_STEP_SUMMARY"
+          if [ -n "$PR_NUMBER" ]; then
+            set -- "$@" --pr "$PR_NUMBER"
+          elif [ "$GITHUB_EVENT_NAME" = schedule ] && [ -n "$NIGHTLY_ISSUE" ]; then
+            set -- "$@" --issue "$NIGHTLY_ISSUE"
+          fi
+          python -m e2e.report.ci_publish "$@"
 
   # THE macOS LEG (PLAN §11, L3 and L4) IS NOT BUILT YET. This placeholder keeps
   # its shape in review beside the Linux leg, so building it is a diff to this

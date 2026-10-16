@@ -1,19 +1,28 @@
-"""Put one CI run in front of a reviewer: screenshots on a per-run ref, one sticky PR comment.
+"""Put CI runs in front of a reviewer: screenshots on a per-run ref, one sticky PR comment.
 
-    python -m e2e.report.ci_publish RUN_DIR --repo OWNER/NAME [--pr N | --issue N]
-                                    [--summary-file PATH] [--dry-run]
+    python -m e2e.report.ci_publish EVIDENCE --repo OWNER/NAME [--pr N | --issue N]
+                                    [--artifact NAME] [--summary-file PATH] [--dry-run]
+
+EVIDENCE is what actions/download-artifact left behind: one run directory, or a
+directory of them (``runs_in`` says why it can be either). ``--artifact`` is the
+Actions artifact the comment sends readers to for the gallery and the video;
+``{track}`` in it becomes each run's track.
 
 What it does, in order:
 
-1. **Scan** the run for credentials (e2e.report.secret_scan) and refuse on a hit — a
-   second, independent check after the workflow's own, because what follows is public.
-2. **Evidence → ``refs/e2e/runs/<run-id>``**: an orphan commit holding only this run's
+1. **Check every run before publishing any.** Each run.json must pass the report's own
+   checks (e2e.report.build.read_run). Its run id and track must be safe in a git ref
+   and an HTML comment. And no file may hold a credential (e2e.report.secret_scan):
+   a second, independent check after the workflow's own, because what follows is public.
+2. **Evidence → ``refs/e2e/runs/<run-id>``**: an orphan commit holding only the run's
    ``shots/`` and ``run.json``. Deliberately NOT a branch: default clones and fetches take
    ``refs/heads/*`` and ``refs/tags/*`` only, so screenshots never reach a developer's
    machine, and no two runs write the same ref, so concurrent runs cannot race. GitHub
    keeps a commit while a ref names it and serves its files by SHA —
    ``https://raw.githubusercontent.com/OWNER/NAME/<sha>/shots/…`` — so the links in a
    comment are immutable (measured on 2026-10-16: a custom-ref commit's PNG served 200).
+   The commit is dated from run.json, so the same run always makes the same commit:
+   re-running this job pushes nothing new, and a ref is never silently repointed.
 3. **summary.md** rebuilt with that SHA-pinned image base (e2e.report.build).
 4. **One sticky comment** per PR (or tracking issue) and track: found by a hidden marker
    and edited in place, so a PR shows its latest run rather than a pile of comments. A
@@ -23,9 +32,9 @@ What it does, in order:
 Why not ``gh … --attach`` (images as user-attachments, no git at all): GitHub's docs say it
 authenticates with a user's OAuth token or a classic PAT, not the workflow's GITHUB_TOKEN.
 This needs nothing but the GITHUB_TOKEN with ``contents: write`` (the ref) and
-``pull-requests: write`` (the comment). The token is read from GH_TOKEN or GITHUB_TOKEN,
-handed to git through a credential helper that reads the environment (never argv), and
-never printed.
+``pull-requests: write`` (the comment; ``issues: write`` for a tracking issue). The token
+is read from GH_TOKEN or GITHUB_TOKEN, handed to git through a credential helper that
+reads the environment (never argv), and never printed.
 
 Stdlib only, like the rest of e2e/report.
 """
@@ -43,11 +52,11 @@ import tempfile
 import urllib.error
 import urllib.request
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO
 
-from e2e.contracts import load
 from e2e.report import build, secret_scan
 from e2e.report.facts import Links
 
@@ -56,6 +65,7 @@ STICKY = "<!-- aisquare-e2e-sticky track={track} -->"
 
 REF_PREFIX = "refs/e2e/runs/"
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$")
+_TRACK = re.compile(r"^[a-z0-9][a-z0-9-]{0,30}$")
 _REPO = re.compile(r"^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$")
 _BOT = ("github-actions[bot]", "41898282+github-actions[bot]@users.noreply.github.com")
 _QA = ("QA Bot", "e2e@example.invalid")
@@ -77,6 +87,21 @@ class Target:
     kind: str
     """``pr`` or ``issue`` — both are issues to the comments API."""
     number: int
+
+
+@dataclass(frozen=True)
+class Publication:
+    """One run that passed every check, and what publishing it takes."""
+
+    run_dir: Path
+    run_id: str
+    verdict: str
+    track: str
+    ref: str
+    date: str
+    """The commit's date in git's format, from run.json's ``finished_at``."""
+    artifact: str
+    """The Actions artifact the comment names for the gallery and the video."""
 
 
 def sticky_marker(track: str) -> str:
@@ -108,6 +133,56 @@ def ref_for(run_id: str) -> str:
 
 def raw_base(repo: str, sha: str) -> str:
     return f"https://raw.githubusercontent.com/{repo}/{sha}"
+
+
+# --- the runs -----------------------------------------------------------------------------
+
+
+def runs_in(evidence: Path) -> list[Path]:
+    """The run directories in ``evidence``, however actions/download-artifact laid them out.
+
+    Downloading by pattern, it extracts a lone matching artifact straight into its
+    ``path``, and several into one subdirectory each, named after the artifact (a
+    nightly's two tracks). So a run is ``evidence`` itself, or each subdirectory that
+    holds a run.json.
+    """
+    if (evidence / "run.json").is_file():
+        return [evidence]
+    return sorted(record.parent for record in evidence.glob("*/run.json"))
+
+
+def prepare(run_dir: Path, artifact: str) -> Publication:
+    """Check one run against everything publishing it needs; ``PublishError`` if it fails."""
+    try:
+        record = build.read_run(run_dir)
+    except build.InvalidRun as exc:
+        raise PublishError(f"{exc} — not publishing", code=2) from None
+    if not (run_dir / "shots").is_dir():
+        raise PublishError(f"{run_dir} has no shots/ — nothing to publish", code=2)
+    track = record.env.track
+    if not _TRACK.match(track):
+        # It is spliced into an HTML comment (the sticky marker) and an artifact's name.
+        raise PublishError(f"{run_dir}: track {track!r} is not a plain name", code=2)
+    return Publication(
+        run_dir=run_dir,
+        run_id=record.run_id,
+        verdict=record.verdict,
+        track=track,
+        ref=ref_for(record.run_id),
+        date=_git_date(record.finished_at),
+        artifact=artifact.replace("{track}", track),
+    )
+
+
+def _git_date(stamp: str) -> str:
+    """An ISO 8601 time from run.json in git's own date format, ``@<epoch> +0000``."""
+    try:
+        moment = datetime.fromisoformat(stamp)
+    except ValueError:
+        raise PublishError(f"finished_at {stamp!r} is not an ISO 8601 time", code=2) from None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return f"@{int(moment.timestamp())} +0000"
 
 
 # --- the GitHub REST API (comments) -------------------------------------------------------
@@ -164,8 +239,16 @@ class GitHub:
 # --- the evidence ref ---------------------------------------------------------------------
 
 
-def _git(args: Sequence[str], cwd: Path, env: Mapping[str, str]) -> str:
+def _git(
+    args: Sequence[str],
+    cwd: Path,
+    env: Mapping[str, str],
+    extra: Mapping[str, str] | None = None,
+) -> str:
+    # The caller's GIT_* (GIT_DIR, GIT_INDEX_FILE, …) could point git somewhere else, so
+    # they are dropped; ``extra`` is the only way one gets in.
     clean = {k: v for k, v in env.items() if not k.startswith("GIT_")}
+    clean.update(extra or {})
     result = subprocess.run(
         ["git", *args], cwd=cwd, env=clean, capture_output=True, text=True, check=False
     )
@@ -174,11 +257,17 @@ def _git(args: Sequence[str], cwd: Path, env: Mapping[str, str]) -> str:
     return result.stdout.strip()
 
 
-def push_evidence(run_dir: Path, repo: str, ref: str, env: Mapping[str, str]) -> str:
-    """Commit this run's shots/ and run.json as an orphan commit, push it to ``ref``; its SHA."""
+def push_evidence(run_dir: Path, repo: str, ref: str, env: Mapping[str, str], *, date: str) -> str:
+    """Commit this run's shots/ and run.json as an orphan commit, push it to ``ref``; its SHA.
+
+    ``date`` (git's format) is the author's and the committer's, so the same run makes
+    the same commit every time. Pushing it again changes nothing, and a ref that already
+    holds other evidence rejects the push rather than being overwritten.
+    """
     name, email = _BOT if env.get("GITHUB_ACTIONS") == "true" else _QA
     # Overridable for the self-tests, which push to a local bare repository.
     remote = env.get("E2E_PUBLISH_REMOTE") or f"https://github.com/{repo}.git"
+    dated = {"GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date}
     with tempfile.TemporaryDirectory(prefix="e2e-evidence-") as tmp:
         site = Path(tmp)
         shutil.copytree(run_dir / "shots", site / "shots")
@@ -199,6 +288,7 @@ def push_evidence(run_dir: Path, repo: str, ref: str, env: Mapping[str, str]) ->
             [*identity, "commit", "-q", "-m", f"e2e evidence: {ref.removeprefix(REF_PREFIX)}"],
             site,
             env,
+            dated,
         )
         sha = _git(["rev-parse", "HEAD"], site, env)
         _git(
@@ -225,13 +315,22 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m e2e.report.ci_publish", description=__doc__.split("\n\n")[0]
     )
-    parser.add_argument("run_dir", type=Path)
+    parser.add_argument(
+        "evidence",
+        type=Path,
+        help="a run directory, or a directory of them (what actions/download-artifact left)",
+    )
     parser.add_argument(
         "--repo", required=True, help="OWNER/NAME (the workflow's GITHUB_REPOSITORY)"
     )
     target = parser.add_mutually_exclusive_group()
     target.add_argument("--pr", type=int, help="pull request to post/update the sticky comment on")
     target.add_argument("--issue", type=int, help="tracking issue (nightly) to post/update on")
+    parser.add_argument(
+        "--artifact",
+        help="the Actions artifact the comment names; {track} becomes each run's track "
+        "(default: $E2E_ARTIFACT_NAME)",
+    )
     parser.add_argument(
         "--summary-file", type=Path, help="append the summary here ($GITHUB_STEP_SUMMARY)"
     )
@@ -243,47 +342,52 @@ def _parser() -> argparse.ArgumentParser:
 
 def run(argv: Sequence[str], env: Mapping[str, str], out: TextIO) -> int:
     args = _parser().parse_args(argv)
-    run_dir: Path = args.run_dir
     if not _REPO.match(args.repo):
         raise PublishError(f"--repo {args.repo!r} is not OWNER/NAME", code=2)
-    if not (run_dir / "run.json").is_file() or not (run_dir / "shots").is_dir():
-        raise PublishError(f"{run_dir} has no run.json or no shots/ — nothing to publish", code=2)
-    record = load(run_dir / "run.json")
-    track = record.env.track
-    ref = ref_for(record.run_id)
-    target = (
-        Target("pr", args.pr) if args.pr else Target("issue", args.issue) if args.issue else None
-    )
-    hits = secret_scan.scan(run_dir)
+    found = runs_in(args.evidence)
+    if not found:
+        raise PublishError(f"{args.evidence} holds no run.json — nothing to publish", code=2)
+    artifact = args.artifact or env.get("E2E_ARTIFACT_NAME") or Links.artifact_name
+    runs = [prepare(run_dir, artifact) for run_dir in found]
+    hits = [hit for one in runs for hit in secret_scan.scan(one.run_dir)]
     if hits:
         for hit in hits:
             print(f"ci_publish: {hit}", file=out)
         raise PublishError(
-            f"{len(hits)} credential-shaped string(s) in the run — not publishing", code=3
+            f"{len(hits)} credential-shaped string(s) in the evidence — not publishing", code=3
         )
-    token = env.get("GH_TOKEN") or env.get("GITHUB_TOKEN") or ""
-    print(f"e2e ci_publish: run {record.run_id} · {record.verdict} · track {track}", file=out)
-    print(f"  evidence   {ref} on {args.repo} (shots/ + run.json, orphan commit)", file=out)
+    target = (
+        Target("pr", args.pr) if args.pr else Target("issue", args.issue) if args.issue else None
+    )
     target_text = f"{target.kind} #{target.number}" if target else "none (job summary only)"
-    print(f"  comment    {target_text} · sticky marker: {sticky_marker(track)}", file=out)
+    for one in runs:
+        print(f"e2e ci_publish: run {one.run_id} · {one.verdict} · track {one.track}", file=out)
+        print(f"  evidence   {one.ref} on {args.repo} (shots/ + run.json, orphan commit)", file=out)
+        print(f"  comment    {target_text} · sticky marker: {sticky_marker(one.track)}", file=out)
+        print(f"  artifact   {one.artifact}", file=out)
     if args.dry_run:
         print("  dry run: nothing pushed, nothing posted", file=out)
         return 0
+    token = env.get("GH_TOKEN") or env.get("GITHUB_TOKEN") or ""
     if not token:
         raise PublishError("no GH_TOKEN / GITHUB_TOKEN in the environment", code=2)
-    sha = push_evidence(run_dir, args.repo, ref, env)
-    base = raw_base(args.repo, sha)
-    print(f"  pushed     {sha} → images at {base}/shots/…", file=out)
-    summary = build.write_summary(run_dir, image_base=base, links=Links.from_env(env))
-    body = with_marker(summary.read_text(encoding="utf-8"), track)
-    if args.summary_file:
-        with args.summary_file.open("a", encoding="utf-8") as handle:
-            handle.write(body + "\n")
-        print(f"  summary    appended to {args.summary_file}", file=out)
-    if target:
-        api = env.get("GITHUB_API_URL") or "https://api.github.com"
-        url = GitHub(args.repo, token, api).upsert(target.number, body, track)
-        print(f"  comment    {url}", file=out)
+    links = Links.from_env(env)
+    for one in runs:
+        sha = push_evidence(one.run_dir, args.repo, one.ref, env, date=one.date)
+        base = raw_base(args.repo, sha)
+        print(f"  pushed     {one.run_id}: {sha} → images at {base}/shots/…", file=out)
+        summary = build.write_summary(
+            one.run_dir, image_base=base, links=replace(links, artifact_name=one.artifact)
+        )
+        body = with_marker(summary.read_text(encoding="utf-8"), one.track)
+        if args.summary_file:
+            with args.summary_file.open("a", encoding="utf-8") as handle:
+                handle.write(body + "\n")
+            print(f"  summary    {one.run_id}: appended to {args.summary_file}", file=out)
+        if target:
+            api = env.get("GITHUB_API_URL") or "https://api.github.com"
+            url = GitHub(args.repo, token, api).upsert(target.number, body, one.track)
+            print(f"  comment    {one.run_id}: {url}", file=out)
     return 0
 
 

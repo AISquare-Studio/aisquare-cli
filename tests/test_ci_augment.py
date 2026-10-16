@@ -221,6 +221,24 @@ def test_the_default_descriptor_pushes_on_prompts_only_and_announces_the_tool(
     assert start.instruction_version == ci_augment.INSTRUCTION_VERSION
 
 
+def test_a_session_start_that_records_its_turn_captures_its_directory_first(
+    wired: StubCI, isolated_home: Path, tmp_path: Path
+) -> None:
+    """Review of #259, round 19: the team hook captured the directory at every session
+    start until it captured only for a board (round 18). A session start in a directory
+    with no board and no role then wrote its turn for a project with no row, which
+    ``metrics show --project`` could not reach. The turn's project is captured with it."""
+    from aisquare.core.store import store_session
+
+    hooks_service.session_start_context(tmp_path, session_id=SESSION)
+
+    start = _turn()
+    with store_session() as store:
+        row = store.get_project(start.project_id)
+        assert store.team_sessions(start.project_id) == [], "the premise: no board"
+    assert row is not None and row.onboarded_at is None, "captured, not added"
+
+
 def test_with_capture_off_only_a_project_added_on_purpose_consults_or_records(
     wired: StubCI, isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -236,6 +254,8 @@ def test_with_capture_off_only_a_project_added_on_purpose_consults_or_records(
     assert hooks_service.prompt_submitted("one", tmp_path, session_id=SESSION) == ""
     assert wired.call_count == 0 and wired.descriptor_fetches == 0
     assert metrics_service.recent(session_id=SESSION) == []
+    with store_session() as store:
+        assert store.list_projects(all=True, include_forgotten=True) == [], "nor a project"
 
     with store_session() as store:
         store.onboard_project(current_project(tmp_path))

@@ -124,6 +124,12 @@ def _session_start_ci(
     would only say "off" again. A failure anywhere here costs the CI part of
     the context and nothing else — the saved entries and the board must reach
     the agent whatever the test bed does.
+
+    The directory is captured before its rows are written, with ``[projects] capture`` on
+    (the caller asked :func:`~aisquare.services.project.tracked`). The team hook captured
+    it for them until it captured only for a board (review of #259, round 18), and a
+    session start in a directory with no board then wrote a turn and an insights row for
+    a project with no row, which ``metrics show --project`` could not reach (round 19).
     """
     try:
         augmentation = ci_augment.for_session_start(
@@ -131,6 +137,8 @@ def _session_start_ci(
         )
         if not augmentation.configured:
             return "", ""
+        with store_session() as store:
+            project_service.capture(store, project)
         metrics_service.open_turn(augmentation.metric(project.id, session_id, closed=True))
         if augmentation.run_id:
             insights.record_turn(

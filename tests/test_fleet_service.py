@@ -1917,6 +1917,25 @@ def test_with_capture_off_a_row_captured_before_gets_no_codename_but_from_a_spaw
     assert started.tmux_session == f"asq-{listed.codename}"
 
 
+def test_with_capture_off_a_row_captured_with_a_codename_keeps_it(tmp_path: Path) -> None:
+    """Review of #259, round 19: the guard that gives a directory nobody added no codename
+    came before the stored row was read, so with capture off a row captured under 0.8.0,
+    codename and agents and all, came back without its codename to a caller that passed a
+    project with none: a stop then looked for its agents in the session ``asq-``. A codename
+    the row holds comes back, and nothing is written."""
+    where = tmp_path / "old"
+    where.mkdir()
+    old = team_project(where)
+    with store_session() as store:
+        store.ensure_project(old)  # what 0.8.0's capture wrote
+        store.set_codename(old.id, "quiet-lynx")  # and its first spawn
+
+    assert fleet_service.ensure_codename(old).codename == "quiet-lynx"
+    with store_session() as store:
+        [row] = store.list_projects(all=True)
+    assert row.onboarded_at is None, "nothing written"
+
+
 def test_the_codename_a_row_kept_is_read_by_its_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

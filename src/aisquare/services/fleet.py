@@ -866,22 +866,27 @@ def ensure_codename(project: ProjectInfo, store: ContextStore | None = None) -> 
     With capture off, only a project added on purpose gets one here
     (:func:`~aisquare.services.project.tracked`): a directory nobody added comes back
     without a codename, whether it has no live row or one captured before capture
-    went off (:func:`attach_argv` then takes the one its row holds, a forgotten
-    one's included, or refuses: no agent ran there). Written onto a captured row, it
+    went off with none (:func:`attach_argv` then takes the one a forgotten row holds,
+    or refuses: no agent ran there). Written onto a captured row, it
     reserved a codename for a directory nobody added, on every ``fleet attach`` there,
     which then refused (review of #259, round 18). A spawn works its codename out
     without writing it (:func:`_codename_to_add`), and adds the project with it once
     the window exists, with the agent's row: added here, before the window, a spawn
     refused afterwards left the directory listed with no agent, or brought a
-    forgotten one back (round 17).
+    forgotten one back (round 17). A codename its live row holds already comes back
+    whatever capture says: held back, a stop in a directory captured under 0.8.0
+    looked for its agents in the session ``asq-`` (review of #259, round 19).
     """
     if project.codename:
         return project
 
     def assign(store: ContextStore) -> ProjectInfo:
+        stored = store.get_project(project.id)
+        if stored is not None and stored.codename:
+            return stored
         if not project_service.tracked(store, project):
             return project
-        if store.get_project(project.id) is None:
+        if stored is None:
             store.ensure_project(project)  # capture on: captured, as its next prompt would be
         for _ in range(_CODENAME_RETRIES):
             current = store.get_project(project.id)

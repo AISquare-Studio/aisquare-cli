@@ -125,6 +125,12 @@ def machine(run_dir: Path) -> Iterator[Machine]:
         box.close()
 
 
+@pytest.fixture(scope="session")
+def repo(machine: Machine) -> Path:
+    """The small git repo the user stands in when they install aisquare (shared by modules)."""
+    return machine.seed_repo("acme-api")
+
+
 def _collect_machine_facts(box: Machine, run_dir: Path) -> None:
     """Versions as the user's machine sees them, plus the product's own state, for the report."""
     for name, cmd in {

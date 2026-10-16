@@ -21,7 +21,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from e2e.contracts import Check, Journey, Status, Step
+from e2e.contracts import Check, Journey, JourneyKind, Status, Step
 from e2e.runner.terminal import TRACEBACK, StepTimeout, TerminalSession
 
 
@@ -106,9 +106,24 @@ class Recorder:
 
     @contextmanager
     def journey(
-        self, jid: str, title: str, story: str, terminal: TerminalSession | None
+        self,
+        jid: str,
+        title: str,
+        story: str,
+        terminal: TerminalSession | None,
+        *,
+        kind: JourneyKind = "journey",
+        finding: str | None = None,
     ) -> Iterator[JourneyRecorder]:
-        journey = Journey(id=jid, title=title, story=story, status="passed", duration_s=0.0)
+        journey = Journey(
+            id=jid,
+            title=title,
+            story=story,
+            status="passed",
+            duration_s=0.0,
+            kind=kind,
+            finding=finding,
+        )
         self.journeys.append(journey)
         start = time.monotonic()
         try:

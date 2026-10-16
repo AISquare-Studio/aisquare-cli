@@ -50,11 +50,6 @@ J04 = (
 
 
 @pytest.fixture(scope="module")
-def repo(machine: Machine) -> Path:
-    return machine.seed_repo("acme-api")
-
-
-@pytest.fixture(scope="module")
 def term(
     browser: Browser,
     machine: Machine,

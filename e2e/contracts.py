@@ -28,6 +28,8 @@ SCHEMA = "aisquare-e2e/run/v1"
 Status = Literal["passed", "failed", "skipped", "error"]
 """A step or journey outcome. ``error`` is the harness's own fault (never the product's)."""
 
+JourneyKind = Literal["journey", "watch"]
+
 Verdict = Literal["PASSED", "RC_FAILED", "ENV_FAILED", "GATE_ERROR"]
 """The QA org's release-gate classes. Precedence: ENV_FAILED > GATE_ERROR > RC_FAILED.
 
@@ -74,6 +76,12 @@ class Journey:
     video: str | None = None
     error: str | None = None
     """The failure's first line, when the journey failed or errored."""
+    kind: JourneyKind = "journey"
+    """``watch``: a KNOWN BUG from the QA report, re-checked every night. ``failed`` then
+    means "still open" and ``passed`` means "fixed: promote this check to a gate". Watch
+    items never change the run's verdict — they are reported, not gated."""
+    finding: str | None = None
+    """The QA-report id a watch item tracks, e.g. ``QA-01``."""
 
 
 @dataclass
@@ -145,6 +153,7 @@ def verdict_for(journeys: list[Journey], *, env_failed: bool = False) -> Verdict
     """The run's verdict from its journeys, with the release gate's precedence."""
     if env_failed:
         return "ENV_FAILED"
+    journeys = [j for j in journeys if j.kind == "journey"]  # watch items never gate
     if not journeys or all(j.status == "skipped" for j in journeys):
         return "GATE_ERROR"
     if any(j.status == "error" for j in journeys):

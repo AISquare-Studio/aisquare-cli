@@ -177,3 +177,21 @@ def test_a_skipped_journey_is_recorded_with_its_reason(tmp_path: Path) -> None:
     rec.skipped("J9", "t", "s", why="J1 did not pass")
     assert rec.journeys[0].status == "skipped"
     assert rec.journeys[0].error == "J1 did not pass"
+
+
+def test_watch_items_never_change_the_verdict() -> None:
+    open_bug = _journey("failed")
+    open_bug.kind = "watch"
+    assert verdict_for([_journey("passed"), open_bug]) == "PASSED"
+    assert verdict_for([open_bug]) == "GATE_ERROR"  # watch items alone tested nothing
+
+
+def test_old_run_json_without_watch_fields_still_loads(tmp_path: Path) -> None:
+    legacy = (
+        '{"schema": "aisquare-e2e/run/v1", "run_id": "1", "started_at": "a", "finished_at": "b",'
+        ' "verdict": "PASSED", "env": {"os": "o", "runner": "r", "track": "main", "agent": "a",'
+        ' "aisquare": "0", "commit": "c"}, "journeys": [{"id": "J01", "title": "t", "story": "s",'
+        ' "status": "passed", "duration_s": 1.0}]}'
+    )
+    (tmp_path / "run.json").write_text(legacy, encoding="utf-8")
+    assert load(tmp_path / "run.json").journeys[0].kind == "journey"

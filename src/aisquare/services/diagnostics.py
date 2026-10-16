@@ -1622,10 +1622,12 @@ def _claude_account_limit_checks() -> list[DoctorCheck]:
             switches = []
             by_id = {p.id: p for p in projects}
             for session, _project_name in limited:
-                agent = store.fleet_agent_for_session(session.project_id, session.id)
+                agent = store.fleet_agent_for_session(session.id)
                 labels[session.id] = agent.label if agent is not None else session.id[:8]
-                if agent is not None:  # only a fleet agent is switched, by its project and label
-                    project = by_id[session.project_id]
+                # Only a fleet agent is switched, by its row's project and label: under a hub
+                # the session's is the hub's board (review of #259, round 23).
+                project = by_id.get(agent.project_id) if agent is not None else None
+                if agent is not None and project is not None:
                     switches.append(project_service.fleet_command("switch", project, agent.label))
     except Exception:  # the database line reports a broken store
         return []

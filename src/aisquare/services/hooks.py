@@ -281,8 +281,11 @@ def _hand_over_if_configured(failure: team_service.TurnFailure) -> None:
         return
     session = failure.session
     with store_session() as store:
-        agent = store.fleet_agent_for_session(session.project_id, session.id)
-        project = store.get_project(session.project_id)
+        # The row's own project, not the session's: under AISQUARE_TEAM_HUB the session is on
+        # the hub's board and the row is in its spawn's project, and asked by the board, no
+        # limited agent was ever handed over (review of #259, round 23).
+        agent = store.fleet_agent_for_session(session.id)
+        project = store.get_project(agent.project_id) if agent is not None else None
     if agent is None or project is None:
         return  # a hand-typed session is the operator's to move
     resets_at = failure.notice.resets_at if failure.notice is not None else None
@@ -383,8 +386,8 @@ def hand_over(session_id: str, *, reason: str | None = None) -> None:
         session = store.get_session(session_id)
         if session is None:
             return
-        agent = store.fleet_agent_for_session(session.project_id, session.id)
-        project = store.get_project(session.project_id)
+        agent = store.fleet_agent_for_session(session.id)  # in its own project, as above
+        project = store.get_project(agent.project_id) if agent is not None else None
     if agent is None or project is None:
         return
     if session.state == team_service.HANDOVER_STATE:

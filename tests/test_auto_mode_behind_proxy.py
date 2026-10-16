@@ -678,6 +678,30 @@ def test_a_refused_session_is_put_in_attention_once_with_one_board_line(
     assert _state("sess-coder") == "waiting"
 
 
+def test_under_a_hub_the_refused_agent_is_restarted_in_its_own_rows_project(
+    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 23, 1/10: under ``AISQUARE_TEAM_HUB`` the session is on the
+    hub's board and its row in the project it was spawned in. Read by the board's project,
+    the row was not found: the line named the agent by its short id, with no restart. It
+    names the row's label and its own project's ``fleet restart``, on the hub's board."""
+    paths.ensure_home()
+    _configure(tracing=True, modes={"coder": "auto"})
+    _launched(monkeypatch, traced=True)
+    hub = _project(tmp_path / "hub")
+    team_service.activate(hub.root)
+    project = _project(tmp_path / "repo")
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub.root))
+    _session(hub, "sess-coder", _sized(tmp_path / "t" / "coder.jsonl", 137_000, refusals=5))
+    _fleet_agent(project, "sess-coder", label="coder-auth", role="coder")
+
+    assert auto_mode.record_refusals("sess-coder") == 5
+
+    blocked = [text for kind, text in _events(hub) if kind == auto_mode.EVENT_KIND]
+    assert len(blocked) == 1 and blocked[0].startswith("coder-auth: auto mode"), blocked
+    assert f"aisquare fleet restart --project {project.id} coder-auth" in blocked[0]
+
+
 def test_fewer_refusals_than_the_threshold_or_no_transcript_change_nothing(
     isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

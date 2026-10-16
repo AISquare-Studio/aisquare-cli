@@ -2011,7 +2011,10 @@ def hook_stop_failure(
         already_limited = session.state in ("limited", HANDOVER_STATE)
         if session.state != HANDOVER_STATE:
             store.mark_limited(session.id, notice.resets_at if notice is not None else None)
-        agent = store.fleet_agent_for_session(session.project_id, session.id)
+        # The session's row in whichever project it is: under AISQUARE_TEAM_HUB the session
+        # is on the hub's board and its row in its spawn's project, and asked by the board,
+        # the line named no command and the agent by its short id (review of #259, round 23).
+        agent = store.fleet_agent_for_session(session.id)
         label = agent.label if agent is not None else (session.label or short_id(session.id))
         if not already_limited:
             _emit(
@@ -2022,7 +2025,7 @@ def hook_stop_failure(
                     label,
                     text,
                     notice,
-                    project=store.get_project(session.project_id) if agent is not None else None,
+                    project=store.get_project(agent.project_id) if agent is not None else None,
                 ),
                 session_id=session.id,
             )
@@ -2030,8 +2033,12 @@ def hook_stop_failure(
     if not already_limited:
         # After the row says limited, never before, and outside the `with`
         # (it opens its own connection): path 2 types into a WAITING manager;
-        # a working one reads the event on its next delta or its own Stop.
-        _nudge_manager(session.project_id, reason=f"{label} hit its usage limit")
+        # a working one reads the event on its next delta or its own Stop. The manager of
+        # the agent's own project, whose row is beside the agent's: a hub's has none.
+        _nudge_manager(
+            agent.project_id if agent is not None else session.project_id,
+            reason=f"{label} hit its usage limit",
+        )
     return TurnFailure(refreshed, kind, notice, already_limited=already_limited)
 
 
@@ -2041,22 +2048,22 @@ def fleet_switches(sessions: list[TeamSession]) -> dict[str, str]:
 
     Not the board's project: under ``AISQUARE_TEAM_HUB`` the board is the hub's, every
     session on it is a fleet agent of some other project, and ``fleet switch --project
-    <hub> <label>`` answered "no live agent" (review of #259, round 22). A session with no
-    live row, or whose row's project is gone, has none. The store is opened only when a
-    live session is limited, and a read that fails costs the commands, never the board.
+    <hub> <label>`` answered "no live agent" (review of #259, round 22). The row is the one
+    the store records against the session (``fleet_agent_for_session``), the lookup the
+    ``limited`` feed line and the hand-over make too. A session with no live row, or whose
+    row's project is gone, has none. The store is opened only when a live session is
+    limited, and a read that fails costs the commands, never the board.
     """
-    limited = {s.id for s in sessions if s.ended_at is None and s.state == "limited"}
+    limited = [s.id for s in sessions if s.ended_at is None and s.state == "limited"]
     if not limited:
         return {}
     switches: dict[str, str] = {}
     try:
         with store_session() as store:
-            for agent in store.live_fleet_agents():
-                session_id = agent.session_id
-                if session_id is None or session_id not in limited:
-                    continue
-                project = store.get_project(agent.project_id)
-                if project is not None:
+            for session_id in limited:
+                agent = store.fleet_agent_for_session(session_id)
+                project = store.get_project(agent.project_id) if agent is not None else None
+                if agent is not None and project is not None:
                     switches[session_id] = project_service.fleet_command(
                         "switch", project, agent.label
                     )
@@ -2569,7 +2576,10 @@ def _fleet_row(
     named = _fleet_row_named(store, project_id)
     if named is not None and (allow_unbound or named.session_id == session_id):
         return named
-    return store.fleet_agent_for_session(project_id, session_id)
+    # This project's row only, as the name is: what both doors read it for is a task on the
+    # row's project's board, and under a hub the session's board is another.
+    bound = store.fleet_agent_for_session(session_id)
+    return bound if bound is not None and bound.project_id == project_id else None
 
 
 def _fleet_row_for(store: ContextStore, session_id: str, project_id: str) -> FleetAgent | None:

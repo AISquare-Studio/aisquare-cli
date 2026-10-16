@@ -5681,7 +5681,7 @@ def test_task_next_survives_a_fleet_row_it_cannot_read(
     monkeypatch.setenv("AISQUARE_ROLE", "coder")
     team_service.hook_session_start("sess-plain-r4", project.root, "startup")
 
-    def boom(self: SqliteStore, project_id: str, session_id: str) -> FleetAgent | None:
+    def boom(self: SqliteStore, session_id: str) -> FleetAgent | None:
         raise sqlite3.OperationalError("no such column: worktree")
 
     monkeypatch.setattr(SqliteStore, "fleet_agent_for_session", boom)
@@ -5715,7 +5715,7 @@ def test_a_fleet_row_task_next_cannot_read_is_logged_not_swallowed(
     team_service.hook_session_start(first, project.root, "startup")
 
     def changed(self: SqliteStore, *args: object) -> FleetAgent | None:
-        raise TypeError("fleet_agent_for_session() takes 2 positional arguments")
+        raise TypeError("fleet_agent_for_session() takes 1 positional argument")
 
     monkeypatch.setattr(SqliteStore, "fleet_agent_for_session", changed)
     monkeypatch.setattr(SqliteStore, "get_fleet_agent", changed)

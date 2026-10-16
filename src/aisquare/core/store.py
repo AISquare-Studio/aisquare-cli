@@ -1295,7 +1295,7 @@ class ContextStore(Protocol):
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
     def live_fleet_agents(self) -> list[FleetAgent]: ...
     def fleet_agents_ended_since(self, project_id: str, since: datetime) -> list[FleetAgent]: ...
-    def fleet_agent_for_session(self, project_id: str, session_id: str) -> FleetAgent | None: ...
+    def fleet_agent_for_session(self, session_id: str) -> FleetAgent | None: ...
     def ui_state(self, key: str) -> str | None: ...
     def set_ui_state(self, key: str, value: str | None) -> None: ...
     def project_groups(self) -> list[ProjectGroup]: ...
@@ -3756,19 +3756,27 @@ class SqliteStore:
         ).fetchall()
         return [_row_to_fleet_agent(row) for row in rows]
 
-    def fleet_agent_for_session(self, project_id: str, session_id: str) -> FleetAgent | None:
-        """The live fleet row recorded against ``session_id``, if there is one.
+    def fleet_agent_for_session(self, session_id: str) -> FleetAgent | None:
+        """The live fleet row recorded against ``session_id``, if there is one, in whichever
+        project it is.
 
         One targeted lookup rather than materialising every live row and
         scanning: this runs on the session-start hook AND on every ``task next``,
         including the plain CLI ones that have no fleet row at all and paid for
-        the whole list to find that out (review of #116, round 3).
+        the whole list to find that out (review of #116, round 3). It walks the live
+        rows alone, through the partial ``fleet_agent_live_label`` index.
+
+        Not filtered on the session's project: under ``AISQUARE_TEAM_HUB`` the session is
+        on the hub's board while its row is in the project it was spawned in, and the
+        limit hand-over, asking with the board's project, found no row and never switched
+        the agent (review of #259, round 23). A session id names one session wherever it
+        sits, so the row recorded against it is that session's.
         """
         row = self._conn.execute(
             f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent "
-            "WHERE project_id = ? AND session_id = ? AND ended_at IS NULL "
+            "WHERE session_id = ? AND ended_at IS NULL "
             "ORDER BY created_at DESC LIMIT 1",
-            (project_id, session_id),
+            (session_id,),
         ).fetchone()
         return _row_to_fleet_agent(row) if row is not None else None
 

@@ -515,7 +515,7 @@ def record_refusals(session_id: str) -> int:
             count = transcripts.refusal_count(transcript, since=since or 0)
             if count < REFUSAL_THRESHOLD or (recorded is not None and since is None):
                 return count
-            agent = store.fleet_agent_for_session(session.project_id, session.id)
+            agent = store.fleet_agent_for_session(session.id)
             if _handing_over(session, agent) or not store.replace_session_state(
                 session.id, session.state, "attention"
             ):
@@ -526,7 +526,9 @@ def record_refusals(session_id: str) -> int:
                 return count
             label = agent.label if agent is not None else (session.label or session.id[:8])
             step = None
-            project = store.get_project(session.project_id)
+            # The row's own project: under a hub the session's is the hub's board, and the
+            # restart named there found no agent (review of #259, round 23).
+            project = store.get_project(agent.project_id) if agent is not None else None
             if agent is not None and project is not None:
                 from aisquare.services import fleet as fleet_service  # lazy: fleet imports us
 

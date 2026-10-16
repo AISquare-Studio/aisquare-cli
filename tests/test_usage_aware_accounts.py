@@ -621,7 +621,7 @@ def test_with_no_other_account_a_limit_starts_no_hand_over_and_posts_nothing_of_
     _session(work, "sess-fleet")
     _fleet_row(work, "agt_limited2", "coder-db", "sess-fleet")
     with store_session() as store:
-        row = store.fleet_agent_for_session(work.id, "sess-fleet")
+        row = store.fleet_agent_for_session("sess-fleet")
         assert row is not None
         store.upsert_fleet_agent(row.model_copy(update={"account_slot": mine.slot}))
 
@@ -656,7 +656,7 @@ def test_with_the_registry_unreadable_a_limit_still_reaches_the_worker_that_says
     _session(work, "sess-fleet")
     _fleet_row(work, "agt_limited4", "coder-db", "sess-fleet")
     with store_session() as store:
-        row = store.fleet_agent_for_session(work.id, "sess-fleet")
+        row = store.fleet_agent_for_session("sess-fleet")
         assert row is not None
         store.upsert_fleet_agent(row.model_copy(update={"account_slot": mine.slot}))
     unreadable = "accounts registry unreadable (database is locked)"
@@ -686,7 +686,7 @@ def test_with_the_registry_unreadable_and_no_other_slot_a_limit_starts_no_hand_o
     _session(work, "sess-fleet")
     _fleet_row(work, "agt_limited6", "coder-db", "sess-fleet")
     with store_session() as store:
-        row = store.fleet_agent_for_session(work.id, "sess-fleet")
+        row = store.fleet_agent_for_session("sess-fleet")
         assert row is not None
         store.upsert_fleet_agent(row.model_copy(update={"account_slot": mine.slot}))
     unreadable = "accounts registry unreadable (database is locked)"
@@ -744,7 +744,7 @@ def test_remote_holds_the_limit_of_an_agent_the_hook_hands_over_from_an_account_
     _session(work, "sess-fleet")
     _fleet_row(work, "agt_limited3", "coder-1", "sess-fleet")
     with store_session() as store:
-        row = store.fleet_agent_for_session(work.id, "sess-fleet")
+        row = store.fleet_agent_for_session("sess-fleet")
         assert row is not None
         row = row.model_copy(update={"account_slot": mine.slot})
         store.upsert_fleet_agent(row)
@@ -1061,6 +1061,62 @@ def test_the_detached_half_moves_the_agent_and_puts_a_refusal_on_the_board(
     for session_id in ("sess-hand", "sess-none"):
         assert runner.invoke(app, ["hook", "hand-over", session_id]).exit_code == 0
     assert len(switches) == 1
+
+
+def test_under_a_hub_the_limit_is_handed_over_from_the_agents_own_row(
+    fake_home: Path,
+    work: ProjectInfo,
+    tmp_path: Path,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 23, 1/10: under ``AISQUARE_TEAM_HUB`` the session is on the
+    hub's board and its fleet row in the project it was spawned in. The stop-failure hook,
+    the hand-over decision and its worker all asked the store for the row by the board's
+    project and found none: the feed line named the agent by its short id with no command,
+    ``on_limit = "switch"`` never started the worker, and the hub's manager was the one
+    nudged. Each now reads the row recorded against the session, in its own project, as the
+    board's chip and doctor's line do."""
+    hub_root = tmp_path / "hub"
+    hub_root.mkdir()
+    hub = team_project(hub_root)
+    with store_session() as store:
+        store.onboard_project(hub)
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub_root))
+    nudged: list[str] = []
+    monkeypatch.setattr(
+        team_service, "_nudge_manager", lambda project_id, *, reason: nudged.append(project_id)
+    )
+    started: list[list[str]] = []
+    monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
+    moved: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        fleet_service, "switch", lambda project, label, **kwargs: moved.append((project.id, label))
+    )
+    _slot("work@example.com", "tok-work")
+    _slot("home@example.com", "tok-home")
+    _settings(wait_if_reset_within_minutes=15)
+    session = _session(hub, "sess-fleet")
+    _fleet_row(work, "agt_hub1", "coder-db", "sess-fleet")
+    switch = f"aisquare fleet switch --project {work.id} coder-db"
+
+    _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
+
+    limited = [text for kind, text in _events(hub) if kind == "limited"]
+    assert len(limited) == 1 and limited[0].startswith("coder-db hit its weekly limit"), limited
+    assert f"`{switch}`" in limited[0]
+    assert nudged == [work.id], "the agent's own project's manager"
+    assert len(started) == 1 and started[0][-4:-2] == ["hand-over", "sess-fleet"]
+    assert runner.invoke(app, ["hook", "hand-over", "sess-fleet"]).exit_code == 0
+    assert moved == [(work.id, "coder-db")]
+
+    with store_session() as store:
+        parked = store.get_session("sess-fleet")
+    assert parked is not None and parked.state == "limited"
+    assert team_service.fleet_switches([parked]) == {"sess-fleet": switch}
+    [doctor] = diagnostics._claude_account_limit_checks()
+    assert switch in (doctor.fix or ""), doctor
+    assert session.project_id == hub.id  # the premise: the board is the hub's
 
 
 # --------------------------------------------------------------------------- the pick

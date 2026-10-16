@@ -123,8 +123,8 @@ _FLEET_OP = "the project the fleet operation acts on, whose own row the message 
 _SHOWN = "the project the fleet UI shows, whose rows it lists"
 _WALKED = "each project its rows are read from, project by project"
 _ROW_OF_SESSION = (
-    "the project its row was found in, by the session's own (``fleet_agent_for_session``): "
-    "under a hub that finds none, and no command is given"
+    "the project of the row the store records against the session, in whichever project "
+    "(``fleet_agent_for_session``): under a hub, not the session's board's"
 )
 PROJECT_OF: dict[tuple[str, str], str] = {
     ("cli/fleet.py", "_emit_agents"): _TARGET,
@@ -159,7 +159,7 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ("services/fleet.py", "attach_argv"): _FLEET_OP,
     ("services/project.py", "ProjectBusyError.__init__"): "the project forget refused",
     ("services/remote_server.py", "_remote_turn_pinned"): "the project the Remote request names",
-    ("services/team.py", "fleet_switches"): "each limited session's own live row, any project",
+    ("services/team.py", "fleet_switches"): _ROW_OF_SESSION,
     ("services/team.py", "_limited_text"): _ROW_OF_SESSION,
     ("services/team.py", "_role_cycle"): (
         "``_cycle_project``: the row ``AISQUARE_FLEET_AGENT`` names, any project; with no "

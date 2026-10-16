@@ -5415,6 +5415,29 @@ def test_a_usage_limit_reads_the_agents_row_once(hubbed: _Hubbed) -> None:
     assert hubbed.woken == [hubbed.fleet.id], "its own manager, once"
 
 
+@pytest.mark.parametrize(("verb", "looked_up"), [("drop", 0), ("done", 1)])
+def test_a_task_dropped_looks_up_no_manager_to_wake(
+    hubbed: _Hubbed, verb: str, looked_up: int
+) -> None:
+    """Review of #259, round 25, 9/10: ``_finish_task`` worked out the manager a write wakes,
+    a lookup of the writer's live row, for every status, ``drop`` too, whose caller threw
+    it away. Only a status that wakes looks."""
+    reads: list[str] = []
+    real = SqliteStore.fleet_agent_for_session
+
+    def counted(self: SqliteStore, session_id: str) -> FleetAgent | None:
+        reads.append(session_id)
+        return real(self, session_id)
+
+    hubbed.monkeypatch.setattr(SqliteStore, "fleet_agent_for_session", counted)
+    finish = team_service.drop_task if verb == "drop" else team_service.finish_task
+
+    finish(hubbed.task.id, session_ref=hubbed.coder_sid)
+
+    assert len(reads) == looked_up
+    assert hubbed.woken == ([hubbed.fleet.id] if looked_up else [])
+
+
 @pytest.mark.parametrize("nested", ["a sub-folder", "a linked worktree"])
 def test_a_project_rooted_below_its_checkout_spawns_for_a_task_on_the_checkouts_board(
     tmux: FakeTmux,

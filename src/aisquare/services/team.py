@@ -1363,9 +1363,12 @@ def _finish_task(
     *,
     note: str | None = None,
     session_ref: str | None = None,
+    wakes: bool = True,
 ) -> tuple[TeamTask, _Board, str]:
     """Set the task's status with its event; the board, and the project whose manager the
-    write wakes (:func:`_nudge_target`)."""
+    write wakes (:func:`_nudge_target`). ``wakes=False``, for a status that wakes nobody
+    (``drop``): the board's, with no lookup, as :func:`add_note` does for its quiet kinds
+    (review of #259, round 25, 9/10)."""
     _DELIVERY.set(None)
     with store_session() as store:
         session = _resolve_session(store, session_ref)
@@ -1387,7 +1390,9 @@ def _finish_task(
             task_id=updated.id,
         )
         board = _board_of(store, updated.project_id)
-        manager = _nudge_target(store, session.id if session else None, board.id)
+        manager = (
+            _nudge_target(store, session.id if session else None, board.id) if wakes else board.id
+        )
     _record_delivery(event, board)
     return updated, board, manager
 
@@ -1514,7 +1519,7 @@ def block_task(ref: str, *, reason: str, session_ref: str | None = None) -> Team
 def drop_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
     """Drop a task that is no longer worth doing (``task drop``)."""
     _require_enabled()
-    task, _, _ = _finish_task(ref, "dropped", "task_dropped", session_ref=session_ref)
+    task, _, _ = _finish_task(ref, "dropped", "task_dropped", session_ref=session_ref, wakes=False)
     return task
 
 

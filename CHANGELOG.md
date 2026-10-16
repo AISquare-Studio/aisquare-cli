@@ -589,6 +589,10 @@ all of them, and the fleet cleans up the worktrees it made.**
     wakes the waiting manager that reads that board. Under a hub with several
     managers, it wakes the one whose project holds the writer's directory.
     Before, it woke nobody.
+  - Remote's needs feed finds an agent's exit on the board the agent was
+    spawned under, even when Remote (or `asq`, whose R panel starts it) runs
+    under another hub, or none. A coder whose hand-over never started its
+    replacement is a card again, and a manager's failed hand-over says so.
 
 ### Security
 - **One choke point.** Every request and every socket handshake passes the

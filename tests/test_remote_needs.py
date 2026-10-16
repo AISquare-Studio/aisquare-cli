@@ -1497,6 +1497,11 @@ def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> Needs
         ],
         board_events=board_events,
         board_since=board_since,
+        exits_since=lambda board, since: [
+            event
+            for event in fleet.events
+            if event.kind == "agent_exited" and event.created_at >= since
+        ],
         board_sessions=lambda pid, ids: [
             session for session in fleet.sessions if session.id in ids
         ],
@@ -4404,24 +4409,30 @@ def test_under_a_team_hub_a_resumed_agent_at_the_trust_question_is_a_card(
     assert "waiting for folder trust" in items[0].reason
 
 
-@pytest.mark.parametrize("under_a_hub", [False, True])
+@pytest.mark.parametrize(
+    ("spawned", "remote"),
+    [("no hub", "no hub"), ("hub", "hub"), ("hub", "no hub"), ("no hub", "hub")],
+    ids=lambda under: under,
+)
 def test_a_coder_whose_hand_over_never_started_its_replacement_is_reported_under_a_hub_too(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, under_a_hub: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spawned: str, remote: str
 ) -> None:
     """A coder's switch whose replacement never started is a card and a push, the case
     ``HANDOVER_FAILED`` is for, with a hub and without: the scan reads the exit where the
-    fleet writes it (review of #243, round 18, 1/4). That is the board the row's session
-    reads (``fleet._emit_exit``), the hub's under one, where its manager reads it too
-    (review of #259, round 24, 3/6)."""
+    fleet writes it (review of #243, round 18, 1/4). That is the board the row recorded at
+    spawn (``fleet._emit_exit``), the hub's under one, where its manager reads it too
+    (review of #259, round 24, 3/6), whatever hub Remote itself runs under: read only from
+    the board Remote's environment resolves, it was lost when the two differ (round 25,
+    6/10)."""
     hour_ago = datetime.now(UTC) - timedelta(hours=1)
     stopped = datetime.now(UTC) - timedelta(minutes=10)
     with store_session() as store:
         alpha = store.onboard_project(_rooted(tmp_path / "alpha"))
-        board = alpha
-        if under_a_hub:
-            board = _rooted(tmp_path / "hub")
-            monkeypatch.setenv("AISQUARE_TEAM_HUB", str(board.root))
-            store.ensure_project(board)
+        hub = _rooted(tmp_path / "hub")
+        store.ensure_project(hub)
+        board = hub if spawned == "hub" else alpha
+        if remote == "hub":
+            monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub.root))
         store.upsert_session(
             TeamSession(
                 id="ses_c", project_id=board.id, role="coder", label="coder-1",
@@ -4954,6 +4965,7 @@ _READS = (
     "tmux_answers",
     "ended_agents",
     "board_since",
+    "exits_since",
     "board_sessions",
     "accounts",
     "board_events",

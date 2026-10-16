@@ -430,6 +430,10 @@ class NeedsSources:
     ended on an API error (``turn_failed``). An item lives for :data:`QUESTION_HORIZON`
     however busy the board is, so it is read by time, not from a window of the newest
     events that 300 notes push it out of."""
+    exits_since: Callable[[str, datetime], list[TeamEvent]]
+    """The board's ``agent_exited`` events written at or after the given time: the exits the
+    fleet announced on a board the project's rows recorded (``FleetAgent.board``) other than
+    the one the scan reads whole (:func:`_needs_exits`)."""
     board_sessions: Callable[[str, Collection[str]], list[TeamSession]]
     """The project's sessions with the given ids: the authors of the board's open questions."""
     task_status: Callable[[str], str | None]
@@ -2175,12 +2179,11 @@ def _needs_scan_project(
     every session and event is the hub's: read by the fleet project's id, the board
     was empty to the scan, and a manager's question or result, a failed turn and the
     usage-limit dialog's words never became a card or a push, while the Board tab
-    showed them (sweep 4 of #243). The exits the fleet announces are in that day too: on the
-    board the row's session reads (``fleet._emit_exit``), where its manager reads them.
-    They were the row's own project's, and read there apart (review of #243, round 18,
-    1/4), until the manager under a hub was found never to be told of them (review of
-    #259, round 24, 3/6). No other project's rows are read: whether a manager hears of an
-    item is :func:`_needs_nudged`'s to say.
+    showed them (sweep 4 of #243). The exits the fleet announces are on the board each row
+    recorded at spawn (``fleet._emit_exit``), where its manager reads them, which is in that
+    day when Remote runs under the hub the agents were spawned under; the exits of any other
+    board a row recorded are read apart (:func:`_needs_exits`). No other project's rows are
+    read: whether a manager hears of an item is :func:`_needs_nudged`'s to say.
     """
     from aisquare.services.fleet import RECENTLY_ENDED
 
@@ -2202,6 +2205,7 @@ def _needs_scan_project(
     rows = list(
         {row.id: row for row in [*(ended or []), *(status.agent for status in statuses)]}.values()
     )
+    exits = [*board, *_needs_exits(sources, rows, board_id, day, reads)]
     manager = _needs_manager(rows)
     taking = _needs_nudged(project, board_id, manager, statuses, now)
     authors = _needs_board_authors(board, now)
@@ -2240,14 +2244,14 @@ def _needs_scan_project(
         _needs_crashed(
             ended or [],
             rows,
-            board,
+            exits,
             project=project,
             now=now,
             manager_live=taking is not None,
             task_status=lambda ref: reads.needs_read(partial(sources.task_status, ref), "a task"),
         )
     )
-    items.extend(_needs_manager_down(manager, board, project=project, now=now))
+    items.extend(_needs_manager_down(manager, exits, project=project, now=now))
     items.extend(
         _needs_fleet_down(statuses, project=project, now=now, first_seen=first_seen, seen=seen)
     )
@@ -2366,6 +2370,31 @@ def _needs_window(
         return read[0]
 
     return needs_window
+
+
+def _needs_exits(
+    sources: NeedsSources,
+    rows: Sequence[FleetAgent],
+    board_id: str,
+    day: datetime,
+    reads: _NeedsReads,
+) -> list[TeamEvent]:
+    """The exits the fleet announced since ``day`` on each board ``rows`` recorded
+    (``fleet._board_of_row``) but ``board_id``, whose whole day the scan reads already.
+
+    ``board_id`` is the board Remote's own environment resolves (:func:`_needs_board_of`),
+    and an agent's exit is on the board its spawn recorded: Remote (or ``asq``, whose R panel
+    starts it) run without the hub the agents were spawned under, or with one they were not,
+    found no exit, and a coder whose hand-over never started its replacement was no card, a
+    manager's failed hand-over "the manager stopped" (review of #259, round 25, 6/10). Only
+    the exits of those boards: their other kinds are their own projects' to scan.
+    """
+    from aisquare.services.fleet import _board_of_row
+
+    found: list[TeamEvent] = []
+    for other in sorted({_board_of_row(row) for row in rows} - {board_id}):
+        found.extend(reads.needs_read(partial(sources.exits_since, other, day), "exits") or [])
+    return found
 
 
 def _needs_board_of(sources: NeedsSources, project: ProjectInfo) -> str:
@@ -2777,8 +2806,8 @@ def _needs_blind_kept(
 
 
 def _needs_read_once(sources: NeedsSources) -> NeedsSources:
-    """``sources`` with each board's day, window and sessions, each tmux server's answer, the
-    accounts and each slot's hand-over question read once for a whole scan.
+    """``sources`` with each board's day, window, sessions and exits, each tmux server's answer,
+    the accounts and each slot's hand-over question read once for a whole scan.
 
     Under ``AISQUARE_TEAM_HUB`` every project's board is the hub's, and each project's
     scan read the same day, window and sessions of it again: N copies every 3 s
@@ -2799,6 +2828,7 @@ def _needs_read_once(sources: NeedsSources) -> NeedsSources:
     return replace(
         sources,
         board_since=once("day", sources.board_since),
+        exits_since=once("exits", sources.exits_since),
         board_events=once("window", sources.board_events),
         board_sessions=once("sessions", sources.board_sessions),
         tmux_answers=once("tmux", sources.tmux_answers),
@@ -3295,6 +3325,10 @@ def live_needs_sources() -> NeedsSources:
                 project_id, since, kinds=_NEEDS_DAY_KINDS, human_kinds=_NEEDS_REPLIED
             )
 
+    def needs_exits_since(board_id: str, since: datetime) -> list[TeamEvent]:
+        with store_session() as store:
+            return store.team_events_since(board_id, since, kinds=("agent_exited",))
+
     def needs_board_sessions(project_id: str, ids: Collection[str]) -> list[TeamSession]:
         with store_session() as store:
             return store.team_sessions_seen_since(project_id, None, ids=sorted(ids))
@@ -3339,6 +3373,7 @@ def live_needs_sources() -> NeedsSources:
         ended_agents=needs_rows_ended,
         board_events=needs_board_events,
         board_since=needs_board_since,
+        exits_since=needs_exits_since,
         board_sessions=needs_board_sessions,
         task_status=needs_task_status,
         transcript_tail=_needs_cached_tail,

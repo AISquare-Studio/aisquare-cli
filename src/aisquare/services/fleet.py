@@ -598,6 +598,12 @@ class ShutdownReport:
     carries the per-project failures — ``<project>: could not be read/cleared
     (…)``, joined by ``; `` — for a lookup that SUCCEEDED and left one project's
     own signal unread or unwritten (review of #121, round 9)."""
+    pause_unsettled: list[ProjectInfo] = field(default_factory=list)
+    """The projects named in ``pause_scan_failed`` as one whose signal could not be read or
+    could not be cleared: their ``fleet-paused`` may still be set, and the report gives a
+    ``fleet resume`` for each. Under ``--all`` the warning said only "re-run", with no way
+    to clear a signal and no project to clear it in (review of #259, round 22). Empty when
+    the lookup itself failed: then no project's signal was asked."""
 
 
 @dataclass(frozen=True)
@@ -5571,6 +5577,7 @@ def _reconcile_pauses(
             # the failure is named and the project is not confirmed down, and
             # neither `paused_kept` nor `paused_cleared` claims anything.
             failures.append(f"{_name(project)}: could not be read ({type(exc).__name__}: {exc})")
+            report.pause_unsettled.append(project)
             _not_down(report, project.id)
             continue
         if not paused:
@@ -5588,6 +5595,7 @@ def _reconcile_pauses(
             # The signal was just read ON and the clear did not happen: it IS
             # kept, so it is named as kept as well as reported failed.
             failures.append(f"{_name(project)}: could not be cleared ({type(exc).__name__}: {exc})")
+            report.pause_unsettled.append(project)
             report.paused_kept.append(_name(project))
             _not_down(report, project.id)
             continue

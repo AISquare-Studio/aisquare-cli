@@ -7961,6 +7961,7 @@ def test_shutdown_reports_a_pause_signal_it_could_not_read_or_clear(
     assert report.paused_kept == [], "and nothing is CLAIMED kept either — it was never read"
     assert project.id in report.incomplete_projects, "an unread pause is not a project down"
     assert fleet_service.is_paused(project), "the pause is in fact still on"
+    assert [p.id for p in report.pause_unsettled] == [project.id], "its resume is owed"
 
     monkeypatch.setattr(fleet_service, "_clear_pause_signal", refuse)  # now the WRITE fails
     second = fleet_service.shutdown(project, force=True)
@@ -7972,10 +7973,12 @@ def test_shutdown_reports_a_pause_signal_it_could_not_read_or_clear(
     assert second.paused_cleared == []
     assert project.id in second.incomplete_projects
     assert fleet_service.is_paused(project), "the signal that could not be written stays on"
+    assert [p.id for p in second.pause_unsettled] == [project.id]
     # Negative control: with the store answering, the same run clears it and exits clean.
     third = fleet_service.shutdown(project, force=True)
     assert third.pause_scan_failed is None and third.paused_cleared == [name]
     assert third.incomplete_projects == [] and not fleet_service.is_paused(project)
+    assert third.pause_unsettled == []
 
 
 def test_shutdown_returns_the_report_when_the_pause_lookup_store_is_locked(

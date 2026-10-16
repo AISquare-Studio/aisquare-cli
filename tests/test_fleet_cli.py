@@ -1097,6 +1097,38 @@ def test_shutdown_all_never_resolves_a_project_and_a_clean_run_exits_zero(
     assert shutdown.args == (None,) and resolved.calls == []
 
 
+def test_shutdown_all_names_a_resume_for_each_project_whose_pause_was_not_settled(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 22, 7/9: round 21 named the scoped shutdown's project in the
+    pause warning's ``fleet resume``, and under ``--all`` dropped the command: the line
+    ended at "re-run once the store answers", with signals left set in several projects
+    and no way to clear them but the whole shutdown again. Each project whose signal could
+    not be read or cleared gets its own ``resume``; a lookup that failed whole names none."""
+    report = _report(
+        stopped=[_agent("coder-auth", ended=True)],
+        pause_scan_failed="api: could not be read (locked); tool: could not be cleared (locked)",
+        pause_unsettled=[PROJECT, UNNAMED],
+    )
+    _install(monkeypatch, "shutdown", report)
+
+    result = runner.invoke(app, ["fleet", "shutdown", "--all", "--yes"])
+
+    out = " ".join(_plain(result.stdout).split())
+    assert (
+        "re-run once the store answers, or clear them with "
+        "`aisquare fleet resume --project amber-otter`; "
+        "`aisquare fleet resume --project prj_02def`"
+    ) in out, out
+    assert resolved.calls == []
+
+    _install(monkeypatch, "shutdown", _report(pause_scan_failed="OperationalError: locked"))
+    whole = " ".join(
+        _plain(runner.invoke(app, ["fleet", "shutdown", "--all", "--yes"]).stdout).split()
+    )
+    assert "re-run once the store answers" in whole and "fleet resume" not in whole, whole
+
+
 def test_shutdown_json_carries_every_group_and_the_reasons(
     runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
 ) -> None:

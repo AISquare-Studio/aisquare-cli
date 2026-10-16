@@ -691,9 +691,14 @@ def _emit_shutdown(report: fleet_service.ShutdownReport, target: ProjectInfo | N
         # what was not cleared holds in both shapes, including a signal nobody
         # could read, which the report deliberately claims nothing about (review
         # of #121, round 9 verification).
+        # Each project whose signal was not settled, by its own `resume`: under `--all` the
+        # line had none, so a signal left set had no way out but the whole shutdown again
+        # (review of #259, round 22). A scoped run names its project, as it always did.
+        unsettled = [target] if target is not None else report.pause_unsettled
+        resumes = [f"`{project_service.fleet_command('resume', p)}`" for p in unsettled]
         resume = (
-            f", or clear it with `{project_service.fleet_command('resume', target)}`"
-            if target is not None
+            f", or clear {'it' if len(resumes) == 1 else 'them'} with {'; '.join(resumes)}"
+            if resumes
             else ""
         )
         console.print(

@@ -20,7 +20,7 @@ import os
 import re
 import sqlite3
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -620,7 +620,9 @@ def _nudge_target(
     """The project whose manager a nudge for session ``writer``'s write on board ``board_id``
     wakes: that of the writer's own live fleet row; with none, for a write on ``task``, that
     of the task's own row (:func:`_task_row`); else that of the manager that reads the board
-    (:func:`_reading_manager`); else ``board_id``'s, as every nudge was.
+    (:func:`_reading_manager`); else ``board_id``'s, as every nudge was. The live rows those
+    two look among are read once: each read is every live row, twice on every phone, shell
+    and MCP task write by a writer with no row (review of #259, round 28, 7/10).
 
     Which manager is a fleet question, the news a board one (docs/fleet.md, "Under a hub: one
     board, many fleet projects"): the nudge types a fixed line into the manager row's pane,
@@ -646,19 +648,21 @@ def _nudge_target(
     """
     try:
         row = store.fleet_agent_for_session(writer) if writer is not None else None
-        if row is None and task is not None:
-            row = _task_row(store, task)
         if row is not None:
             return row.project_id
-        return _reading_manager(store, board_id, cwd) or board_id
+        live = store.live_fleet_agents()
+        row = None if task is None else _task_row(store, task, live)
+        if row is not None:
+            return row.project_id
+        return _reading_manager(store, board_id, cwd, live) or board_id
     except Exception:
         return board_id
 
 
-def _task_row(store: ContextStore, task: TeamTask) -> FleetAgent | None:
-    """The live fleet row a task is worked in: the newest spawned for it, else the row of
-    the session that claimed it."""
-    spawned = [row for row in store.live_fleet_agents() if row.task_id == task.id]
+def _task_row(store: ContextStore, task: TeamTask, live: Sequence[FleetAgent]) -> FleetAgent | None:
+    """The live fleet row a task is worked in: the newest of ``live``, the live rows, spawned
+    for it, else the row of the session that claimed it."""
+    spawned = [row for row in live if row.task_id == task.id]
     if spawned:
         return spawned[-1]
     if task.claimed_by is None:
@@ -666,23 +670,21 @@ def _task_row(store: ContextStore, task: TeamTask) -> FleetAgent | None:
     return store.fleet_agent_for_session(task.claimed_by)
 
 
-def _reading_manager(store: ContextStore, board_id: str, cwd: Path | _Nowhere | None) -> str | None:
-    """The project of the live ``manager`` row whose agent reads board ``board_id``, as its
-    spawn recorded (``FleetAgent.board``). Of several, as under a hub, the one whose project's
-    root holds the writer's directory, ``cwd`` or this process's (the phone writes a project's
-    note in its root), the deepest root of those that do; of none that holds it, none, and
-    none for a writer with no directory (:data:`NOWHERE`).
+def _reading_manager(
+    store: ContextStore, board_id: str, cwd: Path | _Nowhere | None, live: Sequence[FleetAgent]
+) -> str | None:
+    """The project of the ``manager`` row of ``live``, the live rows, whose agent reads board
+    ``board_id``, as its spawn recorded (``FleetAgent.board``). Of several, as under a hub,
+    the one whose project's root holds the writer's directory, ``cwd`` or this process's (the
+    phone writes a project's note in its root), the deepest root of those that do; of none
+    that holds it, none, and none for a writer with no directory (:data:`NOWHERE`).
 
     The deepest, not the oldest: a project rooted in a sub-folder of another's reads the same
     board, the checkout's, and its directory is inside both roots, so a note to its manager
     from the phone woke the older project's, and its own waited on (review of #259, round 26,
     5/11).
     """
-    managers = [
-        row
-        for row in store.live_fleet_agents()
-        if row.label == MANAGER_ROLE and row.board == board_id
-    ]
+    managers = [row for row in live if row.label == MANAGER_ROLE and row.board == board_id]
     if len(managers) == 1:
         return managers[0].project_id
     if isinstance(cwd, _Nowhere):

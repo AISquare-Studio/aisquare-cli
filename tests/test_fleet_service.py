@@ -6075,6 +6075,28 @@ def test_under_a_hub_the_phones_done_naming_no_project_picks_no_manager_by_remot
     assert hubbed.woken == [other.id]
 
 
+def test_a_task_write_with_no_row_reads_the_live_rows_once(hubbed: _Hubbed) -> None:
+    """Review of #259, round 28, 7/10: for a writer with no row, ``_nudge_target`` read every
+    live fleet row for the task's own row, then again for the board's managers when no row
+    worked the task: two reads on each phone, shell and MCP task write. One read serves
+    both."""
+    other, _ = _another_fleet_on_the_hub(hubbed)
+    loose = _task(hubbed.fleet, "nobody's")
+    reads: list[int] = []
+    with store_session() as store:
+        real = store.live_fleet_agents
+
+        def counted() -> list[FleetAgent]:
+            reads.append(1)
+            return real()
+
+        hubbed.monkeypatch.setattr(store, "live_fleet_agents", counted)
+        woken = team_service._nudge_target(store, None, hubbed.hub.id, other.root, task=loose)
+
+    assert woken == other.id, "the manager whose root holds the writer's directory"
+    assert len(reads) == 1, reads
+
+
 def test_under_a_hub_shutdown_all_keeps_the_pause_it_says_it_kept(hubbed: _Hubbed) -> None:
     """Review of #259, round 26, 1/11: under ``--all``, a project that was not confirmed down
     is named in ``paused_kept``, and another project's pass then cleared the hub's one signal

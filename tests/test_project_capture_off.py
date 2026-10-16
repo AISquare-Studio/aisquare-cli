@@ -255,7 +255,7 @@ def test_doctor_names_the_rows_that_prune_keeps_and_what_drops_them(tmp_path: Pa
     said = " ".join(check.detail.split())
     assert said.startswith("1 captured directory left from before project capture"), said
     assert "drop them: aisquare project prune --captured-only --older-than 0" in said
-    assert "1 more holds saved context or a live agent, which that prune keeps: notes" in said
+    assert "1 more holds saved context, which that prune keeps: notes" in said
     assert f"aisquare project forget {tmp_path / 'notes'}" in said
 
     from aisquare.services import project as project_service
@@ -268,7 +268,7 @@ def test_doctor_names_the_rows_that_prune_keeps_and_what_drops_them(tmp_path: Pa
     said = " ".join(check.detail.split())
     assert said.startswith(
         "1 captured directory left from before project capture was turned off holds saved "
-        "context or a live agent, which aisquare project prune keeps: notes"
+        "context, which aisquare project prune keeps: notes"
     ), said
     assert "--older-than 0" not in said
 
@@ -344,19 +344,68 @@ def test_doctors_capture_off_line_for_each_count(tmp_path: Path, dropped: int, k
         (2, 0): f"2 captured directories {left} (a hooked session ran there; nothing added it "
         f"on purpose) — {listed}; drop them: aisquare project prune --captured-only "
         "--older-than 0",
-        (2, 1): f"; 1 more holds saved context or a live agent, which that prune keeps: {names} "
+        (2, 1): f"; 1 more holds saved context, which that prune keeps: {names} "
         f"— drop it with {forget}",
-        (1, 2): f"; 2 more hold saved context or a live agent, which that prune keeps: {names} "
+        (1, 2): f"; 2 more hold saved context, which that prune keeps: {names} "
         f"— drop them with {forget}",
-        (0, 1): f"1 captured directory {left} holds saved context or a live agent, which "
+        (0, 1): f"1 captured directory {left} holds saved context, which "
         f"aisquare project prune keeps: {names} — {listed}; drop it with {forget}",
-        (0, 4): f"4 captured directories {left} hold saved context or a live agent, which "
+        (0, 4): f"4 captured directories {left} hold saved context, which "
         f"aisquare project prune keeps: {names} — {listed}; drop them with {forget}",
     }[(dropped, kept)]
 
-    said = diagnostics._left_from_before_capture([*gone, *held], plan)
+    said = diagnostics._left_from_before_capture([*gone, *held], plan, set())
 
     assert said.endswith(wanted) if dropped and kept else said == wanted, said
+
+
+def test_doctor_names_the_captured_rows_with_a_live_agent_apart_from_what_forget_drops(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Review of #259, round 18: the line put the rows kept for a live agent with those kept
+    for saved context, and told the user to drop them all with ``aisquare project forget``,
+    which refuses a project with live fleet agents (``project_busy``). They are named apart,
+    with their agents to stop first."""
+    from datetime import UTC, datetime
+
+    from aisquare.core.ids import new_agent_id
+
+    rows: dict[str, ProjectInfo] = {}
+    for name in ("scratch", "notes", "busy", "both"):
+        (tmp_path / name).mkdir()
+        rows[name] = team_project(tmp_path / name)
+    with store_session() as store:
+        for row in rows.values():
+            store.ensure_project(row)  # 0.8.0's capture
+        for name in ("notes", "both"):
+            store.add(new_entry("a fact", "project", rows[name].id, [], "cli"))
+        for name in ("busy", "both"):
+            store.upsert_fleet_agent(
+                FleetAgent(
+                    id=new_agent_id(),
+                    project_id=rows[name].id,
+                    label="coder-1",
+                    role="coder",
+                    pane_id="%1",
+                    cwd=tmp_path / name,
+                    created_at=datetime.now(tz=UTC),
+                )
+            )
+
+    [check] = diagnostics._check_captured_projects()
+
+    said = " ".join(check.detail.split())
+    assert said.startswith("1 captured directory left from before project capture"), said
+    assert "; 1 more holds saved context, which that prune keeps: notes — drop it with " in said
+    assert (
+        "; 2 more have fleet agents still running, which that prune keeps and aisquare project "
+        "forget refuses: both, busy — stop their agents first (aisquare fleet stop <label>), "
+        "then drop them with aisquare project forget <directory>, for each"
+    ) in said, said
+    refused = runner.invoke(app, ["--json", "project", "forget", str(tmp_path / "busy")])
+    assert json.loads(refused.stdout)["error"] == "project_busy", "the premise"
+    dropped = runner.invoke(app, ["project", "forget", str(tmp_path / "notes")])
+    assert dropped.exit_code == 0, dropped.output
 
 
 # --- the setting, read --------------------------------------------------------------------

@@ -1449,25 +1449,33 @@ def _check_captured_projects() -> list[DoctorCheck]:
     holds saved context, or a live agent, it keeps whatever ``--older-than`` says: counted
     under it, they made the line say "drop them" again after every prune, of rows it
     would never drop (review of #259, round 17). They are named apart, with ``project
-    forget``, which drops one.
+    forget``, which drops one — and the rows with a live agent apart again, since
+    ``forget`` refuses those until their agents are stopped (round 18).
     """
     if _uncreated_home("projects") is not None:
         return []
     try:
         with store_session() as store:
             captured = store.captured_projects()
+        plan: list[PruneCandidate] = []
+        busy: set[str] = set()
         if captured and not project_service.capture_on():
             plan = project_service.prune_candidates(
                 missing=False, worktrees=False, captured_older_than=0
             )
-        else:
-            plan = []
+            planned = {c.project.id for c in plan}
+            with store_session() as store:
+                busy = {c.project.id for c in plan if c.live_agents} | {
+                    p.id
+                    for p in captured
+                    if p.id not in planned and store.fleet_agents(p.id, live_only=True)
+                }
     except Exception:  # the database line reports a broken store
         return []
     if not captured:
         return []
     if not project_service.capture_on():
-        return [_ok("projects", _left_from_before_capture(captured, plan))]
+        return [_ok("projects", _left_from_before_capture(captured, plan, busy))]
     noun = "directory" if len(captured) == 1 else "directories"
     return [
         _ok(
@@ -1479,16 +1487,20 @@ def _check_captured_projects() -> list[DoctorCheck]:
     ]
 
 
-def _left_from_before_capture(captured: list[ProjectInfo], plan: list[PruneCandidate]) -> str:
+def _left_from_before_capture(
+    captured: list[ProjectInfo], plan: list[PruneCandidate], busy: set[str]
+) -> str:
     """The capture-off line: the rows ``prune --captured-only --older-than 0`` drops (``plan``
-    is what it would do), with that command, and apart from them the rows it keeps, by name,
-    with ``project forget``.
+    is what it would do), with that command, and apart from them the rows it keeps, by name:
+    those holding saved context with ``project forget``, and those with a live fleet agent
+    (``busy``, by id), which ``forget`` refuses, with stopping the agents first.
 
     Each part put together once from its noun, verb and pronoun: the kept part was written
     out twice, in near-identical branches, and a wording fix had to be made in each (review
     of #259, round 18)."""
-    dropped = {c.project.id for c in plan if c.reason == "captured" and not c.live_agents}
-    kept = [project for project in captured if project.id not in dropped]
+    dropped = {c.project.id for c in plan if c.reason == "captured" and c.project.id not in busy}
+    held = [p for p in captured if p.id not in dropped and p.id not in busy]
+    working = [p for p in captured if p.id in busy]
     left = "left from before project capture was turned off"
     listed = "listed only by aisquare project list --all"
     parts: list[str] = []
@@ -1498,7 +1510,10 @@ def _left_from_before_capture(captured: list[ProjectInfo], plan: list[PruneCandi
             f"ran there; nothing added it on purpose) — {listed}; drop them: aisquare project "
             "prune --captured-only --older-than 0"
         )
-    if kept:
+    prune = "that prune" if dropped else "aisquare project prune"
+    for kept, agents in ((held, False), (working, True)):
+        if not kept:
+            continue
         one = len(kept) == 1
         names = ", ".join(project_service.display_name(p) for p in kept[:3])
         if len(kept) > 3:
@@ -1510,15 +1525,24 @@ def _left_from_before_capture(captured: list[ProjectInfo], plan: list[PruneCandi
         )
         which = (
             f"{len(kept)} more"
-            if dropped
+            if parts
             else f"{len(kept)} captured {_directories(len(kept))} {left}"
         )
-        prune = "that prune" if dropped else "aisquare project prune"
-        then = "" if dropped else f"{listed}; "
-        parts.append(
-            f"{which} {'holds' if one else 'hold'} saved context or a live agent, which "
-            f"{prune} keeps: {names} — {then}drop {'it' if one else 'them'} with {forget}"
-        )
+        then = "" if parts else f"{listed}; "
+        it = "it" if one else "them"
+        if agents:
+            what = (
+                f"{'has a fleet agent' if one else 'have fleet agents'} still running, which "
+                f"{prune} keeps and aisquare project forget refuses: {names} — {then}stop "
+                f"{'its' if one else 'their'} agents first (aisquare fleet stop <label>), then "
+                f"drop {it} with {forget}"
+            )
+        else:
+            what = (
+                f"{'holds' if one else 'hold'} saved context, which {prune} keeps: {names} — "
+                f"{then}drop {it} with {forget}"
+            )
+        parts.append(f"{which} {what}")
     return "; ".join(parts)
 
 

@@ -580,6 +580,10 @@ all of them, and the fleet cleans up the worktrees it made.**
   - `fleet spawn --task` in a project rooted in a sub-folder of its
     repository, or at a linked worktree, finds the task on the checkout's
     board, where that project's manager and sessions add tasks.
+  - `fleet pause` and `fleet resume` set the `fleet-paused` signal on the
+    board the project's agents read, where its manager looks for it, and
+    `fleet shutdown` clears it there. Under a hub that is the hub's board,
+    so a pause holds every manager on the hub.
 
 ### Security
 - **One choke point.** Every request and every socket handshake passes the

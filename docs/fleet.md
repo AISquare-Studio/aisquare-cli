@@ -549,7 +549,9 @@ aisquare fleet resume
 
 Sets (and clears) a named board signal, `fleet-paused`, that the manager's
 cycle respects: while it is on, the manager spawns nothing. Running agents are
-not touched. Both take `--as SESSION`.
+not touched. Both take `--as SESSION`. The signal goes on the board the
+project's agents read, as each was recorded at spawn: under `AISQUARE_TEAM_HUB`
+that is the hub's, so it pauses every manager on the hub.
 
 ### `ui`
 
@@ -1246,7 +1248,7 @@ window the hub that resolves it.
 | Tasks: `task add`, `next`, `claim`, `review`, `done`, `block` and `reopen`. Also the task `fleet spawn --task` gives an agent, looked up (`12`, `#12` or an id) on the board that agent will read; `switch` and `restart` check it on the board the row recorded | Finding a session's row: the hand-over and the `/clear` that keep its claims for the id that follows, and the adoption of that id onto the row, whatever project the row is in |
 | Notes, questions, results and every other feed line | The panes, tmux, and the row's label and state |
 | The fleet's own lines, `agent_exited`, `switched` and `restarted`, on the board the row recorded, with a session or none; and the entries a replacement's hand-off prompt quotes | `--project` in every hint and cycle command, and the project `fleet spawn`, `stop`, `tell`, `switch` and `restart` act on |
-| The claims a session holds, released or kept when it ends | Which manager a nudge wakes: the manager row in the writer's own row's project (a session with no row: in the board's). The deferred wake of a manager's own Stop wakes its own row |
+| The claims a session holds, released or kept when it ends. The `fleet-paused` signal, on each board the project's agents recorded | Which manager a nudge wakes: the manager row in the writer's own row's project (a session with no row: in the board's). The deferred wake of a manager's own Stop wakes its own row |
 | What a nudge delivers: the delta of the board the woken manager reads | |
 
 Without a hub the two are one project, so a call site that asks the wrong one

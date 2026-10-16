@@ -82,6 +82,7 @@ from aisquare.services.explainability import PIPELINE_ID_ENV_VAR
 from aisquare.services.fleet import (
     ACTIVITY_WINDOW,
     NUDGE_TEXT,
+    PAUSE_SIGNAL,
     PROMPT_TIMEOUT,
     TRUST_PROMPT,
     FleetError,
@@ -5124,6 +5125,40 @@ def _case_exited_under_the_hub_of_a_row_without(w: _Hubbed) -> str | None:
     return _fed_to(w, "agent_exited")
 
 
+def _paused_on(w: _Hubbed) -> list[str]:
+    """The boards, of the hub's and the fleet's, whose ``fleet-paused`` signal reads ON."""
+    with store_session() as store:
+        return [
+            project.id
+            for project in (w.hub, w.fleet)
+            for state in [team_service.read_signal_in(store, project.id, PAUSE_SIGNAL)]
+            if state is not None and state.value == "on"
+        ]
+
+
+def _case_pause(w: _Hubbed) -> str | None:
+    fleet_service.pause(w.fleet)
+    (paused,) = _paused_on(w)
+    assert fleet_service.is_paused(w.fleet)
+    fleet_service.resume(w.fleet)
+    assert _paused_on(w) == [] and not fleet_service.is_paused(w.fleet)
+    return paused
+
+
+def _case_pause_without_the_hub(w: _Hubbed) -> str | None:
+    _without_the_hub(w)
+    return _case_pause(w)
+
+
+def _case_shutdown_clears_the_pause(w: _Hubbed) -> str | None:
+    # Set by the manager itself, `team signal fleet-paused on`, where its cycle reads it.
+    team_service.set_signal(PAUSE_SIGNAL, "on", session_ref=w.manager_sid)
+    (paused,) = _paused_on(w)
+    report = fleet_service.shutdown(w.fleet)
+    assert _paused_on(w) == [] and report.paused_cleared, report
+    return paused
+
+
 #: Each case: which of the rule's two places it goes to, what it is, and how to run it.
 #: A board case is about an agent spawned under the hub; the board is the one its spawn
 #: recorded, whoever asks, with the hub or without it.
@@ -5144,6 +5179,9 @@ _HUB_RULE_CASES: list[tuple[str, str, Any]] = [
     ("board", "a restart from a caller without the hub", _case_restart_without_the_hub),
     ("board", "a switch from a caller without the hub", _case_switch_without_the_hub),
     ("board", "agent_exited, no session, the hub unset", _case_exited_without_a_session_or_the_hub),
+    ("board", "fleet pause and resume", _case_pause),
+    ("board", "fleet pause from a caller without the hub", _case_pause_without_the_hub),
+    ("board", "the pause fleet shutdown clears", _case_shutdown_clears_the_pause),
     (
         "fleet",
         "a restart under the hub of a row without",
@@ -8763,7 +8801,7 @@ def test_shutdown_reports_a_pause_signal_it_could_not_read_or_clear(
     spawn nothing, and nothing in the report saying so. Both failures are surfaced
     the way the visible-projects lookup already is, and the report is preserved.
     """
-    real_read = fleet_service._pause_is_on
+    real_read = fleet_service._paused_boards
     real_clear = fleet_service._clear_pause_signal
 
     def refuse(*args: object, **kwargs: object) -> bool:
@@ -8773,9 +8811,9 @@ def test_shutdown_reports_a_pause_signal_it_could_not_read_or_clear(
     fleet_service.pause(project)
     name = fleet_service._name(project)
 
-    monkeypatch.setattr(fleet_service, "_pause_is_on", refuse)  # the READ fails
+    monkeypatch.setattr(fleet_service, "_paused_boards", refuse)  # the READ fails
     report = fleet_service.shutdown(project, force=True)
-    monkeypatch.setattr(fleet_service, "_pause_is_on", real_read)
+    monkeypatch.setattr(fleet_service, "_paused_boards", real_read)
 
     assert len(report.stopped) == 1, "the report is preserved, not discarded"
     assert report.pause_scan_failed is not None and "locked" in report.pause_scan_failed
@@ -8848,18 +8886,18 @@ def test_shutdown_clears_the_pause_by_the_target_id_not_a_redirected_board(
     """Review of #121, round 8 (P2): with ``AISQUARE_TEAM_HUB`` pointing at project
     A, shutting down explicit project B resolved its pause through cwd and cleared
     A's signal instead — B reported in ``paused_cleared`` while A's agent kept its
-    standing order removed. The pause is read and written by the target project's
-    ID, so the hub cannot redirect it."""
+    standing order removed. The pause is read and written on the board B's agents
+    recorded at spawn (review of #259, round 25, 2/10), so the caller's hub cannot
+    redirect it: B's coder was spawned with no hub, and reads B's own board."""
     hub_root = project.root.parent / "hub-project"
     hub_root.mkdir()
     hub = team_project(hub_root)
     with store_session() as store:
         store.onboard_project(hub)
     fleet_service.pause(hub)
-    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub_root))  # cwd resolution now points at A
-
     _coder(project)
     fleet_service.pause(project)
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub_root))  # cwd resolution now points at A
     assert fleet_service.is_paused(project) and fleet_service.is_paused(hub)
 
     report = fleet_service.shutdown(project, force=True)

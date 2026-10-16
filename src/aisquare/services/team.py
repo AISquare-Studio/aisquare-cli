@@ -2035,6 +2035,36 @@ def hook_stop_failure(
     return TurnFailure(refreshed, kind, notice, already_limited=already_limited)
 
 
+def fleet_switches(sessions: list[TeamSession]) -> dict[str, str]:
+    """The ``fleet switch`` that moves each ``limited`` session's agent, by session id: the
+    project and label of its own live fleet row, in whichever project that is.
+
+    Not the board's project: under ``AISQUARE_TEAM_HUB`` the board is the hub's, every
+    session on it is a fleet agent of some other project, and ``fleet switch --project
+    <hub> <label>`` answered "no live agent" (review of #259, round 22). A session with no
+    live row, or whose row's project is gone, has none. The store is opened only when a
+    live session is limited, and a read that fails costs the commands, never the board.
+    """
+    limited = {s.id for s in sessions if s.ended_at is None and s.state == "limited"}
+    if not limited:
+        return {}
+    switches: dict[str, str] = {}
+    try:
+        with store_session() as store:
+            for agent in store.live_fleet_agents():
+                session_id = agent.session_id
+                if session_id is None or session_id not in limited:
+                    continue
+                project = store.get_project(agent.project_id)
+                if project is not None:
+                    switches[session_id] = project_service.fleet_command(
+                        "switch", project, agent.label
+                    )
+    except Exception:
+        return {}
+    return switches
+
+
 def _limited_text(
     label: str,
     message: str,

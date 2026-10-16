@@ -38,7 +38,6 @@ from aisquare.core.state_file import read_state
 from aisquare.core.store import unmet_needs
 from aisquare.models import ProjectInfo, TeamEvent, TeamSession, TeamTask
 from aisquare.services import claude_accounts as accounts_service
-from aisquare.services import project as project_service
 from aisquare.services import team as team_service
 
 if TYPE_CHECKING:
@@ -161,12 +160,15 @@ def _session_lines(
     sessions: list[TeamSession],
     labels: Mapping[int, str] | None = None,
     *,
-    project: ProjectInfo | None = None,
+    switches: Mapping[str, str] | None = None,
 ) -> Text:
     """The sessions block: who is here, in what state, on which account, how long ago.
 
-    A ``limited`` session is told the ``fleet switch`` that moves it, naming ``project``,
-    the board's: alone, it switched the active project's agent (review of #259, round 21).
+    A ``limited`` session is told the ``fleet switch`` that moves it, from ``switches``
+    (``team_service.fleet_switches``): its own fleet row's project and label. Alone, the
+    command switched the active project's agent (review of #259, round 21); named by the
+    board's project, it was the hub's under ``AISQUARE_TEAM_HUB``, where no agent is (round
+    22). A session with none shows the chip alone.
 
     The account is named by ``labels`` (``services.claude_accounts.slot_labels``
     — the alias, as every other surface shows it; review of #205, third round).
@@ -192,9 +194,9 @@ def _session_lines(
         text.append(f"{emoji} {session.role}·{team_service.short_id(session.id)}", style=style)
         chip, chip_style = _STATE_CHIP.get(session.state, (session.state, "dim"))
         text.append(f"  {chip}", style=chip_style)
-        if session.state == "limited" and project is not None:
-            switch = project_service.fleet_command("switch", project)
-            text.append(f" — `{switch} <label>`", style=chip_style)
+        switch = (switches or {}).get(session.id) if session.state == "limited" else None
+        if switch is not None:
+            text.append(f" — `{switch}`", style=chip_style)
         if session.state == "limited" and session.limit_resets_at is not None:
             text.append(f" (resets {format_reset(session.limit_resets_at)})", style="magenta")
         label = team_service.account_label(session.account, labels)
@@ -465,7 +467,7 @@ def board_frame(height: int, width: int) -> Text:
     live_sessions = [s for s in sessions if s.ended_at is None]
     text.append("sessions\n", style="bold cyan")
     if live_sessions:
-        text.append(_session_lines(sessions, project=project))
+        text.append(_session_lines(sessions, switches=team_service.fleet_switches(sessions)))
     else:
         text.append("  (none live)\n", style="dim")
     statuses = {t.id: t.status for t in tasks}

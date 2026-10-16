@@ -4478,6 +4478,42 @@ def test_a_fleet_agents_cycle_names_its_own_project_under_a_hub(
     assert bare and not any("--project" in command for command in bare), bare
 
 
+def test_the_boards_limited_chip_names_the_agents_own_project_under_a_hub(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 22, 2/9: ``aisquare board`` and the board panel read the hub's
+    board under ``AISQUARE_TEAM_HUB``, and the ``limited`` chip's ``fleet switch`` named
+    that board's project, where the agent's row is not: it refused with "no live agent".
+    It names the agent's own row's project and label. A session with no row has none."""
+    from aisquare.cli.watch import board_frame
+
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    with store_session() as store:
+        store.onboard_project(team_project(hub))
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))
+    agent, session_id = _spawned(project, "coder", None, tmux, monkeypatch)
+    team_service.hook_session_start(session_id, project.root, "startup")
+    _stranger(monkeypatch, "coder")
+    team_service.hook_session_start("sess-no-row", project.root, "startup")
+    with store_session() as store:
+        store.mark_limited(session_id, None)
+        store.mark_limited("sess-no-row", None)
+        stored = store.get_project(project.id)
+    assert stored is not None and stored.codename
+
+    frame = board_frame(height=40, width=200).plain
+
+    switch = f"aisquare fleet switch --project {stored.codename} {agent.label}"
+    assert f"⏳ limited — `{switch}`" in frame
+    assert frame.count("aisquare fleet switch") == 1, "the session with no row: the chip alone"
+    assert team_project(hub).id not in frame
+
+
 def test_task_next_prefers_the_callers_assigned_task_over_the_oldest(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

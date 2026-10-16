@@ -820,7 +820,7 @@ def test_watch_names_a_parked_session_and_its_reset(monkeypatch: pytest.MonkeyPa
     from datetime import UTC, datetime, timedelta
 
     from aisquare.cli.watch import _session_lines
-    from aisquare.models import ProjectInfo, TeamSession
+    from aisquare.models import TeamSession
 
     now = datetime.now(tz=UTC)
     parked = TeamSession(
@@ -833,12 +833,15 @@ def test_watch_names_a_parked_session_and_its_reset(monkeypatch: pytest.MonkeyPa
         limit_resets_at=now + timedelta(hours=2, minutes=10),
     )
     moving = parked.model_copy(update={"id": "sess-switching-1", "state": "switching"})
-    board = ProjectInfo(id="prj_watch", root=Path("/work/watch"), codename="calm-otter")
-    rendered = _session_lines([parked, moving], project=board).plain
-    # The board's project named: alone, it switched the active project's (#259, round 21).
-    assert "⏳ limited — `aisquare fleet switch --project calm-otter <label>`" in rendered
+    switch = "aisquare fleet switch --project calm-otter coder-1"
+    rendered = _session_lines([parked, moving], switches={parked.id: switch}).plain
+    # Its own row's project and label: alone, it switched the active project's (#259, round
+    # 21), and named by the board's project, the hub's (round 22).
+    assert f"⏳ limited — `{switch}`" in rendered
     assert "(resets in 2h" in rendered
     assert "⇄ switching accounts" in rendered
+    bare = _session_lines([parked]).plain
+    assert "⏳ limited (resets in 2h" in bare, "no fleet row: the chip alone"
 
 
 def test_spawn_exec_requires_claude_on_path(

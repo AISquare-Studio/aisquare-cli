@@ -382,8 +382,10 @@ model line under it). Hooks that say *waiting* need that empty prompt too: after
 own (*Switch to gpt-6-luna for lower credit usage?*, past a turn near its limit),
 where the Enter after a typed line picks for you, so a message to a Codex showing
 anything else is a board note that says so. A fleet window's Codex launches with
-`-c notice.hide_rate_limit_model_nudge=true`, which keeps that dialog closed,
-unless your own config (or `-c`) sets that key. Anything else, or a
+`-c notice.hide_rate_limit_model_nudge=true`, which keeps that dialog closed, and
+`-c check_for_update_on_startup=false`, which keeps its *Update available* dialog out of
+a starting pane (whose first choice, *Update now*, an Enter picks), each unless your own
+config (or `-c`, or the `-p` profile) sets that key. Anything else, or a
 queue that fails, is the board note. Every typed line is one paste with its Enter
 a moment later, as `fleet stop` types `/exit`: Codex reads keys in one burst as a
 paste and keeps an Enter inside it as text. The manager's wake-up nudge is typed
@@ -883,8 +885,8 @@ Claude Code settings, nor move the fleet's socket out of `/tmp`. A native `--san
 the operator picks replaces the profile, and these paths with it. Every `aisquare` board call the agent makes there
 goes, unchanged, through that broker, which its launch runs outside the sandbox: it runs
 only a whitelist of board and memory commands, only as the agent's own board sessions,
-only in its own tree, on its own board's tasks and in its own project's memory pool, and
-never a fleet operation (`spawn`, `stop`, `restart`, `switch`, `tell`, `shutdown` …), a
+only in its own tree, on its own board's tasks and in its own project's memory pool (for
+reads too: `context show` and `log` included), and never a fleet operation (`spawn`, `stop`, `restart`, `switch`, `tell`, `shutdown` …), a
 launch, a hook, the config or an account. So nothing that a restart, a switch, a
 hand-over, `tell`, `stop`, `shutdown`, the manager's nudge, `reap` or a spawn reads can
 have been written from inside a sandbox; every git aisquare runs runs no hook and no
@@ -892,12 +894,19 @@ fsmonitor of the repository's, and gbrain starts in its brain's home. The bounda
 tree the agent may write: what the user's own tools run from it (git hooks in the tree
 and git config the repository includes from it, a project venv, a subdirectory's
 settings, what `aisquare project onboard` packs it with, `CLAUDE.md`) is the agent's to
-write, as on Claude Code. Whatever its sandbox, a launch is refused, by `fleet spawn`
-before any window and by `aisquare launch`, where that sandbox may write an aisquare that
-runs outside it, the launcher's own install or the one the agent's hooks run, as read
-from its arguments (the workspace, `-C`, `--add-dir`, `/tmp`; none of them for a
-`read-only` seat): install `aisquare-cli` outside the project (`uv tool install
-aisquare-cli`) and connect the hooks with it
+write, as on Claude Code, and so is the window's `PATH`, where Codex itself and aisquare's
+hooks find `git`: a launch whose `PATH` names a directory its sandbox may write is warned.
+Whatever its sandbox, a launch is refused, by `fleet spawn` before any window, by a
+restart, switch or hand-over before it stops the agent, and by `aisquare launch`, where
+that sandbox may write an aisquare that runs outside it, the launcher's own install or
+what the agent's hooks run (their `hooks.json`'s program, the plugin's launcher), with
+its environment, as read from Codex's config, its `-p` profile and its arguments (the
+workspace, `-C`, `--add-dir`, `writable_roots`, `/tmp`; none of them for a `read-only`
+seat): install `aisquare-cli` outside the project (`uv tool install aisquare-cli`) and
+connect the hooks with it. A `PYTHONPATH` entry it may write is dropped from the
+launch's environment, which the hooks and the broker inherit. A fleet Codex window
+starts with `check_for_update_on_startup=false` unless your config sets it: an `Update
+available` dialog in a starting pane takes an Enter as `npm install -g @openai/codex`
 ([the trust boundary](coding-agents.md#the-sandbox-and-the-aisquare-store)). The launch records stay as defence
 in depth: `fleet spawn` writes each agent's launch record in `launch-seals/` (binary,
 arguments, permission, role, agent, directory, account, and the tmux socket and pane

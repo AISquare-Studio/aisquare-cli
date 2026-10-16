@@ -469,8 +469,14 @@ subdirectory's `.claude/`, `.mcp.json` or `.codex/`, which a `claude` started th
 what the user's own `aisquare project onboard` packs the tree with (repomix, or `npx
 repomix`, run in the project's directory, reads its config and `node_modules` there); and
 `CLAUDE.md` and `AGENTS.md`, which agents read (a prompt-injection path, as on Claude
-Code). What aisquare itself runs or reads outside the sandbox on the agent's behalf, from
-its hooks and its broker, is kept from that tree by these means, and only these:
+Code). So is the launch's `PATH`, the user's shell's: Codex itself runs the `git` it finds
+there outside its sandbox (for its git info), as aisquare's hooks and broker run the
+`git`, `gbrain` and `tmux` they find there. A launch whose `PATH` names a directory its
+sandbox may write (an activated project virtualenv, direnv's `PATH_add`) is warned of it,
+and `aisquare doctor` run in a project whose tree `PATH` names warns (`sandbox-path`):
+launch from a shell whose `PATH` names nothing the agent may write. What aisquare itself
+runs or reads outside the sandbox on the agent's behalf, from its hooks and its broker,
+is kept from that tree by these means, and only these:
 
 - under the store's profile (below; a native `--sandbox` the operator picks replaces it,
   and these paths with it), the aisquare store, its launch records first, read-only in
@@ -480,24 +486,40 @@ its hooks and its broker, is kept from that tree by these means, and only these:
 - whatever the sandbox, the aisquare that runs outside it: the launcher's own install,
   which the broker runs (its interpreter and the installation that comes from, its
   environment and the user site it loads, whose `.pth` files run at every start, its
-  package, an editable install's source tree), and the program each of the agent's
-  aisquare hooks runs with that program's environment (read from its `hooks.json`: hooks
-  connected from another install keep running that one). A
-  launch is refused where its sandbox may write one of them, by `aisquare launch` and by
-  `fleet spawn` before any window is made (`store_broker.refuse_inside`), naming the
-  remedy, and `aisquare doctor` warns. What the sandbox may write is read from the
-  launch's own arguments (`AgentAdapter.sandbox_writes`, measured on 0.162.1): under
-  `workspace-write` (the store's profile over `:workspace`, `--sandbox workspace-write`,
-  `--approve-for-me`, or none named) the workspace (`-C`/`--cd`, else the launch's
-  directory), `/tmp`, `$TMPDIR`, each `--add-dir` and
-  `sandbox_workspace_write.writable_roots`; under `read-only` (over `:read-only`, or
-  `--sandbox read-only`) none of those; and in either, the profile's own `write` paths.
-  A `read-only` seat in the project is not refused; an unsandboxed one
-  (`danger-full-access`, the bypass flags) is trusted as its user is. The remedy is to
-  install the `aisquare-cli` distribution outside every directory the agent may write
-  (`uv tool install aisquare-cli`, or `pipx install aisquare-cli`) and connect the hooks
-  with that install; from above the project (a launch from the home, whose tree holds
-  every install under it), to launch from the project's directory;
+  package, an editable install's source tree), and what the agent's aisquare hooks run,
+  each with its environment: the program its `hooks.json` names (hooks connected from
+  another install keep running that one; a `python -m aisquare` hook's virtualenv by the
+  name it is reached by, not the interpreter it links to), and, where the plugin is
+  installed for that home, what the plugin's launcher runs (the `aisquare` on the launch's
+  `PATH`, else `~/.local/bin`'s, else the pinned release through `uvx`, from uv's cache).
+  A launch is refused where its sandbox may write one of them, by `aisquare launch`, by
+  `fleet spawn` before any window is made, and by `fleet restart`, `switch` and the
+  usage-limit hand-over before they stop the agent (under the home the replacement
+  starts with: a switch's target slot), naming the remedy (`store_broker.refuse_inside`).
+  What the sandbox may write is read as Codex layers its settings, `config.toml`, the
+  `-p` profile beside it, then the launch's arguments (`AgentAdapter.sandbox_writes`,
+  measured on 0.162.1): the sandbox is `--sandbox`, else `-c sandbox_mode`, else the
+  store's profile, which holds over a `sandbox_mode` in the files, else the files'
+  `sandbox_mode`; under `workspace-write` (the store's profile over `:workspace`,
+  `--sandbox workspace-write`, `--approve-for-me`, or none named) it writes the workspace
+  (`-C`/`--cd`, else the launch's directory), `/tmp`, `$TMPDIR`, each `--add-dir` and
+  every layer's `sandbox_workspace_write.writable_roots` (a key or an inline table);
+  under `read-only` (over `:read-only`, or `--sandbox read-only`) none of those; and in
+  either, the profile's own `write` paths. A `read-only` seat in the project is not
+  refused; an unsandboxed one (`danger-full-access`, the bypass flags) is trusted as its
+  user is. The remedy follows what lets the sandbox write the install: one in the project,
+  install the `aisquare-cli` distribution outside it (`uv tool install aisquare-cli`, or
+  `pipx install aisquare-cli`) and connect the hooks with that install; one above the
+  project (a launch from the home, whose tree holds every install under it), launch from
+  the project's directory; one in a directory given the sandbox (`--add-dir`,
+  `writable_roots`), drop it or move the install; one in a temporary directory, move it.
+  `aisquare doctor` run in a project (a git root or a project marker, never the home or
+  `/`) on a machine with Codex warns of an install in that project's tree
+  (`sandbox-install`);
+- a `PYTHONPATH` (or `PYTHONHOME`) entry the sandbox may write: dropped from the launch's
+  environment, which the agent, its hooks and its broker inherit, with a line saying so,
+  as the hooks' and the broker's Python would import from it before the standard library
+  (a module of its name, a `sitecustomize`). A tool that needs it sets it in its command;
 - every git aisquare runs (`core.workspace.git_argv`: the fleet's worktrees, the CI turn
   snapshot's `stash create`, which the agent's own hooks run, the project root's lookup):
   no hook and no fsmonitor of the repository's (`core.hooksPath` at the null device,
@@ -597,8 +619,11 @@ request as `aisquare <argv>` in the launch's environment, never the caller's, an
   task of its board (`services.team._own_task`: task ids resolve across every board);
   `remember`/`context add` write only its project's pool, never the user pool, which
   every project's agents are given (`--user` is refused, and the default is the
-  project's: review r10 of #113, finding 3), and `inject` and `context list`, `search`
-  and `preview` read that pool: the launch's project's, past any `project switch` pin;
+  project's: review r10 of #113, finding 3), and `inject`, `context list`, `search`,
+  `preview` and `log` read the launch's project's, the pool its broker names, past any
+  `project switch` pin and whatever project another directory in its tree resolves to;
+  `context show` shows an entry of that pool or the user pool, and refuses another
+  project's (kind `pool`);
 - signed with the launch's nonce, which only the agent's environment holds (another
   launch's sandbox has its own pid namespace and cannot read it): a request carries a
   MAC under it, never the nonce, as a request file is readable from every sandbox, and
@@ -1052,7 +1077,8 @@ and what a pane whose hooks say waiting, or one `fleet stop` would `/exit`, must
 `idle_on_screen` (the agent's own reading of that empty prompt, for a layout without the
 mark: Codex under `--no-alt-screen`, its empty composer with only its footer below),
 `fleet_settings` (`-c` settings a fleet window's agent launches with unless the
-operator's config sets the key: Codex's `notice.hide_rate_limit_model_nudge=true`),
+operator's config sets the key: Codex's `notice.hide_rate_limit_model_nudge=true` and
+`check_for_update_on_startup=false`),
 `starts_at_its_prompt` (its `SessionStart` fires once it is at rest at its prompt,
 Claude Code's), `start_dialog_mark` (what its screen shows at a dialog before its start,
 where an Enter answers it: Claude Code's `Enter to confirm`, which keeps a prompt out

@@ -134,7 +134,9 @@ adapter.**
   only a whitelist of board and memory commands, only as the agent's own board
   sessions (the ones its own hooks registered), only in its own tree, on its own
   board's tasks and in its own project's memory pool for writes and reads alike
-  (never the user pool, past any `project switch` pin), and never a fleet
+  (`inject`, `context list`/`search`/`preview`/`show` and `log` read that pool or
+  the user pool, never another project's, past any `project switch` pin; writes
+  never the user pool), and never a fleet
   operation, a launch, a hook, the config or an account; every refusal it or a
   command it runs makes is logged, and a forged identity, another board's task or
   pool, a fleet operation or an unsigned request is put on its board once per
@@ -145,16 +147,29 @@ adapter.**
   tree it may write, as a Claude Code agent is: what the user's own tools run from
   it (git hooks in the tree and git config the repository includes from it, a
   project venv, a subdirectory's settings, what `aisquare project onboard` packs it
-  with, `CLAUDE.md`) stays its to write. What aisquare itself runs outside the
-  sandbox on its behalf is kept from that tree: whatever its sandbox, a launch is
-  refused, by `aisquare launch` and by `fleet spawn` before any window, where that
-  sandbox may write an aisquare that runs outside it, the launcher's own install or
-  the one the agent's hooks run, as read from its arguments (the workspace, `-C`,
-  `--add-dir`, `/tmp`; none for a `read-only` seat), with the remedy (`uv tool
-  install aisquare-cli`) and a doctor warning; every git aisquare runs runs no hook
-  and no fsmonitor of the repository's (the fleet's worktrees, the CI turn
-  snapshot's `stash create` from the agent's hooks); and gbrain, which a brokered
-  `recall` and a note's distill run, starts in its brain's home, not the tree.
+  with, `CLAUDE.md`) stays its to write, and so does the launch's `PATH`, where
+  Codex itself and aisquare's hooks and broker find `git`: a launch whose `PATH`
+  names a directory its sandbox may write is warned, and so is a doctor run in a
+  project whose tree `PATH` names (`sandbox-path`, amber the installer expects).
+  What aisquare itself runs outside the sandbox on its behalf is kept from that
+  tree: whatever its sandbox, a launch is refused, by `aisquare launch`, by `fleet
+  spawn` before any window and by a restart, switch or hand-over before it stops
+  the agent, where that sandbox may write an aisquare that runs outside it, the
+  launcher's own install or what the agent's hooks run (their `hooks.json`'s
+  program, the plugin's launcher), each with its environment, as read from Codex's
+  config, its `-p` profile and the arguments (the workspace, `-C`, `--add-dir`,
+  `writable_roots`, `/tmp`; none for a `read-only` seat), with the remedy for how
+  the sandbox reaches it (`uv tool install aisquare-cli` for one in the project)
+  and a doctor warning in a project (`sandbox-install`; never from the home or
+  `/`, where the doctor found every install under it "in the project" and the
+  installer run from the home exited 2); a `PYTHONPATH` entry the sandbox may
+  write is dropped from the launch's environment, which the hooks and the broker
+  inherit; every git aisquare runs runs no hook and no fsmonitor of the
+  repository's (the fleet's worktrees, the CI turn snapshot's `stash create` from
+  the agent's hooks); and gbrain, which a brokered `recall` and a note's distill
+  run, starts in its brain's home, not the tree. A fleet Codex window starts with
+  `check_for_update_on_startup=false` unless the operator sets it: its `Update
+  available` dialog, whose first choice an Enter picks, runs `npm install -g`.
   The transport is a spool directory and a FIFO, not a socket: Codex
   0.162.1's sandbox refuses `connect` on every unix socket (measured). The launch
   records stay as defence in depth: restart, switch, the hand-over and `fleet

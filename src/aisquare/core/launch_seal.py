@@ -5,22 +5,31 @@ to the extent of the tree it may write, as a Claude Code agent (no OS sandbox) a
 contributor are: what the user's own tools later run from that tree is inside that trust,
 documented, not sealed (git hooks that live in it and git config its repository includes
 from it, a project's own venv, a subdirectory's settings, what the user's own ``aisquare
-project onboard`` packs it with, ``CLAUDE.md``/``AGENTS.md``). What aisquare itself runs
-or reads outside the sandbox on the agent's behalf, from its hooks and its broker, is kept
-from that tree by these means, and only these: in the store's profile, which every
-sandboxed launch of aisquare's runs under unless the operator picks a native
-``--sandbox`` (which replaces it, and these paths with it), the store and these launch
-records are read-only, all of it but the launch's broker inbox
+project onboard`` packs it with, ``CLAUDE.md``/``AGENTS.md``), and so is the launch
+environment's ``PATH``: the ``git`` Codex itself runs outside its sandbox, and the
+``git``, ``gbrain`` and ``tmux`` aisquare's hooks and broker run there, are the first
+``PATH`` names, and a launch whose ``PATH`` names a directory its sandbox may write is
+warned of it (``store_broker.sandbox_environment``), as is a doctor run in a project whose
+tree ``PATH`` names (review r13 of #113, finding 1). What aisquare itself runs or reads
+outside the sandbox on the agent's behalf, from its hooks and its broker, is kept from
+that tree by these means, and only these: in the store's profile, which every sandboxed
+launch of aisquare's runs under unless the operator picks a native ``--sandbox`` (which
+replaces it, and these paths with it), the store and these launch records are read-only,
+all of it but the launch's broker inbox
 (:func:`~aisquare.core.agent_adapters.types.store_read_only`), and so are the launch
 inputs at the tops of its trees, ``.git``, the other agents' worktrees and the tmux
 sockets (``services.store_broker.launch_paths``); whatever the sandbox, a launch is
-refused, by ``aisquare launch`` and by ``fleet spawn`` before any window, where its
-sandbox may write an aisquare that runs outside it, the launcher's own or the one its
-hooks run, as read from what that sandbox may write (``store_broker.refuse_inside``,
-``AgentAdapter.sandbox_writes``); every git aisquare runs runs no hook and no fsmonitor of
-the repository's (``core.workspace.git_argv``); gbrain starts in its brain's home, never
-in the tree (``core.brain``); and the agent's board calls go through its launch's broker
-(``services.store_broker``).
+refused, by ``aisquare launch``, by ``fleet spawn`` before any window, and by a restart,
+switch or hand-over before it stops the agent, where its sandbox may write an aisquare
+that runs outside it (the launcher's own, or what its hooks run: their config's program
+or the plugin's launcher), with that aisquare's environment, as read from what that
+sandbox may write (the agent's config, its profile, its arguments:
+``store_broker.refuse_inside``, ``AgentAdapter.sandbox_writes``); a ``PYTHONPATH`` (or
+``PYTHONHOME``) entry the sandbox may write is dropped from the launch's environment,
+which the hooks and the broker inherit; every git aisquare runs runs no hook and no
+fsmonitor of the repository's (``core.workspace.git_argv``); gbrain starts in its brain's
+home, never in the tree (``core.brain``); and the agent's board calls go through its
+launch's broker (``services.store_broker``).
 
 Before the broker every board call opened the store for writing, and a prompt-injected
 Codex coder could rewrite any row in it, its own and every other agent's; what follows

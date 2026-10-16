@@ -3152,6 +3152,10 @@ class _RowProjects:
     forgotten: list[str]
     """For each forgotten project of the rows, in row order: ``<name> is forgotten: <onboard>
     adds it back first``, which the commands for its rows wait on."""
+    unrecorded: int
+    """How many of the rows are in a project with no record at all, not even forgotten."""
+    unreached: str | None
+    """For those rows, that no fleet command reaches them; ``None`` when there are none."""
 
 
 def _row_projects(store: ContextStore, rows: Sequence[FleetAgent]) -> _RowProjects:
@@ -3160,11 +3164,26 @@ def _row_projects(store: ContextStore, rows: Sequence[FleetAgent]) -> _RowProjec
     :func:`_refuse_a_freed_socket` and :func:`_exited_note` each read the projects and wrote
     the forgotten sentence, and the copies had drifted: "adds it back first" against "for
     both", one sorted by id, the other in row order (review of #259, round 22). One reading
-    keeps the two messages in step."""
+    keeps the two messages in step.
+
+    A live row can be in a project with no record at all (``live_fleet_agents`` reads every
+    row), and every fleet command finds its rows through a project, so none reaches it.
+    Such rows are said to be out of reach: with no other way to give, the refusal ended
+    mid-sentence, "if it is not, " (round 22)."""
     known = {each.id: each for each in store.list_projects(include_forgotten=True)}
     live = {each.id for each in store.list_projects(all=True)}
     names = {each.id: _name(each) for each in known.values()}
     theirs = list(dict.fromkeys(row.project_id for row in rows))
+    orphans = [row for row in rows if row.project_id not in known]
+    unreached = None
+    if orphans:
+        one = len(orphans) == 1
+        out_of_reach = ", ".join(f"{row.label} ({row.project_id})" for row in orphans)
+        unreached = (
+            f"no fleet command reaches {out_of_reach}: "
+            f"{'its project is' if one else 'their projects are'} not one this machine has a "
+            "record of"
+        )
     return _RowProjects(
         named=", ".join(
             f"{row.label} ({names.get(row.project_id, row.project_id)})" for row in rows
@@ -3176,6 +3195,8 @@ def _row_projects(store: ContextStore, rows: Sequence[FleetAgent]) -> _RowProjec
             for each in theirs
             if each in known and each not in live
         ],
+        unrecorded=len(orphans),
+        unreached=unreached,
     )
 
 
@@ -3223,6 +3244,9 @@ def _refuse_a_freed_socket(
     ways = [f"{' and '.join(forgets)} {'ends its row' if one else 'end their rows'} on your word"]
     ways = ways if forgets else []
     ways += projects.forgotten
+    if projects.unreached is not None:
+        # The rule that holds a spawn here reads a row from another boot as not running.
+        ways.append(f"{projects.unreached}, so a spawn here is refused until the machine restarts")
     raise FleetError(
         f"not started: the tmux server that {projects.named} {'runs' if one else 'run'} "
         f"on lost its socket file {here}, so no tmux client reaches it, and it may still be "
@@ -3322,11 +3346,18 @@ def _exited_note(srv: TmuxServer, exited: Sequence[FleetAgent]) -> str:
         for row in exited
         if row.project_id in projects.reached
     ]
-    ways = [f"`aisquare fleet reap --all` records {'it' if one else 'them'}"]
+    recorded = len(exited) - projects.unrecorded
+    ways = (
+        [f"`aisquare fleet reap --all` records {'it' if recorded == 1 else 'them'}"]
+        if recorded
+        else []
+    )
     if restarts:
         again = "starts it again" if len(restarts) == 1 else "start them again"
         ways.append(f"{' and '.join(restarts)} {again}")
     ways += projects.forgotten
+    if projects.unreached is not None:
+        ways.append(projects.unreached)
     return (
         f"the tmux server at {srv.socket_path()} had exited, leaving its socket file: "
         f"{projects.named} {'reads' if one else 'read'} lost from now on, as "

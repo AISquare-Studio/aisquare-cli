@@ -3424,6 +3424,37 @@ def test_the_exited_note_tells_a_forgotten_projects_rows_to_add_it_back_first(
     assert f"{plain_project.root.name} is forgotten: {onboard} adds it back first" in said
 
 
+def test_rows_in_no_recorded_project_are_said_to_be_out_of_reach_not_left_mid_sentence(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 22, 5/9: a live row can be in a project with no record at all,
+    and the rows a spawn asks about are read whatever their project. When every stranded row
+    was such a row, the refusal over a freed socket gave no way out and ended mid-sentence,
+    "if it is not, ", and the exited note said ``reap --all`` records rows it never walks.
+    Both now say no fleet command reaches them, and the refusal how long it holds."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    coder = _coder(project)
+    with store_session() as store:  # ended in its own project, and live in none
+        store.end_fleet_agent(coder.id)
+        orphan = store.upsert_fleet_agent(
+            coder.model_copy(update={"id": new_agent_id(), "project_id": "prj_nowhere"})
+        )
+    tmux.running, tmux.socket_file = False, False  # a server that lost its socket file
+
+    with pytest.raises(FleetError, match="lost its socket file") as refused:
+        fleet_service.spawn(project, "coder")
+    said = str(refused.value)
+    note = fleet_service._exited_note(tmux, [orphan])
+
+    unreached = "no fleet command reaches coder-1 (prj_nowhere): its project is not one this"
+    assert said.endswith(
+        f"if it is not, {unreached} machine has a record of, so a spawn here is refused until "
+        "the machine restarts"
+    ), said
+    assert f"({unreached} machine has a record of)" in note, note
+    assert "reap --all" not in note, note
+
+
 def test_the_freed_socket_refusal_and_the_exited_note_name_rows_projects_alike(
     tmux: FakeTmux,
     claude_on_path: Path,

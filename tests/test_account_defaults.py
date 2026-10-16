@@ -214,7 +214,7 @@ def test_a_name_is_never_another_accounts_own_name(fake_home: Path, runner: CliR
     for taken, slot in (
         ("account 3", 3),
         ("Account  3", 3),
-        ("ACCOUNT 03", 3),
+        ("ACCOUNT \ufe003", 3),
         ("plain claude", 1),
         ("Plain Claude", 1),
         ("account 9", 9),
@@ -230,6 +230,19 @@ def test_a_name_is_never_another_accounts_own_name(fake_home: Path, runner: CliR
     assert service.set_alias("1", "Plain Claude").alias == "Plain Claude"
     assert service.set_alias("3", "account 3 laptop").alias == "account 3 laptop"
     assert service.slot_labels() == {1: "Plain Claude", 2: "Account 2", 3: "account 3 laptop"}
+
+
+@pytest.mark.parametrize("name", ["account 1", "Account 01", "account 03", "account 0"])
+def test_a_name_no_slot_prints_is_a_name(fake_home: Path, name: str) -> None:
+    """Review of #259, round 21: ``account 1`` was refused on slot 2 as "what slot 1 is called
+    without an alias", but slot 1 is called ``plain claude`` everywhere; ``account 03`` was
+    refused as slot 3's name, which prints ``account 3``. Only what a slot prints is taken."""
+    core.create_account()  # slot 2
+    core.create_account()  # slot 3
+    assert core.normalise_alias(name, slot=2) == name
+    assert service.set_alias("2", name).alias == name
+    assert service.resolve(name).slot == 2
+    assert service.slot_labels() == {1: "plain claude", 2: name, 3: "account 3"}
 
 
 @pytest.mark.parametrize("name", ["a\u200bb", "evil\u202eexe", "\ufeffwork"])

@@ -215,12 +215,18 @@ def default_label(slot: int) -> str:
 
 def _labelled_slot(name: str) -> int | None:
     """The slot whose :func:`default_label` ``name`` reads as, whatever its case, spacing and
-    variation selectors (:func:`core.names.name_key`): ``account 3`` U+FE00 prints as slot 3's."""
+    variation selectors (:func:`core.names.name_key`): ``account 3`` U+FE00 prints as slot 3's.
+
+    Only a label a slot prints: ``account 1`` is no slot's (slot 1 is ``plain claude``), nor
+    is ``account 03`` (slot 3 is ``account 3``). Each was refused as that slot's name, which
+    it is not (review of #259, round 21)."""
     words = name_key(name).split()
     if words == ["plain", "claude"]:
         return DEFAULT_SLOT
     if len(words) == 2 and words[0] == "account" and words[1].isdecimal():
-        return int(words[1])
+        slot = int(words[1])
+        if slot >= FIRST_MANAGED_SLOT and words == name_key(default_label(slot)).split():
+            return slot
     return None
 
 

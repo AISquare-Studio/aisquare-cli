@@ -491,9 +491,8 @@ def stop(
         console = stdout_console()
         console.print(f"✓ stopped {agent.label} ({agent.id})")
         if agent.worktree:
-            console.print(
-                "  · run `aisquare fleet reap` to remove its worktree once its work is pushed"
-            )
+            reap = project_service.fleet_command("reap", target)
+            console.print(f"  · run `{reap}` to remove its worktree once its work is pushed")
         _say_released(console, len(released))
         # The work the stop returned to the pool is the one thing the next agent
         # inherits from this one; here the receipt carries the tasks, so they are

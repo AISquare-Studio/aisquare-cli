@@ -586,6 +586,7 @@ def test_one_helper_names_a_project_in_a_fleet_command(
     never its nickname) and the ``fleet stop --project`` line it goes in were built twice, in
     ``ProjectBusyError`` and in doctor's capture-off line, and the next change to the rule had
     to be made in both. Both take it from ``project_service.fleet_command``."""
+    from aisquare.services import install_route
     from aisquare.services import project as project_service
 
     named = ProjectInfo(id="prj_named", root=tmp_path / "web", codename="calm-otter", nickname="w")
@@ -594,6 +595,11 @@ def test_one_helper_names_a_project_in_a_fleet_command(
         "aisquare fleet stop --project calm-otter"
     )
     assert project_service.fleet_command("reap", plain) == "aisquare fleet reap --project prj_plain"
+    # Words after the project (a label, a flag) are quoted for this shell too (round 21).
+    restart = project_service.fleet_command("restart", named, "coder 1", "--fresh")
+    assert install_route.split_line(restart) == [
+        *("aisquare", "fleet", "restart", "--project", "calm-otter", "coder 1", "--fresh")
+    ]
 
     asked: list[tuple[str, str]] = []
 

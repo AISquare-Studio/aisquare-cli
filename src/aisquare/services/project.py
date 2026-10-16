@@ -191,10 +191,12 @@ def resolve(ref: str) -> ProjectInfo:
         return _one_match(store, ref)
 
 
-def fleet_command(verb: str, project: ProjectInfo) -> str:
-    """``aisquare fleet <verb> --project <ref>`` for ``project``, quoted for this shell (review
-    of #257). Always with the project: alone, a fleet command acts on the active project, not
-    on the one a message is about (review of #259, round 19).
+def fleet_command(verb: str, project: ProjectInfo, *words: str) -> str:
+    """``aisquare fleet <verb> --project <ref> [words…]`` for ``project``, quoted for this shell
+    (review of #257). Always with the project: alone, a fleet command acts on the active
+    project, not on the one a message is about (review of #259, round 19). ``words`` (a
+    label, a flag) come after it, quoted too; a placeholder such as ``<label>`` is the
+    caller's to append, unquoted.
 
     Named by its codename, else its id, never its nickname: free text that ``find_projects``
     matches last, so ``--project web`` for a project nicknamed "web" shut down ``/work/web``'s
@@ -202,7 +204,7 @@ def fleet_command(verb: str, project: ProjectInfo) -> str:
     captured rows share. One place for the rule: :class:`ProjectBusyError` and doctor's
     capture-off line each built it (round 20)."""
     ref = project.codename or project.id
-    return install_route.command_line(["aisquare", "fleet", verb, "--project", ref])
+    return install_route.command_line(["aisquare", "fleet", verb, "--project", ref, *words])
 
 
 class ProjectBusyError(Exception):

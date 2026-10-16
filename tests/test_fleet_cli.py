@@ -810,12 +810,19 @@ def test_stop_says_reap_removes_the_worktree_of_an_agent_that_had_one(
     runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch, worktree: bool
 ) -> None:
     """A stopped agent's worktree stays until its work is pushed and ``reap`` removes it;
-    nothing said so, so trees piled up (one night: 15 of them, 1.2 GB)."""
+    nothing said so, so trees piled up (one night: 15 of them, 1.2 GB). The reap names the
+    stopped agent's project: alone, it walked the active project's rows, so after ``stop
+    --project web`` from another project's directory web's tree stayed (review of #259,
+    round 21)."""
     agent = _agent("coder-auth", worktree=worktree, ended=True, exit_status=0)
     _install(monkeypatch, "stop", StopReceipt(agent, []))
-    said = runner.invoke(app, ["fleet", "stop", "coder-auth"]).stdout
-    hint = "· run `aisquare fleet reap` to remove its worktree once its work is pushed"
-    assert (hint in said) is worktree, said
+    said = runner.invoke(app, ["fleet", "stop", "--project", "web", "coder-auth"]).stdout
+    hint = (
+        "· run `aisquare fleet reap --project amber-otter` to remove its worktree once its "
+        "work is pushed"
+    )
+    assert (hint in " ".join(said.split())) is worktree, said
+    assert resolved.calls[-1][0] == ("web",)
 
 
 def test_stop_json_returns_the_agent_row(

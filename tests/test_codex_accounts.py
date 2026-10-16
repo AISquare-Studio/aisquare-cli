@@ -1415,7 +1415,9 @@ def test_a_codex_switch_goes_fresh_to_the_codex_account_with_room(
     monkeypatch.setattr(fleet, "_live_agent", lambda store, project, label, agent_id=None: agent)
     monkeypatch.setattr(fleet, "_require_role", lambda role: None)
     monkeypatch.setattr(
-        fleet, "_refuse_a_replay_that_cannot_start", lambda project, record, home=None: None
+        fleet,
+        "_refuse_a_replay_that_cannot_start",
+        lambda project, record, home=None, permission_mode=None: None,
     )
     monkeypatch.setattr(fleet, "_mark_handing_over", lambda *a, **k: None)
     monkeypatch.setattr(fleet, "_unmark_handing_over", lambda session: None)

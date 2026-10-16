@@ -881,6 +881,16 @@ class TmuxServer:
             raise TmuxError(completed.stderr.strip() or f"tmux {' '.join(args)} failed")
         return completed.stdout
 
+    def global_environment(self, variable: str) -> str | None:
+        """``variable`` in the server's global environment (``show-environment -g``), which
+        every window it opens inherits: ``None`` when no server answers, or it has no such
+        variable, or it cannot be asked. Names no pane, session or socket."""
+        try:
+            line = self.run("show-environment", "-g", variable).strip()
+        except (TmuxError, OSError):
+            return None
+        return line.partition("=")[2] if line.startswith(f"{variable}=") else None
+
     def check_conf(self, conf: Path | None = None) -> None:
         """Prove THIS tmux accepts the configuration, or raise with tmux's complaint.
 

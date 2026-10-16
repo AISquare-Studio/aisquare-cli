@@ -99,7 +99,7 @@ def spawn_drain(cwd: Path | None = None, *, root: Path | None = None) -> None:
         root = orchestrator.team_project(cwd).root
     try:
         subprocess.Popen(
-            selfcli.argv_for(["--quiet", "team", "distill"]),
+            selfcli.isolated_argv_for(["--quiet", "team", "distill"]),
             cwd=str(root),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

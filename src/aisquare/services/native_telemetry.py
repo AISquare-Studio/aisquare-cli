@@ -518,7 +518,7 @@ def start_receiver(
     child: subprocess.Popen[bytes] | None = None
     try:
         child = subprocess.Popen(
-            selfcli.argv_for(
+            selfcli.isolated_argv_for(
                 [
                     "--ready",
                     str(ready),

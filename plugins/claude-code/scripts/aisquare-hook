@@ -399,6 +399,13 @@ else
     set -- "$event"
 fi
 
+# Neither PYTHONPATH nor PYTHONHOME reaches the aisquare a hook runs: the agent's session
+# keeps them for its own tools, and a sandboxed agent's sandbox may write a directory they
+# name (direnv's PYTHONPATH=$PWD/src; an empty entry is the folder the hook runs in),
+# where a module of a standard name or a sitecustomize would run here, outside its
+# sandbox. aisquare is installed in its own interpreter and needs neither.
+unset PYTHONPATH PYTHONHOME
+
 if _runner=$(_find aisquare); then
     "$_runner" hook "$@"
     _status=$?

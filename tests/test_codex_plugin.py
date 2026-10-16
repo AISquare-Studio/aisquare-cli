@@ -340,7 +340,9 @@ def test_it_stands_down_where_agents_connect_installed_the_hooks(
     assert agent_core.install_hooks("codex", codex)
     written = agent_core.hook_commands("codex", codex)
     assert all(" --definition " in c and " --config-dir " in c for c in written), written
-    assert all((" -P -m aisquare " in c) == (form == "python-m") for c in written), written
+    # Codex's hooks run outside its sandbox in the agent's environment: whatever the
+    # running install, `-E` keeps its PYTHONPATH from them (review r14 of #113, 1).
+    assert all(" -E -P -m aisquare hook codex" in c for c in written), written
 
     quiet = {event: _run(machine, event) for event in _EVENTS}
 
@@ -565,3 +567,22 @@ def test_the_readme_offers_both_plugins() -> None:
     readme = (REPO / "README.md").read_text(encoding="utf-8")
 
     assert "docs/claude-code-plugin.md" in readme and "docs/codex-plugin.md" in readme
+
+
+def test_the_launchers_aisquare_runs_without_the_sessions_python_paths(machine: Machine) -> None:
+    """Review r14 of #113, finding 1: the agent's session keeps ``PYTHONPATH`` for its own
+    tools, and a sandboxed agent's sandbox may write what it names (direnv's
+    ``$PWD/src``); the aisquare the plugin's hooks run, outside that sandbox, gets neither
+    it nor ``PYTHONHOME``."""
+    seen = machine.log / "python-paths"
+    machine.bin.mkdir(parents=True, exist_ok=True)
+    fake = machine.bin / "aisquare"
+    fake.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s|%s' \"${{PYTHONPATH-unset}}\" \"${{PYTHONHOME-unset}}\" > '{seen}'\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    _run(machine, "SessionStart", env={"PYTHONPATH": "/tree/src", "PYTHONHOME": "/tree/home"})
+    assert seen.read_text(encoding="utf-8") == "unset|unset"

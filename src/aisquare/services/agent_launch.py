@@ -106,9 +106,12 @@ def start_broker(
     """``argv`` with this launch's broker inbox in its sandbox's profile and the broker
     started outside it, for an agent that sandboxes its tools (``services.store_broker.
     start``); a line to print when it could not be. A broker that does not start costs
-    the agent its board calls from the sandbox, which then say so, never the launch; the
-    one refusal raised is ``store_broker.LaunchRefused``: the aisquare its hooks and broker
-    run lives where its sandbox may write (review r11 of #113, finding 2)."""
+    the agent its board calls from the sandbox, which then say so, never the launch. Raised
+    as ``store_broker.LaunchRefused``: the aisquare its hooks and broker run lives where its
+    sandbox may write (review r11 of #113, finding 2), and any other failure to work out
+    the launch's store profile and what its sandbox may write, which launched the agent
+    with none of it, no store read-only, no launch inputs held, no install check (r14,
+    finding 7): refused, as an agent that sandboxes its tools never starts unprotected."""
     from aisquare.services import store_broker
 
     try:
@@ -116,7 +119,11 @@ def start_broker(
     except store_broker.LaunchRefused:
         raise
     except Exception as exc:
-        return argv, f"{selected.adapter.label}: its store broker did not start ({exc})"
+        raise store_broker.LaunchRefused(
+            f"{selected.adapter.label}: its launch could not work out what its sandbox may "
+            f"write ({type(exc).__name__}: {exc}), so it is not started without the store's "
+            "protection; run `aisquare doctor`"
+        ) from exc
 
 
 def prepare_sandbox(selected: ResolvedAgent) -> None:

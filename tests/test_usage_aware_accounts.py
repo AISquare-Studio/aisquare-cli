@@ -543,8 +543,10 @@ def test_the_hook_starts_a_detached_hand_over_only_when_configured_and_the_reset
     _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
     assert len(started) == 1
     argv = started[0]
-    assert argv[:4] == selfcli.argv_for([])  # this interpreter, -P, -m aisquare
-    assert argv[4:] == ["--quiet", "hook", "hand-over", "sess-fleet", "--reason", "weekly limit"]
+    # This interpreter, -E -P -m aisquare: the hook that starts it runs for a sandboxed
+    # agent, outside its sandbox, in its environment (review r14 of #113, finding 4).
+    assert argv[:5] == selfcli.isolated_argv_for([])
+    assert argv[5:] == ["--quiet", "hook", "hand-over", "sess-fleet", "--reason", "weekly limit"]
 
     # …one that lifts within the wait window does not (the note says why)…
     soon = (datetime.now().astimezone() + timedelta(minutes=5)).strftime("%I:%M%p").lstrip("0")

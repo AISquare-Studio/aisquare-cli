@@ -37,6 +37,7 @@ from aisquare.core.agent_adapters.types import (
     store_read_only,
 )
 from aisquare.core.codex_accounts import CodexAccounts, approvals_reviewer
+from aisquare.core.paths import expand_user
 
 #: ``model_reasoning_effort`` levels Codex names (0.162.1). Which of them a model
 #: takes is Codex's to say, so another level is passed through with a note.
@@ -146,6 +147,10 @@ _SCOPES: dict[str, WriteScope] = {"read-only": "read_only", "workspace-write": "
 #: fleet launch defines for its sandbox: Codex's built-in profile for the write scope with
 #: the aisquare store added (:meth:`CodexAdapter.store_access`).
 PERMISSION_PROFILE = "aisquare"
+
+#: The system layer of Codex's config, under every user's (``services.native_telemetry``
+#: reads it too): 0.162.1 reads it (in its binary, review r14 of #113, finding 9).
+SYSTEM_CONFIG = Path("/etc/codex/config.toml")
 _BUILT_IN_PROFILES = {"read_only": ":read-only", "workspace": ":workspace"}
 #: ``-c`` keys (and their tables) that choose the sandbox: given natively, the sandbox is
 #: the operator's, and Codex refuses ``sandbox_mode`` beside ``default_permissions``.
@@ -774,9 +779,10 @@ class CodexAdapter:
         self, args: Sequence[str], cwd: Path, home: Path | None = None
     ) -> SandboxWrites | None:
         """What Codex's sandbox may write for a session with ``args`` in ``cwd``, read as
-        Codex layers its settings: ``config.toml`` in ``home`` (its Codex home; ``None``
-        is this shell's), then the profile ``-p`` selects (``<name>.config.toml`` beside
-        it), then ``args`` (review r13 of #113, finding 6). ``None`` with no sandbox
+        Codex layers its settings: the system's :data:`SYSTEM_CONFIG`, ``config.toml`` in
+        ``home`` (its Codex home; ``None`` is this shell's), then the profile ``-p`` selects
+        (``<name>.config.toml`` beside it), then ``args`` (review r13 of #113, finding 6;
+        r14, finding 9). ``None`` with no sandbox
         (``--sandbox danger-full-access``, ``sandbox_mode = "danger-full-access"``, the
         bypass flags). The sandbox is ``--sandbox``, else a ``-c sandbox_mode``, else the
         store's profile in ``args`` (which holds over a ``sandbox_mode`` in the files,
@@ -793,7 +799,7 @@ class CodexAdapter:
         if any(arg in ("--dangerously-bypass-approvals-and-sandbox", "--yolo") for arg in args):
             return None
         codex_home = home if home is not None else _codex_home(None)
-        files = [_read_toml(codex_home / "config.toml")]
+        files = [_read_toml(SYSTEM_CONFIG), _read_toml(codex_home / "config.toml")]
         profile = next(reversed(option_values(args, "-p", "--profile")), None)
         if profile and Path(profile).name == profile and profile not in {".", ".."}:
             files.append(_read_toml(codex_home / f"{profile}.config.toml"))
@@ -845,7 +851,9 @@ class CodexAdapter:
                 if isinstance(found, list):
                     listed += found
         added = [cwd / d for d in option_values(args, "--add-dir")]
-        added += [cwd / Path(item).expanduser() for item in listed if isinstance(item, str)]
+        # `~olduser` names no home here: read as written, never a RuntimeError, which
+        # cost the launch its store profile through the broker's catch-all (r14, 7).
+        added += [cwd / expand_user(Path(item)) for item in listed if isinstance(item, str)]
         roots = [workspace, *temporary, *added, *written]
         return SandboxWrites(tuple(roots), read, workspace, tuple(temporary))
 

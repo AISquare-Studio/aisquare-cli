@@ -19,6 +19,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path
@@ -1409,41 +1410,117 @@ def test_a_tree_codex_is_given_holds_its_launch_inputs_read_only(
 # --- review r13 of #113 -----------------------------------------------------------------
 
 
-def test_a_launch_drops_a_pythonpath_its_sandbox_may_write_and_warns_of_such_a_path(
+def test_the_agent_keeps_its_pythonpath_and_a_launch_warns_of_a_path_its_sandbox_writes(
     beyond_tmp: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Review r13 of #113, finding 1: the hooks and the broker inherit the launch's
-    environment outside the sandbox. A ``PYTHONPATH`` entry the sandbox may write (direnv's
-    ``PYTHONPATH=<proj>/src``) is imported from before the standard library: dropped from
-    the agent's environment. A ``PATH`` entry it may write (an activated venv's ``bin``) is
-    where Codex itself and the hooks find ``git``: warned of, at launch."""
+    """Review r14 of #113, finding 1 (the manager's decision): r13 dropped a ``PYTHONPATH``
+    entry the sandbox may write from the environment Codex is exec'd with, so the agent's
+    own ``pytest`` in a direnv project (``PYTHONPATH=$PWD/src``) failed. The agent keeps its
+    environment whole; aisquare's own interpreters ignore the variable (``-E``, below).
+    A ``PATH`` entry the sandbox may write is warned of, an empty one too, which is the
+    directory a process runs in (finding 3); ``PYTHONPATH`` is warned of only where the
+    agent's hooks, connected by an older aisquare, would read it."""
     from aisquare.core.agent_adapters.types import SandboxWrites
 
     project = beyond_tmp / "proj"
     (project / "src").mkdir(parents=True)
-    outside = beyond_tmp / "libs"
-    outside.mkdir()
+    writes = SandboxWrites((project,), workspace=project)
     env = {
-        "PYTHONPATH": f"{project / 'src'}{os.pathsep}{outside}",
+        "PYTHONPATH": f"{project / 'src'}{os.pathsep}/opt/libs",
         "PATH": f"{project / '.venv' / 'bin'}{os.pathsep}/usr/bin",
     }
-    said = store_broker.sandbox_environment(env, SandboxWrites((project,), workspace=project))
-    assert env["PYTHONPATH"] == str(outside)
-    assert env["PATH"] == f"{project / '.venv' / 'bin'}{os.pathsep}/usr/bin", "warned, kept"
-    assert any("PYTHONPATH named" in line and "dropped" in line for line in said), said
-    assert any("PATH names" in line and "git" in line for line in said), said
-    alone = {"PYTHONPATH": str(project / "src")}
-    store_broker.sandbox_environment(alone, SandboxWrites((project,), workspace=project))
-    assert "PYTHONPATH" not in alone
-    assert store_broker.sandbox_environment(dict(env), None) == [], "unsandboxed: as its user"
+    kept = dict(env)
+    said = store_broker.sandbox_environment(env, writes, project, True)
+    assert env == kept, "nothing changed in the agent's environment"
+    assert [line for line in said if line.startswith("PATH names")], said
+    assert not [line for line in said if "PYTHONPATH" in line], said
+    older = store_broker.sandbox_environment(env, writes, project, False)
+    assert [line for line in older if line.startswith("PYTHONPATH names")], older
+    empty = store_broker.sandbox_environment(
+        {"PATH": f"/usr/bin{os.pathsep}"}, writes, project, True
+    )
+    assert [line for line in empty if "an empty entry" in line], empty
+    relative = store_broker.sandbox_environment({"PATH": "bin"}, writes, project, True)
+    assert [line for line in relative if "bin" in line], relative
+    assert store_broker.sandbox_environment(dict(env), None, project, True) == [], "unsandboxed"
 
-    # Through the launch itself: the environment it execs the agent with, and the broker's.
+    # Through the launch itself: the environment it execs the agent with is the one given.
     monkeypatch.chdir(project)
     monkeypatch.delenv("TMPDIR", raising=False)
     monkeypatch.setattr(store_broker, "run_broker", lambda directory, env: None)
     launched = {"AISQUARE_LAUNCH_ID": LAUNCH, "PYTHONPATH": str(project / "src")}
-    _, note = store_broker.start_for_launch(launched, get_adapter("codex"), ["codex", *_profile()])
-    assert "PYTHONPATH" not in launched and "PYTHONPATH named" in note
+    store_broker.start_for_launch(launched, get_adapter("codex"), ["codex", *_profile()])
+    assert launched["PYTHONPATH"] == str(project / "src")
+
+
+def test_aisquares_own_interpreters_ignore_a_pythonpath_into_the_tree(tmp_path: Path) -> None:
+    """Review r14 of #113, findings 1, 3 and 4, measured: a ``sitecustomize`` on
+    ``PYTHONPATH``, or in the directory an empty entry names (``-P`` keeps the script's
+    directory off ``sys.path``, not an empty entry's), runs in every interpreter that reads
+    the variable. The ones aisquare starts for a sandboxed agent and the fleet's launches
+    (``selfcli.isolated_argv_for``: ``-E``) never run it."""
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    marker = tmp_path / "ran"
+    (tree / "sitecustomize.py").write_text(
+        f"open({str(marker)!r}, 'a').write('x')\n", encoding="utf-8"
+    )
+    base = {key: value for key, value in os.environ.items() if not key.startswith("PYTHON")}
+
+    def runs(argv: list[str], pythonpath: str) -> bool:
+        if marker.exists():
+            marker.unlink()
+        subprocess.run(
+            argv, cwd=tree, env={**base, "PYTHONPATH": pythonpath}, capture_output=True,
+            timeout=120, check=False,
+        )  # fmt: skip
+        return marker.exists()
+
+    for pythonpath in (str(tree), f"{os.pathsep}/nonexistent"):
+        assert runs(selfcli.argv_for(["--version"]), pythonpath), "the control reads it"
+        assert not runs(selfcli.isolated_argv_for(["--version"]), pythonpath), pythonpath
+
+
+def test_every_interpreter_aisquare_starts_for_a_sandboxed_agent_is_isolated(
+    work: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r14 of #113, findings 1 and 4: the broker's commands, the broker itself, the
+    distiller and the hand-over run with ``-E``; so do a Codex agent's hooks as this version
+    connects them, which :func:`agents.hook_runs_isolated` reads; Claude Code's keep the
+    console script its own tools' environment runs."""
+    from aisquare.core import agents
+
+    started: list[list[str]] = []
+
+    class Child:
+        stdout = stderr = None
+        returncode = 0
+
+        def __init__(self, argv: list[str], **kwargs: object) -> None:
+            started.append(list(argv))
+            raise OSError("not started")
+
+    monkeypatch.setattr(subprocess, "Popen", Child)
+    broker = _broker(tmp_path)
+    broker.answer(_request(["board"], work), RID)
+    with pytest.raises(OSError):
+        REAL_RUN_BROKER(tmp_path / "b", {})
+    monkeypatch.setattr(brain, "brain_enabled", lambda: True)
+    monkeypatch.setattr(shutil, "which", lambda name: "/bin/gbrain")
+    REAL_SPAWN_DRAIN(root=tmp_path)
+    ours = [argv for argv in started if "-m" in argv]
+    assert len(ours) == 3 and all(argv[1:3] == ["-E", "-P"] for argv in ours), started
+    # The hand-over the agent's own hook starts (its argv is built inline there).
+    source = (ROOT / "src" / "aisquare" / "services" / "hooks.py").read_text(encoding="utf-8")
+    assert re.search(r"isolated_argv_for\(\s*\[\s*\"--quiet\", \"hook\", \"hand-over\"", source)
+
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    agents.install_hooks("codex", home)
+    commands = agents.hook_commands("codex", home)
+    assert commands and all(agents.hook_runs_isolated(command) for command in commands)
+    assert all(" -E -P -m aisquare hook codex" in command for command in commands)
+    assert not agents.hook_runs_isolated("/usr/local/bin/aisquare hook codex")
 
 
 def test_the_doctors_sandbox_rows_look_only_in_a_real_project(
@@ -1533,7 +1610,9 @@ def test_the_plugin_routes_launcher_is_an_install_the_hooks_run(
 
     class Installed:
         def installed(self, config_dir: Path | None) -> object:
-            return object()
+            from aisquare.core.agent_adapters.types import PluginInstall
+
+            return PluginInstall(beyond_tmp / "codex-home", "0.8.0")
 
     monkeypatch.setattr(agents, "plugin_of", lambda agent: Installed())
     found = store_broker.install_paths(beyond_tmp / "codex-home", "codex", str(venv_bin))
@@ -1687,3 +1766,148 @@ def test_brokered_reads_take_the_launchs_pool_not_a_directorys_or_a_pin(
     (nested / ".aisquare").mkdir(parents=True)
     monkeypatch.chdir(nested)
     assert "ours alone" in [entry.text for entry in context_service.list_entries()]
+
+
+# --- review r14 of #113 -----------------------------------------------------------------
+
+
+def test_the_plugins_uvx_cache_counts_only_where_its_launcher_would_run_uvx(
+    beyond_tmp: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r14 of #113, finding 2: with the plugin installed, uv's cache and
+    ``~/.cache/aisquare`` always counted as what the hooks run, so ``writable_roots =
+    ["~/.cache"]`` refused every workspace launch, naming an install that was not there.
+    The launcher runs ``uvx`` only with no ``aisquare`` on ``PATH`` or in ``~/.local/bin``,
+    runs nothing for an untrusted plugin, stands down where the hooks file runs aisquare
+    for every event, and finds uv's cache under ``$XDG_CACHE_HOME``."""
+    from aisquare.core import agents
+    from aisquare.core.agent_adapters.types import PluginInstall
+
+    monkeypatch.setattr(store_broker, "install_paths", REAL_INSTALL_PATHS)
+    home = beyond_tmp / "home"
+    (home / ".local" / "bin").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("UV_CACHE_DIR", raising=False)
+    cache = beyond_tmp / "xdg-cache"
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
+    monkeypatch.setattr(agents, "hook_commands", lambda agent, config_dir=None: [])
+    trusted = PluginInstall(home / ".codex", "0.8.0")
+
+    class Plugin:
+        def __init__(self, install: PluginInstall | None) -> None:
+            self.install = install
+
+        def installed(self, config_dir: Path | None) -> PluginInstall | None:
+            return self.install
+
+    monkeypatch.setattr(agents, "plugin_of", lambda agent: Plugin(trusted))
+    monkeypatch.setattr(agents, "hooks_installed", lambda agent, config_dir=None: False)
+    nothing = str(beyond_tmp / "empty-bin")
+    found = store_broker.install_paths(home / ".codex", "codex", nothing)
+    assert (cache / "uv").resolve() in found and (cache / "aisquare").resolve() in found
+    assert (home / ".cache" / "uv").resolve() not in found, "XDG_CACHE_HOME is uv's"
+    # An aisquare in ~/.local/bin is what it runs: uv's cache is not read.
+    local = home / ".local" / "bin" / "aisquare"
+    local.write_text("#!/bin/sh\n", encoding="utf-8")
+    local.chmod(0o755)
+    found = store_broker.install_paths(home / ".codex", "codex", nothing)
+    assert local.resolve() in found and (cache / "uv").resolve() not in found
+    local.unlink()
+    for plugin, hooks_file in (
+        (Plugin(None), False),
+        (Plugin(replace(trusted, trusted=False)), False),
+        (Plugin(trusted), True),
+    ):
+        monkeypatch.setattr(agents, "plugin_of", lambda agent, plugin=plugin: plugin)
+        monkeypatch.setattr(
+            agents, "hooks_installed", lambda agent, config_dir=None, full=hooks_file: full
+        )
+        found = store_broker.install_paths(home / ".codex", "codex", nothing)
+        assert (cache / "uv").resolve() not in found, (plugin.install, hooks_file)
+
+
+def test_an_unexpandable_home_in_a_setting_neither_crashes_nor_launches_unprotected(
+    beyond_tmp: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r14 of #113, finding 7: ``Path.expanduser`` raises on ``~nosuchuser/...``,
+    in ``writable_roots`` or ``PATH``, and the launch's catch-all then started the agent
+    with the arguments it had before its store profile: no store read-only, no launch
+    inputs held, no install check. Such a path is read as written, and any other failure
+    to work out a sandboxed launch refuses it."""
+    from aisquare.core.agent_adapters.types import SandboxWrites
+    from aisquare.services import agent_launch
+
+    codex = get_adapter("codex")
+    roots = ["-c", 'sandbox_workspace_write.writable_roots=["~nosuchuser-asq/x"]']
+    writes = codex.sandbox_writes(roots, beyond_tmp)
+    assert writes is not None
+    said = store_broker.sandbox_environment(
+        {"PATH": "~nosuchuser-asq/bin"}, SandboxWrites((beyond_tmp,), workspace=beyond_tmp),
+        beyond_tmp, True,
+    )  # fmt: skip
+    assert said and "~nosuchuser-asq/bin" in said[0], "a literal relative entry: in the workspace"
+
+    def broken(env: object, adapter: object, argv: object) -> object:
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(store_broker, "start_for_launch", broken)
+    with pytest.raises(store_broker.LaunchRefused, match="not started without"):
+        agent_launch.start_broker(agent_launch.resolve(agent="codex"), {}, ["codex"])
+
+
+def test_a_worktree_outside_its_repository_is_its_own_tree_for_the_doctor_and_the_remedy(
+    beyond_tmp: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r14 of #113, finding 8: a linked worktree outside its principal repository
+    (``../feature``) resolved to the principal, so the doctor showed no sandbox row there
+    while a launch from there warned or was refused, and the remedy said to launch from the
+    project's directory."""
+    from aisquare.services import diagnostics
+
+    monkeypatch.delenv("TMPDIR", raising=False)
+    principal = beyond_tmp / "repo"
+    principal.mkdir()
+    git = ["git", "-C", str(principal), "-c", "user.email=a@b", "-c", "user.name=t"]
+    subprocess.run([*git, "init", "-q"], check=True)
+    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+    feature = beyond_tmp / "feature"
+    subprocess.run([*git, "worktree", "add", "-q", "-b", "f", str(feature)], check=True)
+    venv_bin = feature / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    _a_codex_project(feature, beyond_tmp, monkeypatch)
+    monkeypatch.setenv("PATH", f"{venv_bin}{os.pathsep}{os.environ['PATH']}")
+    row = diagnostics._sandbox_path_check(feature)
+    assert row is not None and ".venv" in row.detail
+    _installed_at(monkeypatch, feature / ".venv")
+    assert diagnostics._sandboxed_install_check(feature) is not None
+    with pytest.raises(store_broker.LaunchRefused) as refusal:
+        store_broker.refuse_inside(
+            ["codex", "--sandbox", "workspace-write"], feature, get_adapter("codex")
+        )
+    said = str(refusal.value)
+    assert f"a worktree of {principal.resolve()}" in said and str(feature.resolve()) in said, said
+
+
+def test_codex_reads_its_system_config_under_the_users(
+    beyond_tmp: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r14 of #113, finding 9: ``/etc/codex/config.toml``, which 0.162.1 reads, was
+    skipped: a system-wide ``writable_roots`` was missed, and a system-wide
+    ``danger-full-access`` read as workspace-write."""
+    from aisquare.core.agent_adapters import codex as codex_module
+
+    system = beyond_tmp / "etc-codex.toml"
+    monkeypatch.setattr(codex_module, "SYSTEM_CONFIG", system)
+    home, cwd = beyond_tmp / "codex-home", beyond_tmp / "w"
+    home.mkdir()
+    cwd.mkdir()
+    shared = beyond_tmp / "shared"
+    system.write_text(
+        f"[sandbox_workspace_write]\nwritable_roots = [{json.dumps(str(shared))}]\n", "utf-8"
+    )
+    writes = get_adapter("codex").sandbox_writes([], cwd, home)
+    assert writes is not None and writes.may_write(shared / "x")
+    system.write_text('sandbox_mode = "danger-full-access"\n', encoding="utf-8")
+    assert get_adapter("codex").sandbox_writes([], cwd, home) is None
+    (home / "config.toml").write_text('sandbox_mode = "workspace-write"\n', encoding="utf-8")
+    assert get_adapter("codex").sandbox_writes([], cwd, home) is not None, "the user's wins"

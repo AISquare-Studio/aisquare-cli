@@ -201,12 +201,13 @@ def _sandboxed_project(cwd: Path | None) -> Path | None:
     import shutil
 
     from aisquare.core.agent_adapters import get_adapter
-    from aisquare.core.workspace import real_project_root
+    from aisquare.core.workspace import project_tree
 
     try:
         if shutil.which(get_adapter("codex").binary) is None:
             return None
-        return real_project_root(cwd or Path.cwd())
+        # The checkout itself: a worktree's own tree, outside its repository too (r14, 8).
+        return project_tree(cwd or Path.cwd())
     except Exception:
         return None
 
@@ -249,6 +250,14 @@ def _sandboxed_install_check(cwd: Path | None = None) -> DoctorCheck | None:
     )
 
 
+def _resolved_or_none(place: Path, root: Path) -> bool:
+    """Whether ``place`` resolves into ``root``; ``False`` where it cannot be resolved."""
+    try:
+        return place.resolve().is_relative_to(root)
+    except (OSError, RuntimeError):
+        return False
+
+
 def _sandbox_path_check(cwd: Path | None = None) -> DoctorCheck | None:
     """A warning when ``PATH`` names a directory in the tree of the project the doctor runs
     in (:func:`_sandboxed_project`: an activated virtualenv, direnv's ``PATH_add``): a
@@ -262,10 +271,13 @@ def _sandbox_path_check(cwd: Path | None = None) -> DoctorCheck | None:
     root = _sandboxed_project(cwd)
     if root is None:
         return None
+    # As an agent launched in the project reads it: an empty or relative entry is under
+    # the directory a process runs in, the project's; PATH expands no `~` (r14, 3 and 7).
+    value = os.environ.get("PATH", "")
     named = [
-        entry
-        for entry in os.environ.get("PATH", "").split(os.pathsep)
-        if entry and Path(entry).expanduser().resolve().is_relative_to(root)
+        entry or "(an empty entry)"
+        for entry in (value.split(os.pathsep) if value else [])
+        if _resolved_or_none(root / entry if entry else root, root)
     ]
     if not named:
         return None

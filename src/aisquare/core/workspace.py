@@ -169,6 +169,30 @@ def real_project_root(start: Path) -> Path | None:
     return root
 
 
+def project_tree(start: Path) -> Path | None:
+    """The tree a launch at ``start`` writes as its project's: the checkout ``start`` is in
+    (the nearest directory holding a ``.git``, file or directory: a linked worktree's own
+    top, even one outside its principal repository, review r14 of #113, finding 8), within
+    a real project (:func:`real_project_root`); else that project's root. ``None`` outside
+    a real project."""
+    root = real_project_root(start)
+    if root is None:
+        return None
+    try:
+        start = start.resolve()
+        for directory in (start, *start.parents):
+            if (directory / ".git").exists():
+                top = directory.resolve()
+                if top == Path.home().resolve() or top == Path(top.anchor):
+                    return root
+                return top
+            if directory == root:
+                break
+    except (OSError, RuntimeError):
+        return root
+    return root
+
+
 def worktree_principal(root: Path) -> Path | None:
     """The principal repository a LINKED worktree at ``root`` belongs to, else ``None``.
 

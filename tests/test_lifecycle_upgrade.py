@@ -3695,7 +3695,7 @@ def new_install_refreshes(
         return Captured(0 if written else 1, "✓ hooks rewritten\n")
 
     monkeypatch.setattr(install_route, "run_captured", run_captured)
-    monkeypatch.setattr(agent_core, "_aisquare_command", lambda: str(tool.script))
+    monkeypatch.setattr(agent_core, "_aisquare_command", lambda *args, **kwargs: str(tool.script))
     return ran
 
 

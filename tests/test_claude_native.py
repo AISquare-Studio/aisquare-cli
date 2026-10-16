@@ -113,7 +113,9 @@ def native(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Native]:
         monkeypatch.setenv("DISABLE_TELEMETRY", "1")
         monkeypatch.setenv("DISABLE_AUTOUPDATER", "1")
         monkeypatch.setenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
-        monkeypatch.setattr(agents, "_aisquare_command", lambda: shlex.join(selfcli.argv_for([])))
+        monkeypatch.setattr(
+            agents, "_aisquare_command", lambda *args, **kwargs: shlex.join(selfcli.argv_for([]))
+        )
         agents.install_hooks("claude-code", config_dir)
         config = load_config()
         config.fleet.tmux_socket = f"asq-claude-native-{os.getpid()}"

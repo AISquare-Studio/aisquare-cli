@@ -108,7 +108,9 @@ def test_only_the_executed_definition_can_verify_trust(
     fire(first)
     assert agents.integration_readiness("codex", tmp_path)[0] == "observed"
     # An upgrade changes the command while an older native session stays open.
-    monkeypatch.setattr(agents, "_aisquare_command", lambda: "/upgraded/bin/aisquare")
+    monkeypatch.setattr(
+        agents, "_aisquare_command", lambda *args, **kwargs: "/upgraded/bin/aisquare"
+    )
     agents.install_hooks("codex", tmp_path)
     second = _definition(tmp_path)
     assert second != first

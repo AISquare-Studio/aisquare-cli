@@ -859,7 +859,7 @@ def test_spawn_manager_builds_the_launch_command_and_records_the_row(
     spawned = tmux.spawned[0]
     assert spawned["session"] == receipt.tmux_session and spawned["name"] == "manager"
     command = _command(tmux)
-    assert command[:6] == [sys.executable, "-P", "-m", "aisquare", "launch", "manager"]
+    assert command[:7] == [sys.executable, "-E", "-P", "-m", "aisquare", "launch", "manager"]
     assert _flag(command, "--permission-mode") == "auto"
     assert agent.session_id and _flag(command, "--session-id") == agent.session_id
     assert _flag(command, "--name") == "manager"
@@ -1012,7 +1012,7 @@ def test_spawn_refuses_an_unknown_role_but_accepts_a_bound_one(
     monkeypatch.setattr("aisquare.cli.launch._declared_roles", lambda: {"scribe"})
     receipt = fleet_service.spawn(project, "scribe")
     assert receipt.agent.role == "scribe" and receipt.agent.label == "scribe-1"
-    assert _command(tmux)[5] == "scribe"
+    assert _command(tmux)[6] == "scribe"
 
 
 def test_spawn_refuses_a_worktree_outside_git(
@@ -1252,7 +1252,7 @@ def test_spawn_records_no_session_for_a_binary_that_takes_no_session_id(
     )
     command = _command(tmux)
     assert receipt.agent.session_id is None and "--session-id" not in command
-    assert command[6:8] == ["--command", sys.executable], "an explicit --bin reaches launch"
+    assert command[7:9] == ["--command", sys.executable], "an explicit --bin reaches launch"
     assert receipt.agent.binary == sys.executable
     assert any("no board join" in note for note in receipt.notes)
     assert fleet_service.status_of(receipt.agent).detail == "no hooks"
@@ -1870,12 +1870,14 @@ def test_the_window_command_carries_the_safe_path_flag_and_not_a_variable(
     aisquare.__main__" from a repo with its own ``aisquare/``). The guard has to
     travel in the command. And as the ``-P`` flag, not a variable in ``env``:
     ``launch`` execve's the agent with the window's whole environment, and a
-    coder's own ``python -m pytest`` must not inherit a changed ``sys.path``."""
+    coder's own ``python -m pytest`` must not inherit a changed ``sys.path``. So is
+    ``-E`` (review r14 of #113, finding 4): the server's ``PYTHONPATH`` is not read by
+    the window's ``launch``, and reaches the agent it execs as it is."""
     monkeypatch.delenv("PYTHONSAFEPATH", raising=False)
     _coder(project)
     command = _command(tmux)
-    assert command[:4] == [sys.executable, "-P", "-m", "aisquare"]
-    assert command == selfcli.argv_for(command[4:]), "one builder for every self-invocation"
+    assert command[:5] == [sys.executable, "-E", "-P", "-m", "aisquare"]
+    assert command == selfcli.isolated_argv_for(command[5:]), "one builder for the fleet's"
     env = tmux.spawned[0]["env"]
     assert isinstance(env, dict) and "PYTHONSAFEPATH" not in env
 
@@ -12705,7 +12707,9 @@ def test_a_replay_refused_inside_the_replacements_spawn_names_no_bin_either(
     tmux.die(agent.pane_id, 1)
     # The binary goes after the check before the stop has passed.
     monkeypatch.setattr(
-        fleet_service, "_refuse_a_replay_that_cannot_start", lambda project, record, home=None: None
+        fleet_service,
+        "_refuse_a_replay_that_cannot_start",
+        lambda project, record, home=None, permission_mode=None: None,
     )
     claude_on_path.unlink()
     monkeypatch.setenv("AISQUARE_BIN_CODER", str(tmp_path / "gone" / "claude"))

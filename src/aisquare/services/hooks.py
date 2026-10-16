@@ -358,7 +358,7 @@ def _hand_over_if_configured(failure: team_service.TurnFailure) -> None:
             )
             return
     window = failure.notice.window if failure.notice is not None else "usage"
-    argv = selfcli.argv_for(
+    argv = selfcli.isolated_argv_for(
         ["--quiet", "hook", "hand-over", session.id, "--reason", f"{window} limit"]
     )
     try:

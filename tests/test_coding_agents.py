@@ -199,7 +199,7 @@ def test_codex_hook_health_finds_all_events_and_module_form(
 
     directory = tmp_path / ".codex-second account"
     command = shlex.join(selfcli.argv_for([]))
-    monkeypatch.setattr(agents, "_aisquare_command", lambda: command)
+    monkeypatch.setattr(agents, "_aisquare_command", lambda *args, **kwargs: command)
     agents.install_hooks("codex", directory)
     commands = agents.hook_commands("codex", directory)
     assert len(commands) == 8

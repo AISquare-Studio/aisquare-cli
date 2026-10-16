@@ -48,6 +48,10 @@ HANDLES = frozenset({"PlacedPane", "PlacedSession"})
 MADE: dict[str, dict[str, str]] = {
     FLEET: {
         "server": "the factory: the socket today's config names, or one a caller passes",
+        "_window_path": (
+            "today's socket (the config's), asked only its global PATH, which every window "
+            "it opens inherits (review r14 of #113, finding 6); nothing named"
+        ),
         "server_for": "a socket's name (`server`): an address's name, or today's to compare",
         "_server_at": "an `_Address`, which only the mints in MINTS make",
         "_address": "the recorded socket's name, to compare its path with this shell's",

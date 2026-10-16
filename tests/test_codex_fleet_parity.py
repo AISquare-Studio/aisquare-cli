@@ -2744,3 +2744,77 @@ def test_a_replacement_its_sandbox_would_refuse_is_refused_before_the_agent_stop
     with pytest.raises(fleet_service.FleetError):
         fleet_service._refuse_a_replay_that_cannot_start(codex.project, record, target)
     assert asked[-1] == target
+
+
+def test_a_fleet_windows_launch_ignores_the_servers_pythonpath(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """Review r14 of #113, finding 4: a fleet window's ``aisquare launch`` ran with the tmux
+    server's ``PYTHONPATH``, which may name a directory a sandboxed agent writes. It runs
+    with ``-E``; the agent it execs keeps the variable, as its tools need it."""
+    fleet_service.spawn(project, "coder", agent="codex", worktree=False)
+    command = _command(tmux)
+    assert command[:6] == [sys.executable, "-E", "-P", "-m", "aisquare", "launch"], command
+
+
+def test_a_restart_under_a_new_permission_mode_is_checked_as_that_mode(
+    codex_agent: tuple[Codex, TeamTask],
+    tmux: FakeTmux,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review r14 of #113, finding 5: the check before the stop read the sandbox from the
+    recorded command, while ``fleet restart --permission-mode`` gives the replacement
+    another: ``full``, which no launch refuses, was refused, and a read-only seat restarted
+    as a workspace one passed, was stopped, and then refused."""
+    from aisquare.core import launch_seal as seals
+    from aisquare.services import store_broker
+
+    codex, _ = codex_agent
+    inside = codex.project.root / ".venv"
+    monkeypatch.setattr(store_broker, "install_paths", lambda *args, **kwargs: (inside,))
+    record = seals.read(codex.agent.id)
+    assert isinstance(record, seals.LaunchRecord)
+    with pytest.raises(fleet_service.FleetError):
+        fleet_service._refuse_a_replay_that_cannot_start(codex.project, record)
+    fleet_service._refuse_a_replay_that_cannot_start(
+        codex.project, record, permission_mode="full:never"
+    )
+    fleet_service._refuse_a_replay_that_cannot_start(
+        codex.project, record, permission_mode="read_only:auto"
+    )
+    with pytest.raises(fleet_service.FleetError):
+        fleet_service._refuse_a_replay_that_cannot_start(
+            codex.project, record, permission_mode="workspace:auto"
+        )
+
+
+def test_the_fleets_install_check_reads_the_path_its_window_will_have(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review r14 of #113, findings 6 and 7: spawn and the check before a stop read the
+    caller's ``PATH`` while the window's launch has the tmux server's, so a spawn took a
+    receipt for a window its launch then refused. It reads the server's while one answers.
+    Any other failure of the check refuses the spawn, before any window."""
+    from aisquare.services import store_broker
+
+    assert fleet_service._window_path(None) == os.environ.get("PATH"), (
+        "no server answers: this process's, which a server it starts takes"
+    )
+    seen: list[object] = []
+    monkeypatch.setattr(tmux, "global_environment", lambda name: "/the/servers/bin", raising=False)
+    monkeypatch.setattr(store_broker, "refuse_inside", lambda *args, **kwargs: seen.append(args[4]))
+    fleet_service.spawn(project, "tester", label="tester-p", agent="codex", worktree=False)
+    assert seen == ["/the/servers/bin"], seen
+
+    def broken(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(store_broker, "refuse_inside", broken)
+    with pytest.raises(fleet_service.FleetError, match="could not work out"):
+        fleet_service.spawn(project, "tester", label="tester-x", agent="codex", worktree=False)
+    assert "tester-x" not in str(tmux.sessions)

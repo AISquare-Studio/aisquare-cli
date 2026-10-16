@@ -236,8 +236,16 @@ def _split_command(command: str) -> list[str]:
     return [token.strip('"') for token in shlex.split(command, posix=False)]
 
 
-def _aisquare_command() -> str:
+def _aisquare_command(isolated: bool = False) -> str:
     """The command hooks should run — an absolute path that works in any shell.
+
+    ``isolated`` for an agent that sandboxes its tools (Codex): ``<this interpreter> -E -P
+    -m aisquare`` (:func:`selfcli.isolated_argv_for`), whatever else would be written, as
+    such an agent's hooks run outside its sandbox in its environment, whose
+    ``PYTHONPATH`` the agent's own tools need and its sandbox may write (an empty entry
+    is the workspace); ``-E`` keeps the hook's interpreter from importing from it, and a
+    console script cannot carry the flag (review r14 of #113, finding 1). The doctor
+    grades the module form by its interpreter (:func:`_same_install`).
 
     The running executable wins: whoever installs hooks is the aisquare the
     hooks should call, even when it was invoked as ``.venv/bin/aisquare``
@@ -253,6 +261,8 @@ def _aisquare_command() -> str:
     rather than ``env PYTHONSAFEPATH=1 …`` because hooks run under ``cmd.exe``
     too, where ``env`` is not a program.
     """
+    if isolated:
+        return " ".join(_quote(part) for part in selfcli.isolated_argv_for([]))
     argv0 = Path(sys.argv[0])
     if _is_aisquare_program(argv0.name) and argv0.exists():
         return _quote(str(argv0.resolve()))
@@ -628,8 +638,9 @@ def install_hooks(name: str, config_dir: Path | None = None) -> bool:
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
         hooks = {}
-    command = _aisquare_command()  # already shell-quoted where needed
     adapter = get_adapter(name)
+    # already shell-quoted where needed
+    command = _aisquare_command(isolated=adapter.capabilities.sandboxes_tools)
     for hook in spec.hooks:
         groups = hooks.get(hook.event)
         kept = _without_aisquare(groups) if isinstance(groups, list) else []
@@ -1868,6 +1879,19 @@ def _resolve_program(token: str) -> Path:
         found = shutil.which(token)
         return Path(found) if found else path
     return path
+
+
+def hook_runs_isolated(command: str) -> bool:
+    """Whether the aisquare hook ``command`` runs its interpreter with ``-E`` (or ``-I``),
+    which ignores ``PYTHONPATH`` and ``PYTHONHOME``: the module form
+    :func:`_aisquare_command` writes for an agent that sandboxes its tools (review r14 of
+    #113, finding 1). A console script's interpreter reads them."""
+    if not _is_aisquare_hook_command(command):
+        return False
+    tokens, _ = _hook_command_parts(command)
+    if tokens[-4:-2] != ["-m", "aisquare"]:
+        return False
+    return any(token in ("-E", "-I") for token in tokens[1:-4])
 
 
 def hook_binary(command: str) -> HookBinary | None:

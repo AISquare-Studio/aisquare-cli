@@ -2481,8 +2481,6 @@ def spawn(
     # window's own launch would ask it: refused there, the spawn reported a live agent whose
     # window had already exited (review r12 of #113, finding 9).
     if selected.adapter.capabilities.sandboxes_tools:
-        from aisquare.services import store_broker
-
         if not use_worktree:
             prospective = project.root
         elif own_worktree is not None:
@@ -2490,16 +2488,13 @@ def spawn(
         else:
             prospective = project.root / config.worktree_dir / picked
         home = choice.account.config_dir if choice.account is not None else selected.config_dir
-        try:
-            store_broker.refuse_inside(
-                [resolution.binary, *native, *arguments.argv],
-                prospective,
-                selected.adapter,
-                home,
-                os.environ.get("PATH"),
-            )
-        except store_broker.LaunchRefused as exc:
-            raise FleetError(str(exc)) from exc
+        _refuse_an_install_the_sandbox_writes(
+            [resolution.binary, *native, *arguments.argv],
+            prospective,
+            selected.adapter,
+            home,
+            config,
+        )
     # The spawn goes ahead: the codename names its tmux session and its branch. A
     # directory with no live row, never seen or forgotten, is captured for it
     # (`ensure_codename`), not listed, and a worktree or a window that then cannot
@@ -2588,7 +2583,10 @@ def spawn(
         native_args, native_env = selected.adapter.disable_native_teams()
         native += native_args
         env.update(native_env)
-    command = selfcli.argv_for(
+    # `-E`: the window's `aisquare launch` ignores the tmux server's PYTHONPATH, which may
+    # name a directory a sandboxed agent writes, while the agent it execs keeps it (review
+    # r14 of #113, finding 4).
+    command = selfcli.isolated_argv_for(
         ["launch", role, *flags, "--", *native, *model_args, *arguments.argv]
     )
     if prompt and selected.adapter.capabilities.positional_prompt:
@@ -6736,8 +6734,61 @@ def _resumable(
     return ResumeSpec(facts.id, transcript, native), None
 
 
+def _window_path(config: FleetSettings | None) -> str | None:
+    """The ``PATH`` a fleet window's ``aisquare launch`` will have: the fleet server's,
+    which every window inherits (``carry_environment`` carries none), while one answers;
+    else this process's, which a server it starts takes (review r14 of #113, finding 6:
+    asked with the caller's, a spawn took a receipt for a window its launch refused)."""
+    with suppress(Exception):
+        found = server(config).global_environment("PATH")
+        if found is not None:
+            return found
+    return os.environ.get("PATH")
+
+
+def _refuse_an_install_the_sandbox_writes(
+    argv: list[str],
+    cwd: Path,
+    adapter: AgentAdapter,
+    home: Path | None,
+    config: FleetSettings | None,
+) -> None:
+    """``store_broker.refuse_inside`` for a window's launch, before any window or stop, with
+    the ``PATH`` the window will have (:func:`_window_path`): its refusal as a
+    :class:`FleetError`, and any other failure to work it out too, rather than a traceback
+    or a window started unprotected (review r14 of #113, finding 7)."""
+    from aisquare.services import store_broker
+
+    try:
+        store_broker.refuse_inside(argv, cwd, adapter, home, _window_path(config))
+    except store_broker.LaunchRefused as exc:
+        raise FleetError(str(exc)) from exc
+    except Exception as exc:
+        raise FleetError(
+            f"could not work out what {adapter.label}'s sandbox may write "
+            f"({type(exc).__name__}: {exc}): nothing was started"
+        ) from exc
+
+
+def _replay_permission_args(
+    adapter: AgentAdapter, record: launch_seal.LaunchRecord, label: str, mode: str
+) -> list[str] | None:
+    """The sandbox and approval arguments ``mode`` gives the replacement of ``record``'s agent
+    (``fleet restart --permission-mode``), as :func:`spawn` turns it into them; ``None``
+    where this cannot tell (a mode that is the agent's to refuse)."""
+    try:
+        if PermissionIntent.written(mode):
+            return adapter.permission_args(PermissionIntent.parse(mode), record.role)
+        return adapter.fleet_args(record.role, label, mode)
+    except ValueError:
+        return None
+
+
 def _refuse_a_replay_that_cannot_start(
-    project: ProjectInfo, record: launch_seal.LaunchRecord, home: Path | None = None
+    project: ProjectInfo,
+    record: launch_seal.LaunchRecord,
+    home: Path | None = None,
+    permission_mode: str | None = None,
 ) -> None:
     """Raise now what replaying ``record`` would refuse — BEFORE its agent is stopped.
 
@@ -6760,7 +6811,10 @@ def _refuse_a_replay_that_cannot_start(
     (``store_broker.refuse_inside``, as :func:`spawn` asks it), under ``home``, the account
     home it starts under (a switch's target slot, whose hooks may run another install),
     else the record's: a switch to such a slot stopped the agent and started nothing
-    (review r13 of #113, finding 7).
+    (review r13 of #113, finding 7). With ``permission_mode`` (``fleet restart
+    --permission-mode``), the replacement's sandbox is that mode's, not the recorded one:
+    a read-only seat restarted as a workspace one was let through, then refused after the
+    stop, and ``full``, which no launch refuses, was refused (r14, finding 5).
     """
     replayed = _launch_binary(
         record.role,
@@ -6778,25 +6832,27 @@ def _refuse_a_replay_that_cannot_start(
     except ValueError as exc:
         raise FleetError(str(exc)) from exc
     if selected.adapter.capabilities.sandboxes_tools:
-        from aisquare.services import store_broker
-
         # The agent's arguments as its window's `launch` passes them: after the `--` of
-        # the recorded command line (the extra ones, for a record from before there was one).
+        # the recorded command line (the extra ones, for a record from before there was one);
+        # with a new permission mode, that mode's in place of the recorded ones.
         command = list(record.spec.command)
         native = (
             command[command.index("--") + 1 :] if "--" in command else list(record.spec.extra_args)
         )
-        account = home or (Path(record.account_home) if record.account_home else None)
-        try:
-            store_broker.refuse_inside(
-                [record.binary, *native],
-                Path(record.cwd),
-                selected.adapter,
-                account or selected.config_dir,
-                os.environ.get("PATH"),
+        if permission_mode:
+            given = _replay_permission_args(
+                selected.adapter, record, record.label or "", permission_mode
             )
-        except store_broker.LaunchRefused as exc:
-            raise FleetError(str(exc)) from exc
+            if given is not None:
+                native = [*given, *record.spec.extra_args]
+        account = home or (Path(record.account_home) if record.account_home else None)
+        _refuse_an_install_the_sandbox_writes(
+            [record.binary, *native],
+            Path(record.cwd),
+            selected.adapter,
+            account or selected.config_dir,
+            None,
+        )
 
 
 def _launch_record(project: ProjectInfo, agent: FleetAgent, verb: str) -> launch_seal.LaunchRecord:
@@ -7014,7 +7070,7 @@ def restart(
     replays = recorded_adapter(record.agent)
     try:
         _require_role(record.role)
-        _refuse_a_replay_that_cannot_start(project, record)
+        _refuse_a_replay_that_cannot_start(project, record, permission_mode=permission_mode)
         choice = (
             claude_accounts_service.choose(
                 str(slot) if slot is not None else None,

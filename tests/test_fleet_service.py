@@ -7826,6 +7826,35 @@ def test_an_upgrade_finds_the_agents_spawned_before_records_and_operates_them(
     assert session not in tmux.sessions
 
 
+def test_a_restart_of_a_row_from_before_launch_records_says_why_it_starts_fresh(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """SMOKE6 (PR #113 at 8b33c942): restarting a census-placed row said "its agent never
+    reached a hook", which was false: its agent ran its hooks under the aisquare it was
+    spawned with, and the census record holds no session because it never carries one. A
+    recorded row whose agent never reached a hook keeps that reason."""
+    legacy, recorded = _coder(project), _coder(project)
+    for agent in (legacy, recorded):
+        tmux.set_command(agent.pane_id, "claude")
+    _board_session(legacy, "waiting")
+    _before_records()
+    fleet_service.list_agents(project)  # the census, which places the legacy row
+    assert [r.id for r in launch_seal.legacy_records(project.id)] == [legacy.id, recorded.id]
+    restarted = fleet_service.restart(project, legacy.label)
+    said = " ".join(restarted.notes)
+    assert "spawned before this aisquare kept launch records" in said, said
+    assert "never reached a hook" not in said, said
+    # A recorded row whose agent's hook never reported a session keeps its own reason.
+    fresh = fleet_service.spawn(project, "coder", worktree=False).agent
+    record = launch_seal.read(fresh.id)
+    assert isinstance(record, launch_seal.LaunchRecord) and not record.legacy
+    _, why = fleet_service._resumable(record.model_copy(update={"session": None}), None)
+    assert why == "no session is recorded for it (its agent never reached a hook)"
+    census = record.model_copy(update={"session": None, "legacy": True})
+    _, why = fleet_service._resumable(census, None)
+    assert why is not None and "spawned before this aisquare kept launch records" in why
+
+
 def test_the_census_is_taken_once_and_never_from_a_store_records_were_kept_beside(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

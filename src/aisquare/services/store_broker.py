@@ -1346,10 +1346,21 @@ def _resolved_writes(writes: SandboxWrites) -> SandboxWrites:
 
 
 def install_inside(writes: SandboxWrites, installs: Sequence[Path]) -> Path | None:
-    """The first of ``installs`` that ``writes`` allows writing, or ``None``: compared as
-    the kernel resolves them."""
+    """Where ``writes`` lets a sandbox write an aisquare of ``installs``, or ``None``:
+    compared as the kernel resolves them, in either direction. An install under a root the
+    sandbox may write (the install, named); or a root the sandbox may write under an
+    install (that root, named: ``--add-dir <venv>/lib``, a ``writable_roots`` entry in
+    site-packages or the package's own directory, ``-C`` into it, a profile's ``write``
+    path), where it writes a ``.pth``, which runs at every start of that interpreter,
+    ``-E`` or not, or a module of the package (SMOKE6: one direction was asked)."""
     real = _resolved_writes(writes)
-    return next((path for path in installs if real.may_write(_resolved(path))), None)
+    for install in (_resolved(path) for path in installs):
+        if real.may_write(install):
+            return install
+        for root in real.writable:
+            if root.is_relative_to(install) and real.may_write(root):
+                return root
+    return None
 
 
 def _remedy(inside: Path, writes: SandboxWrites) -> str:
@@ -1428,9 +1439,9 @@ def refuse_inside(
     if inside is None:
         return
     raise LaunchRefused(
-        f"{adapter.label} runs its tools in a sandbox that may write {inside}, an aisquare "
-        f"its hooks or its store broker run outside that sandbox: what it wrote there would "
-        f"run unsandboxed. {_sentence(_remedy(inside, writes))}"
+        f"{adapter.label} runs its tools in a sandbox that may write {inside}, which is (or "
+        f"is in) an aisquare its hooks or its store broker run outside that sandbox: what it "
+        f"wrote there would run unsandboxed. {_sentence(_remedy(inside, writes))}"
     )
 
 

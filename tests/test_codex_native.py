@@ -2034,3 +2034,50 @@ def test_real_codex_in_a_direnv_project_keeps_its_pythonpath_and_aisquare_import
             server.shutdown()
             thread.join(timeout=2)
             shutil.rmtree(outside, ignore_errors=True)
+
+
+@pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
+def test_real_fleet_refuses_a_codex_agent_given_a_directory_inside_the_aisquare_its_hooks_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SMOKE6, live: ``fleet spawn coder --agent codex -- -c
+    'sandbox_workspace_write.writable_roots=["<the install>/lib"]'`` was spawned, and its
+    sandboxed command wrote into the venv the hooks and broker run. The install is this
+    tree's own, as the hooks this version connects run it (``<python> -E -P -m
+    aisquare``): the spawn is refused before any window, naming the directory."""
+    binary = shutil.which("codex")
+    assert binary, "AISQUARE_TEST_CODEX requires an installed Codex"
+    outside = Path(tempfile.mkdtemp(prefix="asq-", dir="/var/tmp"))
+    store, native_home, workspace = outside / "h", outside / "c", outside / "w"
+    native_home.mkdir()
+    workspace.mkdir()
+    git = ["git", "-C", str(workspace), "-c", "user.email=a@b", "-c", "user.name=t"]
+    subprocess.run([*git, "init", "-q"], check=True)
+    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+    socket = f"asq-codex-ad2-{os.getpid()}"
+    for key in tuple(os.environ):
+        if key.startswith(("OPENAI_", "ANTHROPIC_", "CODEX_")):
+            monkeypatch.delenv(key)
+    monkeypatch.delenv("TMPDIR", raising=False)
+    monkeypatch.setenv("AISQUARE_HOME", str(store))
+    monkeypatch.setenv("CODEX_HOME", str(native_home))
+    monkeypatch.setattr(store_broker, "install_paths", REAL_INSTALL_PATHS)
+    agents.install_hooks("codex", native_home)
+    config = load_config()
+    config.fleet.tmux_socket = socket
+    save_config(config)
+    project = team.activate(workspace)
+    lib = Path(sys.prefix) / "lib"
+    assert lib.is_dir(), lib
+    roots = f"sandbox_workspace_write.writable_roots=[{json.dumps(str(lib))}]"
+    try:
+        with pytest.raises(fleet.FleetError) as refusal:
+            fleet.spawn(
+                project, "coder", label="ad2", agent="codex", worktree=False,
+                agent_args=["-c", roots],
+            )  # fmt: skip
+        assert str(lib.resolve()) in str(refusal.value), str(refusal.value)
+        assert not [a for a in fleet.list_agents(project) if a.agent.label == "ad2"]
+    finally:
+        subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True, check=False)
+        shutil.rmtree(outside, ignore_errors=True)

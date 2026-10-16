@@ -158,7 +158,9 @@ adapter.**
   and hand-overs, is kept from that tree: whatever its sandbox, a launch is
   refused, by `aisquare launch`, by `fleet
   spawn` before any window and by a restart, switch or hand-over before it stops
-  the agent, where that sandbox may write an aisquare that runs outside it, the
+  the agent, where that sandbox may write an aisquare that runs outside it, or a
+  directory inside one (`--add-dir <venv>/lib`, a `writable_roots` entry in
+  site-packages), the
   launcher's own install or what the agent's hooks run (their `hooks.json`'s
   program, or what the plugin's launcher finds as its `_find` does, where its hooks
   run: trusted or under `--dangerously-bypass-hook-trust`, its `uvx` route's binary,

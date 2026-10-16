@@ -2077,3 +2077,64 @@ def test_codex_reads_its_managed_config_over_the_users(
     (home / "config.toml").write_text('sandbox_mode = "danger-full-access"\n', "utf-8")
     managed.write_text('sandbox_mode = "workspace-write"\n', encoding="utf-8")
     assert get_adapter("codex").sandbox_writes([], cwd, home) is not None, "managed wins"
+
+
+# --- SMOKE6 (the final live pass of #113) -----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("install", "inside"),
+    [
+        pytest.param("w/.venv", "w/.venv/lib", id="venv-lib"),
+        pytest.param("w/.venv", "w/.venv/lib/python3.14/site-packages", id="site-packages"),
+        pytest.param("w/src/aisquare", "w/src/aisquare/services", id="package-subdir"),
+        pytest.param("py", "py/lib/python3.14", id="base-lib"),
+        pytest.param(
+            "home/.local/lib/python3.14/site-packages",
+            "home/.local/lib/python3.14/site-packages/extra",
+            id="user-site",
+        ),
+        pytest.param(
+            "home/.local/share/uv/tools/aisquare-cli",
+            "home/.local/share/uv/tools/aisquare-cli/lib",
+            id="uv-tool-env",
+        ),
+    ],
+)
+def test_a_root_the_sandbox_may_write_inside_an_install_is_refused_in_every_spelling(
+    beyond_tmp: Path, monkeypatch: pytest.MonkeyPatch, install: str, inside: str
+) -> None:
+    """SMOKE6: the install check asked only whether an install lay under a root the sandbox
+    may write, never whether such a root lay inside an install, so ``--add-dir
+    <venv>/lib`` (a ``.pth`` in site-packages runs at every start of that interpreter,
+    ``-E`` or not), a ``writable_roots`` entry in site-packages or the package's own
+    directory, ``-C`` into one, or a profile's ``write`` path there was let through. Both
+    directions refuse; a sibling outside the install does not."""
+    monkeypatch.delenv("TMPDIR", raising=False)
+    root, sub = beyond_tmp / install, beyond_tmp / inside
+    sub.mkdir(parents=True)
+    _installed_at(monkeypatch, root)
+    elsewhere = beyond_tmp / "elsewhere"
+    elsewhere.mkdir()
+    codex = get_adapter("codex")
+    store = store_dir()
+    writes = ["codex", "--sandbox", "workspace-write"]
+    spelled = [
+        [*writes, "--add-dir", str(sub)],
+        [*writes, "-c", f"sandbox_workspace_write.writable_roots=[{json.dumps(str(sub))}]"],
+        [*writes, "-c", f"sandbox_workspace_write={{writable_roots=[{json.dumps(str(sub))}]}}"],
+        [*writes, "-C", str(sub)],
+    ]
+    profile = codex.broker_access(
+        codex.store_access("read_only", store), store, store / "broker" / "l" / "in",
+        writable=(sub,),
+    )  # fmt: skip
+    assert profile is not None
+    spelled.append(["codex", *profile])  # a read-only seat with a write path inside it
+    for argv in spelled:
+        with pytest.raises(store_broker.LaunchRefused) as refusal:
+            store_broker.refuse_inside(argv, elsewhere, codex)
+        assert str(sub.resolve()) in str(refusal.value), (argv, str(refusal.value))
+    sibling = root.parent / f"{root.name}-sibling" / "lib"
+    sibling.mkdir(parents=True)
+    store_broker.refuse_inside([*writes, "--add-dir", str(sibling)], elsewhere, codex)

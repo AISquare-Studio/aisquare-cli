@@ -6715,9 +6715,15 @@ def _resumable(
     agent makes it (a UUID; ``codex resume`` reads one that starts with ``-`` as its own
     option, r3, finding 2). An agent that never reached a hook has no session recorded,
     and one recorded with no native id has nothing to name the thread by: both start
-    fresh and say so.
+    fresh and say so. A census record (:attr:`~aisquare.core.launch_seal.LaunchRecord.
+    legacy`) holds no session whether or not its agent reached a hook: its row was
+    spawned before launch records were kept, and that is what it says (SMOKE6).
     """
     facts = record.session
+    if facts is None and record.legacy:
+        return None, (
+            "it was spawned before this aisquare kept launch records, so no session is held for it"
+        )
     if facts is None:
         return None, "no session is recorded for it (its agent never reached a hook)"
     transcript = Path(facts.transcript) if facts.transcript else None

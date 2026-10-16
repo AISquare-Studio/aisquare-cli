@@ -504,7 +504,10 @@ tree by these means, and only these:
   else `$XDG_CACHE_HOME/uv`), the uv-managed Python it links to (`$UV_PYTHON_INSTALL_DIR`,
   uv.toml's `python-install-dir`, else `$XDG_DATA_HOME/uv/python`) and the launcher's
   answers.
-  A launch is refused where its sandbox may write one of them, by `aisquare launch`, by
+  A launch is refused where its sandbox may write one of them or a directory inside one
+  (a root under the install, given with `--add-dir`, `-C`, `writable_roots` or a profile's
+  `write` path: a `.pth` in its site-packages runs at every start of its interpreter, `-E`
+  or not), naming that directory, by `aisquare launch`, by
   `fleet spawn` before any window is made, and by `fleet restart`, `switch` and the
   usage-limit hand-over before they stop the agent (under the home the replacement
   starts with: a switch's target slot), naming the remedy (`store_broker.refuse_inside`).

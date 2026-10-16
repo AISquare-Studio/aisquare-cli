@@ -5491,6 +5491,32 @@ def test_a_fleet_row_from_before_v32_reads_its_sessions_board(hubbed: _Hubbed) -
     assert _row(unbound.id).board == hubbed.fleet.id, "no session registered: its project's"
 
 
+def test_a_fleet_row_an_older_build_writes_into_a_v32_store_reads_its_sessions_board(
+    hubbed: _Hubbed,
+) -> None:
+    """Review of #259, round 26, 9/11: 0.8.0 opens a v32 store as it is and writes no board,
+    and a row with none was read as its own project's, where the backfill gives a row from
+    before v32 its session's. Under a hub its exit went to the fleet project's board and its
+    pause was set there, neither where its manager reads. Read, it is the backfill's answer:
+    its session's board, else its project's."""
+    hubbed.monkeypatch.delenv("AISQUARE_TEAM_HUB")
+    unbound = fleet_service.spawn(hubbed.fleet, "coder", worktree=False).agent
+    raw = sqlite3.connect(str(paths.db_path()))
+    try:
+        raw.execute("UPDATE fleet_agent SET board = NULL")  # what a 0.8.0 spawn writes
+        raw.commit()
+    finally:
+        raw.close()
+
+    assert _row(hubbed.coder.id).board == hubbed.hub.id, "its session's"
+    assert _row(unbound.id).board == hubbed.fleet.id, "no session registered: its project's"
+    with store_session() as store:
+        listed = {row.id: row.board for row in store.fleet_agents(hubbed.fleet.id)}
+        assert listed[hubbed.manager.id] == hubbed.hub.id, "every read, not one of them"
+        by_session = store.fleet_agent_for_session(hubbed.coder_sid)
+        assert by_session is not None and by_session.board == hubbed.hub.id
+
+
 @pytest.mark.parametrize("writer", ["the coder's task done", "the manager's deferred Stop"])
 def test_under_a_hub_a_waiting_manager_is_woken_by_its_coders_writes_and_its_own_stop(
     hubbed: _Hubbed, writer: str

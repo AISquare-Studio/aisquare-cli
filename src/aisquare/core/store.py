@@ -676,9 +676,23 @@ def _number_unnumbered_tasks(connection: sqlite3.Connection) -> None:
         raise
 
 
+#: The board of a ``fleet_agent`` row that recorded none: that of the session bound to it,
+#: the one its hooks registered on, else its own project's. The one answer for the v32
+#: backfill (:func:`_board_existing_agents`) and for every read of a row written with no
+#: board since (:data:`_FLEET_AGENT_READ`): a 0.8.0 build opens a v32 store as it is, and
+#: its spawn writes NULL there. Read as the row's project, such a row under a hub announced
+#: its exit, and took its pause, on a board its manager does not read, where the backfill
+#: gave a row from before v32 the hub's (review of #259, round 26, 9/11).
+_UNRECORDED_BOARD = (
+    "COALESCE((SELECT session.project_id FROM team_session AS session"
+    " WHERE session.id = fleet_agent.session_id), fleet_agent.project_id)"
+)
+
+
 def _board_existing_agents(connection: sqlite3.Connection) -> None:
     """v31 → v32's backfill: every fleet agent already recorded reads the board of the
-    session bound to it, the one its hooks registered on, else its own project's.
+    session bound to it, the one its hooks registered on, else its own project's
+    (:data:`_UNRECORDED_BOARD`).
 
     Runs right after ``fleet_agent.board`` is added, in the same transaction, and only then
     (:data:`_BACKFILLS`). A store without ``team_session`` (doctor's damaged-store case)
@@ -688,12 +702,7 @@ def _board_existing_agents(connection: sqlite3.Connection) -> None:
     if connection.execute(query).fetchone() is None:
         connection.execute("UPDATE fleet_agent SET board = project_id WHERE board IS NULL")
         return
-    connection.execute(
-        "UPDATE fleet_agent SET board = COALESCE(("
-        "  SELECT session.project_id FROM team_session AS session"
-        "  WHERE session.id = fleet_agent.session_id"
-        "), project_id) WHERE board IS NULL"
-    )
+    connection.execute(f"UPDATE fleet_agent SET board = {_UNRECORDED_BOARD} WHERE board IS NULL")
 
 
 #: Backfills that belong to a column, keyed ``(table, column)``. Each runs in the
@@ -1170,6 +1179,11 @@ _FLEET_AGENT_COLUMNS = (
     "task_id, spawned_by, created_at, ended_at, exit_status, account_slot, launch_spec, "
     "socket_path, boot_id, server_started_at, branch, board"
 )
+#: :data:`_FLEET_AGENT_COLUMNS` as a row is read: a ``board`` it never recorded is its
+#: session's, as the v32 backfill gives it (:data:`_UNRECORDED_BOARD`).
+_FLEET_AGENT_READ = _FLEET_AGENT_COLUMNS.removesuffix("board") + (
+    f"COALESCE(board, {_UNRECORDED_BOARD}) AS board"
+)
 _CLAUDE_ACCOUNT_COLUMNS = "slot, config_dir, alias, position, is_default, disabled, created_at"
 
 
@@ -1475,8 +1489,7 @@ def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
         boot_id=row["boot_id"],
         server_started_at=_maybe_dt(row["server_started_at"]),
         branch=row["branch"],
-        # NULL only on a row a build from before v32 wrote: its project's, as it spawned it.
-        board=row["board"] or row["project_id"],
+        board=row["board"],  # never NULL as read (`_FLEET_AGENT_READ`)
     )
 
 
@@ -3745,7 +3758,7 @@ class SqliteStore:
     def get_fleet_agent(self, ref: str) -> FleetAgent | None:
         """A fleet agent by id or unambiguous id prefix (git-style)."""
         rows = self._conn.execute(
-            f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent WHERE id GLOB ? LIMIT 2",
+            f"SELECT {_FLEET_AGENT_READ} FROM fleet_agent WHERE id GLOB ? LIMIT 2",
             (_glob_prefix(ref),),
         ).fetchall()
         if len(rows) > 1:
@@ -3755,7 +3768,7 @@ class SqliteStore:
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]:
         clause = " AND ended_at IS NULL" if live_only else ""
         rows = self._conn.execute(
-            f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent "
+            f"SELECT {_FLEET_AGENT_READ} FROM fleet_agent "
             f"WHERE project_id = ?{clause} ORDER BY created_at, id",
             (project_id,),
         ).fetchall()
@@ -3769,7 +3782,7 @@ class SqliteStore:
         ran one query per project ever registered, captured directories included, and a
         spawn asks it twice (review of #259, round 4)."""
         rows = self._conn.execute(
-            f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent "
+            f"SELECT {_FLEET_AGENT_READ} FROM fleet_agent "
             "WHERE ended_at IS NULL ORDER BY created_at, id"
         ).fetchall()
         return [_row_to_fleet_agent(row) for row in rows]
@@ -3783,7 +3796,7 @@ class SqliteStore:
         ``since`` compares as the stored ISO-8601 UTC strings do.
         """
         rows = self._conn.execute(
-            f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent "
+            f"SELECT {_FLEET_AGENT_READ} FROM fleet_agent "
             "WHERE project_id = ? AND ended_at >= ? ORDER BY created_at, id",
             (project_id, since.astimezone(UTC).isoformat()),
         ).fetchall()
@@ -3806,7 +3819,7 @@ class SqliteStore:
         sits, so the row recorded against it is that session's.
         """
         row = self._conn.execute(
-            f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent "
+            f"SELECT {_FLEET_AGENT_READ} FROM fleet_agent "
             "WHERE session_id = ? AND ended_at IS NULL "
             "ORDER BY created_at DESC LIMIT 1",
             (session_id,),
@@ -3890,7 +3903,7 @@ class SqliteStore:
     ) -> FleetAgent | None:
         clause = " AND ended_at IS NULL" if live_only else ""
         row = self._conn.execute(
-            f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent "
+            f"SELECT {_FLEET_AGENT_READ} FROM fleet_agent "
             f"WHERE project_id = ? AND label = ?{clause} ORDER BY created_at DESC LIMIT 1",
             (project_id, label),
         ).fetchone()

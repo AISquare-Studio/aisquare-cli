@@ -111,7 +111,9 @@ all of them, and the fleet cleans up the worktrees it made.**
 
   0.8.0 opens a v32 store as it is. A task it adds gets no number there; the
   next open by 0.8.1 numbers it after the last number on its board, in the
-  order such tasks were added.
+  order such tasks were added. An agent it spawns records no board there, and
+  0.8.1 reads it as one started before v32: its session's board, else its
+  project's.
 - Remote keeps its state in `~/.aisquare`: `remote.json` (owner-only),
   `remote-audit.log`, `remote-needs.json` and `remote-push.json`. Each is
   written only once Remote is used. `aisquare uninstall --purge` removes them

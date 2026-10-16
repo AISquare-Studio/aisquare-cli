@@ -8843,28 +8843,65 @@ def test_a_waiter_on_the_branch_lock_waits_while_its_holder_moves_on(
         holder.join(30)
 
 
-def test_a_holder_of_the_branch_lock_says_it_holds_it_whatever_step_it_is_on(
-    repo: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("stepping", [True, False], ids=["git-steps", "blocked"])
+def test_a_holder_of_the_branch_lock_moves_on_only_as_its_git_steps_finish(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, stepping: bool
 ) -> None:
-    """Review of #259, round 19: a holder said it moved on after each git command (a check in
-    the git seam) and once a spawn's window was up. Every other step under the lock, the
-    account files, the server's socket and start, the row, said nothing, and each step added
-    later had to remember to. The hold says so itself, from a thread of its own, whatever
-    the holder does, and stops once it lets go."""
+    """Review of #259, round 20: the hold said it still held from a thread of its own, every
+    ``_HOLDER_LOOK`` for as long as it lasted (round 19). That shows the process alive, not
+    moving: a holder blocked under the lock (a state-file ``flock`` on an NFS home whose lock
+    manager is gone, a ``git worktree add`` that will not die on Windows) kept saying so, and
+    every waiter waited on it with no limit. A holder moves on as each git command it runs
+    under the lock finishes; blocked, it says nothing, and a waiter calls it stuck.
+
+    Driven by events: stepping, the holder finishes one git command each time the waiter
+    looks, ten in all, more looks than the waiter's patience lasts, then lets go; blocked, it
+    holds until the waiter gives up, or for 5 s, after which round 19's waiter took the lock."""
     monkeypatch.setattr(fleet_service, "_HOLDER_LOOK", 0.01)
     common = fleet_service._git_common_dir(repo)
-    words: set[str] = set()
+    real_look = fleet_service._lock_holder
+    holding, step, stepped, let_go = (threading.Event() for _ in range(4))
+    steps: list[str] = []
+    looks: list[str] = []
 
-    with fleet_service._branches_locked(common, wait=0):
-        deadline = time.monotonic() + 5
-        while len(words) < 3 and time.monotonic() < deadline:  # no git, no tmux: a step
-            words.add(fleet_service._lock_holder(common))
-            time.sleep(0.005)
+    def look(at: Path) -> str:
+        if stepping and holding.is_set() and len(steps) < 10:
+            stepped.clear()
+            step.set()
+            assert stepped.wait(30)
+        looks.append(real_look(at))
+        return looks[-1]
 
-    assert len(words) >= 3, "the holder said nothing while it held"
-    assert not [t for t in threading.enumerate() if t.name == "aisquare-branch-lock"], (
-        "still saying so after it let go"
-    )
+    def a_holder() -> None:
+        with fleet_service._branches_locked(common, wait=0):
+            holding.set()
+            if not stepping:
+                let_go.wait(5)  # alive, and no step of it finishes
+                return
+            while len(steps) < 10:
+                step.wait(30)
+                step.clear()
+                steps.append(fleet_service._git(repo, "rev-parse", "HEAD").stdout)
+                stepped.set()
+
+    monkeypatch.setattr(fleet_service, "_lock_holder", look)
+    holder = threading.Thread(target=a_holder)
+    holder.start()
+    try:
+        assert holding.wait(30)
+        if stepping:
+            with fleet_service._branches_locked(common, wait=0.05):
+                assert len(steps) == 10, "taken once the holder let go"
+            assert len(looks) > 10, "waited through more looks than its patience lasts"
+        else:
+            with (
+                pytest.raises(FleetError, match="may be stuck"),
+                fleet_service._branches_locked(common, wait=0.05),
+            ):
+                pytest.fail("taken: the blocked holder said it held until it let go")
+    finally:
+        let_go.set()
+        holder.join(30)
 
 
 def test_a_spawn_waits_through_a_queue_of_holders_of_the_branch_lock(

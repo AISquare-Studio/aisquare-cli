@@ -2002,7 +2002,7 @@ function tellSheet(ctx, mode, replyTo) {
         if (delivered && ctx.needsId) dismissItem({ id: ctx.needsId });
         return;
       }
-      // current lists the agent's items once the card went; else it names the pin's row now.
+      // current: the agent's items once the card went, else the pin's row now.
       const now = res.status === 409 && res.error === "stale" ? (res.data && res.data.current) || [] : null;
       if (now && replyTo && !Array.isArray(now)) return postReply(ctx, sheet, replyTo, text.value);
       if (now && ctx.item) {
@@ -2031,8 +2031,8 @@ function tellSheet(ctx, mode, replyTo) {
   });
 }
 
-/* A note to the manager wakes it; another agent the fleet runs reads one only at its next
- * prompt, which nothing brings one that asked and waits: a reply to it is a Tell (auto). */
+/* A note wakes the manager; another agent reads one only at its next prompt, which nothing
+ * brings one that waits: a reply to it is a Tell (auto). */
 function replySheet(ctx) {
   const detail = ctx.item.detail && typeof ctx.item.detail === "object" ? ctx.item.detail : {};
   const author = typeof detail.author === "string" ? detail.author : "";
@@ -2055,6 +2055,7 @@ function replySheet(ctx) {
 async function postReply(ctx, sheet, author, words) {
   const body = { text: words, kind: "note", project: ctx.pid };
   if (isText(author)) body.to = author;
+  if (ctx.agentId) body.agent_id = ctx.agentId;
   sheet.busy(true);
   const res = await apiWrite(writePath("note"), body, "Reply", () => { sheet.status.textContent = LOST_WAIT; });
   sheet.busy(false);

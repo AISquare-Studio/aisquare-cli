@@ -2998,8 +2998,9 @@ async function dismissals() {
  * the fleet runs (agent and agent_id are its row), the tell typed in and filed as a note, and
  * refused stale as the machine refuses it once that row ended or another holds coder-1, or
  * once the card went (then, tapped again, once the row ended too); and a Reply to the
- * manager. The sheet's title, what was sent, the toast, the dismissals and what the sheet
- * said last, while it is open. */
+ * manager, posted, and refused as the machine refuses a row the project does not hold. The
+ * sheet's title, what was sent, the toast, the dismissals and what the sheet said last, while
+ * it is open. */
 async function crewReplies() {
   const crew = Object.assign({}, ITEM, {
     id: "ny_00000000000000c1", kind: "board_question", detail: { text: "Take T-4 or T-5?", author: "coder-1" }, answers: [], actions: ["reply", "dismiss"],
@@ -3008,12 +3009,12 @@ async function crewReplies() {
   const ok = () => ({ status: 200, json: { ok: true } });
   const strip = (body) => Object.fromEntries(Object.entries(body).filter(([key]) => key !== "request_id"));
   // told answers each tap of the sheet's button in turn, the last one any tap after it.
-  const reply = async (item, told, go) => {
+  const reply = async (item, told, go, noted = ok) => {
     const answers = [].concat(told);
     const page = bootPage("#/", signedIn({
       "GET api/needs": () => ({ status: 200, json: { items: [item] } }),
       "POST api/agent/tell": () => (answers.length > 1 ? answers.shift() : answers[0])(),
-      "POST api/note": ok,
+      "POST api/note": noted,
       "POST api/needs/dismiss": ok,
     }));
     await settle();
@@ -3046,6 +3047,9 @@ async function crewReplies() {
     went: await reply(crew, went, "Tell"),
     wentThenEnded: await reply(crew, [went, ended], "Tell"),
     manager: await reply(manager, answered(true, "typed into its pane (it was waiting)"), "Post"),
+    managerRefused: await reply(manager, answered(true, "typed"), "Post", () => ({
+      status: 404, json: { error: "not_found", message: "no fleet agent 'agt_m' in x (the 'agent_id' field)" },
+    })),
   };
 }
 

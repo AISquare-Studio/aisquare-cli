@@ -730,6 +730,32 @@ def _remote_task(
     return task
 
 
+def _remote_reply_board(target: ProjectInfo, agent_id: str) -> str:
+    """The board a phone's reply to a card of fleet row ``agent_id`` goes to: the one that row
+    recorded at spawn (``fleet._board_of_row``), where its session posted the question or
+    result the card is of, as ``fleet tell``'s note goes there too (``fleet._file_note``).
+
+    Resolved from the project's root under Remote's own environment, a reply to a manager
+    spawned under a hub Remote does not run under went to the project's own board: the
+    manager never read it, the question stayed open where it was asked, and the page, told
+    the note was posted, dismissed the card (review of #259, round 28, 2/10). A row of
+    another project, or none (an id prefix is not one), is a 404, and nothing is written."""
+    from aisquare.core.store import AmbiguousIdError, store_session
+    from aisquare.services import project as project_service
+    from aisquare.services.fleet import _board_of_row
+
+    with store_session() as store:
+        try:
+            row = store.get_fleet_agent(agent_id)
+        except AmbiguousIdError:
+            row = None
+    if row is None or row.id != agent_id or row.project_id != target.id:
+        name = project_service.display_name(target)
+        said = f"no fleet agent {agent_id!r} in {name} (the 'agent_id' field)"
+        raise RequestError(404, "not_found", said)
+    return _board_of_row(row)
+
+
 def _remote_number_board(session: str | None, project: str | None) -> str:
     """The board a write reads a task number on: the session's, the id of the ``as`` it
     resolved (:func:`_remote_author`, so a board a phone may reach), else the board of
@@ -3517,6 +3543,11 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
         phone, by its field: the board's sentence names ``asq note``'s ``--task``. Only
         that refusal: another ``ValueError`` from deeper in (a pydantic one, a text that
         will not encode) is still a write that failed.
+
+        ``agent_id``, a card's Reply: the fleet row whose question or result it answers. The
+        note goes to the board that row recorded (:func:`_remote_reply_board`), ``as`` or
+        not, so it lands where the card was read and the agent reads; a row the project
+        does not hold is a 404, and the page keeps the card.
         """
         from aisquare.services import team as team_service
 
@@ -3532,11 +3563,13 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
         if to is not None:
             check_note_to(to)
         task = _optional_ref(body, "task", limit=BOARD_REF_MAX)
+        replying = _optional_ref(body, "agent_id", limit=BOARD_REF_MAX, guard=True)
         try:
             reach = _RemoteReach()
             with _remote_board_refusals(reach, ("as", author, "session"), ("task", task, "task")):
                 session = _remote_author(author, reach)
-                cwd = _resolve_project(project).root
+                target = _resolve_project(project)
+                board = None if replying is None else _remote_reply_board(target, replying)
                 event = team_service.add_note(
                     text,
                     session_ref=session,
@@ -3547,7 +3580,8 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
                     ),
                     to_role=to,
                     kind=kind,
-                    cwd=cwd,
+                    cwd=target.root,
+                    board_id=board,
                 )
         except ValueError as exc:  # a task of another project's board, as ``asq note`` says
             if task is None or type(exc) is not ValueError:

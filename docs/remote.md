@@ -679,7 +679,9 @@ nobody added (the hooks capture one only with `[projects] capture` on), is named
 none of them, and `*` names nothing. A switch adds the project it names, so the current one, if you never
 added it, is switched to only where `add` would add it. A task's `ref`, a note's
 `task` and a board write's `as` name only a task or session on the board of a
-project the page is shown.
+project the page is shown. A card's Reply names the card's agent row (`agent_id`),
+and the note goes to the board that agent was spawned to read, where it asked;
+a row the project does not hold is a 404, and the card stays.
 
 The stream sends `{"type", "payload", "ts"}` frames, each kind when it changed:
 

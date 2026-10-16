@@ -615,6 +615,8 @@ all of them, and the fleet cleans up the worktrees it made.**
     replacement, or whose turn failed, is a card again, a manager's failed
     hand-over says so, a parked agent's limit card keeps its id, and a
     coder's question there is a card unless its manager reads that board.
+    The phone's Reply to such a card is posted on that board too, where the
+    agent reads it, and the card stays when the reply could not be posted.
   - Under a hub, a live manager keeps its own agents' questions and results to
     it, their crashes and their failed hand-overs off the phone, and holds back
     a usage limit's push, as it does without a hub. Before, each was a card and

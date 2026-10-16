@@ -2615,13 +2615,37 @@ def test_a_reply_to_a_coder_that_asked_reaches_it_as_its_tell_does(
         "dismissed": [],
         "said": None,
     }
+    noted = {"text": "Take T-4.", "kind": "note", "project": "prj_x", "to": "manager"}
+    noted.update(agent_id="agt_m")
     assert replies["manager"] == {
         "title": "Reply on the board",
         "told": [],
-        "noted": [{"text": "Take T-4.", "kind": "note", "project": "prj_x", "to": "manager"}],
+        "noted": [noted],
         "toast": "Posted on the board",
         "dismissed": ["ny_00000000000000c2"],
         "said": None,
+    }
+
+
+def test_a_reply_to_a_cards_agent_names_its_row_and_keeps_the_card_until_it_is_posted(
+    boot_report: dict[str, Any],
+) -> None:
+    """Review of #259, round 28, 2/10: a Reply to the manager's question was a note the
+    machine wrote on the board Remote's own environment resolves, not the one the question
+    was asked on, and the page dismissed the card on the 200 all the same: under a hub only
+    one of the two runs under, the answer was lost. The note names the card's row, whose
+    board the machine writes it on (``remote_server._remote_reply_board``); refused, as for
+    a row the project does not hold, it is not posted and the card stays."""
+    replies = boot_report["crewReplies"]
+    noted = {"text": "Take T-4.", "kind": "note", "project": "prj_x", "to": "manager"}
+    noted.update(agent_id="agt_m")
+    assert replies["managerRefused"] == {
+        "title": "Reply on the board",
+        "told": [],
+        "noted": [noted],
+        "toast": "",
+        "dismissed": [],
+        "said": "no fleet agent 'agt_m' in x (the 'agent_id' field)",
     }
 
 
@@ -2639,6 +2663,7 @@ def test_a_reply_to_a_coder_that_ended_or_was_replaced_since_it_asked_is_the_not
     told = {"agent": "coder-1", "project": "prj_x", "text": "Take T-4.", "mode": "auto"}
     told.update(needs_id="ny_00000000000000c1", agent_id="agt_1")
     noted = {"text": "Take T-4.", "kind": "note", "project": "prj_x", "to": "coder-1"}
+    noted.update(agent_id="agt_1")  # the row that asked: its board is where it asked
     for gone in ("ended", "replaced"):
         assert replies[gone] == {
             "title": "Tell coder-1",
@@ -3235,7 +3260,8 @@ def test_every_request_asks_as_the_spec_says(boot_report: dict[str, Any]) -> Non
 
 def test_each_write_carries_what_the_spec_says_it_sends(boot_report: dict[str, Any]) -> None:
     """SPEC §6.3's writes, as the machine received them. Send carries the ⏎ toggle; a note
-    and a Reply their project, a Reply the question's author; a card's Tell mode prompt and
+    and a Reply their project, a Reply the question's author and the card's row, on whose
+    board it is written (review of #259, round 28, 2/10); a card's Tell mode prompt and
     the card's needs_id; a card's Switch agent_id, confirm and needs_id, the fields the
     machine's stale and double-run guards stand on. A Tell refused agent_busy offers
     Interrupt & tell, and an agent at its usage limit has Switch account first. No test
@@ -3248,7 +3274,13 @@ def test_each_write_carries_what_the_spec_says_it_sends(boot_report: dict[str, A
         {"text": "shipping now", "kind": "decision", "project": "prj_x", "to": "lead-1"}
     ]
     assert writes["reply"] == [
-        {"text": "Postgres", "kind": "note", "project": "prj_x", "to": "lead-1"}
+        {
+            "text": "Postgres",
+            "kind": "note",
+            "project": "prj_x",
+            "to": "lead-1",
+            "agent_id": "agt_1",
+        }
     ]
     card = {"needs_id": "ny_0123456789abcdef", "agent_id": "agt_1"}
     assert writes["tell"] == [{**agent, "text": "yes, merge", "mode": "prompt", **card}]

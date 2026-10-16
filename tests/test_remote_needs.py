@@ -4716,6 +4716,55 @@ def test_a_result_on_a_board_the_stopped_manager_never_read_stays_a_card(
     assert results() == [("board_result", "coder-1")]
 
 
+def test_a_phones_reply_to_a_card_is_posted_on_the_board_its_row_asked_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 28, 2/10: P's manager, spawned under a hub, asks the human on the
+    hub's board, and Remote runs without the hub. The phone's Reply was ``note`` with
+    ``project: P``, written in P's root under Remote's environment: on P's own board, which
+    the manager does not read, so the question stayed open where it was asked, and the page
+    dismissed the card on the 200. The reply names the card's row, and goes to the board that
+    row recorded; a row the project does not hold is refused, and nothing is written."""
+    from aisquare.services.remote_server import RequestError, live_writes
+
+    monkeypatch.delenv("AISQUARE_TEAM_HUB", raising=False)
+    with store_session() as store:
+        p = store.onboard_project(_rooted(tmp_path / "p"))
+        other = store.onboard_project(_rooted(tmp_path / "other"))
+        hub = _rooted(tmp_path / "hub")
+        store.ensure_project(hub)
+        _seat_up(store, _manager_of("p", asks=True), p, hub)
+        _seat_up(store, _Seat("other", "coder-1"), other, other)
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+
+    def cards() -> list[tuple[str, str | None]]:
+        items = scan_needs_you(
+            remote_needs.live_needs_sources(), now=datetime.now(UTC), dismissed=()
+        )
+        return [(item.kind, item.agent) for item in items]
+
+    def notes() -> dict[str, list[str]]:
+        with store_session() as store:
+            boards = (p.id, hub.id, other.id)
+            return {
+                board: [e.text for e in store.recent_events(board, limit=9) if e.kind == "note"]
+                for board in boards
+            }
+
+    reply = {"text": "Postgres", "kind": "note", "project": p.id, "to": "manager"}
+    assert cards() == [("board_question", "manager")]
+    with pytest.raises(RequestError) as refused:
+        live_writes().handlers["note"]({**reply, "agent_id": "agt_other_coder-1"})
+    assert refused.value.status == 404, "another project's row"
+    assert notes() == {p.id: [], hub.id: [], other.id: []}
+
+    live_writes().handlers["note"]({**reply, "agent_id": "agt_p_manager"})
+
+    assert notes() == {p.id: [], hub.id: ["Postgres"], other.id: []}
+    assert cards() == [], "answered where it was asked"
+
+
 @dataclass(frozen=True)
 class _Seat:
     """One agent of a board: its fleet project, label and role; whether a fleet row holds it

@@ -2204,6 +2204,8 @@ def test_a_usage_line_under_python_m_names_the_program_aisquare() -> None:
     done = subprocess.run(
         [*selfcli.isolated_argv_for(["task", "no-such-command"])],
         capture_output=True, text=True, timeout=120, check=False,
+        env={**os.environ, "NO_COLOR": "1", "TERM": "dumb"},
     )  # fmt: skip
-    said = done.stdout + done.stderr
+    # Plain text however the runner styles it (CI forces colour: the escapes split the line).
+    said = re.sub(r"\x1b\[[0-9;]*m", "", done.stdout + done.stderr)
     assert "Usage: aisquare task" in said and "python -m" not in said, said

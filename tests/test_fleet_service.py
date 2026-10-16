@@ -4434,6 +4434,50 @@ def test_a_spawned_agent_is_told_its_task_on_its_first_start(
     assert _row(agent.id).session_id == first, "the minted id is the row's from the spawn"
 
 
+def test_a_fleet_agents_cycle_names_its_own_project_under_a_hub(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 22, 1/9: under ``AISQUARE_TEAM_HUB`` every session is on the
+    hub's board, and the cycle named the board's project in every fleet command. So the
+    manager was told to spawn its coders in the hub's directory, and its ``stop``,
+    ``tell`` and ``switch`` found no live agent there. They name the agent's own row's
+    project, by its codename. A session with no row is left bare under a hub."""
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    with store_session() as store:
+        store.onboard_project(team_project(hub))
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))
+    _agent, session_id = _spawned(project, "manager", None, tmux, monkeypatch)
+    with store_session() as store:
+        stored = store.get_project(project.id)
+    assert stored is not None and stored.codename, "a spawn gives its project a codename"
+
+    board = team_service.hook_session_start(session_id, project.root, "startup")
+
+    assert "Your standing cycle (manager)" in board
+    commands = re.findall(r"aisquare fleet [a-z]+(?: --project [\w.-]+)?", board)
+    assert {command.split()[2] for command in commands} == {
+        "spawn",
+        "tell",
+        "switch",
+        "stop",
+        "reap",
+    }
+    assert all(command.endswith(f"--project {stored.codename}") for command in commands), commands
+    assert team_project(hub).id not in board
+
+    _stranger(monkeypatch, "manager")
+    plain = team_service.hook_session_start("sess-no-row", project.root, "startup")
+
+    assert "`aisquare fleet reap` again, then" in plain
+    bare = re.findall(r"aisquare fleet [a-z]+(?: --project [\w.-]+)?", plain)
+    assert bare and not any("--project" in command for command in bare), bare
+
+
 def test_task_next_prefers_the_callers_assigned_task_over_the_oldest(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

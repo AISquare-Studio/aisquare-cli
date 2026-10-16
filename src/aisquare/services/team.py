@@ -42,6 +42,7 @@ from aisquare.models import (
     TeamTask,
 )
 from aisquare.services import distill as distill_service
+from aisquare.services import install_route
 from aisquare.services import project as project_service
 
 #: The fail-open reads of the fleet row say here what they swallowed. Nothing
@@ -1569,6 +1570,7 @@ def hook_session_start(
             me=session,
             assigned=assigned,
             labels=lambda: slot_labels_via(store),
+            fleet=_cycle_project(store, project),
         )
 
 
@@ -1629,6 +1631,7 @@ def hook_prompt_heartbeat(
                 me=session,
                 assigned=assigned,
                 labels=lambda: slot_labels_via(store),
+                fleet=_cycle_project(store, project),
             )
         # Same check as session_start, on the path that actually runs every turn.
         # It must survive the empty-delta early return below: a collision warning
@@ -2359,7 +2362,10 @@ def _render_board(
     me: TeamSession | None,
     assigned: Assignment | None = None,
     labels: Mapping[int, str] | Callable[[], Mapping[int, str]] | None = None,
+    fleet: ProjectInfo | None = None,
 ) -> str:
+    """The board, and for ``me`` the protocol and its role's cycle, whose fleet commands
+    name ``fleet`` (:func:`_cycle_project`)."""
     now = _now()
     numbers = {t.id: t.number for t in tasks if t.number is not None}
     lines = ["<aisquare-team>"]
@@ -2437,7 +2443,7 @@ def _render_board(
             f"`aisquare task done <id> --as {short_id(me.id)}`. Share decisions/results:",
             f'`aisquare note "…" --as {short_id(me.id)}`. Full board: `aisquare board`.',
             "Every ✓ prints a receipt (seq N); `aisquare team verify <seq>` re-checks it.",
-            *_role_cycle(me, project),
+            *_role_cycle(me, fleet),
         ]
     lines.append("</aisquare-team>")
     return "\n".join(lines)
@@ -2901,7 +2907,7 @@ def _assignment_lines(assignment: Assignment, me: TeamSession) -> list[str]:
     ]
 
 
-def _role_cycle(me: TeamSession, project: ProjectInfo) -> list[str]:
+def _role_cycle(me: TeamSession, project: ProjectInfo | None) -> list[str]:
     """The standing work cycle for a role — injected so nobody has to paste it.
 
     The cycles themselves live in :mod:`aisquare.core.harness` (one source of
@@ -2911,13 +2917,50 @@ def _role_cycle(me: TeamSession, project: ProjectInfo) -> list[str]:
     role's cycle. Without that a seat got an empty briefing — the one thing the
     seat's own comment in ``cli/launch.py`` promises it does not lose.
 
-    Its fleet commands name ``project``, the board's (``project_service.fleet_command``).
+    Its fleet commands name ``project``, the session's fleet project
+    (:func:`_cycle_project`), through ``project_service.fleet_command``. With none, they
+    are bare, and act on the active project, as they did before round 21 of the review of
+    #259.
     """
-    return harness.role_cycle(
-        base_role(me.role),
-        short_id(me.id),
-        fleet=lambda verb: project_service.fleet_command(verb, project),
+    fleet: harness.FleetCommand = (
+        (lambda verb: project_service.fleet_command(verb, project))
+        if project is not None
+        else (lambda verb: install_route.command_line(["aisquare", "fleet", verb]))
     )
+    return harness.role_cycle(base_role(me.role), short_id(me.id), fleet=fleet)
+
+
+def _cycle_project(store: ContextStore, board: ProjectInfo) -> ProjectInfo | None:
+    """The project a session's cycle names in its fleet commands: its fleet row's.
+
+    Not the board's. Under ``AISQUARE_TEAM_HUB`` the board is the hub's, and ``fleet
+    spawn`` sets the hub on every window it starts, while each row is in its own project.
+    Named by the board, a manager's cycle spawned its coders in the hub's directory, and
+    its ``stop``, ``tell`` and ``switch`` found no live agent there (review of #259, round
+    22). The row is the one ``AISQUARE_FLEET_AGENT`` names, read whatever project it is in:
+    a child that inherited the variable runs in the same project. Its project is read
+    stored, codename and all.
+
+    A session with no live row is named by the board when no hub is set: the board is then
+    its directory's project. Under a hub it is ``None``, and the commands are left bare.
+    Fail-open, like the assignment: a row that cannot be read costs the project, never
+    the board.
+    """
+    agent_id = orchestrator.env_fleet_agent()
+    if agent_id is not None:
+        try:
+            agent = store.get_fleet_agent(agent_id)
+            if agent is not None and agent.ended_at is None:
+                return store.get_project(agent.project_id)
+        except Exception as exc:
+            _log.warning(
+                "the fleet row %s could not be read, so the cycle names no project (%s: %s)",
+                agent_id,
+                type(exc).__name__,
+                exc,
+            )
+            return None
+    return None if orchestrator.team_hub() is not None else board
 
 
 def event_line(

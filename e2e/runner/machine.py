@@ -70,11 +70,18 @@ def _refuse_real_home(home: Path) -> None:
         raise RealHomeError(f"refusing to use {resolved} as the test machine's HOME (it is real)")
 
 
-def _system_path() -> list[str]:
-    """What a developer's PATH has besides ~/.local/bin: system dirs, Homebrew, Node."""
+def _system_path(*, developer_node: bool) -> list[str]:
+    """What the user's PATH has besides ~/.local/bin: the system dirs (and Homebrew's).
+
+    ``developer_node`` adds the directory of the ``node`` the HARNESS sees (nvm, fnm),
+    which is what a developer's own shell has. Only for local runs: in CI the user is a
+    fresh account, and handing it the runner's Node (act's toolcache, the VM's) would
+    let the installer report Node "already current" instead of installing it — the
+    very step J01 exists to watch.
+    """
     entries = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
-    node = shutil.which("node")
-    if node:  # nvm / fnm / Homebrew Node: repomix needs it for codebase snapshots
+    node = shutil.which("node") if developer_node else None
+    if node:  # repomix needs Node for codebase snapshots
         entries.insert(0, str(Path(node).parent))
     return [e for e in dict.fromkeys(entries) if Path(e).is_dir()]
 
@@ -120,7 +127,8 @@ class Machine:
         return self.home / ".local" / "e2e-agent"
 
     def path(self) -> str:
-        return ":".join([str(self.agent_dir), str(self.home / ".local" / "bin"), *_system_path()])
+        system = _system_path(developer_node=self.user is None)
+        return ":".join([str(self.agent_dir), str(self.home / ".local" / "bin"), *system])
 
     def base_env(self) -> dict[str, str]:
         """The allowlisted environment of a fresh login on this machine."""

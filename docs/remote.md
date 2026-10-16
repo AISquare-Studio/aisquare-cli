@@ -686,7 +686,10 @@ added it, is switched to only where `add` would add it. A task's `ref`, a note's
 `task` and a board write's `as` name only a task or session on the board of a
 project the page is shown. A card's Reply names the card's agent row (`agent_id`),
 and the note goes to the board that agent was spawned to read, where it asked;
-a row the project does not hold is a 404, and the card stays. A note's `task`
+a row the project does not hold is a 404, and the card stays. A card of a session
+no fleet row holds (one launched by hand) names the board it was read on instead
+(`board`, which each board card carries), and the note goes there; a board the
+page is not shown is a 404. A note's `task`
 number (`12`, `#12`) is read on the board the note goes to, as the CLI's
 `--task` reads it.
 

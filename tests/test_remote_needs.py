@@ -4864,6 +4864,55 @@ def test_a_phones_reply_to_a_card_is_posted_on_the_board_its_row_asked_on(
     assert cards() == [], "answered where it was asked"
 
 
+def test_a_phones_reply_to_a_card_no_row_holds_is_posted_on_the_board_it_was_read_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 32, 1/9: P's manager, spawned under a hub, reads the hub, and
+    Remote runs without it. A session launched by hand in P's checkout (no fleet row) asks
+    on P's own board, and its card's Reply named only its author: no running agent has that
+    label, so the note went to the board P's manager reads. The asker never read it, its
+    question stayed open, and the page dismissed the card on the 200. The card carries the
+    board it was read on, and the Reply that sends it back is posted there; a board the
+    phone may not reach is refused, and nothing is written."""
+    from aisquare.services.remote_server import RequestError, live_writes
+
+    monkeypatch.delenv("AISQUARE_TEAM_HUB", raising=False)
+    with store_session() as store:
+        p = store.onboard_project(_rooted(tmp_path / "p"))
+        hub = _rooted(tmp_path / "hub")
+        store.ensure_project(hub)
+        _seat_up(store, _manager_of("p"), p, hub)
+        _seat_up(store, _Seat("p", "coder-1", asks=True, rowed=False), p, p)
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+
+    def cards() -> list[NeedsItem]:
+        return scan_needs_you(
+            remote_needs.live_needs_sources(), now=datetime.now(UTC), dismissed=()
+        )
+
+    def notes() -> dict[str, list[str]]:
+        with store_session() as store:
+            return {
+                board: [e.text for e in store.recent_events(board, limit=9) if e.kind == "note"]
+                for board in (p.id, hub.id)
+            }
+
+    (card,) = cards()
+    shown = card.needs_item_json()
+    assert (shown["kind"], shown["agent_id"], shown["board"]) == ("board_question", None, p.id)
+    reply = {"text": "Postgres", "kind": "note", "project": p.id, "to": "coder-1"}
+    with pytest.raises(RequestError) as refused:
+        live_writes().handlers["note"]({**reply, "board": "prj_nowhere"})
+    assert refused.value.status == 404, "a board the phone may not reach"
+    assert notes() == {p.id: [], hub.id: []}
+
+    live_writes().handlers["note"]({**reply, "board": shown["board"]})
+
+    assert notes() == {p.id: ["Postgres"], hub.id: []}
+    assert cards() == [], "answered where it was asked"
+
+
 def _hubbed_tasks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remote: str, *, end: str | None = None
 ) -> tuple[ProjectInfo, ProjectInfo, TeamTask]:
@@ -7059,7 +7108,7 @@ def test_the_feed_is_one_scan_away_when_no_watcher_runs(live: Live) -> None:
     card = body["items"][0]
     assert set(card) == {
         "id", "kind", "project", "agent", "agent_id", "reason", "excerpt", "detail",
-        "answers", "since", "actions",
+        "answers", "since", "actions", "board",
     }  # fmt: skip
     assert card["project"] == {"id": "prj_alpha", "name": "alpha"}
     assert card["detail"] == {"tool": "Bash", "input": {"command": "git push"}}

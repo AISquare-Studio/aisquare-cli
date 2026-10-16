@@ -1046,6 +1046,7 @@ def test_a_needs_item_serializes_to_the_wire_shape_without_push_after() -> None:
         "answers": [{"label": "Redis", "keys": ["1"]}, {"label": "Cancel", "keys": ["Escape"]}],
         "since": "2026-10-07T10:12:03+00:00",
         "actions": ["answer", "open", "dismiss"],
+        "board": None,
     }
 
 

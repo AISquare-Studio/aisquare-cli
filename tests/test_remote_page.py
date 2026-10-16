@@ -700,8 +700,9 @@ BUDGETS = {
     # SPEC §6.1 set 110 KB, and the page met it with 13 bytes to spare. The third review of
     # #243 found more for it to do: ask for a board only on its tab, keep keys in tap order,
     # answer a late reply in its own sheet. The fourth, and a sweep of the page in a real
-    # browser, found more again. This is their room; the page stays under 150 KB.
-    "app.js": 129 * 1024,
+    # browser, found more again. This is their room; the page stays under 150 KB. Half a KiB
+    # more for a Reply that names the board its card was read on (#259, round 32, 1/9).
+    "app.js": 129 * 1024 + 512,
     "sw.js": 4 * 1024,
     "manifest.webmanifest": 1024,
 }
@@ -2647,6 +2648,29 @@ def test_a_reply_to_a_cards_agent_names_its_row_and_keeps_the_card_until_it_is_p
         "dismissed": [],
         "said": "no fleet agent 'agt_m' in x (the 'agent_id' field)",
     }
+
+
+def test_a_reply_to_a_card_no_row_holds_names_the_board_the_card_was_read_on(
+    boot_report: dict[str, Any],
+) -> None:
+    """Review of #259, round 32, 1/9: a Reply to a card of a session no fleet row holds (one
+    launched by hand) named only its author, and the machine, finding no running agent of
+    that label, wrote the note on the board the project's manager reads, not the one the
+    card was read on. The page sends the card's ``board`` back with such a Reply; a card
+    with a row names the row (``agent_id``) alone, whose board the machine knows."""
+    replies = boot_report["crewReplies"]
+    noted = {"text": "Take T-4.", "kind": "note", "project": "prj_x", "to": "coder-1"}
+    noted.update(board="prj_c")
+    assert replies["rowless"] == {
+        "title": "Reply on the board",
+        "told": [],
+        "noted": [noted],
+        "toast": "Posted on the board",
+        "dismissed": ["ny_00000000000000c3"],
+        "said": None,
+    }
+    (by_row,) = replies["manager"]["noted"]
+    assert by_row["agent_id"] == "agt_m" and "board" not in by_row
 
 
 def test_a_reply_to_a_coder_that_ended_or_was_replaced_since_it_asked_is_the_note_it_was(

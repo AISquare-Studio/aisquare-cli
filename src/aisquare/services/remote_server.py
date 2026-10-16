@@ -846,6 +846,23 @@ def _remote_reply_board(target: ProjectInfo, agent_id: str) -> str:
     return _board_of_row(row)
 
 
+def _remote_card_board(board: str, reach: Callable[[], set[str]]) -> str:
+    """The board a phone's reply to a card of a session no row holds goes to: the one the card
+    was read on, which the card carries (``NeedsItem.board``), when a phone may reach it
+    (``reach``, :class:`_RemoteReach`); else a 404, and nothing is written.
+
+    Such a card's Reply named only its author, and with no running agent of that label the
+    note went to the board the project's manager reads (:func:`_remote_note_board`). Under a
+    hub only the manager was spawned under, a question asked on the project's checkout board
+    by a session launched by hand was answered on the hub: the asker never read it, its
+    question stayed open, and the page, told the note was posted, dismissed the card (review
+    of #259, round 32, 1/9; a card with a row names it, :func:`_remote_reply_board`)."""
+    if board not in reach():
+        said = f"no board {board!r} on a project the page is shown (the 'board' field)"
+        raise RequestError(404, "not_found", said)
+    return board
+
+
 def _remote_number_board(session: str | None, project: str | None) -> str:
     """The board a write reads a task number on: the session's, the id of the ``as`` it
     resolved (:func:`_remote_author`, so a board a phone may reach), else the board of
@@ -3660,11 +3677,13 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
         ``agent_id``, a card's Reply: the fleet row whose question or result it answers. The
         note goes to the board that row recorded (:func:`_remote_reply_board`), ``as`` or
         not, so it lands where the card was read and the agent reads; a row the project
-        does not hold is a 404, and the page keeps the card. With neither, the note goes to
-        the board its ``to`` reads, when that is the label of one of the project's running
-        agents, else to the board the project's agents read, the one the Board tab shows
-        (:func:`_remote_note_board`). A ``task`` number is read on the board the note goes to
-        (:func:`_remote_task`).
+        does not hold is a 404, and the page keeps the card. ``board``, a Reply to a card
+        of a session no row holds: the board the card was read on (``NeedsItem.board``),
+        ``as`` or not, one a phone may reach or a 404 (:func:`_remote_card_board`). With
+        none of them, the note goes to the board its ``to`` reads, when that is the label of
+        one of the project's running agents, else to the board the project's agents read,
+        the one the Board tab shows (:func:`_remote_note_board`). A ``task`` number is read
+        on the board the note goes to (:func:`_remote_task`).
         """
         from aisquare.services import team as team_service
 
@@ -3681,6 +3700,7 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
             check_note_to(to)
         task = _optional_ref(body, "task", limit=BOARD_REF_MAX)
         replying = _optional_ref(body, "agent_id", limit=BOARD_REF_MAX, guard=True)
+        card = _optional_ref(body, "board", limit=BOARD_REF_MAX, guard=True)
         try:
             reach = _RemoteReach()
             with _remote_board_refusals(reach, ("as", author, "session"), ("task", task, "task")):
@@ -3689,6 +3709,8 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
                 board: str | None = None  # `as`: the session's own board, the CLI's rule
                 if replying is not None:
                     board = _remote_reply_board(target, replying)
+                elif card is not None:
+                    board = _remote_card_board(card, reach)
                 elif session is None:
                     # The addressed agent's, else the Board tab's. A project with no live
                     # rows is resolved in its root as `asq note` there does, which refuses

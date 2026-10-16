@@ -328,12 +328,15 @@ class NeedsItem:
     it is drawn is a card of its own. Internal: never serialized."""
     board: str | None = None
     """The board a board question or result was read on, which several projects' scans may
-    read (:func:`_needs_board_once`); ``None`` for every other kind. Internal: never
-    serialized."""
+    read (:func:`_needs_board_once`); ``None`` for every other kind. Sent with the card, and
+    its Reply sends it back, so the note goes to the board the card was read on
+    (``remote_server.write_note``): from a session no row holds, a Reply naming only its
+    author went to the board the project's manager reads (review of #259, round 32, 1/9)."""
 
     def needs_item_json(self) -> dict[str, object]:
         """The wire shape (SPEC §1.4): the project as ``{id, name}``, ``push_after`` left out,
-        ``since`` the API's ISO stamp (``remote_server._iso_seconds``)."""
+        ``since`` the API's ISO stamp (``remote_server._iso_seconds``), and the ``board`` a
+        board question or result was read on (``null`` for every other kind)."""
         from aisquare.services.remote_server import _iso_seconds
 
         return {
@@ -348,6 +351,7 @@ class NeedsItem:
             "answers": [{"label": a.label, "keys": list(a.keys)} for a in self.answers],
             "since": _iso_seconds(self.since),
             "actions": list(self.actions),
+            "board": self.board,
         }
 
 

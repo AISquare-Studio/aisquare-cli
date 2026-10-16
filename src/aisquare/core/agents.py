@@ -1253,8 +1253,10 @@ def hooks_can_start(name: str, config_dir: Path) -> bool:
     return all(binary is None or _starts(binary.program) for binary in found)
 
 
-def launcher_finds(name: str) -> Path | None:
-    """The program ``name`` where the plugin's launcher looks for it, as THIS process sees.
+def launcher_finds(name: str, path: str | None = None) -> Path | None:
+    """The program ``name`` where the plugin's launcher looks for it, as THIS process sees,
+    or as a process with ``path`` for its ``PATH`` does (a launch's, whose hooks run with it:
+    ``store_broker.install_paths``).
 
     The launcher's ``_find`` (``plugins/claude-code/scripts/aisquare-hook``): on PATH,
     then ``~/.local/bin`` and ``~/.cargo/bin``, for ``aisquare`` and for ``uvx`` alike,
@@ -1263,7 +1265,7 @@ def launcher_finds(name: str) -> Path | None:
     started from a desktop app may see another PATH; this is the best a doctor run can
     see.
     """
-    found = shutil.which(name)
+    found = shutil.which(name, path=path)
     if found and _starts(Path(found)):
         return Path(found)
     for candidate in (_home() / ".local" / "bin", _home() / ".cargo" / "bin"):
@@ -1787,6 +1789,10 @@ class HookBinary:
 
     program: Path
     module_form: bool = False
+    isolated: bool = False
+    """The module form with ``-E`` (or ``-I``), which ignores ``PYTHONPATH`` and
+    ``PYTHONHOME``: what :func:`_aisquare_command` writes for an agent that sandboxes its
+    tools (:func:`hook_runs_isolated`)."""
 
     def version_argv(self) -> list[str]:
         argv = [str(self.program)]
@@ -1794,8 +1800,10 @@ class HookBinary:
             # -P keeps the probe's cwd off sys.path (#81): doctor run from a
             # checkout that ships its own `aisquare/` package would otherwise
             # import THAT instead of the hook's install and grade a healthy
-            # hook `unknown`. Same flag `selfcli.argv_for` writes into hooks.
-            argv += ["-P", "-m", "aisquare"]
+            # hook `unknown`. Same flag `selfcli.argv_for` writes into hooks; and
+            # -E where the hook has it, so the probe imports what the hook imports, not a
+            # tree's on PYTHONPATH (review r15 of #113, finding 12).
+            argv += ["-E", "-P", "-m", "aisquare"] if self.isolated else ["-P", "-m", "aisquare"]
         return [*argv, "--version"]
 
 
@@ -1900,7 +1908,11 @@ def hook_binary(command: str) -> HookBinary | None:
         return None
     tokens, _ = _hook_command_parts(command)
     if tokens[-4:-2] == ["-m", "aisquare"]:
-        return HookBinary(_resolve_program(tokens[0]), module_form=True)
+        return HookBinary(
+            _resolve_program(tokens[0]),
+            module_form=True,
+            isolated=any(token in ("-E", "-I") for token in tokens[1:-4]),
+        )
     return HookBinary(_resolve_program(tokens[0]))
 
 

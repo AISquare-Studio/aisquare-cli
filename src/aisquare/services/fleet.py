@@ -2493,7 +2493,7 @@ def spawn(
             prospective,
             selected.adapter,
             home,
-            config,
+            _window_path(config, selected.profile.env),
         )
     # The spawn goes ahead: the codename names its tmux session and its branch. A
     # directory with no live row, never seen or forgotten, is captured for it
@@ -6734,11 +6734,17 @@ def _resumable(
     return ResumeSpec(facts.id, transcript, native), None
 
 
-def _window_path(config: FleetSettings | None) -> str | None:
-    """The ``PATH`` a fleet window's ``aisquare launch`` will have: the fleet server's,
-    which every window inherits (``carry_environment`` carries none), while one answers;
-    else this process's, which a server it starts takes (review r14 of #113, finding 6:
-    asked with the caller's, a spawn took a receipt for a window its launch refused)."""
+def _window_path(
+    config: FleetSettings | None, bound: Mapping[str, str] | None = None
+) -> str | None:
+    """The ``PATH`` a fleet window's ``aisquare launch`` checks with: the role binding's
+    (``bound``, the profile's ``env``, which that launch lays over its environment before
+    it asks: review r15 of #113, finding 7), else the fleet server's, which every window
+    inherits (``carry_environment`` carries none), while one answers; else this
+    process's, which a server it starts takes (r14, finding 6: asked with the caller's, a
+    spawn took a receipt for a window its launch refused)."""
+    if bound and "PATH" in bound:
+        return bound["PATH"]
     with suppress(Exception):
         found = server(config).global_environment("PATH")
         if found is not None:
@@ -6751,16 +6757,16 @@ def _refuse_an_install_the_sandbox_writes(
     cwd: Path,
     adapter: AgentAdapter,
     home: Path | None,
-    config: FleetSettings | None,
+    path: str | None,
 ) -> None:
     """``store_broker.refuse_inside`` for a window's launch, before any window or stop, with
-    the ``PATH`` the window will have (:func:`_window_path`): its refusal as a
+    the ``PATH`` the window will have (``path``, :func:`_window_path`): its refusal as a
     :class:`FleetError`, and any other failure to work it out too, rather than a traceback
     or a window started unprotected (review r14 of #113, finding 7)."""
     from aisquare.services import store_broker
 
     try:
-        store_broker.refuse_inside(argv, cwd, adapter, home, _window_path(config))
+        store_broker.refuse_inside(argv, cwd, adapter, home, path)
     except store_broker.LaunchRefused as exc:
         raise FleetError(str(exc)) from exc
     except Exception as exc:
@@ -6772,16 +6778,16 @@ def _refuse_an_install_the_sandbox_writes(
 
 def _replay_permission_args(
     adapter: AgentAdapter, record: launch_seal.LaunchRecord, label: str, mode: str
-) -> list[str] | None:
+) -> list[str]:
     """The sandbox and approval arguments ``mode`` gives the replacement of ``record``'s agent
-    (``fleet restart --permission-mode``), as :func:`spawn` turns it into them; ``None``
-    where this cannot tell (a mode that is the agent's to refuse)."""
-    try:
-        if PermissionIntent.written(mode):
-            return adapter.permission_args(PermissionIntent.parse(mode), record.role)
-        return adapter.fleet_args(record.role, label, mode)
-    except ValueError:
-        return None
+    (``fleet restart --permission-mode``), as :func:`spawn` turns it into them, the role's
+    own settings included (:func:`permission_flags` with ``role_settings``: a mode in the
+    agent's own words beside a role's ``sandbox`` is refused there, which the stop came
+    before; review r15 of #113, finding 6). :class:`FleetError` for one spawn would refuse."""
+    flags, _ = permission_flags(
+        adapter, record.role, label, role_settings(record.role), permission_mode=mode
+    )
+    return flags
 
 
 def _refuse_a_replay_that_cannot_start(
@@ -6843,15 +6849,14 @@ def _refuse_a_replay_that_cannot_start(
             given = _replay_permission_args(
                 selected.adapter, record, record.label or "", permission_mode
             )
-            if given is not None:
-                native = [*given, *record.spec.extra_args]
+            native = [*given, *record.spec.extra_args]
         account = home or (Path(record.account_home) if record.account_home else None)
         _refuse_an_install_the_sandbox_writes(
             [record.binary, *native],
             Path(record.cwd),
             selected.adapter,
             account or selected.config_dir,
-            None,
+            _window_path(None, selected.profile.env),
         )
 
 

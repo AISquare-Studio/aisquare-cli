@@ -18,7 +18,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from importlib import import_module
@@ -1068,6 +1068,7 @@ def test_the_install_check_reads_the_interpreters_whole_startup(
     monkeypatch.setattr(store_broker, "install_paths", REAL_INSTALL_PATHS)
     user_site = tmp_path / "home" / ".local" / "lib" / "site-packages"
     monkeypatch.setattr(site, "ENABLE_USER_SITE", True)
+    monkeypatch.setattr(sys, "base_prefix", sys.prefix)  # an interpreter that loads it
     monkeypatch.setattr(site, "getusersitepackages", lambda: str(user_site))
     environment = tmp_path / "hooks-venv"
     program = environment / "bin" / "aisquare"
@@ -1778,8 +1779,9 @@ def test_the_plugins_uvx_cache_counts_only_where_its_launcher_would_run_uvx(
     ``~/.cache/aisquare`` always counted as what the hooks run, so ``writable_roots =
     ["~/.cache"]`` refused every workspace launch, naming an install that was not there.
     The launcher runs ``uvx`` only with no ``aisquare`` on ``PATH`` or in ``~/.local/bin``,
-    runs nothing for an untrusted plugin, stands down where the hooks file runs aisquare
-    for every event, and finds uv's cache under ``$XDG_CACHE_HOME``."""
+    runs nothing for an untrusted plugin (unless the launch bypasses hook trust: r15),
+    stands down beside a hook of ours that can start (r15), and finds uv's cache under
+    ``$XDG_CACHE_HOME``."""
     from aisquare.core import agents
     from aisquare.core.agent_adapters.types import PluginInstall
 
@@ -1787,10 +1789,13 @@ def test_the_plugins_uvx_cache_counts_only_where_its_launcher_would_run_uvx(
     home = beyond_tmp / "home"
     (home / ".local" / "bin").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(agents, "_home", lambda: home)
     monkeypatch.delenv("UV_CACHE_DIR", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(beyond_tmp / "no-config"))
     cache = beyond_tmp / "xdg-cache"
     monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
     monkeypatch.setattr(agents, "hook_commands", lambda agent, config_dir=None: [])
+    _executable(home / ".cargo" / "bin" / "uvx")  # the launcher's uvx, off PATH
     trusted = PluginInstall(home / ".codex", "0.8.0")
 
     class Plugin:
@@ -1801,7 +1806,6 @@ def test_the_plugins_uvx_cache_counts_only_where_its_launcher_would_run_uvx(
             return self.install
 
     monkeypatch.setattr(agents, "plugin_of", lambda agent: Plugin(trusted))
-    monkeypatch.setattr(agents, "hooks_installed", lambda agent, config_dir=None: False)
     nothing = str(beyond_tmp / "empty-bin")
     found = store_broker.install_paths(home / ".codex", "codex", nothing)
     assert (cache / "uv").resolve() in found and (cache / "aisquare").resolve() in found
@@ -1820,7 +1824,7 @@ def test_the_plugins_uvx_cache_counts_only_where_its_launcher_would_run_uvx(
     ):
         monkeypatch.setattr(agents, "plugin_of", lambda agent, plugin=plugin: plugin)
         monkeypatch.setattr(
-            agents, "hooks_installed", lambda agent, config_dir=None, full=hooks_file: full
+            agents, "plugin_stands_down", lambda agent, config_dir=None, down=hooks_file: down
         )
         found = store_broker.install_paths(home / ".codex", "codex", nothing)
         assert (cache / "uv").resolve() not in found, (plugin.install, hooks_file)
@@ -1911,3 +1915,165 @@ def test_codex_reads_its_system_config_under_the_users(
     assert get_adapter("codex").sandbox_writes([], cwd, home) is None
     (home / "config.toml").write_text('sandbox_mode = "workspace-write"\n', encoding="utf-8")
     assert get_adapter("codex").sandbox_writes([], cwd, home) is not None, "the user's wins"
+
+
+# --- review r15 of #113 -----------------------------------------------------------------
+
+
+def _executable(place: Path, text: str = "#!/bin/sh\nexit 0\n") -> Path:
+    place.parent.mkdir(parents=True, exist_ok=True)
+    place.write_text(text, encoding="utf-8")
+    place.chmod(0o755)
+    return place
+
+
+def test_the_plugins_launches_are_found_as_its_launcher_finds_them(
+    beyond_tmp: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r15 of #113, findings 2, 3 and 9: the plugin's launches were skipped for an
+    untrusted plugin though Codex runs its hooks under ``--dangerously-bypass-hook-trust``;
+    an ``aisquare`` on PATH that cannot start was counted where the launcher passes over it
+    to ``uvx``; ``~/.cargo/bin`` was not looked in; the stand-down read events where the
+    launcher reads whether a hook's program can start; and on the ``uvx`` route only uv's
+    cache counted, not the ``uvx`` the launcher finds off PATH, the uv-managed Python the
+    cached environment links to, nor a cache ``uv.toml`` moves."""
+    from aisquare.core import agents
+    from aisquare.core.agent_adapters.types import PluginInstall
+
+    monkeypatch.setattr(store_broker, "install_paths", REAL_INSTALL_PATHS)
+    home = beyond_tmp / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(agents, "_home", lambda: home)
+    for variable in ("UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR", "XDG_CACHE_HOME", "XDG_DATA_HOME"):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(beyond_tmp / "config"))
+    codex_home = home / ".codex"
+    codex_home.mkdir()
+    untrusted = PluginInstall(codex_home, "0.8.0", trusted=False)
+
+    class Plugin:
+        def installed(self, config_dir: Path | None) -> PluginInstall | None:
+            return untrusted
+
+    monkeypatch.setattr(agents, "plugin_of", lambda agent: Plugin())
+    bare = str(beyond_tmp / "bare-bin")
+    uvx = _executable(home / ".local" / "bin" / "uvx")
+
+    def found(args: Sequence[str] = ("--dangerously-bypass-hook-trust",)) -> tuple[Path, ...]:
+        return store_broker.install_paths(codex_home, "codex", bare, args)
+
+    assert found([]) == found([]) and uvx.resolve() not in found([]), "untrusted, no bypass"
+    paths_found = found()
+    assert uvx.resolve() in paths_found, "the bypass runs it: its uvx, off PATH"
+    assert (home / ".cache" / "uv").resolve() in paths_found
+    assert (home / ".local" / "share" / "uv" / "python").resolve() in paths_found
+    (beyond_tmp / "config" / "uv").mkdir(parents=True)
+    moved = beyond_tmp / "moved-cache"
+    (beyond_tmp / "config" / "uv" / "uv.toml").write_text(
+        f"cache-dir = {json.dumps(str(moved))}\n", encoding="utf-8"
+    )
+    assert moved.resolve() in found(), "uv.toml's cache-dir"
+    # An aisquare that cannot start is passed over; one in ~/.cargo/bin is found.
+    dead = _executable(beyond_tmp / "path-bin" / "aisquare", "#!/nonexistent/python\n")
+    assert dead.resolve() not in store_broker.install_paths(
+        codex_home, "codex", str(dead.parent), ["--dangerously-bypass-hook-trust"]
+    )
+    cargo = _executable(home / ".cargo" / "bin" / "aisquare")
+    assert cargo.resolve() in found() and moved.resolve() not in found(), "it runs, no uvx"
+    # Beside a hook of ours whose program can start, the launcher stands down.
+    hook_program = _executable(beyond_tmp / "hooks-bin" / "aisquare")
+    monkeypatch.setattr(
+        agents, "hook_commands", lambda agent, config_dir=None: [f"{hook_program} hook codex"]
+    )
+    assert cargo.resolve() not in found(), "standing down"
+    hook_program.unlink()
+    assert cargo.resolve() in found(), "its hook's program is gone: the plugin runs instead"
+
+
+def test_the_user_site_counts_where_an_isolated_interpreter_loads_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review r15 of #113, finding 8: ``-E`` ignores ``PYTHONNOUSERSITE`` too, so the
+    broker, the hooks and the receiver load the user site, which was counted only where
+    the launching process had ``site.ENABLE_USER_SITE``."""
+    import site
+
+    monkeypatch.setattr(store_broker, "install_paths", REAL_INSTALL_PATHS)
+    user_site = tmp_path / "user-site"
+    monkeypatch.setattr(site, "ENABLE_USER_SITE", False)  # PYTHONNOUSERSITE=1 here
+    monkeypatch.setattr(site, "getusersitepackages", lambda: str(user_site))
+    monkeypatch.setattr(sys, "base_prefix", sys.prefix)  # no venv to keep it out
+    assert user_site.resolve() in store_broker.install_paths()
+    venv = tmp_path / "venv"
+    venv.mkdir()
+    (venv / "pyvenv.cfg").write_text("include-system-site-packages = false\n", "utf-8")
+    monkeypatch.setattr(sys, "prefix", str(venv))
+    assert user_site.resolve() not in store_broker.install_paths(), "a venv keeps it out"
+
+
+def test_an_unexpandable_socket_path_is_read_as_written(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review r15 of #113, finding 13: ``_socket_dirs`` expanded ``fleet.tmux_socket``
+    unguarded, and a ``~olduser/...`` one refused every sandboxed launch, naming nothing."""
+    dirs = store_broker._socket_dirs({}, "~nosuchuser-asq/sockets/fleet")  # no RuntimeError
+    assert [d for d in dirs if d.parts[-2:] == ("~nosuchuser-asq", "sockets")], dirs
+
+
+def test_the_doctor_probes_an_isolated_hook_as_it_runs(tmp_path: Path) -> None:
+    """Review r15 of #113, finding 12: Codex's hooks run ``<python> -E -P -m aisquare``, and
+    the doctor's version probe of the module form ran without ``-E``, so in a checkout on
+    ``PYTHONPATH=$PWD/src`` it graded the tree's version, not the hook's."""
+    from aisquare.core import agents
+
+    isolated = agents.hook_binary(f"{sys.executable} -E -P -m aisquare hook codex")
+    plain = agents.hook_binary(f"{sys.executable} -P -m aisquare hook codex")
+    assert isolated is not None and plain is not None
+    assert isolated.version_argv()[1:5] == ["-E", "-P", "-m", "aisquare"]
+    assert plain.version_argv()[1:4] == ["-P", "-m", "aisquare"]
+
+
+def test_the_doctor_flags_codex_hooks_that_read_pythonpath(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r15 of #113, finding 1: Codex hooks a pre-merge build of this branch connected
+    run the console script, which reads ``PYTHONPATH`` outside the sandbox. The doctor says
+    so (``sandbox-hooks``), and ``agents connect codex`` writes the ``-E`` form."""
+    from aisquare.core import agents
+    from aisquare.services import diagnostics
+
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    console = _executable(tmp_path / "bin" / "aisquare")
+    monkeypatch.setattr(agents, "_aisquare_command", lambda *args, **kwargs: str(console))
+    agents.install_hooks("codex", home)
+    row = diagnostics._sandbox_hooks_check()
+    assert row is not None and row.name == "sandbox-hooks" and "PYTHONPATH" in row.detail
+    monkeypatch.undo()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    agents.install_hooks("codex", home)
+    assert diagnostics._sandbox_hooks_check() is None
+
+
+def test_codex_reads_its_managed_config_over_the_users(
+    beyond_tmp: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r15 of #113, finding 4: ``/etc/codex/managed_config.toml``, which 0.162.1
+    reads over every user's config, was skipped."""
+    from aisquare.core.agent_adapters import codex as codex_module
+
+    managed = beyond_tmp / "managed.toml"
+    monkeypatch.setattr(codex_module, "MANAGED_CONFIG", managed)
+    monkeypatch.setattr(codex_module, "SYSTEM_CONFIG", beyond_tmp / "no-system.toml")
+    home, cwd = beyond_tmp / "codex-home", beyond_tmp / "w"
+    home.mkdir()
+    cwd.mkdir()
+    shared = beyond_tmp / "shared"
+    managed.write_text(
+        f"[sandbox_workspace_write]\nwritable_roots = [{json.dumps(str(shared))}]\n", "utf-8"
+    )
+    writes = get_adapter("codex").sandbox_writes([], cwd, home)
+    assert writes is not None and writes.may_write(shared)
+    (home / "config.toml").write_text('sandbox_mode = "danger-full-access"\n', "utf-8")
+    managed.write_text('sandbox_mode = "workspace-write"\n', encoding="utf-8")
+    assert get_adapter("codex").sandbox_writes([], cwd, home) is not None, "managed wins"

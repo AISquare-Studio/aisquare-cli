@@ -1164,7 +1164,9 @@ def _socket_dirs(env: Mapping[str, str], configured: str) -> list[Path]:
     if pane_server:
         dirs.append(Path(pane_server).parent)
     if "/" in configured:
-        dirs.append(Path(configured).expanduser().parent)
+        # `~olduser` names no home here: read as written (review r15 of #113, finding 13),
+        # never a RuntimeError, which a sandboxed launch now refuses on.
+        dirs.append(paths.expand_user(Path(configured)).parent)
     # A socket made straight in a shared directory (`tmux -S /tmp/x`) names that directory:
     # held read-only, every write of the session there would fail (review r11, finding 6).
     shared = {
@@ -1194,7 +1196,10 @@ def _with_environment(program: Path) -> list[Path]:
 
 
 def install_paths(
-    config_dir: Path | None = None, agent: str | None = None, path: str | None = None
+    config_dir: Path | None = None,
+    agent: str | None = None,
+    path: str | None = None,
+    args: Sequence[str] = (),
 ) -> tuple[Path, ...]:
     """Where the aisquare that runs outside an agent's sandbox on its behalf lives: this one,
     which the broker runs (``sys.executable -P -m aisquare``: the interpreter and the
@@ -1229,46 +1234,103 @@ def install_paths(
                 if hook is not None:
                     found += _with_environment(hook.program)
         with suppress(Exception):
-            found += _plugin_launches(agent, config_dir, path)
+            found += _plugin_launches(agent, config_dir, path, args)
     with suppress(Exception):
-        if site.ENABLE_USER_SITE:  # never in a venv that keeps the system's site out
+        if _loads_user_site():
             found.append(Path(site.getusersitepackages()))
     return tuple(dict.fromkeys(_resolved(path) for path in found))
 
 
+def _loads_user_site() -> bool:
+    """Whether an interpreter aisquare starts with ``-E`` loads the user site, ``.pth`` files
+    and all: ``-E`` ignores ``PYTHONNOUSERSITE`` too, so whatever this process's
+    ``site.ENABLE_USER_SITE`` says, only a venv that keeps the system's site out (its
+    ``pyvenv.cfg``) stops it (review r15 of #113, finding 8)."""
+    if sys.prefix == sys.base_prefix:
+        return True
+    try:
+        config = (Path(sys.prefix) / "pyvenv.cfg").read_text(encoding="utf-8")
+    except OSError:
+        return True
+    for line in config.splitlines():
+        key, _, value = line.partition("=")
+        if key.strip().lower() == "include-system-site-packages":
+            return value.strip().lower() == "true"
+    return False
+
+
+def _xdg(variable: str, fallback: Path) -> Path:
+    """``$<variable>`` where it is absolute, as uv and the plugin's launcher read it (a
+    relative one the XDG spec says to ignore), else ``fallback``."""
+    value = os.environ.get(variable, "")
+    return Path(value) if value.startswith("/") else fallback
+
+
 def _cache_home() -> Path:
-    """``$XDG_CACHE_HOME`` where it is absolute, as uv and the plugin's launcher read it
-    (a relative one the XDG spec says to ignore), else ``~/.cache``."""
-    xdg = os.environ.get("XDG_CACHE_HOME", "")
-    return Path(xdg) if xdg.startswith("/") else Path.home() / ".cache"
+    """``$XDG_CACHE_HOME``, else ``~/.cache``."""
+    return _xdg("XDG_CACHE_HOME", Path.home() / ".cache")
 
 
-def _plugin_launches(agent: str, config_dir: Path | None, path: str | None) -> list[Path]:
+def _uv_setting(key: str) -> Path | None:
+    """``key`` in uv's own config (``uv.toml``: the user's, ``$XDG_CONFIG_HOME/uv``, then the
+    system's, ``/etc/uv``), as ``uvx`` reads it; ``None`` where neither sets it."""
+    import tomllib
+
+    for config in (
+        _xdg("XDG_CONFIG_HOME", Path.home() / ".config") / "uv" / "uv.toml",
+        Path("/etc/uv/uv.toml"),
+    ):
+        try:
+            with config.open("rb") as handle:
+                value = tomllib.load(handle).get(key)
+        except (OSError, ValueError, RecursionError):
+            continue
+        if isinstance(value, str) and value:
+            return paths.expand_user(Path(value))
+    return None
+
+
+def _plugin_launches(
+    agent: str, config_dir: Path | None, path: str | None, args: Sequence[str] = ()
+) -> list[Path]:
     """What the agent's plugin launcher (``plugins/*/scripts/aisquare-hook``) runs, with
     each one's environment, where it runs at all: the plugin installed for ``config_dir``
-    and trusted (Codex runs an untrusted plugin's hooks not at all), and the hooks file not
-    already running aisquare for every event (the launcher stands down for those). Then the
-    ``aisquare`` it finds on ``path`` or in ``~/.local/bin``, or, with neither, uv's cache
-    (``$UV_CACHE_DIR``, else ``$XDG_CACHE_HOME/uv``) and its own answers there, which its
-    ``uvx`` run reads."""
+    and its hooks trusted, or run regardless (``--dangerously-bypass-hook-trust`` in the
+    launch's ``args``: Codex runs an untrusted plugin's hooks then; review r15 of #113,
+    finding 2), and not standing down beside a hook of ours in the hooks file whose
+    program can start (``agents.plugin_stands_down``, the launcher's own test). Then what
+    the launcher's ``_find`` finds, on ``path`` then in ``~/.local/bin`` and
+    ``~/.cargo/bin``, passing over one that cannot start (``agents.launcher_finds``;
+    r15, finding 3): its ``aisquare``, or, with none, its ``uvx`` and what that runs: uv's
+    cache (``$UV_CACHE_DIR``, else uv.toml's ``cache-dir``, else ``$XDG_CACHE_HOME/uv``),
+    the uv-managed Python the cached environment links to (``$UV_PYTHON_INSTALL_DIR``,
+    else uv.toml's ``python-install-dir``, else ``$XDG_DATA_HOME/uv/python``) and the
+    launcher's answers (``$XDG_CACHE_HOME/aisquare``) (r15, finding 9)."""
     from aisquare.core import agents
 
     plugin = agents.plugin_of(agent)
     install = plugin.installed(config_dir) if plugin is not None else None
-    if install is None or not install.trusted or agents.hooks_installed(agent, config_dir):
+    if install is None:
         return []
-    found: list[Path] = []
-    on_path = shutil.which("aisquare", path=path if path is not None else os.environ.get("PATH"))
-    local = Path.home() / ".local" / "bin" / "aisquare"
-    launchers = [Path(on_path)] if on_path else []
-    if local.exists():
-        launchers.append(local)
-    for launcher in launchers:
-        found += _with_environment(launcher)
-    if not launchers:
-        cache = os.environ.get("UV_CACHE_DIR")
-        found += [Path(cache) if cache else _cache_home() / "uv", _cache_home() / "aisquare"]
-    return found
+    if not (install.trusted or "--dangerously-bypass-hook-trust" in args):
+        return []
+    if agents.plugin_stands_down(agent, config_dir):
+        return []
+    runner = agents.launcher_finds("aisquare", path)
+    if runner is not None:
+        return _with_environment(runner)
+    uvx = agents.launcher_finds("uvx", path)
+    if uvx is None:
+        return []  # it runs nothing, and says so once
+    cache = os.environ.get("UV_CACHE_DIR")
+    pythons = os.environ.get("UV_PYTHON_INSTALL_DIR")
+    data = _xdg("XDG_DATA_HOME", Path.home() / ".local" / "share")
+    return [
+        *_with_environment(uvx),
+        Path(cache) if cache else _uv_setting("cache-dir") or _cache_home() / "uv",
+        Path(pythons) if pythons else _uv_setting("python-install-dir") or data / "uv" / "python",
+        _cache_home() / "aisquare",
+    ]
 
 
 def _resolved_writes(writes: SandboxWrites) -> SandboxWrites:
@@ -1362,7 +1424,7 @@ def refuse_inside(
     writes = adapter.sandbox_writes(list(argv)[1:], cwd, config_dir)
     if writes is None:
         return
-    inside = install_inside(writes, install_paths(config_dir, adapter.id, path))
+    inside = install_inside(writes, install_paths(config_dir, adapter.id, path, list(argv)[1:]))
     if inside is None:
         return
     raise LaunchRefused(

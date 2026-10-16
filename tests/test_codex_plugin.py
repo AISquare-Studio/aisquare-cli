@@ -569,6 +569,7 @@ def test_the_readme_offers_both_plugins() -> None:
     assert "docs/claude-code-plugin.md" in readme and "docs/codex-plugin.md" in readme
 
 
+@posix_only
 def test_the_launchers_aisquare_runs_without_the_sessions_python_paths(machine: Machine) -> None:
     """Review r14 of #113, finding 1: the agent's session keeps ``PYTHONPATH`` for its own
     tools, and a sandboxed agent's sandbox may write what it names (direnv's

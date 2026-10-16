@@ -174,6 +174,7 @@ def doctor(
             # Only when this aisquare lives where a sandboxed agent may write (r11 of #113).
             *_optional(_sandboxed_install_check(cwd)),
             *_optional(_sandbox_path_check(cwd)),
+            *_optional(_sandbox_hooks_check()),
             *_experiment_checks(),
             *explainability_ops.checks(live=live, target_name=target, project_id=project_id),
             # Only while a key the CLI minted is owed a revocation (#142); --live
@@ -247,6 +248,33 @@ def _sandboxed_install_check(cwd: Path | None = None) -> DoctorCheck | None:
         "Codex agent launched there may write: such a launch is refused",
         "install aisquare-cli outside the project (uv tool install aisquare-cli, or pipx "
         "install aisquare-cli), then connect the Codex hooks again with that install",
+    )
+
+
+def _sandbox_hooks_check() -> DoctorCheck | None:
+    """A warning when Codex's own aisquare hooks (its hooks file in this shell's Codex home)
+    run the console script, whose interpreter reads ``PYTHONPATH`` outside the agent's
+    sandbox, where the agent keeps it for its tools and its sandbox may write a directory
+    it names: hooks a build of this branch connected before review r14 of #113. ``aisquare
+    agents connect codex``, and an upgrade's refresh, write ``<python> -E -P -m aisquare``
+    (``agents.hook_runs_isolated``; r15, finding 1). ``None`` otherwise."""
+    import os
+
+    from aisquare.core.agent_adapters import get_adapter
+
+    try:
+        home = get_adapter("codex").config_dir(agent_core._home(), os.environ)
+        commands = agent_core.hook_commands("codex", home)
+    except Exception:
+        return None
+    if not commands or all(agent_core.hook_runs_isolated(command) for command in commands):
+        return None
+    return _warn(
+        "sandbox-hooks",
+        f"Codex's aisquare hooks in {home} run the console script, which imports from "
+        "PYTHONPATH outside the agent's sandbox, where its sandbox may write a directory it "
+        "names (direnv's $PWD/src)",
+        "aisquare agents connect codex",
     )
 
 

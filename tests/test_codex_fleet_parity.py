@@ -2818,3 +2818,51 @@ def test_the_fleets_install_check_reads_the_path_its_window_will_have(
     with pytest.raises(fleet_service.FleetError, match="could not work out"):
         fleet_service.spawn(project, "tester", label="tester-x", agent="codex", worktree=False)
     assert "tester-x" not in str(tmux.sessions)
+
+
+def test_a_restart_mode_beside_the_roles_own_sandbox_is_refused_before_the_stop(
+    codex_agent: tuple[Codex, TeamTask],
+    tmux: FakeTmux,  # noqa: F811
+) -> None:
+    """Review r15 of #113, finding 6: the check before the stop turned a new mode into
+    arguments without the role's config, so a mode in Codex's own words for a role that
+    sets ``fleet.roles.<role>.sandbox`` passed it, and spawn then refused (``Use --sandbox
+    for Codex, without --permission-mode``) with the agent already stopped."""
+    from aisquare.core import launch_seal as seals
+
+    codex, _ = codex_agent
+    config = load_config()
+    config.fleet.roles["coder"] = FleetRoleSettings(sandbox="read-only")
+    save_config(config)
+    record = seals.read(codex.agent.id)
+    assert isinstance(record, seals.LaunchRecord)
+    with pytest.raises(fleet_service.FleetError, match="--sandbox"):
+        fleet_service._refuse_a_replay_that_cannot_start(
+            codex.project, record, permission_mode="workspace-write"
+        )
+    with pytest.raises(fleet_service.FleetError, match="--sandbox"):
+        fleet_service.restart(codex.project, codex.agent.label, permission_mode="workspace-write")
+    assert tmux.typed == [] and tmux.killed == [], "refused before anything was stopped"
+
+
+def test_the_install_check_reads_the_path_a_role_binding_gives_the_window(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review r15 of #113, finding 7: the window's launch lays a role binding's
+    ``--env PATH=...`` over the server's PATH before its install check, while spawn's
+    check read the server's alone."""
+    assert fleet_service._window_path(None, {"PATH": "/bound/bin"}) == "/bound/bin"
+    assert fleet_service._window_path(None, {"OTHER": "x"}) == os.environ.get("PATH")
+    asked: list[object] = []
+    real = fleet_service._window_path
+
+    def window_path(config: object, bound: object = None) -> str | None:
+        asked.append(bound)
+        return real(config, bound)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(fleet_service, "_window_path", window_path)
+    fleet_service.spawn(project, "tester", label="tester-b", agent="codex", worktree=False)
+    assert asked and isinstance(asked[0], dict), "the role's profile env is asked"

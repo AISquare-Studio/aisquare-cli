@@ -151,6 +151,10 @@ PERMISSION_PROFILE = "aisquare"
 #: The system layer of Codex's config, under every user's (``services.native_telemetry``
 #: reads it too): 0.162.1 reads it (in its binary, review r14 of #113, finding 9).
 SYSTEM_CONFIG = Path("/etc/codex/config.toml")
+#: The managed layer an administrator sets over every user's config, also in 0.162.1's
+#: binary (review r15 of #113, finding 4). Its ``requirements.toml`` beside it only
+#: narrows what may be chosen, and its macOS MDM and cloud-managed layers are not files.
+MANAGED_CONFIG = Path("/etc/codex/managed_config.toml")
 _BUILT_IN_PROFILES = {"read_only": ":read-only", "workspace": ":workspace"}
 #: ``-c`` keys (and their tables) that choose the sandbox: given natively, the sandbox is
 #: the operator's, and Codex refuses ``sandbox_mode`` beside ``default_permissions``.
@@ -780,12 +784,13 @@ class CodexAdapter:
     ) -> SandboxWrites | None:
         """What Codex's sandbox may write for a session with ``args`` in ``cwd``, read as
         Codex layers its settings: the system's :data:`SYSTEM_CONFIG`, ``config.toml`` in
-        ``home`` (its Codex home; ``None`` is this shell's), then the profile ``-p`` selects
-        (``<name>.config.toml`` beside it), then ``args`` (review r13 of #113, finding 6;
-        r14, finding 9). ``None`` with no sandbox
-        (``--sandbox danger-full-access``, ``sandbox_mode = "danger-full-access"``, the
-        bypass flags). The sandbox is ``--sandbox``, else a ``-c sandbox_mode``, else the
-        store's profile in ``args`` (which holds over a ``sandbox_mode`` in the files,
+        ``home`` (its Codex home; ``None`` is this shell's), the profile ``-p`` selects
+        (``<name>.config.toml`` beside it), the administrator's :data:`MANAGED_CONFIG` over
+        them, then ``args`` (review r13 of #113, finding 6; r14, finding 9; r15, finding
+        4). ``None`` with no sandbox (``--sandbox danger-full-access``, ``sandbox_mode =
+        "danger-full-access"``, the bypass flags). The sandbox is ``--sandbox``, else a
+        ``-c sandbox_mode``, else the store's profile in ``args`` (which holds over a
+        ``sandbox_mode`` in the files,
         measured on 0.162.1), else the files' ``sandbox_mode``. The workspace is ``-C``/
         ``--cd``'s directory, else ``cwd``. Measured on 0.162.1: ``read-only`` (the store's
         profile over ``:read-only``, or ``--sandbox read-only``) writes nothing but the
@@ -803,6 +808,7 @@ class CodexAdapter:
         profile = next(reversed(option_values(args, "-p", "--profile")), None)
         if profile and Path(profile).name == profile and profile not in {".", ".."}:
             files.append(_read_toml(codex_home / f"{profile}.config.toml"))
+        files.append(_read_toml(MANAGED_CONFIG))  # over the user's, the files' last word
         settings: dict[str, str] = {}
         for value in option_values(args, "-c", "--config"):
             parsed = config_assignment(value)

@@ -163,10 +163,11 @@ _NEEDS_DAY_KINDS = (*_NEEDS_ASKED, "agent_exited", "turn_failed")
 opens a board item or moves on from one, the exits the fleet announces, and the turns that
 died on an API error."""
 
-_NEEDS_ELSEWHERE_KINDS = ("agent_exited", "turn_failed")
-"""The kinds the scan reads of a board the project's rows recorded but the one it reads whole
-(``fleet_since``): the exits the fleet announces of them, and their turns that died on an API
-error. The rest of such a board is its own projects' to scan."""
+_NEEDS_FLEET_KINDS = ("agent_exited", "turn_failed")
+"""The kinds the scan takes, every one, of the day of a board the project's rows recorded but
+the one it reads whole (:func:`_needs_elsewhere`): the exits the fleet announces of them, and
+their turns that died on an API error. Of the rest of such a board, the scan takes its own
+rows' posts and the human's replies."""
 
 _NEEDS_ACTIONS: dict[str, tuple[str, ...]] = {
     "permission": ("answer", "open", "dismiss"),
@@ -325,6 +326,10 @@ class NeedsItem:
     sighted: bool = False
     """Whether its id names the scan that first saw it too (:func:`_needs_dated`), so each time
     it is drawn is a card of its own. Internal: never serialized."""
+    board: str | None = None
+    """The board a board question or result was read on, which several projects' scans may
+    read (:func:`_needs_board_once`); ``None`` for every other kind. Internal: never
+    serialized."""
 
     def needs_item_json(self) -> dict[str, object]:
         """The wire shape (SPEC §1.4): the project as ``{id, name}``, ``push_after`` left out,
@@ -435,11 +440,6 @@ class NeedsSources:
     ended on an API error (``turn_failed``). An item lives for :data:`QUESTION_HORIZON`
     however busy the board is, so it is read by time, not from a window of the newest
     events that 300 notes push it out of."""
-    fleet_since: Callable[[str, datetime], list[TeamEvent]]
-    """The board's events of :data:`_NEEDS_ELSEWHERE_KINDS` written at or after the given time:
-    the exits the fleet announced, and the turns that failed, on a board the project's rows
-    recorded (``FleetAgent.board``) other than the one the scan reads whole
-    (:func:`_needs_elsewhere`)."""
     board_sessions: Callable[[str, Collection[str]], list[TeamSession]]
     """The project's sessions with the given ids: the authors of the board's open questions."""
     task_status: Callable[[str], str | None]
@@ -1963,6 +1963,7 @@ def needs_from_board(
     manager_live: bool = False,
     stopped: datetime | None = None,
     own_board: bool = True,
+    board: str | None = None,
 ) -> list[NeedsItem]:
     """The board's open questions and results for the human (:func:`is_needs_board_event`).
 
@@ -1986,7 +1987,8 @@ def needs_from_board(
     so it also takes a post by a session no row holds, whose nudge wakes the board's
     reading manager. On a board several projects share, such a post is a card whatever the
     manager: which of them it woke is the writer's directory's to say, which the board does
-    not record (review of #259, round 25, 7/10).
+    not record (review of #259, round 25, 7/10). ``board`` is the board ``events`` were read
+    on, which each item keeps (``NeedsItem.board``).
     """
     from aisquare.services.fleet import RECENTLY_ENDED
 
@@ -2021,7 +2023,9 @@ def needs_from_board(
             )
             if open_still and is_needs_board_event(event, author_role=role, manager_live=taken):
                 items.append(
-                    _needs_board_item(event, project=project, row=row, author=label or role)
+                    _needs_board_item(
+                        event, project=project, row=row, author=label or role, board=board
+                    )
                 )
         if event.kind in _NEEDS_ASKED:
             moved_on.add(event.session_id)
@@ -2029,12 +2033,18 @@ def needs_from_board(
 
 
 def _needs_board_item(
-    event: TeamEvent, *, project: ProjectInfo, row: FleetAgent | None, author: str | None
+    event: TeamEvent,
+    *,
+    project: ProjectInfo,
+    row: FleetAgent | None,
+    author: str | None,
+    board: str | None = None,
 ) -> NeedsItem:
-    """One board question or result. ``agent`` is the author's fleet row, when it has one."""
+    """One board question or result, read on ``board``. ``agent`` is the author's fleet row,
+    when it has one."""
     who = needs_push_safe(author or "") or "an agent"
     asks = event.kind == "question"
-    return _needs_item(
+    item = _needs_item(
         "board_question" if asks else "board_result",
         str(event.seq),
         project=project,
@@ -2047,6 +2057,7 @@ def _needs_board_item(
         since=event.created_at,
         push_after=event.created_at,
     )
+    return replace(item, board=board)
 
 
 # --- one project --------------------------------------------------------------------------
@@ -2124,9 +2135,9 @@ class _NeedsProject:
     blind: Mapping[str, Exception]
     """Agent id → the capture of its screen that failed (:class:`_NeedsReads`): that agent's
     own item is not to be used, and every other's is."""
-    posted: frozenset[int] = frozenset()
-    """The seqs of the board's events its rows' sessions posted: its own to judge
-    (:func:`_needs_board_once`)."""
+    posted: frozenset[tuple[str, int]] = frozenset()
+    """``(board, seq)`` of each event its rows' sessions posted on a board the scan read: its
+    own to judge (:func:`_needs_board_once`)."""
 
 
 _T = TypeVar("_T")
@@ -2200,8 +2211,12 @@ def _needs_scan_project(
     recorded at spawn (``fleet._emit_exit``, its session's board), where its manager reads
     them, which is in that day when Remote runs under the hub the agents were spawned under;
     those of any other board a row recorded are read apart (:func:`_needs_elsewhere`,
-    :func:`_needs_own_events`). No other project's rows are read: whether a manager hears of
-    an item is :func:`_needs_nudged`'s to say.
+    :func:`_needs_own_events`). So are the questions and results its rows post there, each
+    judged by whether the manager reads that board: read on ``board_id`` alone, a coder
+    spawned without the hub its manager was spawned under asked on the project's own board,
+    the manager was rightly not woken, and nobody heard (review of #259, round 27, 1/7). No
+    other project's rows are read: whether a manager hears of an item is
+    :func:`_needs_nudged`'s to say.
     """
     from aisquare.services.fleet import RECENTLY_ENDED, _board_of_row
 
@@ -2223,17 +2238,20 @@ def _needs_scan_project(
     rows = list(
         {row.id: row for row in [*(ended or []), *(status.agent for status in statuses)]}.values()
     )
-    days = [*board, *_needs_elsewhere(sources, rows, board_id, day, reads)]
+    elsewhere = _needs_elsewhere(sources, rows, board_id, day, reads)
+    days = [*board, *(e for _, read in elsewhere for e in read if e.kind in _NEEDS_FLEET_KINDS)]
     manager = _needs_manager(rows)
     taking = _needs_nudged(manager, statuses, now)
     # The board the manager that takes its agents' items reads: it takes those on that board.
     hears = None if taking is None else _board_of_row(taking)
-    authors = _needs_board_authors(board, now)
-    sessions = (
-        reads.needs_read(lambda: sources.board_sessions(board_id, authors), "sessions")
+    # Each board's questions and results, and their authors, judged on that board.
+    asked = [(board_id, board), *elsewhere]
+    sessions = {
+        on: reads.needs_read(partial(sources.board_sessions, on, authors), "sessions") or []
+        for on, read in asked
+        for authors in [_needs_board_authors(read, now)]
         if authors
-        else []
-    )
+    }
     accounts = reads.needs_read(sources.accounts, "the accounts")
     window = _needs_window(sources, board_id, reads)
     items: list[NeedsItem] = []
@@ -2279,18 +2297,20 @@ def _needs_scan_project(
     items.extend(
         _needs_fleet_down(statuses, project=project, now=now, first_seen=first_seen, seen=seen)
     )
-    items.extend(
-        needs_from_board(
-            board,
-            sessions or [],
-            rows,
-            project=project,
-            now=now,
-            manager_live=hears == board_id,
-            stopped=manager.ended_at if manager is not None else None,
-            own_board=own,
+    for on, read in asked:
+        items.extend(
+            needs_from_board(
+                read,
+                sessions.get(on, []),
+                rows,
+                project=project,
+                now=now,
+                manager_live=hears == on,
+                stopped=manager.ended_at if manager is not None else None,
+                own_board=own and on == board_id,
+                board=on,
+            )
         )
-    )
     posters = {row.session_id for row in rows if row.session_id}
     return _NeedsProject(
         items=items,
@@ -2300,7 +2320,9 @@ def _needs_scan_project(
         failed=reads.failed,
         failed_read=reads.failed_read,
         blind=reads.blind,
-        posted=frozenset(event.seq for event in board if event.session_id in posters),
+        posted=frozenset(
+            (on, event.seq) for on, read in asked for event in read if event.session_id in posters
+        ),
     )
 
 
@@ -2421,24 +2443,37 @@ def _needs_elsewhere(
     board_id: str,
     day: datetime,
     reads: _NeedsReads,
-) -> list[TeamEvent]:
-    """The exits the fleet announced and the turns that failed since ``day``
-    (:data:`_NEEDS_ELSEWHERE_KINDS`) on each board ``rows`` recorded (``fleet._board_of_row``)
-    but ``board_id``, whose whole day the scan reads already.
+) -> list[tuple[str, list[TeamEvent]]]:
+    """What the scan takes of the day since ``day`` (``board_since``) of each board ``rows``
+    recorded (``fleet._board_of_row``) but ``board_id``, whose whole day the scan reads
+    already, by board: the exits the fleet announced and the turns that failed
+    (:data:`_NEEDS_FLEET_KINDS`), the posts of the sessions of the rows that recorded that
+    board, and the human's replies, which may answer them.
 
     ``board_id`` is the board Remote's own environment resolves (:func:`_needs_board_of`),
-    and an agent's exit and failed turns are on the board its spawn recorded: Remote (or
-    ``asq``, whose R panel starts it) run without the hub the agents were spawned under, or
-    with one they were not, found no exit, and a coder whose hand-over never started its
-    replacement was no card, a manager's failed hand-over "the manager stopped" (review of
-    #259, round 25, 6/10); and no failed turn, no card (round 26, 3/11). Only those kinds:
-    the rest of those boards is their own projects' to scan.
+    and an agent's exit, its failed turns and its posts are on the board its spawn recorded:
+    Remote (or ``asq``, whose R panel starts it) run without the hub the agents were spawned
+    under, or with one they were not, found no exit, and a coder whose hand-over never
+    started its replacement was no card, a manager's failed hand-over "the manager stopped"
+    (review of #259, round 25, 6/10); no failed turn, no card (round 26, 3/11); and no
+    question, no card (round 27, 1/7). The rest of those boards is their own projects' to
+    scan. One read a board: the scan's reads are each asked once (:func:`_needs_read_once`),
+    so a hub several projects' rows recorded is read once.
     """
     from aisquare.services.fleet import _board_of_row
 
-    found: list[TeamEvent] = []
+    found: list[tuple[str, list[TeamEvent]]] = []
     for other in sorted({_board_of_row(row) for row in rows} - {board_id}):
-        found.extend(reads.needs_read(partial(sources.fleet_since, other, day), "events") or [])
+        posters = {row.session_id for row in rows if row.session_id and _board_of_row(row) == other}
+        read = reads.needs_read(partial(sources.board_since, other, day), "the board") or []
+        kept = [
+            event
+            for event in read
+            if event.kind in _NEEDS_FLEET_KINDS
+            or event.session_id in posters
+            or (event.session_id is None and event.kind in _NEEDS_REPLIED)
+        ]
+        found.append((other, kept))
     return found
 
 
@@ -2810,7 +2845,7 @@ def scan_needs_you(
         if scanned is not None and scanned.failed is None:
             items.extend(scanned.items)
             items.extend(_needs_blind_kept(scanned, project, kept, memory, seen, failing))
-            posters.update(((boards[project.id], seq), project.id) for seq in scanned.posted)
+            posters.update((posted, project.id) for posted in scanned.posted)
         else:
             _needs_still_remembered(memory, seen, project)
             items.extend(item for item in kept if item.project_id == project.id)
@@ -2875,7 +2910,6 @@ def _needs_read_once(sources: NeedsSources) -> NeedsSources:
     return replace(
         sources,
         board_since=once("day", sources.board_since),
-        fleet_since=once("elsewhere", sources.fleet_since),
         board_events=once("window", sources.board_events),
         board_sessions=once("sessions", sources.board_sessions),
         tmux_answers=once("tmux", sources.tmux_answers),
@@ -2903,25 +2937,29 @@ def _needs_board_once(
     its live manager took the post, no other project's scan, which saw no row of the
     poster's, makes a card of it. Kept by the lowest rank alone, a coder's question to its
     woken manager was still every other project's card and push (review of #259, round 25,
-    7/10).
+    7/10). That holds on a board the poster's project read apart, as one its rows recorded
+    (:func:`_needs_elsewhere`), while another's scan read it whole: an item is of the board
+    it was read on (``NeedsItem.board``), and its poster's card is the one card (round 27,
+    1/7).
     """
     posters = posters or {}
     writers: dict[str, list[str]] = {}
     for project_id, written in boards.items():
         writers.setdefault(written, []).append(project_id)
     shared = {board: ids for board, ids in writers.items() if len(ids) > 1}
-    if not shared:
-        return list(items)
     kept: dict[tuple[str, object], NeedsItem] = {}
     rest: list[NeedsItem] = []
     for item in items:
-        board = boards.get(item.project_id)
-        if item.kind not in _NEEDS_BOARD_KINDS or board not in shared:
+        if item.kind not in _NEEDS_BOARD_KINDS:
             rest.append(item)
             continue
-        key = (board, item.detail.get("seq"))
+        board = item.board or boards.get(item.project_id)
+        key = (board or "", item.detail.get("seq"))
         if key in posters and posters[key] != item.project_id:
             continue  # the poster's project judged it, a card or none
+        if board not in shared:
+            rest.append(item)
+            continue
         held = kept.get(key)
         if held is None or _needs_board_rank(item, board, shared[board]) < _needs_board_rank(
             held, board, shared[board]
@@ -3386,10 +3424,6 @@ def live_needs_sources() -> NeedsSources:
                 project_id, since, kinds=_NEEDS_DAY_KINDS, human_kinds=_NEEDS_REPLIED
             )
 
-    def needs_fleet_since(board_id: str, since: datetime) -> list[TeamEvent]:
-        with store_session() as store:
-            return store.team_events_since(board_id, since, kinds=_NEEDS_ELSEWHERE_KINDS)
-
     def needs_board_sessions(project_id: str, ids: Collection[str]) -> list[TeamSession]:
         with store_session() as store:
             return store.team_sessions_seen_since(project_id, None, ids=sorted(ids))
@@ -3434,7 +3468,6 @@ def live_needs_sources() -> NeedsSources:
         ended_agents=needs_rows_ended,
         board_events=needs_board_events,
         board_since=needs_board_since,
-        fleet_since=needs_fleet_since,
         board_sessions=needs_board_sessions,
         task_status=needs_task_status,
         transcript_tail=_needs_cached_tail,

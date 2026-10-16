@@ -1497,11 +1497,6 @@ def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> Needs
         ],
         board_events=board_events,
         board_since=board_since,
-        fleet_since=lambda board, since: [
-            event
-            for event in fleet.events
-            if event.kind in ("agent_exited", "turn_failed") and event.created_at >= since
-        ],
         board_sessions=lambda pid, ids: [
             session for session in fleet.sessions if session.id in ids
         ],
@@ -4524,6 +4519,91 @@ def test_a_live_manager_on_another_board_keeps_nothing_on_this_one_off_the_phone
     ]
 
 
+@pytest.mark.parametrize(
+    ("manager", "coder", "remote", "card"),
+    [
+        ("hub", "alpha", "hub", True),  # the coder spawned without its manager's hub
+        ("alpha", "hub", "no hub", True),  # the mirror: the coder under a hub, its manager not
+        ("hub", "hub", "no hub", False),  # the manager reads the board the coder asked on
+        ("alpha", "alpha", "hub", False),
+    ],
+    ids=lambda under: str(under),
+)
+def test_a_coders_question_is_read_on_the_board_its_row_recorded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    manager: str,
+    coder: str,
+    remote: str,
+    card: bool,
+) -> None:
+    """Review of #259, round 27, 1/7: the scan read questions and results only on the board
+    Remote's own environment resolves. alpha's manager spawned from ``asq`` under a hub, a
+    coder spawned without it asking on alpha's own board, and Remote under the hub: the
+    coder's nudge rightly woke no manager, as it reads the hub's, and the scan never read the
+    question, so nobody heard of it. Each board a row recorded is read for that row's posts,
+    and a post is the manager's only when it reads that board."""
+    with store_session() as store:
+        alpha = store.onboard_project(_rooted(tmp_path / "alpha"))
+        hub = _rooted(tmp_path / "hub")
+        store.ensure_project(hub)
+        on = {"hub": hub, "alpha": alpha}
+        _seat_up(store, _manager_of("alpha"), alpha, on[manager])
+        _seat_up(store, _Seat("alpha", "coder-1", asks=True), alpha, on[coder])
+    if remote == "hub":
+        monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub.root))
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+
+    items = scan_needs_you(remote_needs.live_needs_sources(), now=datetime.now(UTC), dismissed=())
+
+    cards = [(item.kind, item.project_id, item.agent) for item in items]
+    assert cards == ([("board_question", alpha.id, "coder-1")] if card else []), cards
+
+
+def test_a_question_on_a_board_its_row_recorded_is_answered_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 27, 1/7: read on a board the scan does not read whole, a coder's
+    question is cleared as on its own: by the human's later reply to it, on that board."""
+    from aisquare.services import team as team_service
+
+    with store_session() as store:
+        alpha = store.onboard_project(_rooted(tmp_path / "alpha"))
+        hub = _rooted(tmp_path / "hub")
+        store.ensure_project(hub)
+        _seat_up(store, _Seat("alpha", "coder-1", asks=True), alpha, alpha)
+        team_service._emit(store, alpha.id, "note", "main", to_role="coder-1")
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub.root))
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+
+    items = scan_needs_you(remote_needs.live_needs_sources(), now=datetime.now(UTC), dismissed=())
+
+    assert items == []
+
+
+def test_a_question_read_on_a_board_another_project_reads_whole_is_one_card(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 27, 1/7: beta's coder spawned to read alpha's board asks there.
+    beta's scan reads it, as a board its row recorded, and alpha's scan reads alpha's board
+    whole, where a post no row of alpha's holds is alpha's card too. It is one card, the
+    poster's project's."""
+    with store_session() as store:
+        alpha = store.onboard_project(_rooted(tmp_path / "alpha"))
+        beta = store.onboard_project(_rooted(tmp_path / "beta"))
+        _seat_up(store, _Seat("beta", "coder-1", asks=True), beta, alpha)
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+
+    items = scan_needs_you(remote_needs.live_needs_sources(), now=datetime.now(UTC), dismissed=())
+
+    assert [(item.kind, item.project_id, item.agent) for item in items] == [
+        ("board_question", beta.id, "coder-1")
+    ]
+
+
 @dataclass(frozen=True)
 class _Seat:
     """One agent of a board: its fleet project, label and role; whether a fleet row holds it
@@ -5051,7 +5131,6 @@ _READS = (
     "tmux_answers",
     "ended_agents",
     "board_since",
-    "fleet_since",
     "board_sessions",
     "accounts",
     "board_events",

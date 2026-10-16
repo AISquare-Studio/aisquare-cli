@@ -608,12 +608,13 @@ all of them, and the fleet cleans up the worktrees it made.**
     one that claimed it). Otherwise, with several managers on one board, it
     wakes the one whose project holds the writer's directory, the innermost
     when one project is rooted inside another. Before, it woke nobody.
-  - Remote's needs feed finds an agent's exit, its failed turns and its
-    usage-limit events on the board the agent was spawned under, even when
-    Remote (or `asq`, whose R panel starts it) runs under another hub, or
-    none. A coder whose hand-over never started its replacement, or whose
-    turn failed, is a card again, a manager's failed hand-over says so, and a
-    parked agent's limit card keeps its id.
+  - Remote's needs feed finds an agent's exit, its failed turns, its
+    usage-limit events and its questions and results on the board the agent
+    was spawned under, even when Remote (or `asq`, whose R panel starts it)
+    runs under another hub, or none. A coder whose hand-over never started its
+    replacement, or whose turn failed, is a card again, a manager's failed
+    hand-over says so, a parked agent's limit card keeps its id, and a
+    coder's question there is a card unless its manager reads that board.
   - Under a hub, a live manager keeps its own agents' questions and results to
     it, their crashes and their failed hand-overs off the phone, and holds back
     a usage limit's push, as it does without a hub. Before, each was a card and
@@ -624,7 +625,8 @@ all of them, and the fleet cleans up the worktrees it made.**
     coder spawned from a shell without the hub its manager was spawned under
     writes on its project's board: its question used to wake the manager to a
     delta without it, and the phone showed no card since a manager was live.
-    Now the manager is left alone and the phone shows the card.
+    Now the manager is left alone and the phone shows the card, wherever
+    Remote runs.
 
 ### Security
 - **One choke point.** Every request and every socket handshake passes the

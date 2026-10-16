@@ -576,6 +576,10 @@ all of them, and the fleet cleans up the worktrees it made.**
     without the hub no longer refuse an agent's task with "belongs to another
     project's board". The replacement reads the same board as the agent it
     replaces, and its window gets that board's hub, not the caller's.
+  - `fleet tell` to an agent that is not at its prompt files the note on the
+    board the agent reads, from the phone, `asq` or a shell without the hub
+    too. Before, it went to the caller's board, was reported filed, and the
+    agent never saw it.
   - An agent's exit is announced on the board its manager reads, even when it
     ended before its session registered and was reaped by a process with
     another hub, or none.

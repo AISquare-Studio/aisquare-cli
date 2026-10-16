@@ -2759,7 +2759,7 @@ def test_tell_files_a_board_note_when_the_agent_is_not_waiting(
     assert len(notes) == 1 and notes[0].text == "please rebase" and notes[0].to_role == "coder-1"
 
 
-def test_tell_to_a_board_nobody_added_is_a_fleet_error_not_a_traceback(
+def test_tell_from_under_a_hub_nobody_added_files_the_note_where_the_agent_reads(
     tmux: FakeTmux,
     claude_on_path: Path,
     project: ProjectInfo,
@@ -2767,22 +2767,20 @@ def test_tell_to_a_board_nobody_added_is_a_fleet_error_not_a_traceback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Review of #259, round 17: an agent not at its prompt is told through a board note,
-    filed on the board its project resolves to — ``AISQUARE_TEAM_HUB``'s when one is set.
-    With ``[projects] capture`` off, one nobody added refuses the note (``NotAdded``), and
-    ``_file_note`` caught only a board that is off: ``fleet tell`` ended in a traceback.
-    It is a ``FleetError`` now, saying what to add."""
+    which was filed on the board the CALLER resolved, ``AISQUARE_TEAM_HUB``'s when it set
+    one, and with ``[projects] capture`` off a hub nobody added ended ``fleet tell`` in a
+    traceback, then a ``FleetError``. Round 26, 2/11: the note goes to the board the agent
+    reads, as its spawn recorded, so the caller's hub is never asked: filed, not refused."""
     agent = _coder(project)
     _board_session(agent, "working")
     hub = tmp_path / "hub"
     hub.mkdir()
     monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))
 
-    with pytest.raises(FleetError, match="cannot file the message as a board note") as refused:
-        fleet_service.tell(project, "coder-1", "please rebase")
+    result = fleet_service.tell(project, "coder-1", "please rebase")
 
-    assert "hub is not one of your projects — add it first: aisquare project onboard" in str(
-        refused.value
-    )
+    assert not result.delivered and "filed as board note" in result.how, result
+    assert agent.board == project.id and _events(project, "note") == ["please rebase"]
     assert tmux.typed == []
 
 
@@ -5165,6 +5163,13 @@ def _case_pause_without_the_hub(w: _Hubbed) -> str | None:
     return _case_pause(w)
 
 
+def _case_tell_unhubbed(w: _Hubbed) -> str | None:
+    _without_the_hub(w)  # `asq`, the phone's tell or a plain shell
+    told = fleet_service.tell(w.fleet, w.coder.label, "please rebase")
+    assert not told.delivered and "filed as board note" in told.how, told
+    return _delivered()
+
+
 def _case_pause_is_its_projects(w: _Hubbed) -> str | None:
     fleet_service.pause(w.fleet)
     paused = [project.id for project in (w.hub, w.fleet) if fleet_service.is_paused(project)]
@@ -5206,6 +5211,7 @@ _HUB_RULE_CASES: list[tuple[str, str, Any]] = [
     ("board", "fleet pause from a caller without the hub", _case_pause_without_the_hub),
     ("board", "the pause fleet shutdown clears", _case_shutdown_clears_the_pause),
     ("fleet", "the project a pause on the hub's board pauses", _case_pause_is_its_projects),
+    ("board", "the note fleet tell files from a caller without the hub", _case_tell_unhubbed),
     (
         "fleet",
         "a restart under the hub of a row without",

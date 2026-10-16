@@ -1136,13 +1136,23 @@ def add_note(
     to_role: str | None = None,
     kind: str = "note",
     cwd: Path | None = None,
+    board_id: str | None = None,
 ) -> TeamEvent:
-    """Put a note/decision/question/result on the team pipe."""
+    """Put a note/decision/question/result on the team pipe.
+
+    ``board_id`` names the board outright, whoever writes and from wherever: ``fleet tell``'s
+    note to an agent goes to the board the agent reads (``fleet._board_of_row``), not the
+    teller's.
+    """
     _require_enabled()
     _DELIVERY.set(None)
     with store_session() as store:
         session = _resolve_session(store, session_ref)
-        board = _board(store, session, cwd, write=True)
+        board = (
+            _board_of(store, board_id)
+            if board_id is not None
+            else _board(store, session, cwd, write=True)
+        )
         task_id: str | None = None
         if task_ref is not None:
             task = find_task(store, task_ref, board.id)

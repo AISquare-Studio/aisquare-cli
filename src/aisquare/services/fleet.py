@@ -4181,7 +4181,7 @@ def tell(
         except TmuxError:
             facts = None  # tmux that cannot answer is not a pane to type into either
         if not _its_agent(agent, facts):
-            how = _file_note(project, label, text, sender)
+            how = _file_note(project, label, text, sender, agent=agent)
             if facts is not None and _outlived(agent, facts.server_started):
                 why = (
                     "it reads as waiting, but the tmux server at its socket is not the one it "
@@ -4210,15 +4210,15 @@ def tell(
             # Whatever the note raised: a store locked past its busy timeout is no `FleetError`
             # (round 12, 3/9), and the note is a courtesy once the paste may be on its way.
             try:
-                how = _file_note(project, label, text, sender)
+                how = _file_note(project, label, text, sender, agent=agent)
             except Exception as exc:
                 late = told.late(label, then=" at its prompt, unsent", again="type into it")
                 return TellResult("maybe", f"{late}. It was not filed as a board note: {exc}")
             late = told.late(label, then=" at its prompt as well, unsent", again="type into it")
             return TellResult("maybe", f"{how}, and {late}")
-        how = _file_note(project, label, text, sender)
+        how = _file_note(project, label, text, sender, agent=agent)
         return TellResult("no", f"tmux could not type it ({told.error}) — {how}")
-    how = _file_note(project, label, text, sender)
+    how = _file_note(project, label, text, sender, agent=agent)
     return TellResult("no", f"it is {status.state} — {how}")
 
 
@@ -4243,13 +4243,38 @@ def _runs_the_agent(facts: PaneFacts | None) -> bool:
     return facts is not None and not facts.dead and _agent_running(facts.current_command)
 
 
-def _file_note(project: ProjectInfo, label: str, text: str, sender: str | None) -> str:
+def _file_note(
+    project: ProjectInfo,
+    label: str,
+    text: str,
+    sender: str | None,
+    *,
+    agent: FleetAgent | None = None,
+) -> str:
+    """File ``text`` as a board note to ``label`` on the board its agent reads, as its spawn
+    recorded (:func:`_board_of_row`), whoever tells it and from wherever. ``agent`` is the
+    live row ``label`` names, when the caller has it. Resolved from the caller (the phone's
+    tell, ``asq``, a shell without the hub the agent was spawned under), the note went to the
+    project's own board while the agent read the hub's, and was reported filed; with
+    ``[projects] capture`` off, a project board never added refused it though the hub's was
+    added (review of #259, round 26, 2/11). With no live row, it goes where the caller
+    resolves, as before."""
     team = _team()
+    if agent is None:
+        with store_session() as store:
+            agent = store.fleet_agent_by_label(project.id, label, live_only=True)
     try:
-        event = team.add_note(text, session_ref=sender, to_role=label, cwd=project.root)
+        event = team.add_note(
+            text,
+            session_ref=sender,
+            to_role=label,
+            cwd=project.root,
+            board_id=_board_of_row(agent) if agent is not None else None,
+        )
     except (team.TeamDisabledError, project_service.NotAdded) as exc:
-        # NotAdded: the board the note resolves to (`AISQUARE_TEAM_HUB`'s, or the project's)
-        # is one nobody added, with `[projects] capture` off (review of #259, round 17).
+        # NotAdded: with no row to name it, the board the note resolves to
+        # (`AISQUARE_TEAM_HUB`'s, or the project's) is one nobody added, with
+        # `[projects] capture` off (review of #259, round 17).
         raise FleetError(f"cannot file the message as a board note: {exc}") from exc
     except KeyError as exc:
         raise FleetError(f"unknown sender session {sender!r}") from exc

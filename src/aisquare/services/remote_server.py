@@ -661,11 +661,13 @@ def _remote_board_project(root: Path) -> ProjectInfo:
 
 def _remote_project_board(project: ProjectInfo) -> ProjectInfo:
     """The board ``project``'s agents read, which its Board and Tasks tabs show, a task number
-    is read on and a note naming no agent or session goes to: the one its rows recorded at
-    spawn (``ContextStore.fleet_board``: its live manager's, else its newest live row's, else
-    its newest manager's, else its newest row's). Else, for a project the fleet never spawned
-    into, or whose board the store does not hold, the one ``asq board`` run in its root
-    shows, under Remote's own environment (:func:`_remote_board_project`).
+    is read on and a note naming no agent or session goes to: the one its running agents'
+    rows recorded at spawn (``ContextStore.fleet_board``: its live manager's, else its
+    newest live row's). Else, for a project with no agent running, or whose board the store
+    does not hold, the one ``asq board`` run in its root shows, under Remote's own
+    environment (:func:`_remote_board_project`), as docs/remote.md says: an ended row's
+    board kept the tabs, ``#N`` and the note on its last spawn's hub, and ``done #1`` closed
+    the hub's #1 (review of #259, round 30, 1/8).
 
     Each agent reads the board its row recorded (``fleet._board_of_row``). Resolved from the
     root under Remote's environment, a Remote started without the hub P's agents were
@@ -679,8 +681,8 @@ def _remote_project_board(project: ProjectInfo) -> ProjectInfo:
 
 
 def _remote_recorded_board(project: ProjectInfo) -> ProjectInfo | None:
-    """:func:`_remote_project_board` as ``project``'s rows recorded it; ``None`` for a project
-    with none, or whose board the store does not hold."""
+    """:func:`_remote_project_board` as ``project``'s live rows recorded it; ``None`` for a
+    project with none, or whose board the store does not hold."""
     from aisquare.core.store import store_session
 
     with store_session() as store:
@@ -3622,8 +3624,8 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
                 if replying is not None:
                     board = _remote_reply_board(target, replying)
                 elif session is None:
-                    # The Board tab's. A project with no rows is resolved in its root as
-                    # `asq note` there does, which refuses a board nobody added.
+                    # The Board tab's. A project with no live rows is resolved in its root
+                    # as `asq note` there does, which refuses a board nobody added.
                     recorded = _remote_recorded_board(target)
                     board = None if recorded is None else recorded.id
                 event = team_service.add_note(

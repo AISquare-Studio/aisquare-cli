@@ -180,8 +180,8 @@ The screens, along the bottom bar:
   **Memory**, both read-only. Board and Tasks are the board the project's agents
   read, as recorded when they were spawned (its running manager's first), even
   when Remote runs under another `AISQUARE_TEAM_HUB` than they were spawned
-  under, or none; a project with no agent shows the board `aisquare board` shows
-  in its directory.
+  under, or none; a project with no agent running shows the board `aisquare
+  board` shows in its directory.
 - **An agent** — **Live** (its pane, colours included, the cursor where the
   program shows one, with Fit width), **Transcript** (the conversation, wrapped
   to the phone, each turn's time in the phone's own time zone, older pages on

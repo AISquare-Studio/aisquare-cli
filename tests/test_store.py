@@ -2499,3 +2499,33 @@ def test_a_store_without_team_session_still_reads_its_fleet_rows() -> None:
         assert one is not None and one.board == PROJECT.id
         assert store.fleet_agent_boards(PROJECT.id) == sorted([PROJECT.id, "prj_hub"])
         assert store.fleet_agent_by_label(PROJECT.id, "coder-2") is not None
+
+
+def test_fleet_board_is_a_live_rows_a_live_managers_first() -> None:
+    """Review of #259, round 30, 1/8: an ended row's board was the answer once no row was
+    live, so Remote kept a project's tabs on its last spawn's hub for as long as it ran no
+    agent. Only a live row's board is."""
+    from datetime import timedelta
+
+    from aisquare.models import FleetAgent
+
+    start = datetime.now(tz=UTC)
+
+    def row(n: int, role: str, board: str, *, ended: bool = False) -> FleetAgent:
+        return FleetAgent(
+            id=f"agt_{n}", project_id=PROJECT.id, label=f"{role}-{n}", role=role,
+            pane_id=f"%{n}", cwd=Path("/w"), created_at=start + timedelta(minutes=n),
+            board=board, ended_at=start + timedelta(hours=1) if ended else None,
+        )  # fmt: skip
+
+    with store_session() as store:
+        store.ensure_project(PROJECT)
+        assert store.fleet_board(PROJECT.id) is None, "before its first spawn"
+        store.upsert_fleet_agent(row(1, "manager", "prj_hub", ended=True))
+        assert store.fleet_board(PROJECT.id) is None, "an ended manager's hub is not it"
+        store.upsert_fleet_agent(row(2, "coder", PROJECT.id))
+        store.upsert_fleet_agent(row(3, "coder", "prj_b"))
+        store.upsert_fleet_agent(row(4, "coder", "prj_c", ended=True))
+        assert store.fleet_board(PROJECT.id) == "prj_b", "the newest live row's"
+        store.upsert_fleet_agent(row(0, "manager", "prj_m"))
+        assert store.fleet_board(PROJECT.id) == "prj_m", "a live manager's first"

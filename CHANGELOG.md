@@ -625,7 +625,9 @@ all of them, and the fleet cleans up the worktrees it made.**
     recorded when they were spawned, and a note from the Board tab is posted
     there, even when Remote runs under another hub, or none. A claim or a
     close of a task on that board by id finds it, and `done #12` reads #12
-    there, not on another board that happens to have a #12.
+    there, not on another board that happens to have a #12. With no agent
+    running, they show the board `aisquare board` shows in the project's
+    directory, not the board its last agents read.
   - Under a hub, a live manager keeps its own agents' questions and results to
     it, their crashes and their failed hand-overs off the phone, and holds back
     a usage limit's push, as it does without a hub. Before, each was a card and

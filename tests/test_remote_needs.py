@@ -4865,17 +4865,18 @@ def test_a_phones_reply_to_a_card_is_posted_on_the_board_its_row_asked_on(
 
 
 def _hubbed_tasks(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remote: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remote: str, *, end: str | None = None
 ) -> tuple[ProjectInfo, ProjectInfo, TeamTask]:
     """P's manager, spawned under hub H, and Remote run under another hub (``remote``
     ``"another"``) or none, with a task #1 on each of H (``tsk_hub``), where the manager
-    reads, and the board Remote's own environment gives P: P, H, and the latter task."""
+    reads, and the board Remote's own environment gives P: P, H, and the latter task. With
+    ``end``, the manager has ended so (``_Seat.end``), and P has no agent running."""
     now = datetime.now(UTC)
     with store_session() as store:
         p = store.onboard_project(_rooted(tmp_path / "p"))
         hub = _rooted(tmp_path / "hub")
         store.ensure_project(hub)
-        _seat_up(store, _manager_of("p"), p, hub)
+        _seat_up(store, _manager_of("p", end=end), p, hub)
         other = _rooted(tmp_path / "another")
         store.ensure_project(other)
         elsewhere = other if remote == "another" else p
@@ -4945,9 +4946,9 @@ def _note(p: ProjectInfo, hub: ProjectInfo) -> str:
     assert isinstance(event, dict)
     with store_session() as store:
         (posted,) = [
-            board
-            for board in (p.id, hub.id)
-            if any(e.text == "hi" for e in store.recent_events(board, limit=5))
+            board.id
+            for board in store.list_projects(all=True)
+            if any(e.text == "hi" for e in store.recent_events(board.id, limit=5))
         ]
     return posted
 
@@ -4973,6 +4974,40 @@ def test_remotes_board_and_task_paths_go_to_the_board_the_projects_agents_read(
     with store_session() as store:
         untouched = store.get_task(on_elsewhere.id)
     assert untouched is not None and untouched.status == "todo"
+
+
+@pytest.mark.parametrize("end", ["exit", "stop"])
+@pytest.mark.parametrize("remote", ["none", "another"], ids=["no hub", "another hub"])
+@pytest.mark.parametrize(
+    "path",
+    [_board_tab, _tasks_tab, _done_by_number, _note],
+    ids=lambda path: path.__name__.strip("_"),
+)
+def test_with_no_agent_running_remotes_board_paths_go_to_the_board_its_root_shows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: Any, remote: str, end: str
+) -> None:
+    """Review of #259, round 30, 1/8: the board a project's rows recorded was taken from its
+    ended rows too, so once P's manager spawned under hub H had stopped, the Board and Tasks
+    tabs showed H for as long as P ran no agent, ``done #1`` closed H's #1 and the Board
+    tab's note went to H, where no agent of P reads. With none running, each goes to the
+    board ``aisquare board`` shows in P's root under Remote's own environment, as
+    docs/remote.md says. That board is another hub's nobody added: a note is refused there,
+    as ``asq note`` in P's root refuses it, and is not posted on H."""
+    from aisquare.services.remote_server import RequestError
+
+    p, hub, on_elsewhere = _hubbed_tasks(tmp_path, monkeypatch, remote, end=end)
+
+    if path is _note and remote == "another":
+        with pytest.raises(RequestError) as refused:
+            path(p, hub)
+        assert (refused.value.status, refused.value.error) == (409, "not_added")
+    else:
+        assert path(p, hub) == on_elsewhere.project_id != hub.id
+    with store_session() as store:
+        untouched = store.get_task("tsk_hub")
+        on_hub = [e for e in store.recent_events(hub.id, limit=9) if e.kind == "note"]
+    assert untouched is not None and untouched.status == "todo", "H's #1 is not P's"
+    assert on_hub == []
 
 
 @dataclass(frozen=True)

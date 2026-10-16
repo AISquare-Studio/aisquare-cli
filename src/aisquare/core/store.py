@@ -3867,18 +3867,20 @@ class SqliteStore:
         return [row["board"] for row in rows]
 
     def fleet_board(self, project_id: str) -> str | None:
-        """The board the project's agents read, as one row recorded it: its live manager's,
-        else its newest live row's, else its newest manager's, else its newest row's;
-        ``None`` before its first spawn.
+        """The board the project's running agents read, as one live row recorded it: its live
+        manager's, else its newest live row's; ``None`` with none live.
 
         Picked in SQL (``services.remote_server``'s ``_remote_project_board``): every spawn,
         restart and switch adds a row that is never deleted, and :meth:`fleet_agents` builds
-        them all.
+        them all. Not an ended row's: a project whose agents had all stopped kept the board
+        of its last spawn, however long ago, and under a hub that spawn was given, Remote's
+        ``done #1`` closed the hub's #1, not the one ``aisquare board`` shows in the project
+        (review of #259, round 30, 1/8).
         """
         row = self._conn.execute(
-            f"SELECT {self._fleet_agent_board} AS board FROM fleet_agent WHERE project_id = ? "
-            "ORDER BY ended_at IS NULL DESC, role = 'manager' DESC, created_at DESC, id DESC "
-            "LIMIT 1",
+            f"SELECT {self._fleet_agent_board} AS board FROM fleet_agent "
+            "WHERE project_id = ? AND ended_at IS NULL "
+            "ORDER BY role = 'manager' DESC, created_at DESC, id DESC LIMIT 1",
             (project_id,),
         ).fetchone()
         return None if row is None else str(row["board"])

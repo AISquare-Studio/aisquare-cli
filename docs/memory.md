@@ -65,7 +65,8 @@ the root is registered again; `--purge` deletes them and the snapshot too), and
 `aisquare project prune` sweeps the stale ones: roots that no longer exist, and
 worktrees of a repository that is itself registered. It shows the plan and asks
 before dropping anything; off a terminal it is a dry run unless `--yes`. Both
-refuse a project that has live fleet agents.
+refuse a project that has live fleet agents, and `forget` a hub whose board
+another project's live fleet agents read.
 
 ```sh
 aisquare project forget ../old-checkout       # one registration; --purge deletes its history too

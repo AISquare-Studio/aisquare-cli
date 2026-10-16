@@ -208,19 +208,29 @@ def fleet_command(verb: str, project: ProjectInfo, *words: str) -> str:
 
 
 class ProjectBusyError(Exception):
-    """The project has live fleet agents, so forgetting it would strand them."""
+    """The project has live fleet agents, or another project's (``reader``'s) live fleet
+    agents read its board, as a hub's, so forgetting it would strand them."""
 
-    def __init__(self, project: ProjectInfo, agents: list[FleetAgent]) -> None:
+    def __init__(
+        self, project: ProjectInfo, agents: list[FleetAgent], *, reader: ProjectInfo | None = None
+    ) -> None:
         labels = ", ".join(agent.label for agent in agents)
         # `reap` is named for rows whose SERVER still answers — it refuses to end a
         # row on a server it cannot reach, and an operator following that advice
         # after a hand-run `tmux kill-server` reaped nothing, twice. The scoped
         # `fleet shutdown` is the command that can, on their word.
-        shutdown = fleet_command("shutdown", project)
-        stop = fleet_command("stop", project)
-        reap = fleet_command("reap", project)
+        owner = project if reader is None else reader
+        shutdown = fleet_command("shutdown", owner)
+        stop = fleet_command("stop", owner)
+        reap = fleet_command("reap", owner)
+        has = (
+            f"{display_name(project)} has {len(agents)} live fleet agent(s)"
+            if reader is None
+            else f"{display_name(project)} is the board {display_name(reader)}'s "
+            f"{len(agents)} live fleet agent(s) read"
+        )
         super().__init__(
-            f"{display_name(project)} has {len(agents)} live fleet agent(s): {labels} — "
+            f"{has}: {labels} — "
             f"stop them first ({stop} <label>), or run {reap} if they are already gone; if "
             f"their tmux server is gone too, {shutdown} records them"
         )
@@ -296,11 +306,20 @@ def forget(ref: str, *, purge: bool = False) -> ProjectForgetReport:
 def forget_project(project: ProjectInfo, *, purge: bool = False) -> ProjectForgetReport:
     """:func:`forget` of a project its caller resolved: the remote's ``project/remove``
     reads its ``ref`` without the server's working directory, which :func:`resolve` would
-    read a path against."""
+    read a path against.
+
+    Refused too while another project's live fleet agents read its board, as a hub's
+    (:func:`_board_readers`): a restart or a switch of one gives its replacement that hub,
+    whose ``launch`` adds the board it joins (``team on``), and a hub forgotten to tidy the
+    list came back on it with nothing to say why (review of #259, round 32, 3/9). Not
+    added, with ``[projects] capture`` off, the board refuses every write of theirs."""
     with store_session() as store:
         live = store.fleet_agents(project.id, live_only=True)
         if live:
             raise ProjectBusyError(project, live)
+        reader, reading = _board_readers(store, project)
+        if reader is not None:
+            raise ProjectBusyError(project, reading, reader=reader)
         was_active = active_project(store).id == project.id
         removed = store.purge_project(project.id) if purge else {}
         if not purge:
@@ -316,6 +335,25 @@ def forget_project(project: ProjectInfo, *, purge: bool = False) -> ProjectForge
         pin_error=pin_error,
         keys_still_live=_revoke_owed([project.id]) if purge else [],
     )
+
+
+def _board_readers(
+    store: ContextStore, project: ProjectInfo
+) -> tuple[ProjectInfo | None, list[FleetAgent]]:
+    """The first other project whose live fleet rows recorded ``project``'s board, as a hub's
+    (``FleetAgent.board``), and those rows; ``(None, [])`` for none."""
+    reading = [
+        row
+        for row in store.live_fleet_agents()
+        if row.project_id != project.id and (row.board or row.project_id) == project.id
+    ]
+    if not reading:
+        return None, []
+    first = reading[0]
+    reader = store.get_project(first.project_id, include_forgotten=True) or ProjectInfo(
+        id=first.project_id, root=first.cwd
+    )
+    return reader, [row for row in reading if row.project_id == first.project_id]
 
 
 def prune_candidates(

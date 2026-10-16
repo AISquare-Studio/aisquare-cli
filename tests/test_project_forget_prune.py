@@ -212,6 +212,43 @@ def test_forget_refuses_a_project_with_live_fleet_agents(
     assert _listed(runner) == set()
 
 
+def test_forget_refuses_a_hub_whose_board_another_projects_live_agents_read(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 32, 3/9: ``project forget`` refused only a project with live
+    rows of its own. Beta's agents, spawned under hub alpha, read alpha's board, and alpha
+    was forgotten to tidy the list. A switch on a usage limit gave beta's replacement alpha
+    as its hub, and its ``launch`` added the board it joins (``team on``): alpha was back
+    on the list with nothing to say why. A board another project's live agents read is
+    refused, naming that project's stop; an ended row of theirs does not hold it."""
+    alpha = _register(runner, monkeypatch, work_dir / "alpha")
+    beta = _register(runner, monkeypatch, work_dir / "beta")
+    with store_session() as store:
+        ended = store.upsert_fleet_agent(_agent(beta, "coder0").model_copy(update={"board": alpha}))
+        store.end_fleet_agent(ended.id, exit_status=0)
+        live = [
+            store.upsert_fleet_agent(_agent(beta, label).model_copy(update={"board": alpha}))
+            for label in ("manager", "coder1")
+        ]
+        store.upsert_fleet_agent(_agent(beta, "coder2"))  # on beta's own board
+
+    for purge in ([], ["--purge"]):
+        refused = runner.invoke(app, ["project", "forget", "alpha", *purge])
+        assert refused.exit_code == 2, refused.output
+        said = " ".join(refused.output.split())
+        assert "alpha is the board beta's 2 live fleet agent(s) read: manager, coder1 —" in said
+        assert f"fleet stop --project {beta} <label>" in said and "coder2" not in said
+        as_json = runner.invoke(app, ["--json", "project", "forget", "alpha", *purge])
+        assert _json(as_json.stdout) == {"error": "project_busy", "ref": alpha}
+    assert _listed(runner) == {alpha, beta}
+
+    with store_session() as store:
+        for row in live:
+            store.end_fleet_agent(row.id, exit_status=0)
+    assert runner.invoke(app, ["project", "forget", "alpha"]).exit_code == 0
+    assert _listed(runner) == {beta}
+
+
 def test_forget_the_active_project_moves_the_pin_to_the_most_recently_touched(
     runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

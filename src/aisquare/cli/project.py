@@ -256,7 +256,8 @@ def forget(
     ref: Annotated[str, typer.Argument(help="Project id prefix, name, codename or path.")],
     purge: Annotated[bool, typer.Option("--purge", help=_PURGE_HELP)] = False,
 ) -> None:
-    """Remove a project registration. Refused while it has live fleet agents."""
+    """Remove a project registration. Refused while it has live fleet agents, or while
+    another project's live fleet agents read its board (a hub's)."""
     try:
         report = project_service.forget(ref, purge=purge)
     except KeyError:

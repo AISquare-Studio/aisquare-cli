@@ -970,6 +970,11 @@ def load_config(path: Path | None = None, *, copy: bool = True) -> AppConfig:
     that only reads, and never changes or saves what it is handed: the kept parse itself,
     not a deep copy of it. ``capture_on()`` copied the whole model for one bool, several
     times a session start and on asq's every refresh tick (review of #259, round 19).
+
+    :func:`one_load` keeps a copy of a ``copy=False`` load, never the kept parse: it hands
+    what it keeps to every later load in its block, ``copy=True`` ones too, and a caller
+    there that changed its config changed the kept parse, which every later load of the
+    same bytes, in any caller, then copied (round 20).
     """
     target = path or paths.config_path()
     loaded = _ONE_LOAD.get()
@@ -980,7 +985,7 @@ def load_config(path: Path | None = None, *, copy: bool = True) -> AppConfig:
     else:
         config = _parsed(target, despite_windows_contention(target.read_bytes), copy=copy)
     if loaded is not None:
-        loaded[target] = config
+        loaded[target] = config if copy else config.model_copy(deep=True)
     return config
 
 

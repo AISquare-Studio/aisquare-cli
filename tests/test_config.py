@@ -115,6 +115,26 @@ def test_a_reader_that_only_reads_is_handed_the_kept_parse_uncopied(
     assert mine is not load_config(path, copy=False) and copies
 
 
+def test_a_read_only_load_in_one_load_never_shares_the_kept_parse(tmp_path: Path) -> None:
+    """Review of #259, round 20: ``one_load`` keeps what the first load in its block returned
+    and hands it to every later load there, ``copy=True`` ones too. A ``copy=False`` load
+    first (``capture_on()``) put the kept parse itself in it; a caller later in the block that
+    changed its config changed the kept parse, and every load of the same bytes, in any
+    caller, then had the change until the file's bytes changed."""
+    from aisquare.core.config import one_load
+
+    path = tmp_path / "config.toml"
+    path.write_text("[fleet]\nmax_agents_per_project = 4\n", encoding="utf-8")
+
+    with one_load():
+        load_config(path, copy=False)
+        mine = load_config(path)
+        mine.fleet.max_agents_per_project = 9  # a change it never saves
+
+    assert load_config(path, copy=False).fleet.max_agents_per_project == 4
+    assert load_config(path).fleet.max_agents_per_project == 4
+
+
 def test_a_file_that_will_not_parse_is_read_again_each_load(tmp_path: Path) -> None:
     """Nothing is kept of a load that raised: the next load reads the file again, and a
     broken file after a good one raises rather than handing out the good one."""

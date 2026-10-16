@@ -3421,7 +3421,39 @@ def test_the_exited_note_tells_a_forgotten_projects_rows_to_add_it_back_first(
     assert f"`{restart}` starts it again" in said, said
     assert said.count("aisquare fleet restart") == 1, said
     onboard = project_service.onboard_command(plain_project.root)
-    assert f"{plain_project.root.name} is forgotten: {onboard} adds it back for both" in said
+    assert f"{plain_project.root.name} is forgotten: {onboard} adds it back first" in said
+
+
+def test_the_freed_socket_refusal_and_the_exited_note_name_rows_projects_alike(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    plain_project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 22, 9/9: the spawn's refusal over a freed socket and its note on
+    an exited server each read the rows' projects and wrote what a forgotten one needs, and
+    the copies had drifted ("adds it back first" against "for both", sorted against row
+    order). One reading names them in both, in row order, with one sentence."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    theirs = fleet_service.spawn(plain_project, "manager").agent
+    ours = _coder(project)
+    with store_session() as store:
+        store.forget_project(plain_project.id)
+    rows = [theirs, ours]
+    onboard = project_service.onboard_command(plain_project.root)
+    forgotten = f"{plain_project.root.name} is forgotten: {onboard} adds it back first"
+    named = f"manager ({plain_project.root.name}), coder-1 ({project.root.name})"
+
+    note = fleet_service._exited_note(tmux, rows)
+    tmux.running, tmux.socket_file = False, False  # a server that lost its socket file
+    with pytest.raises(FleetError, match="lost its socket file") as refused:
+        fleet_service.spawn(project, "coder")
+    said = str(refused.value)
+
+    for message in (note, said):
+        assert named in message and forgotten in message, message
+        assert message.count("is forgotten") == 1, message
 
 
 def test_a_check_at_a_path_with_no_file_reads_the_fleets_socket_once(

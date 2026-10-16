@@ -3140,6 +3140,45 @@ def _live_rows_here(
         yield agent, answer
 
 
+@dataclass(frozen=True)
+class _RowProjects:
+    """The projects of live rows from any project, as a message about those rows names them
+    (:func:`_row_projects`)."""
+
+    named: str
+    """Each row as ``<label> (<its project's name>)``, in row order, comma-separated."""
+    reached: dict[str, ProjectInfo]
+    """The rows' projects a fleet command reaches (a registration, captured or not), by id."""
+    forgotten: list[str]
+    """For each forgotten project of the rows, in row order: ``<name> is forgotten: <onboard>
+    adds it back first``, which the commands for its rows wait on."""
+
+
+def _row_projects(store: ContextStore, rows: Sequence[FleetAgent]) -> _RowProjects:
+    """What a message about ``rows``, live rows from any project, says of their projects.
+
+    :func:`_refuse_a_freed_socket` and :func:`_exited_note` each read the projects and wrote
+    the forgotten sentence, and the copies had drifted: "adds it back first" against "for
+    both", one sorted by id, the other in row order (review of #259, round 22). One reading
+    keeps the two messages in step."""
+    known = {each.id: each for each in store.list_projects(include_forgotten=True)}
+    live = {each.id for each in store.list_projects(all=True)}
+    names = {each.id: _name(each) for each in known.values()}
+    theirs = list(dict.fromkeys(row.project_id for row in rows))
+    return _RowProjects(
+        named=", ".join(
+            f"{row.label} ({names.get(row.project_id, row.project_id)})" for row in rows
+        ),
+        reached={each: known[each] for each in theirs if each in live},
+        forgotten=[
+            f"{names[each]} is forgotten: {project_service.onboard_command(known[each].root)} "
+            "adds it back first"
+            for each in theirs
+            if each in known and each not in live
+        ],
+    )
+
+
 def _refuse_a_freed_socket(
     srv: TmuxServer,
     config: FleetSettings,
@@ -3176,25 +3215,16 @@ def _refuse_a_freed_socket(
         gone = [agent for agent, answer in rows if answer == "gone"]
         if not gone:
             return
-        known = {each.id: each for each in store.list_projects(include_forgotten=True)}
-        live = {each.id for each in store.list_projects(all=True)}
-    names = {each.id: _name(each) for each in known.values()}
-    stranded = [f"{row.label} ({names.get(row.project_id, row.project_id)})" for row in gone]
-    one = len(stranded) == 1
+        projects = _row_projects(store, gone)
+    one = len(gone) == 1
     # Each project's own shutdown: the rows are any project's, and a bare one is the active
     # project's (review of #259, round 21). A forgotten project's is reached once it is back.
-    theirs = dict.fromkeys(row.project_id for row in gone)
-    forgets = [_forget(known[each]) for each in theirs if each in live]
+    forgets = [_forget(each) for each in projects.reached.values()]
     ways = [f"{' and '.join(forgets)} {'ends its row' if one else 'end their rows'} on your word"]
     ways = ways if forgets else []
-    ways += [
-        f"{names[each]} is forgotten: {project_service.onboard_command(known[each].root)} "
-        "adds it back first"
-        for each in theirs
-        if each in known.keys() - live
-    ]
+    ways += projects.forgotten
     raise FleetError(
-        f"not started: the tmux server that {', '.join(stranded)} {'runs' if one else 'run'} "
+        f"not started: the tmux server that {projects.named} {'runs' if one else 'run'} "
         f"on lost its socket file {here}, so no tmux client reaches it, and it may still be "
         f"running; a spawn now would start a second server at that path and leave "
         f"{'that agent' if one else 'those agents'} where nothing can reach "
@@ -3286,30 +3316,21 @@ def _exited_note(srv: TmuxServer, exited: Sequence[FleetAgent]) -> str:
     neither until it is added back, so its rows are told that instead."""
     one = len(exited) == 1
     with store_session() as store:
-        known = {each.id: each for each in store.list_projects(include_forgotten=True)}
-        live = {each.id for each in store.list_projects(all=True)}
-    called = {each.id: _name(each) for each in known.values()}
-    names = ", ".join(
-        f"{row.label} ({called.get(row.project_id, row.project_id)})" for row in exited
-    )
+        projects = _row_projects(store, exited)
     restarts = [
-        f"`{project_service.fleet_command('restart', known[row.project_id], row.label)}`"
+        f"`{project_service.fleet_command('restart', projects.reached[row.project_id], row.label)}`"
         for row in exited
-        if row.project_id in live
+        if row.project_id in projects.reached
     ]
     ways = [f"`aisquare fleet reap --all` records {'it' if one else 'them'}"]
     if restarts:
         again = "starts it again" if len(restarts) == 1 else "start them again"
         ways.append(f"{' and '.join(restarts)} {again}")
-    forgotten = {row.project_id for row in exited if row.project_id in known.keys() - live}
-    ways += [
-        f"{called[gone]} is forgotten: {project_service.onboard_command(known[gone].root)} "
-        "adds it back for both"
-        for gone in sorted(forgotten)
-    ]
+    ways += projects.forgotten
     return (
         f"the tmux server at {srv.socket_path()} had exited, leaving its socket file: "
-        f"{names} {'reads' if one else 'read'} lost from now on, as {'its' if one else 'their'}"
+        f"{projects.named} {'reads' if one else 'read'} lost from now on, as "
+        f"{'its' if one else 'their'}"
         f" {'pane' if one else 'panes'} went with it ({'; '.join(ways)})"
     )
 

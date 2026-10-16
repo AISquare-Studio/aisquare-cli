@@ -1339,6 +1339,7 @@ class ContextStore(Protocol):
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
     def live_fleet_agents(self) -> list[FleetAgent]: ...
     def fleet_agents_ended_since(self, project_id: str, since: datetime) -> list[FleetAgent]: ...
+    def newest_fleet_agent(self, project_id: str) -> FleetAgent | None: ...
     def fleet_agent_for_session(self, session_id: str) -> FleetAgent | None: ...
     def ui_state(self, key: str) -> str | None: ...
     def set_ui_state(self, key: str, value: str | None) -> None: ...
@@ -3801,6 +3802,20 @@ class SqliteStore:
             (project_id, since.astimezone(UTC).isoformat()),
         ).fetchall()
         return [_row_to_fleet_agent(row) for row in rows]
+
+    def newest_fleet_agent(self, project_id: str) -> FleetAgent | None:
+        """The project's newest row, live or ended; ``None`` before its first spawn.
+
+        One row through the ``fleet_agent_project`` index, for a question the newest answers
+        (the board a project with nothing live last recorded): every spawn, restart and
+        switch adds a row that is never deleted, and :meth:`fleet_agents` builds them all.
+        """
+        row = self._conn.execute(
+            f"SELECT {_FLEET_AGENT_READ} FROM fleet_agent "
+            "WHERE project_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+            (project_id,),
+        ).fetchone()
+        return _row_to_fleet_agent(row) if row is not None else None
 
     def fleet_agent_for_session(self, session_id: str) -> FleetAgent | None:
         """The live fleet row recorded against ``session_id``, if there is one, in whichever

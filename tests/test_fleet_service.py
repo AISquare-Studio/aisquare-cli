@@ -8519,6 +8519,38 @@ def test_the_pause_pass_reads_and_clears_every_signal_through_one_store(
     assert not fleet_service.is_paused(project) and not fleet_service.is_paused(plain_project)
 
 
+def test_the_pause_builds_no_row_it_does_not_need(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 26, 10/11: the boards a pause goes to were found from every row
+    the project ever had, the ended ones too, even when the caller had the live rows in hand
+    (``fleet shutdown``'s pass over every visible project). Rows are never deleted. Only the
+    live rows are read, none when the caller gives them, and with nothing live the newest."""
+    for _ in range(3):
+        fleet_service.stop(project, _coder(project).label, force=True)
+    coder = _coder(project)
+    reads: list[bool] = []
+    real = core_store.SqliteStore.fleet_agents
+
+    def spied(self: Any, project_id: str, *, live_only: bool = False) -> list[FleetAgent]:
+        reads.append(live_only)
+        return real(self, project_id, live_only=live_only)
+
+    monkeypatch.setattr(core_store.SqliteStore, "fleet_agents", spied)
+
+    fleet_service.pause(project)
+    assert fleet_service.is_paused(project)
+    fleet_service.resume(project)
+    assert reads == [True, True, True], "the live rows alone"
+    reads.clear()
+    with store_session() as store:
+        assert fleet_service._pause_boards(store, project, [coder]) == [project.id]
+        assert reads == [], "the live rows given are not read again"
+        fleet_service.stop(project, coder.label, force=True)
+        assert fleet_service._pause_boards(store, project) == [project.id], "the newest's"
+        assert reads == [True]
+
+
 def test_shutdown_clears_the_fleet_paused_signal(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

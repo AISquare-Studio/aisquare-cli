@@ -7079,18 +7079,23 @@ def _pause_boards(
     recorded; with no row yet, the board a spawn from here gives (:func:`_board_for`), where
     the manager it spawns will read.
 
+    Each read only when the one before it found nothing: ``live`` given is read again not at
+    all, and the rows ended since are never built. Every spawn, restart and switch adds a row
+    that is never deleted, and ``fleet shutdown --all`` asks this of every visible project,
+    so every row each project ever had was built to find its live ones (review of #259,
+    round 26, 10/11). Only a project that never had an agent asks git (:func:`_board_for`).
+
     A signal is the board's (docs/fleet.md, "Under a hub: one board, many fleet projects"),
     and the manager asks its own session's board, as its cycle line tells it to. Set, read
     and cleared on the project's own board, under a hub a paused fleet's manager kept
     spawning, and a pause set where it does read was never cleared by ``fleet shutdown``
     (review of #259, round 25, 2/10). By what name: :func:`_pause_signals`.
     """
-    rows = store.fleet_agents(project.id, live_only=False)
     if live is None:
-        live = [row for row in rows if row.ended_at is None]
+        live = store.fleet_agents(project.id, live_only=True)
     if live:
         return sorted({_board_of_row(row) for row in live})
-    newest = max(rows, key=lambda row: row.created_at, default=None)
+    newest = store.newest_fleet_agent(project.id)
     return [_board_of_row(newest) if newest is not None else _board_for(project)]
 
 

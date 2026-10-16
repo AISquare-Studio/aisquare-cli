@@ -5607,6 +5607,133 @@ def test_a_replacement_gets_the_hub_its_agents_window_was_given_never_one_worked
     assert kept.board == project.id
 
 
+def _as_080_left_it(agent: FleetAgent) -> None:
+    """The row as 0.8.0 wrote it: no board recorded, and a launch spec without the hub."""
+    assert agent.launch_spec is not None
+    legacy = json.loads(agent.launch_spec.model_dump_json())
+    del legacy["hub"]
+    raw = sqlite3.connect(str(paths.db_path()))
+    try:
+        raw.execute(
+            "UPDATE fleet_agent SET board = NULL, launch_spec = ? WHERE id = ?",
+            (json.dumps(legacy), agent.id),
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+
+def _project_below(project: ProjectInfo) -> ProjectInfo:
+    """A project rooted at ``<checkout>/api``, a sub-folder of ``project``'s repository."""
+    root = project.root / "api"
+    root.mkdir()
+    with store_session() as store:
+        return store.onboard_project(ProjectInfo(id=project_id_for(root), root=root))
+
+
+@pytest.mark.parametrize("verb", ["restart", "switch"])
+def test_a_080_agent_of_a_sub_folder_project_with_its_own_board_is_replaced_on_it(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    verb: str,
+) -> None:
+    """Review of #259, round 27, 2/7: in 0.8.0 a project rooted at ``repo/api`` had a board
+    of its own only under ``AISQUARE_TEAM_HUB=repo/api``, its sessions and its ``--task``
+    tasks on it, and the backfill gives its rows that board, their session's. A spec from
+    before the hub field mapped the project's own board to the checkout's: a restart or a
+    switch checked the task on the row's board, stopped the agent, and its replacement was
+    refused the task ("belongs to another project's board"), the agent left down. The
+    session registered on it says the board was read: the replacement reads it, under the
+    hub that gives it, and takes the task."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    below = _project_below(project)
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(below.root))
+    task = _add_task(below, "api's own task")
+    agent = _coder(below, task_id=task.id, account="2")
+    monkeypatch.delenv("AISQUARE_TEAM_HUB")
+    _with_transcript(agent, None)  # its session, registered on the board it read
+    _as_080_left_it(agent)
+    assert _row(agent.id).board == below.id != project.id
+
+    if verb == "restart":
+        again = fleet_service.restart(below, agent.label).started
+    else:
+        again = fleet_service.switch(below, agent.label).started
+
+    assert (again.board, again.task_id) == (below.id, task.id)
+    assert _last_window_hub(tmux) == str(below.root), "the hub that gives that board"
+    assert again.launch_spec is not None and again.launch_spec.hub == str(below.root)
+
+
+def test_a_080_agent_whose_session_never_registered_keeps_the_board_of_its_task(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 27, 2/7: a 0.8.0 row whose session never registered reads as its
+    project's board, and round 26 read such a board as a default, from the checkout. But
+    0.8.0 spawned for a task only on the board it gave the agent: a task on the project's own
+    board says that board was read, and the replacement keeps it, and the task."""
+    below = _project_below(project)
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(below.root))
+    task = _add_task(below, "api's own task")
+    agent = _coder(below, task_id=task.id)
+    monkeypatch.delenv("AISQUARE_TEAM_HUB")
+    _as_080_left_it(agent)
+    with store_session() as store:
+        assert agent.session_id is not None and store.get_session(agent.session_id) is None
+
+    again = fleet_service.restart(below, agent.label).started
+
+    assert (again.board, again.task_id) == (below.id, task.id)
+    assert _last_window_hub(tmux) == str(below.root)
+
+
+@pytest.mark.parametrize("verb", ["restart", "switch"])
+def test_a_replacement_that_could_not_take_the_task_is_refused_before_the_stop(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    verb: str,
+) -> None:
+    """Review of #259, round 27, 2/7: the task was checked on the board the row recorded,
+    and the replacement looked it up on the board it would read, after the stop. Where the
+    two differ (here a board whose project the store no longer has, so the replacement
+    reads the board this process gives), the agent was stopped and then refused its
+    replacement. The task is checked on the replacement's board, before anything is
+    stopped."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    task = _add_task(project, "Ship auth")
+    agent = _coder(project, task_id=task.id, account="2")
+    _with_transcript(agent, None)
+    _as_080_left_it(agent)
+    raw = sqlite3.connect(str(paths.db_path()))
+    try:
+        for table, column, key in (
+            ("fleet_agent", "board", agent.id),
+            ("team_task", "project_id", task.id),
+        ):
+            raw.execute(f"UPDATE {table} SET {column} = 'prj_gone' WHERE id = ?", (key,))
+        raw.commit()
+    finally:
+        raw.close()
+    assert _row(agent.id).board == "prj_gone"
+
+    with pytest.raises(FleetError, match="belongs to another project's board"):
+        if verb == "restart":
+            fleet_service.restart(project, agent.label)
+        else:
+            fleet_service.switch(project, agent.label)
+
+    assert tmux.typed == [] and tmux.killed == [], "no /exit typed, no window killed"
+    assert len(tmux.spawned) == 1
+    with store_session() as store:
+        live = store.fleet_agent_by_label(project.id, agent.label, live_only=True)
+    assert live is not None and live.id == agent.id
+    assert _session_state(agent.session_id or "") == "working", "the session is not marked"
+
+
 def test_a_fleet_row_from_before_v32_reads_its_sessions_board(hubbed: _Hubbed) -> None:
     """v32's backfill: a row recorded before the board was reads the board of the session
     bound to it, where its hooks registered, else its own project's."""

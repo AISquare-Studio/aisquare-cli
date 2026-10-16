@@ -2329,36 +2329,55 @@ def _board_of_row(agent: FleetAgent) -> str:
 
 
 def _board_and_hub(
-    store: ContextStore, project: ProjectInfo, board: str | None, spec: LaunchSpec | None
+    store: ContextStore, project: ProjectInfo, agent: FleetAgent, session: TeamSession | None
 ) -> tuple[str, str]:
-    """The board an agent spawned into ``project`` reads, and the ``AISQUARE_TEAM_HUB`` its
-    window is given so that its ``launch`` and hooks resolve that board.
+    """The board a replacement of ``agent`` in ``project`` reads, and the
+    ``AISQUARE_TEAM_HUB`` its window is given so that its ``launch`` and hooks resolve that
+    board. ``session`` is the agent's, as its row binds it.
 
-    ``board`` and ``spec`` are a replacement's: the board the row it replaces recorded, and
-    the launch it replays, with the hub its window was given (``LaunchSpec.hub``), both kept.
-    A ``restart`` or ``switch`` from ``asq``, the phone or a shell that does not export the
-    hub the agent was spawned under asked for the task on the caller's board and refused it,
-    and the replacement's window took the caller's hub, moving the agent off the board its
-    manager reads (review of #259, round 25, 1/10). The hub is read, never inferred: worked
-    out from the board, as "a board that is not the checkout's is a hub", a row that read
-    its own project's board took that project's root for a hub, and the replacement, and
-    every one after it, read a private board its manager does not (round 26, 8/11).
+    The board the row recorded (:func:`_board_of_row`), and the hub its window was given,
+    kept in the launch it replays (``LaunchSpec.hub``). A ``restart`` or ``switch`` from
+    ``asq``, the phone or a shell that does not export the hub the agent was spawned under
+    asked for the task on the caller's board and refused it, and the replacement's window
+    took the caller's hub, moving the agent off the board its manager reads (review of #259,
+    round 25, 1/10). The hub is read, never inferred: worked out from the board, as "a board
+    that is not the checkout's is a hub", a row that read its own project's board took that
+    project's root for a hub, and the replacement, and every one after it, read a private
+    board its manager does not (round 26, 8/11).
 
-    A spec recorded before it kept the hub says nothing: a board that is the checkout's or
-    the project's own is read with none, from the checkout, as a window with no hub reads it;
-    another project's known board, which only a hub gives, with that hub. A new agent, or a
-    board whose root the store no longer has, reads the board this process gives it
-    (:func:`_board_for`).
+    A spec recorded before it kept the hub (every row 0.8.0 spawned) says nothing, and the
+    board is read with the hub that gives it: none for the checkout's, a known project's
+    root for any other. The project's own board, where the checkout is another's, is the
+    one case the row's board may not be evidence: 0.8.0 recorded no board, and a row whose
+    session never registered reads as its project's (``store._UNRECORDED_BOARD``). It is
+    kept when the row's session registered on it, or the task the row names is on it: 0.8.0
+    gave a project rooted at ``repo/api`` a board of its own only under the hub
+    ``repo/api``, and spawned for a task only on the board it gave. Read from the checkout
+    there, a restart of such an agent with a task stopped it and then refused its
+    replacement the task, and without one moved it off its manager's board (round 27, 2/7).
+    Else it is read as a window with no hub reads it, from the checkout. A board whose root
+    the store no longer has reads the board this process gives (:func:`_board_for`).
+
+    Asked before the agent is stopped, and the task checked against it then
+    (:func:`restart`, :func:`switch`): the replacement's spawn reads the same answer.
     """
-    if board is not None:
-        if spec is not None and spec.hub is not None:
-            return board, spec.hub
-        checkout = orchestrator.directory_project(project.root).id
-        if board in (checkout, project.id):
+    board = _board_of_row(agent)
+    spec = agent.launch_spec
+    if spec is not None and spec.hub is not None:
+        return board, spec.hub
+    checkout = orchestrator.directory_project(project.root).id
+    if board == checkout:
+        return checkout, ""
+    if board == project.id:
+        registered = session is not None and session.project_id == board
+        assigned = agent.task_id is not None and (
+            store.get_task(agent.task_id, project_ids=[board]) is not None
+        )
+        if not (registered or assigned):
             return checkout, ""
-        known = store.get_project(board)
-        if known is not None:
-            return board, str(known.root)
+    known = store.get_project(board)
+    if known is not None:
+        return board, str(known.root)
     return _board_for(project), orchestrator.window_team_hub()
 
 
@@ -2449,7 +2468,7 @@ def spawn(
     bin_flag: bool = True,
     own_worktree: Path | None = None,
     own_branch: str | None = None,
-    board: str | None = None,
+    board_and_hub: tuple[str, str] | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -2472,10 +2491,11 @@ def spawn(
     is taken as it stands — branch, uncommitted work and all — when it is the
     tree this spawn lands in (:func:`_worktree_for`), never put on the
     branch today's task and codename would name; gone, it is made again on
-    ``own_branch``, the branch the replaced row recorded it on. ``board`` is such a
-    replacement's too: the board the replaced row recorded, which the replacement reads and
-    records in turn, its window given the hub that resolves it (:func:`_board_and_hub`);
-    the task is looked up there. A new agent reads the board this process gives it.
+    ``own_branch``, the branch the replaced row recorded it on. ``board_and_hub`` is such a
+    replacement's too: the board it reads and records in turn, and the hub its window is
+    given to resolve it, as :func:`_board_and_hub` answered before the replaced agent was
+    stopped; the task is looked up there. A new agent reads the board this process gives
+    it (:func:`_board_for`), under the hub this process honours.
 
     Every ``None`` means "the role's default" (config, then built-in). Refuses
     past ``max_agents_per_project``, a second manager, a worktree in a non-git
@@ -2619,7 +2639,11 @@ def spawn(
                 f"(max_agents_per_project = {config.max_agents_per_project}) — stop one, "
                 "or raise the limit in [fleet]"
             )
-        board, hub = _board_and_hub(store, project, board, spec)
+        board, hub = (
+            board_and_hub
+            if board_and_hub is not None
+            else (_board_for(project), orchestrator.window_team_hub())
+        )
         task = _task_for(store, board, task_id)
         resolved_task_id = task.id if task is not None else None
         picked = next_label(project, role, wanted=label, task_id=resolved_task_id, store=store)
@@ -6061,13 +6085,18 @@ def switch(
         # agent stopped and nothing started: a row spawned before rule 3 still names
         # its closed task until its next briefing, and switching one always lost it
         # (review of #203, final round, FLEET-3).
-        board = _board_of_row(agent)
-        task = _task_for(store, board, agent.task_id)
+        # On the board the replacement will read (`_board_and_hub`), which a row 0.8.0
+        # spawned may not have read: asked after the stop, the task was refused with the
+        # agent already down (review of #259, round 27, 2/7).
+        board_and_hub = _board_and_hub(store, project, agent, session)
+        task = _task_for(store, board_and_hub[0], agent.task_id)
         # The session's own newest entries (oldest first), not the project's last
         # 60 filtered down: on a busy board those all belonged to other agents
         # and the prompt lost its "last board entries" (review of #205, third round).
         recent = (
-            store.filtered_events(board, session_id=agent.session_id, limit=_HANDOFF_NOTES)
+            store.filtered_events(
+                _board_of_row(agent), session_id=agent.session_id, limit=_HANDOFF_NOTES
+            )
             if agent.session_id is not None
             else []
         )
@@ -6172,6 +6201,7 @@ def switch(
             spawned_by=spawned_by,
             # The hook's hand-over is nobody's add (#139): `spawn`'s `onboard`.
             onboard=not automatic,
+            board_and_hub=board_and_hub,
         )
     except Exception:
         if handed_over.withheld:
@@ -6194,7 +6224,7 @@ def switch(
     with contextlib.suppress(Exception), store_session() as store:  # the courtesy, not the record
         _team()._emit(
             store,
-            board,
+            _board_of_row(receipt.agent),
             "switched",
             f"{label} moved from {from_name} to {claude_accounts_core.label(target)} "
             f"(slot {target.slot}){why} — {how}",
@@ -6229,6 +6259,7 @@ def _respawn(
     takes_over: bool = False,
     permission_mode: str | None = None,
     onboard: bool = True,
+    board_and_hub: tuple[str, str],
 ) -> tuple[SpawnReceipt, bool, list[str]]:
     """Start ``agent`` again — same label, role, task and worktree — resuming when it can.
 
@@ -6252,7 +6283,8 @@ def _respawn(
     replacement's spec records. ``onboard`` is :func:`spawn`'s. A worktree
     agent's replacement works in the same tree, as it stands: its branch is
     the one the agent was on, whatever its task or the codename says now
-    (``spawn(own_worktree=…)``).
+    (``spawn(own_worktree=…)``). ``board_and_hub`` is the board it reads and its window's
+    hub, asked before the stop (:func:`_board_and_hub`).
     """
     notes: list[str] = []
     if task is not None and agent.task_id != task.id:
@@ -6295,7 +6327,7 @@ def _respawn(
         bin_flag=False,
         own_worktree=agent.cwd if agent.worktree else None,
         own_branch=agent.branch,
-        board=_board_of_row(agent),
+        board_and_hub=board_and_hub,
     )
     if agent.launch_spec is not None:
         # Said once the replacement is up, for what it really took from the row: a
@@ -6478,15 +6510,18 @@ def restart(
             # restart's replacement not holding the task (review of #163, round 2).
             raise _in_hand_over(project, "restart", label)
         try:
-            # `spawn`'s refusal for the task (done, dropped, gone from the board).
-            board = _board_of_row(agent)
-            task = _task_for(store, board, agent.task_id)
+            # `spawn`'s refusal for the task (done, dropped, gone from the board), on the
+            # board the replacement will read, as `switch` asks it.
+            board_and_hub = _board_and_hub(store, current, agent, session)
+            task = _task_for(store, board_and_hub[0], agent.task_id)
         except FleetError as exc:
             raise FleetError(f"cannot restart {label!r}: {exc}") from exc
         # The session's own newest entries, as `switch` reads them: the project's
         # last 60 filtered down lost them on a busy board (review of #205, third round).
         recent = (
-            store.filtered_events(board, session_id=agent.session_id, limit=_HANDOFF_NOTES)
+            store.filtered_events(
+                _board_of_row(agent), session_id=agent.session_id, limit=_HANDOFF_NOTES
+            )
             if agent.session_id is not None
             else []
         )
@@ -6587,6 +6622,7 @@ def restart(
             resume_prompt=_restart_prompt(agent),
             takes_over=handed_over is not None,
             permission_mode=permission_mode,
+            board_and_hub=board_and_hub,
         )
     except Exception:
         if handed_over is not None and handed_over.withheld:
@@ -6605,7 +6641,7 @@ def restart(
     with contextlib.suppress(Exception), store_session() as store:  # the courtesy, not the record
         _team()._emit(
             store,
-            board,
+            _board_of_row(receipt.agent),
             "restarted",
             f"{label} restarted — {how}",
             session_id=receipt.agent.session_id,

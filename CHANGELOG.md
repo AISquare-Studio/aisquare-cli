@@ -578,8 +578,11 @@ all of them, and the fleet cleans up the worktrees it made.**
     replaces, and its window gets the hub the agent's own window was given
     (recorded at spawn, `launch_spec.hub` in `fleet ls --json`), not the
     caller's. An agent spawned before 0.8.1 recorded none: its replacement
-    gets the hub of a board only another project's root gives, and no hub for
-    its project's own board or its checkout's.
+    gets the hub that gives its board, none for its checkout's. Its project's
+    own board, where the checkout is another's, is kept, under the project's
+    root as the hub, when the agent's session registered on it or its task is
+    on it; otherwise the replacement reads the checkout's. A task the
+    replacement could not take is refused before the agent is stopped.
   - `fleet tell` to an agent that is not at its prompt files the note on the
     board the agent reads, from the phone, `asq` or a shell without the hub
     too. Before, it went to the caller's board, was reported filed, and the

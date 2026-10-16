@@ -1249,11 +1249,15 @@ board asks the row, never the environment of whoever asks: `asq`, the phone or a
 shell without the hub restarts, switches and reaps an agent on the board it was
 spawned under. A restart or switch gives the replacement the same board, and its
 window the hub the agent's own window was given, recorded at spawn with the launch
-(`launch_spec.hub`).
+(`launch_spec.hub`). An agent spawned before 0.8.1 recorded no hub: its replacement
+gets the one that gives its board, none for the checkout's, a project's root for
+that project's board. A project's own board where the checkout is another's is kept
+only when the agent's session registered on it, or its task is on it; otherwise it
+was only a default, and the replacement reads the checkout's.
 
 | On the session's board (the hub's, under one) | On the row's fleet project (whatever the board) |
 |---|---|
-| Tasks: `task add`, `next`, `claim`, `review`, `done`, `block` and `reopen`. Also the task `fleet spawn --task` gives an agent, looked up (`12`, `#12` or an id) on the board that agent will read; `switch` and `restart` check it on the board the row recorded | Finding a session's row: the hand-over and the `/clear` that keep its claims for the id that follows, and the adoption of that id onto the row, whatever project the row is in |
+| Tasks: `task add`, `next`, `claim`, `review`, `done`, `block` and `reopen`. Also the task `fleet spawn --task` gives an agent, looked up (`12`, `#12` or an id) on the board that agent will read; `switch` and `restart` check it, before they stop anything, on the board the replacement will read | Finding a session's row: the hand-over and the `/clear` that keep its claims for the id that follows, and the adoption of that id onto the row, whatever project the row is in |
 | Notes, questions, results and every other feed line. A `fleet tell` filed as a note goes on the board the told agent recorded | The panes, tmux, and the row's label and state |
 | The fleet's own lines, `agent_exited`, `switched` and `restarted`, on the board the row recorded, with a session or none; and the entries a replacement's hand-off prompt quotes | `--project` in every hint and cycle command, and the project `fleet spawn`, `stop`, `tell`, `switch` and `restart` act on |
 | The claims a session holds, released or kept when it ends. The project's own `fleet-paused` signal, on each board the project's agents recorded, by the project's name there | Which manager a nudge wakes: the manager row in the writer's own row's project; for a writer with no row (the phone, a shell, an MCP client), a task update's the manager in the project of the row working the task (spawned for it, else its claimant's), else the manager that reads the board, and of several, the one whose project holds the writer's directory, the innermost when projects nest. The deferred wake of a manager's own Stop wakes its own row, and a manager no row holds (one launched by hand) wakes nobody. A manager is woken only for a write, or an exit, on the board it reads |

@@ -460,11 +460,10 @@ def test_doctors_capture_off_line_for_each_count(tmp_path: Path, dropped: int, k
 
     gone, held = _captured_rows(tmp_path, "d", dropped), _captured_rows(tmp_path, "k", kept)
     plan = [PruneCandidate(project=p, reason="captured") for p in gone]
-    forget = (
-        install_route.command_line(["aisquare", "project", "forget", str(held[0].root)])
-        if kept == 1
-        else "aisquare project forget <directory>, for each"
-    )
+    forgets = [
+        install_route.command_line(["aisquare", "project", "forget", str(p.root)]) for p in held
+    ]
+    drop = f"drop it with {forgets[0]}" if kept == 1 else f"drop them ({'; '.join(forgets)})"
     names = ", ".join(p.root.name for p in held[:3]) + (f", +{kept - 3} more" if kept > 3 else "")
     left = "left from before project capture was turned off"
     listed = "listed only by aisquare project list --all"
@@ -472,14 +471,12 @@ def test_doctors_capture_off_line_for_each_count(tmp_path: Path, dropped: int, k
         (2, 0): f"2 captured directories {left} (a hooked session ran there; nothing added it "
         f"on purpose) — {listed}; drop them: aisquare project prune --captured-only "
         "--older-than 0",
-        (2, 1): f"; 1 more holds saved context, which that prune keeps: {names} "
-        f"— drop it with {forget}",
-        (1, 2): f"; 2 more hold saved context, which that prune keeps: {names} "
-        f"— drop them with {forget}",
+        (2, 1): f"; 1 more holds saved context, which that prune keeps: {names} — {drop}",
+        (1, 2): f"; 2 more hold saved context, which that prune keeps: {names} — {drop}",
         (0, 1): f"1 captured directory {left} holds saved context, which "
-        f"aisquare project prune keeps: {names} — {listed}; drop it with {forget}",
+        f"aisquare project prune keeps: {names} — {listed}; {drop}",
         (0, 4): f"4 captured directories {left} hold saved context, which "
-        f"aisquare project prune keeps: {names} — {listed}; drop them with {forget}",
+        f"aisquare project prune keeps: {names} — {listed}; {drop}",
     }[(dropped, kept)]
 
     said = diagnostics._left_from_before_capture([*gone, *held], plan, set())
@@ -497,6 +494,7 @@ def test_doctor_names_the_captured_rows_with_a_live_agent_apart_from_what_forget
     from datetime import UTC, datetime
 
     from aisquare.core.ids import new_agent_id
+    from aisquare.services import install_route
 
     rows: dict[str, ProjectInfo] = {}
     for name in ("scratch", "notes", "busy", "both"):
@@ -522,6 +520,9 @@ def test_doctor_names_the_captured_rows_with_a_live_agent_apart_from_what_forget
 
     [check] = diagnostics._check_captured_projects()
 
+    def forget(name: str) -> str:
+        return install_route.command_line(["aisquare", "project", "forget", str(rows[name].root)])
+
     said = " ".join(check.detail.split())
     assert said.startswith("1 captured directory left from before project capture"), said
     assert "; 1 more holds saved context, which that prune keeps: notes — drop it with " in said
@@ -529,7 +530,7 @@ def test_doctor_names_the_captured_rows_with_a_live_agent_apart_from_what_forget
         "; 2 more have fleet agents still running, which that prune keeps and aisquare project "
         f"forget refuses: both, busy — stop their agents first (aisquare fleet stop --project "
         f"{rows['both'].id} <label>; aisquare fleet stop --project {rows['busy'].id} <label>), "
-        "then drop them with aisquare project forget <directory>, for each"
+        f"then drop them ({forget('both')}; {forget('busy')})"
     ) in said, said
     refused = runner.invoke(app, ["--json", "project", "forget", str(tmp_path / "busy")])
     assert json.loads(refused.stdout)["error"] == "project_busy", "the premise"
@@ -609,6 +610,50 @@ def test_doctors_stop_names_each_busy_captured_row_by_a_ref_of_its_own(tmp_path:
         assert argv[:4] == ["aisquare", "fleet", "stop", "--project"], said
         named.append(fleet_service.resolve_project(argv[4]).id)
     assert sorted(named) == sorted(row.id for row in rows), said
+
+
+def test_doctors_forget_names_each_kept_captured_row_by_its_own_directory(
+    tmp_path: Path,
+) -> None:
+    """Review of #259, round 22, 4/9: round 20 gave each busy row its own ``fleet stop``, and
+    left the forget half saying ``aisquare project forget <directory>, for each`` beside the
+    rows' directory names, three at most. ``/a/scratch`` and ``/b/scratch`` both read
+    "scratch", and a fourth row was only "+1 more": no directory to pass for any of them.
+    Each kept row gets its own forget, every row, for saved context and live agents alike."""
+    from datetime import UTC, datetime
+
+    from aisquare.core.ids import new_agent_id
+    from aisquare.services import install_route
+
+    held: list[ProjectInfo] = []
+    busy: list[ProjectInfo] = []
+    for parent, name, rows in (
+        ("a", "scratch", held), ("b", "scratch", held), ("c", "tools", held), ("d", "web", held),
+        ("e", "scratch", busy), ("f", "scratch", busy),
+    ):  # fmt: skip
+        (tmp_path / parent / name).mkdir(parents=True)
+        rows.append(team_project(tmp_path / parent / name))
+    with store_session() as store:
+        for row in (*held, *busy):
+            store.ensure_project(row)  # 0.8.0's capture
+            store.add(new_entry("a fact", "project", row.id, [], "cli"))
+        for row in busy:
+            store.upsert_fleet_agent(
+                FleetAgent(
+                    id=new_agent_id(), project_id=row.id, label="coder-1", role="coder",
+                    pane_id="%1", cwd=row.root, created_at=datetime.now(tz=UTC),
+                )
+            )  # fmt: skip
+
+    [check] = diagnostics._check_captured_projects()
+
+    said = " ".join(check.detail.split())
+    assert "for each" not in said, said
+    for rows, after in ((held, "hold saved context"), (busy, "have fleet agents")):
+        forgets = said.split(after, 1)[1].split("drop them (", 1)[1].split(")", 1)[0]
+        argvs = [install_route.split_line(each) for each in forgets.split("; ")]
+        assert all(argv[:3] == ["aisquare", "project", "forget"] for argv in argvs), said
+        assert sorted(Path(argv[3]) for argv in argvs) == sorted(row.root for row in rows), said
 
 
 def test_one_helper_names_a_project_in_a_fleet_command(

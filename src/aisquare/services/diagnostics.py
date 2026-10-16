@@ -1521,18 +1521,19 @@ def _left_from_before_capture(
         names = ", ".join(project_service.display_name(p) for p in kept[:3])
         if len(kept) > 3:
             names += f", +{len(kept) - 3} more"
-        forget = (
-            install_route.command_line(["aisquare", "project", "forget", str(kept[0].root)])
-            if one
-            else "aisquare project forget <directory>, for each"
-        )
+        # Each row's own, every row, as the stop below (review of #259, round 22): "aisquare
+        # project forget <directory>, for each" beside names shown by directory gave two rows
+        # called scratch no directory to pass, and a fourth row none at all.
+        forgets = [
+            install_route.command_line(["aisquare", "project", "forget", str(p.root)]) for p in kept
+        ]
+        drop = f"drop it with {forgets[0]}" if one else f"drop them ({'; '.join(forgets)})"
         which = (
             f"{len(kept)} more"
             if parts
             else f"{len(kept)} captured {_directories(len(kept))} {left}"
         )
         then = "" if parts else f"{listed}; "
-        it = "it" if one else "them"
         if agents:
             # With the project named, as `ProjectBusyError` names it (review of #259, round 19):
             # each row's own, every row. Said once "--project <name>, for each" beside names
@@ -1542,13 +1543,12 @@ def _left_from_before_capture(
             what = (
                 f"{'has a fleet agent' if one else 'have fleet agents'} still running, which "
                 f"{prune} keeps and aisquare project forget refuses: {names} — {then}stop "
-                f"{'its' if one else 'their'} agents first ({stop}), then drop {it} with "
-                f"{forget}"
+                f"{'its' if one else 'their'} agents first ({stop}), then {drop}"
             )
         else:
             what = (
                 f"{'holds' if one else 'hold'} saved context, which {prune} keeps: {names} — "
-                f"{then}drop {it} with {forget}"
+                f"{then}{drop}"
             )
         parts.append(f"{which} {what}")
     return "; ".join(parts)

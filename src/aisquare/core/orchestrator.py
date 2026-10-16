@@ -30,7 +30,7 @@ import os
 import sys
 from pathlib import Path
 
-from aisquare.core.workspace import find_project_root, git_common_root, project_id_for
+from aisquare.core.workspace import find_project_root, project_id_for
 from aisquare.models import ProjectInfo
 
 _OFF_VALUES = {"0", "false", "no", "off"}
@@ -196,7 +196,10 @@ def directory_project(cwd: Path | None = None) -> ProjectInfo:
     :func:`team_project`'s answer when no hub is set. Under one, it is still where a
     session's own work is: a session the human launched in ``/work/app`` is on the hub's
     board, and its fleet commands are about ``app`` (review of #259, round 23).
+
+    One ``git`` call: ``find_project_root`` asks ``git_common_root`` first. Asked here
+    first too, it ran twice for a directory that is not a git checkout (review of #259,
+    round 30, 7/8).
     """
-    start = (cwd or Path.cwd()).resolve()
-    root = git_common_root(start) or find_project_root(start)
+    root = find_project_root((cwd or Path.cwd()).resolve())
     return ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])

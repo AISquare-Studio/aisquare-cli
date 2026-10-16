@@ -9036,6 +9036,56 @@ def test_the_pause_pass_reads_and_clears_every_signal_through_one_store(
     assert not fleet_service.is_paused(project) and not fleet_service.is_paused(plain_project)
 
 
+def test_the_pause_pass_asks_git_once_for_each_visible_project_and_never_with_the_board_off(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    plain_project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 30, 7/8: the shutdown's pause pass worked out every target's homes
+    (``fleet._pause_homes``, a ``git rev-parse`` with a 5 s timeout) before the store opened:
+    a forgotten project's too, which the pass then skips, and all of them with the board off,
+    where it stops at the first. ``directory_project`` asked git twice for a root that is not
+    a checkout. Now git is asked once for each visible project, and not at all with the board
+    off, where no store is opened either."""
+    from aisquare.core import workspace
+
+    (tmp_path / "gone").mkdir()
+    forgotten = team_project(tmp_path / "gone")
+    with store_session() as store:
+        store.onboard_project(forgotten)
+        store.forget_project(forgotten.id)
+    asked: list[Path] = []
+    real_git = workspace.git_common_root
+
+    def counted_git(start: Path) -> Path | None:
+        asked.append(start.resolve())
+        return real_git(start)
+
+    monkeypatch.setattr(workspace, "git_common_root", counted_git)
+    targets = [project, plain_project, forgotten]
+
+    fleet_service._clear_pause(targets, fleet_service.ShutdownReport())
+    assert sorted(asked) == sorted([project.root.resolve(), plain_project.root.resolve()])
+
+    asked.clear()
+    opens = 0
+    real_open = core_store.open_store
+
+    def counting_open() -> ContextStore:
+        nonlocal opens
+        opens += 1
+        return real_open()
+
+    monkeypatch.setattr(core_store, "open_store", counting_open)
+    monkeypatch.setenv("AISQUARE_TEAM", "0")
+    report = fleet_service.ShutdownReport()
+    fleet_service._clear_pause(targets, report)
+    assert (asked, opens, report.pause_scan_failed, report.pause_unsettled) == ([], 0, None, [])
+
+
 def test_the_pause_builds_no_row(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

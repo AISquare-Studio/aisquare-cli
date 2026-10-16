@@ -850,7 +850,6 @@ def test_a_roots_board_is_team_projects_after_one_git_call_and_kept_a_minute(
         return answers.get(start)  # None: git failed
 
     monkeypatch.setattr(workspace, "git_common_root", git_common_root)
-    monkeypatch.setattr(orchestrator, "git_common_root", git_common_root)
     for root, walked in ((worktree, worktree), (worktree / "sub", worktree), (marked, marked)):
         answers.clear()
         asked.clear()

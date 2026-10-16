@@ -5657,11 +5657,18 @@ def _clear_pause(projects: Sequence[ProjectInfo], report: ShutdownReport) -> Non
     (:func:`services.team.read_signal_in`, :func:`services.team.set_signal_in`),
     which also keeps the shutdown from contending with the hooks of the agents
     it is still stopping (review of #203, round 4).
+
+    Each project's homes (:func:`_pause_homes`, which asks git) are worked out in that pass,
+    for a visible project only, and not at all with the board off. Worked out before the
+    store opened, git ran for every target, forgotten ones included, and for every one with
+    the board off, where the pass stops at the first: serially, at the end of ``shutdown
+    --all``, with a 5 s timeout on each call (review of #259, round 30, 7/8). The connection
+    holds no transaction between statements, so a writer is not kept waiting on git.
     """
+    if not orchestrator.team_enabled():
+        return  # no board, no signals: nothing is paused anywhere
     team = _team()
     try:
-        # Git, before the store opens.
-        targets = [(project, _pause_homes(project)) for project in projects]
         with store_session() as store:
             # `is_paused`/`resume` resolve the board through `ensure_project`,
             # which CLEARS a registration's tombstone. `shutdown --all` reads
@@ -5673,7 +5680,7 @@ def _clear_pause(projects: Sequence[ProjectInfo], report: ShutdownReport) -> Non
             # list would skip every pause set where nothing was ever onboarded,
             # and the shutdown would leave it on with nothing saying so.
             visible = {p.id for p in store.list_projects(all=True)}
-            failures = _reconcile_pauses(store, team, targets, visible, report)
+            failures = _reconcile_pauses(store, team, projects, visible, report)
     except Exception as exc:
         # The store `_record_late_rows` already found locked is still locked (or
         # a fresh failure). The report is owed to the caller regardless, and this
@@ -5691,11 +5698,11 @@ def _clear_pause(projects: Sequence[ProjectInfo], report: ShutdownReport) -> Non
 def _reconcile_pauses(
     store: ContextStore,
     team: Any,
-    targets: Sequence[tuple[ProjectInfo, set[str]]],
+    projects: Sequence[ProjectInfo],
     visible: Collection[str],
     report: ShutdownReport,
 ) -> list[str]:
-    """The per-project half of :func:`_clear_pause`, of each project with its
+    """The per-project half of :func:`_clear_pause`, of each visible project, with its
     :func:`_pause_homes`; returns what could not be done.
 
     Per-project read/write failures are surfaced the way the lookup's is. A
@@ -5707,9 +5714,10 @@ def _reconcile_pauses(
     run on a project with no board still reports clean.
     """
     failures: list[str] = []
-    for project, homes in targets:
+    for project in projects:
         if project.id not in visible:
             continue
+        homes = _pause_homes(project)
         try:
             # Its own pause on each board it lives on (`_pause_signals`), whichever rows were
             # live: under a hub, never another project's on the same board.
@@ -7182,7 +7190,9 @@ def _pause_homes(project: ProjectInfo) -> set[str]:
     (:func:`_pause_boards`): its checkout's, where a spawn from a caller without a hub reads,
     and the one a spawn from here gives (:func:`_board_for`), the hub's under one.
 
-    Asks git, so it is asked before a store opens.
+    Asks git: ``fleet pause``, ``fleet resume`` and ``is_paused`` ask it before their store
+    opens, and ``fleet shutdown``'s pass of each visible project in turn
+    (:func:`_clear_pause`).
     """
     checkout = orchestrator.directory_project(project.root).id
     return {checkout, _board_for(project)} if orchestrator.team_hub() is not None else {checkout}

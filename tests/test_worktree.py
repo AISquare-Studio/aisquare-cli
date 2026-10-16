@@ -145,8 +145,6 @@ def test_a_worktree_git_gives_no_principal_is_its_own_root(
     are each their own root, whether git answers or not: a checkout, which ``serve
     --stdio`` activates in, never git's bookkeeping or a directory that is not there
     (review of #243, round 13, 1/4)."""
-    from aisquare.core import orchestrator
-
     repo, worktree = repo_with_worktree
     _, sub = repo_with_submodule
     if layout == "submodule-worktree":
@@ -161,7 +159,6 @@ def test_a_worktree_git_gives_no_principal_is_its_own_root(
         (start / ".git").write_text("gitdir: C:/Users/me/repo/.git/worktrees/wsl\n")
     assert find_project_root(start) == start.resolve(), "with git"
     monkeypatch.setattr(workspace, "git_common_root", lambda start: None)
-    monkeypatch.setattr(orchestrator, "git_common_root", lambda start: None)
     assert find_project_root(start) == start.resolve(), "with git failing"
     assert team_project(start).root == start.resolve()
 

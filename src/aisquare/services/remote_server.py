@@ -633,9 +633,10 @@ def _remote_board_project(root: Path) -> ProjectInfo:
     than ``asq board``'s until a restart (round 13, 2/4). After a minute ``git`` is asked
     again.
 
-    One ``git`` call for each lookup: ``team_project`` asks ``git_common_root`` and then
-    ``find_project_root``, which asks it again where it failed, and ``find_project_root``
-    alone gives the same answer. Under a hub, where ``team_project`` runs no ``git``, and
+    One ``git`` call for each lookup: ``team_project`` asked ``git_common_root`` and then
+    ``find_project_root``, which asked it again where it failed, and ``find_project_root``
+    alone gives the same answer (``team_project`` asks it alone too since review of #259,
+    round 30, 7/8). Under a hub, where ``team_project`` runs no ``git``, and
     with the board off, which ``resolve_project`` refuses, the answer is theirs. So it is
     under a relative hub, which ``team_project`` ignores with its one-time warning: asked of
     ``team_hub`` alone, it was ignored here without a word (review of #243, round 17, 2/2)."""

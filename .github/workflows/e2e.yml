@@ -1,0 +1,357 @@
+name: e2e
+
+# WHY THIS IS ITS OWN WORKFLOW rather than more jobs in ci.yml or install.yml.
+#
+# ci.yml proves the code and install.yml proves the installer leaves a machine
+# that doctor calls green. Neither USES aisquare the way a person does. This
+# one does, on a fresh machine: it installs aisquare with the README one-liner
+# as a normal user with sudo, drives `asq` in a real terminal (ttyd's PTY,
+# xterm.js in Chromium) with real keys and clicks, and keeps what it saw:
+# screenshots, video, a run.json with the verdict, and the report built from
+# them (e2e/PLAN.md). A leg is budgeted half an hour as the journeys grow, and
+# what the installer fetches comes from other people's servers (astral's uv,
+# GitHub's apt repository for gh, Ubuntu's archive for tmux), so it runs
+# nightly, by hand, and on a pull request only when the PR asks for it with the
+# `e2e` label.
+#
+# PUBLIC BY CONSTRUCTION. This is a public repo, so the uploaded evidence is
+# public too. The workflow holds no secrets, grants nothing beyond reading the
+# checkout, never uses pull_request_target, and does not persist the checkout's
+# token. Nothing from the runner reaches the user's machine either: the harness
+# starts its shell from `env -i` plus an allowlist (e2e/runner/machine.py).
+#
+# The same file runs locally under act: `sh e2e/ci/act-run.sh` (e2e/ci/README.md
+# says what act does differently).
+#
+# TODO (e2e/PLAN.md §10, before this leaves the feature branch): SHA-pin the
+# actions with the version in a trailing comment (dependabot keeps both
+# current), and run step-security/harden-runner in audit mode. (The fail-closed
+# secret scan already runs between the report and the upload.)
+
+on:
+  schedule:
+    # 08:20 UTC: after install.yml's 05:20 and ci.yml's 06:40, so a third-party
+    # installer that broke overnight is already red there, under a clearer name,
+    # by the time this runs into it.
+    - cron: "20 8 * * *"
+  workflow_dispatch:
+    inputs:
+      track:
+        description: "main: a wheel built from this ref, installed by install.sh. release: the README one-liner, from PyPI."
+        type: choice
+        options: [main, release]
+        default: main
+      journeys:
+        description: "pytest -k expression choosing the journeys (empty: all of them)"
+        type: string
+        default: ""
+      smoke:
+        description: "Skip the suite: write a fake run, to exercise the report and the upload in minutes"
+        type: boolean
+        default: false
+  pull_request:
+    types: [labeled, synchronize]
+
+# One run per ref at a time, and never cancelled: a leg cut short leaves no
+# verdict, and a half-written artifact is worse than waiting in a queue.
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  linux:
+    name: linux (${{ matrix.track }})
+    # On a pull request only through the `e2e` label: when that label is added,
+    # and on every push while it stays on. A bare `contains(...)` on the labels
+    # would also start a 40-minute run whenever ANY other label is added to a
+    # PR that already carries `e2e`.
+    if: >-
+      github.event_name != 'pull_request'
+      || (github.event.action == 'labeled' && github.event.label.name == 'e2e')
+      || (github.event.action == 'synchronize'
+          && contains(github.event.pull_request.labels.*.name, 'e2e'))
+    # Pinned rather than ubuntu-latest: the runner IS the user's machine here,
+    # and a silent move to the next LTS would change the machine under test.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # Nightly: both tracks (PLAN §11, legs L1 and L2). By hand: the track
+        # asked for. On a PR: main, the wheel built from the PR's own tree.
+        track: ${{ fromJSON(github.event_name == 'schedule' && '["main", "release"]' || format('["{0}"]', inputs.track || 'main')) }}
+    defaults:
+      run:
+        # An explicit `bash` is what makes GitHub (and act) add -o pipefail.
+        shell: bash
+    env:
+      # What the harness reads (e2e/conftest.py's docstring lists them all).
+      # E2E_RUNNER and E2E_WHEEL are only known at run time, so the steps that
+      # learn them append them to $GITHUB_ENV.
+      E2E_USER: e2e
+      E2E_TRACK: ${{ matrix.track }}
+      E2E_OUT: out/e2e/linux-${{ matrix.track }}
+      # The upload's name, and the name the report's summaries tell people to
+      # download (e2e/report/build.py reads it), from one place.
+      E2E_ARTIFACT_NAME: e2e-linux-${{ matrix.track }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      # act sets ACT=true in every step; GitHub never does. Recorded in the
+      # report, because a run under act is not the same machine as a run on
+      # GitHub's runner (e2e/ci/README.md).
+      - name: Declare the runner
+        run: |
+          if [ "${ACT:-}" = true ]; then runner=act; else runner=github-hosted; fi
+          echo "E2E_RUNNER=$runner" >> "$GITHUB_ENV"
+          echo "runner: $runner, track: $E2E_TRACK, user: $E2E_USER, out: $E2E_OUT"
+
+      # The HARNESS's needs, and nothing the product's installer should provide.
+      # tmux, Node, gh and uv are deliberately not installed here: getting them
+      # onto a machine that lacks them is install.sh's job, and watching it do so
+      # is part of J01. The fonts are Chromium's fallbacks for what the
+      # terminal's webfont lacks: CJK for the "＋" in "＋ spawn agent", colour
+      # emoji for the sidebar's 🗂 🧭 🔨. `sudo` is listed for images that lack
+      # it, which is also why the first commands may run without it.
+      - name: Install the harness's system packages
+        run: |
+          if [ "$(id -u)" -eq 0 ]; then as_root=; else as_root=sudo; fi
+          packages="fonts-noto-cjk fonts-noto-color-emoji sudo curl git ca-certificates"
+          $as_root apt-get update -qq
+          # shellcheck disable=SC2086  # the list is meant to split into words
+          $as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends $packages
+          # shellcheck disable=SC2086
+          dpkg-query -W $packages
+
+      - name: Create the user the journeys play (non-root, sudo, fresh home)
+        run: sh e2e/ci/setup-user.sh
+
+      - name: Install ttyd 1.7.7 (static binary, checksum-pinned)
+        run: sh e2e/ci/install-ttyd.sh
+
+      # From THIS tree, for the same reason install.yml builds one: the main
+      # track grades this ref's code, not the last release's. The release track
+      # installs from PyPI and ignores it, and building it anyway costs seconds
+      # and proves the tree still builds.
+      - name: Build the wheel under test
+        run: |
+          python -m pip wheel --no-deps -w dist .
+          # A glob into "$@", not `ls`: exactly one wheel is the assertion.
+          set -- dist/*.whl
+          test "$#" -eq 1 || { echo "expected one wheel, found $#: $*"; exit 1; }
+          echo "E2E_WHEEL=$PWD/$1" >> "$GITHUB_ENV"
+          echo "wheel: $PWD/$1"
+
+      # The harness's own environment, apart from the product's (the suite never
+      # imports aisquare). --require-hashes says out loud what the hash-locked
+      # file already implies, so a requirements.txt that loses its hashes fails
+      # here rather than installing unverified. --with-deps lets Playwright
+      # install Chromium's system libraries and fonts itself, through sudo on
+      # GitHub's runner.
+      - name: Set up the harness (venv, Playwright's Chromium)
+        run: |
+          python -m venv e2e/.venv
+          e2e/.venv/bin/python -m pip install -q --require-hashes -r e2e/requirements.txt
+          e2e/.venv/bin/python -m playwright install --with-deps chromium
+
+      # 30 of the job's 40 minutes, so a hung journey is stopped by this step's
+      # limit, not the job's, and the report and the upload below still run.
+      - name: Run the journeys
+        if: ${{ !inputs.smoke }}
+        timeout-minutes: 30
+        env:
+          # Through the environment, never spliced into the script: an input is
+          # text someone typed, and `${{ }}` inside `run:` would execute it.
+          JOURNEYS: ${{ inputs.journeys }}
+        # e2e/journeys by path, always: without it pytest walks into tests/ and
+        # loads the product suite's conftest, which imports aisquare. JUnit goes
+        # to $E2E_OUT/junit.xml, so it travels with the rest of the evidence.
+        run: |
+          set -- -c e2e/pytest.ini e2e/journeys
+          if [ -n "$JOURNEYS" ]; then set -- "$@" -k "$JOURNEYS"; fi
+          e2e/.venv/bin/python -m pytest "$@"
+
+      # The plumbing without the suite: e2e/selftest/fake_run.py writes a
+      # realistic fake run (three journeys, one failed check, every picture
+      # stamped FAKE), so the report, the step summary and the upload are
+      # exercised in minutes rather than half an hour. Its verdict is RC_FAILED
+      # on purpose, so the report's failure rendering is what gets exercised;
+      # the step itself succeeds. Plain `python`: it is stdlib-only, like the
+      # report builder.
+      - name: Smoke (a fake run instead of the suite)
+        if: ${{ inputs.smoke }}
+        run: python -m e2e.selftest.fake_run "$E2E_OUT"
+
+      # gallery.html, summary.md, step-summary.md and verdict.json into
+      # $E2E_OUT/report/. Plain `python`, not the harness's venv: e2e/contracts.py
+      # promises the report builder is stdlib-only, and running it without the
+      # harness's requirements keeps that promise checked. It exits 0 whatever
+      # the verdict and 2 when run.json is missing or untrustworthy, so this step
+      # is red only when there is nothing to report on. always(): a red or
+      # timed-out night is exactly when the report is needed.
+      - name: Build the report
+        if: always()
+        run: python -m e2e.report.build "$E2E_OUT"
+
+      - name: Step summary
+        if: always()
+        run: |
+          summary=$E2E_OUT/report/step-summary.md
+          if [ -f "$summary" ]; then
+            cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "### e2e, linux ($E2E_TRACK): no report"
+              echo "Nothing wrote \`$summary\`; the job log says why. Whatever evidence exists is in the \`$E2E_ARTIFACT_NAME\` artifact."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # The one action act cannot run as written: its artifact server refuses
+      # uploads from upload-artifact v6 and later, so e2e/ci/act-run.sh points
+      # this step at v5 when it runs locally (the script says why). GitHub runs
+      # v7, like the repo's other workflows.
+      # FAIL CLOSED before anything is published: this repo is public, so its
+      # artifacts are too (PLAN §10). On a hit the run's text evidence is not
+      # uploaded at all — the step fails, and the upload below is gated on it —
+      # and the log names file, offset and rule, never the matched text.
+      - name: Scan the evidence for credentials
+        id: scan
+        if: always()
+        run: python -m e2e.report.secret_scan "$E2E_OUT"
+
+      - name: Upload the evidence
+        if: ${{ always() && steps.scan.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.E2E_ARTIFACT_NAME }}
+          path: ${{ env.E2E_OUT }}
+          retention-days: 14
+          if-no-files-found: warn
+
+      # The job's colour follows the verdict, not only pytest's exit code. A run
+      # that tested nothing can exit 0, and only its verdict, GATE_ERROR by
+      # e2e/contracts.py's own rule, says so. It comes after the upload, so a red
+      # night still leaves its evidence; a missing verdict.json fails it too. Not
+      # on a smoke run, whose fake verdict is red on purpose.
+      - name: Gate on the verdict
+        if: ${{ always() && !inputs.smoke }}
+        run: |
+          verdict=$(python -c 'import json, sys; print(json.load(open(sys.argv[1]))["verdict"])' \
+            "$E2E_OUT/report/verdict.json")
+          echo "verdict: $verdict"
+          if [ "$verdict" != PASSED ]; then
+            echo "::error::the e2e verdict is $verdict: the step summary says why, and the $E2E_ARTIFACT_NAME artifact holds the evidence"
+            exit 1
+          fi
+
+  # WHERE A REVIEWER SEES IT. The linux job holds a read-only token and runs the
+  # product under test (with sudo); this job holds the write token and runs only
+  # e2e/report/ci_publish.py on the uploaded evidence. Splitting them is the
+  # point: nothing the product does can reach a token that writes.
+  #
+  # What it writes, and why that needs no secret beyond the GITHUB_TOKEN:
+  #   contents: write      the run's screenshots, as one orphan commit on its own
+  #                        ref, refs/e2e/runs/<run-id>. Not a branch, so default
+  #                        clones and fetches never download them; the comment's
+  #                        images are served from that commit by SHA.
+  #   pull-requests: write one sticky comment per PR and track, edited on every
+  #                        run (a hidden marker finds it).
+  #   issues: write        the same comment on a nightly's tracking issue: the
+  #                        repository variable E2E_NIGHTLY_ISSUE, when one is set.
+  # Every run's summary, with its images, also goes to this job's summary.
+  #
+  # NOT FOR PULL REQUESTS FROM FORKS: GitHub gives their runs a read-only token
+  # by design, and pull_request_target is never used here (PLAN §10). Their
+  # evidence is still in the artifact and the step summary; a workflow_run
+  # publisher, once this file is on the default branch, is the way to post them.
+  publish:
+    name: publish the evidence
+    needs: linux
+    if: >-
+      always()
+      && contains(fromJSON('["success", "failure"]'), needs.linux.result)
+      && !inputs.smoke
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Download the evidence
+        uses: actions/download-artifact@v8
+        with:
+          pattern: e2e-linux-*
+          path: evidence
+
+      # evidence/ is one run (a lone artifact is extracted straight into it) or
+      # one directory per artifact (a nightly's two tracks); ci_publish.runs_in
+      # reads both. --artifact is the linux job's E2E_ARTIFACT_NAME, with the
+      # track left for ci_publish to fill in from each run.json.
+      - name: Publish the screenshots and the PR comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Through the environment, never spliced into the script.
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          NIGHTLY_ISSUE: ${{ vars.E2E_NIGHTLY_ISSUE }}
+        run: |
+          if [ ! -d evidence ]; then
+            echo "::warning::no e2e evidence was uploaded, so there is nothing to publish"
+            exit 0
+          fi
+          set -- evidence --repo "$GITHUB_REPOSITORY" --artifact 'e2e-linux-{track}' \
+            --summary-file "$GITHUB_STEP_SUMMARY"
+          if [ -n "$PR_NUMBER" ]; then
+            set -- "$@" --pr "$PR_NUMBER"
+          elif [ "$GITHUB_EVENT_NAME" = schedule ] && [ -n "$NIGHTLY_ISSUE" ]; then
+            set -- "$@" --issue "$NIGHTLY_ISSUE"
+          fi
+          python -m e2e.report.ci_publish "$@"
+
+  # THE macOS LEG (PLAN §11, L3 and L4) IS NOT BUILT YET. This placeholder keeps
+  # its shape in review beside the Linux leg, so building it is a diff to this
+  # job rather than a new file. Expect three differences from Linux: ttyd from
+  # Homebrew instead of e2e/ci/install-ttyd.sh; no setup-user.sh, because the
+  # harness runs a scratch HOME under $HOME (not /tmp) instead of a second
+  # account; and a native `claude` stand-in, because tmux reads the process
+  # name (p_comm) there. It stays off until the repository variable
+  # E2E_MACOS is `on` (the switch PLAN §11 gives the dormant real-agent legs),
+  # and its only step fails, so turning it on before it is built reads as red
+  # rather than as a green leg that tested nothing.
+  macos:
+    name: macos (not built yet)
+    if: vars.E2E_MACOS == 'on'
+    runs-on: macos-26
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - name: Not built yet
+        run: |
+          echo "::error::the macOS leg is a placeholder; see the comment above this job in e2e.yml"
+          exit 1

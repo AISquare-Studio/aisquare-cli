@@ -1,0 +1,53 @@
+<!doctype html>
+<!--
+  The terminal window the E2E suite types into and photographs.
+
+  A real terminal emulator (xterm.js 6, vendored) attached to a real PTY (ttyd).
+  Not a screenshot renderer: every pixel in a shot was drawn by the emulator from
+  the bytes the product wrote, exactly as in a user's browser or VS Code terminal.
+  The window chrome is ours so screenshots read as "a terminal window", and it is
+  identical on every OS because fonts are vendored.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>aisquare e2e terminal</title>
+<link rel="stylesheet" href="/vendor/xterm.css">
+<style>
+  @font-face { font-family: "JetBrains Mono"; font-weight: 400;
+    src: url("/vendor/JetBrainsMono-Regular.woff2") format("woff2"); }
+  @font-face { font-family: "JetBrains Mono"; font-weight: 700;
+    src: url("/vendor/JetBrainsMono-Bold.woff2") format("woff2"); }
+  html, body { margin: 0; background: #0b0f14; }
+  #window {
+    display: inline-block; margin: 18px; border-radius: 10px; overflow: hidden;
+    background: #0d1117; box-shadow: 0 14px 36px rgba(0, 0, 0, .55), 0 0 0 1px #30363d;
+  }
+  #titlebar {
+    height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 12px;
+    background: #1c2128; border-bottom: 1px solid #30363d; color: #9da7b3;
+    font: 12px/1 -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  }
+  .dot { width: 12px; height: 12px; border-radius: 50%; flex: none; }
+  #title { flex: 1; text-align: center; margin-right: 60px; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; }
+  #terminal { padding: 10px 12px; background: #0d1117; }
+  /* No blinking or animated cursor: a shot must not depend on when it was taken. */
+  .xterm .xterm-cursor-blink { animation: none !important; }
+</style>
+</head>
+<body>
+<div id="window">
+  <div id="titlebar">
+    <span class="dot" style="background:#ff5f56"></span>
+    <span class="dot" style="background:#ffbd2e"></span>
+    <span class="dot" style="background:#27c93f"></span>
+    <div id="title">terminal</div>
+  </div>
+  <div id="terminal"></div>
+</div>
+<script src="/vendor/xterm.js"></script>
+<script src="/vendor/addon-unicode11.js"></script>
+<script src="/client/client.js"></script>
+</body>
+</html>

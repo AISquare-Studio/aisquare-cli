@@ -1478,7 +1478,7 @@ def _check_captured_projects() -> list[DoctorCheck]:
         return []
     if not capture:
         return [_ok("projects", _left_from_before_capture(captured, plan, busy))]
-    noun = "directory" if len(captured) == 1 else "directories"
+    noun = _directories(len(captured))
     return [
         _ok(
             "projects",

@@ -4601,6 +4601,42 @@ def test_a_cycle_with_no_fleet_row_names_its_project_by_its_codename(
         assert project.id not in board
 
 
+def test_a_hook_reads_the_row_its_window_names_once_for_the_assignment_and_the_cycle(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 23, 10/10: at every session start of a fleet agent, and at
+    every late join through the heartbeat, the row ``AISQUARE_FLEET_AGENT`` names was read
+    twice in the same store session, a GLOB on its id each time: once for the assignment
+    (``_fleet_row_named``) and again for the cycle's project (``_cycle_project``). It is
+    read once and handed to both, and each still gets what it got."""
+    mine = _task(project, "the task this manager is for")
+    agent, session_id = _spawned(project, "manager", mine.id, tmux, monkeypatch)
+    with store_session() as store:
+        stored = store.get_project(project.id)
+    assert stored is not None and stored.codename
+    reads: list[str] = []
+    real = SqliteStore.get_fleet_agent
+
+    def counted(self: SqliteStore, agent_id: str) -> FleetAgent | None:
+        reads.append(agent_id)
+        return real(self, agent_id)
+
+    monkeypatch.setattr(SqliteStore, "get_fleet_agent", counted)
+
+    started = team_service.hook_session_start(session_id, project.root, "startup")
+
+    assert reads == [agent.id]
+    assert f"ASSIGNED TO YOU: {mine.id} [todo]" in started
+    assert f"aisquare fleet reap --project {stored.codename}" in started
+    with store_session() as store:  # a session the hook has not seen joins at a prompt
+        store.end_session(session_id, release_claims=False)
+    reads.clear()
+    joined = team_service.hook_prompt_heartbeat("sess-late-10", project.root)
+
+    assert reads == [agent.id]
+    assert f"aisquare fleet reap --project {stored.codename}" in joined
+
+
 def test_a_cycle_whose_project_cannot_be_read_still_gets_its_board(
     project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -5367,7 +5403,10 @@ def test_an_unreadable_fleet_row_costs_the_line_and_not_the_board(
 ) -> None:
     """The docstring has promised fail-open since the first version; only
     AmbiguousIdError was ever caught, so any sqlite error propagated out of
-    `hook_session_start` and took the whole board with it (review of #116)."""
+    `hook_session_start` and took the whole board with it (review of #116). Both
+    lookups, by the name and by the session: the hook reads the named row on its own
+    since round 23 of #259, and with that read alone failing, the row recorded against
+    the session still briefs it."""
     task = _task(project, "some task")
     _agent, first = _spawned(project, "coder", task.id, tmux, monkeypatch)
 
@@ -5375,6 +5414,7 @@ def test_an_unreadable_fleet_row_costs_the_line_and_not_the_board(
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(SqliteStore, "get_fleet_agent", boom)
+    monkeypatch.setattr(SqliteStore, "fleet_agent_for_session", boom)
 
     board = team_service.hook_session_start(first, project.root, "startup")
 

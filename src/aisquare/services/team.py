@@ -1606,8 +1606,10 @@ def hook_session_start(
             session = store.update_session(session.id, role=role)
         # Before the board is read below: the assignment may move this agent's
         # claims onto its new id, and a board read first still named the old one.
-        # ``source`` plays no part — see rule 1 of the fleet-row section.
-        assigned = _assignment(store, session.id, project.id)
+        # ``source`` plays no part — see rule 1 of the fleet-row section. The row the window
+        # names is read once, for the assignment and the cycle's project.
+        named = _hook_named_row(store)
+        assigned = _assignment(store, session.id, project.id, named=named)
         # Presence is board state, not feed traffic: /clear cycles, resumes and
         # ephemeral `claude -p` children would otherwise spam join/left pairs.
         return collision + _render_board(
@@ -1618,7 +1620,7 @@ def hook_session_start(
             me=session,
             assigned=assigned,
             labels=lambda: slot_labels_via(store),
-            fleet=_cycle_project(store, project, cwd),
+            fleet=_cycle_project(store, project, cwd, session.id, named=named),
         )
 
 
@@ -1670,7 +1672,8 @@ def hook_prompt_heartbeat(
             # orchestrator was switched on) — and does so BEFORE the tasks are
             # read: computed as an argument, the claim it moved was rendered
             # under its old holder on this very board (review of #135).
-            assigned = _assignment(store, session.id, project.id)
+            named = _hook_named_row(store)
+            assigned = _assignment(store, session.id, project.id, named=named)
             return _render_board(
                 project,
                 store.team_sessions(project.id),
@@ -1679,7 +1682,7 @@ def hook_prompt_heartbeat(
                 me=session,
                 assigned=assigned,
                 labels=lambda: slot_labels_via(store),
-                fleet=_cycle_project(store, project, cwd),
+                fleet=_cycle_project(store, project, cwd, session.id, named=named),
             )
         # Same check as session_start, on the path that actually runs every turn.
         # It must survive the empty-delta early return below: a collision warning
@@ -2592,12 +2595,15 @@ def _render_board(
 # the board and never the work loop.
 
 
-def _fleet_row_named(store: ContextStore, project_id: str) -> FleetAgent | None:
-    """The live fleet row ``AISQUARE_FLEET_AGENT`` names, when it is this project's.
+def _named_fleet_row(store: ContextStore) -> FleetAgent | None:
+    """The live fleet row ``AISQUARE_FLEET_AGENT`` names, in whichever project it is; free
+    to raise.
 
     The variable names a row; it does not prove the reader IS that row's agent
     (rule 1). Binding on the name goes through :func:`_adopt`; ``task next``
-    reads it for the order alone (:func:`_fleet_row_hint`).
+    reads it for the order alone (:func:`_fleet_row_hint`). A GLOB on the id, so a hook
+    reads it once (:func:`_hook_named_row`) and hands it to the assignment and the cycle's
+    project, which each read it again (review of #259, round 23).
     """
     agent_id = orchestrator.env_fleet_agent()
     if agent_id is None:
@@ -2606,13 +2612,43 @@ def _fleet_row_named(store: ContextStore, project_id: str) -> FleetAgent | None:
         agent = store.get_fleet_agent(agent_id)
     except AmbiguousIdError:
         return None
-    if agent is None or agent.ended_at is not None or agent.project_id != project_id:
+    if agent is None or agent.ended_at is not None:
         return None
     return agent
 
 
+def _hook_named_row(store: ContextStore) -> FleetAgent | None:
+    """:func:`_named_fleet_row` for a hook, fail-open: a row that cannot be read costs the
+    assignment and the cycle's project, never the board, and is logged."""
+    try:
+        return _named_fleet_row(store)
+    except Exception as exc:
+        _log.warning(
+            "the fleet row AISQUARE_FLEET_AGENT names could not be read, so this session "
+            "has none (%s: %s)",
+            type(exc).__name__,
+            exc,
+        )
+        return None
+
+
+def _of_project(agent: FleetAgent | None, project_id: str) -> FleetAgent | None:
+    """``agent`` when it is ``project_id``'s row, else ``None``."""
+    return agent if agent is not None and agent.project_id == project_id else None
+
+
+def _fleet_row_named(store: ContextStore, project_id: str) -> FleetAgent | None:
+    """The live fleet row ``AISQUARE_FLEET_AGENT`` names, when it is this project's."""
+    return _of_project(_named_fleet_row(store), project_id)
+
+
 def _fleet_row(
-    store: ContextStore, session_id: str, project_id: str, *, allow_unbound: bool
+    store: ContextStore,
+    session_id: str,
+    project_id: str,
+    *,
+    named: FleetAgent | None,
+    allow_unbound: bool,
 ) -> FleetAgent | None:
     """The live fleet row for a session: the ONE lookup both doors make, free to raise.
 
@@ -2627,14 +2663,16 @@ def _fleet_row(
     copy and not the other: the session-identity check, the ended-row check,
     the fail-open ``try`` (review of #116). With one lookup, the next guard has
     one place to go.
+
+    ``named`` is what :func:`_named_fleet_row` read, whatever its project: a hook reads it
+    once for the assignment and the cycle's project both.
     """
-    named = _fleet_row_named(store, project_id)
+    named = _of_project(named, project_id)
     if named is not None and (allow_unbound or named.session_id == session_id):
         return named
     # This project's row only, as the name is: what both doors read it for is a task on the
     # row's project's board, and under a hub the session's board is another.
-    bound = store.fleet_agent_for_session(session_id)
-    return bound if bound is not None and bound.project_id == project_id else None
+    return _of_project(store.fleet_agent_for_session(session_id), project_id)
 
 
 def _fleet_row_for(store: ContextStore, session_id: str, project_id: str) -> FleetAgent | None:
@@ -2654,7 +2692,9 @@ def _fleet_row_for(store: ContextStore, session_id: str, project_id: str) -> Fle
     round 5).
     """
     try:
-        return _fleet_row(store, session_id, project_id, allow_unbound=False)
+        return _fleet_row(
+            store, session_id, project_id, named=_named_fleet_row(store), allow_unbound=False
+        )
     except Exception as exc:
         _log.warning(
             "the fleet row of session %s could not be read, so it has none (%s: %s)",
@@ -2789,7 +2829,9 @@ class Assignment(NamedTuple):
     holder_gone: bool
 
 
-def _assignment(store: ContextStore, session_id: str, project_id: str) -> Assignment | None:
+def _assignment(
+    store: ContextStore, session_id: str, project_id: str, *, named: FleetAgent | None
+) -> Assignment | None:
     """The task this session was spawned for, joining the session to its fleet row.
 
     ``fleet spawn --task`` recorded the task on the ``fleet_agent`` row and named
@@ -2802,9 +2844,10 @@ def _assignment(store: ContextStore, session_id: str, project_id: str) -> Assign
 
     Fail-open throughout: an unreadable row, a tmux that will not answer, a
     task that will not parse — each costs the assignment block, never the board.
+    ``named`` is the row the window's variable names (:func:`_hook_named_row`).
     """
     try:
-        return _resolve_assignment(store, session_id, project_id)
+        return _resolve_assignment(store, session_id, project_id, named)
     except Exception:
         return None
 
@@ -2829,12 +2872,14 @@ def _late_assignment(store: ContextStore, session: TeamSession) -> Assignment | 
         return None
     if _fleet_row_for(store, session.id, session.project_id) is not None:
         return None
-    return _assignment(store, session.id, session.project_id)
+    return _assignment(store, session.id, session.project_id, named=_hook_named_row(store))
 
 
-def _resolve_assignment(store: ContextStore, session_id: str, project_id: str) -> Assignment | None:
+def _resolve_assignment(
+    store: ContextStore, session_id: str, project_id: str, named: FleetAgent | None
+) -> Assignment | None:
     """The body of :func:`_assignment`, free to raise; the rules are the section's."""
-    agent = _fleet_row(store, session_id, project_id, allow_unbound=True)
+    agent = _fleet_row(store, session_id, project_id, named=named, allow_unbound=True)
     if agent is None:
         return None
     if agent.session_id != session_id and not _adopt(store, agent, session_id):
@@ -2844,7 +2889,7 @@ def _resolve_assignment(store: ContextStore, session_id: str, project_id: str) -
         # two doors read the same row now; this one used to give up here and
         # the agent lost its ASSIGNED TO YOU block while `task next` still put
         # its task first (round 8 of #203). The same lookup, bound rows only.
-        agent = _fleet_row(store, session_id, project_id, allow_unbound=False)
+        agent = _fleet_row(store, session_id, project_id, named=named, allow_unbound=False)
         if agent is None:
             return None
     if agent.task_id is None:
@@ -3047,16 +3092,26 @@ _NO_CYCLE_PROJECT = "<project>"
 """What a cycle's fleet commands name when :func:`_cycle_project` has no project."""
 
 
-def _cycle_project(store: ContextStore, board: ProjectInfo, cwd: Path | None) -> ProjectInfo | None:
+def _cycle_project(
+    store: ContextStore,
+    board: ProjectInfo,
+    cwd: Path | None,
+    session_id: str,
+    *,
+    named: FleetAgent | None,
+) -> ProjectInfo | None:
     """The project a session's cycle names in its fleet commands: its fleet row's.
 
     Not the board's. Under ``AISQUARE_TEAM_HUB`` the board is the hub's, and ``fleet
     spawn`` sets the hub on every window it starts, while each row is in its own project.
     Named by the board, a manager's cycle spawned its coders in the hub's directory, and
     its ``stop``, ``tell`` and ``switch`` found no live agent there (review of #259, round
-    22). The row is the one ``AISQUARE_FLEET_AGENT`` names, read whatever project it is in:
-    a child that inherited the variable runs in the same project. Its project is read
-    stored, codename and all.
+    22). The row is the one ``AISQUARE_FLEET_AGENT`` names, whatever project it is in: a
+    child that inherited the variable runs in the same project. The hook read it already,
+    for the assignment, and hands it over as ``named``: read here too, a session start paid
+    for the same GLOB lookup twice (round 23). Without one, it is the row the store records
+    against the session (``fleet_agent_for_session``), the lookup the hand-over and the
+    board's chip make. Its project is read stored, codename and all.
 
     A session with no live row is named by the board when no hub is set: the board is then
     its directory's project. Read stored too: the board ``orchestrator.team_project`` builds
@@ -3072,20 +3127,17 @@ def _cycle_project(store: ContextStore, board: ProjectInfo, cwd: Path | None) ->
     still this session's project; under one, no project is.
     """
     hub = orchestrator.team_hub() is not None
-    agent_id = orchestrator.env_fleet_agent()
     try:
-        if agent_id is not None:
-            agent = store.get_fleet_agent(agent_id)
-            if agent is not None and agent.ended_at is None:
-                return store.get_project(agent.project_id)
+        agent = named if named is not None else store.fleet_agent_for_session(session_id)
+        if agent is not None:
+            return store.get_project(agent.project_id)
         if hub:
             return store.get_project(orchestrator.directory_project(cwd).id)
         return store.get_project(board.id) or board
     except Exception as exc:
         _log.warning(
-            "the project of this session's cycle could not be read (fleet row %s), so it "
-            "names %s (%s: %s)",
-            agent_id or "none",
+            "the project of session %s's cycle could not be read, so it names %s (%s: %s)",
+            short_id(session_id),
             "no project" if hub else "the board's",
             type(exc).__name__,
             exc,

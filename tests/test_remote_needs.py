@@ -5002,6 +5002,46 @@ def test_remotes_board_paths_go_to_a_hub_forgotten_since(
     assert untouched is not None and untouched.status == "todo"
 
 
+@pytest.mark.parametrize(
+    ("to", "expected"),
+    [
+        ("coder-1", "p"),
+        ("manager", "hub"),
+        ("coder", "hub"),
+        ("coder-2", "hub"),
+        ("coder-9", "hub"),
+    ],
+    ids=["a coder's label", "the manager's", "a role", "an ended coder's", "nobody's"],
+)
+def test_a_board_tab_note_to_a_running_agent_goes_to_the_board_it_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, to: str, expected: str
+) -> None:
+    """Review of #259, round 30, 3/8: a note from the Board tab with ``to`` and no ``as`` went
+    to the board P's manager reads, whatever ``to`` named. ``coder-1``, spawned from a plain
+    shell, reads P's checkout board while the manager reads hub H: the note landed on H,
+    which coder-1 never reads, and the page said "Posted". ``fleet tell`` files its note on
+    the told agent's board (``fleet._file_note``), and so does the phone's: a running
+    agent's label is that row's board, and anything else the Board tab's."""
+    from aisquare.services.remote_server import live_writes
+
+    p, hub, _ = _hubbed_tasks(tmp_path, monkeypatch, "none")
+    with store_session() as store:
+        _seat_up(store, _Seat("p", "coder-1"), p, p)
+        _seat_up(store, _Seat("p", "coder-2", end="exit"), p, p)
+    boards = {"p": p.id, "hub": hub.id}
+
+    live_writes().handlers["note"]({"text": "rebase first", "project": p.id, "to": to})
+
+    with store_session() as store:
+        posted = {
+            name
+            for name, board in boards.items()
+            for event in store.recent_events(board, limit=9)
+            if event.kind == "note" and event.text == "rebase first"
+        }
+    assert posted == {expected}
+
+
 @pytest.mark.parametrize("end", ["exit", "stop"])
 @pytest.mark.parametrize("remote", ["none", "another"], ids=["no hub", "another hub"])
 @pytest.mark.parametrize(

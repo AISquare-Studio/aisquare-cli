@@ -1,7 +1,7 @@
 #!/bin/sh
 # Make the person the journeys play: a normal account ($E2E_USER, default
-# `e2e`) with a fresh home from /etc/skel, bash as its login shell, and
-# passwordless sudo. Linux CI only.
+# `e2e`) with a fresh home (stock Ubuntu's three dotfiles and nothing else),
+# bash as its login shell, and passwordless sudo. Linux CI only.
 #
 # WHY NOT THE JOB'S OWN USER. Under act the job runs as root; on GitHub it runs
 # as `runner`, whose home already holds a toolcache, the checkout and a dozen
@@ -9,7 +9,7 @@
 # path where install.sh's `sudo_run` degrades to a plain `run`
 # (tests/install/cell-nonroot.sh explains why that path is the one a person
 # never takes), and the runner's home is anything but fresh. An account made
-# here starts with what `useradd -m` gives a new user on Ubuntu, and nothing
+# here starts with what `useradd -m` gives a new user on stock Ubuntu, nothing
 # from the harness: the journeys reach it through a login shell, never by
 # mounting or sharing the checkout (e2e/PLAN.md §10).
 #
@@ -83,7 +83,20 @@ if getent group "$user" >/dev/null; then
     groupdel "$user"
 fi
 
-useradd --create-home --user-group --uid "$uid" --shell /bin/bash "$user"
+# The home is made from a skeleton holding only what stock Ubuntu's /etc/skel
+# holds: .bashrc, .bash_logout and .profile. GitHub's runner image adds its SDKs
+# to /etc/skel (.rustup, .cargo, .nvm, .dotnet, .ghcup, .composer: gigabytes),
+# so a plain `useradd -m` spent two minutes copying them into a home that is
+# meant to be fresh. The harness then writes its own .bashrc and .bash_profile
+# (e2e/runner/machine.py) over these.
+skel=$(mktemp -d)
+for name in .bashrc .bash_logout .profile; do
+    if [ -f "/etc/skel/$name" ]; then
+        cp -p "/etc/skel/$name" "$skel/$name"
+    fi
+done
+useradd --create-home --skel "$skel" --user-group --uid "$uid" --shell /bin/bash "$user"
+rm -rf -- "$skel"
 home=$(getent passwd "$user" | cut -d: -f6)
 if [ -z "$home" ] || [ ! -d "$home" ]; then
     die "useradd made $user without a home directory"

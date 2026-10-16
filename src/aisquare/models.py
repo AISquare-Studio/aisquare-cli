@@ -1024,6 +1024,11 @@ class LaunchSpec(BaseModel):
     """The aisquare version that recorded the spec; ``None`` on one recorded before 0.8.0,
     whose reviewer may hold that release's built-in ``--restricted``, which nobody chose
     and a replay replaces (``services.fleet``)."""
+    hub: str | None = None
+    """The ``AISQUARE_TEAM_HUB`` its window was given: the hub's absolute path, ``""`` for none
+    (``core.orchestrator.window_team_hub``). A restart or switch gives the replacement's
+    window the same, whoever runs it (``services.fleet._board_and_hub``). ``None`` on a spec
+    recorded before 0.8.1 kept it."""
 
 
 class FleetAgent(BaseModel):

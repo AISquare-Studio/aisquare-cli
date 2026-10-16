@@ -2324,21 +2324,34 @@ def _board_of_row(agent: FleetAgent) -> str:
     return agent.board or agent.project_id
 
 
-def _board_and_hub(store: ContextStore, project: ProjectInfo, board: str | None) -> tuple[str, str]:
+def _board_and_hub(
+    store: ContextStore, project: ProjectInfo, board: str | None, spec: LaunchSpec | None
+) -> tuple[str, str]:
     """The board an agent spawned into ``project`` reads, and the ``AISQUARE_TEAM_HUB`` its
     window is given so that its ``launch`` and hooks resolve that board.
 
-    ``board`` is a replacement's: the board the row it replaces recorded, kept, with the hub
-    that gives it, blank when the project's own checkout resolves to it, else the board's
-    root. A ``restart`` or ``switch`` from ``asq``, the phone or a shell that does not
-    export the hub the agent was spawned under asked for the task on the caller's board and
-    refused it, and the replacement's window took the caller's hub, moving the agent off the
-    board its manager reads (review of #259, round 25, 1/10). A new agent, or a board whose
-    root the store no longer has, reads the board this process gives it (:func:`_board_for`).
+    ``board`` and ``spec`` are a replacement's: the board the row it replaces recorded, and
+    the launch it replays, with the hub its window was given (``LaunchSpec.hub``), both kept.
+    A ``restart`` or ``switch`` from ``asq``, the phone or a shell that does not export the
+    hub the agent was spawned under asked for the task on the caller's board and refused it,
+    and the replacement's window took the caller's hub, moving the agent off the board its
+    manager reads (review of #259, round 25, 1/10). The hub is read, never inferred: worked
+    out from the board, as "a board that is not the checkout's is a hub", a row that read
+    its own project's board took that project's root for a hub, and the replacement, and
+    every one after it, read a private board its manager does not (round 26, 8/11).
+
+    A spec recorded before it kept the hub says nothing: a board that is the checkout's or
+    the project's own is read with none, from the checkout, as a window with no hub reads it;
+    another project's known board, which only a hub gives, with that hub. A new agent, or a
+    board whose root the store no longer has, reads the board this process gives it
+    (:func:`_board_for`).
     """
     if board is not None:
-        if board == orchestrator.directory_project(project.root).id:
-            return board, ""
+        if spec is not None and spec.hub is not None:
+            return board, spec.hub
+        checkout = orchestrator.directory_project(project.root).id
+        if board in (checkout, project.id):
+            return checkout, ""
         known = store.get_project(board)
         if known is not None:
             return board, str(known.root)
@@ -2602,7 +2615,7 @@ def spawn(
                 f"(max_agents_per_project = {config.max_agents_per_project}) — stop one, "
                 "or raise the limit in [fleet]"
             )
-        board, hub = _board_and_hub(store, project, board)
+        board, hub = _board_and_hub(store, project, board, spec)
         task = _task_for(store, board, task_id)
         resolved_task_id = task.id if task is not None else None
         picked = next_label(project, role, wanted=label, task_id=resolved_task_id, store=store)
@@ -2876,6 +2889,7 @@ def spawn(
                 worktree=use_worktree,
                 command=list(command),
                 recorded_by=__version__,
+                hub=hub,
             ),
             socket_path=socket_path,
             boot_id=tmux_core.boot_id(),

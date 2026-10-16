@@ -5096,6 +5096,14 @@ def _case_spawn_records(w: _Hubbed) -> str | None:
     return _row(w.coder.id).board
 
 
+def _case_spawn_records_the_hub(w: _Hubbed) -> str | None:
+    spec = _row(w.coder.id).launch_spec
+    assert spec is not None and spec.hub is not None
+    with pytest.MonkeyPatch.context() as window:
+        window.setenv("AISQUARE_TEAM_HUB", spec.hub)
+        return team_project(w.fleet.root).id
+
+
 def _case_restart_without_the_hub(w: _Hubbed) -> str | None:
     row = _for_its_task(w)
     w.tmux.die(row.pane_id, 0)
@@ -5213,6 +5221,7 @@ _HUB_RULE_CASES: list[tuple[str, str, Any]] = [
     ("board", "switched", _case_switched),
     ("board", "the entries a hand-off prompt quotes", _case_hand_off_entries),
     ("board", "the board a spawn records", _case_spawn_records),
+    ("board", "the board under the hub a spawn records", _case_spawn_records_the_hub),
     ("board", "a restart from a caller without the hub", _case_restart_without_the_hub),
     ("board", "a switch from a caller without the hub", _case_switch_without_the_hub),
     ("board", "agent_exited, no session, the hub unset", _case_exited_without_a_session_or_the_hub),
@@ -5497,6 +5506,63 @@ def test_a_project_rooted_below_its_checkout_spawns_for_a_task_on_the_checkouts_
     assert (row.project_id, row.task_id, row.board) == (below.id, task.id, task.project_id)
     tmux.die(row.pane_id, 0)
     assert fleet_service.restart(below, row.label).started.task_id == task.id
+
+
+def _last_window_hub(tmux: FakeTmux) -> object:
+    """The ``AISQUARE_TEAM_HUB`` the last window the fleet opened was given."""
+    env = tmux.spawned[-1]["env"]
+    assert isinstance(env, dict)
+    return env["AISQUARE_TEAM_HUB"]
+
+
+def test_a_replacement_gets_the_hub_its_agents_window_was_given_never_one_worked_out(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 26, 8/11: a restart's window was given a hub worked out from the
+    board the row recorded, "a board that is not the checkout's is a hub, at its root". For a
+    project rooted at ``repo/api``, whose window reads ``repo``'s board, a row that read as its
+    own project's (0.8.0 writes no board, and a session that never registered gives the
+    project's) got ``AISQUARE_TEAM_HUB=repo/api``: a private board its manager never reads,
+    recorded again by every restart after. And a window spawned under the hub ``repo``, whose
+    board is the checkout's too, came back with none. The spawn records the hub its window
+    was given (``LaunchSpec.hub``), and a replacement is given it again."""
+    root = project.root / "api"
+    root.mkdir()
+    with store_session() as store:
+        below = store.onboard_project(ProjectInfo(id=project_id_for(root), root=root))
+    plain = _coder(below, label="coder-plain")
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(project.root))  # the checkout, as a hub
+    under = _coder(below, label="coder-under")
+    monkeypatch.delenv("AISQUARE_TEAM_HUB")
+    assert plain.launch_spec is not None and plain.launch_spec.hub == ""
+    assert under.launch_spec is not None and under.launch_spec.hub == str(project.root)
+    assert plain.board == under.board == project.id, "the checkout's board, both"
+    raw = sqlite3.connect(str(paths.db_path()))
+    try:
+        legacy = json.loads(plain.launch_spec.model_dump_json())
+        del legacy["hub"]  # as a build from before the field wrote it
+        raw.execute(
+            "UPDATE fleet_agent SET board = NULL, launch_spec = ? WHERE id = ?",
+            (json.dumps(legacy), plain.id),
+        )
+        raw.commit()
+    finally:
+        raw.close()
+    assert _row(plain.id).board == below.id, "no session registered: its project's"
+
+    tmux.die(plain.pane_id, 0)
+    again = fleet_service.restart(below, plain.label).started
+
+    assert _last_window_hub(tmux) == "", "no hub: the window reads the checkout's board"
+    assert again.board == project.id and again.launch_spec is not None
+    assert again.launch_spec.hub == ""
+    tmux.die(under.pane_id, 0)
+    kept = fleet_service.restart(below, under.label).started
+    assert _last_window_hub(tmux) == str(project.root), "the hub it was spawned under"
+    assert kept.board == project.id
 
 
 def test_a_fleet_row_from_before_v32_reads_its_sessions_board(hubbed: _Hubbed) -> None:

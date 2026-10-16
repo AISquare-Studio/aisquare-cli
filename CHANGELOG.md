@@ -575,7 +575,11 @@ all of them, and the fleet cleans up the worktrees it made.**
   - `fleet restart` and `fleet switch` from `asq`, the phone or a shell
     without the hub no longer refuse an agent's task with "belongs to another
     project's board". The replacement reads the same board as the agent it
-    replaces, and its window gets that board's hub, not the caller's.
+    replaces, and its window gets the hub the agent's own window was given
+    (recorded at spawn, `launch_spec.hub` in `fleet ls --json`), not the
+    caller's. An agent spawned before 0.8.1 recorded none: its replacement
+    gets the hub of a board only another project's root gives, and no hub for
+    its project's own board or its checkout's.
   - `fleet tell` to an agent that is not at its prompt files the note on the
     board the agent reads, from the phone, `asq` or a shell without the hub
     too. Before, it went to the caller's board, was reported filed, and the

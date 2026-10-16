@@ -1245,7 +1245,8 @@ principal checkout's board as its sessions do. Every later question of an agent'
 board asks the row, never the environment of whoever asks: `asq`, the phone or a
 shell without the hub restarts, switches and reaps an agent on the board it was
 spawned under. A restart or switch gives the replacement the same board, and its
-window the hub that resolves it.
+window the hub the agent's own window was given, recorded at spawn with the launch
+(`launch_spec.hub`).
 
 | On the session's board (the hub's, under one) | On the row's fleet project (whatever the board) |
 |---|---|

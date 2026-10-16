@@ -3,6 +3,23 @@
 > **Status:** working brief. Move the design into `docs/nightly-e2e.md` and drop this file before any PR.
 > **Branch:** `feat/e2e-nightly`. Nothing leaves this machine without the human's go-ahead.
 
+## 0. Status (updated 2026-10-16)
+A first slice is built and green locally (macOS):
+
+- **Harness:** a TerminalSession driving xterm.js 6 on a ttyd PTY; the Machine (scratch HOME and
+  CI user modes); the evidence recorder; `run.json` (`e2e/contracts.py`).
+- **Journeys:** J01 install via the one-liner, J02 Welcome → "Your fleet is up", J04 agent pane,
+  J06 Doctor and Accounts.
+- **Agent:** `e2e/agent/claude`, a plain stand-in (echo).
+- **Being wired now:** the report/gallery (`e2e/report`), `.github/workflows/e2e.yml` and the act
+  runner (`e2e/ci`).
+
+**Still open for the fleet**, by package below:
+- the scripted agent (§6, hooks, tasks, contracts);
+- J03, J05, J07–J10 and the watchlist;
+- the container machine mode;
+- macOS CI legs, baselines and diffs, change-only Slack, review.
+
 ## 1. Goal
 A nightly job in this repo that uses aisquare **the way a person does** and keeps the evidence. On a fresh Linux
 machine and a fresh Mac it:

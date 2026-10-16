@@ -9191,6 +9191,41 @@ def test_a_resume_writes_off_only_where_the_pause_reads_on(hubbed: _Hubbed) -> N
     assert sorted(_paused_on(w)) == sorted([w.hub.id, w.fleet.id]), "on: every board"
 
 
+def test_a_pause_or_resume_as_a_prefix_of_two_sessions_is_refused_as_ambiguous(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, runner: CliRunner
+) -> None:
+    """Review of #259, round 31, 2/7: ``--as`` is read as a session id prefix, and one that
+    names two sessions raised ``AmbiguousIdError``, a ``LookupError`` and no ``KeyError``:
+    out of ``resume``'s own check with nothing paused, and out of ``set_signal`` on the
+    ``on`` path. The CLI catches only ``FleetError``, so ``fleet resume --as ses_aa`` ended
+    in a traceback, and ``--json`` printed nothing. It is refused, as an ambiguous task is,
+    and nothing is written."""
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        for sid in ("ses_aa1", "ses_aa2"):
+            store.upsert_session(
+                TeamSession(
+                    id=sid, project_id=project.id, role="manager", started_at=now,
+                    last_seen_at=now,
+                )
+            )  # fmt: skip
+    ambiguous = "session 'ses_aa' is ambiguous — use more of the id"
+
+    for verb in (fleet_service.pause, fleet_service.resume):
+        with pytest.raises(FleetError) as refused:
+            verb(project, session_ref="ses_aa")
+        assert str(refused.value) == ambiguous
+        assert not fleet_service.is_paused(project)
+    fleet_service.pause(project)
+    with pytest.raises(FleetError, match="ambiguous"):
+        fleet_service.resume(project, session_ref="ses_aa")
+    assert fleet_service.is_paused(project), "still paused"
+
+    result = runner.invoke(app, ["--json", "fleet", "resume", "-P", project.id, "--as", "ses_aa"])
+    assert result.exit_code == 1, result.exception
+    assert json.loads(result.stdout) == {"error": "fleet_error", "detail": ambiguous}
+
+
 def test_shutdown_clears_the_fleet_paused_signal(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

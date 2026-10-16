@@ -7158,7 +7158,10 @@ def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> Non
     every board one of the project's rows ever recorded, ``fleet resume -P a`` put
     ``fleet-paused.a: off`` in the next prompt of every agent on every hub ``a`` ever ran
     under, where it had never been paused (review of #259, round 30, 5/8). With nothing on,
-    ``--as`` is still checked: an unknown session is refused, as a write refuses it.
+    ``--as`` is still checked: an unknown session is refused, as a write refuses it, and so
+    is a prefix of several, as :func:`_task_for` refuses one of a task. Left to the CLI,
+    which catches only ``FleetError``, ``fleet resume --as ses_a`` ended in a traceback, and
+    ``--json`` printed nothing (round 31, 2/7).
     """
     team = _team()
     try:
@@ -7176,6 +7179,8 @@ def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> Non
             team.set_signal(name, value, session_ref=session_ref, project_id=board)
     except team.TeamDisabledError as exc:
         raise FleetError(f"cannot set the pause signal: {exc}") from exc
+    except AmbiguousIdError as exc:
+        raise FleetError(f"session {session_ref!r} is ambiguous — use more of the id") from exc
     except KeyError as exc:
         raise FleetError(f"unknown session {session_ref!r}") from exc
 

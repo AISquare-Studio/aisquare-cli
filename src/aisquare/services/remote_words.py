@@ -71,7 +71,7 @@ REMOTE_PASSPHRASE_WORDS: tuple[str, ...] = (
     "sofa", "solar", "sonar", "sonnet", "sparrow", "spider", "spinach", "spiral", "sponge",
     "spoon", "spring", "sprout", "spruce", "squash", "squid", "stamp", "statue", "storm", "stream",
     "string", "studio", "sturdy", "subway", "sugar", "summit", "swamp", "swan", "sweater",
-    "swift", "table", "tablet", "taco", "tango", "taxi", "teal", "teapot", "temple", "tempo",
+    "swift", "table", "tablet", "tadpole", "tango", "taxi", "teal", "teapot", "temple", "tempo",
     "thimble", "thunder", "ticket", "tidy", "tiger", "tin", "tiny", "toast", "toaster", "tomato",
     "topaz", "tornado", "toucan", "towel", "tower", "tractor", "trail", "trophy", "trout",
     "truck", "trumpet", "tugboat", "tulip", "tundra", "tunnel", "turkey", "turnip", "turtle",

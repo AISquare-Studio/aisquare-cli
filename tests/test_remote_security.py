@@ -868,8 +868,9 @@ _NEAR_HOMOPHONES = ("bear", "lava", "cedar", "atom", "ladder", "otter", "pudding
 
 #: Words with a widely known vulgar slang sense, which the curation keeps out too: the
 #: phrase is read aloud off a terminal. ``beaver`` came in with the round-29 swap and was
-#: replaced in review of #259, round 30, 8/8.
-_SLANG = ("beaver",)
+#: replaced in review of #259, round 30, 8/8, and ``taco``, in it since the list grew to 512
+#: words, in round 31, 7/7.
+_SLANG = ("beaver", "taco")
 
 
 def test_the_word_list_holds_no_word_its_curation_keeps_out() -> None:

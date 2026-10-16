@@ -4398,8 +4398,8 @@ def test_stop_leaves_the_row_live_when_a_denied_socket_cannot_confirm_the_pane_d
 
 # --- a spawned agent learns the task it was spawned for --------------------------------
 #
-# The row belongs to the PROCESS in its pane (the three rules above
-# ``team._fleet_row_named``). These tests act as that process the way Claude Code
+# The row belongs to the PROCESS in its pane (the rules above
+# ``team._named_fleet_row``). These tests act as that process the way Claude Code
 # would: the fake pane reports a pid, and ``CLAUDE_PID`` — what Claude Code hands
 # every hook, measured on 2.1.272 — carries the same number. A nested child is a
 # different number under the same window variables. A ``/clear`` is fired in the
@@ -4614,7 +4614,7 @@ def test_a_hook_reads_the_row_its_window_names_once_for_the_assignment_and_the_c
     """Review of #259, round 23, 10/10: at every session start of a fleet agent, and at
     every late join through the heartbeat, the row ``AISQUARE_FLEET_AGENT`` names was read
     twice in the same store session, a GLOB on its id each time: once for the assignment
-    (``_fleet_row_named``) and again for the cycle's project (``_cycle_project``). It is
+    (``_named_fleet_row``) and again for the cycle's project (``_cycle_project``). It is
     read once and handed to both, and each still gets what it got."""
     mine = _task(project, "the task this manager is for")
     agent, session_id = _spawned(project, "manager", mine.id, tmux, monkeypatch)
@@ -4893,6 +4893,24 @@ def _case_spawn_task(w: _Hubbed) -> str | None:
     return _task_now(row.task_id).project_id
 
 
+def _kept_by(w: _Hubbed, session_id: str) -> str | None:
+    """The board of the coder's task while ``session_id`` still holds it, else ``None``."""
+    task = _task_now(w.task.id)
+    return task.project_id if task.status == "doing" and task.claimed_by == session_id else None
+
+
+def _case_hand_over_keeps(w: _Hubbed) -> str | None:
+    with store_session() as store:
+        store.touch_session(w.coder_sid, state=team_service.HANDOVER_STATE)
+    team_service.hook_session_end(w.coder_sid, w.fleet.root, reason="prompt_input_exit")
+    return _kept_by(w, w.coder_sid)
+
+
+def _case_clear_keeps(w: _Hubbed) -> str | None:
+    team_service.hook_session_end(w.coder_sid, w.fleet.root, reason="clear")
+    return _kept_by(w, w.coder_sid)
+
+
 def _case_cycle_project(w: _Hubbed) -> str | None:
     with store_session() as store:
         named = team_service._cycle_project(store, w.hub, w.fleet.root, w.manager_sid, named=None)
@@ -4924,6 +4942,8 @@ _HUB_RULE_CASES: list[tuple[str, str, Any]] = [
     ("board", "task review", _case_task_review),
     ("board", "task done", _case_task_done),
     ("board", "the task fleet spawn --task gives", _case_spawn_task),
+    ("board", "the claim a hand-over's SessionEnd keeps", _case_hand_over_keeps),
+    ("board", "the claim a /clear's SessionEnd keeps", _case_clear_keeps),
     ("fleet", "the cycle's --project", _case_cycle_project),
     ("fleet", "a limited chip's fleet switch", _case_limited_chip),
     ("fleet", "the manager a usage limit wakes", _case_limit_nudge),
@@ -4951,6 +4971,32 @@ def test_under_a_hub_a_manager_spawns_its_coder_for_a_task_it_added(hubbed: _Hub
     assert stray.project_id == hubbed.fleet.id
     with pytest.raises(FleetError, match="belongs to another project's board"):
         fleet_service.spawn(hubbed.fleet, "coder", task_id=stray.id, worktree=False)
+
+
+@pytest.mark.parametrize("reason", ["switch", "clear"])
+def test_under_a_hub_a_hand_over_or_a_clear_keeps_the_agents_claims(
+    hubbed: _Hubbed, reason: str
+) -> None:
+    """Review of #259, round 24, 1/6: the SessionEnd of a hand-over or a ``/clear`` keeps the
+    agent's claims when the session is a live fleet row's, and it asked for the row with the
+    session's board. Under a hub that is the hub's, where the row is not: a coder's
+    usage-limit switch released its task back to the pool, with ``task_released`` on the
+    feed, and its replacement inherited nothing; its ``/clear`` released it the same way.
+    The row is found in any project, and the claims wait for the id that follows."""
+    with store_session() as store:
+        if reason == "switch":
+            store.touch_session(hubbed.coder_sid, state=team_service.HANDOVER_STATE)
+
+    team_service.hook_session_end(
+        hubbed.coder_sid, hubbed.fleet.root, reason="clear" if reason == "clear" else "other"
+    )
+
+    task = _task_now(hubbed.task.id)
+    assert (task.status, task.claimed_by) == ("doing", hubbed.coder_sid)
+    with store_session() as store:
+        assert not [e for e in store.recent_events(hubbed.hub.id) if e.kind == "task_released"]
+        ended = store.get_session(hubbed.coder_sid)
+    assert ended is not None and ended.ended_at is not None, "the presence is retired"
 
 
 @pytest.mark.parametrize(

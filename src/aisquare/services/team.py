@@ -1405,7 +1405,7 @@ def next_task(
         # a looper picking from a pool; it was wrong for an agent the manager
         # started FOR a task: that one took whatever was oldest, and two spawned
         # together raced for the same one while their own sat idle.
-        row = _fleet_row_hint(store, session, board.id, claim=claim)
+        row = _fleet_row_hint(store, session, claim=claim)
         prefer = row.task_id if row is not None else None
         picked: TeamTask | None = None
         while True:
@@ -2587,6 +2587,12 @@ def _render_board(
 #    and, for rows that predate the rule, from the briefing itself): a later
 #    session start is not briefed on finished work, and a reopened task claimed
 #    by someone else is not read as an order to stand down (finding 5).
+# 4. THE ROW IS FOUND WHATEVER THE BOARD. Under ``AISQUARE_TEAM_HUB`` a session is
+#    on the hub's board and its row in the project it was spawned into, so no
+#    lookup of a row filters by the board (docs/fleet.md, "Under a hub: one
+#    board, many fleet projects"). Filtered, a hub agent's ``SessionEnd`` found no
+#    row, and its hand-over or ``/clear`` released the claims its next id was to
+#    inherit (review of #259, round 24, 1/6). Only a task is the board's.
 #
 # Two doors read the row: the briefing — the session-start hook, and the
 # heartbeat's first-prompt board for a session that arrived before the
@@ -2637,23 +2643,18 @@ def _of_project(agent: FleetAgent | None, project_id: str) -> FleetAgent | None:
     return agent if agent is not None and agent.project_id == project_id else None
 
 
-def _fleet_row_named(store: ContextStore, project_id: str) -> FleetAgent | None:
-    """The live fleet row ``AISQUARE_FLEET_AGENT`` names, when it is this project's."""
-    return _of_project(_named_fleet_row(store), project_id)
-
-
 def _fleet_row(
     store: ContextStore,
     session_id: str,
-    project_id: str,
     *,
     named: FleetAgent | None,
     allow_unbound: bool,
 ) -> FleetAgent | None:
     """The live fleet row for a session: the ONE lookup both doors make, free to raise.
 
-    The row ``AISQUARE_FLEET_AGENT`` names (:func:`_fleet_row_named`), when it
-    records this session; otherwise the row bound to the session, if any. With
+    The row ``AISQUARE_FLEET_AGENT`` names (:func:`_named_fleet_row`), when it
+    records this session; otherwise the row bound to the session, if any. In any project:
+    under a hub the session's board is another (rule 4). With
     ``allow_unbound`` the named row is returned whoever it records, because that
     is how a session comes to be bound: the briefing hands it to :func:`_adopt`,
     which decides. Nothing else may take it on the name alone.
@@ -2667,15 +2668,12 @@ def _fleet_row(
     ``named`` is what :func:`_named_fleet_row` read, whatever its project: a hook reads it
     once for the assignment and the cycle's project both.
     """
-    named = _of_project(named, project_id)
     if named is not None and (allow_unbound or named.session_id == session_id):
         return named
-    # This project's row only, as the name is: what both doors read it for is a task on the
-    # row's project's board, and under a hub the session's board is another.
-    return _of_project(store.fleet_agent_for_session(session_id), project_id)
+    return store.fleet_agent_for_session(session_id)
 
 
-def _fleet_row_for(store: ContextStore, session_id: str, project_id: str) -> FleetAgent | None:
+def _fleet_row_for(store: ContextStore, session_id: str) -> FleetAgent | None:
     """The live fleet row a session *is* — the row already bound to that session.
 
     The name in the environment is accepted only when the row it names records
@@ -2692,9 +2690,7 @@ def _fleet_row_for(store: ContextStore, session_id: str, project_id: str) -> Fle
     round 5).
     """
     try:
-        return _fleet_row(
-            store, session_id, project_id, named=_named_fleet_row(store), allow_unbound=False
-        )
+        return _fleet_row(store, session_id, named=_named_fleet_row(store), allow_unbound=False)
     except Exception as exc:
         _log.warning(
             "the fleet row of session %s could not be read, so it has none (%s: %s)",
@@ -2706,7 +2702,7 @@ def _fleet_row_for(store: ContextStore, session_id: str, project_id: str) -> Fle
 
 
 def _fleet_row_hint(
-    store: ContextStore, session: TeamSession | None, project_id: str, *, claim: bool
+    store: ContextStore, session: TeamSession | None, *, claim: bool
 ) -> FleetAgent | None:
     """The row whose task ``task next`` should put first — for the ORDER, never for a claim.
 
@@ -2720,16 +2716,18 @@ def _fleet_row_hint(
     the older one, because the cycle passed no session and nothing else was
     consulted (review of #135, finding 11). A CLAIM is not taken on the name
     alone: that is identity, and the variable is inherited, so it keeps needing
-    a session the row is bound to.
+    a session the row is bound to. The row is found in any project (rule 4): the
+    board is asked for the task, by ``store.next_task``, which prefers it among the
+    board's own.
     """
     if session is not None:
-        row = _fleet_row_for(store, session.id, project_id)
+        row = _fleet_row_for(store, session.id)
         if row is not None:
             return row
     if claim:
         return None
     try:
-        return _fleet_row_named(store, project_id)
+        return _named_fleet_row(store)
     except Exception as exc:  # the order is a preference: logged, as in _fleet_row_for
         _log.warning(
             "the fleet row AISQUARE_FLEET_AGENT names could not be read, so task next "
@@ -2788,9 +2786,10 @@ def _adopt(store: ContextStore, agent: FleetAgent, session_id: str) -> bool:
 
 def _handing_over_a_fleet_row(store: ContextStore, session: TeamSession) -> bool:
     """Whether ``session`` is a live fleet row's — the premise of parking its claims for the
-    replacement. Fail-open towards RELEASING, like :func:`_clearing_its_own_pane`."""
+    replacement. Fail-open towards RELEASING, like :func:`_clearing_its_own_pane`. The row
+    in any project (rule 4): asked by the session's board, a hub agent had none."""
     try:
-        return _fleet_row_for(store, session.id, session.project_id) is not None
+        return _fleet_row_for(store, session.id) is not None
     except Exception:
         return False
 
@@ -2802,10 +2801,11 @@ def _clearing_its_own_pane(store: ContextStore, session: TeamSession) -> bool:
     the row and the claims kept for it. A nested child clearing its own session
     is not (its pid is not the pane's), nor is a binary without ``CLAUDE_PID``,
     and both release as before. Fail-open towards RELEASING: an unreadable row
-    must not leave claims parked on an id nothing will come back for.
+    must not leave claims parked on an id nothing will come back for. The row in any
+    project, as for a hand-over (rule 4).
     """
     try:
-        row = _fleet_row_for(store, session.id, session.project_id)
+        row = _fleet_row_for(store, session.id)
         return row is not None and _pane_holds(row) is True
     except Exception:
         return False
@@ -2870,7 +2870,7 @@ def _late_assignment(store: ContextStore, session: TeamSession) -> Assignment | 
     """
     if orchestrator.env_fleet_agent() is None:
         return None
-    if _fleet_row_for(store, session.id, session.project_id) is not None:
+    if _fleet_row_for(store, session.id) is not None:
         return None
     return _assignment(store, session.id, session.project_id, named=_hook_named_row(store))
 
@@ -2879,7 +2879,7 @@ def _resolve_assignment(
     store: ContextStore, session_id: str, project_id: str, named: FleetAgent | None
 ) -> Assignment | None:
     """The body of :func:`_assignment`, free to raise; the rules are the section's."""
-    agent = _fleet_row(store, session_id, project_id, named=named, allow_unbound=True)
+    agent = _of_project(_fleet_row(store, session_id, named=named, allow_unbound=True), project_id)
     if agent is None:
         return None
     if agent.session_id != session_id and not _adopt(store, agent, session_id):
@@ -2889,7 +2889,9 @@ def _resolve_assignment(
         # two doors read the same row now; this one used to give up here and
         # the agent lost its ASSIGNED TO YOU block while `task next` still put
         # its task first (round 8 of #203). The same lookup, bound rows only.
-        agent = _fleet_row(store, session_id, project_id, named=named, allow_unbound=False)
+        agent = _of_project(
+            _fleet_row(store, session_id, named=named, allow_unbound=False), project_id
+        )
         if agent is None:
             return None
     if agent.task_id is None:

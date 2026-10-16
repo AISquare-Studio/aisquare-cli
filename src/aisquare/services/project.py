@@ -31,6 +31,7 @@ from aisquare.models import (
     ProjectInfo,
     ProjectPruneReport,
     PruneCandidate,
+    PruneReason,
     Snapshot,
 )
 from aisquare.services import install_route
@@ -304,6 +305,12 @@ def prune_candidates(
     rows are considered for the other two reasons too: a missing root is
     missing whether or not anyone added it. A live fleet agent count is
     carried so the plan can show what will be kept and why.
+
+    Only what a reason asked for is asked: the live agents of a candidate alone, and a
+    root's ``stat`` only for ``missing`` or ``worktrees``. Doctor asks for the captured
+    rows alone on every run, and got a live-agent query for every project and a ``stat`` of
+    every root, some on network mounts (review of #259, round 18). A root that cannot be
+    asked (``EACCES``, which ``is_dir`` raises) is not called missing, and fails no plan.
     """
     with store_session() as store:
         projects = store.list_projects(all=True)
@@ -315,21 +322,31 @@ def prune_candidates(
             else None
         )
         found: list[PruneCandidate] = []
-        for project in projects:
+
+        def candidate(
+            project: ProjectInfo, reason: PruneReason, principal: ProjectInfo | None = None
+        ) -> None:
             live = len(store.fleet_agents(project.id, live_only=True))
+            found.append(
+                PruneCandidate(
+                    project=project, reason=reason, principal=principal, live_agents=live
+                )
+            )
+
+        for project in projects:
             if (
                 cutoff is not None
                 and project.onboarded_at is None
                 and activity.get(project.id, "") < cutoff
                 and not store.entries("project", project_id=project.id)
             ):
-                found.append(PruneCandidate(project=project, reason="captured", live_agents=live))
+                candidate(project, "captured")
                 continue
-            if not project.root.is_dir():
+            if not (missing or worktrees):
+                continue
+            if not _is_dir(project.root):
                 if missing:
-                    found.append(
-                        PruneCandidate(project=project, reason="missing", live_agents=live)
-                    )
+                    candidate(project, "missing")
                 continue
             if not worktrees:
                 continue
@@ -340,12 +357,16 @@ def prune_candidates(
                 project_id_for(principal_root)
             )
             if principal is not None and principal.id != project.id:
-                found.append(
-                    PruneCandidate(
-                        project=project, reason="worktree", principal=principal, live_agents=live
-                    )
-                )
+                candidate(project, "worktree", principal=principal)
     return found
+
+
+def _is_dir(root: Path) -> bool:
+    """Whether ``root`` is a directory; one that cannot be asked is taken to be one."""
+    try:
+        return root.is_dir()
+    except OSError:
+        return True
 
 
 def prune_plan(candidates: list[PruneCandidate], *, purge: bool) -> ProjectPruneReport:

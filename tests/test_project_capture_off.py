@@ -18,7 +18,7 @@ from aisquare.cli.app import app
 from aisquare.core.entries import new_entry
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
-from aisquare.models import ProjectInfo
+from aisquare.models import FleetAgent, ProjectInfo
 from aisquare.services import destinations as dest
 from aisquare.services import diagnostics
 from aisquare.services import team as team_service
@@ -271,6 +271,47 @@ def test_doctor_names_the_rows_that_prune_keeps_and_what_drops_them(tmp_path: Pa
         "context or a live agent, which aisquare project prune keeps: notes"
     ), said
     assert "--older-than 0" not in said
+
+
+def test_doctor_asks_only_the_captured_rows_and_no_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 18: with capture off, doctor built the whole prune plan to word
+    its line: a live-agent query for every project, a ``stat`` of every root (some on network
+    mounts) though no reason asked for one, and a root ``is_dir`` raised ``EACCES`` for hid
+    the whole line. It asks the captured rows alone, and no root."""
+    from aisquare.core.store import SqliteStore
+
+    added = ProjectInfo(id="prj_added", root=tmp_path / "locked" / "added")
+    with store_session() as store:
+        store.onboard_project(added)
+        store.ensure_project(ProjectInfo(id="prj_scratch", root=tmp_path / "scratch"))
+
+    locked, is_dir = tmp_path / "locked", Path.is_dir
+
+    def no_stat(self: Path) -> bool:
+        if self.is_relative_to(locked):  # under a directory this user may not search
+            raise PermissionError(13, "Permission denied", str(self))
+        return is_dir(self)
+
+    asked: list[str] = []
+    real = SqliteStore.fleet_agents
+
+    def counted(self: SqliteStore, project_id: str, **kwargs: bool) -> list[FleetAgent]:
+        asked.append(project_id)
+        return real(self, project_id, **kwargs)
+
+    monkeypatch.setattr(Path, "is_dir", no_stat)
+    monkeypatch.setattr(SqliteStore, "fleet_agents", counted)
+
+    [check] = diagnostics._check_captured_projects()
+
+    assert check.detail.startswith("1 captured directory left from before project capture")
+    assert "prj_added" not in asked, "an added project's agents were asked"
+    from aisquare.services import project as project_service
+
+    plan = project_service.prune_candidates(missing=True, worktrees=False)
+    assert [c.project.id for c in plan] == ["prj_scratch"], "a root it cannot ask is not missing"
 
 
 # --- the setting, read --------------------------------------------------------------------

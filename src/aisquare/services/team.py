@@ -1870,14 +1870,14 @@ def hook_stop(
             return None
         failure: Exception | None = None
         deferred: str | None = None
-        manager = session.project_id
+        manager: str | None = None
         if session.role == MANAGER_ROLE:
             try:
                 decision = _manager_wakeup(store, session, stop_hook_active=stop_hook_active)
                 if decision is None and stop_hook_active:
                     deferred = _deferred_wake_reason(store, session)
-                    if deferred is not None:  # its own row's project: under a hub, not the board's
-                        manager = _nudge_target(store, session.id, session.project_id, cwd)
+                    if deferred is not None:
+                        manager = _own_manager_row(store, session)
             except Exception as exc:  # waiting is the contract; the wake-up is the extra
                 failure = exc
             else:
@@ -1887,13 +1887,25 @@ def hook_stop(
         # of an agent `fleet switch` is exiting, whose SessionEnd must still park
         # the claims (review of the #205 fold, round 1).
         store.touch_session(session.id, state="waiting")
-    if deferred is not None:
+    if deferred is not None and manager is not None:
         # After the row says waiting, never before: nudge_manager refuses every
         # other state. Outside the `with` too — it opens its own connection.
         _nudge_manager(manager, reason=deferred, board=session.project_id)
     if failure is not None:
         raise ManagerWakeupError(failure)
     return None
+
+
+def _own_manager_row(store: ContextStore, session: TeamSession) -> str | None:
+    """The project of the live ``manager`` row of ``session`` itself, the one its deferred wake
+    types into (``fleet.nudge_manager``), in whichever project it is: under a hub, not the
+    board's. ``None`` for a manager no row holds, launched by hand, or a numbered seat: its
+    deferred news waits for its next prompt. Asked as any writer is (:func:`_nudge_target`),
+    a manager with no row woke the one manager that reads the board, another project's, and
+    typed its wake into that pane (review of #259, round 26, 7/11).
+    """
+    row = store.fleet_agent_for_session(session.id)
+    return row.project_id if row is not None and row.label == MANAGER_ROLE else None
 
 
 def continuation_key(session_id: str, when: datetime) -> str:

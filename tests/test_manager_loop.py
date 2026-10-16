@@ -40,7 +40,7 @@ from aisquare.core import harness, paths
 from aisquare.core.config import AppConfig, ExplainabilitySettings, load_config, save_config
 from aisquare.core.ids import new_event_id
 from aisquare.core.store import store_session
-from aisquare.models import TeamEvent, TeamSession, TeamTask
+from aisquare.models import FleetAgent, TeamEvent, TeamSession, TeamTask
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from aisquare.services.fleet import FLEET_ROLES
@@ -179,6 +179,22 @@ def _decision(result: Any) -> dict[str, Any]:
     return parsed
 
 
+def _manager_row(work: Path) -> str:
+    """The manager session's own fleet row, on its board, as ``fleet spawn manager`` records
+    it; returns the row's project. A deferred wake nudges that row and no other (review of
+    #259, round 26, 7/11): a manager no row holds defers to its next prompt alone."""
+    session = _session(MANAGER)
+    with store_session() as store:
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_manager", project_id=session.project_id, label="manager",
+                role="manager", pane_id="%9", session_id=MANAGER, cwd=work,
+                board=session.project_id, created_at=datetime.now(tz=UTC),
+            )
+        )  # fmt: skip
+    return session.project_id
+
+
 def _fleet(runner: CliRunner, monkeypatch: pytest.MonkeyPatch, work: Path) -> None:
     _start(runner, monkeypatch, MANAGER, work, "manager")
     _start(runner, monkeypatch, CODER, work, "coder")
@@ -256,8 +272,8 @@ def test_stop_hook_active_defers_the_wakeup_to_the_next_prompt(
     ``test_the_stop_that_ends_a_continuation_schedules_the_rest`` below).
     """
     _fleet(runner, monkeypatch, work_dir)
+    project_id = _manager_row(work_dir)
     before = _session(MANAGER)
-    project_id = before.project_id
     task_id = _coder_reviews(work_dir)
     no_nudge.clear()  # the coder's own write-time nudge is not what is under test
 
@@ -694,7 +710,7 @@ def test_the_stop_that_ends_a_continuation_schedules_the_rest(
     2's nudge, which produces the ``UserPromptSubmit`` the delta rides on.
     """
     _fleet(runner, monkeypatch, work_dir)
-    project_id = _session(MANAGER).project_id
+    project_id = _manager_row(work_dir)
     seqs = [_emit_from_coder("question", f"question number {i}") for i in range(15)]
     assert _decision(_stop(runner, MANAGER, work_dir))["decision"] == BLOCK
     no_nudge.clear()

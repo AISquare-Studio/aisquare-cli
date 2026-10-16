@@ -5575,6 +5575,31 @@ def test_of_two_managers_on_one_board_a_note_wakes_the_one_whose_root_holds_it_d
     assert woken == [below.id, project.id]
 
 
+def test_under_a_hub_a_manager_launched_by_hand_defers_its_wake_to_nobody_else(
+    hubbed: _Hubbed,
+) -> None:
+    """Review of #259, round 26, 7/11: a manager's Stop that defers its wake-up
+    (``stop_hook_active``) nudges its own row. A manager the human launched by hand in
+    another project's folder has none, and was asked as a writer with no row: the one
+    manager that reads the hub's board, the fleet project's, got the nudge for the other's
+    turn typed into its pane. It wakes nobody; its news waits for its next prompt."""
+    other = hubbed.fleet.root.parent / "by-hand"
+    other.mkdir()
+    _stranger(hubbed.monkeypatch, "manager")
+    team_service.hook_session_start("sess-manager-by-hand", other, "startup")
+    team_service.add_note(
+        "which branch?", kind="question", to_role="manager", session_ref=hubbed.coder_sid
+    )
+    hubbed.woken.clear()
+
+    team_service.hook_stop("sess-manager-by-hand", other, stop_hook_active=True)
+
+    assert hubbed.woken == [], "no row of its own: nobody's pane"
+    _become(hubbed.manager, hubbed.tmux, hubbed.monkeypatch, pid=PANE_PID, role="manager")
+    team_service.hook_stop(hubbed.manager_sid, hubbed.fleet.root, stop_hook_active=True)
+    assert hubbed.woken == [hubbed.fleet.id], "a manager with a row still wakes its own"
+
+
 def test_a_nudge_wakes_a_manager_only_for_a_write_on_the_board_it_reads(hubbed: _Hubbed) -> None:
     """Review of #259, round 26, 4/11: a write woke the manager of the writer's row's project
     whatever board that manager reads. Spawned from ``asq`` under the hub, the manager reads

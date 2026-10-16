@@ -268,14 +268,16 @@ def test_recall_finds_a_page_on_the_real_gbrain(
 ) -> None:
     """Review r12 of #113, finding 8, measured where gbrain is installed: the query is
     gbrain's positional as its parser reads one, so a recall finds a distilled page; a
-    query gbrain would read as an option is refused before gbrain is asked."""
+    query gbrain would read as an option is refused before gbrain is asked. A hit, not an
+    echo: the page's own words beyond the query, which no "no results for 'JWT'" prints
+    (r13, finding 12)."""
     assert REAL_GBRAIN is not None
     monkeypatch.setenv("PATH", str(Path(REAL_GBRAIN).parent), prepend=os.pathsep)
     _seed_events(runner)
     assert distill.drain(work_dir) == 3
-    found = runner.invoke(app, ["recall", "auth"])
+    found = runner.invoke(app, ["recall", "JWT"])
     assert found.exit_code == 0, found.output
-    assert "auth" in found.stdout.lower()
+    assert "we will use" in found.stdout, found.stdout
     refused = runner.invoke(app, ["recall", "--", "--help"])
     assert refused.exit_code == 1 and "may not start with '-'" in refused.output
 

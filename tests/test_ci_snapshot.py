@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import ast
 import inspect
 import os
-import re
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -344,20 +344,70 @@ def test_the_snapshots_git_runs_no_hook_of_the_repository(tmp_path: Path) -> Non
     assert marker.exists(), "the repository's own git still runs it"
 
 
+def _git_programs(tree: ast.AST) -> list[ast.AST]:
+    """Each place in ``tree`` that names git as a program to run: the string ``"git"`` as
+    the first element of a list or tuple (however it is laid out, ``["git"] + args`` and
+    ``("git",)`` included), as an argument of a ``subprocess``/``os.exec*``/``shutil.which``
+    call, or bound to a name (``GIT = "git"``)."""
+
+    def is_git(node: ast.AST) -> bool:
+        return isinstance(node, ast.Constant) and node.value == "git"
+
+    found: list[ast.AST] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.List | ast.Tuple) and node.elts and is_git(node.elts[0]):
+            found.append(node)
+        elif isinstance(node, ast.Call):
+            func = node.func
+            owner = (
+                func.value.id
+                if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+                else None
+            )
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            runs = owner in {"subprocess", "os", "shutil"} and (
+                owner != "shutil" or name == "which"
+            )
+            if runs and any(is_git(arg) for arg in [*node.args, *(k.value for k in node.keywords)]):
+                found.append(node)
+        elif (
+            isinstance(node, ast.Assign | ast.AnnAssign)
+            and node.value is not None
+            and is_git(node.value)
+        ):
+            found.append(node)
+    return found
+
+
+def test_the_git_guard_sees_every_shape_of_a_git_argv() -> None:
+    """Review r13 of #113, finding 11: the guard was a one-line regex, blind to ruff's one
+    element per line, ``["git"] + args``, ``("git",)`` and a ``GIT = "git"`` constant."""
+    shapes = [
+        'run(\n    [\n        "git",\n        "status",\n    ]\n)',
+        'run(["git"] + args)',
+        'run(("git",))',
+        'GIT = "git"',
+        'subprocess.run(argv, executable="git")',
+        'shutil.which("git")',
+    ]
+    for shape in shapes:
+        assert _git_programs(ast.parse(shape)), shape
+    assert not _git_programs(ast.parse('KEYS = ("editable", "git", "url")'))
+
+
 def test_every_git_aisquare_runs_is_its_own_hookless_one() -> None:
     """Review r12 of #113, finding 2: aisquare runs git through ``workspace.git_argv`` alone
-    (no hook, no fsmonitor of the repository's), never a ``"git"`` argv of its own; the
-    one other ``"git"`` argv is a command line printed for the user to run."""
+    (no hook, no fsmonitor of the repository's), never a git argv of its own; the one other
+    is a command line printed for the user to run. Read by the syntax tree (r13, 11)."""
     source = Path(__file__).resolve().parents[1] / "src" / "aisquare"
-    argv = re.compile(r"""[\[(]\s*["']git["']\s*,""")
-    found = [
-        f"{path.relative_to(source).as_posix()}: {line.strip()}"
-        for path in sorted(source.rglob("*.py"))
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if argv.search(line) and not line.lstrip().startswith("#")
-    ]
+    found = []
+    for path in sorted(source.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        for node in _git_programs(ast.parse(text, filename=str(path))):
+            found.append(
+                f"{path.relative_to(source).as_posix()}: {ast.get_source_segment(text, node)}"
+            )
     assert found == [
-        'core/workspace.py: return ["git", *GIT_OWN, *args]',
-        "services/install_route.py: "
-        'pull = command_line(["git", "-C", route.source or ".", "pull"])',
+        'core/workspace.py: ["git", *GIT_OWN, *args]',
+        'services/install_route.py: ["git", "-C", route.source or ".", "pull"]',
     ], found

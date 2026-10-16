@@ -514,7 +514,8 @@ def test_ls_with_no_agents_says_how_to_start_one(
 
     assert result.exit_code == 0, result.output
     assert "(no agents)" in result.stdout
-    assert "aisquare fleet spawn manager" in result.stdout
+    # Naming the project listed: alone, it spawned in the active one (#259, round 21).
+    assert "aisquare fleet spawn --project amber-otter manager" in result.stdout
 
 
 def test_ls_all_includes_ended_agents_and_plain_ls_does_not(
@@ -785,7 +786,8 @@ def test_an_interrupted_shutdown_prints_how_far_it_got_and_exits_130(
     assert "⚠ fleet PARTLY shut down: 1 stopped" in out
     assert "💤 manager (exit 0)" in out, "the row already down is named"
     assert "🔓 1 claimed task(s) released back to the board" in out
-    assert "interrupted while stopping coder-auth" in out and "fleet ls --all" in out
+    assert "interrupted while stopping coder-auth" in out
+    assert "`aisquare fleet ls --project amber-otter --all` shows what is still running" in out
 
 
 def test_stop_confirms_and_passes_force_through(

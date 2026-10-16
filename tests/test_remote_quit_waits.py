@@ -171,7 +171,7 @@ def test_a_ctrl_c_while_a_quit_waits_quits_at_once_and_says_what_it_left(
     assert quit_now == [130]
     assert said[-1] == (
         "Remote quit with agent/switch for coder-2 unfinished: "
-        "`aisquare fleet ls` shows where the agent is"
+        "the fleet UI (`aisquare`) shows where the agent is"
     )
 
 
@@ -306,7 +306,7 @@ def test_a_ctrl_c_while_quit_waits_for_remote_to_stop_quits_at_once_and_stops_ng
         assert tunnel.stopped, "ngrok is stopped before the process ends with its stopper"
         assert said[-1] == (
             "Remote quit with agent/restart for coder-1 unfinished: "
-            "`aisquare fleet ls` shows where the agent is"
+            "the fleet UI (`aisquare`) shows where the agent is"
         )
         err = capsys.readouterr().err
         assert "⚠ the theme was not saved: state.json.lock is held by another process" in err
@@ -375,7 +375,7 @@ def test_a_ctrl_c_in_the_quits_waits_says_the_hand_over_did_not_run_and_what_run
         running = remote_server._remote_write_running("agent/restart for coder-1")
         phones = [
             "Remote quit with agent/restart for coder-1 unfinished: "
-            "`aisquare fleet ls` shows where the agent is"
+            "the fleet UI (`aisquare`) shows where the agent is"
         ]
     with running, pytest.raises(SystemExit):
         app_module.run_ui()
@@ -612,7 +612,7 @@ def test_a_ctrl_c_while_serves_quit_waits_for_a_push_ends_the_wait_and_says_noth
     assert quit_now[0] == 130
     assert said == [
         "Remote quit with agent/restart for coder-1 unfinished: "
-        "`aisquare fleet ls` shows where the agent is"
+        "the fleet UI (`aisquare`) shows where the agent is"
     ]
 
 

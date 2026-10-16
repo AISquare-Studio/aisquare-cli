@@ -407,7 +407,11 @@ def test_the_doctor_line_names_the_agents_still_running_in_auto(
     assert check is not None and check.status is CheckStatus.warn, check
     assert check.detail.startswith("the running agent coder-auto (repo) runs in auto mode")
     assert "141k" in check.detail
-    assert check.fix and "aisquare fleet restart <label> --permission-mode acceptEdits" in check.fix
+    # Its own restart, naming its project: alone, the active project's (#259, round 21).
+    restart = (
+        f"aisquare fleet restart --project {project.id} coder-auto --permission-mode acceptEdits"
+    )
+    assert check.fix and restart in check.fix, check.fix
     assert "config set" not in check.fix and "[fleet.roles" not in check.fix
 
 
@@ -519,11 +523,19 @@ def test_a_transcript_doctor_may_not_stat_does_not_crash_doctor(
 # --- the spawn receipt ----------------------------------------------------------------------
 
 
+SPAWNED_IN = ProjectInfo(id="prj_spawned", root=Path("/work/spawned"), codename="calm-otter")
+"""The project a spawn note's agent is in, which its restart names."""
+
+
 def _note(mode: str | None, *, role: str = "coder", label: str = "coder-1") -> str | None:
     """The spawn note as ``fleet.spawn`` asks for it: the evidence for the mode, the role,
-    the label the row was recorded with, the loaded config."""
+    the label the row was recorded with, the loaded config, the spawn's project."""
     return auto_mode.spawn_note(
-        auto_mode.spawn_evidence(mode), role=role, label=label, config=load_config().fleet
+        auto_mode.spawn_evidence(mode),
+        role=role,
+        label=label,
+        config=load_config().fleet,
+        project=SPAWNED_IN,
     )
 
 
@@ -571,8 +583,8 @@ def test_the_spawn_note_names_a_step_a_restart_or_a_switch_receipt_can_follow(
     command = "aisquare config set fleet.roles.coder.permission_mode acceptEdits"
     assert (
         f"set a non-classifier mode for coder ({command}) and "
-        "`aisquare fleet restart coder-auth --permission-mode acceptEdits` (its session resumes)"
-        in note
+        "`aisquare fleet restart --project calm-otter coder-auth --permission-mode acceptEdits` "
+        "(its session resumes)" in note
     )
     result = runner.invoke(app, command.split()[1:])
     assert result.exit_code == 0, result.output
@@ -657,7 +669,7 @@ def test_a_refused_session_is_put_in_attention_once_with_one_board_line(
     assert (
         "5 refusals" in blocked[0] and "fleet.roles.coder.permission_mode acceptEdits" in blocked[0]
     )
-    assert "aisquare fleet restart coder-auth" in blocked[0]
+    assert f"aisquare fleet restart --project {project.id} coder-auth" in blocked[0]
 
     # The next Stop finds the same refusals: the feed does not repeat, the row is waiting again.
     again = runner.invoke(app, ["hook", "stop"], input=payload)
@@ -823,7 +835,7 @@ def test_a_refused_turn_that_ends_inside_a_hand_over_leaves_the_notice_to_the_re
     assert _state("sess-coder") == "attention"
     [line] = _blocked(project)
     assert line.startswith("coder-auth: auto mode is refusing") and "(3 refusals" in line
-    assert "aisquare fleet restart coder-auth" in line
+    assert f"aisquare fleet restart --project {project.id} coder-auth" in line
     # Said once, as for any session.
     assert hooks_service.turn_stopped(project.root, session_id="sess-coder") is None
     assert len(_blocked(project)) == 1

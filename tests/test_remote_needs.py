@@ -2727,7 +2727,7 @@ def test_a_limits_reset_reaches_the_phone_as_an_instant_never_the_machines_clock
         try:
             monkeypatch.setattr(team_service, "_now", lambda: now - timedelta(minutes=1))
             line = team_service._limited_text(
-                "coder-1", "raw", LimitNotice("five-hour", resets), fleet=True
+                "coder-1", "raw", LimitNotice("five-hour", resets), project=PROJECT
             )
             row = _row()
             session = _session(row, state="limited", resets=resets)
@@ -2744,8 +2744,8 @@ def test_a_limits_reset_reaches_the_phone_as_an_instant_never_the_machines_clock
     assert item.reason == "coder-1 hit its usage limit · limit resets in 3h 09m"
     assert push["body"] == item.reason
     assert item.detail == {
-        "text": "coder-1 hit its five-hour limit — `aisquare fleet switch coder-1` moves it to the "
-        "account with the most headroom (or wait for the reset)",
+        "text": "coder-1 hit its five-hour limit — `aisquare fleet switch --project prj_alpha "
+        "coder-1` moves it to the account with the most headroom (or wait for the reset)",
         "resets_at": "2026-10-07T13:10:00+00:00",
     }
     assert item.excerpt == item.detail["text"]

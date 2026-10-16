@@ -137,7 +137,7 @@ def test_the_services_render_a_reset_through_the_same_formatter(
     assert "(Thu " in fleet_service._limit_detail(ahead, NOW)  # never a bare clock time
     assert fleet_service._limit_detail(None, NOW) == "usage limit"
     notice = core.LimitNotice("weekly", ahead)
-    line = team_service._limited_text("coder-1", "raw", notice, fleet=False)
+    line = team_service._limited_text("coder-1", "raw", notice, project=None)
     assert line.startswith("coder-1 hit its weekly limit · resets in 2d 4h (")
 
 

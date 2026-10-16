@@ -2015,7 +2015,12 @@ def hook_stop_failure(
                 store,
                 session.project_id,
                 "limited",
-                _limited_text(label, text, notice, fleet=agent is not None),
+                _limited_text(
+                    label,
+                    text,
+                    notice,
+                    project=store.get_project(session.project_id) if agent is not None else None,
+                ),
                 session_id=session.id,
             )
         refreshed = store.get_session(session.id) or session
@@ -2028,9 +2033,14 @@ def hook_stop_failure(
 
 
 def _limited_text(
-    label: str, message: str, notice: claude_accounts_core.LimitNotice | None, *, fleet: bool
+    label: str,
+    message: str,
+    notice: claude_accounts_core.LimitNotice | None,
+    *,
+    project: ProjectInfo | None,
 ) -> str:
-    """The feed line: what stopped, when it lifts, and the one command that moves it."""
+    """The feed line: what stopped, when it lifts, and the one command that moves it — for a
+    fleet agent, whose ``project`` the command names (review of #259, round 21)."""
     if notice is None:
         head = f"{label} is rate limited: {message}"
     else:
@@ -2038,10 +2048,10 @@ def _limited_text(
         if notice.resets_at is not None:
             # The one formatter (#152; review of #205, finding 9).
             head += f" · resets {claude_accounts_core.format_reset(notice.resets_at, now=_now())}"
-    if fleet:
+    if project is not None:
         head += (
-            f" — `aisquare fleet switch {label}` moves it to the account with the most headroom"
-            " (or wait for the reset)"
+            f" — `{project_service.fleet_command('switch', project, label)}` moves it to the "
+            "account with the most headroom (or wait for the reset)"
         )
     return head
 
@@ -2427,7 +2437,7 @@ def _render_board(
             f"`aisquare task done <id> --as {short_id(me.id)}`. Share decisions/results:",
             f'`aisquare note "…" --as {short_id(me.id)}`. Full board: `aisquare board`.',
             "Every ✓ prints a receipt (seq N); `aisquare team verify <seq>` re-checks it.",
-            *_role_cycle(me),
+            *_role_cycle(me, project),
         ]
     lines.append("</aisquare-team>")
     return "\n".join(lines)
@@ -2891,7 +2901,7 @@ def _assignment_lines(assignment: Assignment, me: TeamSession) -> list[str]:
     ]
 
 
-def _role_cycle(me: TeamSession) -> list[str]:
+def _role_cycle(me: TeamSession, project: ProjectInfo) -> list[str]:
     """The standing work cycle for a role — injected so nobody has to paste it.
 
     The cycles themselves live in :mod:`aisquare.core.harness` (one source of
@@ -2900,8 +2910,14 @@ def _role_cycle(me: TeamSession) -> list[str]:
     Keyed on :func:`base_role`, so a numbered seat (``coder1``) receives its
     role's cycle. Without that a seat got an empty briefing — the one thing the
     seat's own comment in ``cli/launch.py`` promises it does not lose.
+
+    Its fleet commands name ``project``, the board's (``project_service.fleet_command``).
     """
-    return harness.role_cycle(base_role(me.role), short_id(me.id))
+    return harness.role_cycle(
+        base_role(me.role),
+        short_id(me.id),
+        fleet=lambda verb: project_service.fleet_command(verb, project),
+    )
 
 
 def event_line(

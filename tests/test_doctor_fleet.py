@@ -1448,7 +1448,9 @@ def test_doctor_names_a_project_whose_manager_exited_while_its_agents_run(
     assert check.name == "fleet-manager" and check.status is CheckStatus.warn
     assert "the manager exited while agents are still running in: repo" in check.detail
     assert "1 agent(s) still running" in check.detail
-    assert check.fix and "aisquare fleet restart manager --project <name>" in check.fix
+    # Its own project named, not a placeholder to fill (review of #259, round 21).
+    ref = project.codename or project.id
+    assert check.fix and f"aisquare fleet restart --project {ref} manager" in check.fix
     assert "Restart on its row" in check.fix
     assert "fleet-manager" in _by_name(diagnostics.doctor()), "it reaches the real doctor"
 
@@ -1544,9 +1546,10 @@ def test_doctor_counts_the_exited_agents_a_restart_would_resume(home: Path, tmp_
 
     assert check.name == "fleet-resume" and check.status is CheckStatus.ok
     assert check.detail.startswith("1 exited agent can be resumed")
-    assert "coder-1 (repo)" in check.detail
+    # Each with its own restart, naming its project (review of #259, round 21).
+    restart = f"`aisquare fleet restart --project {project.codename or project.id} coder-1`"
+    assert check.detail.endswith(f"starting over: {restart}"), check.detail
     assert "coder-2" not in check.detail and "coder-3" not in check.detail
-    assert "fleet restart <label>" in check.detail
     assert "fleet-resume" in _by_name(diagnostics.doctor()), "it reaches the real doctor"
     on_disk.unlink()
     assert diagnostics._check_resumable_agents() == [], "no transcript, nothing to resume"
@@ -1594,5 +1597,6 @@ def test_the_resume_line_reads_only_the_newest_row_under_each_label(
     [check] = diagnostics._check_resumable_agents()
 
     assert check.detail.startswith("1 exited agent can be resumed"), check.detail
-    assert "coder-2 (repo)" in check.detail and check.detail.count("coder-2") == 1
+    assert f"--project {project.codename or project.id} coder-2`" in check.detail
+    assert check.detail.count("coder-2") == 1
     assert "coder-1" not in check.detail, "live again: nothing to resume"

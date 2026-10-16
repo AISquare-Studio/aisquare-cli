@@ -53,7 +53,7 @@ import json
 import os
 import re
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -820,7 +820,7 @@ _LANE: dict[str, tuple[str, str]] = {
     ),
     "manager": (
         "asked to write code or fix something yourself",
-        "spawn a coder for it (`aisquare fleet spawn coder --task <id> --as {sid}`)",
+        "spawn a coder for it (`{spawn} coder --task <id> --as {sid}`)",
     ),
     "ui-tester": (
         "asked to edit or fix the code",
@@ -831,7 +831,7 @@ _LANE: dict[str, tuple[str, str]] = {
 _LANE["tester"] = _LANE["runner"]
 
 
-def _lane_rule(role: str, sid: str, *, merge_said: bool) -> list[str]:
+def _lane_rule(role: str, sid: str, *, merge_said: bool, fleet: FleetCommand) -> list[str]:
     """The closing paragraph of a first-class role's cycle: stay in the role.
 
     A standing note that only says what a role does loses to a direct
@@ -862,7 +862,7 @@ def _lane_rule(role: str, sid: str, *, merge_said: bool) -> list[str]:
         closing += " Never merge."
     return [
         f"Stay in your lane ({role}). When you are {trigger}, do not do it here.",
-        f"Instead: {instead.format(sid=sid)}.",
+        f"Instead: {instead.format(sid=sid, spawn=fleet('spawn'))}.",
         closing,
     ]
 
@@ -874,12 +874,20 @@ def _lane_rule(role: str, sid: str, *, merge_said: bool) -> list[str]:
 _CLEANUP = (
     "Before you finish or go idle, remove every scratch worktree you added",
     "(`git worktree remove <path>`, then `git worktree prune`) and every temp dir you",
-    "made — never the worktree you were spawned in: `aisquare fleet reap` removes that.",
+    "made — never the worktree you were spawned in: `{reap}` removes that.",
 )
 _CLEANS_UP = frozenset({"coder", "runner", "tester", "reviewer", "validator", "ui-tester"})
 
 
-def role_cycle(role: str, session_short_id: str) -> list[str]:
+FleetCommand = Callable[[str], str]
+"""``aisquare fleet <verb> --project <the project>`` for a verb: what a cycle tells an agent
+to run names its own project (``services.project.fleet_command``). Alone, a fleet command
+acts on the active project, the machine-wide pin before the working directory, so a manager
+whose human pinned another project in some shell spawned, stopped and reaped there (review
+of #259, round 21). A callable, because the command's quoting is the services' to make."""
+
+
+def role_cycle(role: str, session_short_id: str, *, fleet: FleetCommand) -> list[str]:
     """The standing work cycle injected for ``role`` (empty for unknown roles).
 
     Keyed on :func:`base_role`, so a numbered seat (``coder1``) is briefed as
@@ -888,16 +896,16 @@ def role_cycle(role: str, session_short_id: str) -> list[str]:
     cycle and therefore no lane either. The role is normalised once, here.
     """
     role = base_role(role)
-    core = _role_cycle_core(role, session_short_id)
+    core = _role_cycle_core(role, session_short_id, fleet=fleet)
     if not core:
         return []
     if role in _CLEANS_UP:
-        core = [*core, *_CLEANUP]
+        core = [*core, *(line.format(reap=fleet("reap")) for line in _CLEANUP)]
     merge_said = any("merge" in line.lower() for line in core)
-    return [*core, *_lane_rule(role, session_short_id, merge_said=merge_said)]
+    return [*core, *_lane_rule(role, session_short_id, merge_said=merge_said, fleet=fleet)]
 
 
-def _role_cycle_core(role: str, session_short_id: str) -> list[str]:
+def _role_cycle_core(role: str, session_short_id: str, *, fleet: FleetCommand) -> list[str]:
     """The role-specific half of the cycle for an already-normalised ``role``;
     see :func:`role_cycle`."""
     sid = session_short_id
@@ -958,6 +966,7 @@ def _role_cycle_core(role: str, session_short_id: str) -> list[str]:
             "with findings severity-ordered (critical|major|minor|nit) and evidence per finding.",
         ]
     if role == "manager":
+        spawn = fleet("spawn")
         # docs/plans/fleet-tui.md §7.1 — the planner's contract cycle plus the fleet
         # verbs and the loop protocol. Sub-agents are reached ONLY through the board
         # and `fleet spawn|tell` (§3.3, §7.6): native agent teams are off in fleet
@@ -967,23 +976,23 @@ def _role_cycle_core(role: str, session_short_id: str) -> list[str]:
             "work. Intake: ask until the acceptance criteria are executable. Contracts:",
             '`aisquare task add "<title>" --role coder --detail "<objective · why · known ·',
             'acceptance · boundaries>"`, `--needs` for ordering. Help comes only from',
-            f"`aisquare fleet spawn coder --label coder-<purpose> --task <id> --as {sid}` —",
-            "one per parallelisable task, within the agent cap; `fleet spawn tester` once work",
-            'reaches review — `fleet spawn ui-tester --prompt "<branch or worktree to check +',
+            f"`{spawn} coder --label coder-<purpose> --task <id> --as {sid}` —",
+            f"one per parallelisable task, within the agent cap; `{spawn} tester` once work",
+            f'reaches review — `{spawn} ui-tester --prompt "<branch or worktree to check +',
             'the URL to open>"` for tasks titled "UI: …", which it verifies in a real browser',
             "and cannot otherwise place, since nothing moves it into the coder's tree —",
-            "`fleet spawn reviewer` once a PR exists, `fleet spawn validator`",
+            f"`{spawn} reviewer` once a PR exists, `{spawn} validator`",
             "once every task is done. Board updates reach you every turn: reopen with reasons,",
-            '`aisquare fleet tell <label> "…"` to steer, re-spec or split what bounces. Spawn',
+            f'`{fleet("tell")} <label> "…"` to steer, re-spec or split what bounces. Spawn',
             "nothing while the `fleet-paused` signal is set. An agent that hits its Claude usage",
-            "limit shows `limited` on the board and wakes you: `aisquare fleet switch <label>",
+            f"limit shows `limited` on the board and wakes you: `{fleet('switch')} <label>",
             f"--as {sid}` moves it to the account with the most headroom and resumes its session;",
             "if nothing has headroom, leave it — it continues by itself at the reset the event",
             "names. Usage figures are the share USED (40% used = 60% left); headroom is what",
             "is left. An agent whose task is done, with no queued task that fits it:",
-            "`aisquare fleet stop <label>`, then `aisquare fleet reap` — it records the exit",
+            f"`{fleet('stop')} <label>`, then `{fleet('reap')}` — it records the exit",
             "and removes the agent's worktree once its work is pushed. When the validator's",
-            "gate is PASS: `aisquare fleet reap` again, then",
+            f"gate is PASS: `{fleet('reap')}` again, then",
             f'`aisquare note "READY: <PRs + evidence>" --kind result --as {sid}` and stop.',
             "Never write code. Never merge. Blocked twice on one task? Ask the human:",
             f'`aisquare note "…" --kind question --as {sid}`. Labels are unique and descriptive',

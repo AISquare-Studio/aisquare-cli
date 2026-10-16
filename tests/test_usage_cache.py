@@ -28,6 +28,7 @@ from aisquare.core import harness
 from aisquare.core.store import store_session
 from aisquare.models import ClaudeAccount, ClaudeUsage, UsageSample
 from aisquare.services import claude_accounts as service
+from tests.cycles import unscoped
 from tests.test_claude_accounts import NOW
 from tests.test_usage_aware_accounts import _payload, _slot, _Usage
 
@@ -509,7 +510,7 @@ def test_a_refresh_that_fails_keeps_the_figure_and_the_cli_says_the_try_failed(
 
 
 def test_the_managers_cycle_says_figures_are_used_and_headroom_is_left() -> None:
-    cycle = " ".join(harness.role_cycle("manager", "abcd1234"))
+    cycle = " ".join(harness.role_cycle("manager", "abcd1234", fleet=unscoped))
     assert (
         "Usage figures are the share USED (40% used = 60% left); headroom is what is left." in cycle
     )

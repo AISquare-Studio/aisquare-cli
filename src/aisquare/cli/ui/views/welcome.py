@@ -58,6 +58,7 @@ from aisquare.cli.ui.views.onboard import render_verdict
 from aisquare.core.store import store_session
 from aisquare.models import FleetAgent, ProjectInfo
 from aisquare.services import first_run, onboarding
+from aisquare.services import project as project_service
 from aisquare.services.first_run import (
     Candidate,
     Candidates,
@@ -1159,9 +1160,9 @@ class WelcomeView(VerticalScroll):
         elif manager is not None and not up:
             if "coders" in self.busy:
                 status.append("\nStarting the coders…", style="dim")
-            elif stuck is not None:
+            elif stuck is not None and (listed := self._listed_project()) is not None:
                 status.append(f"\n{stuck} could not be restarted: ", style="dim")
-                status.append(f"aisquare fleet reap --project {self._project_ref()}", style="bold")
+                status.append(project_service.fleet_command("reap", listed), style="bold")
                 status.append(
                     " ends the rows of agents whose windows are gone, and Start the coders then "
                     "starts new ones in their place.",
@@ -1303,13 +1304,14 @@ class WelcomeView(VerticalScroll):
                 )
         return ended
 
-    def _project_ref(self) -> str:
-        """How a command names the chosen project: its codename once it has one, else its id."""
+    def _listed_project(self) -> ProjectInfo | None:
+        """The chosen project as the frame lists it, so a command names it by the codename
+        it has once it has one (``project_service.fleet_command``)."""
         project = self.project
         if project is None:
-            return ""
+            return None
         listed = next((p for p in _frame_projects(self.app) or [] if p.id == project.id), project)
-        return listed.codename or project.codename or project.id
+        return listed if listed.codename or not project.codename else project
 
     def _waiting_for(self) -> str:
         missing: list[str] = []

@@ -43,6 +43,7 @@ from aisquare.core.tmux import TmuxServer
 from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services import install_route
+from aisquare.services import project as project_service
 
 SPAWN_WORKER = "spawn-manager"
 """Name of the worker that starts the manager; how its result is told apart."""
@@ -107,10 +108,11 @@ def no_manager_text(
         status = exited.agent.exit_status
         suffix = f" ({status})" if status is not None else ""
         text.append(f"{name}'s manager exited{suffix}.\n", style="bold")
+        restart = project_service.fleet_command("restart", project, "manager")
         text.append(
             "Start manager begins a new session. Restart on its sidebar row brings the same "
-            "session back (its last screen is still there); aisquare fleet restart manager "
-            "does the same from a shell.",
+            f"session back (its last screen is still there); {restart} does the same from a "
+            "shell.",
         )
     else:
         text.append(f"{name} has no manager yet.\n", style="bold")

@@ -87,6 +87,7 @@ from aisquare.services.fleet import (
     NoSuchAgent,
 )
 from tests import fakebin
+from tests.cycles import unscoped
 from tests.fsperms import can_symlink
 from tests.projects import add_project
 
@@ -762,6 +763,14 @@ def _add_task(project: ProjectInfo, title: str) -> TeamTask:
 def _events(project: ProjectInfo, kind: str) -> list[str]:
     with store_session() as store:
         return [e.text for e in store.recent_events(project.id, limit=50) if e.kind == kind]
+
+
+def _fleet(verb: str, project: ProjectInfo, *words: str) -> str:
+    """``project_service.fleet_command`` for ``project`` as the store holds it now: a spawn
+    gives it its codename, which the commands a refusal or a note gives then name."""
+    with store_session() as store:
+        stored = store.get_project(project.id)
+    return project_service.fleet_command(verb, stored or project, *words)
 
 
 def _coder(project: ProjectInfo, **kwargs: object) -> FleetAgent:
@@ -2313,7 +2322,7 @@ def test_reap_server_down_holds_a_row_whose_server_may_still_run(
     reason = report.held[0].reason
     assert "is gone, so no tmux client can reach the server" in reason, reason
     assert "left live: if it is, send that server SIGUSR1" in reason
-    assert "`aisquare fleet shutdown --forget` ends its row on your word" in reason
+    assert f"`{_fleet('shutdown', project, '--forget')}` ends its row on your word" in reason
     with store_session() as store:
         assert [a.id for a in store.fleet_agents(project.id, live_only=True)] == [coder.id]
     assert _events(project, "agent_exited") == []
@@ -3220,12 +3229,14 @@ def test_stop_and_restart_leave_live_a_row_whose_socket_was_taken_from_under_its
 
     with pytest.raises(FleetError, match=r"'coder-1' was not stopped: .* is gone") as stopped:
         fleet_service.stop(project, "coder-1")
-    assert "SIGUSR1" in str(stopped.value) and "shutdown --forget" in str(stopped.value)
+    assert "SIGUSR1" in str(stopped.value)
+    assert f"shutdown --project {project.id} --forget`" in str(stopped.value)
     # Refused before its stop is asked: its replacement could not start at that path either
     # (`_refuse_a_freed_socket`, asked with the replay's refusals: review of #259, round 2).
     with pytest.raises(FleetError, match=r"coder-1 .* runs on lost its socket file") as again:
         fleet_service.restart(project, "coder-1")
-    assert "SIGUSR1" in str(again.value) and "shutdown --forget" in str(again.value)
+    assert "SIGUSR1" in str(again.value)
+    assert f"`{_fleet('shutdown', project, '--forget')}`" in str(again.value)
 
     assert len(tmux.spawned) == spawned, "no second agent in its worktree"
     with store_session() as store:
@@ -3264,7 +3275,7 @@ def test_spawn_refuses_to_start_a_server_at_a_socket_a_running_server_lost(
     said = str(refused.value)
     assert f"the tmux server that coder-1 ({project.root.name}) runs on lost its" in said
     assert "may still be running" in said
-    assert "SIGUSR1" in said and "`aisquare fleet shutdown --forget`" in said
+    assert "SIGUSR1" in said and f"`{_fleet('shutdown', project, '--forget')}`" in said
     with pytest.raises(FleetError, match="lost its socket file"):
         fleet_service.spawn(plain_project, "manager")  # the server is every project's
 
@@ -3651,10 +3662,12 @@ def test_a_row_whose_socket_another_server_took_is_held_not_ended(
         assert named.agent.id == coder.id, said
         assert named.reason.startswith("another tmux server answers on its socket "), named
         assert "— left live: if it is, send that server SIGUSR1" in named.reason
-        assert "`aisquare fleet shutdown --forget` ends its row on your word" in named.reason
+        forget = _fleet("shutdown", project, "--forget")
+        assert f"`{forget}` ends its row on your word" in named.reason
     with pytest.raises(FleetError, match="another tmux server answers on its socket") as stop:
         fleet_service.stop(project, "coder-1")
-    assert "SIGUSR1" in str(stop.value) and "shutdown --forget" in str(stop.value)
+    assert "SIGUSR1" in str(stop.value)
+    assert f"shutdown --project {project.id} --forget`" in str(stop.value)
     with pytest.raises(FleetError, match="another tmux server"):
         fleet_service.restart(project, "coder-1")
     plan = fleet_service.shutdown_plan(project)
@@ -5321,7 +5334,7 @@ def test_the_verifier_cycles_pass_their_session_to_task_next() -> None:
     from aisquare.core import harness
 
     for role in ("tester", "runner", "reviewer", "ui-tester"):
-        first = harness.role_cycle(role, "abcd1234")[0]
+        first = harness.role_cycle(role, "abcd1234", fleet=unscoped)[0]
         assert "task next --status review --as abcd1234" in first, (role, first)
 
 
@@ -5342,7 +5355,10 @@ def test_every_verifying_role_is_known_to_the_assignment(
     from aisquare.core import harness
     from aisquare.services.team import _GATING_ROLES, _VERIFYING_ROLES
 
-    cycles = {role: " ".join(harness.role_cycle(role, "sess-x")) for role in harness.ROLE_PROFILES}
+    cycles = {
+        role: " ".join(harness.role_cycle(role, "sess-x", fleet=unscoped))
+        for role in harness.ROLE_PROFILES
+    }
     pulls_review = {role for role, cycle in cycles.items() if "task next --status review" in cycle}
     gates = {role for role, cycle in cycles.items() if 'note "GATE:' in cycle}
     assert pulls_review == _VERIFYING_ROLES, (
@@ -12569,9 +12585,8 @@ def test_the_spawn_note_names_the_restart_under_the_label_the_agent_was_recorded
         refusals=auto_mode.REFUSAL_THRESHOLD,
     )
     monkeypatch.setattr(auto_mode, "measure_baseline", lambda: auto_mode.Baseline((refused,)))
-    step = "`aisquare fleet restart coder-auth --permission-mode acceptEdits`"
-
     receipt = fleet_service.spawn(project, "coder", label="coder-auth", worktree=False)
+    step = f"`{_fleet('restart', project, 'coder-auth', '--permission-mode', 'acceptEdits')}`"
 
     assert any(step in note for note in receipt.notes), receipt.notes
     tmux.die(receipt.agent.pane_id, 1)
@@ -12628,7 +12643,7 @@ def test_the_auto_mode_evidence_is_read_before_the_window_starts(
     receipt = fleet_service.spawn(project, "coder", worktree=False, label="coder-auth")
 
     assert receipt.agent.label == "coder-auth-2"
-    step = "`aisquare fleet restart coder-auth-2 --permission-mode acceptEdits`"
+    step = f"`{_fleet('restart', project, 'coder-auth-2', '--permission-mode', 'acceptEdits')}`"
     assert any(step in note for note in receipt.notes), receipt.notes
 
 
@@ -13429,7 +13444,7 @@ def test_a_replay_does_not_fall_back_onto_another_kind_of_program(
     message = str(refused.value)
     assert f"{str(aider)!r}, the binary it was launched with, is no longer on your PATH" in message
     assert "'claude' today (chosen by: default)" in message
-    assert "`aisquare fleet spawn coder`" in message and "--bin" not in message
+    assert f"`{_fleet('spawn', project, 'coder')}`" in message and "--bin" not in message
     assert len(tmux.spawned) == started, "nothing was started"
 
     # The other way round: a Claude Code session is not resumed on aider.
@@ -13482,7 +13497,7 @@ def test_a_removed_claude_code_by_another_name_comes_back_on_claude_only_when_kn
     started = len(tmux.spawned)
 
     for fresh in (True, False):
-        with pytest.raises(FleetError, match="`aisquare fleet spawn coder`"):
+        with pytest.raises(FleetError, match=re.escape(f"`{_fleet('spawn', project, 'coder')}`")):
             fleet_service.restart(project, unknown.label, fresh=fresh)
     assert len(tmux.spawned) == started
     resumed = fleet_service.restart(project, joined[0].label)
@@ -13667,7 +13682,7 @@ def test_a_replay_refused_inside_the_replacements_spawn_names_no_bin_either(
     tmux.die(agent.pane_id, 1)
     # The binary goes after the check before the stop has passed.
     monkeypatch.setattr(
-        fleet_service, "_refuse_a_replay_that_cannot_start", lambda agent, session, root: None
+        fleet_service, "_refuse_a_replay_that_cannot_start", lambda agent, session, project: None
     )
     monkeypatch.setenv("AISQUARE_BIN_CODER", str(tmp_path / "gone" / "claude"))
 

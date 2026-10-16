@@ -598,6 +598,11 @@ def _row(
     return agent
 
 
+def _listing(project: ProjectInfo) -> str:
+    """``fleet ls`` for ``project``, as a refusal names it (review of #259, round 21)."""
+    return f"aisquare fleet ls --project {project.codename or project.id}"
+
+
 def _replaced(project: ProjectInfo) -> None:
     """What a manager's ``fleet restart coder-1`` leaves: agt_one ended, agt_new holding it."""
     _row(project, "agt_one", ended=True)
@@ -1883,7 +1888,7 @@ def test_a_pinned_action_in_a_hand_overs_gap_is_stale_not_a_gone_agent(
     assert response.status_code == 409, response.text
     assert response.json() == {
         "error": "stale",
-        "message": "no live agent 'coder-1' in api — `aisquare fleet ls` shows who is running",
+        "message": f"no live agent 'coder-1' in api — `{_listing(project)}` shows who is running",
         "current": {"agent_id": None},
     }
     assert pane.sent == []
@@ -1911,7 +1916,7 @@ def test_a_pinned_action_whose_label_was_handed_on_during_the_fleet_call_is_stal
         with store_session() as store:
             new = store.get_fleet_agent("agt_new")
         assert new is not None
-        raise fleet_service._replaced(LABEL, new, "agt_one")
+        raise fleet_service._replaced(project, LABEL, new, "agt_one")
 
     monkeypatch.setattr(fleet_service, name.removeprefix("agent/"), handed_on)
     body = {"text": "carry on"} if name == "agent/tell" else {"confirm": LABEL}
@@ -1920,7 +1925,7 @@ def test_a_pinned_action_whose_label_was_handed_on_during_the_fleet_call_is_stal
     assert response.json() == {
         "error": "stale",
         "message": "'coder-1' is another agent now (agt_new) — agt_one ended and was "
-        "replaced since; nothing was done to either (`aisquare fleet ls` shows who is running)",
+        f"replaced since; nothing was done to either (`{_listing(project)}` shows who is running)",
         "current": {"agent_id": "agt_new"},
     }
     assert pane.sent == []
@@ -2872,9 +2877,10 @@ def test_a_tell_to_a_label_no_row_holds_is_404_and_makes_no_lock(
 ) -> None:
     response = phone.post("agent/tell", agent="ghost-7", text="hi")
     assert response.status_code == 404
+    listing = f"aisquare fleet ls --project {project.codename or project.id} --all"
     assert response.json() == {
         "error": "no_such_agent",
-        "message": "no agent 'ghost-7' in api — `aisquare fleet ls --all` shows every row",
+        "message": f"no agent 'ghost-7' in api — `{listing}` shows every row",
     }
     assert fleet.calls == []
     assert (project.id, "ghost-7") not in remote_server._agent_locks
@@ -3677,7 +3683,7 @@ def _fleet_switch_itself(
 
     monkeypatch.setattr(fleet_service, "stop", stop)
     monkeypatch.setattr(
-        fleet_service, "_refuse_a_replay_that_cannot_start", lambda agent, session, root: None
+        fleet_service, "_refuse_a_replay_that_cannot_start", lambda agent, session, project: None
     )
     if choice is not None:
         monkeypatch.setattr(

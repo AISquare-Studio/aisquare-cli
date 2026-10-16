@@ -2608,7 +2608,8 @@ def _remote_turn_pinned(
         from aisquare.services import project as project_service
 
         where = project_service.display_name(target)
-        said = f"no agent {label!r} in {where} — `aisquare fleet ls --all` shows every row"
+        listing = project_service.fleet_command("ls", target, "--all")
+        said = f"no agent {label!r} in {where} — `{listing}` shows every row"
         raise RequestError(404, "no_such_agent", said)
     if row is None or (pin is not None and row.id != pin):
         raise remote_stale(target, label, row, done=done)
@@ -6554,7 +6555,7 @@ def _remote_quit_now(undone: str | None = None) -> NoReturn:
         if left:
             _remote_say(
                 f"Remote quit with {', '.join(left)} unfinished: "
-                "`aisquare fleet ls` shows where the agent is"
+                "the fleet UI (`aisquare`) shows where the agent is"
             )
         if undone is not None:
             _remote_say(undone)

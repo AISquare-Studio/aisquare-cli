@@ -143,7 +143,8 @@ def _emit_agents(project: ProjectInfo, agents: list[FleetAgentStatus]) -> None:
         title = f"{title} · {project.codename} · {fleet_service.session_name(project.codename)}"
     console.print(title, markup=False)
     if not agents:
-        console.print("  (no agents) — start one: aisquare fleet spawn manager")
+        spawn = project_service.fleet_command("spawn", project, "manager")
+        console.print(f"  (no agents) — start one: {spawn}", markup=False)
         return
     labels = accounts_service.slot_labels() if any(s.agent.account_slot for s in agents) else {}
     for status in agents:
@@ -591,8 +592,12 @@ def _emit_shutdown_plan(plan: fleet_service.ShutdownPlan) -> None:
         console.print(f"  ⌧ tmux session {session}")
 
 
-def _emit_shutdown(report: fleet_service.ShutdownReport) -> None:
-    """The result, with the service's reason per row and no claim it did not make."""
+def _emit_shutdown(report: fleet_service.ShutdownReport, target: ProjectInfo | None = None) -> None:
+    """The result, with the service's reason per row and no claim it did not make.
+
+    ``target`` is the project the shutdown was scoped to, which the commands it gives name
+    (review of #259, round 21); ``None`` for ``--all``, every project, which the fleet UI
+    lists."""
     if get_state().json_output:
         typer.echo(
             json.dumps(
@@ -658,9 +663,14 @@ def _emit_shutdown(report: fleet_service.ShutdownReport) -> None:
     _say_released(console, len(report.claims_released))
     for failure in report.release_failures:
         console.print(f"  ⚠ claims of {failure}")
+    listed = (
+        f"`{project_service.fleet_command('ls', target, '--all')}`"
+        if target is not None
+        else "the fleet UI (`aisquare`)"
+    )
     if report.interrupted:
         console.print(
-            f"  ⚠ {report.interrupted} — `aisquare fleet ls --all` shows what is still running; "
+            f"  ⚠ {report.interrupted} — {listed} shows what is still running; "
             "re-run this to finish"
         )
     for name in report.paused_cleared:
@@ -681,14 +691,19 @@ def _emit_shutdown(report: fleet_service.ShutdownReport) -> None:
         # what was not cleared holds in both shapes, including a signal nobody
         # could read, which the report deliberately claims nothing about (review
         # of #121, round 9 verification).
+        resume = (
+            f", or clear it with `{project_service.fleet_command('resume', target)}`"
+            if target is not None
+            else ""
+        )
         console.print(
             f"  ⚠ the fleet-paused signals could not be fully reconciled "
             f"({report.pause_scan_failed}) — any signal not named cleared above is still "
-            "set; re-run once the store answers, or clear it with `aisquare fleet resume`"
+            f"set; re-run once the store answers{resume}"
         )
     if partial:
         console.print(
-            "  rows above marked LEFT LIVE were NOT ended: `aisquare fleet ls --all`, then "
+            f"  rows above marked LEFT LIVE were NOT ended: {listed}, then "
             "stop them (or re-run this) once tmux answers"
         )
     console.print(
@@ -786,11 +801,11 @@ def shutdown(
         # The operator's Ctrl-C: rows before it are down and their claims
         # released, committed as they went, so they are told how far it got —
         # and the code says it was not the whole fleet (round 5).
-        _emit_shutdown(exc.report)
+        _emit_shutdown(exc.report, target)
         raise typer.Exit(code=130) from None
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
-    _emit_shutdown(report)
+    _emit_shutdown(report, target)
     if _not_down(report) or report.release_failures:
         # The fleet is not down — or it is, with claims stuck on ended sessions.
         # Said in the report AND in the exit code, so a script that only reads
@@ -826,7 +841,7 @@ def attach(project: ProjectRef = None) -> None:
         # sweep that reached it replaced the pytest process mid-run).
         fail(
             "fleet attach needs an interactive terminal — run it in a terminal, or use "
-            "`aisquare fleet attach --json` to see the command",
+            f"`{project_service.fleet_command('attach', target, '--json')}` to see the command",
             error="not_a_tty",
         )
     try:

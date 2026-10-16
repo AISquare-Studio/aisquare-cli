@@ -248,17 +248,18 @@ class AgentView(Vertical):
         stop.display = self.status.state in _SHOWS_STOP
         stop.disabled = busy
         stop.tooltip = (
-            "/exit, a grace period, then the window is killed (aisquare fleet stop)"
+            "/exit, a grace period, then the window is killed (as `fleet stop` does)"
             if self.status.state in _STOPPABLE
             else "Remove the dead window tmux kept for the last screen; the row leaves the "
-            "listing (aisquare fleet stop)"
+            "listing (as `fleet stop` does)"
         )
         restart = self.query_one("#agent-restart", Button)
         restart.disabled = busy
         restart.label = "Restart" if self.status.state in _STOPPABLE else "Restart (resume)"
         restart.tooltip = (
             "Start it again under this label — same role, task, worktree and account; its "
-            "session is resumed from the transcript when that is on disk (aisquare fleet restart)"
+            "session is resumed from the transcript when that is on disk (as `fleet restart` "
+            "does)"
         )
 
     @on(Button.Pressed, "#agent-stop")

@@ -1403,7 +1403,6 @@ def _check_resumable_agents() -> list[DoctorCheck]:
         resumable: list[str] = []
         with store_session() as store:
             for project in store.list_projects(all=True):
-                name = project.codename or project.root.name or project.id
                 # The NEWEST row under each label only, the one `fleet restart
                 # <label>` acts on: a resumed restart keeps the session id, so the
                 # row it replaced still has its transcript on disk, and counting it
@@ -1418,7 +1417,10 @@ def _check_resumable_agents() -> list[DoctorCheck]:
                     if session is None or not session.transcript_path:
                         continue
                     if Path(session.transcript_path).is_file():
-                        resumable.append(f"{agent.label} ({name})")
+                        # Its own restart, naming its project: alone, `fleet restart <label>`
+                        # restarted the active project's (review of #259, round 21).
+                        restart = project_service.fleet_command("restart", project, agent.label)
+                        resumable.append(f"`{restart}`")
     except Exception:  # the database line reports a broken store
         return []
     if not resumable:
@@ -1431,8 +1433,7 @@ def _check_resumable_agents() -> list[DoctorCheck]:
         _ok(
             "fleet-resume",
             f"{len(resumable)} exited {noun} can be resumed — the transcript is on disk, so "
-            f"Restart continues the session instead of starting over: {shown} "
-            "(aisquare fleet restart <label>)",
+            f"Restart continues the session instead of starting over: {shown}",
         )
     ]
 
@@ -1572,6 +1573,7 @@ def _check_dead_managers() -> list[DoctorCheck]:
         with store_session() as store:
             projects = store.list_projects(all=True)
             headless = []
+            restarts = []
             for project in projects:
                 live = store.fleet_agents(project.id, live_only=True)
                 if not live or any(agent.role == "manager" for agent in live):
@@ -1582,6 +1584,7 @@ def _check_dead_managers() -> list[DoctorCheck]:
                         f"{project.codename or project.root.name or project.id} "
                         f"({len(live)} agent(s) still running)"
                     )
+                    restarts.append(project_service.fleet_command("restart", project, "manager"))
     except Exception:  # the database line reports a broken store
         return []
     if not headless:
@@ -1590,8 +1593,7 @@ def _check_dead_managers() -> list[DoctorCheck]:
         _warn(
             "fleet-manager",
             "the manager exited while agents are still running in: " + "; ".join(headless),
-            "Bring it back with its session: aisquare fleet restart manager --project <name> "
-            "(or Restart on its row in asq)",
+            f"Bring it back with its session: {'; '.join(restarts)} (or Restart on its row in asq)",
         )
     ]
 
@@ -1617,9 +1619,14 @@ def _claude_account_limit_checks() -> list[DoctorCheck]:
                 if session.ended_at is None and session.state == "limited"
             ]
             labels = {}
+            switches = []
+            by_id = {p.id: p for p in projects}
             for session, _project_name in limited:
                 agent = store.fleet_agent_for_session(session.project_id, session.id)
                 labels[session.id] = agent.label if agent is not None else session.id[:8]
+                if agent is not None:  # only a fleet agent is switched, by its project and label
+                    project = by_id[session.project_id]
+                    switches.append(project_service.fleet_command("switch", project, agent.label))
     except Exception:  # the database line reports a broken store
         return []
     if not limited:
@@ -1637,8 +1644,12 @@ def _claude_account_limit_checks() -> list[DoctorCheck]:
         _warn(
             "claude-account-limits",
             f"{len(limited)} agent(s) parked on a Claude usage limit: " + " · ".join(parts),
-            "Move one to an account with headroom: aisquare fleet switch <label>; or wait — "
-            "Claude Code continues by itself at the reset",
+            (
+                f"Move one to an account with headroom: {'; '.join(switches)}; or wait — "
+                if switches
+                else "Wait — "
+            )
+            + "Claude Code continues by itself at the reset",
         )
     ]
 

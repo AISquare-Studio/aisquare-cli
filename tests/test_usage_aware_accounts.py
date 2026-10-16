@@ -322,7 +322,11 @@ def test_a_limited_fleet_agent_is_named_by_its_label_with_the_switch_command(
 
     [text] = [text for kind, text in _events(work) if kind == "limited"]
     assert text.startswith("coder-auth hit its session limit")
-    assert "aisquare fleet switch coder-auth" in text
+    # Naming the agent's project: alone, it switched the active project's (#259, round 21).
+    with store_session() as store:
+        stored = store.get_project(work.id)
+    assert stored is not None
+    assert f"aisquare fleet switch --project {stored.codename or work.id} coder-auth" in text
 
 
 def test_other_api_errors_end_the_turn_as_waiting_with_a_feed_line(
@@ -1877,7 +1881,9 @@ def test_doctor_names_limited_agents_and_is_silent_without_any(
     limits = checks["claude-account-limits"]
     assert limits.status.value == "warn"
     assert "coder-auth" in limits.detail and "resets" in limits.detail
-    assert limits.fix is not None and "aisquare fleet switch <label>" in limits.fix
+    # The agent's own switch, naming its project (review of #259, round 21).
+    switch = f"aisquare fleet switch --project {work.codename or work.id} coder-auth"
+    assert limits.fix is not None and switch in limits.fix, limits.fix
 
 
 def test_doctor_live_headroom_warns_only_when_every_account_is_over_the_line(

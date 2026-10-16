@@ -340,6 +340,8 @@ class BoardPanel(Vertical):
         self._select_mode = False
         self._show_done = False
         self._sessions: dict[str, TeamSession] = {}
+        self._read: ProjectInfo | None = None
+        """The project the last refresh read the board of: ``project``, or the active one."""
         self._labels: Mapping[int, str] = {}
         self._labels_asked_at: float | None = None
         self._all_tasks: list[TeamTask] = []
@@ -433,7 +435,10 @@ class BoardPanel(Vertical):
         self._statuses = {t.id: t.status for t in tasks}
         self._all_tasks = tasks
         self._refresh_labels(sessions)
-        self.query_one("#sessions", Static).update(watch._session_lines(sessions, self._labels))
+        self._read = project
+        self.query_one("#sessions", Static).update(
+            watch._session_lines(sessions, self._labels, project=project)
+        )
         self._ring_on_attention(sessions)
         # Events first: a task_done/dropped this tick flushes the attribution
         # cache BEFORE the archive rebuilds, so the closer is never one frame stale.
@@ -476,7 +481,9 @@ class BoardPanel(Vertical):
             self._labels = event.worker.result
             if self.is_mounted:
                 self.query_one("#sessions", Static).update(
-                    watch._session_lines(list(self._sessions.values()), self._labels)
+                    watch._session_lines(
+                        list(self._sessions.values()), self._labels, project=self._read
+                    )
                 )
 
     def _ring_on_attention(self, sessions: list[TeamSession]) -> None:

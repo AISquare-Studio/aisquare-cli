@@ -44,6 +44,7 @@ from aisquare.models import TeamEvent, TeamSession, TeamTask
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from aisquare.services.fleet import FLEET_ROLES
+from tests.cycles import unscoped
 from tests.projects import add_project
 
 MANAGER = "aaaa1111-0000-0000-0000-000000000000"
@@ -1049,7 +1050,7 @@ def test_the_spy_is_pointed_at_the_real_seam(
 
 
 def _cycle(role: str) -> str:
-    return " ".join(harness.role_cycle(role, "abcd1234"))
+    return " ".join(harness.role_cycle(role, "abcd1234", fleet=unscoped))
 
 
 def test_the_manager_cycle_names_fleet_spawn_and_the_two_prohibitions() -> None:
@@ -1086,8 +1087,8 @@ def test_the_manager_cycle_carries_the_loop_protocol() -> None:
 
 def test_the_tester_cycle_is_the_runners_shape() -> None:
     """`tester` is the fleet's name for `runner`: same lines, only the label differs."""
-    tester = harness.role_cycle("tester", "abcd1234")
-    runner_ = harness.role_cycle("runner", "abcd1234")
+    tester = harness.role_cycle("tester", "abcd1234", fleet=unscoped)
+    runner_ = harness.role_cycle("runner", "abcd1234", fleet=unscoped)
 
     assert tester and runner_
     assert tester[0].startswith("Your standing cycle (tester)")
@@ -1117,7 +1118,7 @@ def test_the_existing_roles_did_not_inherit_the_fleet_verbs(role: str) -> None:
 
 def test_every_fleet_role_has_a_briefing() -> None:
     for role in FLEET_ROLES:
-        lines = harness.role_cycle(role, "abcd1234")
+        lines = harness.role_cycle(role, "abcd1234", fleet=unscoped)
         assert lines, role
         assert any("abcd1234" in line for line in lines), role
 

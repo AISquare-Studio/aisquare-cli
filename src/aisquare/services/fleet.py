@@ -2321,29 +2321,31 @@ def _live_agent(
     if agent is None:
         raise NoSuchAgent(
             f"no live agent {label!r} in {_name(project)} — "
-            "`aisquare fleet ls` shows who is running"
+            f"`{project_service.fleet_command('ls', project)}` shows who is running"
         )
     if agent_id is not None and agent.id != agent_id:
-        raise _replaced(label, agent, agent_id)
+        raise _replaced(project, label, agent, agent_id)
     return agent
 
 
-def _replaced(label: str, current: FleetAgent, agent_id: str) -> NoSuchAgent:
+def _replaced(project: ProjectInfo, label: str, current: FleetAgent, agent_id: str) -> NoSuchAgent:
     """The refusal for a caller pinned to a row whose label has since passed to another."""
     return NoSuchAgent(
         f"{label!r} is another agent now ({current.id}) — {agent_id} ended and was "
-        "replaced since; nothing was done to either (`aisquare fleet ls` shows who is running)"
+        "replaced since; nothing was done to either "
+        f"(`{project_service.fleet_command('ls', project)}` shows who is running)"
     )
 
 
-def _in_hand_over(verb: str, label: str) -> FleetError:
+def _in_hand_over(project: ProjectInfo, verb: str, label: str) -> FleetError:
     """The refusal of a ``restart`` or a ``switch`` of a row a hand-over is already moving
     (:func:`_handed_over`) — the automatic path's own brake, for the commands. It names
     the grace, since a hand-over interrupted on its way holds the row until that lapses."""
     minutes = int(HANDOVER_GRACE.total_seconds() // 60)
     return FleetError(
         f"cannot {verb} {label!r}: a hand-over is already moving it and starts the "
-        f"replacement itself — nothing was done (`aisquare fleet ls` shows it come back; "
+        "replacement itself — nothing was done "
+        f"(`{project_service.fleet_command('ls', project)}` shows it come back; "
         f"one that was interrupted lets go of it within {minutes} min)"
     )
 
@@ -2483,7 +2485,13 @@ def spawn(
     _require_tmux(srv)
     notes: list[str] = []
     resolution = _launch_binary(
-        role, binary=binary, spec=spec, claude_code=claude_code, notes=notes, bin_flag=bin_flag
+        project,
+        role,
+        binary=binary,
+        spec=spec,
+        claude_code=claude_code,
+        notes=notes,
+        bin_flag=bin_flag,
     )
     _refuse_an_env_file_it_cannot_read(role)
     role_config = role_settings(role, config)
@@ -2524,7 +2532,8 @@ def spawn(
             if existing is not None:
                 raise FleetError(
                     f"{_name(project)} already has a manager ({existing.id}) — one per "
-                    "project; `aisquare fleet stop manager` first"
+                    f"project; `{project_service.fleet_command('stop', project, 'manager')}` "
+                    "first"
                 )
         if len(live) >= config.max_agents_per_project:
             raise FleetError(
@@ -2813,7 +2822,9 @@ def spawn(
     # under the label the agent was recorded with (`_record` re-picks one taken
     # meanwhile); a sentence, no store or file read.
     with contextlib.suppress(Exception):
-        warning = auto_mode.spawn_note(evidence, role=role, label=stored.label, config=config)
+        warning = auto_mode.spawn_note(
+            evidence, role=role, label=stored.label, config=config, project=project
+        )
         if warning is not None:
             notes.append(warning)
     # Every note `_take_over` writes is a move that did not happen; `_type_prompt`'s are
@@ -2823,7 +2834,11 @@ def spawn(
         stored = _take_over(stored, takes_over, identity.session_id, moved)
     _supersede(rows, views, stored, config)
     typing: list[str] = []
-    typed = _type_prompt(srv, stored.pane_id, prompt, typing, folder=cwd) if prompt else None
+    typed = (
+        _type_prompt(srv, stored.pane_id, prompt, typing, folder=cwd, to=(project, stored.label))
+        if prompt
+        else None
+    )
     return SpawnReceipt(
         agent=stored,
         asked_label=label,
@@ -2836,6 +2851,7 @@ def spawn(
 
 
 def _launch_binary(
+    project: ProjectInfo,
     role: str,
     *,
     binary: str | None,
@@ -2863,7 +2879,7 @@ def _launch_binary(
     if shutil.which(resolution.binary) is None:
         # Replayed, and gone since: today's resolution, when it is the same kind of program.
         resolution = _in_place_of_recorded(
-            role, resolution.binary, claude_code=claude_code, notes=notes
+            project, role, resolution.binary, claude_code=claude_code, notes=notes
         )
     return resolution
 
@@ -2890,7 +2906,7 @@ def _binary_for(
 
 
 def _in_place_of_recorded(
-    role: str, recorded: str, *, claude_code: bool, notes: list[str]
+    project: ProjectInfo, role: str, recorded: str, *, claude_code: bool, notes: list[str]
 ) -> harness.BinaryResolution:
     """What a replay starts when ``recorded``, the binary its spec holds, has left the PATH.
 
@@ -2928,7 +2944,8 @@ def _in_place_of_recorded(
             f"{gone}, and the role resolves to {today.binary!r} today (chosen by: "
             f"{today.source}), not known to be the same kind of program: the recorded "
             f"arguments are {recorded!r}'s — put {recorded!r} back on your PATH, or start "
-            f"a new agent under today's config with `aisquare fleet spawn {role}`"
+            "a new agent under today's config with "
+            f"`{project_service.fleet_command('spawn', project, role)}`"
         )
     if shutil.which(today.binary) is None:
         raise FleetError(
@@ -3154,18 +3171,30 @@ def _refuse_a_freed_socket(
         gone = [agent for agent, answer in rows if answer == "gone"]
         if not gone:
             return
-        names = {known.id: _name(known) for known in store.list_projects(include_forgotten=True)}
+        known = {each.id: each for each in store.list_projects(include_forgotten=True)}
+        live = {each.id for each in store.list_projects(all=True)}
+    names = {each.id: _name(each) for each in known.values()}
     stranded = [f"{row.label} ({names.get(row.project_id, row.project_id)})" for row in gone]
     one = len(stranded) == 1
+    # Each project's own shutdown: the rows are any project's, and a bare one is the active
+    # project's (review of #259, round 21). A forgotten project's is reached once it is back.
+    theirs = dict.fromkeys(row.project_id for row in gone)
+    forgets = [_forget(known[each]) for each in theirs if each in live]
+    ways = [f"{' and '.join(forgets)} {'ends its row' if one else 'end their rows'} on your word"]
+    ways = ways if forgets else []
+    ways += [
+        f"{names[each]} is forgotten: {project_service.onboard_command(known[each].root)} "
+        "adds it back first"
+        for each in theirs
+        if each in known.keys() - live
+    ]
     raise FleetError(
         f"not started: the tmux server that {', '.join(stranded)} {'runs' if one else 'run'} "
         f"on lost its socket file {here}, so no tmux client reaches it, and it may still be "
         f"running; a spawn now would start a second server at that path and leave "
         f"{'that agent' if one else 'those agents'} where nothing can reach "
         f"{'it' if one else 'them'} again. If it is running, send that server SIGUSR1, which "
-        f"makes tmux create its socket again, and spawn again; if it is not, "
-        f"`aisquare fleet shutdown --forget` ends {'its row' if one else 'their rows'} on "
-        f"your word"
+        f"makes tmux create its socket again, and spawn again; if it is not, {'; '.join(ways)}"
     )
 
 
@@ -3495,7 +3524,13 @@ def _verify_cap(store: ContextStore, stored: FleetAgent, cap: int) -> None:
 
 
 def _type_prompt(
-    srv: TmuxServer, pane_id: str, prompt: str, notes: list[str], *, folder: Path | None = None
+    srv: TmuxServer,
+    pane_id: str,
+    prompt: str,
+    notes: list[str],
+    *,
+    folder: Path | None = None,
+    to: tuple[ProjectInfo, str],
 ) -> Typed:
     """Wait (bounded) for the agent to come up, then paste the prompt and press Enter.
 
@@ -3534,7 +3569,8 @@ def _type_prompt(
     type the prompt", and the prompt sent again with ``fleet tell`` went in beside the first
     (review of #259, round 10, 8/9). And the receipt says so too, ``unsent`` or ``maybe``: it
     said ``False``, "NOT typed", and the board's line and the page told the human to send
-    it (round 11, 2/13).
+    it (round 11, 2/13). ``to`` is the agent's project and label, which the commands a note
+    gives name (:func:`_send_it_later`).
     """
     deadline = _monotonic() + PROMPT_TIMEOUT
     ready = False
@@ -3544,8 +3580,7 @@ def _type_prompt(
         except TmuxError as exc:
             notes.append(
                 f"tmux could not be asked whether the agent is up ({exc}) — the prompt was "
-                "NOT typed. Send it once the agent is up: `aisquare fleet tell <label> …`, "
-                "or `aisquare fleet attach`"
+                f"NOT typed. Send it once the agent is up: {_send_it_later(*to)}"
             )
             return "no"
         if facts is None or facts.dead:
@@ -3559,19 +3594,18 @@ def _type_prompt(
         _sleep(_POLL_INTERVAL)
     if ready:
         _sleep(_PROMPT_SETTLE)
-        if not _past_trust_prompt(srv, pane_id, notes, folder=folder):
+        if not _past_trust_prompt(srv, pane_id, notes, folder=folder, to=to):
             return "no"
     elif "\n" in prompt:
         notes.append(
             f"the agent did not come up within {PROMPT_TIMEOUT:.0f} s and the prompt has "
             "several lines — NOT typed: tmux brackets a paste only for an application that "
             "asked for bracketed paste, and the launcher has not, so each line would arrive "
-            "as its own message. Send it once the agent is up: `aisquare fleet tell "
-            "<label> …`, or `aisquare fleet attach`"
+            f"as its own message. Send it once the agent is up: {_send_it_later(*to)}"
         )
         return "no"
     else:
-        if not _past_trust_prompt(srv, pane_id, notes, folder=folder, wait=False):
+        if not _past_trust_prompt(srv, pane_id, notes, folder=folder, to=to, wait=False):
             return "no"
         notes.append(
             f"the agent did not come up within {PROMPT_TIMEOUT:.0f} s — prompt typed anyway"
@@ -3590,12 +3624,23 @@ def _type_prompt(
     return told.typed
 
 
+def _tell(project: ProjectInfo, label: str) -> str:
+    """``fleet tell`` to the agent ``label`` of ``project``, its text left for the reader."""
+    return project_service.fleet_command("tell", project, label)
+
+
+def _send_it_later(project: ProjectInfo, label: str) -> str:
+    """How a prompt left untyped is sent once the agent is up: told, or typed in its window."""
+    return f"`{_tell(project, label)} …`, or `{project_service.fleet_command('attach', project)}`"
+
+
 def _past_trust_prompt(
     srv: TmuxServer,
     pane_id: str,
     notes: list[str],
     *,
     folder: Path | None = None,
+    to: tuple[ProjectInfo, str],
     wait: bool = True,
 ) -> bool:
     """Whether the agent is past Claude Code's folder-trust question, waited for (bounded).
@@ -3624,8 +3669,8 @@ def _past_trust_prompt(
                 "the agent is waiting at Claude Code's folder-trust question, which no "
                 "account has said yes to for this folder — the prompt was NOT typed (Enter "
                 'there picks "No, exit"). Approve it once in the agent\'s window '
-                f"(`aisquare fleet attach`), or run `{trust}` and "
-                "restart it; then send the prompt: `aisquare fleet tell <label> …`"
+                f"(`{project_service.fleet_command('attach', to[0])}`), or run `{trust}` and "
+                f"restart it; then send the prompt: `{_tell(*to)} …`"
             )
             return False
         _sleep(_POLL_INTERVAL)
@@ -4240,15 +4285,15 @@ def _stop_row(
         for window in srv.windows_or_raise(session):
             if window.pane_id == agent.pane_id:
                 if _outlived(agent, window.server_started):
-                    _refuse_unless_gone(agent, srv)
+                    _refuse_unless_gone(project, agent, srv)
                     return None
                 return window
         facts = srv.pane_facts_or_raise(agent.pane_id)
         if facts is None:
-            _refuse_unless_gone(agent, srv)
+            _refuse_unless_gone(project, agent, srv)
             return None
         if _outlived(agent, facts.server_started):
-            _refuse_unless_gone(agent, srv)
+            _refuse_unless_gone(project, agent, srv)
             return None
         return WindowInfo(
             session=session,
@@ -4372,7 +4417,7 @@ def _stop_row(
     return StopReceipt(ended, released, release_failed, withheld=handover)
 
 
-def _refuse_unless_gone(agent: FleetAgent, srv: TmuxServer) -> None:
+def _refuse_unless_gone(project: ProjectInfo, agent: FleetAgent, srv: TmuxServer) -> None:
     """Raise unless ``agent``'s pane, which tmux did not find on ``srv``, is really gone.
 
     tmux's strict reads answer "no such pane" for a live server that does not hold it, and
@@ -4401,8 +4446,14 @@ def _refuse_unless_gone(agent: FleetAgent, srv: TmuxServer) -> None:
             "so it may still be running, and its row is left live; run this again where it "
             "can be asked"
         )
-    why, way = _unreachable_why(answer, path, forget="`aisquare fleet shutdown --forget`")
+    why, way = _unreachable_why(answer, path, forget=_forget(project))
     raise FleetError(f"{agent.label!r} was not stopped: {why}, and its row is left live. {way}")
+
+
+def _forget(project: ProjectInfo) -> str:
+    """``fleet shutdown --forget`` for ``project``, as a way out names it: the operator's word
+    that ends a row whose agent no tmux client reaches."""
+    return f"`{project_service.fleet_command('shutdown', project, '--forget')}`"
 
 
 def _unreachable_why(answer: SocketAnswer, path: Path, *, forget: str) -> tuple[str, str]:
@@ -5828,7 +5879,7 @@ def switch(
             # `/exit` — and started a replacement of its own, the first failed on its
             # own row, and its take-back wrote a stale state over the second's mark
             # (review of #163, round 2).
-            raise _in_hand_over("switch", label)
+            raise _in_hand_over(project, "switch", label)
         # `spawn`'s refusal for the task (done, dropped, gone from the board), asked
         # before anything is stopped, as `restart` asks it. After the stop it left the
         # agent stopped and nothing started: a row spawned before rule 3 still names
@@ -5872,7 +5923,8 @@ def switch(
             raise FleetError(
                 f"no account under the line for {label!r}{where} — every other account is "
                 "over switch_at or unreadable; it stays parked until a reset, or "
-                f"`aisquare fleet switch` moves it by hand{said}"
+                f"`{project_service.fleet_command('switch', project, label)}` moves it by "
+                f"hand{said}"
             )
         raise FleetError(
             f"no other account with headroom for {label!r}{where}"
@@ -5884,7 +5936,7 @@ def switch(
         raise FleetError(
             f"{label!r} already runs on {claude_accounts_core.label(target)} (slot {target.slot})"
         )
-    _refuse_a_replay_that_cannot_start(agent, session, root=project.root)
+    _refuse_a_replay_that_cannot_start(agent, session, project=project)
     if before_stop is not None:
         before_stop()
     # A hand-over whether it resumes or not: the agent is coming back, so its
@@ -5904,7 +5956,7 @@ def switch(
     with store_session() as store:
         _live_agent(store, project, label, agent_id=agent.id)
     if session is not None:
-        _mark_handing_over(agent, session, "switch", label)
+        _mark_handing_over(project, agent, session, "switch", label)
     try:
         handed_over = stop(project, label, handover=True, agent_id=agent.id)
     finally:
@@ -6085,7 +6137,7 @@ def _respawn(
 
 
 def _refuse_a_replay_that_cannot_start(
-    agent: FleetAgent, session: TeamSession | None, *, root: Path
+    agent: FleetAgent, session: TeamSession | None, *, project: ProjectInfo
 ) -> None:
     """Raise now what replaying ``agent``'s launch spec would refuse — BEFORE it is stopped.
 
@@ -6109,10 +6161,11 @@ def _refuse_a_replay_that_cannot_start(
     That one was asked only inside the spawn, after the stop had typed ``/exit``: an agent
     whose own server listens at another path was stopped, and its replacement refused,
     which left it down (review of #259, round 2). And a worktree that is gone with no
-    branch to make it again on (:func:`_branch_of_a_gone_tree`, which writes nothing);
-    ``root`` is the project's.
+    branch to make it again on (:func:`_branch_of_a_gone_tree`, which writes nothing), in
+    ``project``'s root; a refusal names ``project`` in the commands it gives.
     """
     _launch_binary(
+        project,
         agent.role,
         binary=None,
         spec=agent.launch_spec,
@@ -6122,7 +6175,7 @@ def _refuse_a_replay_that_cannot_start(
     )
     _refuse_an_env_file_it_cannot_read(agent.role)
     if agent.worktree and not agent.cwd.exists():
-        _branch_of_a_gone_tree(root, agent.cwd, agent.branch)
+        _branch_of_a_gone_tree(project.root, agent.cwd, agent.branch)
     config = settings()
     srv = server(config)
     _refuse_a_freed_socket(srv, config, srv.listener())
@@ -6233,11 +6286,11 @@ def restart(
         agent = store.fleet_agent_by_label(project.id, label, live_only=False)
         if agent is None:
             raise NoSuchAgent(
-                f"no agent {label!r} in {_name(project)} — `aisquare fleet ls --all` shows "
-                "every row"
+                f"no agent {label!r} in {_name(project)} — "
+                f"`{project_service.fleet_command('ls', project, '--all')}` shows every row"
             )
         if agent_id is not None and agent.id != agent_id:
-            raise _replaced(label, agent, agent_id)
+            raise _replaced(project, label, agent, agent_id)
         session = store.get_session(agent.session_id) if agent.session_id else None
         if agent.ended_at is None and _handed_over(agent, session, _now()):
             # A `switch` (or another restart) is between its `/exit` and its end: the
@@ -6245,7 +6298,7 @@ def restart(
             # fell through to a plain `stop` here released the parked claims,
             # announced the exit and failed the switch on its own row — with the
             # restart's replacement not holding the task (review of #163, round 2).
-            raise _in_hand_over("restart", label)
+            raise _in_hand_over(project, "restart", label)
         try:
             # `spawn`'s refusal for the task (done, dropped, gone from the board).
             task = _task_for(store, project, agent.task_id)
@@ -6265,7 +6318,7 @@ def restart(
     slot = _account_slot_of(agent, session)
     try:
         _require_role(agent.role)
-        _refuse_a_replay_that_cannot_start(agent, session, root=project.root)
+        _refuse_a_replay_that_cannot_start(agent, session, project=current)
         choice = claude_accounts_service.choose(
             str(slot) if slot is not None else None, role=agent.role, project=project
         )
@@ -6300,7 +6353,7 @@ def restart(
             # no claims to park and nothing to mark; a listing that records the death
             # meanwhile leaves the stop one that worked (`_stop_row`), not a failure.
             if session is not None:
-                _mark_handing_over(agent, session, "restart", label)
+                _mark_handing_over(project, agent, session, "restart", label)
             try:
                 handed_over = stop(project, label, handover=True, agent_id=agent.id)
             finally:
@@ -6434,7 +6487,9 @@ def _account_slot_of(agent: FleetAgent, session: TeamSession | None) -> int | No
     )
 
 
-def _mark_handing_over(agent: FleetAgent, session: TeamSession, verb: str, label: str) -> None:
+def _mark_handing_over(
+    project: ProjectInfo, agent: FleetAgent, session: TeamSession, verb: str, label: str
+) -> None:
     """The session's own ``SessionEnd`` parks its claims for the replacement (rule 2).
 
     Marked for ONE hand-over. ``switch`` and ``restart`` refuse a session a
@@ -6452,7 +6507,7 @@ def _mark_handing_over(agent: FleetAgent, session: TeamSession, verb: str, label
     with store_session() as store:
         marked = store.mark_handover(session.id, held_after=held_after)
     if not marked:
-        raise _in_hand_over(verb, label)
+        raise _in_hand_over(project, verb, label)
 
 
 def _unmark_handing_over(session: TeamSession) -> str | None:
@@ -6644,7 +6699,7 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
             if live:
                 tmux_session = session_name(current.codename) if current.codename else None
                 views = _observe_sockets(live, tmux_session, config, reads=reads)
-                _hold_on_another_server(live, views, config, report)
+                _hold_on_another_server(current, live, views, config, report)
                 if server_down:
                     for address, view in views.items():
                         if view is None:
@@ -6667,6 +6722,7 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
                                 # No server, tmux says: no panes for the rows whose agent
                                 # cannot be running; the rest held, as `shutdown` holds them.
                                 views[address] = _hold_on_absent_server(
+                                    current,
                                     [a for a in live if _address(a, config) == address],
                                     config,
                                     report,
@@ -6718,6 +6774,7 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
 
 
 def _hold_on_absent_server(
+    project: ProjectInfo,
     agents: Sequence[FleetAgent],
     config: FleetSettings,
     report: ReapReport,
@@ -6738,9 +6795,7 @@ def _hold_on_absent_server(
     """
     view: _Observed = {}
     for agent in agents:
-        unreached = _unreached(
-            agent, config, forget="`aisquare fleet shutdown --forget`", reads=reads
-        )
+        unreached = _unreached(agent, config, forget=_forget(project), reads=reads)
         if unreached is not None:
             view[agent.id] = HELD
             report.held.append(ShutdownRow(agent, f"{unreached[1]} — left live: {unreached[2]}"))
@@ -6748,6 +6803,7 @@ def _hold_on_absent_server(
 
 
 def _hold_on_another_server(
+    project: ProjectInfo,
     agents: Sequence[FleetAgent],
     views: Mapping[_Address, _Observed | None],
     config: FleetSettings,
@@ -6769,7 +6825,7 @@ def _hold_on_another_server(
             path = agent.socket_path or _server_at(address, config).socket_path()
         except TmuxUnavailable:
             continue  # no POSIX uid: no tmux server can exist here
-        why, way = _unreachable_why("another", path, forget="`aisquare fleet shutdown --forget`")
+        why, way = _unreachable_why("another", path, forget=_forget(project))
         report.held.append(ShutdownRow(agent, f"{why} — left live: {way[0].lower() + way[1:]}"))
 
 
@@ -6827,9 +6883,10 @@ def rename(project: ProjectInfo, codename: str, *, notes: list[str] | None = Non
                 notes.append(
                     f"the codename is {codename}, but tmux could not be told ({exc}) — if a "
                     f"session named {old_session} is still running this project's agents, "
-                    f"`aisquare fleet attach` looks for {new_session} and will refuse until "
-                    f"it is renamed: `tmux -L {srv.socket} rename-session -t ={old_session} "
-                    f"{new_session}` does that, and a second `aisquare fleet rename` will not "
+                    f"`{project_service.fleet_command('attach', updated)}` looks for "
+                    f"{new_session} and will refuse until it is renamed: `tmux -L {srv.socket} "
+                    f"rename-session -t ={old_session} {new_session}` does that, and renaming "
+                    "again will not "
                     "(it renames from the stored codename, which is already the new one). "
                     "`fleet ls`, `tell`, `stop` and `reap` are unaffected — they address "
                     "panes by id"
@@ -6968,7 +7025,7 @@ def attach_argv(project: ProjectInfo) -> list[str]:
         # #259, round 17).
         raise FleetError(
             f"no fleet session for {_name(project)} — nothing to attach to; "
-            "`aisquare fleet spawn manager` starts one"
+            f"`{project_service.fleet_command('spawn', project, 'manager')}` starts one"
         )
     name = session_name(codename)
     live = _manager_first([agent for agent in rows if agent.ended_at is None])
@@ -6993,5 +7050,5 @@ def attach_argv(project: ProjectInfo) -> list[str]:
             return candidate.attach_argv(name)
     raise FleetError(
         f"no fleet session {name} for {_name(project)} — nothing to attach to; "
-        "`aisquare fleet spawn manager` starts one"
+        f"`{project_service.fleet_command('spawn', project, 'manager')}` starts one"
     )

@@ -1677,9 +1677,16 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
     def on_spawn_agent(self, event: SpawnAgent) -> None:
         # The Spawn dialog is Phase 7 (§9); until it lands the CLI is the way.
+        project = self.snapshot.project(event.project_id) if self.snapshot else None
+        spawn = (
+            f"{project_service.fleet_command('spawn', project)} <role>"
+            if project is not None
+            else "`fleet spawn` with the project"
+        )
         self.notify(
-            "the spawn dialog is not built yet — from a terminal: aisquare fleet spawn <role>",
+            f"the spawn dialog is not built yet — from a terminal: {spawn}",
             timeout=6,
+            markup=False,
         )
 
     async def on_settings_selected(self, event: SettingsSelected) -> None:

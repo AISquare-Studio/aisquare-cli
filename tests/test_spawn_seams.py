@@ -29,6 +29,7 @@ from aisquare.core.spawn import (
     SEAMS,
     TRACED,
     TRACING_ENV_VARS,
+    git_env,
     untraced_env,
 )
 from aisquare.services import distill as _distill
@@ -452,6 +453,37 @@ def test_the_detached_distiller_never_inherits_a_role_identity(
     for name in IDENTITY_ENV_VARS:
         assert name not in env, f"{name} reaches the detached distiller"
     assert env.get("PATH") == os.environ.get("PATH")
+
+
+def test_every_git_seam_runs_in_the_one_git_environment(
+    traced_parent: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 28, 10/10: the fleet's git seam and the CI snapshot's each built
+    git's environment by hand, and they had drifted apart: the snapshot's stripped the
+    identity and set ``GIT_TERMINAL_PROMPT=0``, the fleet's copied the environment as it was.
+    Every git seam takes :func:`git_env`, so a fix to one is a fix to all."""
+    from aisquare.core import snapshot, workspace
+    from aisquare.services import ci_snapshot, fleet
+
+    seen: dict[str, dict[str, str] | None] = {}
+
+    def fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        seen[" ".join(argv[argv.index("git") + 1 :][-2:])] = kwargs.get("env")
+        return subprocess.CompletedProcess(argv, 0, "sha\n", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    fleet._git(tmp_path, "status", "--porcelain")
+    ci_snapshot._git(tmp_path, "stash", "create", timeout=5)
+    workspace.git_common_root(tmp_path)
+    snapshot.head_sha(tmp_path)
+
+    asked = ["rev-parse --git-common-dir", "rev-parse HEAD", "stash create", "status --porcelain"]
+    assert sorted(seen) == asked, seen
+    for argv, env in seen.items():
+        assert env == git_env(), argv
+        assert env["GIT_OPTIONAL_LOCKS"] == env["GIT_TERMINAL_PROMPT"] == "0", argv
+        for name in IDENTITY_ENV_VARS:
+            assert name not in env, f"{name} reaches git {argv}"
 
 
 def _traced_seams() -> Iterator[str]:

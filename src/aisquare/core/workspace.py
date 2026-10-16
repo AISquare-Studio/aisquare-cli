@@ -14,6 +14,7 @@ from pathlib import Path
 
 from aisquare.core import paths
 from aisquare.core.ids import PROJECT_PREFIX
+from aisquare.core.spawn import git_env
 from aisquare.core.state_file import StateUnwritableError, read_state, update_state
 from aisquare.core.store import ContextStore
 from aisquare.models import ProjectInfo
@@ -96,6 +97,7 @@ def git_common_root(start: Path) -> Path | None:
             errors="replace",
             timeout=5,
             check=False,
+            env=git_env(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return None

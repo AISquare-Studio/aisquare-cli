@@ -32,7 +32,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from aisquare.core.spawn import untraced_env
+from aisquare.core.spawn import git_env
 
 GIT_BUDGET_SECONDS = 2.0
 """Total wall clock one capture (or one project_ref) may spend in git."""
@@ -235,14 +235,11 @@ class _Budget:
 def _git(root: Path, *args: str, timeout: float) -> str | None:
     """Run one git command in ``root``; its stdout stripped, or ``None`` on any failure.
 
-    The one spawn site in this module. ``GIT_OPTIONAL_LOCKS=0`` keeps a hook's
-    read from contending with the developer's own ``git`` for the index lock;
-    the traced-session identity is stripped because a child of a hook is not
-    the agent.
+    The one spawn site in this module, in every git's environment (``core.spawn.git_env``):
+    ``GIT_OPTIONAL_LOCKS=0`` keeps a hook's read from contending with the developer's own
+    ``git`` for the index lock, and the traced-session identity is stripped because a child
+    of a hook is not the agent.
     """
-    env = untraced_env()
-    env["GIT_OPTIONAL_LOCKS"] = "0"
-    env["GIT_TERMINAL_PROMPT"] = "0"
     try:
         result = subprocess.run(
             ["git", "-C", str(root), *args],
@@ -252,7 +249,7 @@ def _git(root: Path, *args: str, timeout: float) -> str | None:
             errors="replace",
             timeout=timeout,
             check=False,
-            env=env,
+            env=git_env(),
         )
     except (OSError, subprocess.SubprocessError):
         return None

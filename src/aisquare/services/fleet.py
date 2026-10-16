@@ -56,6 +56,7 @@ from aisquare.core.config import (
 )
 from aisquare.core.ids import new_agent_id
 from aisquare.core.locking import holding
+from aisquare.core.spawn import git_env
 from aisquare.core.store import AmbiguousIdError, ContextStore, store_session
 from aisquare.core.tmux import (
     DEFAULT_WINDOW_HEIGHT,
@@ -995,7 +996,8 @@ def _git(cwd: Path, *args: str) -> _GitResult:
     non-zero exit is an answer (callers read ``returncode``); a missing git or
     a hang is not, and becomes a :class:`FleetError` with the reason.
 
-    Every command with ``GIT_OPTIONAL_LOCKS=0``: a ``git status`` that only reads still
+    Every command runs in every git's environment (``core.spawn.git_env``), the identity
+    stripped and ``GIT_OPTIONAL_LOCKS=0``: a ``git status`` that only reads still
     takes the tree's ``index.lock`` to write back what it refreshed, and a reap's status of
     an ended agent's tree, asked without the branch lock, made a respawn's ``git checkout``
     in that tree fail on the lock it held (77 of 200 overlapping checkouts, review of #259,
@@ -1013,7 +1015,7 @@ def _git(cwd: Path, *args: str) -> _GitResult:
             errors="replace",
             timeout=_GIT_TIMEOUT,
             check=False,
-            env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+            env=git_env(),
         )
     except FileNotFoundError as exc:
         raise FleetError("git is not installed (or not on PATH) — worktrees need it") from exc

@@ -10524,7 +10524,9 @@ def test_every_git_command_the_fleet_runs_takes_no_optional_lock(
     question, ``rev-parse --git-common-dir`` (``workspace.git_common_root``), which every
     hook asks too: it takes no lock (round 26, 11/11). Round 27, 4/7: by
     ``GIT_OPTIONAL_LOCKS=0``, not ``--no-optional-locks``, which a git before 2.15 refuses
-    (exit 129), so every fleet git command failed there; that git ignores the variable."""
+    (exit 129), so every fleet git command failed there; that git ignores the variable.
+    Round 28, 10/10: every git seam, that question's too, runs in the one git environment
+    (``core.spawn.git_env``), so none is left out."""
     real = subprocess.run
     gits: list[tuple[list[str], str | None]] = []
 
@@ -10543,8 +10545,8 @@ def test_every_git_command_the_fleet_runs_takes_no_optional_lock(
 
     assert dict(report.worktrees_kept) == {agent.cwd: "uncommitted changes"}, "status ran"
     assert {argv[argv.index("-C") + 2] for argv, _ in gits} >= {"status", "worktree", "rev-parse"}
-    rest = [argv for argv, locks in gits if locks != "0"]
-    assert rest and all(argv[-2:] == ["rev-parse", "--git-common-dir"] for argv in rest), rest
+    assert any(argv[-2:] == ["rev-parse", "--git-common-dir"] for argv, _ in gits)
+    assert [argv for argv, locks in gits if locks != "0"] == []
 
 
 def test_a_reap_or_a_spawn_asks_git_for_the_branch_locks_directory_once(

@@ -30,7 +30,6 @@ from __future__ import annotations
 import contextlib
 import os
 import re
-import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -2158,9 +2157,7 @@ TRUST_PROMPT = "waiting for folder trust"
 
 def trust_prompt_detail(folder: Path) -> str:
     """The detail of an agent at the folder-trust question in ``folder``: what unblocks it."""
-    return (
-        f"{TRUST_PROMPT} — approve it once, or `aisquare accounts trust {shlex.quote(str(folder))}`"
-    )
+    return f"{TRUST_PROMPT} — approve it once, or `{claude_accounts_service.trust_command(folder)}`"
 
 
 def _with_trust_prompts(
@@ -3589,12 +3586,12 @@ def _past_trust_prompt(
             return True
         asked = True
         if _monotonic() >= deadline:
-            where = shlex.quote(str(folder)) if folder is not None else "<dir>"
+            trust = claude_accounts_service.trust_command(folder)
             notes.append(
                 "the agent is waiting at Claude Code's folder-trust question, which no "
                 "account has said yes to for this folder — the prompt was NOT typed (Enter "
                 'there picks "No, exit"). Approve it once in the agent\'s window '
-                f"(`aisquare fleet attach`), or run `aisquare accounts trust {where}` and "
+                f"(`aisquare fleet attach`), or run `{trust}` and "
                 "restart it; then send the prompt: `aisquare fleet tell <label> …`"
             )
             return False

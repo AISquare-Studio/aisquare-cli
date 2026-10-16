@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import shlex
 import sys
 import threading
 import time
@@ -1636,7 +1635,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         result = event.worker.result
         if event.state is WorkerState.SUCCESS and isinstance(result, ProjectForgetReport):
             removed = result.project
-            back = f"aisquare project onboard {shlex.quote(str(removed.root))}"
+            back = project_service.onboard_command(removed.root)
             self.notify(
                 f"✓ {project_service.display_name(removed)} removed from the fleet — "
                 f"its folder and history are kept; {back} brings it back",
@@ -2078,10 +2077,11 @@ def _hand_off_undone(hand_off: tuple[str, ...]) -> str:
     again once the command is done, and not asked of a command typed in a shell.
     """
     from aisquare.core import selfcli
+    from aisquare.services import install_route
 
     args = [arg for arg in hand_off if arg != "--reopen"]
     button = _HANDED_OVER.get(args[0], args[0]) if args else "the hand-over"
-    command = shlex.join(["aisquare", *selfcli.global_flags(), *args])
+    command = install_route.command_line(["aisquare", *selfcli.global_flags(), *args])
     return f"⚠ {button} did not run: asq quit at the Ctrl-C — `{command}` runs it"
 
 

@@ -38,7 +38,7 @@ from aisquare.core.store import (
 from aisquare.models import ProjectInfo, TeamEvent, TeamSession, TeamTask
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
-from aisquare.services import explainability_ops
+from aisquare.services import explainability_ops, install_route
 from aisquare.services import project as project_service
 from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
@@ -458,8 +458,10 @@ def spawn(
     if unnamed:
         message = (
             f"{role_name}'s binding sets {', '.join(map(repr, unnamed))}, which a shell line "
-            f"cannot set ({_ENV_NAME_RULE}) — unbind it: aisquare team bind {role_name} "
-            f"--unset {shlex.quote(unnamed[0])}"
+            f"cannot set ({_ENV_NAME_RULE}) — unbind it: "
+            + install_route.command_line(
+                ["aisquare", "team", "bind", role_name, "--unset", unnamed[0]]
+            )
         )
         fail(message, error="bad_env_key", detail=message)
     # Put the profile's vars IN the printed command, not just in --exec's env.

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shlex
 import sys
 from pathlib import Path
 from typing import Annotated
@@ -25,6 +24,7 @@ from aisquare.core.state_file import StateUnwritableError
 from aisquare.core.store import store_session
 from aisquare.core.workspace import find_project_root, project_id_for
 from aisquare.models import ProjectGroup, ProjectInfo
+from aisquare.services import install_route
 from aisquare.services import project as project_service
 from aisquare.services import project_groups as groups_service
 
@@ -87,13 +87,13 @@ def list_(
             # one" and "add one" named a step already taken, and taken again it
             # changed nothing (review of #171, round 2).
             noun = "directory" if unlisted == 1 else "directories"
-            flags = " --pinned" if pinned else ""
+            shown = ["aisquare", "project", "list", "--all", *(["--pinned"] if pinned else [])]
             if chosen is not None:
-                flags += f" --group {shlex.quote(chosen.name)}"
+                shown += ["--group", chosen.name]
             filtered = (
                 f"No listed {'pinned ' if pinned else ''}projects{where} — {unlisted} captured "
-                f"{noun} hidden (a hooked session ran there): aisquare project list --all"
-                f"{flags}; add one: aisquare project onboard <path>"
+                f"{noun} hidden (a hooked session ran there): "
+                f"{install_route.command_line(shown)}; add one: aisquare project onboard <path>"
             )
         elif pinned:
             filtered = f"No pinned projects{where} — pin one: aisquare project pin <project>"
@@ -125,11 +125,12 @@ def _matching(
 def _positional(value: str) -> str:
     """``value`` as a shell word a command reads as an argument, never as an option.
 
-    ``shlex.quote`` keeps the shell from splitting a name, not Click from reading
-    ``-wip`` as options; ``--`` ends the options first (review of #171, round 2).
+    Quoting keeps the shell from splitting a name, not Click from reading ``-wip`` as
+    options; ``--`` ends the options first (review of #171, round 2). Quoted for this shell
+    (``install_route.command_line``), as every command a person is told to paste is: not by
+    ``shlex.quote``, whose single quotes cmd.exe passes on (review of #259, round 20).
     """
-    word = shlex.quote(value)
-    return f"-- {word}" if value.startswith("-") else word
+    return install_route.command_line(["--", value] if value.startswith("-") else [value])
 
 
 @app.command("switch")
@@ -190,12 +191,7 @@ def rename(
     except ValueError as exc:
         fail(str(exc), error="bad_nickname", ref=target.id)
     except KeyError:
-        fail(
-            f"{project_service.display_name(target)} is not one of your projects — add it "
-            f"first: aisquare project onboard {shlex.quote(str(target.root))}",
-            error="not_found",
-            ref=target.id,
-        )
+        fail(str(project_service.NotAdded(target)), error="not_found", ref=target.id)
     emit_project_action(
         f"✓ {project_service.display_name(target)} is now called "
         f"{project_service.display_name(renamed)}",

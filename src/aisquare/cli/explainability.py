@@ -41,7 +41,7 @@ from aisquare.services import credits as credits_service
 from aisquare.services import destinations as dest
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops as ops
-from aisquare.services import iam
+from aisquare.services import iam, install_route
 from aisquare.services.explainability import (
     RESERVED_ENV_VARS,
     clear_project_api_key,
@@ -217,7 +217,7 @@ def key_set(
     # that workspace knows this machine's agent identities — every span is
     # refused 409 agent_not_registered — and `register` resolves the same
     # project's key as the launches do.
-    register = shlex.join(
+    register = install_route.command_line(
         [
             "aisquare",
             "explainability",
@@ -485,13 +485,14 @@ def _next_check(target: ops.ResolvedTarget, project: ProjectInfo) -> str:
     named by id. Without it, the step asked about the checkout it was run
     from, which is not the project a ``use --project`` chose (D7).
     """
-    project_id = shlex.quote(project.id)
     if target.key_source == "unset":
         return (
-            f"aisquare explainability key set --project {project_id}"
-            "   (pipe the workspace's key on stdin, or name its variable with --from-env)"
+            install_route.command_line(
+                ["aisquare", "explainability", "key", "set", "--project", project.id]
+            )
+            + "   (pipe the workspace's key on stdin, or name its variable with --from-env)"
         )
-    return f"aisquare doctor --live --project {project_id}"
+    return install_route.command_line(["aisquare", "doctor", "--live", "--project", project.id])
 
 
 @app.command()

@@ -35,7 +35,6 @@ import contextlib
 import hashlib
 import json
 import os
-import shlex
 import shutil
 import signal
 import sqlite3
@@ -73,6 +72,7 @@ from aisquare.models import (
     UsageTrend,
 )
 from aisquare.services import agents as agents_service
+from aisquare.services import install_route
 from aisquare.services import settings as settings_service
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
@@ -2190,10 +2190,19 @@ def _share_trust_into(
     return []
 
 
+def trust_command(folder: Path | None) -> str:
+    """``aisquare accounts trust <folder>``, quoted for this shell (``install_route.command_line``):
+    ``shlex.quote`` wrapped a Windows path in single quotes, which cmd.exe passes on as part
+    of the path (review of #259, round 20). ``<dir>`` for a folder not known."""
+    if folder is None:
+        return "aisquare accounts trust <dir>"
+    return install_route.command_line(["aisquare", "accounts", "trust", str(folder)])
+
+
 def _trust_not_shared(name: str, scope: sharing.TrustScope, exc: Exception) -> str:
     return (
         f"folder trust could not be shared into {name}: {exc} — approve Claude Code's "
-        f"question there once, or `aisquare accounts trust {shlex.quote(str(scope.folder))}`"
+        f"question there once, or `{trust_command(scope.folder)}`"
     )
 
 

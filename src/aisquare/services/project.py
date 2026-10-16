@@ -104,17 +104,21 @@ def capture(store: ContextStore, project: ProjectInfo) -> None:
         store.ensure_project(project)
 
 
-class NotAdded(RuntimeError):
-    """A deliberate action needs a project row, capture is off, and nobody added this one.
-
-    The command it names is quoted for this shell (``install_route.command_line``):
+def onboard_command(root: Path) -> str:
+    """``aisquare project onboard <root>``, quoted for this shell (``install_route.command_line``):
     ``shlex.quote`` wrapped a Windows path in single quotes, which cmd.exe passes on as part
-    of the path."""
+    of the path. Every surface that says how to add a directory back names it so: the
+    refusals, the Remove dialog and its toast (review of #259, round 20)."""
+    return install_route.command_line(["aisquare", "project", "onboard", str(root)])
+
+
+class NotAdded(RuntimeError):
+    """A deliberate action needs a project row, capture is off, and nobody added this one."""
 
     def __init__(self, project: ProjectInfo) -> None:
-        onboard = install_route.command_line(["aisquare", "project", "onboard", str(project.root)])
         super().__init__(
-            f"{display_name(project)} is not one of your projects — add it first: {onboard}"
+            f"{display_name(project)} is not one of your projects — add it first: "
+            f"{onboard_command(project.root)}"
         )
         self.project = project
 

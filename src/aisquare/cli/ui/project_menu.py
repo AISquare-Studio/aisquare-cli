@@ -8,7 +8,6 @@ and ``[wip]`` is not markup.
 
 from __future__ import annotations
 
-import shlex
 from typing import ClassVar
 
 from rich.text import Text
@@ -22,7 +21,7 @@ from textual.widgets.option_list import Option
 
 from aisquare.cli.ui.sidebar import SETTINGS_ICON
 from aisquare.models import ProjectInfo
-from aisquare.services.project import display_name
+from aisquare.services.project import display_name, onboard_command
 
 RENAME = "rename"
 PIN = "pin"
@@ -120,7 +119,7 @@ class ConfirmRemove(ModalScreen[bool]):
         text.append(f"Remove {display_name(self.project)} from the fleet?\n\n", style="bold")
         text.append("Its folder and history are kept; ")
         # Quoted as the toast after a removal quotes it: a root with a space is one argument.
-        text.append(f"aisquare project onboard {shlex.quote(str(self.project.root))}", style="bold")
+        text.append(onboard_command(self.project.root), style="bold")
         text.append(" brings it back.")
         with Vertical(id="confirm-remove"):
             yield Static(text, id="confirm-remove-text")

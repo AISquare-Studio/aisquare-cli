@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import sys
 from collections.abc import Mapping
 from typing import Annotated, NoReturn
@@ -32,6 +31,7 @@ from aisquare.core.state import get_state
 from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
+from aisquare.services import install_route
 from aisquare.services import project as project_service
 
 app = typer.Typer(
@@ -932,7 +932,7 @@ def reap(
         # Named on every reap until it goes: reap deletes it once the default branch has
         # its work, and only the operator knows when work it lacks is abandoned. With its
         # repo, as `--all` walks several (review of #259, round 16).
-        drop = f"git -C {shlex.quote(str(root))} branch -D {shlex.quote(branch)}"
+        drop = install_route.command_line(["git", "-C", str(root), "branch", "-D", branch])
         console.print(
             f"  · kept branch {branch} in {root} — commits the default branch lacks; "
             f"a spawn for its task carries on there, and `{drop}` drops it"

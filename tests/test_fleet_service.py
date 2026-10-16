@@ -4601,6 +4601,36 @@ def test_the_boards_limited_chip_names_the_agents_own_project_under_a_hub(
     assert team_project(hub).id not in frame
 
 
+def test_a_limited_chips_switch_that_cannot_be_read_is_logged_not_swallowed(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review of #259, round 23, 8/10: ``fleet_switches`` fails open, and it did so silently.
+    A store or schema regression took the ``fleet switch`` off every limited chip, on the
+    board panel and in ``aisquare board``, with nothing anywhere saying so. It logs what it
+    swallowed, as ``_cycle_project`` does, and the board still gets no command."""
+    now = datetime.now(tz=UTC)
+    limited = TeamSession(
+        id="sess-limited-8",
+        project_id=project.id,
+        role="coder",
+        started_at=now,
+        last_seen_at=now,
+        state="limited",
+    )
+
+    def changed(self: SqliteStore, *args: object) -> FleetAgent | None:
+        raise sqlite3.OperationalError("no such column: session_id")
+
+    monkeypatch.setattr(SqliteStore, "fleet_agent_for_session", changed)
+
+    with caplog.at_level(logging.WARNING, logger="aisquare.services.team"):
+        assert team_service.fleet_switches([limited]) == {}
+
+    [record] = [r for r in caplog.records if r.name == "aisquare.services.team"]
+    assert "could not be read" in record.getMessage()
+    assert "OperationalError: no such column: session_id" in record.getMessage()
+
+
 def test_task_next_prefers_the_callers_assigned_task_over_the_oldest(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -2052,7 +2052,9 @@ def fleet_switches(sessions: list[TeamSession]) -> dict[str, str]:
     the store records against the session (``fleet_agent_for_session``), the lookup the
     ``limited`` feed line and the hand-over make too. A session with no live row, or whose
     row's project is gone, has none. The store is opened only when a live session is
-    limited, and a read that fails costs the commands, never the board.
+    limited, and a read that fails costs the commands, never the board — logged, as
+    :func:`_cycle_project` does: swallowed silently, a store or schema regression took the
+    switch off every limited chip with nothing anywhere saying so (round 23).
     """
     limited = [s.id for s in sessions if s.ended_at is None and s.state == "limited"]
     if not limited:
@@ -2067,7 +2069,14 @@ def fleet_switches(sessions: list[TeamSession]) -> dict[str, str]:
                     switches[session_id] = project_service.fleet_command(
                         "switch", project, agent.label
                     )
-    except Exception:
+    except Exception as exc:
+        _log.warning(
+            "the fleet rows of %d limited session(s) could not be read, so their chips name "
+            "no fleet switch (%s: %s)",
+            len(limited),
+            type(exc).__name__,
+            exc,
+        )
         return {}
     return switches
 

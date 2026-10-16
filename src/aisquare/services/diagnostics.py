@@ -1482,46 +1482,48 @@ def _check_captured_projects() -> list[DoctorCheck]:
 def _left_from_before_capture(captured: list[ProjectInfo], plan: list[PruneCandidate]) -> str:
     """The capture-off line: the rows ``prune --captured-only --older-than 0`` drops (``plan``
     is what it would do), with that command, and apart from them the rows it keeps, by name,
-    with ``project forget``."""
+    with ``project forget``.
+
+    Each part put together once from its noun, verb and pronoun: the kept part was written
+    out twice, in near-identical branches, and a wording fix had to be made in each (review
+    of #259, round 18)."""
     dropped = {c.project.id for c in plan if c.reason == "captured" and not c.live_agents}
     kept = [project for project in captured if project.id not in dropped]
+    left = "left from before project capture was turned off"
+    listed = "listed only by aisquare project list --all"
     parts: list[str] = []
     if dropped:
-        noun = "directory" if len(dropped) == 1 else "directories"
         parts.append(
-            f"{len(dropped)} captured {noun} left from before project capture was turned off "
-            "(a hooked session ran there; nothing added it on purpose) — listed only by "
-            "aisquare project list --all; drop them: aisquare project prune --captured-only "
-            "--older-than 0"
+            f"{len(dropped)} captured {_directories(len(dropped))} {left} (a hooked session "
+            f"ran there; nothing added it on purpose) — {listed}; drop them: aisquare project "
+            "prune --captured-only --older-than 0"
         )
     if kept:
+        one = len(kept) == 1
         names = ", ".join(project_service.display_name(p) for p in kept[:3])
         if len(kept) > 3:
             names += f", +{len(kept) - 3} more"
         forget = (
             install_route.command_line(["aisquare", "project", "forget", str(kept[0].root)])
-            if len(kept) == 1
+            if one
             else "aisquare project forget <directory>, for each"
         )
-        if dropped:
-            verb = "holds" if len(kept) == 1 else "hold"
-            parts.append(
-                f"{len(kept)} more {verb} saved context or a live agent, which that prune "
-                f"keeps: {names} — drop it with {forget}"
-                if len(kept) == 1
-                else f"{len(kept)} more {verb} saved context or a live agent, which that "
-                f"prune keeps: {names} — drop them with {forget}"
-            )
-        else:
-            noun = "directory" if len(kept) == 1 else "directories"
-            verb = "holds" if len(kept) == 1 else "hold"
-            parts.append(
-                f"{len(kept)} captured {noun} left from before project capture was turned off "
-                f"{verb} saved context or a live agent, which aisquare project prune keeps: "
-                f"{names} — listed only by aisquare project list --all; drop "
-                + (f"it with {forget}" if len(kept) == 1 else f"them with {forget}")
-            )
+        which = (
+            f"{len(kept)} more"
+            if dropped
+            else f"{len(kept)} captured {_directories(len(kept))} {left}"
+        )
+        prune = "that prune" if dropped else "aisquare project prune"
+        then = "" if dropped else f"{listed}; "
+        parts.append(
+            f"{which} {'holds' if one else 'hold'} saved context or a live agent, which "
+            f"{prune} keeps: {names} — {then}drop {'it' if one else 'them'} with {forget}"
+        )
     return "; ".join(parts)
+
+
+def _directories(count: int) -> str:
+    return "directory" if count == 1 else "directories"
 
 
 def _check_dead_managers() -> list[DoctorCheck]:

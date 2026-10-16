@@ -314,6 +314,51 @@ def test_doctor_asks_only_the_captured_rows_and_no_root(
     assert [c.project.id for c in plan] == ["prj_scratch"], "a root it cannot ask is not missing"
 
 
+def _captured_rows(tmp_path: Path, prefix: str, count: int) -> list[ProjectInfo]:
+    return [
+        ProjectInfo(id=f"prj_{prefix}{n}", root=tmp_path / f"{prefix}{n}") for n in range(count)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("dropped", "kept"), [(2, 0), (2, 1), (1, 2), (0, 1), (0, 4)], ids=lambda n: str(n)
+)
+def test_doctors_capture_off_line_for_each_count(tmp_path: Path, dropped: int, kept: int) -> None:
+    """Review of #259, round 18 (12/12): the line's kept part was written out twice, in
+    near-identical branches. Put together once, it reads as it did, for each count of rows
+    the prune drops and keeps."""
+    from aisquare.models import PruneCandidate
+    from aisquare.services import install_route
+
+    gone, held = _captured_rows(tmp_path, "d", dropped), _captured_rows(tmp_path, "k", kept)
+    plan = [PruneCandidate(project=p, reason="captured") for p in gone]
+    forget = (
+        install_route.command_line(["aisquare", "project", "forget", str(held[0].root)])
+        if kept == 1
+        else "aisquare project forget <directory>, for each"
+    )
+    names = ", ".join(p.root.name for p in held[:3]) + (f", +{kept - 3} more" if kept > 3 else "")
+    left = "left from before project capture was turned off"
+    listed = "listed only by aisquare project list --all"
+    wanted = {
+        (2, 0): f"2 captured directories {left} (a hooked session ran there; nothing added it "
+        f"on purpose) — {listed}; drop them: aisquare project prune --captured-only "
+        "--older-than 0",
+        (2, 1): f"; 1 more holds saved context or a live agent, which that prune keeps: {names} "
+        f"— drop it with {forget}",
+        (1, 2): f"; 2 more hold saved context or a live agent, which that prune keeps: {names} "
+        f"— drop them with {forget}",
+        (0, 1): f"1 captured directory {left} holds saved context or a live agent, which "
+        f"aisquare project prune keeps: {names} — {listed}; drop it with {forget}",
+        (0, 4): f"4 captured directories {left} hold saved context or a live agent, which "
+        f"aisquare project prune keeps: {names} — {listed}; drop them with {forget}",
+    }[(dropped, kept)]
+
+    said = diagnostics._left_from_before_capture([*gone, *held], plan)
+
+    assert said.endswith(wanted) if dropped and kept else said == wanted, said
+
+
 # --- the setting, read --------------------------------------------------------------------
 
 

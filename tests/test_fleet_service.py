@@ -5967,6 +5967,32 @@ def test_under_a_hub_each_read_and_write_goes_where_the_rule_says(
     assert case(hubbed) == expected
 
 
+def test_a_note_on_a_forgotten_hub_is_drained_there_and_named_by_it(hubbed: _Hubbed) -> None:
+    """Review of #259, round 32, 7/9: ``add_note(board_id=...)`` named its board through a
+    lookup that read a forgotten project as none. A note ``fleet tell`` filed on a hub
+    forgotten since, where its agents still read, went there, but its receipt named the hub
+    by its id, and its drain ran in the caller's directory (``spawn_drain(root=None)``),
+    distilling the caller's board, not the hub's. Both are the hub's own."""
+    from aisquare.services import distill as distill_service
+
+    w = hubbed
+    drained: list[Path | None] = []
+    w.monkeypatch.setattr(
+        distill_service, "spawn_drain", lambda cwd=None, *, root=None: drained.append(root)
+    )
+    with store_session() as store:
+        store.forget_project(w.hub.id)  # as 0.8.1 before round 32 allowed, to tidy the list
+        assert store.get_project(w.hub.id) is None
+
+    team_service.add_note("ship it", to_role="coder-1", board_id=w.hub.id)
+
+    assert drained == [w.hub.root]
+    receipt = team_service.last_delivery()
+    assert receipt is not None and (receipt.board_id, receipt.board_name) == (w.hub.id, "hub")
+    with store_session() as store:
+        assert store.get_project(w.hub.id) is None, "still forgotten"
+
+
 def _another_fleet_on_the_hub(w: _Hubbed, name: str = "other") -> tuple[ProjectInfo, str]:
     """A second fleet project whose manager, spawned under the hub, reads the hub's board as
     ``w.fleet``'s does; returns it and its manager's session."""

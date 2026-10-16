@@ -461,8 +461,14 @@ def _caller_board_id(store: ContextStore, session: TeamSession | None, cwd: Path
 
 
 def _board_of(store: ContextStore, project_id: str) -> _Board:
-    """The board a known project id names (for task-ref commands)."""
-    project = store.get_project(project_id)
+    """The board a known project id names (for task-ref commands).
+
+    One forgotten since is still named and rooted by its row: its tasks and events are
+    kept, and the agents whose rows recorded it still read it. Read as one the store does
+    not hold, a note ``fleet tell`` or the phone put on a forgotten hub was named by its id,
+    and its drain ran in the caller's directory, with a ``git rev-parse``, distilling the
+    caller's board and not the hub's (review of #259, round 32, 7/9)."""
+    project = store.get_project(project_id, include_forgotten=True)
     if project is None:
         return _Board(id=project_id, name=project_id, root=None)
     return _Board(id=project_id, name=project_service.display_name(project), root=project.root)

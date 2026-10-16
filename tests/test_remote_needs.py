@@ -4739,6 +4739,46 @@ def test_a_question_read_apart_is_one_card_while_its_posters_scan_fails(
     assert [item.id for item in again] == [first[0].id]
 
 
+def test_a_post_its_posters_manager_took_is_no_card_while_the_posters_scan_fails(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 29, 2/8: Remote runs under hub H, and fleet projects A and B
+    both read H. A's coder asks A's live manager on H: A's scan judges it taken, no card, and
+    B's copy, of a post no B row holds, goes by A's verdict. Only a scan that worked named its
+    posts, so while A's scan failed B's copy was a new card, pushed as new, gone when A's
+    scan worked again and back on its next failure. The watcher keeps A's last named posts,
+    as it keeps A's cards."""
+    import sqlite3
+
+    with store_session() as store:
+        hub = _rooted(tmp_path / "hub")
+        store.ensure_project(hub)
+        a = store.onboard_project(_rooted(tmp_path / "a"))
+        b = store.onboard_project(_rooted(tmp_path / "b"))
+        _seat_up(store, _manager_of("a"), a, hub)
+        _seat_up(store, _Seat("a", "coder-1", asks=True), a, hub)
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub.root))
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    live = remote_needs.live_needs_sources()
+
+    def ended(project_id: str, since: datetime) -> list[FleetAgent]:
+        if project_id == a.id:
+            raise sqlite3.OperationalError("database is locked")
+        return live.ended_agents(project_id, since)
+
+    now = datetime.now(UTC)
+    reading = [live]
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path / "dist")
+    watcher = RemoteNeedsWatcher(app.kit, sources=lambda: reading[0], clock=lambda: now)
+    assert watcher.scan_needs_now() == [], "A's manager took it"
+    reading[0] = replace(live, ended_agents=ended)
+    left = scan_needs_you(reading[0], now=now, dismissed=())  # with no memory of A's posts
+    assert [(item.kind, item.project_id) for item in left] == [("board_question", b.id)]
+
+    assert watcher.scan_needs_now() == []
+
+
 def test_a_result_on_a_board_the_stopped_manager_never_read_stays_a_card(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

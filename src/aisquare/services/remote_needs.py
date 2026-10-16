@@ -2811,6 +2811,7 @@ def scan_needs_you(
     first_seen: MutableMapping[str, datetime] | None = None,
     failing: MutableSet[str] | None = None,
     kept: Sequence[NeedsItem] = (),
+    posted: MutableMapping[str, frozenset[tuple[str, int]]] | None = None,
 ) -> list[NeedsItem]:
     """Every item across every project, dismissals dropped, ranked by kind then ``since``.
 
@@ -2824,9 +2825,16 @@ def scan_needs_you(
     looked at this time is kept for the next look. ``failing`` is the watcher's
     memory of the projects whose scans fail, outright or by a read: one warning a streak,
     naming the read, not one every 3 s (:func:`_needs_failed`), and "works again" only
-    once a scan reads all it needs.
+    once a scan reads all it needs. ``posted`` is the watcher's memory of each project's
+    posts, as its last scan that read all it needs named them (``_NeedsProject.posted``):
+    while the project's scan fails they still say which project judges each post
+    (:func:`_needs_board_once`), as its ``kept`` items stand for its cards. Named by the
+    scans that worked alone, a post the poster's live manager took, no card, was every
+    other project's card while that scan failed, pushed as new (review of #259, round 29,
+    2/8).
     """
     memory: MutableMapping[str, datetime] = {} if first_seen is None else first_seen
+    known: MutableMapping[str, frozenset[tuple[str, int]]] = {} if posted is None else posted
     seen: set[str] = set()
     sources = _needs_read_once(sources)
     items: list[NeedsItem] = []
@@ -2854,12 +2862,15 @@ def scan_needs_you(
         if scanned is not None and scanned.failed is None:
             items.extend(scanned.items)
             items.extend(_needs_blind_kept(scanned, project, kept, memory, seen, failing))
-            posters.update((posted, project.id) for posted in scanned.posted)
+            known[project.id] = scanned.posted
         else:
             _needs_still_remembered(memory, seen, project)
             items.extend(item for item in kept if item.project_id == project.id)
+        posters.update((post, project.id) for post in known.get(project.id, ()))
     for key in [key for key in memory if key not in seen]:
         del memory[key]
+    for key in [key for key in known if key not in boards]:
+        del known[key]
     items = _needs_board_once(items, boards, posters)
     return _needs_ranked([item for item in items if item.id not in dismissed])
 
@@ -2942,22 +2953,24 @@ def _needs_board_once(
     own project when it is listed, else of the first project that writes the board.
     ``boards`` is each scanned project's board, by its id, in the order scanned.
 
-    ``posters`` is the project whose rows posted each event, by ``(board, seq)``, of the
-    projects scanned in full (``_NeedsProject.posted``). Its verdict is the event's: when
-    its live manager took the post, no other project's scan, which saw no row of the
-    poster's, makes a card of it. Kept by the lowest rank alone, a coder's question to its
-    woken manager was still every other project's card and push (review of #259, round 25,
-    7/10). That holds on a board the poster's project read apart, as one its rows recorded
-    (:func:`_needs_elsewhere`), while another's scan read it whole: an item is of the board
-    it was read on (``NeedsItem.board``), and its poster's card is the one card (round 27,
-    1/7).
+    ``posters`` is the project whose rows posted each event, by ``(board, seq)``, as the
+    project's last scan that read all it needs named them (``_NeedsProject.posted``), this
+    one's or, while its scan fails, the one before (:func:`scan_needs_you`). Its verdict is
+    the event's: when its live manager took the post, no other project's scan, which saw no
+    row of the poster's, makes a card of it. Kept by the lowest rank alone, a coder's
+    question to its woken manager was still every other project's card and push (review of
+    #259, round 25, 7/10). That holds on a board the poster's project read apart, as one its
+    rows recorded (:func:`_needs_elsewhere`), while another's scan read it whole: an item is
+    of the board it was read on (``NeedsItem.board``), and its poster's card is the one card
+    (round 27, 1/7).
 
-    Only a scan that read all it needs names its posts, and a project whose scan failed keeps
-    its last cards. So every board's items are one card by ``(board, seq)``, the main board of
-    one project or of several, ranked by :func:`_needs_board_rank`: the poster's kept card,
-    its row's, is still the one. Ranked only on a board two projects write, a question on a
-    board the poster's project read apart, which one other project reads whole, was two cards
-    while the poster's scan failed, and the other's copy was pushed as new (round 28, 3/10).
+    A project whose scan failed keeps its last cards, and a post newer than its last full
+    scan has no poster here. So every board's items are one card by ``(board, seq)``, the
+    main board of one project or of several, ranked by :func:`_needs_board_rank`: the
+    poster's kept card, its row's, is still the one. Ranked only on a board two projects
+    write, a question on a board the poster's project read apart, which one other project
+    reads whole, was two cards while the poster's scan failed, and the other's copy was
+    pushed as new (round 28, 3/10).
     """
     posters = posters or {}
     writers: dict[str, list[str]] = {}
@@ -3922,6 +3935,9 @@ class RemoteNeedsWatcher:
         and ``_failing_projects`` the projects whose part of it has: each streak is told once
         (:func:`_needs_failed`)."""
         self._failing_projects: set[str] = set()
+        self._posted: dict[str, frozenset[tuple[str, int]]] = {}
+        """Each project's posts, as its last scan that read all it needs named them
+        (:func:`scan_needs_you`)."""
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
         self._rescan: threading.Timer | None = None
@@ -4066,6 +4082,7 @@ class RemoteNeedsWatcher:
                 first_seen=self._first_seen,
                 failing=self._failing_projects,
                 kept=self.needs_items_now(),
+                posted=self._posted,
             )
             scanned = [item for item in everything if item.id not in dismissed]
             with self._lock:

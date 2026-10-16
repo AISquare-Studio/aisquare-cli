@@ -4313,18 +4313,17 @@ def _file_note(
     project's own board while the agent read the hub's, and was reported filed; with
     ``[projects] capture`` off, a project board never added refused it though the hub's was
     added (review of #259, round 26, 2/11). With no live row, it goes where the caller
-    resolves, as before."""
+    resolves, as before (:func:`_note_board`)."""
     team = _team()
-    if agent is None:
+    board: str | None
+    if agent is not None:
+        board = _board_of_row(agent)
+    else:
         with store_session() as store:
-            agent = store.fleet_agent_by_label(project.id, label, live_only=True)
+            board = _note_board(store, project, label)
     try:
         event = team.add_note(
-            text,
-            session_ref=sender,
-            to_role=label,
-            cwd=project.root,
-            board_id=_board_of_row(agent) if agent is not None else None,
+            text, session_ref=sender, to_role=label, cwd=project.root, board_id=board
         )
     except (team.TeamDisabledError, project_service.NotAdded) as exc:
         # NotAdded: with no row to name it, the board the note resolves to
@@ -4334,6 +4333,17 @@ def _file_note(
     except KeyError as exc:
         raise FleetError(f"unknown sender session {sender!r}") from exc
     return f"filed as board note #{event.seq} to {label}"
+
+
+def _note_board(store: ContextStore, project: ProjectInfo, label: str) -> str | None:
+    """The board a note to ``label`` in ``project`` goes to, through ``store``: the one the
+    live row ``label`` names recorded (:func:`_board_of_row`); ``None`` with no live row of
+    that label, where the caller's own rule decides. ``fleet tell``'s note
+    (:func:`_file_note`) and the phone's (``remote_server._remote_note_board``) both ask it:
+    each wrote this routing out, and the phone's opened a store for the label and another
+    for its fallback (review of #259, round 31, 6/7)."""
+    agent = store.fleet_agent_by_label(project.id, label, live_only=True)
+    return None if agent is None else _board_of_row(agent)
 
 
 def stop(

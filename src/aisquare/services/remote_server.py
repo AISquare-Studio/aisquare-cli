@@ -717,16 +717,19 @@ def _remote_note_board(project: ProjectInfo, to: str | None) -> str | None:
     ``to`` is a label or a role. Sent to the manager's board whatever it named, a note to a
     coder spawned from a plain shell, on its checkout's board, went to the hub its manager
     reads, which the coder never reads, and the page said "Posted" (review of #259, round
-    30, 3/8). A role, or a label no running agent has, is the Board tab's."""
-    from aisquare.core.store import store_session
-    from aisquare.services.fleet import _board_of_row
+    30, 3/8). A role, or a label no running agent has, is the Board tab's.
 
-    if to is not None:
-        with store_session() as store:
-            addressed = store.fleet_agent_by_label(project.id, to, live_only=True)
+    The label's board is ``fleet tell``'s (``fleet._note_board``), and both are looked up in
+    one store: a store each, a note to a role opened two before ``add_note`` opened its own
+    (round 31, 6/7)."""
+    from aisquare.core.store import store_session
+    from aisquare.services.fleet import _note_board
+
+    with store_session() as store:
+        addressed = None if to is None else _note_board(store, project, to)
         if addressed is not None:
-            return _board_of_row(addressed)
-    recorded = _remote_recorded_board(project)
+            return addressed
+        recorded = _remote_recorded_board(project, store)
     return None if recorded is None else recorded.id
 
 

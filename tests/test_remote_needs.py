@@ -5043,6 +5043,55 @@ def test_a_board_tab_note_to_a_running_agent_goes_to_the_board_it_reads(
 
 
 @pytest.mark.parametrize(
+    ("to", "expected"),
+    [("coder-1", "p"), ("coder", "hub"), ("coder-9", "hub"), (None, "hub")],
+    ids=["a running coder's label", "a role", "nobody's label", "no to"],
+)
+def test_a_phone_notes_board_is_fleet_tells_found_in_one_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, to: str | None, expected: str
+) -> None:
+    """Review of #259, round 31, 6/7: the phone's note wrote ``fleet tell``'s routing out a
+    second time (the live row a label names, then its recorded board), and looked the label
+    up in a store of its own and the Board tab's board in another, before ``add_note`` opened
+    a third. Both ask ``fleet._note_board``, and the phone asks it and the Board tab's board
+    in one store."""
+    from aisquare.core import store as core_store
+    from aisquare.services import remote_server
+
+    p, hub, _ = _hubbed_tasks(tmp_path, monkeypatch, "none")
+    with store_session() as store:
+        _seat_up(store, _Seat("p", "coder-1"), p, p)
+    asked: list[str] = []
+    real = fleet_service._note_board
+
+    def spied(store: Any, project: ProjectInfo, label: str) -> str | None:
+        asked.append(label)
+        return real(store, project, label)
+
+    monkeypatch.setattr(fleet_service, "_note_board", spied)
+    opens = 0
+    real_open = core_store.open_store
+
+    def counting_open() -> Any:
+        nonlocal opens
+        opens += 1
+        return real_open()
+
+    monkeypatch.setattr(core_store, "open_store", counting_open)
+
+    board = remote_server._remote_note_board(p, to)
+
+    assert board == {"p": p.id, "hub": hub.id}[expected]
+    assert opens == 1, f"one store, not {opens}"
+    assert asked == ([] if to is None else [to])
+    fleet_service._file_note(p, "coder-1", "rebase first", None)
+    assert asked[-1] == "coder-1", "fleet tell's note asks the same"
+    with store_session() as store:
+        filed = [e.text for e in store.recent_events(p.id, limit=9) if e.kind == "note"]
+    assert filed == ["rebase first"]
+
+
+@pytest.mark.parametrize(
     ("field", "value", "expected"),
     [
         ("to", "coder-1", ("p", "tsk_elsewhere")),

@@ -102,6 +102,25 @@ def trust_scope(folder: Path) -> TrustScope:
     return TrustScope(real, project_key(canonical), tuple(covering))
 
 
+def worktree_scope(repository: Path, tree: Path) -> TrustScope:
+    """The entries that will trust ``tree``, a worktree of the repository ``repository`` is
+    in, whether or not ``git worktree add`` has made it yet.
+
+    Once it exists, :func:`trust_scope`'s: a worktree is its own top level, so the canonical
+    root's entry, then its own. Before, the same two: asked of a path with no ``.git`` yet,
+    :func:`trust_scope` walked up from it into the main checkout and counted every folder
+    there up to the repository's top, which do not cover the tree once it is made (review
+    of #259, round 22). Outside git, :func:`trust_scope`'s, as there is no tree to make."""
+    if os.path.lexists(tree / ".git"):
+        return trust_scope(tree)
+    top = _git_top(Path(os.path.realpath(repository)))
+    if top is None:
+        return trust_scope(tree)
+    real = Path(os.path.realpath(tree))
+    canonical = project_key(_canonical_root(top))
+    return TrustScope(real, canonical, tuple(dict.fromkeys((canonical, project_key(real)))))
+
+
 def project_key(path: Path) -> str:
     """``path`` as Claude Code spells a ``projects`` key: with ``/`` on Windows too, where
     its path normaliser turns every ``\\`` into one."""

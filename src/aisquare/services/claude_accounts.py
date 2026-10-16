@@ -2106,7 +2106,7 @@ class SharedNote(str):
 
 
 def share_for_launch(
-    folder: Path | None = None,
+    folder: Path | sharing.TrustScope | None = None,
     *,
     account: ClaudeAccount | None = None,
     env: Mapping[str, str] | None = None,
@@ -2117,7 +2117,9 @@ def share_for_launch(
     spawn`` opens its window (so the receipt carries the note). The account is ``account``
     when the launch chose one, else the one whose ``.claude.json`` the launch's ``env``
     leads Claude Code to (default: this process's), and nothing is done for a directory
-    that is no account of ours. ``folder`` defaults to the working directory.
+    that is no account of ours. ``folder`` defaults to the working directory; a spawn
+    whose worktree is not made yet passes the scope it will have
+    (:func:`core.claude_sharing.worktree_scope`).
 
     - ``share_trust``: when no entry trusts the folder there and another account's does,
       that entry is copied (:func:`core.claude_sharing.grant_trust`). Trust nobody gave is
@@ -2143,7 +2145,12 @@ def share_for_launch(
             return []
         notes: list[str] = []
         if knobs.share_trust:
-            notes += _share_trust_into(target, Path.cwd() if folder is None else folder, accounts)
+            scope = (
+                folder
+                if isinstance(folder, sharing.TrustScope)
+                else sharing.trust_scope(Path.cwd() if folder is None else folder)
+            )
+            notes += _share_trust_into(target, scope, accounts)
         if knobs.share_settings and target.managed:
             notes += _share_settings_into(target)
         return notes
@@ -2169,10 +2176,9 @@ def _same_path(a: Path, b: Path) -> bool:
 
 
 def _share_trust_into(
-    target: ClaudeAccount, folder: Path, accounts: Sequence[ClaudeAccount]
+    target: ClaudeAccount, scope: sharing.TrustScope, accounts: Sequence[ClaudeAccount]
 ) -> list[str]:
-    """Copy the entry that trusts ``folder`` into ``target`` from the first account with one."""
-    scope = sharing.trust_scope(folder)
+    """Copy an entry of ``scope`` into ``target`` from the first account with one."""
     name = core.label(target)
     try:
         own = sharing.read_claude_json(core.claude_json_path(target))

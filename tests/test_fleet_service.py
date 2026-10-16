@@ -64,6 +64,7 @@ from aisquare.core.tmux import (
     WindowInfo,
 )
 from aisquare.core.version import __version__
+from aisquare.core.workspace import project_id_for
 from aisquare.models import (
     CheckStatus,
     FleetAgent,
@@ -14397,6 +14398,55 @@ def test_a_spawn_shares_the_trust_outside_the_branch_lock_and_tells_the_window(
     assert again.shared == [] and any("could not be shared" in note for note in again.notes)
     untold = tmux.spawned[-1]["env"]
     assert isinstance(untold, dict) and accounts_service.SHARED_ENV not in untold
+
+
+def test_a_worktree_spawn_shares_the_trust_its_tree_will_have_not_its_roots(
+    fake_home: Path,
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    repo: Path,
+    tmp_path: Path,
+) -> None:
+    """Review of #259, round 22, 8/9: round 21 moved the spawn's share before the branch lock,
+    for the project's root, and told the window, whose launch then did not share for the
+    tree it starts in. The two scopes differ. An entry on the tree itself (an older Claude
+    Code's, or a hand edit; the fleet reuses one tree per label) was no longer found, and
+    an entry on a root that is a sub-folder of its repository was copied and said shared,
+    though it does not cover the tree. The spawn shares for the tree as it will be."""
+    _signed_in(accounts_core.default_account(), "one@x.dev")
+    second, third = accounts_core.create_account(), accounts_core.create_account()
+    worktrees = fleet_service.settings().worktree_dir
+    tree = claude_sharing.project_key(Path(os.path.realpath(project.root)) / worktrees / "coder-1")
+    _signed_in(second, "two@x.dev", trusted=(tree,))
+    _signed_in(third, "three@x.dev")
+
+    receipt = fleet_service.spawn(project, "coder", worktree=True, account="3")
+
+    assert claude_sharing.project_key(Path(os.path.realpath(receipt.agent.cwd))) == tree
+    assert receipt.shared == [f"accounts: {tree} is trusted on account 2 — now on account 3 too"]
+    data = json.loads(accounts_core.claude_json_path(third).read_text())
+    assert data["projects"] == {tree: {"hasTrustDialogAccepted": True}}
+    told = tmux.spawned[-1]["env"]
+    assert isinstance(told, dict) and told[accounts_service.SHARED_ENV] == "3"
+
+    # A root that is itself a worktree of another checkout: an entry on it covers it, and
+    # not the trees the fleet makes under it, which are their own top levels.
+    checkout = tmp_path / "checkout"
+    _git("worktree", "add", "-q", "-b", "elsewhere", str(checkout), cwd=repo)
+    nested = ProjectInfo(id=project_id_for(checkout), root=checkout, linked_repos=[])
+    with store_session() as store:
+        store.onboard_project(nested)
+    on_root = claude_sharing.project_key(Path(os.path.realpath(checkout)))
+    assert on_root in claude_sharing.trust_scope(checkout).covering, "the premise"
+    _signed_in(second, "two@x.dev", trusted=(on_root,))
+    _signed_in(third, "three@x.dev")
+
+    inside = fleet_service.spawn(nested, "coder", worktree=True, account="3")
+
+    assert inside.agent.cwd != checkout, "its own worktree, under that root"
+    assert inside.shared == [], "the root's entry does not cover the tree"
+    assert json.loads(accounts_core.claude_json_path(third).read_text())["projects"] == {}
 
 
 def test_an_agent_at_the_trust_question_needs_the_human_until_it_is_answered(

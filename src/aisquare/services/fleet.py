@@ -2700,15 +2700,22 @@ def spawn(
     # landed between a reuse and the row read the tree as an ended agent's, clean and
     # pushed, and removed it from under the agent starting in it (review of #259, round 17).
     made: list[str] = []
+    common = _git_common_dir(project.root) if use_worktree else None
+    # Where the agent will start: the worktree `_worktree_for` makes or reuses, else the root.
+    start = project.root / config.worktree_dir / picked if common is not None else project.root
+    settled: str | None = None
     if choice.account is not None:
         # Here as well as in the window's `aisquare launch`, so the receipt — the manager's
         # one view of the spawn — says when the folder's trust could not be shared and the
         # agent will stop at Claude Code's question. Before the branch lock, which a reap
-        # and every other spawn in the repository queue on: the trust a worktree needs is
-        # its main checkout's, the project's own, so the tree need not exist yet. And the
-        # window is told, so its launch does not read the same files again (review of #259,
-        # round 21); with no account chosen, only the window knows its environment.
-        shared = claude_accounts_service.share_for_launch(project.root, account=choice.account)
+        # and every other spawn in the repository queue on (review of #259, round 21): for
+        # the folder the agent starts in, with the entries that will cover it once made.
+        # Asked of the project's root instead, it copied an entry on a root that is a
+        # sub-folder of its repository, which does not cover the tree, and missed one on the
+        # tree itself (round 22). And the window is told, so its launch does not read the
+        # same files again; with no account chosen, only the window knows its environment.
+        scope = claude_sharing.worktree_scope(project.root, start) if common is not None else start
+        shared = claude_accounts_service.share_for_launch(scope, account=choice.account)
         notes.extend(f"accounts: {note}" for note in shared)
         made = [
             f"accounts: {note}"
@@ -2716,8 +2723,7 @@ def spawn(
             if isinstance(note, claude_accounts_service.SharedNote)
         ]
         if len(made) == len(shared):  # nothing it could not share, which the launch tries again
-            env[claude_accounts_service.SHARED_ENV] = str(choice.account.slot)
-    common = _git_common_dir(project.root) if use_worktree else None
+            settled = str(choice.account.slot)
     tree_lock = (
         _branches_locked(common, wait=_BRANCHES_LOCK_WAIT)
         if common is not None
@@ -2742,6 +2748,9 @@ def spawn(
                 own_branch=own_branch,
                 common=common,
             )
+        if settled is not None and os.path.realpath(cwd) == os.path.realpath(start):
+            # Only for the folder it shared for: a restart's own tree can be elsewhere.
+            env[claude_accounts_service.SHARED_ENV] = settled
         try:
             # Every pair is this window's alone: `spawn_window` keeps them out of
             # the session environment, so a later spawn — or a window opened by hand

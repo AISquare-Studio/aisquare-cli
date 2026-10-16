@@ -159,6 +159,28 @@ def test_a_worktree_is_trusted_as_its_main_checkout_inside_or_outside_it(tmp_pat
         assert scope.covering == (root, _key(worktree))
 
 
+def test_a_worktree_not_made_yet_has_the_scope_it_will_have_once_made(tmp_path: Path) -> None:
+    """Review of #259, round 22, 8/9: a spawn shares the trust before ``git worktree add``
+    makes the tree. Asked of that path, ``trust_scope`` walked up into the main checkout and
+    counted the repository's folders, an entry on any of which does not cover the tree once
+    it is made. ``worktree_scope`` gives the scope the tree will have, from its root or from a
+    sub-folder of the repository alike, and a tree that exists is read as it is."""
+    repo = _repo(tmp_path / "repo")
+    sub = repo / "sub"
+    sub.mkdir()
+    for root in (repo, sub):
+        tree = root / ".wt" / "coder-1"
+        before = sharing.worktree_scope(root, tree)
+        assert before.covering == (_key(repo), _key(tree)), root
+        assert _key(root) not in before.covering[1:] and before.key == _key(repo)
+        assert sharing.trust_scope(tree).covering != before.covering, "the walk it replaces"
+        _git("worktree", "add", "-q", "-b", f"b-{root.name}", str(tree), cwd=repo)
+        assert sharing.worktree_scope(root, tree) == before == sharing.trust_scope(tree)
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert sharing.worktree_scope(plain, plain / "x") == sharing.trust_scope(plain / "x")
+
+
 def test_on_windows_a_key_is_spelled_with_forward_slashes(monkeypatch: pytest.MonkeyPatch) -> None:
     """Claude Code's path normaliser turns every backslash into ``/`` on Windows, so its
     ``projects`` keys read ``C:/Users/me/work``; an entry spelled the native way is none."""

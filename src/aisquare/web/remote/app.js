@@ -369,6 +369,10 @@ function str(value) {
   return typeof value === "string" ? value : "";
 }
 
+function obj(value) {
+  return value && typeof value === "object" ? value : {};
+}
+
 function clip(text, limit) {
   const chars = Array.from(text);
   return chars.length > limit ? chars.slice(0, limit - 1).join("") + "…" : text;
@@ -492,13 +496,13 @@ function excerptRepeats(excerpt, detail) {
  * p h2 h3 ul li button are made here. */
 function renderNeedsCard(item, doc, opts) {
   const o = opts || {};
-  const it = item && typeof item === "object" ? item : {};
+  const it = obj(item);
   const kind = typeof it.kind === "string" && Object.prototype.hasOwnProperty.call(KINDS, it.kind) ? it.kind : null;
   const look = kind ? KINDS[kind] : ["Needs you", "k-info"];
   const card = mk(doc, "div", "card " + look[1]);
   const head = mk(doc, "div", "card-head");
   head.appendChild(mk(doc, "span", "badge " + look[1], look[0]));
-  const project = it.project && typeof it.project === "object" ? it.project : {};
+  const project = obj(it.project);
   const where = [project.name, it.agent].filter(isText).map((part) => clip(plainText(part), 40));
   head.appendChild(mk(doc, "span", "where", where.join(" · ")));
   const now = typeof o.now === "number" ? o.now : Date.now();
@@ -587,7 +591,7 @@ function parseRoute(hash) {
 
 /* The canonical hash of a route; "#/" for anything that does not validate. */
 function routeHash(route) {
-  const r = route && typeof route === "object" ? route : {};
+  const r = obj(route);
   const enc = encodeURIComponent;
   if (["unlock", "projects", "devices", "settings"].indexOf(r.name) >= 0) return "#/" + r.name;
   if (r.name === "card" && NEEDS_ID.test(r.id || "")) {
@@ -909,7 +913,7 @@ function settleFromLedger(entries) {
   if (!Array.isArray(entries)) return;
   for (const entry of entries) {
     if (!entry || typeof entry.request_id !== "string") continue;
-    const body = entry.body && typeof entry.body === "object" ? entry.body : {};
+    const body = obj(entry.body);
     const status = toInt(entry.status);
     const res = {
       ok: status >= 200 && status < 300, status, data: body, network: false, notJson: false, retryAfter: 0,
@@ -1953,7 +1957,7 @@ async function dismissItem(item) {
 }
 
 function contextOf(item) {
-  const project = item.project && typeof item.project === "object" ? item.project : {};
+  const project = obj(item.project);
   return { pid: project.id, label: item.agent, agentId: typeof item.agent_id === "string" ? item.agent_id : null, needsId: item.id, item };
 }
 
@@ -2003,7 +2007,7 @@ function tellSheet(ctx, mode, replyTo) {
       sheet.busy(false);
       if (res.ok) {
         sheet.close();
-        const told = res.data && typeof res.data === "object" ? res.data : {};
+        const told = obj(res.data);
         const delivered = told.delivered === true;
         // Not typed: the machine says what came of it (a board note, unsent text).
         toast(delivered ? "Typed into " + label : label + ": " + (untold(told) || "not typed — look at its pane"));
@@ -2036,7 +2040,7 @@ function tellSheet(ctx, mode, replyTo) {
 /* A note wakes the manager; another agent reads one only at its next prompt, which nothing
  * brings one that waits: a reply to it is a Tell (auto). */
 function replySheet(ctx) {
-  const detail = ctx.item.detail && typeof ctx.item.detail === "object" ? ctx.item.detail : {};
+  const detail = obj(ctx.item.detail);
   const author = str(detail.author);
   if (author === ctx.label && ctx.agentId && author.trim().toLowerCase() !== "manager") return tellSheet(ctx, "auto", author);
   openSheet("Reply on the board", (sheet) => {
@@ -2053,13 +2057,14 @@ function replySheet(ctx) {
   });
 }
 
-/* The card gives way, the words stay: Tell or Post again sends them with no card. */
-function giveWay(ctx, sheet, now, verb) {
+/* The card gives way, the words stay: Tell or Post again sends them with no card, Post to
+ * the board the machine names. */
+function giveWay(ctx, sheet, now, verb, board) {
   const item = ctx.item;
   ctx.item = ctx.needsId = null;
   noLonger(item, now);
   if (!Array.isArray(now)) return false;
-  sheet.say(noLongerText(item, now) + " " + verb + " again to send it anyway.");
+  sheet.say(noLongerText(item, now) + " " + verb + " again to send it " + (isText(board) ? "to " + plainText(board) + "'s board " : "") + "anyway.");
   return true;
 }
 
@@ -2078,7 +2083,7 @@ async function postReply(ctx, sheet, author, words) {
     if (ctx.item) dismissItem(ctx.item);
     return;
   }
-  if (isStale(res) && body.needs_id && ctx.item) return giveWay(ctx, sheet, [], "Post");
+  if (isStale(res) && body.needs_id && ctx.item) return giveWay(ctx, sheet, [], "Post", res.data && res.data.board);
   sheet.say(failText(res, TEXT_MAX.note));
   afterFailure(res, ctx, sheet);
 }
@@ -2107,7 +2112,7 @@ function untold(d) {
 }
 
 function doneSentence(kind, label, data) {
-  const d = data && typeof data === "object" ? data : {};
+  const d = obj(data);
   const done = AGENT_ACTIONS[kind].done + " " + label, not = untold(d);
   if (not) return done + (d.prompt_typed === false ? ": " : isText(d.release_failed) ? ", but " : ", but not all of it: ") + not;
   return kind === "restart" && d.resumed === true ? done + " on its own conversation" : done;
@@ -2214,7 +2219,7 @@ VIEWS.projects = (route, main) => {
       const waiting = needsFor(row.id).length;
       if (waiting) top.appendChild(el("span", "badge s-attention", "NEEDS YOU " + waiting));
       line.appendChild(top);
-      const counts = row.agents && typeof row.agents === "object" ? row.agents : {};
+      const counts = obj(row.agents);
       const words = Object.keys(counts).filter((state) => toInt(counts[state]) > 0).map((state) => toInt(counts[state]) + " " + plainText(state));
       const sub = [isText(row.group) ? plainText(row.group) : "", words.length ? words.join(" · ") : "no agents"].filter(Boolean);
       line.appendChild(el("span", "muted", sub.join(" — ")));
@@ -2603,7 +2608,7 @@ VIEWS.agent = (route, main) => {
         return before && res.error === "stale_cursor" ? load(null) : afterFailure(res, route);
       }
       const page = res.data;
-      const stamps = page.stamps && typeof page.stamps === "object" ? page.stamps : {};
+      const stamps = obj(page.stamps);
       const nodes = (Array.isArray(page.lines) ? page.lines : []).map((line, n) => renderRuns(ansiToRuns(String(line) + turnTime(stamps[n])), document));
       if (before) {
         const first = lines.firstChild;

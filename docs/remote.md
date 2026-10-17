@@ -689,7 +689,8 @@ and the note goes to the board that agent was spawned to read, where it asked;
 a row the project does not hold is a 404, and the card stays. A card of a session
 no fleet row holds (one launched by hand) names the card instead (`needs_id`), and
 the note goes to the board the machine read that card on; a card no longer in the
-feed is a 409 `stale`, and nothing is posted. A note's `task`
+feed is a 409 `stale`, and nothing is posted. Its `board` names the board the same
+note with no card goes to, which the page's Post again says. A note's `task`
 number (`12`, `#12`) is read on the board the note goes to, as the CLI's
 `--task` reads it.
 

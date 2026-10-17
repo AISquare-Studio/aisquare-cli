@@ -4918,6 +4918,50 @@ def test_a_phones_reply_to_a_card_no_row_holds_is_posted_on_the_board_it_was_rea
     assert watcher.needs_items_now() == [], "answered where it was asked"
 
 
+@pytest.mark.parametrize("to", ["coder-1", "manager"])
+def test_a_reply_to_a_card_gone_from_the_feed_names_the_board_a_post_again_goes_to(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, to: str
+) -> None:
+    """Review of #259, round 35, 3/8: refused 409 ``stale`` for a card gone from the feed, the
+    page offered Post again, a note with no card, which goes to the board of the running
+    agent ``to`` names, else to the board P's agents read (``_remote_note_board``). That is
+    often not the board the card was read on: coder-1, a session launched by hand, asked on
+    P's own board, while P's manager reads hub H. Post again posted on H, which coder-1
+    never reads, and the page said "Posted on the board". The refusal names the board Post
+    again posts on, H's, which the page says; posted, it lands there."""
+    monkeypatch.delenv("AISQUARE_TEAM_HUB", raising=False)
+    with store_session() as store:
+        p = store.onboard_project(_rooted(tmp_path / "p"))
+        hub = _rooted(tmp_path / "hub")
+        store.ensure_project(hub)
+        _seat_up(store, _manager_of("p"), p, hub)
+        _seat_up(store, _Seat("p", "coder-1", asks=True, rowed=False), p, p)
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path / "dist")
+    client = make_client(app)
+    assert unlock(client, runtime).status_code == 200
+    runtime.set_allow_write(True)
+    app.kit.lane_state["needs"] = RemoteNeedsWatcher(
+        app.kit, sources=remote_needs.live_needs_sources
+    )
+    url = f"{base(runtime)}/api/note"
+    reply = {"text": "Postgres", "kind": "note", "project": p.id, "to": to}
+
+    gone = client.post(url, json={**reply, "needs_id": "ny_0000000000000000"})
+
+    assert (gone.status_code, gone.json()["error"]) == (409, "stale"), gone.text
+    assert gone.json()["board"] == "hub", "the manager's board, and the one with no such agent"
+    posted = client.post(url, json=reply)  # Post again: no card
+    assert posted.status_code == 200, posted.text
+    with store_session() as store:
+        noted = {
+            board.id: [e.text for e in store.recent_events(board.id, limit=9) if e.kind == "note"]
+            for board in (p, hub)
+        }
+    assert noted == {p.id: [], hub.id: ["Postgres"]}, "where the refusal said it goes"
+
+
 def _hubbed_tasks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remote: str, *, end: str | None = None
 ) -> tuple[ProjectInfo, ProjectInfo, TeamTask]:

@@ -2680,7 +2680,9 @@ def test_a_reply_to_a_card_gone_from_the_feed_gives_way_and_posts_again_with_no_
     ``stale`` once the machine's feed no longer holds it, and the page said so as any
     failure: the card stayed, still offering Reply, and every Post was refused the same way
     until the next needs frame. It gives way as a Tell's does: the card is said gone, and
-    Post again goes as a note with no card, on the board the machine picks for one."""
+    Post again goes as a note with no card, on the board the machine picks for one, which the
+    sheet names as the refusal does: often not the board the card was read on, where the
+    asker reads (round 35, 3/8)."""
     replies = boot_report["crewReplies"]
     noted = {"text": "Take T-4.", "kind": "note", "project": "prj_x", "to": "coder-1"}
     card = {**noted, "needs_id": "ny_00000000000000c3"}
@@ -2690,7 +2692,10 @@ def test_a_reply_to_a_card_gone_from_the_feed_gives_way_and_posts_again_with_no_
         "noted": [card],
         "toast": "",
         "dismissed": [],
-        "said": "No longer needs you: nothing waits on coder-1 now. Post again to send it anyway.",
+        "said": (
+            "No longer needs you: nothing waits on coder-1 now. Post again to send it to hub's "
+            "board anyway."
+        ),
     }
     assert replies["rowlessWentThenPosted"] == {
         "title": "Reply on the board",

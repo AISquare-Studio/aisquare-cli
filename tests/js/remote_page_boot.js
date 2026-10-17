@@ -3043,8 +3043,10 @@ async function crewReplies() {
   const stale = (message, current) => () => ({ status: 409, json: { error: "stale", message, current } });
   const ended = stale("there is no agent 'coder-1' in proj now — nothing was done", { agent_id: null });
   const went = stale("coder-1 no longer shows what that card was about — nothing was done", []);
-  // As the machine refuses a Reply that names a card its feed no longer holds.
-  const wentNote = stale("that card is gone from the feed — nothing was posted (the 'needs_id' field)", []);
+  // As the machine refuses a Reply that names a card its feed no longer holds, naming the
+  // board the note goes to with no card.
+  const gone = stale("that card is gone from the feed — nothing was posted (the 'needs_id' field)", []);
+  const wentNote = () => Object.assign(gone(), { json: Object.assign(gone().json, { board: "hub" }) });
   return {
     typed: await reply(crew, answered(true, "typed into its pane (it was waiting)"), "Tell"),
     filed: await reply(crew, answered(false, "it is working — filed as board note #12 to coder-1"), "Tell"),

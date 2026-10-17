@@ -856,11 +856,13 @@ def _remote_reply_board(target: ProjectInfo, agent_id: str) -> str:
     return _board_of_row(row)
 
 
-def _remote_card_board(target: ProjectInfo, needs_id: str) -> str:
+def _remote_card_board(target: ProjectInfo, needs_id: str, to: str | None) -> str:
     """The board a phone's reply to a card of a session no row holds goes to: the one the card
     was read on (``NeedsItem.board``), as the needs feed this server holds has the card by
     its id (``needs_lookup``). A card the feed no longer has, another project's, or one that
-    is no board question or result, is a 409 ``stale``, and nothing is written.
+    is no board question or result, is a 409 ``stale``, and nothing is written. The 409's
+    ``board`` names the board the same note with no card goes to (:func:`_remote_note_board`
+    for ``to``), which the page's Post again sends.
 
     Such a card's Reply named only its author, and with no running agent of that label the
     note went to the board the project's manager reads (:func:`_remote_note_board`). Under a
@@ -870,7 +872,11 @@ def _remote_card_board(target: ProjectInfo, needs_id: str) -> str:
     of #259, round 32, 1/9; a card with a row names it, :func:`_remote_reply_board`). Sent
     to the page in each card and back in each Reply, the board was the client's to name: a
     body naming project A and B's board posted on B's with A's root, checked only against
-    every board a phone may reach (round 33, 9/10)."""
+    every board a phone may reach (round 33, 9/10).
+
+    Unnamed, that board was often not the one the card was read on, and Post again sent the
+    note to it, which the asker never reads, while the page said "Posted on the board"
+    (round 35, 3/8): the page now says which board it posts on."""
     from aisquare.services import remote_needs
 
     kit = _WRITE_KIT.get()
@@ -878,8 +884,28 @@ def _remote_card_board(target: ProjectInfo, needs_id: str) -> str:
     item = None if found is None else found[0]
     if item is None or item.project_id != target.id or item.board is None:
         said = "that card is gone from the feed — nothing was posted (the 'needs_id' field)"
-        raise RequestError(409, "stale", said, current=[])
+        raise RequestError(
+            409, "stale", said, current=[], board=_remote_note_board_name(target, to)
+        )
     return item.board
+
+
+def _remote_note_board_name(target: ProjectInfo, to: str | None) -> str | None:
+    """The name of the board a note to ``to`` naming no card, row or session goes to
+    (:func:`_remote_note_board`; with none, the one ``asq note`` in ``target``'s root
+    resolves, :func:`_remote_board_project`); ``None`` for a root that cannot be looked at."""
+    from aisquare.core.store import store_session
+    from aisquare.services import project as project_service
+
+    board = _remote_note_board(target, to)
+    if board is None:
+        try:
+            return project_service.display_name(_remote_board_project(target.root))
+        except OSError:
+            return None
+    with store_session() as store:
+        found = store.get_project(board, include_forgotten=True)
+    return project_service.display_name(found) if found is not None else board
 
 
 def _remote_number_board(store: ContextStore, session: str | None, project: str | None) -> str:
@@ -3746,7 +3772,7 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
                 if replying is not None:
                     board = _remote_reply_board(target, replying)
                 elif card is not None:
-                    board = _remote_card_board(target, card)
+                    board = _remote_card_board(target, card, to)
                 elif session is None:
                     # The addressed agent's, else the Board tab's. A project with no live
                     # rows is resolved in its root as `asq note` there does, which refuses

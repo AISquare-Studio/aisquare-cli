@@ -459,3 +459,41 @@ def test_a_real_uv_keeps_a_tool_installed_with_serve_whole_when_the_hint_is_foll
     (site,) = tool.glob("lib/python*/site-packages")
     names = {dist.metadata["Name"] for dist in importlib.metadata.distributions(path=[str(site)])}
     assert {"aisquare-cli", "starlette", "mcp", "tiktoken", "llm"} <= names
+
+
+@pytest.mark.parametrize(
+    ("route", "command"),
+    [
+        ("uv tool", "uv tool install --python 3.13 --with tiktoken 'aisquare-cli[remote]'"),
+        ("pipx", "pipx inject aisquare-cli segno"),
+        ("venv made by uv", "uv pip install --python '{python}' 'aisquare-cli[remote]'"),
+    ],
+)
+def test_a_qr_without_segno_names_the_command_that_puts_it_back_in_the_install_that_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, route: str, command: str
+) -> None:
+    """Review of #259, round 39, 8/9: the R panel's QR said "QR unavailable — pip install
+    segno". segno is a core dependency, missing only from a damaged install, and the install
+    the docs give, a uv tool, has no pip: the command put segno into some other Python, and
+    the panel still showed no QR. It names the command for the install that runs, as the
+    remote extra's notice does: installed again, a uv tool syncs what it lacks."""
+    from aisquare.cli.ui.views import remote as remote_view
+
+    prefix = tmp_path / "a venv with a space"
+    prefix.mkdir()
+    if route == "uv tool":
+        (prefix / "uv-receipt.toml").write_text(INSTALL_SH_RECEIPT)
+    elif route == "pipx":
+        (prefix / "pipx_metadata.json").write_text("{}")
+    else:
+        (prefix / "pyvenv.cfg").write_text(
+            f"home = /usr/bin\nuv = 0.12.19\nversion_info = {PYTHON}\n"
+        )
+    _installed(monkeypatch, prefix, missing=("segno",))
+    monkeypatch.setitem(sys.modules, "segno", None)  # `import segno` raises ImportError
+
+    art = remote_view.qr_art("https://abcd-12.ngrok-free.app/r/AbCdEfGhIjKlMnOpQrStUv")
+
+    said = command.format(python=prefix / "bin" / "python")
+    assert art.plain == f"QR unavailable: this install lacks segno — {said}"
+    assert not art.style, "the notice is plain, not the QR's colours"

@@ -6322,6 +6322,12 @@ def remote_install_hint() -> str:
     quotes cannot come first as it is in both of that platform's shells: PowerShell reads
     a quoted first word as a string, not a program, and needs ``&`` before it, which
     cmd.exe refuses. That command is PowerShell's, saying what cmd.exe drops.
+
+    It puts back segno, the R panel's QR, too: a core dependency, missing only from a
+    damaged install, which ``pip install segno`` sent to whichever Python ``pip`` is, never
+    a uv tool's (review of #259, round 39, 8/9). A uv tool installed again syncs what its
+    environment lacks (measured with uv 0.12.19), pip installs what a requirement it already
+    has needs, and pipx is told to inject it by name.
     """
     import importlib.util
     import sys
@@ -6332,7 +6338,8 @@ def remote_install_hint() -> str:
     if (prefix / "uv-receipt.toml").is_file():
         return _remote_uv_tool_hint(prefix / "uv-receipt.toml")
     if (prefix / "pipx_metadata.json").is_file():
-        missing = [name for name in REMOTE_EXTRA if importlib.util.find_spec(name) is None]
+        needed = (*REMOTE_EXTRA, "segno")
+        missing = [name for name in needed if importlib.util.find_spec(name) is None]
         return f"pipx inject {DISTRIBUTION} {' '.join(missing or REMOTE_EXTRA)}"
     python = _remote_shell_word(sys.executable)
     extra = _remote_shell_word(f"{DISTRIBUTION}[remote]")

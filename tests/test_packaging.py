@@ -46,8 +46,8 @@ def test_the_base_install_gains_no_dependencies() -> None:
 
     ``segno`` (pure python, typed, one module) is the Remote modal's QR. It is
     imported lazily by the QR renderer alone (``cli/ui/views/remote.py``), so the
-    hook path never loads it; when it is absent the modal says "QR unavailable —
-    pip install segno" instead of failing."""
+    hook path never loads it; when it is absent the modal says the QR is unavailable, and the
+    command that puts segno back in the install that runs, instead of failing."""
     import re
     import tomllib
 

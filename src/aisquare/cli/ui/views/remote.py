@@ -34,9 +34,12 @@ from aisquare.cli.ui.remote_control import (
     RemoteController,
 )
 from aisquare.cli.ui.ticks import while_running
-from aisquare.services.remote_server import _remote_instant
+from aisquare.services.remote_server import _remote_instant, remote_install_hint
 
-QR_UNAVAILABLE = "QR unavailable — pip install segno"
+QR_UNAVAILABLE = "QR unavailable: this install lacks segno"
+"""The QR's notice, before the command that puts segno back in the install that runs
+(``remote_install_hint``). It said ``pip install segno``, which the install the docs give, a
+uv tool, cannot follow: its environment has no pip (review of #259, round 39, 8/9)."""
 LOCAL_ONLY = (
     "this machine only: a phone needs ngrok's link, which shows here, with its QR, once ngrok is up"
 )
@@ -61,7 +64,7 @@ white", which reverses it in every theme."""
 def qr_art(url: str) -> Text:
     """The QR for ``url`` in :data:`QR_COLOURS`; the notice, plain, when segno is absent."""
     art = qr_text(url)
-    return Text(art) if art == QR_UNAVAILABLE else Text(art, style=QR_COLOURS)
+    return Text(art) if art.startswith(QR_UNAVAILABLE) else Text(art, style=QR_COLOURS)
 
 
 def qr_text(url: str) -> str:
@@ -69,7 +72,7 @@ def qr_text(url: str) -> str:
     try:
         import segno
     except ImportError:
-        return QR_UNAVAILABLE
+        return f"{QR_UNAVAILABLE} — {remote_install_hint()}"
     buffer = io.StringIO()
     segno.make(url, error="l").terminal(out=buffer, compact=True, border=1)
     return buffer.getvalue().rstrip("\n")

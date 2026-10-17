@@ -7,7 +7,7 @@ import os
 import shutil
 import stat
 import subprocess
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
@@ -221,6 +221,10 @@ class Frees(NamedTuple):
     """Its ``project forget``: a stopped row starts on the hub again at a restart."""
 
 
+BoardRows = Mapping[str, Sequence[FleetAgent]]
+"""The fleet rows that hold a board (:func:`reading_rows`), by the board each recorded."""
+
+
 class BoardReader(NamedTuple):
     """A project whose fleet rows hold another's board, as a hub's (:func:`_board_readers`)."""
 
@@ -430,7 +434,7 @@ def forget_project(project: ProjectInfo, *, purge: bool = False) -> ProjectForge
 def _busy(
     store: ContextStore,
     project: ProjectInfo,
-    readers: Sequence[FleetAgent] | None = None,
+    readers: BoardRows | None = None,
     *,
     live: Sequence[FleetAgent] | None = None,
     dropping: Collection[str] = (),
@@ -457,7 +461,7 @@ def _busy(
 
 
 def _holds(
-    store: ContextStore, projects: Sequence[ProjectInfo], readers: Sequence[FleetAgent]
+    store: ContextStore, projects: Sequence[ProjectInfo], readers: BoardRows
 ) -> dict[str, ProjectBusyError | None]:
     """What holds each of ``projects`` (:func:`_busy`), by id, when one prune forgets every
     one nothing holds: decided over them all, against the store as it is before any goes.
@@ -490,7 +494,7 @@ def forget_refusals(
     projects: Sequence[ProjectInfo],
     *,
     dropping: Collection[str] = (),
-    readers: Sequence[FleetAgent] | None = None,
+    readers: BoardRows | None = None,
 ) -> dict[str, ProjectBusyError]:
     """Why ``project forget`` of each of ``projects`` would be refused (:func:`_busy`), by id,
     for each one it would, with the projects of ``dropping`` forgotten first (as a prune
@@ -507,23 +511,32 @@ def forget_refusals(
     return {project_id: busy for project_id, busy in refused.items() if busy is not None}
 
 
-def reading_rows(store: ContextStore) -> list[FleetAgent]:
+def reading_rows(store: ContextStore) -> dict[str, list[FleetAgent]]:
     """The fleet rows, in every project, whose recorded board holds a project
     (:func:`_board_readers`): the live ones, and each stopped one a ``restart`` acts on, the
-    newest of its label (``ContextStore.fleet_label_heads``).
+    newest of its label (``ContextStore.fleet_label_heads``). By the board each recorded
+    (``FleetAgent.board``, its own project's for none), oldest first on each.
 
     A restart of a stopped row starts its replacement under the hub its launch recorded
     (``fleet._board_and_hub``), whose ``launch`` adds the board it joins (``team on``). Asked
     of live rows alone, a hub whose readers' agents had all stopped was forgotten, and a
     Restart of one brought it back on the list with nothing to say why (review of #259,
-    round 33, 3/10)."""
-    return store.fleet_label_heads()
+    round 33, 3/10).
+
+    Grouped once here: a flat list, each lookup walked every row of every project, for each
+    candidate of a prune on each pass of its holds (:func:`_holds`) and for each captured
+    row doctor asks of, 1.5 M row checks a pass for 300 captured rows over 5 000 heads, at
+    each ``asq`` start (round 37, 6/7)."""
+    by_board: dict[str, list[FleetAgent]] = {}
+    for row in store.fleet_label_heads():
+        by_board.setdefault(row.board or row.project_id, []).append(row)
+    return by_board
 
 
 def _board_readers(
     store: ContextStore,
     project: ProjectInfo,
-    readers: Sequence[FleetAgent] | None = None,
+    readers: BoardRows | None = None,
     dropping: Collection[str] = (),
 ) -> list[BoardReader]:
     """Every other project whose fleet rows that hold a board (:func:`reading_rows`, or
@@ -534,7 +547,7 @@ def _board_readers(
     Every one: the first alone, ``forget`` of a hub two projects read named one of them, and
     the forget it advised ended in a refusal naming the other (review of #259, round 35,
     2/8)."""
-    rows = reading_rows(store) if readers is None else readers
+    rows = (reading_rows(store) if readers is None else readers).get(project.id, ())
     registered: dict[str, ProjectInfo | None] = {}
 
     def known(project_id: str) -> ProjectInfo | None:
@@ -544,13 +557,9 @@ def _board_readers(
 
     reading: dict[str, list[FleetAgent]] = {}
     for row in rows:
-        if (
-            row.project_id != project.id
-            and (row.board or row.project_id) == project.id
-            and (
-                row.ended_at is None
-                or (row.project_id not in dropping and known(row.project_id) is not None)
-            )
+        if row.project_id != project.id and (
+            row.ended_at is None
+            or (row.project_id not in dropping and known(row.project_id) is not None)
         ):
             reading.setdefault(row.project_id, []).append(row)
     found: list[BoardReader] = []
@@ -570,7 +579,7 @@ def prune_candidates(
     worktrees: bool,
     captured_older_than: int | None = None,
     store: ContextStore | None = None,
-    readers: Sequence[FleetAgent] | None = None,
+    readers: BoardRows | None = None,
     refused: dict[str, ProjectBusyError] | None = None,
 ) -> list[PruneCandidate]:
     """The registrations ``project prune`` would drop, and why — nothing is changed.

@@ -285,6 +285,52 @@ def test_forget_refuses_a_hub_a_restart_of_another_projects_stopped_agent_reads_
     assert _listed(runner) == set()
 
 
+class _Unwalked(list[FleetAgent]):
+    """Another board's rows, which a lookup of one board must not walk."""
+
+    def __iter__(self) -> Any:
+        raise AssertionError("a lookup of one board walked another board's rows")
+
+
+def test_what_reads_a_board_is_looked_up_by_the_board_not_over_every_row(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 37, 6/7: ``_board_readers`` walked every row that holds a board,
+    in every project, for each project it was asked of: each candidate of a prune on each
+    pass of its holds, and each captured row doctor asks of at every ``asq`` start, 1.5 M
+    row checks a pass for 300 rows over 5 000 heads. The rows are grouped by the board each
+    recorded once (``reading_rows``), and a lookup reads only its board's."""
+    from aisquare.services import project as project_service
+
+    tools = _register(runner, monkeypatch, work_dir / "tools")
+    api = _register(runner, monkeypatch, work_dir / "api")
+    web = _register(runner, monkeypatch, work_dir / "web")
+    others = [_register(runner, monkeypatch, work_dir / f"other{n}") for n in range(3)]
+    with store_session() as store:
+        manager = store.upsert_fleet_agent(
+            _agent(api, "manager").model_copy(update={"board": tools})
+        )
+        store.end_fleet_agent(manager.id, exit_status=0)
+        store.upsert_fleet_agent(_agent(web, "coder1").model_copy(update={"board": tools}))
+        for other in others:
+            store.upsert_fleet_agent(_agent(other, "coder1"))
+        known = {each.id: each for each in store.list_projects(all=True)}
+        rows = project_service.reading_rows(store)
+        assert set(rows) == {tools, *others}, "by the board each row recorded"
+        assert [(row.project_id, row.label) for row in rows[tools]] == [
+            (api, "manager"),
+            (web, "coder1"),
+        ]
+        readers = {board: rows[board] if board == tools else _Unwalked() for board in rows}
+
+        refused = project_service.forget_refusals(
+            store, [known[tools], known[api]], readers=readers
+        )
+
+    assert list(refused) == [tools], "nothing reads api's board"
+    assert [reader.project.id for reader in refused[tools].readers] == [api, web]
+
+
 def test_forget_of_a_hub_two_projects_read_names_both_with_what_frees_each(
     runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

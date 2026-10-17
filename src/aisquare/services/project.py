@@ -174,8 +174,9 @@ def resolve(ref: str) -> ProjectInfo:
     a nickname (only when nothing else matches: :meth:`ContextStore.find_projects`).
 
     A path is tried first whenever ``ref`` looks like one — it exists, or it
-    is spelled with a separator or a leading dot — and is looked up by the id
-    its resolved root would have, which is the derivation registration used;
+    is spelled with a separator (``/`` or this platform's: a gone root that a prune's
+    ``project forget`` names on Windows is ``C:\\...``) or a leading dot — and is looked
+    up by the id its resolved root would have, which is the derivation registration used;
     then, if the directory exists, by the root git resolves it to, so a
     worktree path finds its principal. A path that names no registration falls
     through to the name lookup: ``aisquare-cli`` is a directory AND a name.
@@ -189,7 +190,7 @@ def resolve(ref: str) -> ProjectInfo:
     """
     with store_session() as store:
         candidate = Path(ref).expanduser()
-        if candidate.exists() or "/" in ref or ref.startswith("."):
+        if candidate.exists() or any(sep in ref for sep in {"/", os.sep}) or ref.startswith("."):
             try:
                 root = _resolved(candidate)
             except OSError:  # a symlink loop (ELOOP)

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import shlex
 import shutil
 import sqlite3
 import sys
@@ -1803,13 +1804,20 @@ def test_a_worktrees_prune_says_a_worktree_whose_tree_went_is_kept_for_its_root_
 
     With this run's ``--purge`` (round 40, 2/6): named without it, the prune it advised after
     a purge only forgot the row, its entries, prompts, board rows and data directory stayed,
-    and nothing could purge it then (no list shows a forgotten row, and its root is gone)."""
+    and nothing could purge it then (no list shows a forgotten row, and its root is gone).
+
+    Each row's own ``project forget`` (round 41, 5/6): ``prune --missing`` acts on every
+    registration whose root is missing, and following it purged another one too, which the
+    line did not count."""
     from aisquare.core.store import store_session
     from aisquare.services import project as project_service
 
     repo, worktree = repo_and_worktree
     wt_id = _register_worktree_as_its_own_project(worktree)
     _register(runner, monkeypatch, repo)
+    other = _register(runner, monkeypatch, repo.parent / "other")
+    monkeypatch.chdir(repo)
+    shutil.rmtree(repo.parent / "other")  # missing too, and no worktree: not this prune's
     real = project_service.prune_candidates
 
     def the_prompt_sat_open(**kwargs: Any) -> list[Any]:
@@ -1829,17 +1837,19 @@ def test_a_worktrees_prune_says_a_worktree_whose_tree_went_is_kept_for_its_root_
     said = " ".join(result.stdout.split())
     assert marker == "·" and "(kept: its root went since the plan)" in said, said
     assert "kept 1 whose root went since the plan" in said, said
-    advised = said.split("drop them: ", 1)[1].split(" --yes")[0].split()
-    assert advised == ["aisquare", "project", "prune", "--missing", *flags], said
+    [hint] = [line for line in result.stdout.splitlines() if "drop it: " in line]
+    advised = shlex.split(hint.split("drop it: ", 1)[1])
+    assert advised == ["aisquare", "project", "forget", *flags, str(worktree.resolve())], hint
     assert "no longer stale" not in said, said
 
     monkeypatch.setattr(project_service, "prune_candidates", real)
-    followed = runner.invoke(app, [*advised[1:], "--yes"])
+    followed = runner.invoke(app, advised[1:])
 
     assert followed.exit_code == 0, followed.output
     with store_session() as store:
         assert store.get_project(wt_id) is None, "dropped"
         kept = store.get_project(wt_id, include_forgotten=True)
+        assert store.get_project(other) is not None, "the other missing root is not this one"
     assert (kept is None) is purge, "purged, or only forgotten"
 
 

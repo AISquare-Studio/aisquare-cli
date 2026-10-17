@@ -489,12 +489,24 @@ def emit_prune(report: ProjectPruneReport) -> None:
         stale_no_more = len(report.changed) - len(report.root_gone)
         console.print(f"  kept {stale_no_more} that changed since the plan: no longer stale")
     if report.root_gone:
-        # With this run's --purge: a plain prune only forgets them, and nothing lists a
-        # forgotten row to purge it after (round 40, 2/6).
-        purge = " --purge" if report.purged else ""
+        # Each row's own forget, as doctor's capture-off line names them: `prune --missing`
+        # drops every registration whose root is missing, not only these, and under --purge
+        # deletes each one's entries, prompts and data directory (round 41, 5/6). With this
+        # run's --purge: a plain forget only forgets them, and nothing lists a forgotten row
+        # to purge it after (round 40, 2/6).
+        from aisquare.services import install_route  # lazy: see project_for_ref
+
+        roots = {candidate.project.id: candidate.project.root for candidate in report.candidates}
+        purge = ["--purge"] if report.purged else []
+        forgets = [
+            install_route.command_line(["aisquare", "project", "forget", *purge, str(roots[gone])])
+            for gone in report.root_gone
+        ]
+        drop = f"drop it: {forgets[0]}" if len(forgets) == 1 else f"drop them: {'; '.join(forgets)}"
         console.print(
             f"  kept {len(report.root_gone)} whose root went since the plan, which this prune "
-            f"did not ask for — drop them: aisquare project prune --missing{purge}"
+            f"did not ask for — {drop}",
+            markup=False,
         )
     if not report.purged and count:
         console.print(

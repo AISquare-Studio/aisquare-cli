@@ -499,7 +499,8 @@ all of them, and the fleet cleans up the worktrees it made.**
   with it. One stale for another reason the prune asks for is dropped under that
   reason: a worktree whose tree went is dropped as missing by a plain prune.
   Asked for `--worktrees` alone, such a worktree is kept, and the row and the
-  summary say its root went and name `aisquare project prune --missing`. Under
+  summary say its root went and name the `aisquare project forget` that drops
+  each (with `--purge` after a purging prune). Under
   `--purge`, a candidate another shell forgot meanwhile is purged if it is
   still stale, and otherwise left forgotten and said so. `--json` gains
   `changed`, the ids kept as changed since the plan, `root_gone`, those of them

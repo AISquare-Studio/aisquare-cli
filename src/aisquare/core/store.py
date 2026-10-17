@@ -1449,6 +1449,7 @@ class ContextStore(Protocol):
     def project_settings(self, key: str) -> dict[str, str]: ...
     # What the open could not converge (doctor's database row).
     def missing_schema(self) -> list[str]: ...
+    def has_table(self, table: str) -> bool: ...
     def close(self) -> None: ...
 
 
@@ -1760,6 +1761,18 @@ def _scope_filter(
     return [f"{pool_col} = 'user'"], []
 
 
+#: When each table's rows last touched a project, keyed by the table it reads
+#: (:meth:`SqliteStore.project_activity`).
+_ACTIVITY = {
+    "entry": "SELECT project_id, updated_at FROM entry WHERE project_id IS NOT NULL",
+    "prompt": "SELECT project_id, created_at FROM prompt WHERE project_id IS NOT NULL",
+    "team_session": "SELECT project_id, last_seen_at FROM team_session",
+    "team_task": "SELECT project_id, updated_at FROM team_task",
+    "team_event": "SELECT project_id, created_at FROM team_event",
+    "fleet_agent": "SELECT project_id, created_at FROM fleet_agent",
+}
+
+
 class SqliteStore:
     """The SQLite implementation of :class:`ContextStore`."""
 
@@ -1774,6 +1787,7 @@ class SqliteStore:
         # read, the live-only ones doctor's own checks make included, fail with "no such
         # table: team_session" (review of #259, round 27, 5/7). Told by the names the open
         # read, not asked of ``sqlite_master`` again (round 28, 9/10).
+        self._names = frozenset(names)
         sessions = "team_session" in names
         self._fleet_agent_read = _FLEET_AGENT_READ if sessions else _FLEET_AGENT_READ_SESSIONLESS
         self._fleet_agent_board = _FLEET_AGENT_BOARD if sessions else _FLEET_AGENT_BOARD_SESSIONLESS
@@ -2189,16 +2203,17 @@ class SqliteStore:
         posted, an agent spawned. Uniform ISO strings compare lexicographically,
         which is what lets one ``MAX`` span six tables. Used to pick where the
         active pin lands when the active project is forgotten.
+
+        A table the store lacks (doctor's damaged-store case) has nothing to add: named,
+        "no such table" ended every captured-row prune, and doctor's capture-off line was
+        dropped without a word (review of #259, round 40, 1/6).
         """
+        touched = "".join(
+            f" UNION ALL {select}" for table, select in _ACTIVITY.items() if table in self._names
+        )
         rows = self._conn.execute(
             "SELECT p.id, MAX(t.at) AS at FROM project p JOIN ("
-            "  SELECT id AS project_id, created_at AS at FROM project"
-            "  UNION ALL SELECT project_id, updated_at FROM entry WHERE project_id IS NOT NULL"
-            "  UNION ALL SELECT project_id, created_at FROM prompt WHERE project_id IS NOT NULL"
-            "  UNION ALL SELECT project_id, last_seen_at FROM team_session"
-            "  UNION ALL SELECT project_id, updated_at FROM team_task"
-            "  UNION ALL SELECT project_id, created_at FROM team_event"
-            "  UNION ALL SELECT project_id, created_at FROM fleet_agent"
+            f"  SELECT id AS project_id, created_at AS at FROM project{touched}"
             ") t ON t.project_id = p.id "
             "WHERE p.forgotten_at IS NULL GROUP BY p.id"
         ).fetchall()
@@ -4319,6 +4334,12 @@ class SqliteStore:
         columns of another line's are not this build's and are never reported.
         """
         return _missing_from(self._conn, _ladder_schema())
+
+    def has_table(self, table: str) -> bool:
+        """Whether this store holds ``table``, as the open read its names: no query. A store
+        without ``team_session`` or ``team_task`` (doctor's damaged-store case) still opens,
+        and a read that only adds evidence asks this before it asks such a table."""
+        return table in self._names
 
     def close(self) -> None:
         self._conn.close()

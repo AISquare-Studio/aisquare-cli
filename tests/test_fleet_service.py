@@ -5870,6 +5870,57 @@ def test_a_080_row_whose_root_cannot_be_asked_keeps_its_board_and_fails_no_forge
         assert store.get_project(unrelated.id) is None, "forgotten"
 
 
+@pytest.mark.parametrize("table", ["team_session", "team_task"])
+def test_a_080_row_on_a_store_without_its_session_or_task_table_fails_no_forget_or_prune(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    table: str,
+) -> None:
+    """Review of #259, round 40, 1/6: the rows that hold a board asked the store whether a
+    0.8.0 row read its own board before the checkout (round 39, 1/9), and a store without
+    ``team_session`` or ``team_task`` (doctor's damaged-store case, which every fleet read
+    tolerates) raised "no such table" for a row with a session, or a task. ``project
+    forget`` of any other project and ``prune`` ended in a traceback, and doctor's
+    capture-off line was dropped without a word. That line was lost on such a store before
+    too: a captured row's last activity (``project_activity``) named both tables. A table
+    the store lacks shows nothing, and the row is read from the checkout."""
+    from aisquare.services import diagnostics
+
+    agent = _coder(project, task_id=_add_task(project, "Ship auth").id)
+    if table == "team_session":
+        _with_transcript(agent, None)  # its session, registered on its project's board
+    _as_080_left_it(agent)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    with store_session() as store:
+        unrelated = store.onboard_project(ProjectInfo(id=project_id_for(elsewhere), root=elsewhere))
+        store.ensure_project(ProjectInfo(id="prj_gone", root=tmp_path / "gone"))  # captured
+    raw = sqlite3.connect(str(paths.db_path()))
+    try:
+        raw.execute(f"DROP TABLE {table}")
+        raw.commit()
+    finally:
+        raw.close()
+
+    with store_session() as store:
+        assert not store.has_table(table) and store.has_table("fleet_agent")
+        rows = project_service.reading_rows(store)
+    [check] = diagnostics._check_captured_projects()
+    plan = project_service.prune_candidates(missing=True, worktrees=True)
+    report = project_service.prune(plan, purge=False, missing=True, worktrees=True)
+    project_service.forget_project(unrelated)
+
+    assert {board: [row.id for row in theirs] for board, theirs in rows.items()} == {
+        project.id: [agent.id]
+    }
+    assert check.detail.startswith("1 captured directory left from before project capture")
+    assert report.dropped == ["prj_gone"]
+    with store_session() as store:
+        assert store.get_project(unrelated.id) is None, "forgotten"
+
+
 @pytest.mark.parametrize("verb", ["restart", "switch"])
 def test_a_replacement_that_could_not_take_the_task_is_refused_before_the_stop(
     tmux: FakeTmux,

@@ -2493,12 +2493,14 @@ def _read_its_own_board(
 ) -> bool:
     """Whether ``agent``, a row whose board is its own project's and whose launch kept no hub,
     is shown to have read that board: its session registered on it, or the task it names is
-    on it (:func:`_replacement_board`)."""
+    on it (:func:`_replacement_board`). A store without ``team_task`` shows no task."""
     board = agent.project_id
     if session is not None and session.project_id == board:
         return True
-    return agent.task_id is not None and (
-        store.get_task(agent.task_id, project_ids=[board]) is not None
+    return (
+        agent.task_id is not None
+        and store.has_table("team_task")
+        and store.get_task(agent.task_id, project_ids=[board]) is not None
     )
 
 
@@ -2516,7 +2518,13 @@ def restart_board(store: ContextStore, agent: FleetAgent, checkouts: dict[str, s
     A root whose checkout cannot be worked out, a symlink loop (``Path.resolve`` raises on
     3.11 and 3.12) or a mount that answers ``EIO``, is no evidence either, and the row's
     board stands. Uncaught, one such project's root ended every other's ``project forget``
-    in a traceback, and doctor's capture-off line went without a word (round 39, 2/9)."""
+    in a traceback, and doctor's capture-off line went without a word (round 39, 2/9).
+
+    Nor is a table the store lacks (doctor's damaged-store case, which every fleet read
+    tolerates): without ``team_session`` the row shows no session, without ``team_task`` no
+    task, and its board is read from the checkout. Asked anyway, a 0.8.0 row with a session
+    raised "no such table" there, and the forget, the prune and doctor's line with it
+    (round 40, 1/6)."""
 
     def checkout() -> str:
         board = agent.project_id
@@ -2529,7 +2537,9 @@ def restart_board(store: ContextStore, agent: FleetAgent, checkouts: dict[str, s
         return checkouts[board]
 
     def session() -> TeamSession | None:
-        return store.get_session(agent.session_id) if agent.session_id else None
+        if not agent.session_id or not store.has_table("team_session"):
+            return None
+        return store.get_session(agent.session_id)
 
     return _replacement_board(store, agent, session, checkout)
 

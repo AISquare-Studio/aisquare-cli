@@ -1159,6 +1159,59 @@ def test_a_purge_purges_a_row_forgotten_since_the_plan_and_says_one_purged_alrea
     assert not paths.project_data_dir(ids["b"]).exists()
 
 
+@pytest.mark.parametrize("output", ["table", "json"])
+def test_a_purge_says_a_row_forgotten_since_the_plan_that_is_stale_no_more_forgotten(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch, output: str
+) -> None:
+    """Review of #259, round 39, 4/9: under ``--purge`` the run re-reads a candidate another
+    shell forgot while the confirmation sat open. One whose reason no longer held, its
+    missing root back, was counted as changed: marked · and "kept: changed since the
+    plan", and in "kept 1 that changed since the plan". Nothing kept it, and no list shows
+    it. It is left forgotten, not purged, and said forgotten since the plan."""
+    from aisquare.services import project as project_service
+
+    ids = {name: _register(runner, monkeypatch, work_dir / name) for name in ("a", "b")}
+    monkeypatch.chdir(work_dir)
+    for name in ids:
+        shutil.rmtree(work_dir / name)
+    real = project_service.prune_candidates
+
+    def the_prompt_sat_open(**kwargs: Any) -> list[Any]:
+        plan = real(**kwargs)
+        assert {c.project.id for c in plan} == set(ids.values()), "the premise"
+        with store_session() as store:
+            store.forget_project(ids["b"])  # another shell's forget
+        (work_dir / "b").mkdir()  # and its root back
+        return plan
+
+    monkeypatch.setattr(project_service, "prune_candidates", the_prompt_sat_open)
+    flags = ["--json"] if output == "json" else []
+
+    result = runner.invoke(
+        app,
+        [*flags, "project", "prune", "--missing", "--purge", "--yes"],
+        env={"COLUMNS": "400"},
+    )
+
+    assert result.exit_code == 0, result.output
+    with store_session() as store:
+        assert store.get_project(ids["b"]) is None
+        assert store.get_project(ids["b"], include_forgotten=True) is not None, "not purged"
+    if output == "json":
+        report = _json(result.stdout)
+        assert (report["dropped"], report["changed"], report["forgotten"]) == (
+            [ids["a"]],
+            [],
+            [ids["b"]],
+        )
+        return
+    marker = next(line.split() for line in result.stdout.splitlines() if ids["b"] in line)[1]
+    said = " ".join(result.stdout.split())
+    assert marker == "-" and "(gone already: forgotten since the plan)" in said, said
+    assert "changed since the plan" not in said, said
+    assert "✓ purged 1 registration" in said, said
+
+
 @pytest.mark.parametrize("held", [False, True], ids=["its reader goes", "its reader stays"])
 @pytest.mark.parametrize("hub_first", [True, False], ids=["hub first", "reader first"])
 def test_a_prune_of_a_hub_and_its_reader_decides_every_hold_before_either_goes(

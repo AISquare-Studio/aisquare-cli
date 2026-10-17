@@ -763,7 +763,10 @@ def prune(
     it was dropped anyway, and under ``--purge`` the entries just saved went with it, and
     its data directory (review of #259, round 37, 2/7). One that is a candidate still, for
     whichever reason the run asks for, goes, and the report gives it as the run read it: a
-    worktree whose tree went meanwhile is missing now (round 38, 2/4 and 4/4).
+    worktree whose tree went meanwhile is missing now (round 38, 2/4 and 4/4). One a
+    ``--purge`` finds forgotten elsewhere and no longer a candidate is left forgotten, and
+    reported so (``forgotten``): counted as changed, it was said kept, though no list shows
+    it (round 39, 4/9).
     """
     dropped: list[str] = []
     kept: list[PruneCandidate] = []
@@ -780,7 +783,12 @@ def prune(
             if (row := store.get_project(c.project.id, include_forgotten=purge)) is not None
         ]
         reread = {row.id: why(row) for row in here}
-        changed = [project_id for project_id, now in reread.items() if now is None]
+        lapsed = [project_id for project_id, now in reread.items() if now is None]
+        # Under --purge, one forgotten elsewhere meanwhile is left as it was found: not kept.
+        forgotten = [
+            project_id for project_id in lapsed if purge and store.get_project(project_id) is None
+        ]
+        changed = [project_id for project_id in lapsed if project_id not in forgotten]
         still = [now for now in reread.values() if now is not None]
         holds = _holds(store, [c.project for c in still], reading_rows(store)) if still else {}
         for candidate in still:
@@ -804,6 +812,7 @@ def prune(
         dropped=dropped,
         kept=kept,
         changed=changed,
+        forgotten=forgotten,
         dry_run=False,
         purged=purge,
         active=active,

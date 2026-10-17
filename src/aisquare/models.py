@@ -868,6 +868,11 @@ class ProjectPruneReport(BaseModel):
     """Ids NOT dropped because why each was a candidate no longer held when the run re-read
     it: added on purpose or given an entry since the plan, a root back on disk. Empty on a
     dry run."""
+    forgotten: list[str] = Field(default_factory=list)
+    """Ids a ``--purge`` run found forgotten elsewhere since the plan and no longer
+    candidates, and left as it found them: not purged, and not kept either (review of #259,
+    round 39, 4/9); one a candidate still is purged. Empty on a dry run, and without
+    ``--purge``, whose run passes over every row forgotten since."""
     dry_run: bool = True
     purged: bool = False
     active: ProjectInfo | None = None

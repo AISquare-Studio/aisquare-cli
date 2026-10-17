@@ -428,6 +428,7 @@ def emit_prune(report: ProjectPruneReport) -> None:
     # it out (review of #259, round 35, 4/8).
     dropped = set(report.dropped)
     changed = set(report.changed)
+    forgotten = set(report.forgotten)
     table = Table(show_header=True, header_style="bold")
     table.add_column("", no_wrap=True)
     table.add_column("WHY", no_wrap=True)
@@ -451,8 +452,10 @@ def emit_prune(report: ProjectPruneReport) -> None:
             # Added, given an entry or back on disk while the prompt sat open (round 37, 2/7).
             why += " (kept: changed since the plan)"
         elif not report.dry_run and project.id not in dropped:
-            # A purge purges a row forgotten since (round 36, 5/9): one it passes is gone.
-            why += f" (gone already: {'purged' if report.purged else 'forgotten'} since the plan)"
+            # A purge purges a row forgotten since (round 36, 5/9): one it passes is gone, or
+            # one no longer a candidate it left forgotten (round 39, 4/9).
+            purged = report.purged and project.id not in forgotten
+            why += f" (gone already: {'purged' if purged else 'forgotten'} since the plan)"
         marker = ""
         if not report.dry_run:
             kept_here = held is not None or project.id in changed

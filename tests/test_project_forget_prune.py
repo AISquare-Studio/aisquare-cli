@@ -1041,6 +1041,50 @@ def test_a_prune_marks_only_what_it_dropped_and_says_a_row_gone_already(
     assert "✓ forgot 2 registrations" in result.stdout
 
 
+@pytest.mark.parametrize("elsewhere", ["forget", "purge"])
+def test_a_purge_purges_a_row_forgotten_since_the_plan_and_says_one_purged_already(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch, elsewhere: str
+) -> None:
+    """Review of #259, round 36, 5/9: under ``--purge`` a candidate another shell forgot while
+    the confirmation sat open was passed over as gone: "gone already: forgotten since the
+    plan", beside "✓ purged 2 registrations", its rows and data directory kept, though their
+    deletion was what ``--purge`` asked, and no later prune lists a forgotten row to purge.
+    It is purged with the others; one purged already is said so."""
+    from aisquare.services import project as project_service
+
+    ids = {name: _register(runner, monkeypatch, work_dir / name) for name in ("a", "b", "c")}
+    monkeypatch.chdir(work_dir)
+    for name in ids:
+        shutil.rmtree(work_dir / name)
+    paths.project_data_dir(ids["b"]).mkdir(parents=True, exist_ok=True)
+    real = project_service.prune_candidates
+
+    def the_prompt_sat_open(**kwargs: Any) -> list[Any]:
+        plan = real(**kwargs)
+        with store_session() as store:
+            getattr(store, f"{elsewhere}_project")(ids["b"])  # another shell's
+        return plan
+
+    monkeypatch.setattr(project_service, "prune_candidates", the_prompt_sat_open)
+
+    result = runner.invoke(
+        app, ["project", "prune", "--missing", "--purge", "--yes"], env={"COLUMNS": "400"}
+    )
+
+    assert result.exit_code == 0, result.output
+    marker = next(line.split() for line in result.stdout.splitlines() if ids["b"] in line)[1]
+    said = " ".join(result.stdout.split())
+    with store_session() as store:
+        assert store.get_project(ids["b"], include_forgotten=True) is None
+    if elsewhere == "purge":
+        assert marker == "-" and "(gone already: purged since the plan)" in said, said
+        assert "✓ purged 2 registrations" in said, said
+        return
+    assert marker == "✓" and "gone already" not in said, result.stdout
+    assert "✓ purged 3 registrations" in said, said
+    assert not paths.project_data_dir(ids["b"]).exists()
+
+
 @pytest.mark.parametrize("held", [False, True], ids=["its reader goes", "its reader stays"])
 @pytest.mark.parametrize("hub_first", [True, False], ids=["hub first", "reader first"])
 def test_a_prune_of_a_hub_and_its_reader_decides_every_hold_before_either_goes(

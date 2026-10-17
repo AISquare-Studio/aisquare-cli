@@ -445,7 +445,8 @@ def emit_prune(report: ProjectPruneReport) -> None:
         elif held is not None:
             why += f" (kept: {held.live_agents} live agent(s))"
         elif not report.dry_run and project.id not in dropped:
-            why += " (gone already: forgotten since the plan)"
+            # A purge purges a row forgotten since (round 36, 5/9): one it passes is gone.
+            why += f" (gone already: {'purged' if report.purged else 'forgotten'} since the plan)"
         marker = ""
         if not report.dry_run:
             marker = "✓" if project.id in dropped else "·" if held is not None else "-"

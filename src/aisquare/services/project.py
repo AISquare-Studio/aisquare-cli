@@ -673,13 +673,21 @@ def prune(candidates: list[PruneCandidate], *, purge: bool) -> ProjectPruneRepor
     that one busy project does not stop the other three hundred. What holds it is
     re-read here, not trusted from the plan, since a prompt may have sat open, and decided
     over every candidate before any goes (:func:`_holds`), as the plan was.
+
+    A purge purges a candidate forgotten elsewhere while the prompt sat open too: passed
+    over as gone, its rows and data directory stayed, beside "✓ purged", and no later prune
+    lists a forgotten row to purge it (review of #259, round 36, 5/9).
     """
     dropped: list[str] = []
     kept: list[PruneCandidate] = []
     with store_session() as store:
         active_id = active_project(store).id
         # Gone since the plan was made: nothing to drop, and no hold to decide.
-        here = [c for c in candidates if store.get_project(c.project.id) is not None]
+        here = [
+            c
+            for c in candidates
+            if store.get_project(c.project.id, include_forgotten=purge) is not None
+        ]
         holds = _holds(store, [c.project for c in here], reading_rows(store)) if here else {}
         for candidate in here:
             project_id = candidate.project.id

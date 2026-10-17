@@ -2514,6 +2514,10 @@ def restart_board(store: ContextStore, agent: FleetAgent, checkouts: dict[str, s
     caller asking of every row (``project.reading_rows``). Filed under the row's own board, a
     row that read ``repo``'s held ``repo/api``'s instead, and ``project forget repo`` was not
     refused, though a restart of it brought ``repo`` back (review of #259, round 38, 3/4).
+    Asked first once it is known: the rule's answer is the row's board or the checkout, so
+    where the two are one, the row is filed with no lookup. Asked of the store first, every
+    0.8.0 row ran a session read, and a task read, the checkout already settled, though
+    before round 39 a project's rows after its first ran none (round 40, 4/6).
 
     A root whose checkout cannot be worked out, a symlink loop (an ``OSError`` on every
     Python, as ``find_project_root`` resolves it: round 40, 3/6) or a mount that answers
@@ -2542,6 +2546,9 @@ def restart_board(store: ContextStore, agent: FleetAgent, checkouts: dict[str, s
             return None
         return store.get_session(agent.session_id)
 
+    known = checkouts.get(agent.project_id)
+    if known is not None and known == _board_of_row(agent):
+        return known
     return _replacement_board(store, agent, session, checkout)
 
 

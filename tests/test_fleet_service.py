@@ -5789,6 +5789,47 @@ def test_a_080_row_that_shows_it_read_its_own_board_is_filed_without_a_git_call(
     assert asked == [], "the store said: no git"
 
 
+def test_a_projects_rows_after_its_checkout_is_known_are_filed_with_no_lookup(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 40, 4/6: since round 39 the rows that hold a board asked the
+    store of every 0.8.0 row (its session, then its task) before the checkout, and asked it
+    again for each row the checkout had already settled: a project rooted at its own
+    checkout, whose rows after its first ran no query before. Once a project's checkout is
+    known, a row whose board it is is filed with no lookup."""
+    from aisquare.core import orchestrator
+
+    rows = [_coder(project) for _ in range(3)]
+    for each in rows:
+        _as_080_left_it(each)  # no session registered, no task: the checkout settles it
+    asked: list[str] = []
+    real = orchestrator.directory_project
+
+    def counted(cwd: Path | None = None) -> ProjectInfo:
+        asked.append("git")
+        return real(cwd)
+
+    def counting(name: str) -> Callable[..., Any]:
+        read = getattr(SqliteStore, name)
+
+        def lookup(self: SqliteStore, *args: Any, **kwargs: Any) -> Any:
+            asked.append(name)
+            return read(self, *args, **kwargs)
+
+        return lookup
+
+    for name in ("get_session", "get_task"):
+        monkeypatch.setattr(SqliteStore, name, counting(name))
+    monkeypatch.setattr(orchestrator, "directory_project", counted)
+    with store_session() as store:
+        filed = project_service.reading_rows(store)
+
+    assert {board: [row.id for row in theirs] for board, theirs in filed.items()} == {
+        project.id: [row.id for row in rows]
+    }
+    assert asked == ["get_session", "git"], "the first row alone asks"
+
+
 @pytest.mark.parametrize("shape", ["shows nothing", "session", "task", "hub kept"])
 def test_the_holds_and_a_restart_read_a_rows_board_by_one_rule(
     tmux: FakeTmux,

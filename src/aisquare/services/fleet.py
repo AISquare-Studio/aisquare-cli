@@ -2435,9 +2435,36 @@ def _board_for(project: ProjectInfo) -> str:
     principal checkout's board (review of #259, round 25, 3/10).
 
     Asked once, at spawn, and recorded on the row (``FleetAgent.board``); every later
-    question of the row's board asks the row (:func:`_board_of_row`).
+    question of the row's board asks the row (:func:`_board_of_row`). A root whose checkout
+    cannot be worked out is a ``FleetError`` (:func:`_unaskable_root`).
     """
-    return orchestrator.team_project(project.root).id
+    try:
+        return orchestrator.team_project(project.root).id
+    except OSError as exc:
+        raise _unaskable_root(project, exc) from exc
+
+
+def _checkout_board(project: ProjectInfo) -> str:
+    """The board of the checkout ``project``'s root belongs to
+    (:func:`orchestrator.directory_project`), where a window with no hub reads; a root whose
+    checkout cannot be worked out is a ``FleetError`` (:func:`_unaskable_root`)."""
+    try:
+        return orchestrator.directory_project(project.root).id
+    except OSError as exc:
+        raise _unaskable_root(project, exc) from exc
+
+
+def _unaskable_root(project: ProjectInfo, exc: OSError) -> FleetError:
+    """The refusal of a command that has to work out ``project``'s board from its root and
+    cannot: a root that became a symlink loop raises ``OSError`` on every Python (round 40,
+    3/6), and so does one under a folder this user may not search (round 42, 5/11). The
+    ``fleet`` commands catch ``FleetError`` alone, and ``fleet pause``, ``restart`` and
+    ``switch`` ended in a traceback, ``--json`` printing nothing (review of #259, round 43,
+    4/7)."""
+    return FleetError(
+        f"the board of {_name(project)} cannot be worked out: its root {project.root} cannot "
+        f"be looked at ({exc.strerror or exc})"
+    )
 
 
 def _board_of_row(agent: FleetAgent) -> str:
@@ -2496,7 +2523,7 @@ def _board_and_hub(
     spec = agent.launch_spec
     if spec is not None and spec.hub is not None:
         return _board_of_row(agent), spec.hub
-    checkout = orchestrator.directory_project(project.root).id
+    checkout = _checkout_board(project)
     board = _replacement_board(store, agent, lambda: session, lambda: checkout)
     if board == checkout:
         return checkout, ""
@@ -7463,7 +7490,7 @@ def _pause_homes(project: ProjectInfo) -> set[str]:
     Asks git, before the store opens, and only to set the pause: reading or clearing it
     finds it by name (:func:`_pause_where_on`).
     """
-    checkout = orchestrator.directory_project(project.root).id
+    checkout = _checkout_board(project)
     return {checkout, _board_for(project)} if orchestrator.team_hub() is not None else {checkout}
 
 

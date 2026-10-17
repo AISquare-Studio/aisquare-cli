@@ -6003,6 +6003,54 @@ def test_a_restart_the_holds_and_a_pause_read_a_gone_roots_own_board_not_its_anc
     assert fleet_service._pause_homes(own) == {own.id}
 
 
+@pytest.mark.parametrize("root", ["a symlink loop", "under a folder it may not search"])
+def test_a_pause_restart_or_switch_whose_board_its_root_cannot_give_is_a_fleet_error(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    root: str,
+) -> None:
+    """Review of #259, round 43, 4/7: a pause (``_pause_homes``), and a restart or switch of a
+    row whose launch kept no hub (``_board_and_hub``), ask ``directory_project`` of the
+    project's root, which raises ``OSError`` for a root that became a symlink loop, or one
+    under a folder this user may not search. The ``fleet`` commands catch ``FleetError``
+    alone: ``fleet pause`` ended in a traceback, ``--json`` printing nothing. Each is a
+    ``FleetError`` that names the root."""
+    if root == "under a folder it may not search" and not can_deny_reads():
+        pytest.skip("mode 000 does not stop this user from reading")
+    monkeypatch.delenv("AISQUARE_TEAM_HUB", raising=False)
+    where = tmp_path / "locked" / "app"
+    where.mkdir(parents=True)
+    own = team_project(where)
+    with store_session() as store:
+        store.onboard_project(own)
+    agent = _coder(own)
+    _as_080_left_it(agent)  # no hub kept: its board is read from the checkout
+    codename = _codename(own)
+    if root == "a symlink loop":
+        where.rmdir()
+        where.symlink_to(where)
+    else:
+        where.parent.chmod(0)
+    try:
+        paused = runner.invoke(app, ["--json", "fleet", "pause", "--project", codename])
+        with pytest.raises(FleetError, match="cannot be worked out") as restarted:
+            fleet_service.restart(own, agent.label)
+        with store_session() as store, pytest.raises(FleetError) as switched:
+            fleet_service._board_and_hub(store, own, _row(agent.id), None)  # switch's
+    finally:
+        where.parent.chmod(0o700)
+
+    assert paused.exit_code == 1, paused.output
+    refused = json.loads(paused.stdout)
+    assert refused["error"] == "fleet_error"
+    assert f"its root {where} cannot be looked at" in refused["detail"]
+    assert str(where) in str(restarted.value) and str(where) in str(switched.value)
+    assert _row(agent.id).ended_at is None, "the restart stopped nothing"
+
+
 @pytest.mark.parametrize("table", ["team_session", "team_task"])
 def test_a_080_row_on_a_store_without_its_session_or_task_table_fails_no_forget_or_prune(
     tmux: FakeTmux,

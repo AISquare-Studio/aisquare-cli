@@ -491,6 +491,21 @@ all of them, and the fleet cleans up the worktrees it made.**
   runner, reviewer, validator and ui-tester are told to remove the scratch
   worktrees and temp dirs they made before they finish or go idle, never the
   worktree they were spawned in, which is reap's.
+- **`project prune` reads why each candidate is one again before it drops
+  anything**, as its confirmation may sit open meanwhile; 0.8.0 re-read only
+  live agents. One no longer stale is kept and marked as changed since the plan:
+  a capture added on purpose or given an entry, or a missing root back on disk.
+  0.8.0 dropped it all the same, and under `--purge` the entry just saved went
+  with it. One stale for another reason the prune asks for is dropped under that
+  reason: a worktree whose tree went is dropped as missing by a plain prune.
+  Asked for `--worktrees` alone, such a worktree is kept, and the row and the
+  summary say its root went and name `aisquare project prune --missing`. Under
+  `--purge`, a candidate another shell forgot meanwhile is purged if it is
+  still stale, and otherwise left forgotten and said so. `--json` gains
+  `changed`, the ids kept as changed since the plan, `root_gone`, those of them
+  that are worktrees whose tree went, and `forgotten`, the ids a `--purge` left
+  forgotten. An id the run did not drop is in `kept`, `changed` or `forgotten`,
+  or in none for a row gone since the plan.
 
 ### Fixed
 - `fleet spawn` no longer starts a tmux server at a socket path a running

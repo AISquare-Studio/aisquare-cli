@@ -1674,6 +1674,41 @@ def test_a_prune_drops_a_worktree_whose_tree_went_while_the_prompt_sat_open(
     assert _listed(runner) == ({repo_id} if dropped else {repo_id, wt_id})
 
 
+def test_the_changelog_names_each_key_a_prunes_json_gained_since_080(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 39, 7/9: a prune re-reads why each candidate is one (rounds 37
+    and 38), and ``--json`` gained ``changed`` for the ids it kept as changed since the
+    plan, but the 0.8.1 notes named neither: a script reading ``prune --yes --json`` found
+    such ids in neither ``dropped`` nor ``kept``, under a key it was never told of. The
+    report's keys are pinned, so one added is a change the notes have to name, and each
+    0.8.0 lacked is named there."""
+    _register(runner, monkeypatch, work_dir / "gone")
+    monkeypatch.chdir(work_dir)
+    shutil.rmtree(work_dir / "gone")
+
+    result = runner.invoke(app, ["--json", "project", "prune", "--missing", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    since_080 = {"changed", "root_gone", "forgotten"}
+    assert set(_json(result.stdout)) == {
+        "candidates",
+        "dropped",
+        "kept",
+        "dry_run",
+        "purged",
+        "active",
+        "active_changed",
+        "pin_error",
+        "keys_still_live",
+        *since_080,
+    }
+    changelog = (Path(__file__).parents[1] / "CHANGELOG.md").read_text()
+    notes = " ".join(changelog.split("## [0.8.1]")[1].split("## [0.8.0]")[0].split())
+    assert "`project prune` reads why each candidate is one again" in notes
+    assert all(f"`{key}`" in notes for key in since_080), notes
+
+
 @pytest.mark.parametrize(("candidate", "lists"), [("missing", 0), ("worktree", 1)])
 def test_a_prunes_run_lists_the_registrations_only_for_a_worktree_it_re_reads(
     runner: CliRunner,

@@ -1664,7 +1664,12 @@ def _sweep_fleet_branches(
     A branch some worktree has out, the tree gone by hand or not, is left alone, and so is
     one a LIVE row names. The deletes are made under the lock a spawn makes its tree under
     (:func:`_branches_locked`), after asking the trees again: never meanwhile, as a branch
-    a spawn has just made, or is about to check out, reads as out of every tree.
+    a spawn has just made, or is about to check out, reads as out of every tree. Each is
+    deleted at the tip that was judged and no other (``update-ref -d <ref> <tip>``, which
+    git refuses once the ref moved), and the next reap judges it again: ``branch -D``
+    deleted whatever the ref held by then, and a tip moved after the check (a ``git fetch
+    origin fleet/x:fleet/x``, a ``branch -f``) went with commits nobody judged (review of
+    #259, round 33, 6/10). Its ``branch.<name>`` config goes too, as ``branch -D`` takes it.
 
     Only a branch a row recorded is the fleet's. Any ``fleet/…`` branch was, and every reap
     deleted a merged ``git branch fleet/my-own-notes`` in each project it walked, one no
@@ -1704,7 +1709,11 @@ def _sweep_fleet_branches(
         with _branches_locked(common, wait=0):
             out = set(_worktree_branches(root).values())  # asked again, under the lock
             for branch in done:
-                if branch not in out and _git(root, "branch", "-D", branch).returncode == 0:
+                if branch in out:
+                    continue
+                ref = f"refs/heads/{branch}"
+                if _git(root, "update-ref", "-d", ref, every[branch]).returncode == 0:
+                    _git(root, "config", "--remove-section", f"branch.{branch}")  # none: fine
                     report.branches_deleted.append((root, branch))
     except FleetError:
         return

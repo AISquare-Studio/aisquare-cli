@@ -10806,6 +10806,50 @@ def test_reap_deletes_only_a_fleet_branch_an_ended_agent_recorded(
     assert bool(_git("branch", "--list", branch, cwd=project.root)) == (verdict != "deleted")
 
 
+def test_a_reap_deletes_a_done_branch_only_at_the_tip_it_judged(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 33, 6/10: the sweep judged which branches were done (merged, or
+    squashed in) before it took the lock, and under it ran ``git branch -D``, which deletes
+    whatever the ref holds by then. A tip moved in between (a ``git fetch origin
+    fleet/x:fleet/x``, a ``branch -f``) was deleted with commits nobody judged. The delete
+    is made at the judged tip alone: a moved branch is kept, and judged again next reap.
+    One deleted takes its ``branch.<name>`` config with it, as ``branch -D`` did."""
+    task = _add_task(project, "Wire the auth flow")
+    agent = fleet_service.spawn(project, "coder", task_id=task.id).agent
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=agent.cwd)
+    fleet_service.stop(project, agent.label, force=True)
+    _git("config", f"branch.{branch}.remote", "origin", cwd=project.root)  # as `push -u` sets
+    real = fleet_service._squashed
+    fetched: list[str] = []
+
+    def a_fetch_meanwhile(root: Path, tips: Mapping[str, str], default: str) -> set[str]:
+        if not fetched:  # after `--merged` read it done, before the lock
+            tip = _git("commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "fetched", cwd=root)
+            _git("branch", "-f", branch, tip, cwd=root)
+            fetched.append(tip)
+        return real(root, tips, default)
+
+    monkeypatch.setattr(fleet_service, "_squashed", a_fetch_meanwhile)
+
+    first = fleet_service.reap(project)
+
+    assert first.branches_deleted == [], first
+    assert _git("rev-parse", branch, cwd=project.root) == fetched[0], "kept, at its new tip"
+    again = fleet_service.reap(project)
+    assert again.branches_deleted == [] and again.branches_kept == [(project.root, branch)]
+    _git("branch", "-f", branch, "HEAD", cwd=project.root)  # main holds its tip again
+    assert fleet_service.reap(project).branches_deleted == [(project.root, branch)]
+    assert _git("branch", "--list", branch, cwd=project.root) == ""
+    left = subprocess.run(
+        ["git", "config", "--get", f"branch.{branch}.remote"],
+        cwd=project.root,
+        capture_output=True,
+        text=True,
+    )
+    assert (left.returncode, left.stdout) == (1, ""), "its config went with it"
+
+
 def test_a_reap_inside_a_spawn_never_deletes_the_branch_the_spawn_is_making_its_tree_on(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

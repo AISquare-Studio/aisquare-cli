@@ -1212,6 +1212,43 @@ def test_a_purge_says_a_row_forgotten_since_the_plan_that_is_stale_no_more_forgo
     assert "✓ purged 1 registration" in said, said
 
 
+@pytest.mark.parametrize("since", ["changed", "forgotten", "gone"])
+def test_a_runs_candidate_it_did_not_re_read_as_one_carries_no_hold(
+    work_dir: Path, since: str
+) -> None:
+    """Review of #259, round 40, 5/6: the run report's ``candidates`` kept the plan's copy of
+    each id the run did not re-read as a candidate, with the hold the plan worked out. A row
+    the plan held (live agents, or another project's on its board) that is now changed since
+    the plan, forgotten since under ``--purge``, or gone, read ``live_agents: 2`` and a
+    ``read_by`` in ``--json``, so ``held``, though the run kept or passed it for another
+    reason and never read its hold again. It carries none."""
+    from aisquare.models import PruneCandidate
+    from aisquare.services import project as project_service
+
+    root = (work_dir / "back").resolve()
+    root.mkdir()  # the missing root the plan saw, back on disk
+    with store_session() as store:
+        project = store.onboard_project(ProjectInfo(id=project_id_for(root), root=root))
+        if since != "changed":
+            store.forget_project(project.id)
+    reader = ProjectInfo(id="prj_reader", root=work_dir / "reader")
+    planned = PruneCandidate(project=project, reason="missing", live_agents=2, read_by=[reader])
+    assert planned.held, "the premise: the plan held it"
+
+    report = project_service.prune(
+        [planned], purge=since == "forgotten", missing=True, worktrees=False
+    )
+
+    assert (report.changed, report.forgotten) == (
+        [project.id] if since == "changed" else [],
+        [project.id] if since == "forgotten" else [],
+    )
+    [candidate] = report.candidates
+    assert (candidate.live_agents, candidate.read_by, candidate.held) == (0, [], False)
+    assert (candidate.project, candidate.reason) == (planned.project, planned.reason)
+    assert report.kept == [] and report.dropped == []
+
+
 @pytest.mark.parametrize("held", [False, True], ids=["its reader goes", "its reader stays"])
 @pytest.mark.parametrize("hub_first", [True, False], ids=["hub first", "reader first"])
 def test_a_prune_of_a_hub_and_its_reader_decides_every_hold_before_either_goes(

@@ -859,7 +859,10 @@ class ProjectPruneReport(BaseModel):
 
     candidates: list[PruneCandidate] = Field(default_factory=list)
     """The plan's candidates. After a run, each one it found a candidate still is as the run
-    read it: its reason now (a worktree whose tree went is ``missing``) and what holds it."""
+    read it: its reason now (a worktree whose tree went is ``missing``) and what holds it.
+    Each other one, no longer a candidate (:attr:`changed`, :attr:`forgotten`) or gone since
+    the plan, is the plan's with no hold: the run did not read its hold again, and nothing
+    held it (review of #259, round 40, 5/6)."""
     dropped: list[str] = Field(default_factory=list)
     """Ids dropped. Empty on a dry run."""
     kept: list[PruneCandidate] = Field(default_factory=list)

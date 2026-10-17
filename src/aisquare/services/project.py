@@ -824,7 +824,9 @@ def prune(
         for project_id in dropped:
             _remove_data_dir(project_id)
     return ProjectPruneReport(
-        candidates=[ran.get(c.project.id, c) for c in candidates],
+        # One the run did not re-read as a candidate was not kept for a hold, nor its hold read
+        # again: the plan's, it read `held` in --json, kept for another reason (round 40, 5/6).
+        candidates=[ran.get(c.project.id) or _held(c, None) for c in candidates],
         dropped=dropped,
         kept=kept,
         changed=changed,

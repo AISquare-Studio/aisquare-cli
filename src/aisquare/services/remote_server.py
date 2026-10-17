@@ -556,16 +556,26 @@ def _resolve_project(ref: str | None) -> ProjectInfo:
     added the directory it named, which every phone then read (round 10, 1/7 and 2/7).
     """
     from aisquare.core.store import store_session
+
+    with store_session() as store:
+        return _resolve_project_in(store, ref)
+
+
+def _resolve_project_in(store: ContextStore, ref: str | None) -> ProjectInfo:
+    """:func:`_resolve_project` through a store the CALLER holds open, which then reads the
+    project's board through it too: the Board and Tasks tabs, and a task number's board
+    (:func:`_remote_number_board`). Resolved in a store of its own, each opened two, and
+    ``done #12`` opened the second inside the first before the write opened its own (review
+    of #259, round 33, 8/10). The current project is the one ``fleet`` resolves
+    (``fleet.resolve_project``), asked in ``store`` too, and only when it is needed."""
+    from aisquare.core.workspace import active_project
     from aisquare.services import fleet as fleet_service
 
     if ref is None:
-        try:
-            return fleet_service.resolve_project(None)
-        except fleet_service.NoSuchProject as exc:
-            raise NoSuchProject(str(exc)) from exc
-    with store_session() as store:
-        found = store.find_projects(ref)
-    matches = _remote_reachable(found)
+        return active_project(store)
+    found = store.find_projects(ref)
+    added = all(project.onboarded_at is not None for project in found)
+    matches = _remote_reachable(found, None if added else active_project(store))
     try:
         return fleet_service.only_project(ref, matches)
     except fleet_service.NoSuchProject as exc:
@@ -866,15 +876,15 @@ def _remote_card_board(board: str, reach: Callable[[], set[str]]) -> str:
 def _remote_number_board(store: ContextStore, session: str | None, project: str | None) -> str:
     """The board a write reads a task number on: the session's, the id of the ``as`` it
     resolved (:func:`_remote_author`, so a board a phone may reach), else the board of
-    ``project``'s agents (:func:`_remote_project_board`; :func:`_resolve_project`, the
+    ``project``'s agents (:func:`_remote_project_board`; :func:`_resolve_project_in`, the
     current project for ``None``). Through ``store``, which :func:`_remote_task` then reads
-    the number in: a store each, ``done #12`` opened two before the write opened its own
-    (review of #259, round 32, 9/9)."""
+    the number in, the project resolved in it too: a store each, ``done #12`` opened two
+    before the write opened its own (review of #259, round 32, 9/9; round 33, 8/10)."""
     if session is not None:
         found = store.get_session(session)
         if found is not None:
             return found.project_id
-    return _remote_project_board(_resolve_project(project), store).id
+    return _remote_project_board(_resolve_project_in(store, project), store).id
 
 
 @contextlib.contextmanager
@@ -3078,9 +3088,11 @@ def remote_board_payload(project: str | None = None, *, glance: bool = False) ->
     minute :func:`_remote_board_project` keeps a root's board for spared none of it for a
     project with rows (round 30, 6/8). A root's board, for a project with none, still asks
     ``git`` at most once a minute, with the connection holding no transaction. With the
-    board off it is refused before that store opens, as ``board_data`` refuses: refused by
-    ``board_data_in``, after the board was looked up, a phone's Board tab paid a store open
-    and a ``fleet_board`` query a second for a board that is off (round 31, 4/7).
+    board off it is refused once the project is found, before the board is looked up, as
+    ``board_data`` refuses: refused by ``board_data_in``, after the board was looked up, a
+    phone's Board tab paid a ``fleet_board`` query a second for a board that is off (round
+    31, 4/7). The project is found in that store too (:func:`_resolve_project_in`): in one
+    of its own, every frame opened two (round 33, 8/10).
 
     #240 fold: pass ``exclude_kinds=team_service.CAPTAIN_AUDIT_KINDS`` here (one line).
     """
@@ -3088,9 +3100,9 @@ def remote_board_payload(project: str | None = None, *, glance: bool = False) ->
     from aisquare.core.store import store_session
     from aisquare.services import team as team_service
 
-    target = _resolve_project(project)
-    team_service._require_enabled()
     with store_session() as store:
+        target = _resolve_project_in(store, project)
+        team_service._require_enabled()
         board = _remote_project_board(target, store)
         read = team_service.board_data_in(
             store, target.root, events=BOARD_EVENTS, project=board, glance=glance
@@ -3139,12 +3151,14 @@ def live_sources() -> Sources:
         from aisquare.services import team as team_service
 
         # The board the Board tab shows (`remote_board_payload`), the current project's for
-        # none, found in the store its tasks are read through: a store each, every Tasks tab
-        # read opened two (review of #259, round 32, 9/9). Refused with the board off before
-        # that store opens, as `list_tasks` refuses.
-        target = _resolve_project(project)
-        team_service._require_enabled()
+        # none, found in the store its tasks are read through, the project too: a store
+        # each, every Tasks tab read opened three (review of #259, round 32, 9/9), and two
+        # with the project resolved in one of its own (round 33, 8/10). Refused with the
+        # board off once the project is found, before the board is looked up, as
+        # `list_tasks` refuses.
         with store_session() as store:
+            target = _resolve_project_in(store, project)
+            team_service._require_enabled()
             board = _remote_project_board(target, store).id
             tasks = team_service.list_tasks_in(store, board)
         return [task.model_dump(mode="json") for task in tasks]

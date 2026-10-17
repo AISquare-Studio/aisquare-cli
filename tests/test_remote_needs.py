@@ -5188,7 +5188,8 @@ def test_a_board_frame_opens_one_store_for_its_board_and_its_events(
     """Review of #259, round 30, 6/8: the board P's rows recorded was looked up in a store of
     its own (``_remote_project_board``), and ``board_data`` then opened another, so the frame
     a phone's Board tab reads every second opened two (connect, WAL switch, migration
-    check). The board is found in the store the frame's events are read through."""
+    check). The board is found in the store the frame's events are read through, and since
+    round 33 (8/10) the project too: it was resolved in a store of its own first."""
     from aisquare.core import store as core_store
     from aisquare.services import remote_server
 
@@ -5210,7 +5211,7 @@ def test_a_board_frame_opens_one_store_for_its_board_and_its_events(
 
     frame = remote_server.remote_board_frame(remote_server.remote_board_payload(p.id, glance=True))
 
-    assert opens == resolving + 1, f"the project's lookup and one store, not {opens}"
+    assert opens == resolving == 1, f"one store, the project's lookup in it, not {opens}"
     project = frame["project"]
     assert isinstance(project, dict)
     assert project["id"] == (hub.id if end is None else on_elsewhere.project_id)
@@ -5224,7 +5225,8 @@ def test_the_tasks_tab_and_a_task_number_open_one_store_for_the_board_and_the_re
     (``_remote_project_board``) and read the tasks in another (``list_tasks``), and a task
     number did the same (``_remote_number_board``, then ``task_by_number``), each open a
     connect, a WAL switch and a migration check. Both find the board in the store they read
-    through, as the Board frame does."""
+    through, as the Board frame does. Round 33, 8/10: the project was still resolved in a
+    store of its own, opened inside the number's: one store in all now."""
     from aisquare.core import store as core_store
     from aisquare.services import remote_server
 
@@ -5246,12 +5248,12 @@ def test_the_tasks_tab_and_a_task_number_open_one_store_for_the_board_and_the_re
 
     opens = 0
     tasks = remote_server.live_sources().tasks(p.id)
-    assert opens == resolving + 1, f"the project's lookup and one store, not {opens}"
+    assert opens == resolving == 1, f"one store, the project's lookup in it, not {opens}"
     assert isinstance(tasks, list) and {task["project_id"] for task in tasks} == {expected}
 
     opens = 0
     task = remote_server._remote_task("#1", set, session=None, project=p.id)
-    assert opens == resolving + 1, f"the project's lookup and one store, not {opens}"
+    assert opens == 1, f"one store, the project's lookup in it, not {opens}"
     assert task.project_id == expected
 
 

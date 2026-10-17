@@ -1397,8 +1397,8 @@ def list_tasks_in(
 ) -> list[TeamTask]:
     """:func:`list_tasks` of ``board_id`` through a store the CALLER holds open: Remote's
     Tasks tab, which finds the board it shows in that store first (``remote_server``'s
-    ``tasks_payload``)."""
-    _require_enabled()
+    ``tasks_payload``). The caller has refused a board that is off, as :func:`list_tasks`
+    does, before it looked the board up."""
     return store.team_tasks(board_id, status=status)
 
 

@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import itertools
 import json
-import shlex
 import shutil
 import sqlite3
 import sys
@@ -1903,8 +1902,13 @@ def test_a_worktrees_prune_says_a_worktree_whose_tree_went_is_kept_for_its_root_
 
     Each row's own ``project forget`` (round 41, 5/6): ``prune --missing`` acts on every
     registration whose root is missing, and following it purged another one too, which the
-    line did not count."""
+    line did not count.
+
+    Read back with ``install_route.split_line``, as the shell it was printed for reads it:
+    ``shlex.split`` took each backslash of a bare Windows root for an escape and dropped it
+    (round 42, 1/11)."""
     from aisquare.core.store import store_session
+    from aisquare.services import install_route
     from aisquare.services import project as project_service
 
     repo, worktree = repo_and_worktree
@@ -1933,7 +1937,7 @@ def test_a_worktrees_prune_says_a_worktree_whose_tree_went_is_kept_for_its_root_
     assert marker == "·" and "(kept: its root went since the plan)" in said, said
     assert "kept 1 whose root went since the plan" in said, said
     [hint] = [line for line in result.stdout.splitlines() if "drop it: " in line]
-    advised = shlex.split(hint.split("drop it: ", 1)[1])
+    advised = install_route.split_line(hint.split("drop it: ", 1)[1])
     assert advised == ["aisquare", "project", "forget", *flags, str(worktree.resolve())], hint
     assert "no longer stale" not in said, said
 

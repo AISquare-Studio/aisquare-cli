@@ -479,7 +479,7 @@ def test_doctors_capture_off_line_for_each_count(tmp_path: Path, dropped: int, k
         f"aisquare project prune keeps: {names} — {listed}; {drop}",
     }[(dropped, kept)]
 
-    said = diagnostics._left_from_before_capture([*gone, *held], plan, set())
+    said = diagnostics._left_from_before_capture([*gone, *held], plan, {})
 
     assert said.endswith(wanted) if dropped and kept else said == wanted, said
 
@@ -536,6 +536,72 @@ def test_doctor_names_the_captured_rows_with_a_live_agent_apart_from_what_forget
     assert json.loads(refused.stdout)["error"] == "project_busy", "the premise"
     dropped = runner.invoke(app, ["project", "forget", str(tmp_path / "notes")])
     assert dropped.exit_code == 0, dropped.output
+
+
+def test_doctor_names_a_captured_hub_prune_keeps_apart_with_the_project_that_reads_it(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Review of #259, round 34, 3/10: doctor asked a captured row's own live agents alone,
+    but prune and forget hold a hub, a board another project's agents read, running or a
+    restart away. ``tools``, captured before capture was off, is the board ``api``'s stopped
+    manager recorded: doctor counted it under "drop them" with a prune that keeps it, and
+    said so again after that prune. ``notes``, holding saved context and read by ``api``'s
+    running coder, was told to drop with a forget that refuses it. Both are named apart,
+    with the project that reads them and the forget that frees them, as ``forget`` says."""
+    from datetime import UTC, datetime
+
+    from aisquare.core.ids import new_agent_id
+    from aisquare.services import install_route
+    from aisquare.services import project as project_service
+
+    rows: dict[str, ProjectInfo] = {}
+    for name in ("api", "notes", "scratch", "tools"):
+        (tmp_path / name).mkdir()
+        rows[name] = team_project(tmp_path / name)
+    with store_session() as store:
+        store.onboard_project(rows["api"])  # added on purpose
+        for name in ("notes", "scratch", "tools"):
+            store.ensure_project(rows[name])  # 0.8.0's capture
+        store.add(new_entry("a fact", "project", rows["notes"].id, [], "cli"))
+        for label, board in (("manager", "tools"), ("coder-1", "notes")):
+            row = store.upsert_fleet_agent(
+                FleetAgent(
+                    id=new_agent_id(), project_id=rows["api"].id, label=label, role="coder",
+                    pane_id="%1", cwd=rows["api"].root, created_at=datetime.now(tz=UTC),
+                    board=rows[board].id,
+                )
+            )  # fmt: skip
+            if label == "manager":
+                store.end_fleet_agent(row.id, exit_status=0)
+
+    def forget(name: str) -> str:
+        return install_route.command_line(["aisquare", "project", "forget", str(rows[name].root)])
+
+    hubs = (
+        "; 2 more are the boards another project's fleet agents read (api), running or stopped, "
+        "which that prune keeps and aisquare project forget refuses: notes, tools — once you are "
+        f"done with its agents, forget it first ({forget('api')}), then drop them "
+        f"({forget('notes')}; {forget('tools')})"
+    )
+    [check] = diagnostics._check_captured_projects()
+    said = " ".join(check.detail.split())
+    assert said.startswith("1 captured directory left from before project capture"), said
+    assert said.endswith(hubs), said
+    assert "fleet stop" not in said, "neither has agents of its own to stop"
+
+    plan = project_service.prune_candidates(missing=False, worktrees=False, captured_older_than=0)
+    report = project_service.prune(plan, purge=False)
+    assert report.dropped == [rows["scratch"].id], "the prune drops what doctor says"
+    for name in ("notes", "tools"):
+        refused = runner.invoke(app, ["--json", "project", "forget", str(rows[name].root)])
+        assert json.loads(refused.stdout)["error"] == "project_busy", name
+    [check] = diagnostics._check_captured_projects()
+    said = " ".join(check.detail.split())
+    assert "--older-than 0" not in said, "nothing more for that prune to drop"
+    assert said.startswith(
+        "2 captured directories left from before project capture was turned off are the boards "
+        "another project's fleet agents read (api)"
+    ), said
 
 
 def test_doctors_stop_for_a_captured_rows_agent_names_that_project(
@@ -686,7 +752,7 @@ def test_one_helper_names_a_project_in_a_fleet_command(
 
     monkeypatch.setattr(project_service, "fleet_command", fleet_command)
     busy = str(project_service.ProjectBusyError(named, []))
-    said = diagnostics._left_from_before_capture([named], [], {named.id})
+    said = diagnostics._left_from_before_capture([named], [], {named.id: None})
 
     assert "(<stop prj_named> <label>)" in busy and "<reap prj_named>" in busy, busy
     assert "<shutdown prj_named>" in busy, busy

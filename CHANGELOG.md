@@ -395,7 +395,9 @@ all of them, and the fleet cleans up the worktrees it made.**
   nothing. A fleet spawn adds the project it starts in, and `fleet attach` or a
   stop asks for a codename without writing a row. `asq` lists no captured row and
   `a` is no key; doctor names `aisquare project prune --captured-only --older-than
-  0` for the rows left from before. `aisquare config set projects.capture true`
+  0` for the rows left from before, and apart from them the rows that prune keeps
+  (saved context, live agents, or a hub another project's agents read), each
+  with what frees it. `aisquare config set projects.capture true`
   restores 0.8.0's capture.
 - **`aisquare upgrade` warns, and `aisquare uninstall` refuses, while Remote is
   on in another process**, as they already do for running fleet agents. Both

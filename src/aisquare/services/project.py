@@ -407,6 +407,19 @@ def _holds(
         dropping = free
 
 
+def forget_refusals(
+    store: ContextStore, projects: Sequence[ProjectInfo]
+) -> dict[str, ProjectBusyError]:
+    """Why ``project forget`` of each of ``projects`` alone would be refused (:func:`_busy`),
+    by id, for each one it would; the rows that hold a board read once for them all. For
+    doctor's capture-off line, which names the forget of each captured row prune keeps."""
+    if not projects:
+        return {}
+    readers = _reading_rows(store)
+    refused = {project.id: _busy(store, project, readers) for project in projects}
+    return {project_id: busy for project_id, busy in refused.items() if busy is not None}
+
+
 def _reading_rows(store: ContextStore) -> list[FleetAgent]:
     """The fleet rows, in every project, whose recorded board holds a project
     (:func:`_board_readers`): the live ones, and each stopped one a ``restart`` acts on, the

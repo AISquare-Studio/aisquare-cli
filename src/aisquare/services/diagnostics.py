@@ -1452,6 +1452,14 @@ def _check_captured_projects() -> list[DoctorCheck]:
     would never drop (review of #259, round 17). They are named apart, with ``project
     forget``, which drops one — and the rows with a live agent apart again, since
     ``forget`` refuses those until their agents are stopped (round 18).
+
+    What holds a row is the hold prune and forget ask (``held`` on the plan's rows,
+    :func:`~aisquare.services.project.forget_refusals` for the rest): the board of another
+    project's agents, live or a restart away, as a hub's, is one. Asked of the row's own live
+    agents alone, a hub prune keeps was counted under "drop them" after every prune, as the
+    live agents' rows were before round 17, and the rows apart were told to stop their own
+    agents, which they had none of; they are named apart again, with the project that reads
+    each and the way out ``forget`` names (review of #259, round 34, 3/10).
     """
     if _uncreated_home("projects") is not None:
         return []
@@ -1460,7 +1468,7 @@ def _check_captured_projects() -> list[DoctorCheck]:
         # opened for one line (review of #259, round 19).
         capture = project_service.capture_on()
         plan: list[PruneCandidate] = []
-        busy: set[str] = set()
+        holds: dict[str, ProjectInfo | None] = {}
         with store_session() as store:
             captured = store.captured_projects()
             if captured and not capture:
@@ -1468,17 +1476,18 @@ def _check_captured_projects() -> list[DoctorCheck]:
                     missing=False, worktrees=False, captured_older_than=0, store=store
                 )
                 planned = {c.project.id for c in plan}
-                busy = {c.project.id for c in plan if c.live_agents} | {
-                    p.id
-                    for p in captured
-                    if p.id not in planned and store.fleet_agents(p.id, live_only=True)
+                refused = project_service.forget_refusals(
+                    store, [p for p in captured if p.id not in planned]
+                )
+                holds = {c.project.id: c.read_by for c in plan if c.held} | {
+                    project_id: busy.reader for project_id, busy in refused.items()
                 }
     except Exception:  # the database line reports a broken store
         return []
     if not captured:
         return []
     if not capture:
-        return [_ok("projects", _left_from_before_capture(captured, plan, busy))]
+        return [_ok("projects", _left_from_before_capture(captured, plan, holds))]
     noun = _directories(len(captured))
     return [
         _ok(
@@ -1491,19 +1500,21 @@ def _check_captured_projects() -> list[DoctorCheck]:
 
 
 def _left_from_before_capture(
-    captured: list[ProjectInfo], plan: list[PruneCandidate], busy: set[str]
+    captured: list[ProjectInfo], plan: list[PruneCandidate], holds: Mapping[str, ProjectInfo | None]
 ) -> str:
     """The capture-off line: the rows ``prune --captured-only --older-than 0`` drops (``plan``
     is what it would do), with that command, and apart from them the rows it keeps, by name:
-    those holding saved context with ``project forget``, and those with a live fleet agent
-    (``busy``, by id), which ``forget`` refuses, with stopping the agents first.
+    those holding saved context with ``project forget``, and those ``forget`` refuses
+    (``holds``, by id: the project whose fleet agents read the row's board, or ``None`` for
+    its own live ones), with what frees each first.
 
     Each part put together once from its noun, verb and pronoun: the kept part was written
     out twice, in near-identical branches, and a wording fix had to be made in each (review
     of #259, round 18)."""
-    dropped = {c.project.id for c in plan if c.reason == "captured" and c.project.id not in busy}
-    held = [p for p in captured if p.id not in dropped and p.id not in busy]
-    working = [p for p in captured if p.id in busy]
+    dropped = {c.project.id for c in plan if c.reason == "captured" and c.project.id not in holds}
+    held = [p for p in captured if p.id not in dropped and p.id not in holds]
+    working = [p for p in captured if p.id in holds and holds[p.id] is None]
+    read = [p for p in captured if holds.get(p.id) is not None]
     left = "left from before project capture was turned off"
     listed = "listed only by aisquare project list --all"
     parts: list[str] = []
@@ -1514,7 +1525,7 @@ def _left_from_before_capture(
             "prune --captured-only --older-than 0"
         )
     prune = "that prune" if dropped else "aisquare project prune"
-    for kept, agents in ((held, False), (working, True)):
+    for kept, why in ((held, "context"), (working, "agents"), (read, "hub")):
         if not kept:
             continue
         one = len(kept) == 1
@@ -1534,7 +1545,24 @@ def _left_from_before_capture(
             else f"{len(kept)} captured {_directories(len(kept))} {left}"
         )
         then = "" if parts else f"{listed}; "
-        if agents:
+        if why == "hub":
+            # The project whose agents read each, and its forget, as `ProjectBusyError` names
+            # them: a restart of a stopped one starts it under the hub again.
+            readers = {reader.id: reader for p in kept if (reader := holds.get(p.id)) is not None}
+            them = len(readers) == 1
+            whose = ", ".join(project_service.display_name(r) for r in readers.values())
+            frees = "; ".join(
+                install_route.command_line(["aisquare", "project", "forget", str(r.root)])
+                for r in readers.values()
+            )
+            what = (
+                f"{'is the board' if one else 'are the boards'} another project's fleet agents "
+                f"read ({whose}), running or stopped, which {prune} keeps and aisquare project "
+                f"forget refuses: {names} — {then}once you are done with "
+                f"{'its' if them else 'their'} agents, forget {'it' if them else 'them'} first "
+                f"({frees}), then {drop}"
+            )
+        elif why == "agents":
             # With the project named, as `ProjectBusyError` names it (review of #259, round 19):
             # each row's own, every row. Said once "--project <name>, for each" beside names
             # shown by directory, two rows called scratch had no name to pass, and a fourth

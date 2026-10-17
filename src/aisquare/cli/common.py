@@ -440,8 +440,10 @@ def emit_prune(report: ProjectPruneReport) -> None:
             why = f"worktree of {_project_name(candidate.principal)}"
         held = kept.get(project.id)
         if held is not None and held.read_by:
+            # Not "the board api, web's fleet agents read", as if the last one's alone (review
+            # of #259, round 36, 6/9); the names early, before a narrow terminal cuts the cell.
             whose = ", ".join(_project_name(reader) for reader in held.read_by)
-            why += f" (kept: the board {whose}'s fleet agents read)"
+            why += f" (kept: the fleet agents of {whose} read its board)"
         elif held is not None:
             why += f" (kept: {held.live_agents} live agent(s))"
         elif not report.dry_run and project.id not in dropped:

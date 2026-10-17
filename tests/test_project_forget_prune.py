@@ -955,7 +955,7 @@ def test_prune_keeps_a_hub_whose_board_another_projects_agents_read(
 
     assert result.exit_code == 0, result.output
     said = " ".join(result.stdout.split())
-    assert "missing (kept: the board beta's fleet agents" in said, said  # cut to the width
+    assert "missing (kept: the fleet agents of beta" in said, said  # cut to the width
     assert "kept 1 whose board another project's fleet agents read, as a hub's" in said
     assert _listed(runner) == {hub, beta}
     with store_session() as store:
@@ -963,6 +963,34 @@ def test_prune_keeps_a_hub_whose_board_another_projects_agents_read(
         assert (store.get_project(gone, include_forgotten=True) is None) == bool(purge)
     forget = runner.invoke(app, ["--json", "project", "forget", hub, *purge])
     assert _json(forget.stdout) == {"error": "project_busy", "ref": hub}, "the same guard"
+
+
+def test_a_prunes_reason_for_a_hub_reads_as_every_readers_and_the_changelog_says_no_more(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 36, 6/9: the CHANGELOG said ``project prune`` keeps a hub "naming
+    every project that reads it, each with what frees it", but prune's table names the
+    readers alone, which is ``forget``'s to add. And "(kept: the board api, web's fleet agents
+    read)" read as if the board were web's alone. The reason names each reader as one of
+    several, early in the cell, and the CHANGELOG gives what frees each to ``forget`` alone."""
+    hub = _register(runner, monkeypatch, work_dir / "hub")
+    readers = [_register(runner, monkeypatch, work_dir / name) for name in ("api", "web")]
+    monkeypatch.chdir(work_dir)
+    shutil.rmtree(work_dir / "hub")
+    with store_session() as store:
+        for reader in readers:
+            store.upsert_fleet_agent(_agent(reader, "coder1").model_copy(update={"board": hub}))
+
+    result = runner.invoke(app, ["project", "prune", "--missing", "--yes"], env={"COLUMNS": "400"})
+
+    assert result.exit_code == 0, result.output
+    said = " ".join(result.stdout.split())
+    assert "missing (kept: the fleet agents of api, web read its board)" in said, said
+    changelog = " ".join((Path(__file__).parents[1] / "CHANGELOG.md").read_text().split())
+    assert (
+        "`project forget` refuses it, naming every project that reads it, each with what frees "
+        "it, and `project prune` keeps it, `--purge` included, naming those projects, unless"
+    ) in changelog
 
 
 @pytest.mark.parametrize("before", ["free", "its own agent"])
@@ -998,7 +1026,7 @@ def test_a_prune_says_why_it_kept_a_row_as_the_run_read_it_not_the_plan(
 
     assert result.exit_code == 0, result.output
     said = " ".join(result.stdout.split())
-    assert "missing (kept: the board beta's fleet agents" in said, said
+    assert "missing (kept: the fleet agents of beta" in said, said
     assert "live agent(s)" not in said, said
     assert "kept 1 whose board another project's fleet agents read, as a hub's" in said
     assert _listed(runner) == {hub, beta}

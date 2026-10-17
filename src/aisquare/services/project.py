@@ -652,6 +652,7 @@ def _why_stale(
     worktrees: bool,
     captured_older_than: int | None,
     projects: Sequence[ProjectInfo] | None = None,
+    gone: set[str] | None = None,
 ) -> Callable[[ProjectInfo], PruneCandidate | None]:
     """Why a project is one ``project prune`` drops, as :func:`prune_candidates` asks it: its
     candidate, with the reason and a worktree's principal, or ``None``. Captured first
@@ -661,7 +662,10 @@ def _why_stale(
     registered roots (of ``projects`` when the caller listed them), is read once: the roots on
     the first worktree a principal is looked up for. Listed up front, every :func:`prune`
     run under ``--worktrees``, which a plain prune asks, read every registration to re-read
-    the few candidates it was handed (review of #259, round 39, 6/9).
+    the few candidates it was handed (review of #259, round 39, 6/9). With ``gone``, the id of
+    each project whose root it found no directory is put in it: :func:`prune` tells a
+    worktree kept for its root by it, and ``stat``-ed each such root, some on network mounts,
+    a second time (round 40, 6/6).
 
     The one place the rules are written: :func:`prune` asks them again of each candidate
     before any goes. Written out a second time there, inverted, the copies drifted, and a
@@ -689,6 +693,8 @@ def _why_stale(
         if not (missing or worktrees):
             return None
         if not _is_dir(project.root):
+            if gone is not None:
+                gone.add(project.id)
             return PruneCandidate(project=project, reason="missing") if missing else None
         if not worktrees:
             return None
@@ -782,8 +788,13 @@ def prune(
     ran: dict[str, PruneCandidate] = {}
     with store_session() as store:
         active_id = active_project(store).id
+        rootless: set[str] = set()
         why = _why_stale(
-            store, missing=missing, worktrees=worktrees, captured_older_than=captured_older_than
+            store,
+            missing=missing,
+            worktrees=worktrees,
+            captured_older_than=captured_older_than,
+            gone=rootless,
         )
         # Gone since the plan was made: nothing to drop, and no hold to decide.
         here = {
@@ -794,16 +805,15 @@ def prune(
         reread = {project_id: why(row) for project_id, row in here.items()}
         lapsed = [project_id for project_id, now in reread.items() if now is None]
         # Under --purge, one forgotten elsewhere meanwhile is left as it was found: not kept.
-        forgotten = [
-            project_id for project_id in lapsed if purge and store.get_project(project_id) is None
-        ]
-        changed = [project_id for project_id in lapsed if project_id not in forgotten]
+        tombstoned = store.forgotten_among(lapsed) if purge and lapsed else set()
+        forgotten = [project_id for project_id in lapsed if project_id in tombstoned]
+        changed = [project_id for project_id in lapsed if project_id not in tombstoned]
         # A worktree whose tree went is none now, and a run not asked for missing roots keeps it.
         planned = {c.project.id: c.reason for c in candidates}
         root_gone = [
             project_id
             for project_id in changed
-            if planned[project_id] == "worktree" and not _is_dir(here[project_id].root)
+            if planned[project_id] == "worktree" and project_id in rootless
         ]
         still = [now for now in reread.values() if now is not None]
         holds = _holds(store, [c.project for c in still], reading_rows(store)) if still else {}

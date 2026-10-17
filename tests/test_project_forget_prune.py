@@ -1843,6 +1843,44 @@ def test_a_worktrees_prune_says_a_worktree_whose_tree_went_is_kept_for_its_root_
     assert (kept is None) is purge, "purged, or only forgotten"
 
 
+def test_a_prunes_run_reads_a_lapsed_rows_project_and_its_root_once(
+    runner: CliRunner, repo_and_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 40, 6/6: the run asked again what it had just read. Under
+    ``--purge`` each lapsed id ran a ``get_project`` of its own to tell it forgotten, though
+    the run had read each row; and a worktree kept for its root was ``stat``-ed a second
+    time, right after the re-read had, some on network mounts. One query tells which of the
+    lapsed ids are forgotten, and the re-read's ``stat`` says whose root went."""
+    from aisquare.services import project as project_service
+
+    repo, worktree = repo_and_worktree
+    wt_id = _register_worktree_as_its_own_project(worktree)
+    _register(runner, monkeypatch, repo)
+    plan = project_service.prune_candidates(missing=False, worktrees=True)
+    assert [(c.project.id, c.reason) for c in plan] == [(wt_id, "worktree")], "the premise"
+    shutil.rmtree(worktree)  # reaped while the prompt sat open
+    asked: list[str] = []
+    real_get, real_is_dir = SqliteStore.get_project, project_service._is_dir
+
+    def get_project(self: SqliteStore, project_id: str, **kwargs: bool) -> ProjectInfo | None:
+        if project_id == wt_id:
+            asked.append("get_project")
+        return real_get(self, project_id, **kwargs)
+
+    def is_dir(root: Path) -> bool:
+        if root == worktree.resolve():
+            asked.append("stat")
+        return real_is_dir(root)
+
+    monkeypatch.setattr(SqliteStore, "get_project", get_project)
+    monkeypatch.setattr(project_service, "_is_dir", is_dir)
+
+    report = project_service.prune(plan, purge=True, missing=False, worktrees=True)
+
+    assert (report.changed, report.root_gone, report.forgotten) == ([wt_id], [wt_id], [])
+    assert sorted(asked) == ["get_project", "stat"], asked
+
+
 @pytest.mark.parametrize(
     ("case", "reason"),
     [

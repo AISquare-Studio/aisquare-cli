@@ -1248,6 +1248,7 @@ class ContextStore(Protocol):
     def get_project(
         self, project_id: str, *, include_forgotten: bool = False
     ) -> ProjectInfo | None: ...
+    def forgotten_among(self, project_ids: Collection[str]) -> set[str]: ...
     def find_projects(self, term: str) -> list[ProjectInfo]: ...
     def add_linked_repo(self, project_id: str, repo: str) -> ProjectInfo: ...
     def forget_project(self, project_id: str) -> None: ...
@@ -2038,6 +2039,23 @@ class SqliteStore:
             f"SELECT {_PROJECT_COLUMNS} FROM project WHERE id = ?{live}", (project_id,)
         ).fetchone()
         return _row_to_project(row) if row is not None else None
+
+    def forgotten_among(self, project_ids: Collection[str]) -> set[str]:
+        """Which of ``project_ids`` the store holds forgotten (a tombstone, ``forgotten_at``):
+        for rows read with their tombstones (``get_project(..., include_forgotten=True)``),
+        one query, where a ``get_project`` of each asked again what was just read (review of
+        #259, round 40, 6/6)."""
+        named = sorted(set(project_ids))
+        found: set[str] = set()
+        for start in range(0, len(named), 500):  # well under SQLite's bound on parameters
+            chunk = named[start : start + 500]
+            rows = self._conn.execute(
+                "SELECT id FROM project "
+                f"WHERE forgotten_at IS NOT NULL AND id IN ({', '.join('?' * len(chunk))})",
+                chunk,
+            ).fetchall()
+            found.update(str(row["id"]) for row in rows)
+        return found
 
     def find_projects(self, term: str) -> list[ProjectInfo]:
         """The live projects ``term`` names: an id prefix, a directory name or a codename,

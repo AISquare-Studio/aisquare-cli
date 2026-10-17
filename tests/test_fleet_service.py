@@ -5789,6 +5789,40 @@ def test_a_080_row_that_shows_it_read_its_own_board_is_filed_without_a_git_call(
     assert asked == [], "the store said: no git"
 
 
+@pytest.mark.parametrize("shape", ["shows nothing", "session", "task", "hub kept"])
+def test_the_holds_and_a_restart_read_a_rows_board_by_one_rule(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    shape: str,
+) -> None:
+    """Review of #259, round 39, 3/9: the board a restart starts a replacement on
+    (``_board_and_hub``) and the one the holds file its row under (``restart_board``) were
+    each worked out by a copy of the rule, and the next change to one would leave ``project
+    forget`` and prune judging holds by the old one. Both read one rule, and agree on every
+    shape a row of a sub-folder project comes in."""
+    below = _project_below(project)
+    if shape == "task":
+        monkeypatch.setenv("AISQUARE_TEAM_HUB", str(below.root))
+        agent = _coder(below, task_id=_add_task(below, "api's own task").id)
+        monkeypatch.delenv("AISQUARE_TEAM_HUB")
+    else:
+        agent = _coder(below)
+    if shape == "session":
+        _with_transcript(agent, None)
+    if shape != "hub kept":
+        _as_080_left_it(agent)
+
+    with store_session() as store:
+        row = _row(agent.id)
+        session = store.get_session(agent.session_id) if agent.session_id else None
+        board, _ = fleet_service._board_and_hub(store, below, row, session)
+        filed = fleet_service.restart_board(store, row, {})
+
+    assert filed == board == (below.id if shape in ("session", "task") else project.id)
+
+
 @pytest.mark.parametrize("root", ["a symlink loop", "a mount that answers EIO"])
 def test_a_080_row_whose_root_cannot_be_asked_keeps_its_board_and_fails_no_forget(
     tmux: FakeTmux,

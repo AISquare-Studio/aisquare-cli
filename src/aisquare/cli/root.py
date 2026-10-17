@@ -29,6 +29,7 @@ from aisquare.services import diagnostics as diagnostics_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops
 from aisquare.services import lifecycle as lifecycle_service
+from aisquare.services import project as project_service
 from aisquare.services import sync as sync_service
 
 
@@ -81,6 +82,8 @@ def init(
                 assume_yes=yes,
                 explainability=_explainability_decision(explainability),
             )
+    except project_service.NotAFolder as exc:
+        fail(str(exc), error="not_a_directory", ref=str(path or Path.cwd()))
     except lifecycle_service.UnreadableConfigResetRefused as refused:
         fail(
             f"--reinit would replace config.toml, which cannot be read ({refused.summary}), "

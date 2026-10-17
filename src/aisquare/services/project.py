@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import subprocess
 from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import suppress
@@ -932,14 +933,44 @@ def link(repo: str) -> ProjectInfo:
         return store.add_linked_repo(project.id, repo)
 
 
+class NotAFolder(Exception):
+    """A path typed for ``project onboard`` or ``init`` that names no folder to register
+    (:func:`typed_root`): the message says the path and why."""
+
+
+def typed_root(path: Path | None) -> Path:
+    """The project root of the folder a user typed (``project onboard <path>``, ``init
+    <path>``), the working directory for none; :class:`NotAFolder` unless it is a folder
+    that can be looked inside, as Welcome's ``validate_path`` and Remote's
+    ``check_project_add_root`` refuse one.
+
+    ``find_project_root`` takes a start that is not a directory for its own root, a stored
+    root whose folder is gone (review of #259, round 42, 3/11), and typed paths reached it
+    unchecked: ``project onboard repo/src/main.py`` registered the file as a project of its
+    own, whose snapshot then failed, and ``project onboard repo/src/typo`` a path that does
+    not exist (round 43, 3/7). A symlink loop, or a folder this user may not look inside,
+    is refused with the system's words, where the lookup's ``OSError`` was a traceback.
+    """
+    start = path or Path.cwd()
+    try:
+        if not stat.S_ISDIR(os.stat(start).st_mode):
+            raise NotAFolder(f"{start} is a file, not a directory")
+        return find_project_root(start)
+    except (FileNotFoundError, NotADirectoryError):
+        raise NotAFolder(f"{start} does not exist") from None
+    except OSError as exc:
+        raise NotAFolder(f"{start} cannot be looked at ({exc.strerror or exc})") from exc
+
+
 def onboard(path: Path | None, *, refresh: bool) -> OnboardReport:
     """Pack the codebase into a snapshot and seed facts from ecosystem markers.
 
     Generates the Repomix snapshot (full pack + skeleton + index) on first run,
     or when ``refresh`` is set, and seeds one fact per detected marker. Existing
-    facts are never duplicated; the snapshot is reused unless ``refresh``.
+    facts are never duplicated; the snapshot is reused unless ``refresh``. ``path`` is
+    the user's, refused unless it is a folder (:func:`typed_root`).
     """
-    root = find_project_root(path or Path.cwd())
+    root = typed_root(path)
     project = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
     facts = [fact for marker, fact in _ECOSYSTEM_MARKERS if (root / marker).exists()]
     seeded: list[ContextEntry] = []

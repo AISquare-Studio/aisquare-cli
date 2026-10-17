@@ -47,8 +47,8 @@ from aisquare.core.tmux import (
     server_may_run,
 )
 from aisquare.core.version import DISTRIBUTION, __version__
-from aisquare.core.workspace import current_project
-from aisquare.models import ClaudeIdentity, SetupReport
+from aisquare.core.workspace import project_id_for
+from aisquare.models import ClaudeIdentity, ProjectInfo, SetupReport
 from aisquare.services import agents as agents_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import install_route, onboarding
@@ -123,7 +123,12 @@ def initialize(
     moot for now). ``reinit`` resets ``config.toml`` to defaults. Agents named via
     ``--agent`` are connected (hooks installed + context ingested); cloud auth is
     not wired yet.
+
+    ``path`` is refused unless it is a folder (``project.NotAFolder``), before anything is
+    written: a file or a mistyped folder was registered as a project of its own (review of
+    #259, round 43, 3/7).
     """
+    root = project_service.typed_root(path)
     home = paths.aisquare_home()
     already_initialized = paths.config_path().exists() or paths.db_path().exists()
     paths.ensure_home()
@@ -147,7 +152,7 @@ def initialize(
     if reinit or not paths.config_path().exists():
         save_config(AppConfig(), discard_unreadable=unreadable is not None)
 
-    project = current_project(path)
+    project = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
     with store_session() as store:
         store.onboard_project(project)  # init is the deliberate add (#139)
 

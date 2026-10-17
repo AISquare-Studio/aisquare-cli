@@ -220,8 +220,12 @@ def onboard(
         # a blank group went to `create_group`, whose ValueError escaped uncaught after
         # the onboard had committed (review of #203, round 2).
         fail("a group needs a name", error="invalid_group", ref=group)
-    report = project_service.onboard(path, refresh=refresh)
+    try:
+        report = project_service.onboard(path, refresh=refresh)
+    except project_service.NotAFolder as exc:
+        fail(str(exc), error="not_a_directory", ref=str(path or Path.cwd()))
     if name:
+        # A folder: the onboard refused any other path.
         project_id = project_id_for(find_project_root(path or Path.cwd()))
         try:
             with store_session() as store:

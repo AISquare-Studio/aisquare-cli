@@ -28,7 +28,9 @@ U+FE00 print as ``work`` — and is refused; any variation selector is left out 
 names are compared (:func:`name_key`). A joiner is kept, too, where a script draws with
 it: after a virama (Sinhala's "Sri") and between the letters of a cursive script (the
 non-joiner in Persian). Between two letters that draw the same either way a joiner is an
-invisible look-alike, and refused.
+invisible look-alike, and refused. A prepended concatenation mark (the Arabic number sign,
+the end of ayah, the Syriac abbreviation mark) is a format character that is drawn, a sign
+over the digits or letters after it, and is kept where one follows.
 """
 
 from __future__ import annotations
@@ -65,6 +67,11 @@ _CURSIVE_SCRIPTS = ("ARABIC", "SYRIAC", "NKO", "MONGOLIAN", "MANDAIC", "ADLAM", 
 """Scripts whose letters join, so a joiner or non-joiner between two of them is drawn."""
 _VIRAMA = 9
 """The canonical combining class of a virama: a joiner after one picks a conjunct's form."""
+_PREPENDED_MARKS = frozenset(
+    "\u0600\u0601\u0602\u0603\u0604\u0605\u06dd\u070f\u0890\u0891\u08e2\U000110bd\U000110cd"
+)
+"""Unicode's Prepended_Concatenation_Mark (PropList.txt): format characters drawn as a sign
+that spans the digits or letters after them, as U+0600 ARABIC NUMBER SIGN spans a number."""
 
 
 def name_flaw(text: str) -> NameFlaw | None:
@@ -106,7 +113,19 @@ def _hidden(text: str, at: int) -> bool:
         return not _joins(text, at)
     if ord(char) in _TAGS:
         return not _in_a_flag(text, at)
+    if char in _PREPENDED_MARKS:
+        return not _spans(text, at)
     return True
+
+
+def _spans(text: str, at: int) -> bool:
+    """Whether the prepended mark at ``at`` has a digit or a letter after it to be drawn over.
+
+    Refused as "invisible" wherever it was, ``؀١٢`` (the Arabic number sign over 12) and an
+    ayah's number under its end mark were names "with an invisible formatting character"
+    (review of #259, round 37, 5/7)."""
+    after = text[at + 1 : at + 2]
+    return after != "" and unicodedata.category(after)[0] in "LN"
 
 
 def _joins(text: str, at: int) -> bool:

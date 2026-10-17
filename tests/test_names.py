@@ -52,6 +52,11 @@ ACCEPTED = [
     pytest.param("\u845b\U000e0100\u98fe", id="ideographic selector after a han ideograph"),
     pytest.param("\u8fbb\ufe00", id="standardized selector after a han ideograph"),
     pytest.param("\u1820\u180b\u1828", id="mongolian selector after a mongolian letter"),
+    # A format character that is drawn: a sign over what follows (review of #259, round 37).
+    pytest.param("\u0600\u0661\u0662", id="arabic number sign over a number"),
+    pytest.param("ayah \u06dd\u0661", id="end of ayah over its number"),
+    pytest.param("\u070f\u0710\u0712", id="syriac abbreviation mark over letters"),
+    pytest.param("\U000110bd\u0967", id="kaithi number sign over a digit"),
 ]
 REFUSED = [
     pytest.param("evil\u202egnp.exe", id="right-to-left override"),
@@ -80,6 +85,10 @@ REFUSED = [
     pytest.param("\u845b\ufe0f", id="emoji selector after a han ideograph"),
     pytest.param("\u845b\U000e0100\U000e0101", id="a second selector"),
     pytest.param("\ufe00work", id="selector first"),
+    # A prepended mark with nothing after it to be drawn over (round 37, 5/7).
+    pytest.param("ops \u0600", id="number sign last"),
+    pytest.param("\u06dd ops", id="end of ayah before a space"),
+    pytest.param("\u0600\u200b1", id="number sign over a zero-width space"),
 ]
 
 

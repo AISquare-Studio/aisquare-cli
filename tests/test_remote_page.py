@@ -701,7 +701,7 @@ BUDGETS = {
     # #243 found more for it to do: ask for a board only on its tab, keep keys in tap order,
     # answer a late reply in its own sheet. The fourth, and a sweep of the page in a real
     # browser, found more again. This is their room; the page stays under 150 KB. Half a KiB
-    # more for a Reply that names the board its card was read on (#259, round 32, 1/9).
+    # more for a Reply that names its card (#259, round 32, 1/9, and round 33, 9/10).
     "app.js": 129 * 1024 + 512,
     "sw.js": 4 * 1024,
     "manifest.webmanifest": 1024,
@@ -2650,17 +2650,17 @@ def test_a_reply_to_a_cards_agent_names_its_row_and_keeps_the_card_until_it_is_p
     }
 
 
-def test_a_reply_to_a_card_no_row_holds_names_the_board_the_card_was_read_on(
-    boot_report: dict[str, Any],
-) -> None:
+def test_a_reply_to_a_card_no_row_holds_names_the_card(boot_report: dict[str, Any]) -> None:
     """Review of #259, round 32, 1/9: a Reply to a card of a session no fleet row holds (one
     launched by hand) named only its author, and the machine, finding no running agent of
     that label, wrote the note on the board the project's manager reads, not the one the
-    card was read on. The page sends the card's ``board`` back with such a Reply; a card
-    with a row names the row (``agent_id``) alone, whose board the machine knows."""
+    card was read on. Such a Reply names its card (``needs_id``), and the machine posts on
+    the board it read that card on: round 32 sent the board to the page and back, the
+    client's to name (round 33, 9/10). A card with a row names the row (``agent_id``) alone,
+    whose board the machine knows."""
     replies = boot_report["crewReplies"]
     noted = {"text": "Take T-4.", "kind": "note", "project": "prj_x", "to": "coder-1"}
-    noted.update(board="prj_c")
+    noted.update(needs_id="ny_00000000000000c3")
     assert replies["rowless"] == {
         "title": "Reply on the board",
         "told": [],
@@ -2670,7 +2670,7 @@ def test_a_reply_to_a_card_no_row_holds_names_the_board_the_card_was_read_on(
         "said": None,
     }
     (by_row,) = replies["manager"]["noted"]
-    assert by_row["agent_id"] == "agt_m" and "board" not in by_row
+    assert by_row["agent_id"] == "agt_m" and "needs_id" not in by_row
 
 
 def test_a_reply_to_a_coder_that_ended_or_was_replaced_since_it_asked_is_the_note_it_was(

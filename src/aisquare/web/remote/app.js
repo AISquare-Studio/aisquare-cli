@@ -2051,12 +2051,12 @@ function replySheet(ctx) {
   });
 }
 
-/* A reply as a note to whoever asked, on its row's board, else on its card's. */
+/* A reply as a note to whoever asked, on its row's board, else its card's. */
 async function postReply(ctx, sheet, author, words) {
   const body = { text: words, kind: "note", project: ctx.pid };
   if (isText(author)) body.to = author;
   if (ctx.agentId) body.agent_id = ctx.agentId;
-  else body.board = ctx.item.board;
+  else body.needs_id = ctx.needsId;
   sheet.busy(true);
   const res = await apiWrite(writePath("note"), body, "Reply", () => { sheet.status.textContent = LOST_WAIT; });
   sheet.busy(false);

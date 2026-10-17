@@ -4865,17 +4865,17 @@ def test_a_phones_reply_to_a_card_is_posted_on_the_board_its_row_asked_on(
 
 
 def test_a_phones_reply_to_a_card_no_row_holds_is_posted_on_the_board_it_was_read_on(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Review of #259, round 32, 1/9: P's manager, spawned under a hub, reads the hub, and
     Remote runs without it. A session launched by hand in P's checkout (no fleet row) asks
     on P's own board, and its card's Reply named only its author: no running agent has that
     label, so the note went to the board P's manager reads. The asker never read it, its
-    question stayed open, and the page dismissed the card on the 200. The card carries the
-    board it was read on, and the Reply that sends it back is posted there; a board the
-    phone may not reach is refused, and nothing is written."""
-    from aisquare.services.remote_server import RequestError, live_writes
-
+    question stayed open, and the page dismissed the card on the 200. The Reply names its
+    card, and the note is posted on the board the server's feed read that card on. Round 33,
+    9/10: the board went to the page in each card and came back in each Reply, the client's
+    to name, checked only against every board a phone may reach; it stays on the server. A
+    card the feed no longer has is a 409 ``stale``, and nothing is written."""
     monkeypatch.delenv("AISQUARE_TEAM_HUB", raising=False)
     with store_session() as store:
         p = store.onboard_project(_rooted(tmp_path / "p"))
@@ -4885,11 +4885,13 @@ def test_a_phones_reply_to_a_card_no_row_holds_is_posted_on_the_board_it_was_rea
         _seat_up(store, _Seat("p", "coder-1", asks=True, rowed=False), p, p)
     tmux = FakeTmux()
     monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
-
-    def cards() -> list[NeedsItem]:
-        return scan_needs_you(
-            remote_needs.live_needs_sources(), now=datetime.now(UTC), dismissed=()
-        )
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path / "dist")
+    client = make_client(app)
+    assert unlock(client, runtime).status_code == 200
+    runtime.set_allow_write(True)
+    watcher = RemoteNeedsWatcher(app.kit, sources=remote_needs.live_needs_sources)
+    app.kit.lane_state["needs"] = watcher
+    watcher._needs_scan_told()
 
     def notes() -> dict[str, list[str]]:
         with store_session() as store:
@@ -4898,19 +4900,22 @@ def test_a_phones_reply_to_a_card_no_row_holds_is_posted_on_the_board_it_was_rea
                 for board in (p.id, hub.id)
             }
 
-    (card,) = cards()
+    (card,) = watcher.needs_items_now()
     shown = card.needs_item_json()
-    assert (shown["kind"], shown["agent_id"], shown["board"]) == ("board_question", None, p.id)
+    assert (shown["kind"], shown["agent_id"], card.board) == ("board_question", None, p.id)
+    assert "board" not in shown, "the board stays on the server"
+    url = f"{base(runtime)}/api/note"
     reply = {"text": "Postgres", "kind": "note", "project": p.id, "to": "coder-1"}
-    with pytest.raises(RequestError) as refused:
-        live_writes().handlers["note"]({**reply, "board": "prj_nowhere"})
-    assert refused.value.status == 404, "a board the phone may not reach"
+    gone = client.post(url, json={**reply, "needs_id": "ny_0000000000000000"})
+    assert (gone.status_code, gone.json()["error"]) == (409, "stale"), gone.text
     assert notes() == {p.id: [], hub.id: []}
 
-    live_writes().handlers["note"]({**reply, "board": shown["board"]})
+    posted = client.post(url, json={**reply, "needs_id": card.id})
 
+    assert posted.status_code == 200, posted.text
     assert notes() == {p.id: ["Postgres"], hub.id: []}
-    assert cards() == [], "answered where it was asked"
+    watcher._needs_scan_told()
+    assert watcher.needs_items_now() == [], "answered where it was asked"
 
 
 def _hubbed_tasks(
@@ -7149,7 +7154,7 @@ def test_the_feed_is_one_scan_away_when_no_watcher_runs(live: Live) -> None:
     card = body["items"][0]
     assert set(card) == {
         "id", "kind", "project", "agent", "agent_id", "reason", "excerpt", "detail",
-        "answers", "since", "actions", "board",
+        "answers", "since", "actions",
     }  # fmt: skip
     assert card["project"] == {"id": "prj_alpha", "name": "alpha"}
     assert card["detail"] == {"tool": "Bash", "input": {"command": "git push"}}

@@ -856,21 +856,30 @@ def _remote_reply_board(target: ProjectInfo, agent_id: str) -> str:
     return _board_of_row(row)
 
 
-def _remote_card_board(board: str, reach: Callable[[], set[str]]) -> str:
+def _remote_card_board(target: ProjectInfo, needs_id: str) -> str:
     """The board a phone's reply to a card of a session no row holds goes to: the one the card
-    was read on, which the card carries (``NeedsItem.board``), when a phone may reach it
-    (``reach``, :class:`_RemoteReach`); else a 404, and nothing is written.
+    was read on (``NeedsItem.board``), as the needs feed this server holds has the card by
+    its id (``needs_lookup``). A card the feed no longer has, another project's, or one that
+    is no board question or result, is a 409 ``stale``, and nothing is written.
 
     Such a card's Reply named only its author, and with no running agent of that label the
     note went to the board the project's manager reads (:func:`_remote_note_board`). Under a
     hub only the manager was spawned under, a question asked on the project's checkout board
     by a session launched by hand was answered on the hub: the asker never read it, its
     question stayed open, and the page, told the note was posted, dismissed the card (review
-    of #259, round 32, 1/9; a card with a row names it, :func:`_remote_reply_board`)."""
-    if board not in reach():
-        said = f"no board {board!r} on a project the page is shown (the 'board' field)"
-        raise RequestError(404, "not_found", said)
-    return board
+    of #259, round 32, 1/9; a card with a row names it, :func:`_remote_reply_board`). Sent
+    to the page in each card and back in each Reply, the board was the client's to name: a
+    body naming project A and B's board posted on B's with A's root, checked only against
+    every board a phone may reach (round 33, 9/10)."""
+    from aisquare.services import remote_needs
+
+    kit = _WRITE_KIT.get()
+    found = None if kit is None else remote_needs._needs_watcher(kit).needs_lookup(needs_id)
+    item = None if found is None else found[0]
+    if item is None or item.project_id != target.id or item.board is None:
+        said = "that card is gone from the feed — nothing was posted (the 'needs_id' field)"
+        raise RequestError(409, "stale", said, current=[])
+    return item.board
 
 
 def _remote_number_board(store: ContextStore, session: str | None, project: str | None) -> str:
@@ -1268,6 +1277,12 @@ _WRITE_ARRIVED: contextvars.ContextVar[float | None] = contextvars.ContextVar(
 )
 """When the write a handler runs for reached the server (``time.monotonic``): a wait it makes
 counts from then, not from when a thread of the write pool was free to run it."""
+
+_WRITE_KIT: contextvars.ContextVar[RemoteKit | None] = contextvars.ContextVar(
+    "asq_remote_write_kit", default=None
+)
+"""The kit whose write a handler runs (:meth:`RemoteKit.kit_run_write`): what the server holds
+that a write may ask, the needs feed's cards (:func:`_remote_card_board`)."""
 
 _STATE_CHECKED: contextvars.ContextVar[Runtime | None] = contextvars.ContextVar(
     "asq_remote_state_checked", default=None
@@ -3696,15 +3711,17 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
         ``agent_id``, a card's Reply: the fleet row whose question or result it answers. The
         note goes to the board that row recorded (:func:`_remote_reply_board`), ``as`` or
         not, so it lands where the card was read and the agent reads; a row the project
-        does not hold is a 404, and the page keeps the card. ``board``, a Reply to a card
-        of a session no row holds: the board the card was read on (``NeedsItem.board``),
-        ``as`` or not, one a phone may reach or a 404 (:func:`_remote_card_board`). With
+        does not hold is a 404, and the page keeps the card. ``needs_id``, a Reply to a card
+        of a session no row holds: the card, and the note goes to the board it was read on,
+        ``as`` or not, while the server's feed has the card, else a 409
+        (:func:`_remote_card_board`). With
         none of them, the note goes to the board its ``to`` reads, when that is the label of
         one of the project's running agents, else to the board the project's agents read,
         the one the Board tab shows (:func:`_remote_note_board`). A ``task`` number is read
         on the board the note goes to (:func:`_remote_task`).
         """
         from aisquare.services import team as team_service
+        from aisquare.services.remote_needs import NEEDS_ID_MAX
 
         project = _optional_ref(body, "project")
         text = _required(body, "text")
@@ -3719,7 +3736,7 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
             check_note_to(to)
         task = _optional_ref(body, "task", limit=BOARD_REF_MAX)
         replying = _optional_ref(body, "agent_id", limit=BOARD_REF_MAX, guard=True)
-        card = _optional_ref(body, "board", limit=BOARD_REF_MAX, guard=True)
+        card = _optional_ref(body, "needs_id", limit=NEEDS_ID_MAX, guard=True)
         try:
             reach = _RemoteReach()
             with _remote_board_refusals(reach, ("as", author, "session"), ("task", task, "task")):
@@ -3729,7 +3746,7 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
                 if replying is not None:
                     board = _remote_reply_board(target, replying)
                 elif card is not None:
-                    board = _remote_card_board(card, reach)
+                    board = _remote_card_board(target, card)
                 elif session is None:
                     # The addressed agent's, else the Board tab's. A project with no live
                     # rows is resolved in its root as `asq note` there does, which refuses
@@ -5164,6 +5181,7 @@ class RemoteKit:
         try:
             context = contextvars.copy_context()
             context.run(_WRITE_ARRIVED.set, arrived)
+            context.run(_WRITE_KIT.set, self)
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(self.kit_write_pool(), context.run, write_now)
         finally:

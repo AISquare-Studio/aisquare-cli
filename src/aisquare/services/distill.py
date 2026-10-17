@@ -13,6 +13,8 @@ without any command or hook ever waiting on gbrain.
 
 from __future__ import annotations
 
+import logging
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -20,6 +22,8 @@ from pathlib import Path
 from aisquare.core import brain, orchestrator, selfcli, spawn
 from aisquare.core.store import ContextStore, store_session
 from aisquare.models import TeamEvent
+
+_log = logging.getLogger(__name__)
 
 # Deliberate team communication and task outcomes distill; presence churn,
 # focus flickers and permission notices do not.
@@ -104,11 +108,19 @@ def spawn_drain(
     of ``root``, which is not a hub's rooted in a sub-folder or a worktree: a
     note ``fleet tell`` or the phone filed on another board than the caller's
     was distilled from the wrong pipe (review of #259, round 33, 5/10).
+
+    Told its board, the worker's directory names nothing, and one gone from disk (a hub
+    folder cleaned up, a root moved while its row stays) is not used: ``Popen`` refused it
+    with ``FileNotFoundError``, the drain was dropped without a word, and that board's
+    notes and results were never distilled (round 37, 3/7). It runs where this process
+    does then, and a worker that cannot be started at all is logged.
     """
     if not brain.brain_enabled() or shutil.which("gbrain") is None:
         return
     if root is None and board is None:
         root = orchestrator.team_project(cwd).root
+    if board is not None and root is not None and not os.path.isdir(root):
+        root = None
     named = [] if board is None else ["--board", board]
     try:
         subprocess.Popen(
@@ -124,8 +136,11 @@ def spawn_drain(
             # attach its gbrain work to a Run that may already have ended.
             env=spawn.untraced_env(),
         )
-    except OSError:
-        return
+    except OSError as exc:
+        again = "aisquare team distill" + ("" if board is None else f" --board {board}")
+        _log.warning(
+            "the board's distill drain could not be started (%s); `%s` runs it", exc, again
+        )
 
 
 def _slug(event: TeamEvent) -> str:

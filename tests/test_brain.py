@@ -245,6 +245,64 @@ def test_a_drain_spawned_for_a_board_drains_that_board_whatever_its_directory_re
     assert distill.drain(work_dir) == 3, "the checkout's pipe was left for its own drain"
 
 
+def test_a_drain_spawned_for_a_board_whose_root_is_gone_still_runs_and_drains_it(
+    runner: CliRunner,
+    fake_gbrain: Path,
+    work_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 37, 3/7: told its board, the worker was still started in the
+    board's root, and with that folder gone (a hub cleaned up, a root moved while its row
+    stays) ``Popen`` raised ``FileNotFoundError``, swallowed: that board's decisions were
+    never distilled. The worker runs where this process does, the real ``Popen`` shows, and
+    drains the board it is told."""
+    hub_root = tmp_path / "hub"
+    hub_root.mkdir()
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub_root))
+    team_service.activate()
+    runner.invoke(app, ["note", "the hub's decision", "--kind", "decision"])
+    hub = team_project(work_dir)
+    monkeypatch.delenv("AISQUARE_TEAM_HUB")
+    hub_root.rmdir()
+    real_popen = subprocess.Popen
+    seen: dict[str, object] = {}
+
+    def popen(argv: list[str], **kw: object) -> None:
+        real_popen([sys.executable, "-c", ""], **kw).wait()  # type: ignore[call-overload]
+        seen.update(argv=argv, **kw)
+
+    with monkeypatch.context() as spawning:
+        spawning.setattr(subprocess, "Popen", popen)
+        _REAL_SPAWN_DRAIN(root=hub_root, board=hub.id)
+    argv = seen.get("argv")
+    assert isinstance(argv, list), "the drain was started"
+    assert argv[-2:] == ["--board", hub.id] and seen["cwd"] is None
+
+    drained = runner.invoke(app, ["--json", *argv[-4:]])
+
+    assert json.loads(drained.stdout) == {"distilled": 1}, drained.output
+
+
+def test_a_drain_that_cannot_be_started_is_logged_with_the_command_that_runs_it(
+    fake_gbrain: Path,
+    work_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Review of #259, round 37, 3/7: a worker ``Popen`` refused was dropped without a word."""
+
+    def popen(argv: list[str], **kw: object) -> None:
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    with caplog.at_level("WARNING", logger="aisquare.services.distill"):
+        _REAL_SPAWN_DRAIN(root=work_dir, board="prj_board")
+
+    (said,) = [record.getMessage() for record in caplog.records]
+    assert "Too many open files" in said and "aisquare team distill --board prj_board" in said
+
+
 def test_distill_cli_reports_count(runner: CliRunner, fake_gbrain: Path, work_dir: Path) -> None:
     _seed_events(runner)
     result = runner.invoke(app, ["--json", "team", "distill"])

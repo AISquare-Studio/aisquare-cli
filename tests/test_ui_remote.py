@@ -1392,11 +1392,17 @@ def test_the_panels_controls_never_wait_for_remote_jsons_lock_on_textuals_thread
                 lambda: modal.query_one("#remote-regen", Button).press(),
                 lambda: modal.query_one("#remote-revoke", Button).press(),
             ]
+            # A press that waited for the lock would take all ten seconds of its wait. One
+            # that did not has taken 1.1 to 1.2 s on a loaded runner (CI runs 38935521598,
+            # 38990392377 and 39041202952), past the one second this allowed: half the wait
+            # tells them apart.
+            waited = remote_server.STATE_LOCK_WAIT_SECONDS / 2
             for press in presses:
                 started = time.monotonic()
                 press()
                 await pilot.pause()
-                assert time.monotonic() - started < 1.0, "a press waited for remote.json's lock"
+                took = time.monotonic() - started
+                assert took < waited, f"a press waited {took:.1f} s for remote.json's lock"
             assert app.remote.running
             await asyncio.sleep(remote_control.SAVING_AFTER)
             modal.repaint()

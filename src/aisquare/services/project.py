@@ -209,6 +209,18 @@ def fleet_command(verb: str, project: ProjectInfo, *words: str) -> str:
     return install_route.command_line(["aisquare", "fleet", verb, "--project", ref, *words])
 
 
+class Frees(NamedTuple):
+    """The commands that free a hub of one reader (:meth:`BoardReader.frees`), in order."""
+
+    onboard: str | None
+    """Its onboard, when it is forgotten: no ``fleet`` command finds it, nor ``forget``."""
+    stop: str | None
+    """Its ``fleet stop``, a ``<label>`` to fill in, when its agents run: ``forget`` refuses
+    a project with live agents."""
+    forget: str
+    """Its ``project forget``: a stopped row starts on the hub again at a restart."""
+
+
 class BoardReader(NamedTuple):
     """A project whose fleet rows hold another's board, as a hub's (:func:`_board_readers`)."""
 
@@ -223,6 +235,18 @@ class BoardReader(NamedTuple):
     def has_live(self) -> bool:
         """Whether any of :attr:`rows` is live, so a ``fleet stop`` frees it."""
         return any(row.ended_at is None for row in self.rows)
+
+    def frees(self) -> Frees:
+        """What frees the board its rows hold, step by step, which :class:`ProjectBusyError`
+        and doctor's capture-off line each word: written out in each, their rules differed,
+        and a wording fix had to be made twice (review of #259, round 36, 7/9)."""
+        return Frees(
+            onboard=onboard_command(self.project.root) if self.forgotten else None,
+            stop=fleet_command("stop", self.project) + " <label>" if self.has_live else None,
+            forget=install_route.command_line(
+                ["aisquare", "project", "forget", str(self.project.root)]
+            ),
+        )
 
 
 class ProjectBusyError(Exception):
@@ -268,40 +292,39 @@ def _of(
     owner: ProjectInfo, agents: Sequence[FleetAgent], *, reader: BoardReader | None = None
 ) -> str:
     """``<labels> — <ways>``: ``agents``, rows of ``owner``, and what frees the board they hold
-    (``reader``, or ``owner``'s own when ``None``)."""
+    (``reader``'s :meth:`~BoardReader.frees`, or ``owner``'s own stop when ``None``)."""
     stopped = sum(agent.ended_at is not None for agent in agents)
     labels = ", ".join(
         agent.label + (" (stopped)" if agent.ended_at is not None else "") for agent in agents
     )
+    frees = None if reader is None else reader.frees()
     ways: list[str] = []
-    if reader is not None and reader.forgotten:
+    if frees is not None and frees.onboard is not None:
         # No fleet command finds a forgotten project (`find_projects`), so its stop would say
         # "no project matches" (review of #259, round 35, 2/8).
-        ways.append(
-            f"{display_name(owner)} is forgotten: {onboard_command(owner.root)} adds it back first"
-        )
-    if not stopped or stopped < len(agents):
+        ways.append(f"{display_name(owner)} is forgotten: {frees.onboard} adds it back first")
+    if frees is None or frees.stop is not None:
         # `reap` is named for rows whose SERVER still answers — it refuses to end a
         # row on a server it cannot reach, and an operator following that advice
         # after a hand-run `tmux kill-server` reaped nothing, twice. The scoped
         # `fleet shutdown` is the command that can, on their word.
         shutdown = fleet_command("shutdown", owner)
-        stop = fleet_command("stop", owner)
+        stop = fleet_command("stop", owner) + " <label>" if frees is None else frees.stop
         reap = fleet_command("reap", owner)
         ways.append(
-            f"stop {'the live ones' if stopped else 'them'} first ({stop} <label>), or run "
+            f"stop {'the live ones' if stopped else 'them'} first ({stop}), or run "
             f"{reap} if they are already gone; if their tmux server is gone too, "
             f"{shutdown} records them"
         )
-    if reader is not None:
+    if frees is not None:
         # Stopped, a live one is the newest of its label still, a restart away from this
         # board: with its stop alone, the forget it advised was refused again, naming the
         # stopped row (review of #259, round 36, 1/9).
-        forget = install_route.command_line(["aisquare", "project", "forget", str(owner.root)])
-        then = "then " if stopped < len(agents) else ""
+        then = "" if frees.stop is None else "then "
         ways.append(
             f"{then}forget {display_name(owner)} {'' if then else 'first '}if you are done "
-            f"with its agents ({forget}): a stopped one starts on this board again at a restart"
+            f"with its agents ({frees.forget}): a stopped one starts on this board again at a "
+            "restart"
         )
     return f"{labels} — " + "; ".join(ways)
 

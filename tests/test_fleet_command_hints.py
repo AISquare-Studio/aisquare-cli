@@ -139,9 +139,6 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ),
     ("services/diagnostics.py", "_check_resumable_agents"): _WALKED,
     ("services/diagnostics.py", "_left_from_before_capture"): "each captured row itself",
-    ("services/diagnostics.py", "_what_frees"): (
-        "each project whose fleet agents read a captured row's board (``ProjectBusyError``)"
-    ),
     ("services/diagnostics.py", "_check_dead_managers"): _WALKED,
     ("services/diagnostics.py", "_claude_account_limit_checks"): _ROW_OF_SESSION,
     ("services/fleet.py", "_live_agent"): _FLEET_OP,
@@ -160,6 +157,10 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ("services/fleet.py", "restart"): _FLEET_OP,
     ("services/fleet.py", "rename"): "the project renamed, with its new codename",
     ("services/fleet.py", "attach_argv"): _FLEET_OP,
+    ("services/project.py", "BoardReader.frees"): (
+        "each project whose fleet agents read a hub's board (``ProjectBusyError``, and doctor's "
+        "capture-off line of a captured row's board)"
+    ),
     ("services/project.py", "_of"): (
         "the project forget refused, or each project whose fleet agents read its board"
     ),

@@ -1560,8 +1560,8 @@ def _left_from_before_capture(
         )
         then = "" if parts else f"{listed}; "
         if why == "hub":
-            # Every project whose agents read each, and what frees it, as `ProjectBusyError`
-            # names them: a restart of a stopped one starts it under the hub again.
+            # Every project whose agents read each, and what frees it, from the steps
+            # `ProjectBusyError` words too: a restart of a stopped one starts it under the hub.
             agents, frees = _what_frees(kept, holds)
             what = (
                 f"{'is the board' if one else 'are the boards'} {agents}, running or stopped, "
@@ -1592,45 +1592,33 @@ def _what_frees(
     kept: Sequence[ProjectInfo], holds: Mapping[str, Sequence[project_service.BoardReader]]
 ) -> tuple[str, str]:
     """``<whose> fleet agents read (<projects>)`` of the boards ``kept`` (``holds``), every
-    project named, and what frees them, as ``ProjectBusyError`` names it: each one's stop
-    when its agents run, since ``forget`` refuses a project with live agents; its onboard
-    when it is forgotten, since ``forget`` and ``fleet`` find no such project; then its
-    forget, since a restart of a stopped one starts it under the hub again.
+    project named, and what frees them: each one's steps (:meth:`BoardReader.frees`, which
+    ``ProjectBusyError`` words too), its onboard when it is forgotten, its stop when its
+    agents run, then its forget.
 
     The first reader of a row alone, with its forget alone, a row two projects read was
     refused again after it, naming the other; a reader whose agents ran was refused its
     forget, with no stop given; and a forgotten one's forget matched nothing (review of #259,
-    round 35, 2/8)."""
-    readers: dict[str, ProjectInfo] = {}
-    running: set[str] = set()
-    forgotten: set[str] = set()
+    round 35, 2/8). The steps were written out here a second time, with rules of their own
+    (round 36, 7/9)."""
+    readers: dict[str, tuple[ProjectInfo, project_service.Frees]] = {}
     for reader in (reader for p in kept for reader in holds[p.id]):
-        readers.setdefault(reader.project.id, reader.project)
-        if reader.has_live:
-            running.add(reader.project.id)
-        if reader.forgotten:
-            forgotten.add(reader.project.id)
+        frees = reader.frees()
+        known = readers.get(reader.project.id)
+        if known is None or known[1].stop is None:  # running under any row it holds
+            readers[reader.project.id] = (reader.project, frees)
     them = len(readers) == 1
     steps: list[str] = []
-    if forgotten:
-        adds = "; ".join(
-            project_service.onboard_command(r.root) for r in readers.values() if r.id in forgotten
-        )
-        ones = "it" if them else "the forgotten " + ("one" if len(forgotten) == 1 else "ones")
-        steps.append(f"add {ones} back ({adds})")
-    if running:
-        stops = "; ".join(
-            project_service.fleet_command("stop", r) + " <label>"
-            for r in readers.values()
-            if r.id in running
-        )
-        steps.append(f"stop the running ones ({stops})")
-    frees = "; ".join(
-        install_route.command_line(["aisquare", "project", "forget", str(r.root)])
-        for r in readers.values()
-    )
-    steps.append(f"forget {'it' if them else 'them'} ({frees})")
-    whose = ", ".join(project_service.display_name(r) for r in readers.values())
+    adds = [frees.onboard for _, frees in readers.values() if frees.onboard is not None]
+    if adds:
+        ones = "it" if them else "the forgotten " + ("one" if len(adds) == 1 else "ones")
+        steps.append(f"add {ones} back ({'; '.join(adds)})")
+    stops = [frees.stop for _, frees in readers.values() if frees.stop is not None]
+    if stops:
+        steps.append(f"stop the running ones ({'; '.join(stops)})")
+    forgets = "; ".join(frees.forget for _, frees in readers.values())
+    steps.append(f"forget {'it' if them else 'them'} ({forgets})")
+    whose = ", ".join(project_service.display_name(project) for project, _ in readers.values())
     agents = "another project's" if them else "other projects'"
     return f"{agents} fleet agents read ({whose})", (
         f"once you are done with {'its' if them else 'their'} agents, "

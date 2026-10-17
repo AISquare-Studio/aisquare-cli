@@ -676,6 +676,52 @@ def test_doctor_names_every_project_reading_a_captured_hub_with_what_frees_each(
         assert done.exit_code == 0, (name, done.output)
 
 
+def test_the_refusal_and_doctor_free_a_hubs_readers_by_the_same_steps(tmp_path: Path) -> None:
+    """Review of #259, round 36, 7/9: doctor wrote out what frees a hub's readers a second
+    time beside ``ProjectBusyError``, with rules of its own: doctor always said to forget a
+    reader, the refusal only when one of its rows had stopped (1/9). Both are worded from
+    each reader's :meth:`BoardReader.frees`: its onboard when it is forgotten, its stop when
+    its agents run, then its forget, the same commands in the same order in each."""
+    from datetime import UTC, datetime
+
+    from aisquare.services import project as project_service
+
+    hub = ProjectInfo(id="prj_hub", root=tmp_path / "hub")
+
+    def row(project: ProjectInfo, *, ended: bool) -> FleetAgent:
+        now = datetime.now(tz=UTC)
+        return FleetAgent(
+            id=f"a-{project.id}", project_id=project.id, label="coder-1", role="coder",
+            pane_id="%1", cwd=project.root, created_at=now, board=hub.id,
+            ended_at=now if ended else None,
+        )  # fmt: skip
+
+    readers = [
+        project_service.BoardReader(reader, [row(reader, ended=ended)], forgotten=forgotten)
+        for reader, ended, forgotten in (
+            (ProjectInfo(id="prj_api", root=tmp_path / "api"), True, False),
+            (ProjectInfo(id="prj_web", root=tmp_path / "web"), False, False),
+            (ProjectInfo(id="prj_old", root=tmp_path / "old"), False, True),
+        )
+    ]
+    refusal = str(project_service.ProjectBusyError(hub, readers=readers))
+    _, doctor = diagnostics._what_frees([hub], {hub.id: readers})
+
+    for reader in readers:
+        said = refusal.split(f"{reader.project.root.name}'s 1 ", 1)[1].split(". It is also", 1)[0]
+        frees = reader.frees()
+        given = [step for step in frees if step is not None]
+        assert [said.index(step) for step in given] == sorted(said.index(s) for s in given), said
+        assert all(step in doctor for step in given), (given, doctor)
+        for step, unsaid in (
+            (frees.onboard, project_service.onboard_command(reader.project.root)),
+            (frees.stop, project_service.fleet_command("stop", reader.project)),
+        ):
+            assert step is not None or (unsaid not in said and unsaid not in doctor), unsaid
+    assert doctor.index("add the forgotten one back") < doctor.index("stop the running ones")
+    assert doctor.index("stop the running ones") < doctor.index("forget them ("), doctor
+
+
 def test_doctor_frees_a_row_outside_the_plan_of_a_reader_that_prune_drops(
     runner: CliRunner, tmp_path: Path
 ) -> None:

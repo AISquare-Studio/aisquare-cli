@@ -124,19 +124,29 @@ def _resolved(path: Path) -> Path:
     ``resolve`` tells it, not by what ``resolve`` raises. Mapped from its ``RuntimeError``
     alone, a loop raised nothing from 3.13, which CI runs: ``find_project_root`` walked from
     it to the nearest ancestor with a marker, and a 0.8.0 row was filed under that board, a
-    phone could reach it, and a note named it (round 41, 1/6)."""
+    phone could reach it, and a note named it (round 41, 1/6).
+
+    For a path read from the user or the store; git cannot answer with a loop, it fails,
+    and its answers are resolved plainly (review of #259, round 42, 9/11)."""
+    return _resolved_dir(path)[0]
+
+
+def _resolved_dir(path: Path) -> tuple[Path, bool]:
+    """:func:`_resolved` of ``path``, and whether that is a directory (:func:`_is_dir`), from
+    the one ``stat``: ``find_project_root`` asks both of its start, on every hook."""
     try:
         resolved = path.resolve()
     except RuntimeError as exc:
         raise OSError(errno.ELOOP, os.strerror(errno.ELOOP), str(path)) from exc
     try:
-        os.stat(resolved)
+        mode = os.stat(resolved).st_mode
     except OSError as exc:
         if exc.errno == errno.ELOOP or (
             getattr(exc, "winerror", 0) == _WINERROR_CANT_RESOLVE_FILENAME
         ):
             raise OSError(errno.ELOOP, os.strerror(errno.ELOOP), str(path)) from exc
-    return resolved
+        return resolved, exc.errno not in _GONE
+    return resolved, stat.S_ISDIR(mode)
 
 
 def git_common_root(start: Path) -> Path | None:
@@ -193,7 +203,7 @@ def git_common_root(start: Path) -> Path | None:
     common_dir = Path(common)
     if not common_dir.is_absolute():
         here = start / common_dir
-        common_dir = _resolved(here if here.exists() or not up else start / up / common_dir)
+        common_dir = (here if here.exists() or not up else start / up / common_dir).resolve()
     if common_dir.name != ".git" and ".git" in common_dir.parts:
         # A submodule's common dir is <super>/.git/modules/<name> (deeper when
         # nested) — git bookkeeping, not anyone's project root. Bail to the
@@ -201,7 +211,7 @@ def git_common_root(start: Path) -> Path | None:
         return None
     # <principal>/.git → <principal>; a bare repo's common dir is the repo itself.
     root = common_dir.parent if common_dir.name == ".git" else common_dir
-    return _resolved(root)
+    return root.resolve()
 
 
 def find_project_root(start: Path) -> Path:
@@ -222,8 +232,8 @@ def find_project_root(start: Path) -> Path:
     closed ``~``'s tasks for ``app``. Guarded in ``fleet.restart_board`` alone (round 41,
     3/6), the holds and the restart read different boards (review of #259, round 42, 3/11).
     """
-    start = _resolved(start)
-    if not _is_dir(start):
+    start, is_dir = _resolved_dir(start)
+    if not is_dir:
         return start
     common = git_common_root(start)
     if common is not None:

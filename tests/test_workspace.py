@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from aisquare.core import workspace
 from aisquare.core.ids import PROJECT_PREFIX
 from aisquare.core.state_file import StateUnwritableError
 from aisquare.core.store import store_session
@@ -70,6 +73,37 @@ def test_a_start_that_may_not_be_searched_raises_on_every_python(tmp_path: Path)
         assert find_project_root(locked.parent) == home.resolve(), "beside it, the walk"
     finally:
         locked.chmod(0o700)
+
+
+def test_a_checkout_is_looked_up_with_one_stat_of_its_start_and_none_of_gits_answers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 42, 9/11: every hook asks ``find_project_root``, which stat-ed its
+    start for a loop and again for a directory, and ``git_common_root`` stat-ed git's common
+    dir and root for a loop, which git cannot answer with: it fails instead. The start is
+    stat-ed once, for both, and git's answers not at all. The lookup's own ``stat`` calls are
+    counted: 3.11's and 3.12's ``Path.resolve`` makes its own, which no change here can
+    spare."""
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    seen: list[Path] = []
+
+    class Counted:
+        """``os`` as the lookup sees it, its ``stat`` calls written down."""
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(os, name)
+
+        def stat(self, path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+            seen.append(Path(path))
+            return os.stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(workspace, "os", Counted())
+    root = find_project_root(repo / "src")
+
+    assert root == repo.resolve()
+    assert seen == [(repo / "src").resolve()]
 
 
 def test_project_id_is_stable_and_path_specific(tmp_path: Path) -> None:

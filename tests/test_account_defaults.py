@@ -214,13 +214,16 @@ def test_a_name_is_never_another_accounts_own_name(fake_home: Path, runner: CliR
     for taken, slot in (
         ("account 3", 3),
         ("Account  3", 3),
-        ("ACCOUNT \ufe003", 3),
         ("plain claude", 1),
         ("Plain Claude", 1),
         ("account 9", 9),
     ):
         with pytest.raises(ValueError, match=f"what slot {slot} is called"):
             service.set_alias("2", taken)
+    # A selector after a space draws nothing, and is refused before the label is asked (review
+    # of #259, round 33, 10/10).
+    with pytest.raises(ValueError, match="invisible formatting character"):
+        service.set_alias("2", "ACCOUNT \ufe003")
     assert service.slot_labels() == {1: "plain claude", 2: "account 2", 3: "account 3"}
     refused = runner.invoke(app, ["accounts", "alias", "2", "account 3"])
     assert refused.exit_code != 0 and "slot 3" in refused.output

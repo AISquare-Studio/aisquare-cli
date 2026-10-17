@@ -20,12 +20,15 @@ U+200D + laptop is the technologist, the white flag + U+FE0F + U+200D + rainbow 
 rainbow flag, the slightly smiling face + U+200D + left-right arrow + U+FE0F is the head
 shaking), the emoji and text variation selectors after a character that has the two
 presentations (a symbol; ‼, ⁉, U+2139 information, 〰 and 〽; a keycap's digit), skin
-tones, and the tag characters of a subdivision flag. After a letter a variation selector
-draws nothing — ``work`` U+FE0F prints as ``work`` — and is refused; any variation
-selector is left out when two names are compared (:func:`name_key`). A joiner is kept,
-too, where a script draws with it: after a virama (Sinhala's "Sri") and between the
-letters of a cursive script (the non-joiner in Persian). Between two letters that draw
-the same either way a joiner is an invisible look-alike, and refused.
+tones, and the tag characters of a subdivision flag. Any other variation selector is kept
+where it picks a form too: a standardized or ideographic one after a Han ideograph (the
+glyph a person's or a place's name is registered in), one of Mongolian's after a Mongolian
+letter. Anywhere else a variation selector draws nothing — ``work`` U+FE0F and ``work``
+U+FE00 print as ``work`` — and is refused; any variation selector is left out when two
+names are compared (:func:`name_key`). A joiner is kept, too, where a script draws with
+it: after a virama (Sinhala's "Sri") and between the letters of a cursive script (the
+non-joiner in Persian). Between two letters that draw the same either way a joiner is an
+invisible look-alike, and refused.
 """
 
 from __future__ import annotations
@@ -47,8 +50,11 @@ _EMOJI_BESIDE_SYMBOLS = frozenset({"\u203c", "\u2049", "\u2139", "\u3030", "\u30
 (Unicode's emoji-variation-sequences.txt; every other base there but a keycap's is So/Sm)."""
 _KEYCAP_BASES = frozenset("#*0123456789")
 _KEYCAP = "\u20e3"
-_ANY_VARIATION_SELECTOR = (range(0xFE00, 0xFE10), range(0xE0100, 0xE01F0), range(0x180B, 0x1810))
+_MONGOLIAN_SELECTORS = range(0x180B, 0x1810)
+_ANY_VARIATION_SELECTOR = (range(0xFE00, 0xFE10), range(0xE0100, 0xE01F0), _MONGOLIAN_SELECTORS)
 """Every variation selector: the standardized ones, the ideographic ones, Mongolian's."""
+_HAN = ("CJK UNIFIED IDEOGRAPH", "CJK COMPATIBILITY IDEOGRAPH")
+"""How the names of the Han ideographs begin, a selector after which picks a glyph."""
 _TAGS = range(0xE0020, 0xE0080)
 _BLACK_FLAG = "\U0001f3f4"
 _CANCEL_TAG = "\U000e007f"
@@ -80,11 +86,11 @@ def name_flaw(text: str) -> NameFlaw | None:
 def name_key(text: str) -> str:
     """``text`` as two names are compared: without case, and without any variation selector,
     which changes how a character is drawn and never which one it is."""
-    return "".join(
-        char
-        for char in text
-        if not any(ord(char) in selectors for selectors in _ANY_VARIATION_SELECTOR)
-    ).casefold()
+    return "".join(char for char in text if not _is_variation_selector(char)).casefold()
+
+
+def _is_variation_selector(char: str) -> bool:
+    return any(ord(char) in selectors for selectors in _ANY_VARIATION_SELECTOR)
 
 
 def _hidden(text: str, at: int) -> bool:
@@ -92,8 +98,8 @@ def _hidden(text: str, at: int) -> bool:
     char = text[at]
     if char in _BLANK_LETTERS:
         return True
-    if char in _VARIATION_SELECTORS:
-        return not _selects_a_presentation(text, at)
+    if _is_variation_selector(char):
+        return not _selects_a_form(text, at)
     if unicodedata.category(char) != "Cf":
         return False
     if char in _JOINERS:
@@ -132,6 +138,23 @@ def _starts_an_emoji_part(text: str, at: int) -> bool:
     if category == "So":
         return True
     return category == "Sm" and text[at + 1 : at + 2] == "\ufe0f"
+
+
+def _selects_a_form(text: str, at: int) -> bool:
+    """Whether the variation selector at ``at`` picks a form of the character before it:
+    VS15 or VS16 after one with two presentations (:func:`_selects_a_presentation`), one of
+    Mongolian's after a Mongolian letter, any other after a Han ideograph. Only VS15 and
+    VS16 were asked: VS1 to VS14, the ideographic selectors and Mongolian's are category
+    Mn, not Cf, and ``work`` U+FE00 was a name that printed as ``work`` (review of #259,
+    round 33, 10/10)."""
+    if text[at] in _VARIATION_SELECTORS:
+        return _selects_a_presentation(text, at)
+    if at == 0:
+        return False
+    base = unicodedata.name(text[at - 1], "")
+    if ord(text[at]) in _MONGOLIAN_SELECTORS:
+        return base.startswith("MONGOLIAN LETTER")
+    return base.startswith(_HAN)
 
 
 def _selects_a_presentation(text: str, at: int) -> bool:

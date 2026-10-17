@@ -48,6 +48,10 @@ ACCEPTED = [
     pytest.param("\u2139\ufe0f info", id="information"),
     pytest.param("\u3030\ufe0f", id="wavy dash"),
     pytest.param("\u303d\ufe0e ops", id="part alternation mark"),
+    # A selector that picks a glyph where a script has them (review of #259, round 33, 10/10).
+    pytest.param("\u845b\U000e0100\u98fe", id="ideographic selector after a han ideograph"),
+    pytest.param("\u8fbb\ufe00", id="standardized selector after a han ideograph"),
+    pytest.param("\u1820\u180b\u1828", id="mongolian selector after a mongolian letter"),
 ]
 REFUSED = [
     pytest.param("evil\u202egnp.exe", id="right-to-left override"),
@@ -68,6 +72,14 @@ REFUSED = [
     pytest.param("work\ufe0e", id="text selector after a letter"),
     pytest.param("ops 1\ufe0f", id="digit without its keycap"),
     pytest.param("!\ufe0f", id="punctuation with no emoji"),
+    # Every other selector, which is Mn, not Cf, after what it picks no form of (round 33).
+    pytest.param("work\ufe00", id="standardized selector after a letter"),
+    pytest.param("ops 1\ufe0d", id="standardized selector after a digit"),
+    pytest.param("work\U000e0100", id="ideographic selector after a letter"),
+    pytest.param("work\u180b", id="mongolian selector after a latin letter"),
+    pytest.param("\u845b\ufe0f", id="emoji selector after a han ideograph"),
+    pytest.param("\u845b\U000e0100\U000e0101", id="a second selector"),
+    pytest.param("\ufe00work", id="selector first"),
 ]
 
 
@@ -112,27 +124,31 @@ def test_the_rule_names_what_is_wrong(name: str, flaw: str | None) -> None:
 
 
 def test_a_name_that_differs_only_by_a_variation_selector_is_taken(fake_home: Path) -> None:
-    """A standardized variation selector (U+FE00) after a letter is not refused — it is how
-    some scripts pick a glyph — but it changes how a character is drawn, never which one it
-    is: ``work`` U+FE00 beside ``work`` printed as one name, and ``resolve("work")`` picked
-    slot 3 (review of #261, N3). Compared without it (``core.names.name_key``), it is taken."""
+    """A variation selector after a Han ideograph is not refused — it picks the glyph a name
+    is registered in — but it changes how a character is drawn, never which one it is:
+    ``work`` U+FE00 beside ``work`` printed as one name, and ``resolve("work")`` picked slot
+    3 (review of #261, N3). Compared without it (``core.names.name_key``), it is taken.
+    After a letter it is refused outright since round 33 (10/10), and a ref typed with one
+    still finds the name."""
     from aisquare.services import claude_accounts as accounts_service
 
     accounts_core.create_account()  # slot 2
     accounts_core.create_account()  # slot 3
-    accounts_service.set_alias("2", "work")
+    accounts_service.set_alias("2", "\u845b work")
     with pytest.raises(accounts_service.AccountsError, match="already taken"):
-        accounts_service.set_alias("3", "work\ufe00")
-    assert accounts_service.resolve("work").slot == 2
-    assert accounts_service.resolve("WORK\ufe00").slot == 2  # typed with one, found all the same
+        accounts_service.set_alias("3", "\u845b\U000e0100 work")
+    assert accounts_service.resolve("\u845b work").slot == 2
+    assert accounts_service.resolve("\u845b\U000e0100 WORK\ufe00").slot == 2  # found all the same
 
 
 @pytest.mark.parametrize(
     ("name", "why"),
     [
-        pytest.param("account 3\ufe00", "what slot 3 is called", id="slot 3's label"),
-        pytest.param("ACCOUNT 3\U000e0100", "what slot 3 is called", id="ideographic selector"),
-        pytest.param("Plain Claude\ufe00", "what slot 1 is called", id="slot 1's label"),
+        # Refused as what draws nothing since round 33 (10/10): a selector after a digit or
+        # a letter picks no form. Either way the alias is not stored.
+        pytest.param("account 3\ufe00", "invisible formatting", id="slot 3's label"),
+        pytest.param("ACCOUNT 3\U000e0100", "invisible formatting", id="ideographic selector"),
+        pytest.param("Plain Claude\ufe00", "invisible formatting", id="slot 1's label"),
         pytest.param("3\ufe00", "reads as a slot number", id="a slot number"),
     ],
 )

@@ -209,13 +209,16 @@ def fleet_command(verb: str, project: ProjectInfo, *words: str) -> str:
 
 
 class ProjectBusyError(Exception):
-    """The project has live fleet agents, or another project's (``reader``'s) live fleet
-    agents read its board, as a hub's, so forgetting it would strand them."""
+    """The project has live fleet agents, or another project's (``reader``'s) fleet agents
+    read its board, as a hub's, live or a restart away, so forgetting it would strand them."""
 
     def __init__(
         self, project: ProjectInfo, agents: list[FleetAgent], *, reader: ProjectInfo | None = None
     ) -> None:
-        labels = ", ".join(agent.label for agent in agents)
+        stopped = sum(agent.ended_at is not None for agent in agents)
+        labels = ", ".join(
+            agent.label + (" (stopped)" if agent.ended_at is not None else "") for agent in agents
+        )
         # `reap` is named for rows whose SERVER still answers — it refuses to end a
         # row on a server it cannot reach, and an operator following that advice
         # after a hand-run `tmux kill-server` reaped nothing, twice. The scoped
@@ -228,13 +231,22 @@ class ProjectBusyError(Exception):
             f"{display_name(project)} has {len(agents)} live fleet agent(s)"
             if reader is None
             else f"{display_name(project)} is the board {display_name(reader)}'s "
-            f"{len(agents)} live fleet agent(s) read"
+            f"{len(agents)} {'' if stopped else 'live '}fleet agent(s) read"
         )
-        super().__init__(
-            f"{has}: {labels} — "
-            f"stop them first ({stop} <label>), or run {reap} if they are already gone; if "
-            f"their tmux server is gone too, {shutdown} records them"
-        )
+        ways: list[str] = []
+        if not stopped or stopped < len(agents):
+            ways.append(
+                f"stop {'the live ones' if stopped else 'them'} first ({stop} <label>), or run "
+                f"{reap} if they are already gone; if their tmux server is gone too, "
+                f"{shutdown} records them"
+            )
+        if stopped and reader is not None:
+            forget = install_route.command_line(["aisquare", "project", "forget", str(reader.root)])
+            ways.append(
+                "a restart of a stopped one starts it on this board again: forget "
+                f"{display_name(reader)} first if you are done with its agents ({forget})"
+            )
+        super().__init__(f"{has}: {labels} — " + "; ".join(ways))
         self.project = project
         self.agents = agents
         self.reader = reader
@@ -360,8 +372,15 @@ def _busy(
 
 def _reading_rows(store: ContextStore) -> list[FleetAgent]:
     """The fleet rows, in every project, whose recorded board holds a project
-    (:func:`_board_readers`): the live ones."""
-    return store.live_fleet_agents()
+    (:func:`_board_readers`): the live ones, and each stopped one a ``restart`` acts on, the
+    newest of its label (``ContextStore.fleet_label_heads``).
+
+    A restart of a stopped row starts its replacement under the hub its launch recorded
+    (``fleet._board_and_hub``), whose ``launch`` adds the board it joins (``team on``). Asked
+    of live rows alone, a hub whose readers' agents had all stopped was forgotten, and a
+    Restart of one brought it back on the list with nothing to say why (review of #259,
+    round 33, 3/10)."""
+    return store.fleet_label_heads()
 
 
 def _board_readers(
@@ -369,12 +388,15 @@ def _board_readers(
 ) -> tuple[ProjectInfo | None, list[FleetAgent]]:
     """The first other project whose fleet rows that hold a board (:func:`_reading_rows`, or
     ``readers``) recorded ``project``'s, as a hub's (``FleetAgent.board``), and those rows;
-    ``(None, [])`` for none."""
+    ``(None, [])`` for none. A stopped row of a project forgotten since is none: nothing
+    lists it to restart."""
     rows = _reading_rows(store) if readers is None else readers
     reading = [
         row
         for row in rows
-        if row.project_id != project.id and (row.board or row.project_id) == project.id
+        if row.project_id != project.id
+        and (row.board or row.project_id) == project.id
+        and (row.ended_at is None or store.get_project(row.project_id) is not None)
     ]
     if not reading:
         return None, []

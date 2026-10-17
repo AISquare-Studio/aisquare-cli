@@ -1365,6 +1365,7 @@ class ContextStore(Protocol):
     def get_fleet_agent(self, ref: str) -> FleetAgent | None: ...
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
     def live_fleet_agents(self) -> list[FleetAgent]: ...
+    def fleet_label_heads(self) -> list[FleetAgent]: ...
     def fleet_agents_ended_since(self, project_id: str, since: datetime) -> list[FleetAgent]: ...
     def fleet_agent_boards(self, project_id: str, *, live_only: bool = False) -> list[str]: ...
     def fleet_board(self, project_id: str) -> str | None: ...
@@ -3834,6 +3835,22 @@ class SqliteStore:
         rows = self._conn.execute(
             f"SELECT {self._fleet_agent_read} FROM fleet_agent "
             "WHERE ended_at IS NULL ORDER BY created_at, id"
+        ).fetchall()
+        return [_row_to_fleet_agent(row) for row in rows]
+
+    def fleet_label_heads(self) -> list[FleetAgent]:
+        """Every live fleet row, and the newest row of each label, live or ended, in every
+        project, forgotten ones' included, oldest first: the rows a ``fleet stop`` or a
+        ``restart`` by label acts on (:meth:`fleet_agent_by_label`), ended or not.
+
+        The rows that may read a board again (``services.project._reading_rows``): a restart
+        of a stopped one starts its replacement under the hub its launch recorded. Picked in
+        SQL: every spawn, restart and switch adds a row that is never deleted."""
+        rows = self._conn.execute(
+            f"SELECT {self._fleet_agent_read} FROM fleet_agent "
+            "WHERE ended_at IS NULL OR NOT EXISTS (SELECT 1 FROM fleet_agent AS newer "
+            "WHERE newer.project_id = fleet_agent.project_id AND newer.label = fleet_agent.label "
+            "AND newer.created_at > fleet_agent.created_at) ORDER BY created_at, id"
         ).fetchall()
         return [_row_to_fleet_agent(row) for row in rows]
 

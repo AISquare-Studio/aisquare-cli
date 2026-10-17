@@ -10038,16 +10038,26 @@ def test_a_pause_whose_own_signal_does_not_parse_on_a_board_it_goes_to_sets_none
     assert sorted(_paused_on(w)) == sorted([w.hub.id, w.fleet.id])
 
 
-class _LockedOn:
-    """A store's connection that refuses ``board``'s signal event as a lock does, in the
-    transaction the boards sorted before it have already written in."""
+class _RefusedOn:
+    """A store's connection that refuses ``board``'s signal event as a lock does (or with
+    ``message`` and SQLite's ``code``), in the transaction the boards sorted before it have
+    already written in."""
 
-    def __init__(self, conn: sqlite3.Connection, board: str) -> None:
-        self._conn, self._board = conn, board
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        board: str,
+        message: str = "database is locked",
+        code: int | None = None,
+    ) -> None:
+        self._conn, self._board, self._message, self._code = conn, board, message, code
 
     def execute(self, sql: str, params: Sequence[object] = ()) -> sqlite3.Cursor:
         if sql.startswith("INSERT INTO team_event") and params[1] == self._board:
-            raise sqlite3.OperationalError("database is locked")
+            refused = sqlite3.OperationalError(self._message)
+            if self._code is not None:
+                refused.sqlite_errorcode = self._code
+            raise refused
         return self._conn.execute(sql, params)
 
     def __enter__(self) -> sqlite3.Connection:
@@ -10080,7 +10090,7 @@ def test_a_pause_or_resume_the_store_refuses_on_a_later_board_writes_none(
         store: SqliteStore, writes: Sequence[tuple[TeamEvent, str, dict[str, Any]]]
     ) -> list[TeamEvent]:
         conn = store._conn
-        store._conn = _LockedOn(conn, last)  # type: ignore[assignment]
+        store._conn = _RefusedOn(conn, last)  # type: ignore[assignment]
         try:
             return real(store, writes)
         finally:
@@ -10105,6 +10115,54 @@ def test_a_pause_or_resume_the_store_refuses_on_a_later_board_writes_none(
     w.monkeypatch.setattr(SqliteStore, "add_signal_events", real)
     getattr(fleet_service, verb)(w.fleet)
     assert sorted(_paused_on(w)) == ([] if verb == "resume" else sorted([w.hub.id, w.fleet.id]))
+
+
+@pytest.mark.parametrize("verb", ["pause", "resume"])
+@pytest.mark.parametrize(
+    ("message", "code"),
+    [
+        ("database or disk is full", sqlite3.SQLITE_FULL),
+        ("attempt to write a readonly database", sqlite3.SQLITE_READONLY),
+        ("disk I/O error", sqlite3.SQLITE_IOERR),
+    ],
+    ids=["full", "readonly", "io"],
+)
+def test_a_pause_or_resume_a_full_or_readonly_store_refuses_is_said_with_no_traceback(
+    hubbed: _Hubbed, runner: CliRunner, verb: str, message: str, code: int
+) -> None:
+    """Review of #259, round 36, 2/9: round 35 re-raised every store error of a pause but a
+    lock, for the CLI's root group to say how to recover from damage. That group maps damage
+    alone: a full disk, a readonly store or an I/O error ended in a traceback, ``--json``
+    printing nothing, as before round 31. Each is a ``fleet_error`` that names it, nothing
+    written, with no "try again", which a lock alone is told."""
+    w = hubbed
+    if verb == "resume":
+        fleet_service.pause(w.fleet)
+    before = sorted(_paused_on(w))
+    last = max(w.hub.id, w.fleet.id)
+    real = SqliteStore.add_signal_events
+
+    def refused_on_last(
+        store: SqliteStore, writes: Sequence[tuple[TeamEvent, str, dict[str, Any]]]
+    ) -> list[TeamEvent]:
+        conn = store._conn
+        store._conn = _RefusedOn(conn, last, message, code)  # type: ignore[assignment]
+        try:
+            return real(store, writes)
+        finally:
+            store._conn = conn
+
+    w.monkeypatch.setattr(SqliteStore, "add_signal_events", refused_on_last)
+
+    with pytest.raises(FleetError) as refused:
+        getattr(fleet_service, verb)(w.fleet)
+    said = str(refused.value)
+    assert message in said and said.endswith("nothing was written"), said
+    told = runner.invoke(app, ["--json", "fleet", verb, "-P", w.fleet.id])
+    assert told.exit_code != 0 and isinstance(told.exception, SystemExit), told.output
+    payload = json.loads(told.stdout)
+    assert payload["error"] == "fleet_error" and message in payload["detail"], payload
+    assert sorted(_paused_on(w)) == before, "nothing was written"
 
 
 def _zero_the_table(table: str) -> None:

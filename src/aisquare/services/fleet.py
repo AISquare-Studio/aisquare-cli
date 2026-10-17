@@ -57,7 +57,14 @@ from aisquare.core.config import (
 from aisquare.core.ids import new_agent_id
 from aisquare.core.locking import holding
 from aisquare.core.spawn import git_env
-from aisquare.core.store import AmbiguousIdError, ContextStore, is_locked_error, store_session
+from aisquare.core.store import (
+    AmbiguousIdError,
+    ContextStore,
+    StoreUnopenable,
+    is_corrupt_error,
+    is_locked_error,
+    store_session,
+)
 from aisquare.core.tmux import (
     DEFAULT_WINDOW_HEIGHT,
     DEFAULT_WINDOW_WIDTH,
@@ -7262,7 +7269,10 @@ def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> Non
     again (:func:`is_locked_error`), and nothing else is: a store found damaged
     (``database disk image is malformed``, a ``StoreUnopenable``) reaches the CLI's root
     group, which says to move it aside. Said as "try again" too, it was told to retry what
-    never works, and never how to recover (round 35, 1/8).
+    never works, and never how to recover (round 35, 1/8). Any other store error (``database
+    or disk is full``, a readonly store, ``disk I/O error``) is a ``FleetError`` that names
+    it: the root group maps damage alone, and re-raised, it ended in a traceback, ``--json``
+    printing nothing (round 36, 2/9).
 
     Each write is a ``signal`` event in the delta of every session on that board. Off on
     every board one of the project's rows ever recorded, ``fleet resume -P a`` put
@@ -7298,11 +7308,12 @@ def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> Non
                 raise FleetError(f"cannot {doing} the pause: {named} could not be read")
             team.set_signals_in(store, signals, value, session_ref=session_ref)
     except sqlite3.Error as exc:
-        if not is_locked_error(exc):
-            raise  # damage the CLI says how to recover from, or a fault keeping its traceback
+        if isinstance(exc, StoreUnopenable) or is_corrupt_error(exc):
+            raise  # damage, which the CLI's root group says how to recover from
+        again = "; try again" if is_locked_error(exc) else ""
         raise FleetError(  # every write rolled back
             f"cannot {doing} the pause: the store refused it ({type(exc).__name__}: {exc}) — "
-            "nothing was written; try again"
+            f"nothing was written{again}"
         ) from exc
     except team.TeamDisabledError as exc:
         raise FleetError(f"cannot set the pause signal: {exc}") from exc

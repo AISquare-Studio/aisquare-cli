@@ -9904,6 +9904,40 @@ def test_a_signal_that_does_not_parse_holds_up_only_the_project_whose_pause_it_i
     assert other.id in report.incomplete_projects and project.id not in report.incomplete_projects
 
 
+@pytest.mark.parametrize("blob", ["not json", "[1, 2]", '{"value": "off", "seq": null}'])
+def test_a_pause_whose_own_signal_does_not_parse_on_a_board_it_goes_to_sets_none(
+    hubbed: _Hubbed, runner: CliRunner, blob: str
+) -> None:
+    """Review of #259, round 33, 1/10: round 32 refused a resume whose own pause did not
+    parse, but ``fleet pause`` set each board in turn, and the write reads the value it
+    replaces: the blob on the board sorted last raised a traceback there, ``--json`` printed
+    nothing, and the boards before it were left paused. Every board is asked before any is
+    written; a blob that does not parse on one is refused, naming it, and none is set."""
+    w = hubbed
+    last = max(w.hub.id, w.fleet.id)  # the boards are set in this order
+    name = harness.pause_signal(w.fleet.id, last)
+    with store_session() as store:
+        store.set_meta(f"signal/{last}/{name}", blob)
+
+    with pytest.raises(FleetError) as refused:
+        fleet_service.pause(w.fleet)
+    assert str(refused.value) == f"cannot set the pause: {name} on {last} could not be read"
+    paused = runner.invoke(app, ["--json", "fleet", "pause", "-P", w.fleet.id])
+    assert paused.exit_code != 0 and isinstance(paused.exception, SystemExit), paused.output
+    assert "could not be read" in json.loads(paused.stdout)["detail"]
+    first = min(w.hub.id, w.fleet.id)
+    with store_session() as store:
+        before = team_service.read_signal_in(store, first, harness.pause_signal(w.fleet.id, first))
+    assert before is None, "nothing was set, on the board before it either"
+
+    other = "prj_elsewhere"
+    with store_session() as store:
+        store.set_meta(f"signal/{last}/{name}", "{}")  # repaired by hand
+        store.set_meta(f"signal/{other}/{harness.pause_signal(w.fleet.id, other)}", blob)
+    fleet_service.pause(w.fleet)  # its own, on a board it is not set on: no concern
+    assert sorted(_paused_on(w)) == sorted([w.hub.id, w.fleet.id])
+
+
 def test_shutdown_reports_a_pause_signal_it_could_not_read_or_clear(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

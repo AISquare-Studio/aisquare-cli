@@ -7180,8 +7180,12 @@ def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> Non
     (:func:`_pause_signals`), ``off`` wherever it reads on (:func:`_pause_where_on`).
 
     A resume whose own pause does not parse on some board is refused, naming it, and nothing
-    is written: the write reads the value it replaces. Another project's that does not parse
-    is no concern of this one's (:func:`team.board_signals_in`).
+    is written: the write reads the value it replaces. So is a pause whose own does not parse
+    on a board it is set on, every board worked out before any is written: set on the boards
+    sorted before it, ``fleet pause`` then ended in a traceback, ``--json`` printed nothing,
+    and the project was paused on some boards and not on others (review of #259, round 33,
+    1/10). Another project's that does not parse is no concern of this one's
+    (:func:`team.board_signals_in`).
 
     Each write is a ``signal`` event in the delta of every session on that board. Off on
     every board one of the project's rows ever recorded, ``fleet resume -P a`` put
@@ -7196,22 +7200,26 @@ def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> Non
     try:
         # The team off: `set_signal` refuses before any store opens.
         signals = [(project.id, PAUSE_SIGNAL)]
-        if orchestrator.team_enabled() and value == "on":
-            homes = _pause_homes(project)
-            with store_session() as store:
-                signals = _pause_signals(store, project, homes)
-        elif orchestrator.team_enabled():
+        if orchestrator.team_enabled():
+            homes = _pause_homes(project) if value == "on" else set()
             unreadable: list[tuple[str, str]] = []
             with store_session() as store:
-                signals = _pause_where_on(
-                    project, team.board_signals_in(store, unreadable=unreadable)
-                )
-                if session_ref is not None and store.get_session(session_ref) is None:
-                    raise KeyError(session_ref)
-            broken = _pause_where_on(project, unreadable)
+                states = team.board_signals_in(store, unreadable=unreadable)
+                if value == "on":
+                    signals = _pause_signals(store, project, homes)
+                else:
+                    signals = _pause_where_on(project, states)
+                    if session_ref is not None and store.get_session(session_ref) is None:
+                        raise KeyError(session_ref)
+            broken = [
+                where
+                for where in _pause_where_on(project, unreadable)
+                if value == "off" or where in signals
+            ]
             if broken:
                 named = ", ".join(f"{name} on {board}" for board, name in broken)
-                raise FleetError(f"cannot clear the pause: {named} could not be read")
+                doing = "set" if value == "on" else "clear"
+                raise FleetError(f"cannot {doing} the pause: {named} could not be read")
         for board, name in signals:
             team.set_signal(name, value, session_ref=session_ref, project_id=board)
     except team.TeamDisabledError as exc:

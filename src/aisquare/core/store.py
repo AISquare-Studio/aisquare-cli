@@ -4069,10 +4069,16 @@ class SqliteStore:
     def fleet_agent_by_label(
         self, project_id: str, label: str, *, live_only: bool = True
     ) -> FleetAgent | None:
+        """The newest row of ``label`` in the project (``live_only``: its live one), two
+        stamped alike giving the one of the greater id, as :meth:`fleet_label_heads` picks
+        it. With no tie-break, SQLite gave whichever its plan reached first, and the holds
+        ``project forget`` and prune judge could read one row while a restart acted on the
+        other (review of #259, round 41, 4/6)."""
         clause = " AND ended_at IS NULL" if live_only else ""
         row = self._conn.execute(
             f"SELECT {self._fleet_agent_read} FROM fleet_agent "
-            f"WHERE project_id = ? AND label = ?{clause} ORDER BY created_at DESC LIMIT 1",
+            f"WHERE project_id = ? AND label = ?{clause} ORDER BY created_at DESC, id DESC "
+            "LIMIT 1",
             (project_id, label),
         ).fetchone()
         return _row_to_fleet_agent(row) if row is not None else None

@@ -2501,6 +2501,28 @@ def test_the_label_heads_are_every_live_row_and_each_labels_newest(store: Contex
     assert "agt_gone_1" not in {head.id for head in heads}
 
 
+def test_a_label_lookup_and_the_label_heads_pick_one_row_of_two_stamped_alike(
+    store: ContextStore,
+) -> None:
+    """Review of #259, round 41, 4/6: the heads break a tie on ``created_at`` with the greater
+    id, and ``fleet_agent_by_label``, the row a ``fleet stop`` or a ``restart`` by label acts
+    on, broke none: SQLite gave whichever row its plan reached first, and the holds could
+    judge one row while a restart acted on the other. Both give the greater id, whichever
+    was written first."""
+    stamped = datetime(2026, 2, 1, tzinfo=UTC).isoformat()
+    store._conn.executemany(  # type: ignore[attr-defined]
+        "INSERT INTO fleet_agent (id, project_id, label, role, pane_id, cwd, created_at, "
+        "ended_at) VALUES (?, 'prj_0', 'coder-1', 'coder', '%1', '/w', ?, ?)",
+        [("agt_b", stamped, stamped), ("agt_a", stamped, stamped)],
+    )
+
+    [head] = store.fleet_label_heads()
+    found = store.fleet_agent_by_label("prj_0", "coder-1", live_only=False)
+
+    assert found is not None
+    assert (head.id, found.id) == ("agt_b", "agt_b")
+
+
 def test_the_label_heads_cost_grows_with_the_rows_not_their_square(store: ContextStore) -> None:
     """Review of #259, round 37, 4/7: each label's newest was a correlated ``NOT EXISTS`` per
     row, over the ``(project_id, created_at)`` index, which has no ``label``: quadratic in a

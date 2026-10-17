@@ -1098,7 +1098,9 @@ def test_a_prunes_reason_for_a_hub_reads_as_every_readers_and_the_changelog_says
     assert result.exit_code == 0, result.output
     said = " ".join(result.stdout.split())
     assert "missing (kept: the fleet agents of api, web read its board)" in said, said
-    changelog = " ".join((Path(__file__).parents[1] / "CHANGELOG.md").read_text().split())
+    changelog = " ".join(
+        (Path(__file__).parents[1] / "CHANGELOG.md").read_text(encoding="utf-8").split()
+    )
     assert (
         "`project forget` refuses it, naming every project that reads it, each with what frees "
         "it, and `project prune` keeps it, `--purge` included, naming those projects, unless"
@@ -1864,7 +1866,7 @@ def test_the_changelog_names_each_key_a_prunes_json_gained_since_080(
         "keys_still_live",
         *since_080,
     }
-    changelog = (Path(__file__).parents[1] / "CHANGELOG.md").read_text()
+    changelog = (Path(__file__).parents[1] / "CHANGELOG.md").read_text(encoding="utf-8")
     notes = " ".join(changelog.split("## [0.8.1]")[1].split("## [0.8.0]")[0].split())
     assert "`project prune` reads why each candidate is one again" in notes
     assert all(f"`{key}`" in notes for key in since_080), notes

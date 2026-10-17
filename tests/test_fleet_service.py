@@ -10623,7 +10623,9 @@ def test_where_a_pause_goes_is_said_with_the_live_rows_boards_wherever_it_is_sai
     assert "while the project has no manager row" not in said["fleet_agent_boards"]
     assert "besides its manager's and its homes" in said["fleet_agent_boards"]
     assert "besides its homes and the boards its live rows recorded" in said["fleet_manager_board"]
-    docs = " ".join((Path(__file__).parents[1] / "docs" / "fleet.md").read_text().split())
+    docs = " ".join(
+        (Path(__file__).parents[1] / "docs" / "fleet.md").read_text(encoding="utf-8").split()
+    )
     assert "running or not, the boards its running agents recorded, and the ones a spawn" in docs
 
 

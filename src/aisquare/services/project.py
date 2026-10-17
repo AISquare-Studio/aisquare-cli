@@ -673,11 +673,18 @@ def _no_longer(
     project: ProjectInfo,
     activity: dict[str, str],
     cutoff: str | None,
+    *,
+    missing: bool,
 ) -> bool:
     """Whether ``candidate``'s reason no longer holds of ``project``, its row as :func:`prune`
     re-reads it: a capture added on purpose since (``project onboard``), given a context
     entry or, with ``cutoff``, touched since it; a missing root back on disk; a worktree no
-    longer one, or whose principal is no longer registered, the only handle left on it."""
+    longer one, or whose principal is no longer registered, the only handle left on it.
+
+    A worktree whose tree is gone is still one with ``missing`` (the run asks for missing
+    roots too): read as no longer a worktree, a tree removed while the prompt sat open (a
+    ``fleet reap``) was kept as "no longer stale", though more stale than before (review of
+    #259, round 38, 2/4)."""
     if candidate.reason == "captured":
         return (
             project.onboarded_at is not None
@@ -686,6 +693,8 @@ def _no_longer(
         )
     if candidate.reason == "missing":
         return _is_dir(project.root)
+    if not _is_dir(project.root):
+        return not missing
     principal = candidate.principal
     return (
         principal is None
@@ -734,7 +743,11 @@ def prune_plan(candidates: list[PruneCandidate], *, purge: bool) -> ProjectPrune
 
 
 def prune(
-    candidates: list[PruneCandidate], *, purge: bool, captured_older_than: int | None = None
+    candidates: list[PruneCandidate],
+    *,
+    purge: bool,
+    missing: bool,
+    captured_older_than: int | None = None,
 ) -> ProjectPruneReport:
     """Drop the candidates — the same forget as :func:`forget`, per registration.
 
@@ -750,11 +763,11 @@ def prune(
     lists a forgotten row to purge it (review of #259, round 36, 5/9).
 
     Why each is a candidate is re-read too, before any goes (:func:`_no_longer`, with the
-    ``captured_older_than`` the plan was made with): a capture added on purpose or given an
-    entry while the prompt sat open, or a missing root that came back, is kept, as changed
-    since the plan (``changed``). Only its holds re-read, it was dropped anyway, and under
-    ``--purge`` the entries just saved went with it, and its data directory (review of #259,
-    round 37, 2/7).
+    ``missing`` and ``captured_older_than`` the plan was made with): a capture added on
+    purpose or given an entry while the prompt sat open, or a missing root that came back,
+    is kept, as changed since the plan (``changed``). Only its holds re-read, it was dropped
+    anyway, and under ``--purge`` the entries just saved went with it, and its data
+    directory (review of #259, round 37, 2/7).
     """
     dropped: list[str] = []
     kept: list[PruneCandidate] = []
@@ -772,7 +785,9 @@ def prune(
         changed = [
             c.project.id
             for c in here
-            if _no_longer(store, c, rows[c.project.id] or c.project, activity, cutoff)
+            if _no_longer(
+                store, c, rows[c.project.id] or c.project, activity, cutoff, missing=missing
+            )
         ]
         here = [c for c in here if c.project.id not in changed]
         holds = _holds(store, [c.project for c in here], reading_rows(store)) if here else {}

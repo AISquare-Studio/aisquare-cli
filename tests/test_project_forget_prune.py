@@ -1195,7 +1195,7 @@ def test_a_prune_of_a_hub_and_its_reader_decides_every_hold_before_either_goes(
     ordered = sorted(plan, key=lambda c: (c.project.id == hub) != hub_first)
     assert ordered[0].project.id == (hub if hub_first else beta)
 
-    report = project_service.prune(ordered, purge=False)
+    report = project_service.prune(ordered, purge=False, missing=True)
 
     assert sorted(report.dropped) == ([] if held else sorted([hub, beta])), "as the plan said"
     assert {c.project.id: [r.id for r in c.read_by] for c in report.kept if c.read_by} == readers
@@ -1579,6 +1579,44 @@ def test_a_prune_keeps_a_missing_root_that_came_back_and_says_so(
     assert "missing (kept: changed since the plan)" in said, said
     assert "✓ forgot 1 registration" in said and "kept 1 that changed since the plan" in said
     assert _listed(runner) == {ids["a"]}
+
+
+@pytest.mark.parametrize(
+    ("flags", "dropped"), [([], True), (["--worktrees"], False)], ids=["plain", "worktrees-only"]
+)
+def test_a_prune_drops_a_worktree_whose_tree_went_while_the_prompt_sat_open(
+    runner: CliRunner,
+    repo_and_worktree: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    flags: list[str],
+    dropped: bool,
+) -> None:
+    """Review of #259, round 38, 2/4: a worktree candidate read as changed whenever its root
+    named no principal, as a root that is gone names none: a tree a ``fleet reap`` removed
+    while the confirmation sat open was kept as "no longer stale" by a plain prune, which
+    asks for missing roots too. It is dropped; asked for worktrees alone, it is kept, as a
+    plan made then would not list it."""
+    from aisquare.services import project as project_service
+
+    repo, worktree = repo_and_worktree
+    wt_id = _register_worktree_as_its_own_project(worktree)
+    repo_id = _register(runner, monkeypatch, repo)
+    real = project_service.prune_candidates
+
+    def the_prompt_sat_open(**kwargs: Any) -> list[Any]:
+        plan = real(**kwargs)
+        assert [(c.project.id, c.reason) for c in plan] == [(wt_id, "worktree")], "the premise"
+        shutil.rmtree(worktree)  # reaped
+        return plan
+
+    monkeypatch.setattr(project_service, "prune_candidates", the_prompt_sat_open)
+
+    result = runner.invoke(app, ["--json", "project", "prune", *flags, "--yes"])
+
+    assert result.exit_code == 0, result.output
+    report = _json(result.stdout)
+    assert (report["dropped"], report["changed"]) == (([wt_id], []) if dropped else ([], [wt_id]))
+    assert _listed(runner) == ({repo_id} if dropped else {repo_id, wt_id})
 
 
 def test_an_empty_list_names_the_captured_directories_it_hides(

@@ -843,6 +843,49 @@ def test_prune_keeps_a_hub_whose_board_another_projects_agents_read(
     assert _json(forget.stdout) == {"error": "project_busy", "ref": hub}, "the same guard"
 
 
+@pytest.mark.parametrize("held", [False, True], ids=["its reader goes", "its reader stays"])
+@pytest.mark.parametrize("hub_first", [True, False], ids=["hub first", "reader first"])
+def test_a_prune_of_a_hub_and_its_reader_decides_every_hold_before_either_goes(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch, held: bool, hub_first: bool
+) -> None:
+    """Review of #259, round 34, 4/10: a prune asked each candidate's hold in turn and
+    forgot as it went, and a stopped row holds a hub only while its project is listed to
+    restart it. Hub and beta both ``--missing``, beta's one manager stopped on the hub's
+    board: the hub first, it was kept and beta dropped, so nothing held it for the next
+    prune; beta first, both went, though the plan said the hub was kept. Every hold is
+    decided before anything goes, plan and run alike: a reader the prune drops holds
+    nothing, and one it keeps (gamma's stopped row on beta's board holds beta) still holds."""
+    from aisquare.services import project as project_service
+
+    hub = _register(runner, monkeypatch, work_dir / "hub")
+    beta = _register(runner, monkeypatch, work_dir / "beta")
+    gamma = _register(runner, monkeypatch, work_dir / "gamma")
+    monkeypatch.chdir(work_dir)
+    shutil.rmtree(work_dir / "hub")
+    shutil.rmtree(work_dir / "beta")
+    with store_session() as store:
+        reads = [(beta, hub), (gamma, beta)] if held else [(beta, hub)]
+        for project_id, board in reads:
+            row = store.upsert_fleet_agent(
+                _agent(project_id, "manager").model_copy(update={"board": board})
+            )
+            store.end_fleet_agent(row.id, exit_status=0)
+
+    plan = project_service.prune_candidates(missing=True, worktrees=False)
+    by_id = {c.project.id: c for c in plan}
+    assert set(by_id) == {hub, beta}
+    readers = {p: c.read_by.id for p, c in by_id.items() if c.read_by is not None}
+    assert readers == ({hub: beta, beta: gamma} if held else {}), "the plan"
+    ordered = sorted(plan, key=lambda c: (c.project.id == hub) != hub_first)
+    assert ordered[0].project.id == (hub if hub_first else beta)
+
+    report = project_service.prune(ordered, purge=False)
+
+    assert sorted(report.dropped) == ([] if held else sorted([hub, beta])), "as the plan said"
+    assert {c.project.id: c.read_by.id for c in report.kept if c.read_by} == readers
+    assert _listed(runner) == ({hub, beta, gamma} if held else {gamma})
+
+
 def test_prune_moves_the_pin_when_it_drops_the_active_project(
     runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

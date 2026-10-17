@@ -7,7 +7,7 @@ import os
 import shutil
 import stat
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -350,24 +350,61 @@ def forget_project(project: ProjectInfo, *, purge: bool = False) -> ProjectForge
 
 
 def _busy(
-    store: ContextStore, project: ProjectInfo, readers: Sequence[FleetAgent] | None = None
+    store: ContextStore,
+    project: ProjectInfo,
+    readers: Sequence[FleetAgent] | None = None,
+    *,
+    live: Sequence[FleetAgent] | None = None,
+    dropping: Collection[str] = (),
 ) -> ProjectBusyError | None:
-    """Why ``project`` may not be forgotten now, or ``None``: its own live fleet rows, else
-    another project's that read its board (:func:`_board_readers`, of ``readers`` when the
-    caller read them once for many projects, :func:`_reading_rows`).
+    """Why ``project`` may not be forgotten now, or ``None``: its own live fleet rows
+    (``live`` when the caller read them), else another project's that read its board
+    (:func:`_board_readers`, of ``readers`` when the caller read them once for many
+    projects, :func:`_reading_rows`; a stopped one of a project in ``dropping``, forgotten
+    with it, is none).
 
     The one guard :func:`forget_project` (``project forget``, Remote's ``project/remove``)
-    and :func:`prune` ask. Asked only in ``forget``, ``prune --missing --purge`` of a hub
-    whose folder held no code purged the board another project's live agents were claiming
-    tasks on, and a prune without ``--purge`` tombstoned it, which ``forget`` refuses
-    (review of #259, round 33, 2/10)."""
-    live = store.fleet_agents(project.id, live_only=True)
-    if live:
-        return ProjectBusyError(project, live)
-    reader, reading = _board_readers(store, project, readers)
+    and :func:`prune` ask (:func:`_holds`, for a prune's every candidate at once). Asked
+    only in ``forget``, ``prune --missing --purge`` of a hub whose folder held no code
+    purged the board another project's live agents were claiming tasks on, and a prune
+    without ``--purge`` tombstoned it, which ``forget`` refuses (review of #259, round 33,
+    2/10)."""
+    own = store.fleet_agents(project.id, live_only=True) if live is None else live
+    if own:
+        return ProjectBusyError(project, list(own))
+    reader, reading = _board_readers(store, project, readers, dropping)
     if reader is not None:
         return ProjectBusyError(project, reading, reader=reader)
     return None
+
+
+def _holds(
+    store: ContextStore, projects: Sequence[ProjectInfo], readers: Sequence[FleetAgent]
+) -> dict[str, ProjectBusyError | None]:
+    """What holds each of ``projects`` (:func:`_busy`), by id, when one prune forgets every
+    one nothing holds: decided over them all, against the store as it is before any goes.
+
+    A stopped row holds the board it read only while its project is listed to restart it,
+    and a prune forgets as it goes. Asked one candidate at a time, a hub and the only
+    project that read it, both ``--missing``, came out by their order: the hub first, it
+    was kept, its reader dropped, and nothing held it for the next prune; the reader first,
+    both went, though the plan the user confirmed kept the hub (review of #259, round 34,
+    4/10). So a stopped reader holds nothing when its project goes in this prune too, and
+    which go is settled first: every candidate without live agents of its own, less each
+    held by a project that stays, until none changes. :func:`prune_candidates` asks this,
+    and :func:`prune` again, so the plan and the run agree.
+    """
+    live = {project.id: store.fleet_agents(project.id, live_only=True) for project in projects}
+    dropping = {project.id for project in projects if not live[project.id]}
+    while True:
+        holds = {
+            project.id: _busy(store, project, readers, live=live[project.id], dropping=dropping)
+            for project in projects
+        }
+        free = {project_id for project_id in dropping if holds[project_id] is None}
+        if free == dropping:
+            return holds
+        dropping = free
 
 
 def _reading_rows(store: ContextStore) -> list[FleetAgent]:
@@ -384,19 +421,25 @@ def _reading_rows(store: ContextStore) -> list[FleetAgent]:
 
 
 def _board_readers(
-    store: ContextStore, project: ProjectInfo, readers: Sequence[FleetAgent] | None = None
+    store: ContextStore,
+    project: ProjectInfo,
+    readers: Sequence[FleetAgent] | None = None,
+    dropping: Collection[str] = (),
 ) -> tuple[ProjectInfo | None, list[FleetAgent]]:
     """The first other project whose fleet rows that hold a board (:func:`_reading_rows`, or
     ``readers``) recorded ``project``'s, as a hub's (``FleetAgent.board``), and those rows;
-    ``(None, [])`` for none. A stopped row of a project forgotten since is none: nothing
-    lists it to restart."""
+    ``(None, [])`` for none. A stopped row of a project forgotten since, or forgotten with
+    it (``dropping``), is none: nothing lists it to restart."""
     rows = _reading_rows(store) if readers is None else readers
     reading = [
         row
         for row in rows
         if row.project_id != project.id
         and (row.board or row.project_id) == project.id
-        and (row.ended_at is None or store.get_project(row.project_id) is not None)
+        and (
+            row.ended_at is None
+            or (row.project_id not in dropping and store.get_project(row.project_id) is not None)
+        )
     ]
     if not reading:
         return None, []
@@ -445,18 +488,11 @@ def prune_candidates(
             else None
         )
         found: list[PruneCandidate] = []
-        readers: list[FleetAgent] | None = None  # read once, for the first candidate
 
         def candidate(
             project: ProjectInfo, reason: PruneReason, principal: ProjectInfo | None = None
         ) -> None:
-            nonlocal readers
-            if readers is None:
-                readers = _reading_rows(store)
-            busy = _busy(store, project, readers)
-            found.append(
-                _held(PruneCandidate(project=project, reason=reason, principal=principal), busy)
-            )
+            found.append(PruneCandidate(project=project, reason=reason, principal=principal))
 
         for project in projects:
             if (
@@ -483,7 +519,10 @@ def prune_candidates(
             )
             if principal is not None and principal.id != project.id:
                 candidate(project, "worktree", principal=principal)
-        return found
+        if not found:
+            return found  # the rows that read a board are read for a candidate only
+        holds = _holds(store, [c.project for c in found], _reading_rows(store))
+        return [_held(c, holds[c.project.id]) for c in found]
 
     if store is not None:
         return plan(store)
@@ -536,18 +575,19 @@ def prune(candidates: list[PruneCandidate], *, purge: bool) -> ProjectPruneRepor
     project's that read its board, as a hub's) is KEPT and reported rather than failing
     the whole sweep: the point of a prune over hundreds of registrations is
     that one busy project does not stop the other three hundred. What holds it is
-    re-read here, not trusted from the plan, since a prompt may have sat open.
+    re-read here, not trusted from the plan, since a prompt may have sat open, and decided
+    over every candidate before any goes (:func:`_holds`), as the plan was.
     """
     dropped: list[str] = []
     kept: list[PruneCandidate] = []
     with store_session() as store:
         active_id = active_project(store).id
-        readers = _reading_rows(store)
-        for candidate in candidates:
+        # Gone since the plan was made: nothing to drop, and no hold to decide.
+        here = [c for c in candidates if store.get_project(c.project.id) is not None]
+        holds = _holds(store, [c.project for c in here], _reading_rows(store)) if here else {}
+        for candidate in here:
             project_id = candidate.project.id
-            if store.get_project(project_id) is None:
-                continue  # already gone since the plan was made
-            held = _held(candidate, _busy(store, candidate.project, readers))
+            held = _held(candidate, holds[project_id])
             if held.held:
                 kept.append(held)
                 continue

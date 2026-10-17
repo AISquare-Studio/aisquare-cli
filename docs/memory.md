@@ -68,7 +68,9 @@ before dropping anything; off a terminal it is a dry run unless `--yes`. Both
 refuse a project that has live fleet agents (`prune` keeps it and says so), and
 a hub whose board another project's fleet agents read: running ones, and stopped
 ones a restart would start under it again. `forget` names them, and what frees
-it.
+it. A `prune` that drops the reading project too, its agents all stopped, drops
+the hub with it: every hold is decided before anything goes, so the plan and
+the sweep agree.
 
 ```sh
 aisquare project forget ../old-checkout       # one registration; --purge deletes its history too

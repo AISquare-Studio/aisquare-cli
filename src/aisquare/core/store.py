@@ -1366,7 +1366,7 @@ class ContextStore(Protocol):
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
     def live_fleet_agents(self) -> list[FleetAgent]: ...
     def fleet_agents_ended_since(self, project_id: str, since: datetime) -> list[FleetAgent]: ...
-    def fleet_agent_boards(self, project_id: str) -> list[str]: ...
+    def fleet_agent_boards(self, project_id: str, *, live_only: bool = False) -> list[str]: ...
     def fleet_board(self, project_id: str) -> str | None: ...
     def fleet_manager_board(self, project_id: str) -> str | None: ...
     def fleet_agent_for_session(self, session_id: str) -> FleetAgent | None: ...
@@ -3852,17 +3852,19 @@ class SqliteStore:
         ).fetchall()
         return [_row_to_fleet_agent(row) for row in rows]
 
-    def fleet_agent_boards(self, project_id: str) -> list[str]:
-        """Every board one of the project's rows recorded, live or ended, sorted; ``[]``
-        before its first spawn.
+    def fleet_agent_boards(self, project_id: str, *, live_only: bool = False) -> list[str]:
+        """Every board one of the project's rows recorded, live or ended (``live_only``: live),
+        sorted; ``[]`` before its first spawn.
 
         The boards a phone may reach for the project (``services.remote_server``'s
-        ``_remote_boards``). Distinct in SQL: every spawn, restart and switch adds a row that
-        is never deleted, and :meth:`fleet_agents` builds them all.
+        ``_remote_boards``); the live ones, those a pause goes to while the project has no
+        manager row (``services.fleet._pause_boards``). Distinct in SQL: every spawn, restart
+        and switch adds a row that is never deleted, and :meth:`fleet_agents` builds them all.
         """
+        clause = " AND ended_at IS NULL" if live_only else ""
         rows = self._conn.execute(
             f"SELECT DISTINCT {self._fleet_agent_board} AS board FROM fleet_agent "
-            "WHERE project_id = ? ORDER BY board",
+            f"WHERE project_id = ?{clause} ORDER BY board",
             (project_id,),
         ).fetchall()
         return [row["board"] for row in rows]

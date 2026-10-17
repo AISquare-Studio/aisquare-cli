@@ -9311,6 +9311,52 @@ def test_a_pause_goes_only_where_a_manager_of_the_project_reads_or_would_next(
     assert signals_on_the_old_hub() == 0, "neither the pause nor the resume reached it"
 
 
+def test_a_pause_before_the_first_manager_goes_where_the_live_coders_read(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 33, 4/10: since round 32 the pause goes on the newest manager
+    row's board and the homes. A project with coders spawned under a hub and no manager yet
+    had no manager row, and a pause from a plain shell went on the checkout's board alone;
+    the manager spawned next from ``asq``, under the coders' hub, read none there and
+    staffed. With no manager row the boards its live rows recorded stand in; an ended row's
+    does not."""
+    hub_root, old_root = tmp_path / "hub", tmp_path / "old-hub"
+    hub_root.mkdir()
+    old_root.mkdir()
+    month_ago = datetime.now(tz=UTC) - timedelta(days=30)
+    with store_session() as store:
+        hub = store.onboard_project(team_project(hub_root))
+        old = store.onboard_project(ProjectInfo(id=project_id_for(old_root), root=old_root))
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_old", project_id=project.id, label="old-coder", role="coder",
+                pane_id="%old", cwd=project.root, created_at=month_ago,
+                ended_at=month_ago + timedelta(days=1), board=old.id,
+            )
+        )  # fmt: skip
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub_root))
+    for _ in range(2):
+        fleet_service.spawn(project, "coder", worktree=False)
+    monkeypatch.delenv("AISQUARE_TEAM_HUB")  # a plain shell
+
+    fleet_service.pause(project)
+
+    with store_session() as store:
+        paused = [
+            board
+            for board in (hub.id, project.id, old.id)
+            for state in [
+                team_service.read_signal_in(store, board, harness.pause_signal(project.id, board))
+            ]
+            if state is not None and state.value == "on"
+        ]
+    assert sorted(paused) == sorted([hub.id, project.id]), "the coders' hub, and the checkout"
+
+
 def test_a_pause_or_resume_as_a_prefix_of_two_sessions_is_refused_as_ambiguous(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, runner: CliRunner
 ) -> None:

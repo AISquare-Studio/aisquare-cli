@@ -7258,6 +7258,12 @@ def _pause_boards(store: ContextStore, project: ProjectInfo, homes: Collection[s
     where a ``restart`` of it puts its replacement; and ``homes`` (:func:`_pause_homes`),
     where the next manager a spawn gives reads.
 
+    Before its first manager, the boards its live rows recorded instead: its coders were
+    spawned where its manager will be, a hub this process may not export. Its homes alone, a
+    pause from a plain shell went on the checkout's board, and the manager spawned next from
+    ``asq`` under the coders' hub read none there and staffed (review of #259, round 33,
+    4/10).
+
     Whether that manager is live and whether the caller exports the hub or not. Taken from
     the rows live at the moment, a pause set on a hub where the manager read was left on
     there once that manager stopped, and the next manager spawned under the hub came up
@@ -7267,7 +7273,7 @@ def _pause_boards(store: ContextStore, project: ProjectInfo, homes: Collection[s
     none: set on every board any row ever recorded, ``fleet pause -P a`` put ``a``'s pause,
     and its resume the ``off``, in the next prompt of every agent on every hub ``a`` ever
     ran under (round 32, 2/9). Only a manager reads the pause, so a coder's board is not
-    one. One ``SELECT``, so no row is built: every spawn, restart and switch adds a row that
+    one. A ``SELECT`` each, so no row is built: every spawn, restart and switch adds a row that
     is never deleted (round 26, 10/11).
 
     A signal is the board's (docs/fleet.md, "Under a hub: one board, many fleet projects"),
@@ -7277,7 +7283,9 @@ def _pause_boards(store: ContextStore, project: ProjectInfo, homes: Collection[s
     (review of #259, round 25, 2/10). By what name: :func:`_pause_signals`.
     """
     manager = store.fleet_manager_board(project.id)
-    return sorted({*homes} if manager is None else {manager, *homes})
+    if manager is None:
+        return sorted({*store.fleet_agent_boards(project.id, live_only=True), *homes})
+    return sorted({manager, *homes})
 
 
 def _pause_signals(

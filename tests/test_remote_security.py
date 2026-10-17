@@ -2951,6 +2951,23 @@ def test_a_remove_naming_a_registered_root_under_a_folder_it_may_not_search_remo
     assert [project.id for project in project_service.list_projects()] == [alpha.id]
 
 
+def test_a_remove_naming_a_nickname_that_starts_with_a_tilde_removes_its_project(
+    home: Path, runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 43, 5/7: a ``~word`` with no home here was 404 ``not_found``, as a
+    ``~user/...`` path is, where ``project forget`` finds the project nicknamed so. A bare one
+    is a name."""
+    alpha, beta = _projects(home, "code/alpha", "code/beta")
+    project_service.set_nickname(beta, "~wip")
+    monkeypatch.chdir(alpha.root)
+    client = _project_writes(runtime, tmp_path)
+
+    removed = client.post(f"{base(runtime)}/api/project/remove", json={"ref": "~wip"})
+
+    assert removed.status_code == 200, removed.text
+    assert [project.id for project in project_service.list_projects()] == [alpha.id]
+
+
 def test_a_task_another_session_holds_is_refused_claim_lost(
     home: Path, runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

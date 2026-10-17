@@ -202,9 +202,17 @@ def resolve(ref: str) -> ProjectInfo:
     and the markers cannot be asked of is none. Doctor and :class:`ProjectBusyError` print
     the ``forget`` of a root under a folder this user may not search, which ``prune
     --missing`` keeps, and it ended in a traceback (round 42, 4/11).
+
+    A ``~word`` that names no home directory here is no path, and is looked up by name:
+    nicknames are free text, and ``Path.expanduser`` raised ``RuntimeError`` for ``~wip``,
+    which ``project forget`` and every ``--project`` let through as a traceback (round 43,
+    5/7).
     """
     with store_session() as store:
-        candidate = Path(ref).expanduser()
+        try:
+            candidate = Path(ref).expanduser()
+        except RuntimeError:  # "Could not determine home directory."
+            return _one_match(store, ref)
         if (
             os.path.exists(candidate)
             or any(sep in ref for sep in {"/", os.sep})

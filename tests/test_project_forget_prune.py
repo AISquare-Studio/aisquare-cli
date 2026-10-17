@@ -2208,3 +2208,28 @@ def test_a_busy_nicknamed_projects_shutdown_is_never_another_projects(work_dir: 
     for command in (stop, reap):
         argv = install_route.split_line(command)
         assert argv[-2] == "--project" and fleet_service.resolve_project(argv[-1]).id == api.id
+
+
+def test_a_nickname_that_starts_with_a_tilde_names_its_project(
+    runner: CliRunner, work_dir: Path
+) -> None:
+    """Review of #259, round 43, 5/7: nicknames are free text, and ``project.resolve`` expanded
+    every ref as a path first: ``Path("~wip").expanduser()`` raises ``RuntimeError`` where no
+    user ``wip`` has a home, which ``project forget`` and every ``--project`` let through as a
+    traceback. A ``~word`` with no home is no path, and is looked up by name."""
+    from aisquare.services import project as project_service
+
+    root = work_dir / "alpha"
+    with store_session() as store:
+        alpha = store.onboard_project(ProjectInfo(id=project_id_for(root), root=root))
+    project_service.set_nickname(alpha, "~wip")
+
+    found = project_service.resolve("~wip")
+    unknown = runner.invoke(app, ["--json", "project", "forget", "~nobody-here"])
+    forgot = runner.invoke(app, ["--json", "project", "forget", "~wip"])
+
+    assert found.id == alpha.id
+    assert unknown.exit_code == 1, unknown.output
+    assert _json(unknown.stdout) == {"error": "not_found", "ref": "~nobody-here"}
+    assert forgot.exit_code == 0, forgot.output
+    assert _json(forgot.stdout)["project"]["id"] == alpha.id

@@ -2569,12 +2569,14 @@ def remote_project_ref(ref: str) -> ProjectInfo:
 
     A path the system will not look up is refused first, before
     ``project_service.resolve`` asks the disk about it: a NUL byte is 400 ``invalid``,
-    and a name longer than any file's, a ``~user`` with no home here, a directory the
+    and a name longer than any file's, a ``~user/...`` with no home here, a directory the
     server may not read (``/root``) or a symlink loop is 404 ``not_found``, as no project
     has it for a root. Left to ``resolve``, the NUL's ``ValueError`` read as two projects
     matching (400 ``ambiguous_project``), and the others fell to 400 ``write_failed``,
     each with the system's own words (``[Errno 13] Permission denied: '/root/.git'``) for
-    a write that never began (sweeps 3 and 4 of #243). A loop is ``Path.resolve``'s
+    a write that never began (sweeps 3 and 4 of #243). A bare ``~word`` with no home here
+    is a name, as ``project forget`` reads it: a nickname is free text (review of #259,
+    round 43, 5/7). A loop is ``Path.resolve``'s
     ``RuntimeError`` ("Symlink loop from ...") on Python 3.11 and 3.12, which CI runs,
     and no error on 3.13. A registered root that became a loop still names its project, as
     ``project forget`` reads it, on every Python: it is asked whether it is a directory
@@ -2606,7 +2608,9 @@ def remote_project_ref(ref: str) -> ProjectInfo:
     try:
         path = Path(ref).expanduser()
     except RuntimeError:  # ~user, for a user this machine does not have
-        raise no_such from None
+        if any(separator in ref for separator in {"/", os.sep}):
+            raise no_such from None
+        return _resolve_project(ref)  # `~wip`: no path, and a nickname may be
     if path.is_absolute():
         try:
             found = project_service.resolve(str(path))

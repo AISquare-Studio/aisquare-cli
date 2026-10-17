@@ -1454,14 +1454,16 @@ def _check_captured_projects() -> list[DoctorCheck]:
     ``forget`` refuses those until their agents are stopped (round 18).
 
     What holds a row is the hold prune and forget ask
-    (:func:`~aisquare.services.project.forget_refusals`, of the plan's rows with the rows that
-    prune drops gone, as prune decides it): the board of another project's agents, live or a
-    restart away, as a hub's, is one. Asked of the row's own live agents alone, a hub prune
-    keeps was counted under "drop them" after every prune, as the live agents' rows were
-    before round 17, and the rows apart were told to stop their own agents, which they had
-    none of; they are named apart again, with the projects that read each and the way out
-    ``forget`` names (review of #259, round 34, 3/10): every project, each with its stop when
-    its agents run, and its onboard when it is forgotten (round 35, 2/8).
+    (:func:`~aisquare.services.project.forget_refusals`, of every captured row with the rows
+    that prune drops gone, as prune decides it; asked so of the plan's rows alone, a row
+    holding context was told to forget a stopped reader the prune it names drops, which then
+    matched nothing: review of #259, round 36, 3/9): the board of another project's agents,
+    live or a restart away, as a hub's, is one. Asked of the row's own live agents alone, a
+    hub prune keeps was counted under "drop them" after every prune, as the live agents' rows
+    were before round 17, and the rows apart were told to stop their own agents, which they
+    had none of; they are named apart again, with the projects that read each and the way
+    out ``forget`` names (review of #259, round 34, 3/10): every project, each with its stop
+    when its agents run, and its onboard when it is forgotten (round 35, 2/8).
     """
     if _uncreated_home("projects") is not None:
         return []
@@ -1486,7 +1488,10 @@ def _check_captured_projects() -> list[DoctorCheck]:
                 refused = project_service.forget_refusals(
                     store, [c.project for c in plan if c.held], dropping=dropped, readers=rows
                 ) | project_service.forget_refusals(
-                    store, [p for p in captured if p.id not in planned], readers=rows
+                    store,
+                    [p for p in captured if p.id not in planned],
+                    dropping=dropped,
+                    readers=rows,
                 )
                 holds = {project_id: busy.readers for project_id, busy in refused.items()}
     except Exception:  # the database line reports a broken store

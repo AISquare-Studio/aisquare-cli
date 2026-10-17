@@ -676,6 +676,53 @@ def test_doctor_names_every_project_reading_a_captured_hub_with_what_frees_each(
         assert done.exit_code == 0, (name, done.output)
 
 
+def test_doctor_frees_a_row_outside_the_plan_of_a_reader_that_prune_drops(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Review of #259, round 36, 3/9: the plan's held rows were asked with the rows the prune
+    drops gone, and the captured rows outside the plan without. ``scratch``, captured with no
+    entries, is in the plan and dropped; its stopped manager read ``notes``, which holds
+    context and is not. The line named the prune, then told the user to forget ``scratch``
+    before dropping ``notes``: run after that prune, as the line lists it, the forget matched
+    nothing, and ``notes`` was free already. ``notes`` is named with its own forget alone."""
+    from datetime import UTC, datetime
+
+    from aisquare.core.ids import new_agent_id
+    from aisquare.services import install_route
+    from aisquare.services import project as project_service
+
+    rows: dict[str, ProjectInfo] = {}
+    for name in ("notes", "scratch"):
+        (tmp_path / name).mkdir()
+        rows[name] = team_project(tmp_path / name)
+    with store_session() as store:
+        for name in ("notes", "scratch"):
+            store.ensure_project(rows[name])  # 0.8.0's capture
+        store.add(new_entry("a fact", "project", rows["notes"].id, [], "cli"))
+        manager = store.upsert_fleet_agent(
+            FleetAgent(
+                id=new_agent_id(), project_id=rows["scratch"].id, label="manager", role="manager",
+                pane_id="%1", cwd=rows["scratch"].root, created_at=datetime.now(tz=UTC),
+                board=rows["notes"].id,
+            )
+        )  # fmt: skip
+        store.end_fleet_agent(manager.id, exit_status=0)
+    forget = install_route.command_line(["aisquare", "project", "forget", str(rows["notes"].root)])
+
+    [check] = diagnostics._check_captured_projects()
+
+    said = " ".join(check.detail.split())
+    assert said.endswith(
+        "drop them: aisquare project prune --captured-only --older-than 0; 1 more holds saved "
+        f"context, which that prune keeps: notes — drop it with {forget}"
+    ), said
+    assert str(rows["scratch"].root) not in said, said
+    plan = project_service.prune_candidates(missing=False, worktrees=False, captured_older_than=0)
+    assert project_service.prune(plan, purge=False).dropped == [rows["scratch"].id]
+    done = runner.invoke(app, ["project", "forget", str(rows["notes"].root)])
+    assert done.exit_code == 0, done.output
+
+
 def test_doctor_reads_the_rows_that_hold_a_board_once_a_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

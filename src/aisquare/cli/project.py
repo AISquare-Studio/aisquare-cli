@@ -327,7 +327,11 @@ def prune(
     if yes:
         emit_prune(
             project_service.prune(
-                candidates, purge=purge, missing=missing, captured_older_than=captured
+                candidates,
+                purge=purge,
+                missing=missing,
+                worktrees=worktrees,
+                captured_older_than=captured,
             )
         )
         return
@@ -347,7 +351,11 @@ def prune(
         return
     emit_prune(
         project_service.prune(
-            candidates, purge=purge, missing=missing, captured_older_than=captured
+            candidates,
+            purge=purge,
+            missing=missing,
+            worktrees=worktrees,
+            captured_older_than=captured,
         )
     )
 

@@ -1195,7 +1195,7 @@ def test_a_prune_of_a_hub_and_its_reader_decides_every_hold_before_either_goes(
     ordered = sorted(plan, key=lambda c: (c.project.id == hub) != hub_first)
     assert ordered[0].project.id == (hub if hub_first else beta)
 
-    report = project_service.prune(ordered, purge=False, missing=True)
+    report = project_service.prune(ordered, purge=False, missing=True, worktrees=False)
 
     assert sorted(report.dropped) == ([] if held else sorted([hub, beta])), "as the plan said"
     assert {c.project.id: [r.id for r in c.read_by] for c in report.kept if c.read_by} == readers
@@ -1617,6 +1617,83 @@ def test_a_prune_drops_a_worktree_whose_tree_went_while_the_prompt_sat_open(
     report = _json(result.stdout)
     assert (report["dropped"], report["changed"]) == (([wt_id], []) if dropped else ([], [wt_id]))
     assert _listed(runner) == ({repo_id} if dropped else {repo_id, wt_id})
+
+
+@pytest.mark.parametrize(
+    ("case", "reason"),
+    [
+        ("tree gone", "missing"),
+        ("root back as a worktree", "worktree"),
+        ("principal forgotten", None),
+        ("capture added, root gone", "missing"),
+    ],
+)
+def test_a_prunes_run_reads_each_candidate_by_the_plans_own_rules(
+    runner: CliRunner,
+    repo_and_worktree: tuple[Path, Path],
+    work_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    project_capture: None,
+    case: str,
+    reason: str | None,
+) -> None:
+    """Review of #259, round 38, 4/4: ``prune`` re-read each candidate by its reason's rule
+    written out again, inverted, beside the plan's, and the copies drifted (2/4 was the
+    first). A missing root back as a worktree of a registered repo was kept as changed,
+    though a plain prune drops worktrees too, and a capture added on purpose whose root went
+    was kept by ``--captured-only --missing``. One set of rules reads both: the run drops what
+    a plan made at that moment would, keeps as changed what it would not list, and gives
+    each row it drops the reason that plan would."""
+    from aisquare.services import project as project_service
+
+    repo, worktree = repo_and_worktree
+    repo_id = _register(runner, monkeypatch, repo)
+    back, scratch = work_dir / "back", work_dir / "scratch"
+    flags: list[str] = []
+    if case in ("tree gone", "principal forgotten"):
+        target = _register_worktree_as_its_own_project(worktree)
+    elif case == "root back as a worktree":
+        target = _register(runner, monkeypatch, back)
+        monkeypatch.chdir(work_dir)
+        shutil.rmtree(back)
+    else:
+        target = _capture(runner, monkeypatch, scratch)
+        monkeypatch.chdir(work_dir)
+        flags = ["--captured-only", "--missing", "--older-than", "0"]
+    real = project_service.prune_candidates
+    now: list[Any] = []
+
+    def the_prompt_sat_open(**kwargs: Any) -> list[Any]:
+        plan = real(**kwargs)
+        assert [c.project.id for c in plan] == [target], "the premise"
+        if case == "tree gone":
+            shutil.rmtree(worktree)  # reaped
+        elif case == "root back as a worktree":
+            _git("worktree", "add", "-q", str(back), "-b", "back", cwd=repo)
+        elif case == "principal forgotten":
+            with store_session() as store:
+                store.forget_project(repo_id)
+        else:
+            with store_session() as store:
+                row = store.get_project(target)
+                assert row is not None
+                store.onboard_project(row)
+            shutil.rmtree(scratch)
+        now.extend(real(**kwargs))  # a plan made now
+        return plan
+
+    monkeypatch.setattr(project_service, "prune_candidates", the_prompt_sat_open)
+
+    result = runner.invoke(app, ["--json", "project", "prune", *flags, "--yes"])
+
+    assert result.exit_code == 0, result.output
+    report = _json(result.stdout)
+    planned_now = {c.project.id: c.reason for c in now if not c.held}
+    assert planned_now == ({} if reason is None else {target: reason}), "the case"
+    assert report["dropped"] == list(planned_now), report
+    assert report["changed"] == ([] if planned_now else [target]), report
+    given = {c["project"]["id"]: c["reason"] for c in report["candidates"]}
+    assert {project_id: given[project_id] for project_id in report["dropped"]} == planned_now
 
 
 def test_an_empty_list_names_the_captured_directories_it_hides(

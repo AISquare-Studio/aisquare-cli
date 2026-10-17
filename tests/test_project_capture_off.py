@@ -593,7 +593,9 @@ def test_doctor_names_a_captured_hub_prune_keeps_apart_with_the_project_that_rea
     assert said.count("fleet stop") == 1, "neither has agents of its own to stop: api's alone"
 
     plan = project_service.prune_candidates(missing=False, worktrees=False, captured_older_than=0)
-    report = project_service.prune(plan, purge=False, missing=False, captured_older_than=0)
+    report = project_service.prune(
+        plan, purge=False, missing=False, worktrees=False, captured_older_than=0
+    )
     assert report.dropped == [rows["scratch"].id], "the prune drops what doctor says"
     for name in ("notes", "tools"):
         refused = runner.invoke(app, ["--json", "project", "forget", str(rows[name].root)])
@@ -764,7 +766,9 @@ def test_doctor_frees_a_row_outside_the_plan_of_a_reader_that_prune_drops(
     ), said
     assert str(rows["scratch"].root) not in said, said
     plan = project_service.prune_candidates(missing=False, worktrees=False, captured_older_than=0)
-    report = project_service.prune(plan, purge=False, missing=False, captured_older_than=0)
+    report = project_service.prune(
+        plan, purge=False, missing=False, worktrees=False, captured_older_than=0
+    )
     assert report.dropped == [rows["scratch"].id]
     done = runner.invoke(app, ["project", "forget", str(rows["notes"].root)])
     assert done.exit_code == 0, done.output

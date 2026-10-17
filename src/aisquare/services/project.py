@@ -7,7 +7,7 @@ import os
 import shutil
 import stat
 import subprocess
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
@@ -35,7 +35,6 @@ from aisquare.models import (
     ProjectInfo,
     ProjectPruneReport,
     PruneCandidate,
-    PruneReason,
     Snapshot,
 )
 from aisquare.services import install_route
@@ -616,41 +615,14 @@ def prune_candidates(
 
     def plan(store: ContextStore) -> list[PruneCandidate]:
         projects = store.list_projects(all=True)
-        by_root = {project.root: project for project in projects}
-        activity = store.project_activity() if captured_older_than is not None else {}
-        cutoff = _captured_cutoff(captured_older_than)
-        found: list[PruneCandidate] = []
-
-        def candidate(
-            project: ProjectInfo, reason: PruneReason, principal: ProjectInfo | None = None
-        ) -> None:
-            found.append(PruneCandidate(project=project, reason=reason, principal=principal))
-
-        for project in projects:
-            if (
-                cutoff is not None
-                and project.onboarded_at is None
-                and activity.get(project.id, "") < cutoff
-                and not store.has_entries(project.id)
-            ):
-                candidate(project, "captured")
-                continue
-            if not (missing or worktrees):
-                continue
-            if not _is_dir(project.root):
-                if missing:
-                    candidate(project, "missing")
-                continue
-            if not worktrees:
-                continue
-            principal_root = worktree_principal(project.root)
-            if principal_root is None:
-                continue
-            principal = by_root.get(principal_root) or store.get_project(
-                project_id_for(principal_root)
-            )
-            if principal is not None and principal.id != project.id:
-                candidate(project, "worktree", principal=principal)
+        why = _why_stale(
+            store,
+            missing=missing,
+            worktrees=worktrees,
+            captured_older_than=captured_older_than,
+            projects=projects,
+        )
+        found = [candidate for candidate in map(why, projects) if candidate is not None]
         if not found:
             return found  # the rows that read a board are read for a candidate only
         rows = reading_rows(store) if readers is None else readers
@@ -673,40 +645,55 @@ def _captured_cutoff(days: int | None) -> str | None:
     return (datetime.now(tz=UTC) - timedelta(days=days)).isoformat()
 
 
-def _no_longer(
+def _why_stale(
     store: ContextStore,
-    candidate: PruneCandidate,
-    project: ProjectInfo,
-    activity: dict[str, str],
-    cutoff: str | None,
     *,
     missing: bool,
-) -> bool:
-    """Whether ``candidate``'s reason no longer holds of ``project``, its row as :func:`prune`
-    re-reads it: a capture added on purpose since (``project onboard``), given a context
-    entry or, with ``cutoff``, touched since it; a missing root back on disk; a worktree no
-    longer one, or whose principal is no longer registered, the only handle left on it.
+    worktrees: bool,
+    captured_older_than: int | None,
+    projects: Sequence[ProjectInfo] | None = None,
+) -> Callable[[ProjectInfo], PruneCandidate | None]:
+    """Why a project is one ``project prune`` drops, as :func:`prune_candidates` asks it: its
+    candidate, with the reason and a worktree's principal, or ``None``. Captured first
+    (``captured_older_than``), then a root no longer on disk (``missing``), then a worktree
+    of another registered project (``worktrees``); what a reason was not asked for is not
+    read. What the rules read of the store as a whole, each project's last activity and the
+    registered roots (of ``projects`` when the caller listed them), is read once here.
 
-    A worktree whose tree is gone is still one with ``missing`` (the run asks for missing
-    roots too): read as no longer a worktree, a tree removed while the prompt sat open (a
-    ``fleet reap``) was kept as "no longer stale", though more stale than before (review of
-    #259, round 38, 2/4)."""
-    if candidate.reason == "captured":
-        return (
-            project.onboarded_at is not None
-            or store.has_entries(project.id)
-            or (cutoff is not None and activity.get(project.id, "") >= cutoff)
-        )
-    if candidate.reason == "missing":
-        return _is_dir(project.root)
-    if not _is_dir(project.root):
-        return not missing
-    principal = candidate.principal
-    return (
-        principal is None
-        or store.get_project(principal.id) is None
-        or worktree_principal(project.root) is None
-    )
+    The one place the rules are written: :func:`prune` asks them again of each candidate
+    before any goes. Written out a second time there, inverted, the copies drifted, and a
+    worktree whose tree went while the prompt sat open was kept as no longer stale, though
+    the plain prune asks for missing roots too (review of #259, round 38, 2/4 and 4/4)."""
+    activity = store.project_activity() if captured_older_than is not None else {}
+    cutoff = _captured_cutoff(captured_older_than)
+    by_root: dict[Path, ProjectInfo] = {}
+    if worktrees:
+        listed = store.list_projects(all=True) if projects is None else projects
+        by_root = {project.root: project for project in listed}
+
+    def why(project: ProjectInfo) -> PruneCandidate | None:
+        if (
+            cutoff is not None
+            and project.onboarded_at is None
+            and activity.get(project.id, "") < cutoff
+            and not store.has_entries(project.id)
+        ):
+            return PruneCandidate(project=project, reason="captured")
+        if not (missing or worktrees):
+            return None
+        if not _is_dir(project.root):
+            return PruneCandidate(project=project, reason="missing") if missing else None
+        if not worktrees:
+            return None
+        principal_root = worktree_principal(project.root)
+        if principal_root is None:
+            return None
+        principal = by_root.get(principal_root) or store.get_project(project_id_for(principal_root))
+        if principal is None or principal.id == project.id:
+            return None
+        return PruneCandidate(project=project, reason="worktree", principal=principal)
+
+    return why
 
 
 #: What ``stat`` says of a root that is gone: nothing there, a file where a directory on its
@@ -753,6 +740,7 @@ def prune(
     *,
     purge: bool,
     missing: bool,
+    worktrees: bool,
     captured_older_than: int | None = None,
 ) -> ProjectPruneReport:
     """Drop the candidates — the same forget as :func:`forget`, per registration.
@@ -768,38 +756,36 @@ def prune(
     over as gone, its rows and data directory stayed, beside "✓ purged", and no later prune
     lists a forgotten row to purge it (review of #259, round 36, 5/9).
 
-    Why each is a candidate is re-read too, before any goes (:func:`_no_longer`, with the
-    ``missing`` and ``captured_older_than`` the plan was made with): a capture added on
-    purpose or given an entry while the prompt sat open, or a missing root that came back,
-    is kept, as changed since the plan (``changed``). Only its holds re-read, it was dropped
-    anyway, and under ``--purge`` the entries just saved went with it, and its data
-    directory (review of #259, round 37, 2/7).
+    Why each is a candidate is re-read too, before any goes, by the plan's own rules
+    (:func:`_why_stale`, asked what the plan was made with): one no longer a candidate, a
+    capture added on purpose or given an entry while the prompt sat open, a missing root
+    back on disk, is kept, as changed since the plan (``changed``). Only its holds re-read,
+    it was dropped anyway, and under ``--purge`` the entries just saved went with it, and
+    its data directory (review of #259, round 37, 2/7). One that is a candidate still, for
+    whichever reason the run asks for, goes, and the report gives it as the run read it: a
+    worktree whose tree went meanwhile is missing now (round 38, 2/4 and 4/4).
     """
     dropped: list[str] = []
     kept: list[PruneCandidate] = []
+    ran: dict[str, PruneCandidate] = {}
     with store_session() as store:
         active_id = active_project(store).id
-        rows = {
-            c.project.id: store.get_project(c.project.id, include_forgotten=purge)
-            for c in candidates
-        }
-        cutoff = _captured_cutoff(captured_older_than)
-        captured = cutoff is not None and any(c.reason == "captured" for c in candidates)
-        activity = store.project_activity() if captured else {}
+        why = _why_stale(
+            store, missing=missing, worktrees=worktrees, captured_older_than=captured_older_than
+        )
         # Gone since the plan was made: nothing to drop, and no hold to decide.
-        here = [c for c in candidates if rows[c.project.id] is not None]
-        changed = [
-            c.project.id
-            for c in here
-            if _no_longer(
-                store, c, rows[c.project.id] or c.project, activity, cutoff, missing=missing
-            )
+        here = [
+            row
+            for c in candidates
+            if (row := store.get_project(c.project.id, include_forgotten=purge)) is not None
         ]
-        here = [c for c in here if c.project.id not in changed]
-        holds = _holds(store, [c.project for c in here], reading_rows(store)) if here else {}
-        for candidate in here:
+        reread = {row.id: why(row) for row in here}
+        changed = [project_id for project_id, now in reread.items() if now is None]
+        still = [now for now in reread.values() if now is not None]
+        holds = _holds(store, [c.project for c in still], reading_rows(store)) if still else {}
+        for candidate in still:
             project_id = candidate.project.id
-            held = _held(candidate, holds[project_id])
+            held = ran[project_id] = _held(candidate, holds[project_id])
             if held.held:
                 kept.append(held)
                 continue
@@ -814,7 +800,7 @@ def prune(
         for project_id in dropped:
             _remove_data_dir(project_id)
     return ProjectPruneReport(
-        candidates=candidates,
+        candidates=[ran.get(c.project.id, c) for c in candidates],
         dropped=dropped,
         kept=kept,
         changed=changed,

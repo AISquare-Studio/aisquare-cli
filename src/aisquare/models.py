@@ -858,6 +858,8 @@ class ProjectPruneReport(BaseModel):
     """Outcome of ``project prune``: the plan, and what was actually dropped."""
 
     candidates: list[PruneCandidate] = Field(default_factory=list)
+    """The plan's candidates. After a run, each one it found a candidate still is as the run
+    read it: its reason now (a worktree whose tree went is ``missing``) and what holds it."""
     dropped: list[str] = Field(default_factory=list)
     """Ids dropped. Empty on a dry run."""
     kept: list[PruneCandidate] = Field(default_factory=list)

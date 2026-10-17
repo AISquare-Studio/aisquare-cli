@@ -789,7 +789,15 @@ def test_the_board_lines_keep_the_feed_and_the_tasks_on_screen_whatever_the_size
                 app.query_one("#side-divider").display,
             )
             await pilot.resize_terminal(120, 40)
-            await pilot.pause()
+            # The panel's own Resize shows the column again, and on windows-latest it came
+            # after the pause: `b` found the column still hidden and showed it (CI run
+            # 39041194777). The press waits for the column it is about to hide.
+            side = app.query_one("#board-side")
+            for _ in range(100):
+                await pilot.pause(0.05)
+                if not side.has_class("collapsed"):
+                    break
+            seen["widened"] = not side.has_class("collapsed")
             app.board.action_toggle_board()  # `b`
             await pilot.pause()
             seen["toggled"] = (
@@ -806,6 +814,7 @@ def test_the_board_lines_keep_the_feed_and_the_tasks_on_screen_whatever_the_size
     # 100 x 30: 67 + 1 + 32 columns; 29 rows are 8 + 1 + 20.
     assert seen["shrunk"] == (67, 32, 20, 8, 4)
     assert seen["narrow"] == (False, False), "the column and the line that resizes it hide"
+    assert seen["widened"], "the premise: 120 columns show the column again"
     assert seen["toggled"] == (False, False)
 
 

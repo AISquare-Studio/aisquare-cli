@@ -843,6 +843,45 @@ def test_prune_keeps_a_hub_whose_board_another_projects_agents_read(
     assert _json(forget.stdout) == {"error": "project_busy", "ref": hub}, "the same guard"
 
 
+@pytest.mark.parametrize("before", ["free", "its own agent"])
+def test_a_prune_says_why_it_kept_a_row_as_the_run_read_it_not_the_plan(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch, before: str
+) -> None:
+    """Review of #259, round 34, 6/10: the table took the reason after "kept:" from the
+    plan's copy of each row, and the summary below from what ``prune`` re-read. A hub
+    beta's coder came to read while the confirmation sat open read "(kept: 0 live
+    agent(s))", and one the plan held for its own agent, stopped since, said "1 live
+    agent(s)", each beside a summary that named a hub. Both say what the run read."""
+    from aisquare.services import project as project_service
+
+    hub = _register(runner, monkeypatch, work_dir / "hub")
+    beta = _register(runner, monkeypatch, work_dir / "beta")
+    monkeypatch.chdir(work_dir)
+    shutil.rmtree(work_dir / "hub")
+    with store_session() as store:
+        own = store.upsert_fleet_agent(_agent(hub, "manager")) if before != "free" else None
+    real = project_service.prune_candidates
+
+    def the_prompt_sat_open(**kwargs: Any) -> list[Any]:
+        plan = real(**kwargs)
+        with store_session() as store:
+            if own is not None:
+                store.end_fleet_agent(own.id, exit_status=0)
+            store.upsert_fleet_agent(_agent(beta, "coder1").model_copy(update={"board": hub}))
+        return plan
+
+    monkeypatch.setattr(project_service, "prune_candidates", the_prompt_sat_open)
+
+    result = runner.invoke(app, ["project", "prune", "--missing", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    said = " ".join(result.stdout.split())
+    assert "missing (kept: the board beta's fleet agents" in said, said
+    assert "live agent(s)" not in said, said
+    assert "kept 1 whose board another project's fleet agents read, as a hub's" in said
+    assert _listed(runner) == {hub, beta}
+
+
 @pytest.mark.parametrize("held", [False, True], ids=["its reader goes", "its reader stays"])
 @pytest.mark.parametrize("hub_first", [True, False], ids=["hub first", "reader first"])
 def test_a_prune_of_a_hub_and_its_reader_decides_every_hold_before_either_goes(

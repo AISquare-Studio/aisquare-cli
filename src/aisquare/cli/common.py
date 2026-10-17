@@ -418,7 +418,11 @@ def emit_prune(report: ProjectPruneReport) -> None:
     if not report.candidates:
         console.print("nothing to prune")
         return
-    kept = {candidate.project.id for candidate in report.kept}
+    # Each kept row's reason as the run re-read it (``prune``'s ``kept``), not the plan's copy
+    # in ``candidates``: a hold that changed while the prompt sat open read "kept: 0 live
+    # agent(s)" beside a summary that named a hub (review of #259, round 34, 6/10). A dry
+    # run's ``kept`` is the plan's own.
+    kept = {candidate.project.id: candidate for candidate in report.kept}
     table = Table(show_header=True, header_style="bold")
     table.add_column("", no_wrap=True)
     table.add_column("WHY", no_wrap=True)
@@ -430,11 +434,12 @@ def emit_prune(report: ProjectPruneReport) -> None:
         why: str = candidate.reason
         if candidate.principal is not None:
             why = f"worktree of {_project_name(candidate.principal)}"
-        if project.id in kept and candidate.read_by is not None:
-            why += f" (kept: the board {_project_name(candidate.read_by)}'s fleet agents read)"
-        elif project.id in kept:
-            why += f" (kept: {candidate.live_agents} live agent(s))"
-        marker = "" if report.dry_run else ("·" if project.id in kept else "✓")
+        held = kept.get(project.id)
+        if held is not None and held.read_by is not None:
+            why += f" (kept: the board {_project_name(held.read_by)}'s fleet agents read)"
+        elif held is not None:
+            why += f" (kept: {held.live_agents} live agent(s))"
+        marker = "" if report.dry_run else ("·" if held is not None else "✓")
         table.add_row(
             marker, Text(why), Text(_project_name(project)), project.id, str(project.root)
         )

@@ -78,7 +78,7 @@ from aisquare.core.tmux import (
     WindowInfo,
 )
 from aisquare.core.version import __version__
-from aisquare.core.workspace import active_project
+from aisquare.core.workspace import _gone, _resolved, active_project
 from aisquare.models import (
     CLOSED_STATUSES,
     FleetAgent,
@@ -1581,6 +1581,12 @@ def _remove_finished_worktrees(
     is on the report with why. A tree a live agent still sits in (a respawn reused it)
     is never touched.
 
+    A tree, or a project root, that cannot be looked at (a folder above it this user may not
+    search, a mount that answered ``EIO``) is kept and said so, and the sweep goes on. Asked
+    with ``Path.exists``, which raised ``PermissionError`` for one up to 3.13, one such root
+    ended ``reap --all`` in a traceback, every later project unreaped and ``--json`` printing
+    nothing, and from 3.14 it was passed over without a word (review of #259, round 43, 1/7).
+
     The tree goes, and its branch stays, recorded on the newest row at its path just before
     the tree went, under the branch lock (:func:`_reap_tree`), whatever its name: a spawn for
     the task checks it out (:func:`_worktree_for`), and a restart of the agent makes its tree
@@ -1600,7 +1606,11 @@ def _remove_finished_worktrees(
         # directories `reap()` walks included: no tree and no branch is the fleet's to take,
         # and git is not asked (review of #259, round 16).
         return
-    if not is_git_project(root):
+    try:
+        if not _present(root / ".git"):  # `is_git_project`, asked alike on every Python
+            return
+    except OSError as exc:
+        report.worktrees_kept.append((root, f"not looked at, nor any tree in it: {_why(exc)}"))
         return
     try:
         default = _default_branch(root)
@@ -1612,10 +1622,18 @@ def _remove_finished_worktrees(
     # for its task — leaves older rows at the same path, each with the branch it recorded
     # when it ended; the tree's branch written to the oldest was a restart's of the newest
     # rebuilding on the branch before it (review of #259, round 16).
-    owners = {agent.cwd.resolve(): agent for agent in rows if agent.worktree}
-    in_use = {agent.cwd.resolve() for agent in rows if agent.ended_at is None} | {root.resolve()}
+    trees = [(_tree_at(agent.cwd), agent) for agent in rows]
+    owners = {here: agent for here, agent in trees if here is not None and agent.worktree}
+    in_use = {here for here, agent in trees if here is not None and agent.ended_at is None}
+    in_use.add(root.resolve())
     for path, agent in owners.items():
-        if path in in_use or agent.ended_at is None or not agent.cwd.exists():
+        if path in in_use or agent.ended_at is None:
+            continue
+        try:
+            if not _present(agent.cwd):
+                continue
+        except OSError as exc:
+            report.worktrees_kept.append((agent.cwd, f"not looked at: {_why(exc)}"))
             continue
         removed, kept = _reap_tree(store, project, agent, default, common, read_at)
         if removed:
@@ -1624,6 +1642,34 @@ def _remove_finished_worktrees(
             report.worktrees_kept.append((agent.cwd, kept))
     # Read again: the branches recorded just now are the ones the sweep asks about.
     _sweep_fleet_branches(root, common, default, store.fleet_agents(project.id), report)
+
+
+def _present(path: Path) -> bool:
+    """Whether ``path`` is there, as ``Path.exists`` asks, with what cannot be asked raised as
+    the ``OSError`` it is on every Python: ``Path.exists`` raised it up to 3.13 and says False
+    for it from 3.14. Gone (``workspace._gone``) is False."""
+    try:
+        os.stat(path)
+    except OSError as exc:
+        if _gone(exc):
+            return False
+        raise
+    return True
+
+
+def _tree_at(path: Path) -> Path | None:
+    """``path`` resolved, as a stored root is (``workspace._resolved``); ``None`` through a
+    symlink loop, where no tree is. Resolved raw, a loop raised ``RuntimeError`` on 3.11 and
+    3.12, out of the reap of every project (review of #259, round 43, 1/7)."""
+    try:
+        return _resolved(path)
+    except OSError:
+        return None
+
+
+def _why(exc: OSError) -> str:
+    """What the system said of a path it would not look at, in its own words."""
+    return exc.strerror or str(exc)
 
 
 def _reap_tree(
@@ -1676,7 +1722,7 @@ def _reap_tree(
                 *store.fleet_agents(project.id, live_only=True),
                 *store.fleet_agents_ended_since(project.id, read_at),
             ]
-            if any(row.id != agent.id and row.cwd.resolve() == here for row in since):
+            if any(row.id != agent.id and _tree_at(row.cwd) == here for row in since):
                 return False, None
             _record_the_branch(store, agent)
             if kept is not None:

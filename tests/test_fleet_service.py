@@ -10898,6 +10898,45 @@ def test_reap_removes_a_merged_worktree_and_keeps_an_unmerged_one(
     assert fleet_service.reap(project).worktrees_removed == []
 
 
+@pytest.mark.skipif(not can_deny_reads(), reason="mode 000 does not stop this user from reading")
+def test_a_reap_of_every_project_goes_on_past_a_root_or_tree_it_may_not_look_at(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Review of #259, round 43, 1/7: the worktree pass asked ``Path.exists`` of each root's
+    ``.git`` and of each ended agent's tree, which raised ``PermissionError`` for one under a
+    folder this user may not search up to 3.13 (and from 3.14 said False, passing it over in
+    silence). One such project ended ``reap --all`` in a traceback, the projects after it
+    unreaped. Each is kept, and said so, and the sweep goes on."""
+    ended: dict[str, FleetAgent] = {}
+    for name in ("locked/root", "trees", "fine"):
+        root = project.root if name == "fine" else tmp_path / name
+        if name != "fine":
+            root.mkdir(parents=True)
+            _git("init", "-q", "-b", "main", cwd=root)
+            _git("commit", "-q", "--allow-empty", "-m", "init", cwd=root)
+        here = team_project(root)
+        with store_session() as store:
+            store.onboard_project(here)
+        ended[name] = fleet_service.spawn(here, "coder", label="coder-1").agent
+        fleet_service.stop(here, "coder-1", force=True)
+    locked = [tmp_path / "locked", ended["trees"].cwd.parent]
+    for folder in locked:
+        folder.chmod(0)
+    try:
+        report = fleet_service.reap(None)
+    finally:
+        for folder in locked:
+            folder.chmod(0o700)
+
+    assert report.worktrees_removed == [ended["fine"].cwd], "the sweep went on"
+    assert dict(report.worktrees_kept) == {
+        (tmp_path / "locked" / "root").resolve(): "not looked at, nor any tree in it: "
+        "Permission denied",
+        ended["trees"].cwd: "not looked at: Permission denied",
+    }
+    assert ended["trees"].cwd.exists() and (tmp_path / "locked" / "root").exists()
+
+
 def _remote(project: ProjectInfo, tmp_path: Path) -> Path:
     """A bare remote for the project's repo, ``origin``, with ``main`` pushed to it."""
     bare = tmp_path / "remote.git"

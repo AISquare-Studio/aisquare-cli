@@ -266,7 +266,7 @@ function sameLook(a, b) {
 function ansiToRuns(row) {
   const state = newSgr();
   const runs = [];
-  const text = typeof row === "string" ? row : "";
+  const text = str(row);
   scanAnsi(text, false, (chunk) => {
     const run = runOf(chunk, state);
     const last = runs[runs.length - 1];
@@ -363,6 +363,10 @@ const SUMMARY_KEYS = Object.freeze(["command", "file_path", "path", "pattern", "
 
 function isText(value) {
   return typeof value === "string" && value.trim() !== "";
+}
+
+function str(value) {
+  return typeof value === "string" ? value : "";
 }
 
 function clip(text, limit) {
@@ -773,8 +777,8 @@ async function apiCall(method, path, options) {
   const crashed = !json && response.status === 500;
   const res = {
     ok: response.ok && json, status: response.status, data, network: false, notJson: !json && !crashed,
-    error: crashed ? "internal_error" : typeof body.error === "string" ? body.error : "",
-    message: crashed ? "the machine hit an error answering that" : typeof body.message === "string" ? body.message : "",
+    error: crashed ? "internal_error" : str(body.error),
+    message: crashed ? "the machine hit an error answering that" : str(body.message),
     retryAfter: toInt(response.headers.get("retry-after")),
   };
   if (res.status === 401 && o.auth !== false) toUnlock();
@@ -909,7 +913,7 @@ function settleFromLedger(entries) {
     const status = toInt(entry.status);
     const res = {
       ok: status >= 200 && status < 300, status, data: body, network: false, notJson: false, retryAfter: 0,
-      error: typeof body.error === "string" ? body.error : "", message: typeof body.message === "string" ? body.message : "",
+      error: str(body.error), message: str(body.message),
     };
     const pending = S.pending.get(entry.request_id);
     if (pending && pending.resolve) {
@@ -922,6 +926,10 @@ function settleFromLedger(entries) {
       toast(verb + ": " + (res.ok ? "done" + (not && " — " + not) : failText(res)));
     }
   }
+}
+
+function isStale(res) {
+  return res.status === 409 && res.error === "stale";
 }
 
 /* SPEC §6.4, a sentence per refusal. A network error comes here once nothing retries it. */
@@ -1103,7 +1111,7 @@ function onFrame(text) {
     S.board = payload;
     viewCall("board");
   } else if (frame.type === "pane" && typeof frame.agent === "string") {
-    const key = (typeof frame.project === "string" ? frame.project : "") + "\n" + frame.agent;
+    const key = str(frame.project) + "\n" + frame.agent;
     const watcher = paneWatchers.get(key);
     if (watcher && payload && typeof payload === "object") {
       S.panes.set(key, payload);
@@ -1119,7 +1127,7 @@ function onFrame(text) {
  * watcher stuck in a scan leaves the feed saying how old it is. */
 function noteScan(ts, payload) {
   S.backoff = 0; // heartbeats, not opens, say healthy
-  const scanned = payload && typeof payload.needs_scanned_at === "string" ? payload.needs_scanned_at : "";
+  const scanned = payload ? str(payload.needs_scanned_at) : "";
   const behind = Date.parse(ts) - Date.parse(scanned) > SCAN_BEHIND_MS ? scanned : "";
   if (behind === S.scannedBehind) return;
   S.scannedBehind = behind;
@@ -1919,7 +1927,7 @@ async function answerCard(item, answer, row) {
   for (const control of quick) control.classList.remove("busy");
   gateButtons();
   if (res.ok) return toast("Sent " + label + " to " + plainText(item.agent || "the agent"));
-  if (res.status === 409 && res.error === "stale") return noLonger(item, res.data && res.data.current);
+  if (isStale(res)) return noLonger(item, res.data && res.data.current);
   toast(failText(res, TEXT_MAX.keys));
   return afterFailure(res);
 }
@@ -2003,15 +2011,9 @@ function tellSheet(ctx, mode, replyTo) {
         return;
       }
       // current: the agent's items once the card went, else the pin's row now.
-      const now = res.status === 409 && res.error === "stale" ? (res.data && res.data.current) || [] : null;
+      const now = isStale(res) ? (res.data && res.data.current) || [] : null;
       if (now && replyTo && !Array.isArray(now)) return postReply(ctx, sheet, replyTo, text.value);
-      if (now && ctx.item) {
-        // The card gives way, the words stay: Tell again is a Tell with no card.
-        const item = ctx.item;
-        ctx.item = ctx.needsId = null;
-        noLonger(item, now);
-        if (Array.isArray(now)) return sheet.say(noLongerText(item, now) + " Tell again to send it anyway.");
-      }
+      if (now && ctx.item && giveWay(ctx, sheet, now, "Tell")) return;
       // A pin's refusal names the label's new row: Tell again tells it.
       if (now && REF.test(now.agent_id || "")) {
         ctx.agentId = now.agent_id;
@@ -2035,7 +2037,7 @@ function tellSheet(ctx, mode, replyTo) {
  * brings one that waits: a reply to it is a Tell (auto). */
 function replySheet(ctx) {
   const detail = ctx.item.detail && typeof ctx.item.detail === "object" ? ctx.item.detail : {};
-  const author = typeof detail.author === "string" ? detail.author : "";
+  const author = str(detail.author);
   if (author === ctx.label && ctx.agentId && author.trim().toLowerCase() !== "manager") return tellSheet(ctx, "auto", author);
   openSheet("Reply on the board", (sheet) => {
     sheet.body.appendChild(el("p", "lead", isText(author) ? "A note to " + author + " on the board." : "A note on the board."));
@@ -2051,12 +2053,22 @@ function replySheet(ctx) {
   });
 }
 
+/* The card gives way, the words stay: Tell or Post again sends them with no card. */
+function giveWay(ctx, sheet, now, verb) {
+  const item = ctx.item;
+  ctx.item = ctx.needsId = null;
+  noLonger(item, now);
+  if (!Array.isArray(now)) return false;
+  sheet.say(noLongerText(item, now) + " " + verb + " again to send it anyway.");
+  return true;
+}
+
 /* A reply as a note to whoever asked, on its row's board, else its card's. */
 async function postReply(ctx, sheet, author, words) {
   const body = { text: words, kind: "note", project: ctx.pid };
   if (isText(author)) body.to = author;
   if (ctx.agentId) body.agent_id = ctx.agentId;
-  else body.needs_id = ctx.needsId;
+  else if (ctx.needsId) body.needs_id = ctx.needsId;
   sheet.busy(true);
   const res = await apiWrite(writePath("note"), body, "Reply", () => { sheet.status.textContent = LOST_WAIT; });
   sheet.busy(false);
@@ -2066,6 +2078,7 @@ async function postReply(ctx, sheet, author, words) {
     if (ctx.item) dismissItem(ctx.item);
     return;
   }
+  if (isStale(res) && body.needs_id && ctx.item) return giveWay(ctx, sheet, [], "Post");
   sheet.say(failText(res, TEXT_MAX.note));
   afterFailure(res, ctx, sheet);
 }
@@ -2156,7 +2169,7 @@ function actionSheet(kind, ctx) {
         refreshNeeds();
         return;
       }
-      if (res.status === 409 && res.error === "stale") {
+      if (isStale(res)) {
         sheet.close();
         if (ctx.item) noLonger(ctx.item, res.data && res.data.current);
         // The machine's sentence says what was done: an Escape may have gone first.

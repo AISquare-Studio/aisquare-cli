@@ -639,7 +639,9 @@ all of them, and the fleet cleans up the worktrees it made.**
     agent reads it, and the card stays when the reply could not be posted. A
     Reply to the card of a session no agent row holds (one you launched by hand)
     is posted on the board the card was read on, which the machine looks up by
-    the card; a card gone from the feed is refused, and nothing is posted.
+    the card; a card gone from the feed is refused, and nothing is posted: the
+    card is marked gone, and Post again sends the words as a note with no card,
+    as Tell again does for a Tell.
   - Remote's Board and Tasks tabs show the board the project's agents read, as
     recorded when they were spawned, and a note from the Board tab is posted
     there, even when Remote runs under another hub, or none. A claim or a

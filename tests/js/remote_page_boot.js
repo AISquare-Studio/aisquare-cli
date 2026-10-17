@@ -2999,7 +2999,8 @@ async function dismissals() {
  * refused stale as the machine refuses it once that row ended or another holds coder-1, or
  * once the card went (then, tapped again, once the row ended too); a Reply to the
  * manager, posted, and refused as the machine refuses a row the project does not hold; and a
- * Reply to a session no row holds, which names its card, whose board the machine knows. The
+ * Reply to a session no row holds, which names its card, whose board the machine knows,
+ * refused stale once the card left the feed, then posted again with no card. The
  * sheet's title, what was sent, the toast, the dismissals and what the sheet said last, while
  * it is open. */
 async function crewReplies() {
@@ -3010,13 +3011,14 @@ async function crewReplies() {
   const rowless = Object.assign({}, crew, { id: "ny_00000000000000c3", agent_id: null });
   const ok = () => ({ status: 200, json: { ok: true } });
   const strip = (body) => Object.fromEntries(Object.entries(body).filter(([key]) => key !== "request_id"));
-  // told answers each tap of the sheet's button in turn, the last one any tap after it.
+  // told and noted answer each tap of the sheet's button in turn, the last one any tap after it.
   const reply = async (item, told, go, noted = ok) => {
     const answers = [].concat(told);
+    const notes = [].concat(noted);
     const page = bootPage("#/", signedIn({
       "GET api/needs": () => ({ status: 200, json: { items: [item] } }),
       "POST api/agent/tell": () => (answers.length > 1 ? answers.shift() : answers[0])(),
-      "POST api/note": noted,
+      "POST api/note": () => (notes.length > 1 ? notes.shift() : notes[0])(),
       "POST api/needs/dismiss": ok,
     }));
     await settle();
@@ -3026,7 +3028,7 @@ async function crewReplies() {
     const title = sheetTitle(page);
     find(page.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "Take T-4.";
     let said = null;
-    for (let tap = [].concat(told).length; tap > 0 && sheetTitle(page); tap--) {
+    for (let tap = Math.max([].concat(told).length, [].concat(noted).length); tap > 0 && sheetTitle(page); tap--) {
       click(buttonNamed(page.run("UI.sheet"), go));
       await settle();
       const status = sheetTitle(page) && find(page.run("UI.sheet"), (node) => node.className === "status");
@@ -3041,6 +3043,8 @@ async function crewReplies() {
   const stale = (message, current) => () => ({ status: 409, json: { error: "stale", message, current } });
   const ended = stale("there is no agent 'coder-1' in proj now — nothing was done", { agent_id: null });
   const went = stale("coder-1 no longer shows what that card was about — nothing was done", []);
+  // As the machine refuses a Reply that names a card its feed no longer holds.
+  const wentNote = stale("that card is gone from the feed — nothing was posted (the 'needs_id' field)", []);
   return {
     typed: await reply(crew, answered(true, "typed into its pane (it was waiting)"), "Tell"),
     filed: await reply(crew, answered(false, "it is working — filed as board note #12 to coder-1"), "Tell"),
@@ -3053,6 +3057,8 @@ async function crewReplies() {
       status: 404, json: { error: "not_found", message: "no fleet agent 'agt_m' in x (the 'agent_id' field)" },
     })),
     rowless: await reply(rowless, answered(true, "typed"), "Post"),
+    rowlessWent: await reply(rowless, answered(true, "typed"), "Post", wentNote),
+    rowlessWentThenPosted: await reply(rowless, answered(true, "typed"), "Post", [wentNote, ok]),
   };
 }
 

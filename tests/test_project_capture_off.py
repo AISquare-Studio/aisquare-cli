@@ -812,7 +812,13 @@ def test_doctor_reads_the_rows_that_hold_a_board_once_a_run(
 
     assert len(reads) == 1, reads
     assert check.detail == before.detail
-    assert "scratch" in check.detail and "tools" in check.detail and "notes" in check.detail
+    # The dropped row is counted, never named: "scratch" matched only through a temp path that
+    # held it, a scratchpad's, and not under /tmp, as on CI (review of #259, round 38, 1/4).
+    said = " ".join(check.detail.split())
+    assert said.startswith("1 captured directory left from before"), said
+    assert str(rows["scratch"].root) not in said, said
+    assert "which that prune keeps: notes — " in said, said
+    assert "aisquare project forget refuses: tools — " in said, said
 
 
 def test_doctor_works_out_the_hold_of_each_captured_row_once_a_run(

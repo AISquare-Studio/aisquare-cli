@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import subprocess
 from pathlib import Path
@@ -73,6 +74,41 @@ def test_a_start_that_may_not_be_searched_raises_on_every_python(tmp_path: Path)
         assert find_project_root(locked.parent) == home.resolve(), "beside it, the walk"
     finally:
         locked.chmod(0o700)
+
+
+class _WindowsLoop(OSError):
+    """What Windows raises for a path through a symlink loop: ``ERROR_CANT_RESOLVE_FILENAME``,
+    with an ``errno`` other than ``ELOOP``."""
+
+    winerror = 1921
+
+
+def test_a_windows_symlink_loop_is_gone_to_every_stat_of_a_root_or_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 43, 6/7: ``_resolved_dir`` knows a Windows loop by its
+    ``winerror``, and ``_GONE`` alone did not. On Windows a looping ``<dir>/.git`` raised out
+    of the walk, which ``Path.exists`` ignored up to 3.13, and a root that became a loop was
+    taken for a directory, which ``prune --missing`` then never offered. Both read it gone."""
+    marked = tmp_path / "marked"
+    marked.mkdir()
+    looped = {marked / ".git", tmp_path / "root"}
+
+    class Loops:
+        """``os`` as the lookup sees it, with Windows' loop for the paths in ``looped``."""
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(os, name)
+
+        def stat(self, path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+            if Path(path) in looped:
+                raise _WindowsLoop(errno.EINVAL, "cannot be resolved by the system", str(path))
+            return os.stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(workspace, "os", Loops())
+
+    assert workspace.marks_project_root(marked) is False
+    assert workspace._is_dir(tmp_path / "root") is False
 
 
 def test_a_checkout_is_looked_up_with_one_stat_of_its_start_and_none_of_gits_answers(

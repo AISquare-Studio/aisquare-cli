@@ -56,6 +56,28 @@ def _is_aisquare_home(candidate: Path) -> bool:
 #: path was, or a link that can never reach one.
 _GONE = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ELOOP})
 
+#: What Windows says of a path through a symlink loop (``ERROR_CANT_RESOLVE_FILENAME``),
+#: where POSIX says ``ELOOP``; 3.11's and 3.12's ``resolve`` read both as one.
+_WINERROR_CANT_RESOLVE_FILENAME = 1921
+
+
+def _loops(exc: OSError) -> bool:
+    """Whether ``exc``, from a ``stat``, says the path runs through a symlink loop: ``ELOOP``,
+    or on Windows ``winerror`` 1921, which Python reports with another ``errno``."""
+    return exc.errno == errno.ELOOP or (
+        getattr(exc, "winerror", 0) == _WINERROR_CANT_RESOLVE_FILENAME
+    )
+
+
+def _gone(exc: OSError) -> bool:
+    """Whether ``exc``, from a ``stat``, says the path is gone (:data:`_GONE`), a Windows loop
+    (:func:`_loops`) included. With ``_GONE`` alone, :func:`marks_project_root` raised for a
+    looping ``.git`` on Windows, which ``Path.exists`` ignored up to 3.13, and :func:`_is_dir`
+    took a root that became a loop for a directory there, which ``prune --missing`` then never
+    offered, where :func:`_resolved_dir` and POSIX call it gone (review of #259, round 43,
+    6/7)."""
+    return exc.errno in _GONE or _loops(exc)
+
 
 def _is_dir(root: Path) -> bool:
     """Whether ``root`` is a directory; one that cannot be asked is taken to be one.
@@ -67,7 +89,7 @@ def _is_dir(root: Path) -> bool:
     try:
         return stat.S_ISDIR(os.stat(root).st_mode)
     except OSError as exc:
-        return exc.errno not in _GONE
+        return not _gone(exc)
 
 
 def marks_project_root(directory: Path) -> bool:
@@ -94,18 +116,13 @@ def marks_project_root(directory: Path) -> bool:
         try:
             os.stat(candidate)
         except OSError as exc:
-            if exc.errno in _GONE:
+            if _gone(exc):
                 continue
             raise
         if marker == ".aisquare" and _is_aisquare_home(candidate):
             continue
         return True
     return False
-
-
-#: What Windows says of a path through a symlink loop (``ERROR_CANT_RESOLVE_FILENAME``),
-#: where POSIX says ``ELOOP``; 3.11's and 3.12's ``resolve`` read both as one.
-_WINERROR_CANT_RESOLVE_FILENAME = 1921
 
 
 def _resolved(path: Path) -> Path:
@@ -141,11 +158,9 @@ def _resolved_dir(path: Path) -> tuple[Path, bool]:
     try:
         mode = os.stat(resolved).st_mode
     except OSError as exc:
-        if exc.errno == errno.ELOOP or (
-            getattr(exc, "winerror", 0) == _WINERROR_CANT_RESOLVE_FILENAME
-        ):
+        if _loops(exc):
             raise OSError(errno.ELOOP, os.strerror(errno.ELOOP), str(path)) from exc
-        return resolved, exc.errno not in _GONE
+        return resolved, not _gone(exc)
     return resolved, stat.S_ISDIR(mode)
 
 

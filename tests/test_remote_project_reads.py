@@ -14,6 +14,8 @@ import asyncio
 import dataclasses
 import json
 import re
+import shutil
+import subprocess
 import threading
 import time
 from datetime import UTC, datetime
@@ -732,6 +734,47 @@ def test_a_note_names_no_session_or_task_of_a_captured_board(captured: ProjectIn
     with store_session() as store:
         events = store.recent_events(captured.id, limit=10)
     assert [event.kind for event in events] == ["task_added"], "nothing posted there"
+
+
+def test_a_project_whose_folder_is_gone_reads_its_own_board_not_a_marked_parents(
+    two_projects: tuple[ProjectInfo, ProjectInfo],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    project_capture: None,  # the dotfiles repository's board, made by a hook there
+) -> None:
+    """Review of #259, round 42, 2/11: with no agent running, a project's board is the one
+    ``asq board`` in its root shows (``_remote_board_project``), and for a deleted
+    ``~/code/app`` under a dotfiles ``~/.git`` the walk from the missing root landed on
+    ``~``. The Board and Tasks tabs showed ``~``'s tasks, ``done #1`` closed ``~``'s #1,
+    the phone's reach took in ``~``'s captured board, and a stale Reply's 409 named it. A
+    root that is gone is its own board (``find_project_root``)."""
+    monkeypatch.delenv("AISQUARE_TEAM_HUB", raising=False)
+    home = tmp_path / "home"
+    root = home / "code" / "app"
+    root.mkdir(parents=True)
+    for repository in (home, root):
+        subprocess.run(["git", "init", "-q", str(repository)], check=True, capture_output=True)
+    app = team_service.resolve_project(root)
+    with store_session() as store:
+        store.onboard_project(app)
+    theirs, _added = team_service.add_task("home's task", cwd=home)
+    mine, _added = team_service.add_task("app's task", cwd=root)
+    assert theirs.project_id != app.id and mine.project_id == app.id
+    shutil.rmtree(root)
+
+    tasks = live_sources().tasks(app.id)
+    _result, summary = live_writes().handlers["task/done"]({"ref": "#1", "project": app.id})
+    reach = remote_server._remote_boards()
+    named = remote_server._remote_note_board_name(app, None)
+
+    assert isinstance(tasks, list) and [row["title"] for row in tasks] == ["app's task"]
+    assert summary == f"done {mine.id} as=-"
+    with store_session() as store:
+        kept = store.get_task(theirs.id)
+        expected = team_service._board_named(store, app).name
+    assert kept is not None and kept.status == "todo", "home's #1 is not closed"
+    assert app.id in reach and theirs.project_id not in reach
+    assert named == expected
 
 
 def test_a_hubs_board_is_reached_through_every_project_on_it(

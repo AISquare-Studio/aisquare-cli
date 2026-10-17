@@ -650,7 +650,12 @@ def _remote_board_project(root: Path) -> ProjectInfo:
     round 30, 7/8). Under a hub, where ``team_project`` runs no ``git``, and
     with the board off, which ``resolve_project`` refuses, the answer is theirs. So it is
     under a relative hub, which ``team_project`` ignores with its one-time warning: asked of
-    ``team_hub`` alone, it was ignored here without a word (review of #243, round 17, 2/2)."""
+    ``team_hub`` alone, it was ignored here without a word (review of #243, round 17, 2/2).
+
+    A root that is gone is its own board, as ``find_project_root`` gives it: walked from, a
+    deleted ``~/code/app`` read a dotfiles ``~/.git``'s board, and its Board and Tasks tabs,
+    ``done #N``, the phone's reach and a stale Reply's 409 were ``~``'s (review of #259,
+    round 42, 2/11)."""
     from aisquare.core import orchestrator
     from aisquare.core.workspace import current_project
     from aisquare.services import team as team_service

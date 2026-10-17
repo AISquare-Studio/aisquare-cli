@@ -2491,9 +2491,10 @@ def _needs_elsewhere(
 
 def _needs_board_of(sources: NeedsSources, project: ProjectInfo) -> str:
     """The id of ``project``'s board (:attr:`NeedsSources.board_project`); its own when the
-    source cannot say (the team off, a root that is gone): a board read there finds what
-    it finds. Unlike a read of the scan's, a failure here is an answer: with the team off
-    ``team.resolve_project`` refuses every time."""
+    source cannot say (the team off, a root that cannot be looked at): a board read there
+    finds what it finds. Unlike a read of the scan's, a failure here is an answer: with the
+    team off ``team.resolve_project`` refuses every time. A root that is gone is its own
+    board as the source says it (``find_project_root``, review of #259, round 42, 2/11)."""
     try:
         return sources.board_project(project)
     except Exception:

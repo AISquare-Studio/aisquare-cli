@@ -222,7 +222,8 @@ class Frees(NamedTuple):
 
 
 BoardRows = Mapping[str, Sequence[FleetAgent]]
-"""The fleet rows that hold a board (:func:`reading_rows`), by the board each recorded."""
+"""The fleet rows that hold a board (:func:`reading_rows`), by the board a restart of each
+starts it on."""
 
 
 class BoardReader(NamedTuple):
@@ -512,10 +513,12 @@ def forget_refusals(
 
 
 def reading_rows(store: ContextStore) -> dict[str, list[FleetAgent]]:
-    """The fleet rows, in every project, whose recorded board holds a project
-    (:func:`_board_readers`): the live ones, and each stopped one a ``restart`` acts on, the
-    newest of its label (``ContextStore.fleet_label_heads``). By the board each recorded
-    (``FleetAgent.board``, its own project's for none), oldest first on each.
+    """The fleet rows, in every project, whose board holds a project (:func:`_board_readers`):
+    the live ones, and each stopped one a ``restart`` acts on, the newest of its label
+    (``ContextStore.fleet_label_heads``). By the board a restart of each starts it on
+    (``fleet.restart_board``): the one it recorded (``FleetAgent.board``), but for a row from
+    before its launch kept the hub that reads as its own project's and does not show it read
+    it, whose replacement reads its checkout's (round 38, 3/4). Oldest first on each.
 
     A restart of a stopped row starts its replacement under the hub its launch recorded
     (``fleet._board_and_hub``), whose ``launch`` adds the board it joins (``team on``). Asked
@@ -527,9 +530,12 @@ def reading_rows(store: ContextStore) -> dict[str, list[FleetAgent]]:
     candidate of a prune on each pass of its holds (:func:`_holds`) and for each captured
     row doctor asks of, 1.5 M row checks a pass for 300 captured rows over 5 000 heads, at
     each ``asq`` start (round 37, 6/7)."""
+    from aisquare.services import fleet as fleet_service  # lazy: fleet imports this module
+
     by_board: dict[str, list[FleetAgent]] = {}
+    checkouts: dict[str, str] = {}
     for row in store.fleet_label_heads():
-        by_board.setdefault(row.board or row.project_id, []).append(row)
+        by_board.setdefault(fleet_service.restart_board(store, row, checkouts), []).append(row)
     return by_board
 
 
@@ -540,7 +546,7 @@ def _board_readers(
     dropping: Collection[str] = (),
 ) -> list[BoardReader]:
     """Every other project whose fleet rows that hold a board (:func:`reading_rows`, or
-    ``readers``) recorded ``project``'s, as a hub's (``FleetAgent.board``), with those rows,
+    ``readers``) read ``project``'s, as a hub's, or a restart of them would, with those rows,
     in the order of its first; ``[]`` for none. A stopped row of a project forgotten since,
     or forgotten with it (``dropping``), is none: nothing lists it to restart.
 

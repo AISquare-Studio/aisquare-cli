@@ -5701,6 +5701,55 @@ def test_a_080_agent_whose_session_never_registered_keeps_the_board_of_its_task(
     assert _last_window_hub(tmux) == str(below.root)
 
 
+@pytest.mark.parametrize("ended", [False, True], ids=["live", "stopped"])
+def test_a_080_row_a_restart_moves_to_the_checkouts_board_holds_the_checkout_against_forget(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    ended: bool,
+) -> None:
+    """Review of #259, round 38, 3/4: the rows that hold a board were filed by the board each
+    recorded, and a 0.8.0 row of ``repo/api`` whose session never registered reads as its own
+    project's. A restart does not take that board at its word (round 27, 2/7): with no task
+    on it, the replacement reads the checkout's, ``repo``'s, and its ``launch`` adds ``repo``
+    back. So ``project forget repo`` went through, and the next restart undid it. The row is
+    filed under the board a restart starts it on, and the checkout's forget is refused. The
+    checkout is worked out once a project (a ``git`` call), not once a row."""
+    from aisquare.core import orchestrator
+
+    below = _project_below(project)
+    agent, other = _coder(below), _coder(below)
+    for each in (agent, other):
+        _as_080_left_it(each)
+    asked: list[Path | None] = []
+    real = orchestrator.directory_project
+
+    def counted(cwd: Path | None = None) -> ProjectInfo:
+        asked.append(cwd)
+        return real(cwd)
+
+    with store_session() as store:
+        assert agent.session_id is not None and store.get_session(agent.session_id) is None
+        if ended:
+            store.end_fleet_agent(agent.id, exit_status=0)
+        row = _row(agent.id)
+        assert row.board == below.id, "the premise: read as its project's"
+        assert fleet_service._board_and_hub(store, below, row, None) == (project.id, "")
+        monkeypatch.setattr(orchestrator, "directory_project", counted)
+        rows = project_service.reading_rows(store)
+    assert [each.id for each in rows.get(project.id, [])] == [agent.id, other.id], rows
+    assert below.id not in rows
+    assert asked == [below.root], "once for the project"
+
+    with pytest.raises(project_service.ProjectBusyError) as refused:
+        project_service.forget_project(project)
+
+    assert [reader.project.id for reader in refused.value.readers] == [below.id]
+    with store_session() as store:
+        assert store.get_project(project.id) is not None, "not forgotten"
+
+
 @pytest.mark.parametrize("verb", ["restart", "switch"])
 def test_a_replacement_that_could_not_take_the_task_is_refused_before_the_stop(
     tmux: FakeTmux,

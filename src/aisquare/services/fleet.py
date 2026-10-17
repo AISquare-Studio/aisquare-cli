@@ -2454,17 +2454,54 @@ def _board_and_hub(
     checkout = orchestrator.directory_project(project.root).id
     if board == checkout:
         return checkout, ""
-    if board == project.id:
-        registered = session is not None and session.project_id == board
-        assigned = agent.task_id is not None and (
-            store.get_task(agent.task_id, project_ids=[board]) is not None
-        )
-        if not (registered or assigned):
-            return checkout, ""
+    if board == project.id and not _read_its_own_board(store, agent, session):
+        return checkout, ""
     known = store.get_project(board, include_forgotten=True)
     if known is not None:
         return board, str(known.root)
     return _board_for(project), orchestrator.window_team_hub()
+
+
+def _read_its_own_board(
+    store: ContextStore, agent: FleetAgent, session: TeamSession | None
+) -> bool:
+    """Whether ``agent``, a row whose board is its own project's and whose launch kept no hub,
+    is shown to have read that board: its session registered on it, or the task it names is
+    on it (:func:`_board_and_hub`, :func:`restart_board`)."""
+    board = agent.project_id
+    if session is not None and session.project_id == board:
+        return True
+    return agent.task_id is not None and (
+        store.get_task(agent.task_id, project_ids=[board]) is not None
+    )
+
+
+def restart_board(store: ContextStore, agent: FleetAgent, checkouts: dict[str, str]) -> str:
+    """The board a ``restart`` of ``agent`` starts its replacement on, as the store says it
+    (:func:`_board_and_hub`): the one its row recorded. A row from before its launch kept the
+    hub, whose board is its own project's and that does not show it read it
+    (:func:`_read_its_own_board`), is replaced on its project's checkout's board instead. A
+    board the store does not hold stays the row's: a restart reads the one its caller's
+    process gives then (:func:`_board_for`), which is not the store's to say.
+
+    ``checkouts`` keeps each project's checkout (a ``git`` call) as it is worked out, for a
+    caller asking of every row (``project.reading_rows``). Filed under the row's own board, a
+    row that read ``repo``'s held ``repo/api``'s instead, and ``project forget repo`` was not
+    refused, though a restart of it brought ``repo`` back (review of #259, round 38, 3/4)."""
+    board = _board_of_row(agent)
+    spec = agent.launch_spec
+    if board != agent.project_id or (spec is not None and spec.hub is not None):
+        return board
+    if board not in checkouts:
+        project = store.get_project(board, include_forgotten=True)
+        checkouts[board] = (
+            board if project is None else orchestrator.directory_project(project.root).id
+        )
+    checkout = checkouts[board]
+    if checkout == board:
+        return board
+    session = store.get_session(agent.session_id) if agent.session_id else None
+    return board if _read_its_own_board(store, agent, session) else checkout
 
 
 def _task_for(store: ContextStore, board_id: str, task_id: str | None) -> TeamTask | None:

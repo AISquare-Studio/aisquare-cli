@@ -2041,10 +2041,13 @@ class SqliteStore:
         return _row_to_project(row) if row is not None else None
 
     def forgotten_among(self, project_ids: Collection[str]) -> set[str]:
-        """Which of ``project_ids`` the store holds forgotten (a tombstone, ``forgotten_at``):
-        for rows read with their tombstones (``get_project(..., include_forgotten=True)``),
-        one query, where a ``get_project`` of each asked again what was just read (review of
-        #259, round 40, 6/6)."""
+        """Which of ``project_ids`` the store holds forgotten (a tombstone, ``forgotten_at``),
+        in one query, for any ids, read or not; an id it does not hold (purged, or never
+        there) is not among them. A prune asks it of the rows it read with their tombstones
+        (``--purge``), where a ``get_project`` of each asked again what was just read (review
+        of #259, round 40, 6/6), and, without ``--purge``, of the candidates a read that
+        leaves tombstones out did not find, to tell a forgotten row from a purged one (round
+        41, 6/6; round 42, 11/11)."""
         named = sorted(set(project_ids))
         found: set[str] = set()
         for start in range(0, len(named), 500):  # well under SQLite's bound on parameters

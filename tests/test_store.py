@@ -2501,6 +2501,21 @@ def test_the_label_heads_are_every_live_row_and_each_labels_newest(store: Contex
     assert "agt_gone_1" not in {head.id for head in heads}
 
 
+def test_forgotten_among_answers_for_ids_read_or_not(store: ContextStore) -> None:
+    """Review of #259, round 42, 11/11: a plain prune asks ``forgotten_among`` of candidates it
+    could not read at all (a read that leaves tombstones out), to tell a forgotten row from a
+    purged one. It answers for any ids: the tombstones among them, and neither a live row
+    nor one the store no longer holds."""
+    for project_id in ("prj_forgotten", "prj_purged"):
+        store.onboard_project(ProjectInfo(id=project_id, root=Path(f"/tmp/{project_id}")))
+        store.forget_project(project_id)
+    store.purge_project("prj_purged")
+    asked = [PROJECT.id, "prj_forgotten", "prj_purged", "prj_never"]
+
+    assert all(store.get_project(project_id) is None for project_id in asked[1:]), "unread"
+    assert store.forgotten_among(asked) == {"prj_forgotten"}
+
+
 def test_a_label_lookup_and_the_label_heads_pick_one_row_of_two_stamped_alike(
     store: ContextStore,
 ) -> None:

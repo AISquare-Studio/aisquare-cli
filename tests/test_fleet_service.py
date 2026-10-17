@@ -70,6 +70,7 @@ from aisquare.models import (
     FleetAgent,
     FleetAgentStatus,
     ProjectInfo,
+    TeamEvent,
     TeamSession,
     TeamTask,
 )
@@ -9998,6 +9999,25 @@ def test_a_pause_whose_own_signal_does_not_parse_on_a_board_it_goes_to_sets_none
     assert sorted(_paused_on(w)) == sorted([w.hub.id, w.fleet.id])
 
 
+class _LockedOn:
+    """A store's connection that refuses ``board``'s signal event as a lock does, in the
+    transaction the boards sorted before it have already written in."""
+
+    def __init__(self, conn: sqlite3.Connection, board: str) -> None:
+        self._conn, self._board = conn, board
+
+    def execute(self, sql: str, params: Sequence[object] = ()) -> sqlite3.Cursor:
+        if sql.startswith("INSERT INTO team_event") and params[1] == self._board:
+            raise sqlite3.OperationalError("database is locked")
+        return self._conn.execute(sql, params)
+
+    def __enter__(self) -> sqlite3.Connection:
+        return self._conn.__enter__()
+
+    def __exit__(self, *exc: Any) -> bool:
+        return bool(self._conn.__exit__(*exc))
+
+
 @pytest.mark.parametrize("verb", ["pause", "resume"])
 def test_a_pause_or_resume_the_store_refuses_on_a_later_board_writes_none(
     hubbed: _Hubbed, runner: CliRunner, verb: str
@@ -10007,20 +10027,27 @@ def test_a_pause_or_resume_the_store_refuses_on_a_later_board_writes_none(
     own, so a store error on the board sorted last (``database is locked`` while many
     agents' hooks write) left the board before it paused, and ``fleet pause`` ended in a
     traceback, ``--json`` printing nothing. Every board's is written in one transaction in
-    the store the boards were worked out in: refused, none is, and it is said."""
+    the store the boards were worked out in: refused, none is, and it is said. The lock is
+    an ``OperationalError``, as SQLite's is: only a lock is said as "try again" (round 35,
+    1/8)."""
     w = hubbed
     if verb == "resume":
         fleet_service.pause(w.fleet)
     before = sorted(_paused_on(w))
     last = max(w.hub.id, w.fleet.id)  # the boards are written in this order
-    raw = sqlite3.connect(str(paths.db_path()))
-    with raw:
-        raw.execute(
-            "CREATE TRIGGER refuse_last BEFORE INSERT ON team_event "
-            f"WHEN NEW.project_id = '{last}' AND NEW.kind = 'signal' "
-            "BEGIN SELECT RAISE(ABORT, 'database is locked'); END"
-        )
-    raw.close()
+    real = SqliteStore.add_signal_events
+
+    def locked_on_last(
+        store: SqliteStore, writes: Sequence[tuple[TeamEvent, str, dict[str, Any]]]
+    ) -> list[TeamEvent]:
+        conn = store._conn
+        store._conn = _LockedOn(conn, last)  # type: ignore[assignment]
+        try:
+            return real(store, writes)
+        finally:
+            store._conn = conn
+
+    w.monkeypatch.setattr(SqliteStore, "add_signal_events", locked_on_last)
     signals = {board.id: _events(board, "signal") for board in (w.hub, w.fleet)}
 
     with pytest.raises(FleetError) as refused:
@@ -10036,12 +10063,56 @@ def test_a_pause_or_resume_the_store_refuses_on_a_later_board_writes_none(
     assert sorted(_paused_on(w)) == before, "the board before it was not written either"
     assert {board.id: _events(board, "signal") for board in (w.hub, w.fleet)} == signals
 
-    raw = sqlite3.connect(str(paths.db_path()))
-    with raw:
-        raw.execute("DROP TRIGGER refuse_last")
-    raw.close()
+    w.monkeypatch.setattr(SqliteStore, "add_signal_events", real)
     getattr(fleet_service, verb)(w.fleet)
     assert sorted(_paused_on(w)) == ([] if verb == "resume" else sorted([w.hub.id, w.fleet.id]))
+
+
+def _zero_the_table(table: str) -> None:
+    """Zero the root page of ``table`` in the store, its header kept: the store opens, and
+    a query that reaches the table finds ``database disk image is malformed``."""
+    raw = sqlite3.connect(str(paths.db_path()))
+    raw.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    size = raw.execute("PRAGMA page_size").fetchone()[0]
+    (root,) = raw.execute("SELECT rootpage FROM sqlite_master WHERE name = ?", (table,)).fetchone()
+    raw.close()
+    with paths.db_path().open("r+b") as db:
+        db.seek((root - 1) * size)
+        db.write(bytes(size))
+
+
+@pytest.mark.parametrize("verb", ["pause", "resume"])
+@pytest.mark.parametrize("damage", ["at-query", "at-open"])
+def test_a_pause_or_resume_on_a_damaged_store_is_not_told_to_try_again(
+    hubbed: _Hubbed, runner: CliRunner, verb: str, damage: str
+) -> None:
+    """Review of #259, round 35, 1/8: round 34 said every store error of a pause as "the
+    store refused it — try again", a ``FleetError`` the CLI prints as it is. A store found
+    damaged is one too: ``database disk image is malformed`` from the signals' table, or a
+    ``StoreUnopenable`` from the store the pause opens, and a retry of it never works. Only
+    a lock is said so; damage reaches the CLI's root group, which says to move the store
+    aside, as before."""
+    w = hubbed
+    if verb == "resume":
+        fleet_service.pause(w.fleet)
+    if damage == "at-query":
+        _zero_the_table("team_meta")
+    else:
+        paths.db_path().write_bytes(b"this is not a sqlite database, and open_store must say so")
+
+    with pytest.raises(sqlite3.DatabaseError) as found:
+        getattr(fleet_service, verb)(w.fleet)
+    assert not isinstance(found.value, FleetError)
+    if damage == "at-open":
+        assert isinstance(found.value, core_store.StoreUnopenable)
+        return  # the CLI resolves -P in a store of its own first, and that one says it
+    assert core_store.is_corrupt_error(found.value), found.value
+    told = runner.invoke(app, ["--json", "fleet", verb, "-P", w.fleet.id])
+    assert told.exit_code != 0 and isinstance(told.exception, SystemExit), told.output
+    said = json.loads(told.stdout)
+    assert said["error"] == "store_damaged", said
+    assert said["hint"] == core_store.damaged_store_recovery()
+    assert "try again" not in told.stdout
 
 
 def test_shutdown_reports_a_pause_signal_it_could_not_read_or_clear(

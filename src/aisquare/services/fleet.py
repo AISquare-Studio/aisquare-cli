@@ -57,7 +57,7 @@ from aisquare.core.config import (
 from aisquare.core.ids import new_agent_id
 from aisquare.core.locking import holding
 from aisquare.core.spawn import git_env
-from aisquare.core.store import AmbiguousIdError, ContextStore, store_session
+from aisquare.core.store import AmbiguousIdError, ContextStore, is_locked_error, store_session
 from aisquare.core.tmux import (
     DEFAULT_WINDOW_HEIGHT,
     DEFAULT_WINDOW_WIDTH,
@@ -7251,7 +7251,11 @@ def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> Non
     store the boards were worked out in (:func:`team.set_signals_in`): one ``set_signal`` a
     board, each in a store of its own, a store error on a later board (``database is
     locked``) left the earlier ones set and ended in a traceback all the same (round 34,
-    5/10); it rolls every one back now, and is said as a ``FleetError``.
+    5/10); it rolls every one back now. A lock is said as a ``FleetError`` that says to try
+    again (:func:`is_locked_error`), and nothing else is: a store found damaged
+    (``database disk image is malformed``, a ``StoreUnopenable``) reaches the CLI's root
+    group, which says to move it aside. Said as "try again" too, it was told to retry what
+    never works, and never how to recover (round 35, 1/8).
 
     Each write is a ``signal`` event in the delta of every session on that board. Off on
     every board one of the project's rows ever recorded, ``fleet resume -P a`` put
@@ -7286,8 +7290,10 @@ def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> Non
                 named = ", ".join(f"{name} on {board}" for board, name in broken)
                 raise FleetError(f"cannot {doing} the pause: {named} could not be read")
             team.set_signals_in(store, signals, value, session_ref=session_ref)
-    except sqlite3.Error as exc:  # a locked store, say: every write rolled back
-        raise FleetError(
+    except sqlite3.Error as exc:
+        if not is_locked_error(exc):
+            raise  # damage the CLI says how to recover from, or a fault keeping its traceback
+        raise FleetError(  # every write rolled back
             f"cannot {doing} the pause: the store refused it ({type(exc).__name__}: {exc}) — "
             "nothing was written; try again"
         ) from exc

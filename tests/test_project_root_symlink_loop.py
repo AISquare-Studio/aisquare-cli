@@ -75,10 +75,14 @@ def test_a_root_through_a_symlink_loop_is_an_oserror_where_it_is_resolved(
 
 
 def test_a_missing_root_is_no_loop(tmp_path: Path) -> None:
-    """A root that is gone still resolves: ``directory_project`` is asked of deleted roots."""
-    gone = tmp_path / "gone"
+    """A root that is gone still resolves, to itself: ``directory_project`` is asked of
+    deleted roots. Below a marked directory, as the loops here are: with none put there, it
+    held only where no ancestor of the temp dir had one, and failed under a dotfiles
+    ``~/.git`` (review of #259, round 42, 10/11)."""
+    gone = _marked(tmp_path / "repo") / "gone"
 
     assert find_project_root(gone) == gone.resolve()
+    assert orchestrator.directory_project(gone).root == gone.resolve()
 
 
 def test_a_project_root_that_became_a_symlink_loop_adds_no_board_and_fails_no_reach(

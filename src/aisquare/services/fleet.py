@@ -1362,6 +1362,57 @@ def _worktree_branches(root: Path) -> dict[Path, str]:
     return branches
 
 
+def _branches_in_use(root: Path, common: Path) -> set[str] | None:
+    """The branches ``git branch -D`` refuses to delete, as git's own ``branch_checked_out``
+    reads them: each one a worktree of the repository has out, is rebasing (its
+    ``rebase-merge`` or ``rebase-apply`` ``head-name``, and the refs a ``rebase
+    --update-refs`` moves when it ends) or is bisecting from (``BISECT_START``). ``None``
+    when git would not list the worktrees, or a tree's state could not be read: nothing is
+    known to be free then. ``common`` is the repository's own ``.git``
+    (:func:`_git_common_dir`), which holds the main checkout's state, and each linked tree's
+    under ``worktrees/``.
+
+    ``git worktree list`` says ``detached`` of a tree mid-rebase or mid-bisect. Asked of it
+    alone, the sweep deleted a merged ``fleet/x`` that ``../wt`` was rebasing, which ``branch
+    -D`` refuses; the ``rebase --continue`` there failed on the ref, and the rebased commits
+    were left on a detached HEAD (review of #259, round 34, 1/10). Read as no tree at all,
+    a ``worktree list`` that failed let every branch go.
+    """
+    listed = _git(root, "worktree", "list", "--porcelain")
+    if listed.returncode != 0:
+        return None
+    heads = "refs/heads/"
+    used = {
+        line.removeprefix("branch " + heads)
+        for line in listed.stdout.splitlines()
+        if line.startswith("branch " + heads)
+    }
+    trees = common / "worktrees"
+    try:
+        for state in [common, *(sorted(trees.iterdir()) if trees.is_dir() else [])]:
+            rebasing = [
+                _state_file(state / "rebase-merge" / "head-name"),
+                _state_file(state / "rebase-apply" / "head-name"),
+                # A ref, its tip before, its tip after: each third line is a ref.
+                *_state_file(state / "rebase-merge" / "update-refs").splitlines()[::3],
+            ]
+            used.update(ref.strip().removeprefix(heads) for ref in rebasing if ref.strip())
+            bisecting = _state_file(state / "BISECT_START").strip()  # a branch, or a commit
+            if bisecting:
+                used.add(bisecting)
+    except OSError:
+        return None
+    return used
+
+
+def _state_file(path: Path) -> str:
+    """What a worktree's state file at ``path`` says; ``""`` when there is none."""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except (FileNotFoundError, NotADirectoryError):
+        return ""
+
+
 def _default_branch(root: Path) -> str:
     """The branch fleet work merges into: origin's HEAD, else main/master, else HEAD."""
     head = _git(root, "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD")
@@ -1661,8 +1712,10 @@ def _sweep_fleet_branches(
     or rebase merge, whose tip the default branch never holds. Asked of every such branch
     on every reap: a branch kept when its tree went was never looked at again, so it stayed
     for good once merged, and the repo collected one a task (review of #259, round 15).
-    A branch some worktree has out, the tree gone by hand or not, is left alone, and so is
-    one a LIVE row names. The deletes are made under the lock a spawn makes its tree under
+    A branch some worktree has out, the tree gone by hand or not, or is rebasing or
+    bisecting (:func:`_branches_in_use`, what ``branch -D`` refuses: review of #259, round
+    34, 1/10), is left alone, and so is one a LIVE row names; when the trees cannot be
+    asked, every branch is. The deletes are made under the lock a spawn makes its tree under
     (:func:`_branches_locked`), after asking the trees again: never meanwhile, as a branch
     a spawn has just made, or is about to check out, reads as out of every tree. Each is
     deleted at the tip that was judged and no other (``update-ref -d <ref> <tip>``, which
@@ -1690,9 +1743,9 @@ def _sweep_fleet_branches(
         return
     every = _fleet_branches(root)
     merged = _fleet_branches(root, f"--merged={default}")
-    if not every or merged is None:
+    out = _branches_in_use(root, common)
+    if not every or merged is None or out is None:
         return
-    out = set(_worktree_branches(root).values())
     asked = {b: tip for b, tip in every.items() if b in recorded and b not in out}
     squashed = _squashed(root, {b: tip for b, tip in asked.items() if b not in merged}, default)
     done: list[str] = []
@@ -1707,9 +1760,9 @@ def _sweep_fleet_branches(
         # Never waited for: a spawn holds it through a whole `git worktree add`, and the
         # next reap deletes what this one could not.
         with _branches_locked(common, wait=0):
-            out = set(_worktree_branches(root).values())  # asked again, under the lock
+            out = _branches_in_use(root, common)  # asked again, under the lock
             for branch in done:
-                if branch in out:
+                if out is None or branch in out:
                     continue
                 ref = f"refs/heads/{branch}"
                 if _git(root, "update-ref", "-d", ref, every[branch]).returncode == 0:

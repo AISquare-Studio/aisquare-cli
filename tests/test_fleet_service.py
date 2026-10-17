@@ -10850,6 +10850,104 @@ def test_a_reap_deletes_a_done_branch_only_at_the_tip_it_judged(
     assert (left.returncode, left.stdout) == (1, ""), "its config went with it"
 
 
+def _git_in(tree: Path, *args: str, **env: str) -> subprocess.CompletedProcess[str]:
+    """``git <args>`` in ``tree`` with ``env`` added, whatever it exits with."""
+    return subprocess.run(
+        ["git", "-c", "user.email=fleet@test", "-c", "user.name=fleet", *args],
+        cwd=tree,
+        capture_output=True,
+        text=True,
+        env={**os.environ, **env},
+    )
+
+
+@pytest.mark.parametrize("state", ["rebasing", "rebasing, applying", "updating", "bisecting"])
+def test_a_reap_never_deletes_a_branch_a_worktree_is_rebasing_or_bisecting(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path, state: str
+) -> None:
+    """Review of #259, round 34, 1/10: ``git branch -D`` refuses a branch a worktree has out,
+    is rebasing or is bisecting from; the ``update-ref -d`` round 33 deleted with refuses
+    none, and ``git worktree list`` says ``detached`` of a tree mid-rebase. A merged task
+    branch a hand-made tree was rebasing was deleted, its ``rebase --continue`` failed on the
+    ref, and the rebased commits were left on a detached HEAD. The sweep refuses what ``branch
+    -D`` refuses: a rebase's branch (``head-name``, either backend), the refs its
+    ``--update-refs`` moves, and a bisect's; deleted once the tree is done with it."""
+    _commit(project.root, "a.txt")
+    _commit(project.root, "b.txt")
+    task = _add_task(project, "Wire the auth flow")
+    agent = fleet_service.spawn(project, "coder", task_id=task.id).agent
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=agent.cwd)
+    fleet_service.stop(project, agent.label, force=True)
+    _git("worktree", "remove", str(agent.cwd), cwd=project.root)  # merged: main holds its tip
+    tree = tmp_path / "wt"
+    mine = ("-b", "mine") if state == "updating" else ()
+    _git("worktree", "add", "-q", *mine, str(tree), branch, cwd=project.root)
+    if state == "bisecting":
+        started = _git_in(tree, "bisect", "start", "HEAD", "HEAD~2")  # checks out a.txt's
+    else:  # stopped by a conflict: b.txt is theirs on the commit it is replayed onto
+        _git("switch", "-q", "--detach", f"{branch}~1", cwd=tree)
+        (tree / "b.txt").write_text("theirs\n", encoding="utf-8")
+        _git("add", "b.txt", cwd=tree)
+        _git("commit", "-q", "-m", "theirs", cwd=tree)
+        onto = _git("rev-parse", "HEAD", cwd=tree)
+        _git("switch", "-q", "-", cwd=tree)
+        if state == "updating":  # another branch's rebase, which moves this one as it ends
+            _commit(tree, "c.txt")
+        how = {
+            "rebasing": ("HEAD~1",),
+            "rebasing, applying": ("--apply", "HEAD~1"),
+            "updating": ("--update-refs", "HEAD~2"),
+        }[state]
+        started = _git_in(tree, "rebase", "--onto", onto, *how)
+    listed = _git("worktree", "list", "--porcelain", cwd=project.root).split("\n\n")
+    assert listed[1].endswith("detached"), f"the premise: {listed} ({started.stderr})"
+    refused = _git_in(project.root, "branch", "-D", branch)
+    assert refused.returncode != 0 and "used by worktree" in refused.stderr, "as git refuses"
+
+    report = fleet_service.reap(project)
+
+    assert report.branches_deleted == [], report
+    assert _git("branch", "--list", branch, cwd=project.root)
+    if state == "rebasing":
+        (tree / "b.txt").write_text("ours\n", encoding="utf-8")
+        _git("add", "b.txt", cwd=tree)
+        ended = _git_in(tree, "rebase", "--continue", GIT_EDITOR="true")
+        assert ended.returncode == 0, f"it ends cleanly: {ended.stderr}"
+        assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=tree) == branch
+        return
+    if state == "bisecting":
+        _git("bisect", "reset", cwd=tree)
+    else:
+        _git("rebase", "--abort", cwd=tree)
+    _git("worktree", "remove", "--force", str(tree), cwd=project.root)
+    assert fleet_service.reap(project).branches_deleted == [(project.root, branch)]
+
+
+def test_a_reap_deletes_no_branch_when_git_will_not_list_the_worktrees(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 34, 1/10: a ``git worktree list`` that failed read as no tree
+    having any branch out, and every done ``fleet/…`` branch was deleted, one checked out
+    included. Nothing is known to be free then: none goes, and the next reap asks again."""
+    task = _add_task(project, "Wire the auth flow")
+    agent = fleet_service.spawn(project, "coder", task_id=task.id).agent
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=agent.cwd)
+    fleet_service.stop(project, agent.label, force=True)
+    _git("worktree", "remove", str(agent.cwd), cwd=project.root)
+    real = fleet_service._git
+
+    def no_list(root: Path, *args: str) -> fleet_service._GitResult:
+        if args[:2] == ("worktree", "list"):
+            return fleet_service._GitResult(128, "", "fatal: no")
+        return real(root, *args)
+
+    monkeypatch.setattr(fleet_service, "_git", no_list)
+    assert fleet_service.reap(project).branches_deleted == []
+    assert _git("branch", "--list", branch, cwd=project.root)
+    monkeypatch.setattr(fleet_service, "_git", real)
+    assert fleet_service.reap(project).branches_deleted == [(project.root, branch)]
+
+
 def test_a_reap_inside_a_spawn_never_deletes_the_branch_the_spawn_is_making_its_tree_on(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -5740,8 +5740,8 @@ def _clear_pause(projects: Sequence[ProjectInfo], report: ShutdownReport) -> Non
     A signal this could not READ or WRITE is reported rather than passed over —
     the pause outlives the shutdown either way, and the operator has to know.
 
-    ONE store connection for the whole pass. ``is_paused`` and ``resume`` each
-    open their own — connect, WAL switch, migrations — so an ``--all`` shutdown
+    ONE store connection for the whole pass. A read of the pause and ``resume`` each
+    opened their own — connect, WAL switch, migrations — so an ``--all`` shutdown
     paid two opens per project here on top of the rows'; the signals are read
     and cleared through the store this holds, by project id
     (:func:`services.team.board_signals_in`, :func:`services.team.set_signals_in`),
@@ -5759,11 +5759,11 @@ def _clear_pause(projects: Sequence[ProjectInfo], report: ShutdownReport) -> Non
     team = _team()
     try:
         with store_session() as store:
-            # `is_paused`/`resume` resolve the board through `ensure_project`,
-            # which CLEARS a registration's tombstone. `shutdown --all` reads
+            # A pause resolved through `ensure_project` CLEARED a registration's
+            # tombstone (review of #121, round 7). `shutdown --all` reads
             # past tombstones on purpose (a forgotten project can hold live
             # rows), so touching the pause of one would silently undo `project
-            # forget` (review of #121, round 7). A forgotten project's pause is
+            # forget`. A forgotten project's pause is
             # nobody's standing order: skipped, not read. A CAPTURED project's
             # pause is one like any other (#139), hence `all=True`: the default
             # list would skip every pause set where nothing was ever onboarded,
@@ -7323,15 +7323,6 @@ def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> Non
         raise FleetError(f"unknown session {session_ref!r}") from exc
 
 
-def is_paused(project: ProjectInfo) -> bool:
-    """Whether ``project``'s pause reads on, on any board (:func:`_pause_where_on`); a blob
-    that does not parse reads as none (:func:`team.board_signals_in`)."""
-    if not orchestrator.team_enabled():
-        return False  # a disabled board holds no signals: nothing can be paused — and no store
-    with store_session() as store:
-        return bool(_pause_where_on(project, _team().board_signals_in(store)))
-
-
 def _pause_homes(project: ProjectInfo) -> set[str]:
     """The boards ``project``'s pause lives on whatever its rows recorded
     (:func:`_pause_boards`): its checkout's, where a spawn from a caller without a hub reads,
@@ -7363,8 +7354,8 @@ def _pause_boards(store: ContextStore, project: ProjectInfo, homes: Collection[s
     Whether that manager is live and whether the caller exports the hub or not. Taken from
     the rows live at the moment, a pause set on a hub where the manager read was left on
     there once that manager stopped, and the next manager spawned under the hub came up
-    staffing nothing (review of #259, round 29, 1/8). ``fleet resume``, ``is_paused`` and
-    ``fleet shutdown`` now find the pause wherever it is on, by its name
+    staffing nothing (review of #259, round 29, 1/8). ``fleet resume`` and ``fleet
+    shutdown`` now find the pause wherever it is on, by its name
     (:func:`_pause_where_on`), so a board no manager of the project reads any more needs
     none: set on every board any row ever recorded, ``fleet pause -P a`` put ``a``'s pause,
     and its resume the ``off``, in the next prompt of every agent on every hub ``a`` ever
@@ -7412,8 +7403,8 @@ def _pause_where_on(
     The read half of the pause. A signal's name says whose pause it is, on whichever board:
     ``fleet-paused`` on the project's own, ``fleet-paused.<id>`` on any other. Found from the
     boards its rows recorded and its homes (:func:`_pause_boards`, :func:`_pause_homes`),
-    ``fleet resume``, ``is_paused`` and each visible project of ``fleet shutdown --all`` ran
-    ``git`` for a pause they almost never found (review of #259, round 31, 5/7); now they
+    ``fleet resume`` and each visible project of ``fleet shutdown --all`` ran ``git`` for a
+    pause they almost never found (review of #259, round 31, 5/7); now they
     run none, and a pause on a board no row of the project names any more is found too.
     """
     if not isinstance(signals, Mapping):

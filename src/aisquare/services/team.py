@@ -1190,13 +1190,6 @@ def read_signal(
         return _read_signal(store, board.id, name)
 
 
-def read_signal_in(store: ContextStore, project_id: str, name: str) -> SignalState | None:
-    """:func:`read_signal` for ``project_id`` through a store the CALLER holds open
-    (see :func:`set_signals_in` for why)."""
-    _require_enabled()
-    return _read_signal(store, project_id, name)
-
-
 def board_signals_in(
     store: ContextStore, *, unreadable: list[tuple[str, str]] | None = None
 ) -> dict[tuple[str, str], SignalState]:

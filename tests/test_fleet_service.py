@@ -101,6 +101,15 @@ PYTHON_LAUNCHER = "python3"
 # --- the fake tmux ---------------------------------------------------------------------
 
 
+def _is_paused(project: ProjectInfo) -> bool:
+    """Whether ``project``'s pause reads on, on any board, found by its name as ``fleet
+    resume`` and ``fleet shutdown`` find it (``fleet._pause_where_on``); a blob that does not
+    parse reads as none (``team.board_signals_in``). The tests' own: nothing else asks it
+    (review of #259, round 37, 7/7)."""
+    with store_session() as store:
+        return bool(fleet_service._pause_where_on(project, team_service.board_signals_in(store)))
+
+
 def _facts(pane_id: str, **overrides: object) -> PaneFacts:
     base = PaneFacts(
         pane_id=pane_id,
@@ -4620,7 +4629,7 @@ def test_under_a_hub_a_session_with_no_project_is_told_a_pause_to_fill_in_not_th
     fleet_service.pause(app)  # what the human runs once the manager is spawning in `app`
     filled = "fleet-paused." + app.id.lower().replace("_", "-")
     with store_session() as store:
-        state = team_service.read_signal_in(store, board.id, filled)
+        state = team_service._read_signal(store, board.id, filled)
     assert state is not None and state.value == "on", "the name filled in is the one set"
 
 
@@ -5202,7 +5211,7 @@ def _paused_on(w: _Hubbed, project: ProjectInfo | None = None) -> list[str]:
             board.id
             for board in (w.hub, w.fleet)
             for name in [harness.pause_signal(paused.id, board.id)]
-            for state in [team_service.read_signal_in(store, board.id, name)]
+            for state in [team_service._read_signal(store, board.id, name)]
             if state is not None and state.value == "on"
         ]
 
@@ -5213,9 +5222,9 @@ def _case_pause(w: _Hubbed) -> str | None:
     (``fleet._pause_homes``), and nowhere else."""
     fleet_service.pause(w.fleet)
     paused = _paused_on(w)
-    assert fleet_service.is_paused(w.fleet)
+    assert _is_paused(w.fleet)
     fleet_service.resume(w.fleet)
-    assert _paused_on(w) == [] and not fleet_service.is_paused(w.fleet)
+    assert _paused_on(w) == [] and not _is_paused(w.fleet)
     assert sorted(paused) == sorted([w.hub.id, w.fleet.id]), paused
     return _row(w.manager.id).board if _row(w.manager.id).board in paused else None
 
@@ -5234,7 +5243,7 @@ def _case_tell_unhubbed(w: _Hubbed) -> str | None:
 
 def _case_pause_is_its_projects(w: _Hubbed) -> str | None:
     fleet_service.pause(w.fleet)
-    paused = [project.id for project in (w.hub, w.fleet) if fleet_service.is_paused(project)]
+    paused = [project.id for project in (w.hub, w.fleet) if _is_paused(project)]
     return paused[0] if len(paused) == 1 else repr(paused)
 
 
@@ -6031,18 +6040,18 @@ def test_under_a_hub_each_fleet_project_pauses_and_resumes_alone(hubbed: _Hubbed
 
     fleet_service.pause(other)
 
-    assert fleet_service.is_paused(other) and not fleet_service.is_paused(hubbed.fleet)
+    assert _is_paused(other) and not _is_paused(hubbed.fleet)
     assert _paused_on(hubbed, other) == [hubbed.hub.id] and _paused_on(hubbed) == []
     fleet_service.pause(hubbed.fleet)
     fleet_service.resume(hubbed.fleet)
-    assert fleet_service.is_paused(other), "a resume of one is not the other's"
+    assert _is_paused(other), "a resume of one is not the other's"
     fleet_service.pause(hubbed.fleet)
 
     report = fleet_service.shutdown(hubbed.fleet)
 
     assert report.paused_cleared == [fleet_service._name(hubbed.fleet)], report
-    assert not fleet_service.is_paused(hubbed.fleet)
-    assert fleet_service.is_paused(other), "the other project's manager still obeys its pause"
+    assert not _is_paused(hubbed.fleet)
+    assert _is_paused(other), "the other project's manager still obeys its pause"
 
 
 @pytest.mark.parametrize("hubless", [False, True], ids=["under the hub", "without the hub"])
@@ -6071,7 +6080,7 @@ def test_a_pause_is_cleared_where_a_manager_that_has_stopped_read_it(
         report = fleet_service.shutdown(hubbed.fleet, force=True)
         assert report.paused_cleared == [fleet_service._name(hubbed.fleet)], report
 
-    assert _paused_on(hubbed) == [] and not fleet_service.is_paused(hubbed.fleet)
+    assert _paused_on(hubbed) == [] and not _is_paused(hubbed.fleet)
 
 
 def test_with_nothing_live_a_pause_goes_on_every_board_the_project_read(
@@ -6239,9 +6248,9 @@ def test_under_a_hub_shutdown_all_keeps_the_pause_it_says_it_kept(hubbed: _Hubbe
     report = fleet_service.shutdown(force=True)
 
     assert report.paused_kept == [fleet_service._name(other)], report
-    assert fleet_service.is_paused(other), "kept, as the report says"
+    assert _is_paused(other), "kept, as the report says"
     assert report.paused_cleared == [fleet_service._name(hubbed.fleet)]
-    assert not fleet_service.is_paused(hubbed.fleet)
+    assert not _is_paused(hubbed.fleet)
 
 
 def test_task_next_prefers_the_callers_assigned_task_over_the_oldest(
@@ -8232,7 +8241,7 @@ def test_shutdown_keeps_a_surviving_project_paused(
     report = fleet_service.shutdown(project)
 
     assert report.failed and report.sessions_left_up
-    assert fleet_service.is_paused(project), "a surviving fleet keeps its standing order"
+    assert _is_paused(project), "a surviving fleet keeps its standing order"
     assert report.paused_cleared == [] and report.paused_kept == [project.root.name]
 
 
@@ -8287,7 +8296,7 @@ def test_shutdown_reconciles_a_late_row_on_an_initially_absent_socket(
     assert [row.agent.id for row in report.failed] == [late[0].id]
     assert "still alive" in report.failed[0].reason
     assert report.incomplete_projects == [project.id]
-    assert fleet_service.is_paused(project), "a surviving replacement keeps the standing order"
+    assert _is_paused(project), "a surviving replacement keeps the standing order"
     assert report.paused_kept == [project.root.name] and report.paused_cleared == []
 
 
@@ -8318,7 +8327,7 @@ def test_shutdown_keeps_a_late_row_live_when_tmux_left_path_before_the_final_pas
     assert "could not be asked" in report.failed[0].reason
     assert report.incomplete_projects == [project.id]
     tmux.installed = True
-    assert fleet_service.is_paused(project) and report.paused_kept == [project.root.name]
+    assert _is_paused(project) and report.paused_kept == [project.root.name]
     assert [s.agent.id for s in fleet_service.list_agents(project)] == [late[0].id], "still live"
 
 
@@ -8348,7 +8357,7 @@ def test_shutdown_keeps_a_late_row_live_when_the_client_fails_at_execution(
     assert [row.agent.id for row in report.failed] == [late[0].id]
     assert "could not be asked" in report.failed[0].reason
     tmux.exec_unavailable = False
-    assert fleet_service.is_paused(project) and report.paused_kept == [project.root.name]
+    assert _is_paused(project) and report.paused_kept == [project.root.name]
     assert [s.agent.id for s in fleet_service.list_agents(project)] == [late[0].id], "still live"
 
 
@@ -8387,7 +8396,7 @@ def test_shutdown_refuses_when_the_client_goes_away_between_the_guard_and_the_pr
     tmux.installed, tmux.exec_unavailable, tmux.socket_denied = True, False, False
     assert [s.agent.id for s in fleet_service.list_agents(project)] == [coder.id], "untouched"
     assert coder.pane_id in tmux.facts, "the pane was never touched either"
-    assert fleet_service.is_paused(project), "and the standing order stands"
+    assert _is_paused(project), "and the standing order stands"
 
 
 def test_reachable_tells_an_absent_server_from_a_denied_socket() -> None:
@@ -8432,7 +8441,7 @@ def test_shutdown_leaves_a_late_row_live_when_its_socket_is_denied(
     assert [a.id for a in report.stopped] == [coder.id] and report.recorded == []
     assert [row.agent.id for row in report.failed] == [late[0].id]
     assert "could not be asked" in report.failed[0].reason
-    assert fleet_service.is_paused(project) and report.paused_kept == [project.root.name]
+    assert _is_paused(project) and report.paused_kept == [project.root.name]
 
 
 @_needs_a_socket_path
@@ -8492,7 +8501,7 @@ def test_shutdown_reports_a_failed_final_scan_and_keeps_the_pause(
     assert [a.id for a in report.stopped] == [coder.id]
     assert report.late_scan_failed is not None and "database is locked" in report.late_scan_failed
     assert report.incomplete_projects == [project.id]
-    assert fleet_service.is_paused(project) and report.paused_kept == [project.root.name]
+    assert _is_paused(project) and report.paused_kept == [project.root.name]
     assert [s.agent.id for s in fleet_service.list_agents(project)] == [late[0].id], "still live"
 
 
@@ -8686,27 +8695,6 @@ def test_a_release_the_store_refuses_costs_the_release_and_never_the_stop(
     assert "locked" in report.release_failures[0]
 
 
-def test_is_paused_opens_no_store_for_a_disabled_orchestrator(
-    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Review of the fold. The enabled check moved inside the store session, so a
-    disabled orchestrator paid a connect, WAL switch and migration to learn
-    nothing can be paused. Asked first, before any connection."""
-    opens = 0
-    real_open = core_store.open_store
-
-    def counting_open() -> ContextStore:
-        nonlocal opens
-        opens += 1
-        return real_open()
-
-    monkeypatch.setattr(core_store, "open_store", counting_open)
-    monkeypatch.setenv("AISQUARE_TEAM", "0")
-
-    assert fleet_service.is_paused(project) is False
-    assert opens == 0, f"a disabled board opened the store {opens} time(s)"
-
-
 def test_an_interrupt_during_the_stop_loop_does_not_kill_the_fleet(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -8741,7 +8729,7 @@ def test_an_interrupt_during_the_stop_loop_does_not_kill_the_fleet(
         "nothing beyond the row in hand was taken down behind the operator"
     )
     assert _row(second.id).ended_at is None
-    assert fleet_service.is_paused(project), "and the pause is still the manager's standing order"
+    assert _is_paused(project), "and the pause is still the manager's standing order"
 
     # The control: a FAULT in the loop still runs the kill phase — "shutdown means
     # down" holds when something other than a row breaks — and re-raises after.
@@ -8786,7 +8774,7 @@ def test_an_interrupt_before_any_rows_turn_still_carries_the_report(
         "interrupted before anything was stopped; the rest of the fleet was left as it was"
     )
     assert report.stopped == [] and tmux.killed_sessions == []
-    assert fleet_service.is_paused(project)
+    assert _is_paused(project)
 
 
 _SHUTDOWN_PHASES = {
@@ -9112,7 +9100,7 @@ def test_the_pause_pass_reads_and_clears_every_signal_through_one_store(
 
     assert sorted(report.paused_cleared) == sorted([project.root.name, plain_project.root.name])
     assert opens == 1, f"two projects, one connection — not {opens}"
-    assert not fleet_service.is_paused(project) and not fleet_service.is_paused(plain_project)
+    assert not _is_paused(project) and not _is_paused(plain_project)
 
 
 def test_the_pause_pass_asks_git_for_no_project_and_opens_no_store_with_the_board_off(
@@ -9201,7 +9189,7 @@ def test_a_root_the_pause_pass_cannot_look_at_is_cleared_like_any_other(
 
     names = [fleet_service._name(p) for p in (project, plain_project)]
     assert sorted(report.paused_cleared) == sorted(names)
-    assert not fleet_service.is_paused(plain_project) and not fleet_service.is_paused(project)
+    assert not _is_paused(plain_project) and not _is_paused(project)
     assert (report.pause_unsettled, report.pause_scan_failed) == ([], None)
     assert report.incomplete_projects == []
 
@@ -9226,9 +9214,9 @@ def test_the_pause_builds_no_row(
     monkeypatch.setattr(core_store.SqliteStore, "fleet_agents", spied)
 
     fleet_service.pause(project)
-    assert fleet_service.is_paused(project)
+    assert _is_paused(project)
     fleet_service.resume(project)
-    assert not fleet_service.is_paused(project)
+    assert not _is_paused(project)
     report = fleet_service.ShutdownReport()
     fleet_service._clear_pause([project], report)
     assert reads == [], "no row is built"
@@ -9263,7 +9251,7 @@ def test_a_resume_writes_off_only_where_the_pause_reads_on(hubbed: _Hubbed) -> N
     assert _paused_on(w) == [w.fleet.id]
     before = signal_events()
     fleet_service.resume(w.fleet, session_ref=w.manager_sid)
-    assert _paused_on(w) == [] and not fleet_service.is_paused(w.fleet)
+    assert _paused_on(w) == [] and not _is_paused(w.fleet)
     assert signal_events() == {w.hub.id: before[w.hub.id], w.fleet.id: before[w.fleet.id] + 1}
 
     fleet_service.pause(w.fleet)
@@ -9308,9 +9296,9 @@ def test_a_pause_goes_only_where_a_manager_of_the_project_reads_or_would_next(
 
     fleet_service.pause(w.fleet)
     assert sorted(_paused_on(w)) == sorted([w.hub.id, w.fleet.id])
-    assert fleet_service.is_paused(w.fleet)
+    assert _is_paused(w.fleet)
     fleet_service.resume(w.fleet)
-    assert _paused_on(w) == [] and not fleet_service.is_paused(w.fleet)
+    assert _paused_on(w) == [] and not _is_paused(w.fleet)
     assert signals_on_the_old_hub() == 0, "neither the pause nor the resume reached it"
 
 
@@ -9365,7 +9353,7 @@ def test_a_pause_goes_where_the_live_coders_read(
             board
             for board in (hub.id, project.id, old.id)
             for state in [
-                team_service.read_signal_in(store, board, harness.pause_signal(project.id, board))
+                team_service._read_signal(store, board, harness.pause_signal(project.id, board))
             ]
             if state is not None and state.value == "on"
         ]
@@ -9396,11 +9384,11 @@ def test_a_pause_or_resume_as_a_prefix_of_two_sessions_is_refused_as_ambiguous(
         with pytest.raises(FleetError) as refused:
             verb(project, session_ref="ses_aa")
         assert str(refused.value) == ambiguous
-        assert not fleet_service.is_paused(project)
+        assert not _is_paused(project)
     fleet_service.pause(project)
     with pytest.raises(FleetError, match="ambiguous"):
         fleet_service.resume(project, session_ref="ses_aa")
-    assert fleet_service.is_paused(project), "still paused"
+    assert _is_paused(project), "still paused"
 
     result = runner.invoke(app, ["--json", "fleet", "resume", "-P", project.id, "--as", "ses_aa"])
     assert result.exit_code == 1, result.exception
@@ -9441,7 +9429,7 @@ def test_a_resume_looks_its_session_up_once(
     fleet_service.resume(project, session_ref="ses_one")
 
     assert asked == ["ses_one"], asked
-    assert not fleet_service.is_paused(project)
+    assert not _is_paused(project)
     with pytest.raises(FleetError, match="unknown session 'ses_none'"):
         fleet_service.resume(project, session_ref="ses_none")
 
@@ -9476,13 +9464,13 @@ def test_a_pause_is_read_and_cleared_by_its_name_on_any_board_with_no_git(
 
     monkeypatch.setattr(workspace, "git_common_root", counted_git)
 
-    assert fleet_service.is_paused(w.fleet)
-    assert not fleet_service.is_paused(elsewhere), "the fleet's pause there is not its own"
+    assert _is_paused(w.fleet)
+    assert not _is_paused(elsewhere), "the fleet's pause there is not its own"
     fleet_service.resume(w.fleet)
-    assert not fleet_service.is_paused(w.fleet)
+    assert not _is_paused(w.fleet)
     with store_session() as store:
         name = harness.pause_signal(w.fleet.id, elsewhere.id)
-        there = team_service.read_signal_in(store, elsewhere.id, name)
+        there = team_service._read_signal(store, elsewhere.id, name)
     assert there is not None and there.value == "off", "off on the unrecorded board too"
     for board in (w.hub.id, elsewhere.id):
         team_service.set_signal(harness.pause_signal(w.fleet.id, board), "on", project_id=board)
@@ -9491,8 +9479,8 @@ def test_a_pause_is_read_and_cleared_by_its_name_on_any_board_with_no_git(
 
     assert asked == [], "no git"
     assert report.paused_cleared == [fleet_service._name(w.fleet)]
-    assert not fleet_service.is_paused(w.fleet)
-    assert fleet_service.is_paused(w.hub), "the hub's own pause, on the same board, is kept"
+    assert not _is_paused(w.fleet)
+    assert _is_paused(w.hub), "the hub's own pause, on the same board, is kept"
 
 
 def test_shutdown_clears_the_fleet_paused_signal(
@@ -9503,11 +9491,11 @@ def test_shutdown_clears_the_fleet_paused_signal(
     spawn nothing while it is set) with no output from either command naming it."""
     _coder(project)
     fleet_service.pause(project)
-    assert fleet_service.is_paused(project)
+    assert _is_paused(project)
 
     report = fleet_service.shutdown(project, force=True)
 
-    assert not fleet_service.is_paused(project)
+    assert not _is_paused(project)
     assert report.paused_cleared == [project.root.name]
     # A shutdown does not put a fleet-paused row on a board that had none.
     assert fleet_service.shutdown(project).paused_cleared == []
@@ -9985,12 +9973,12 @@ def test_a_signal_that_does_not_parse_holds_up_only_the_project_whose_pause_it_i
         store.set_meta(f"signal/{other.id}/{theirs}", blob)
         store.set_meta("signal/prj_elsewhere/deploy", blob)  # nobody's pause
     fleet_service.pause(project)
-    assert fleet_service.is_paused(project) and not fleet_service.is_paused(other)
+    assert _is_paused(project) and not _is_paused(other)
 
     resumed = runner.invoke(app, ["--json", "fleet", "resume", "-P", project.id])
 
     assert resumed.exit_code == 0, resumed.output
-    assert not fleet_service.is_paused(project)
+    assert not _is_paused(project)
     with pytest.raises(FleetError) as refused:
         fleet_service.resume(other)
     assert str(refused.value) == f"cannot clear the pause: {theirs} on {other.id} could not be read"
@@ -10027,7 +10015,7 @@ def test_a_pause_whose_own_signal_does_not_parse_on_a_board_it_goes_to_sets_none
     assert "could not be read" in json.loads(paused.stdout)["detail"]
     first = min(w.hub.id, w.fleet.id)
     with store_session() as store:
-        before = team_service.read_signal_in(store, first, harness.pause_signal(w.fleet.id, first))
+        before = team_service._read_signal(store, first, harness.pause_signal(w.fleet.id, first))
     assert before is None, "nothing was set, on the board before it either"
 
     other = "prj_elsewhere"
@@ -10267,7 +10255,7 @@ def test_shutdown_reports_a_pause_signal_it_could_not_read_or_clear(
     assert report.paused_cleared == [], "nothing is cleared on a signal that could not be read"
     assert report.paused_kept == [], "and nothing is CLAIMED kept either — it was never read"
     assert project.id in report.incomplete_projects, "an unread pause is not a project down"
-    assert fleet_service.is_paused(project), "the pause is in fact still on"
+    assert _is_paused(project), "the pause is in fact still on"
     assert [p.id for p in report.pause_unsettled] == [project.id], "its resume is owed"
 
     monkeypatch.setattr(fleet_service, "_clear_pause_signal", refuse)  # now the WRITE fails
@@ -10279,12 +10267,12 @@ def test_shutdown_reports_a_pause_signal_it_could_not_read_or_clear(
     assert second.paused_kept == [name], "read ON, not cleared: kept"
     assert second.paused_cleared == []
     assert project.id in second.incomplete_projects
-    assert fleet_service.is_paused(project), "the signal that could not be written stays on"
+    assert _is_paused(project), "the signal that could not be written stays on"
     assert [p.id for p in second.pause_unsettled] == [project.id]
     # Negative control: with the store answering, the same run clears it and exits clean.
     third = fleet_service.shutdown(project, force=True)
     assert third.pause_scan_failed is None and third.paused_cleared == [name]
-    assert third.incomplete_projects == [] and not fleet_service.is_paused(project)
+    assert third.incomplete_projects == [] and not _is_paused(project)
     assert third.pause_unsettled == []
 
 
@@ -10321,7 +10309,7 @@ def test_shutdown_returns_the_report_when_the_pause_lookup_store_is_locked(
 
     assert coder.id in {a.id for a in report.stopped}
     assert report.paused_cleared == [], "no pause is cleared blind"
-    assert fleet_service.is_paused(project), "every pause is kept"
+    assert _is_paused(project), "every pause is kept"
     assert report.pause_scan_failed is not None and "locked" in report.pause_scan_failed
     assert report.late_scan_failed is None, "the scan itself ran; only the pause lookup failed"
 
@@ -10344,13 +10332,13 @@ def test_shutdown_clears_the_pause_by_the_target_id_not_a_redirected_board(
     _coder(project)
     fleet_service.pause(project)
     monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub_root))  # cwd resolution now points at A
-    assert fleet_service.is_paused(project) and fleet_service.is_paused(hub)
+    assert _is_paused(project) and _is_paused(hub)
 
     report = fleet_service.shutdown(project, force=True)
 
     assert report.paused_cleared == [project.root.name], "B, not the hub"
-    assert not fleet_service.is_paused(project), "B's own signal is cleared"
-    assert fleet_service.is_paused(hub), "the hub's pause is untouched"
+    assert not _is_paused(project), "B's own signal is cleared"
+    assert _is_paused(hub), "the hub's pause is untouched"
 
 
 def test_shutdown_with_no_agents_takes_the_fleets_session_down_and_reports_nothing_else(
@@ -11904,12 +11892,12 @@ def test_nudge_never_raises(
 
 
 def test_pause_and_resume_flip_the_board_signal(project: ProjectInfo) -> None:
-    assert not fleet_service.is_paused(project)
+    assert not _is_paused(project)
     fleet_service.pause(project)
-    assert fleet_service.is_paused(project)
+    assert _is_paused(project)
     assert _events(project, "signal") == ["fleet-paused: on"]
     fleet_service.resume(project)
-    assert not fleet_service.is_paused(project)
+    assert not _is_paused(project)
     assert _events(project, "signal")[-1] == "fleet-paused: off (was on)"
 
 
@@ -11919,7 +11907,8 @@ def test_pause_with_the_team_disabled_is_a_fleet_error(
     monkeypatch.setenv("AISQUARE_TEAM", "0")
     with pytest.raises(FleetError, match="pause signal"):
         fleet_service.pause(project)
-    assert not fleet_service.is_paused(project)
+    monkeypatch.delenv("AISQUARE_TEAM")
+    assert not _is_paused(project), "nothing was written"
 
 
 # --- rename --------------------------------------------------------------------------

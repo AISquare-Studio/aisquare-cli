@@ -14,9 +14,12 @@ on:
   # baseline without a push.
   workflow_dispatch:
 
-# Cancel superseded runs on the same branch/PR.
+# Cancel superseded runs on the same branch/PR. Grouped by event too: by ref
+# alone, the nightly shared main's group with pushes to main, so a push
+# cancelled the nightly or the nightly cancelled a push's run. A run by hand
+# has a group of its own for the same reason.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:

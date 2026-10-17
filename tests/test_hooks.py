@@ -14,7 +14,9 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import selfcli
+from aisquare.core.store import store_session
 from aisquare.core.version import __version__
+from aisquare.core.workspace import current_project
 from aisquare.services import hooks as hooks_service
 from aisquare.services import install_route
 
@@ -33,12 +35,68 @@ def _json(output: str) -> Any:
     return json.loads(output)
 
 
-def test_user_prompt_submit_captures(runner: CliRunner, work_dir: Path) -> None:
+def _add(work_dir: Path) -> None:
+    """Add ``work_dir`` on purpose, as ``project onboard`` does, without the snapshot."""
+    with store_session() as store:
+        store.onboard_project(current_project(work_dir))
+
+
+def _prompt(runner: CliRunner, work_dir: Path) -> None:
     payload = json.dumps({"prompt": "add a test for X", "cwd": str(work_dir)})
     result = runner.invoke(app, ["hook", "user-prompt-submit"], input=payload)
     assert result.exit_code == 0, result.output
-    logged = runner.invoke(app, ["--json", "log"])
-    assert "add a test for X" in [prompt["text"] for prompt in _json(logged.stdout)]
+    assert result.stdout == ""
+
+
+def _logged(runner: CliRunner) -> list[str]:
+    return [prompt["text"] for prompt in _json(runner.invoke(app, ["--json", "log"]).stdout)]
+
+
+def test_user_prompt_submit_captures_in_a_project_added_on_purpose(
+    runner: CliRunner, work_dir: Path
+) -> None:
+    _add(work_dir)
+    _prompt(runner, work_dir)
+    assert "add a test for X" in _logged(runner)
+    with store_session() as store:
+        assert len(store.turn_metrics(project_id=current_project(work_dir).id)) == 1
+
+
+def test_a_prompt_where_nothing_was_added_records_nothing_and_makes_no_project(
+    runner: CliRunner, work_dir: Path
+) -> None:
+    """``[projects] capture`` is off by default: no row, no prompt, no turn (#139)."""
+    _prompt(runner, work_dir)
+    assert _logged(runner) == []
+    with store_session() as store:
+        assert store.list_projects(all=True) == []
+        assert store.turn_metrics() == []
+
+
+def test_with_capture_on_a_prompt_captures_the_directory_unlisted(
+    runner: CliRunner, work_dir: Path, project_capture: None
+) -> None:
+    _prompt(runner, work_dir)
+    assert "add a test for X" in _logged(runner)
+    with store_session() as store:
+        assert [p.root for p in store.captured_projects()] == [work_dir.resolve()]
+        assert store.list_projects() == []
+        assert len(store.turn_metrics()) == 1
+
+
+def test_capture_is_a_setting_off_by_default_and_on_captures_as_0_8_0_did(
+    runner: CliRunner, work_dir: Path, isolated_home: Path
+) -> None:
+    """Through config.toml, not the tests' patch: the default is in the system layer,
+    so only a change is written, and setting it back writes nothing."""
+    got = runner.invoke(app, ["--json", "config", "get", "projects.capture"])
+    assert _json(got.stdout) == {"projects.capture": "false"}
+    assert runner.invoke(app, ["config", "set", "projects.capture", "true"]).exit_code == 0
+    assert "[projects]\ncapture = true" in (isolated_home / "config.toml").read_text()
+    _prompt(runner, work_dir)
+    assert "add a test for X" in _logged(runner)
+    assert runner.invoke(app, ["config", "set", "projects.capture", "false"]).exit_code == 0
+    assert "[projects]" not in (isolated_home / "config.toml").read_text()
 
 
 def test_user_prompt_submit_ignores_blank(runner: CliRunner) -> None:
@@ -146,6 +204,7 @@ def _uv_cache(root: Path) -> Path:
 
 
 def _session_start_after_a_prompt(runner: CliRunner, work_dir: Path) -> str:
+    _add(work_dir)
     payload = json.dumps({"prompt": "add a test for X", "cwd": str(work_dir)})
     assert runner.invoke(app, ["hook", "user-prompt-submit"], input=payload).exit_code == 0
     started = runner.invoke(

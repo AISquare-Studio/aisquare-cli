@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,7 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from aisquare.services.onboarding import fix_commands
 from tests.fsperms import can_symlink
+from tests.projects import add_project
 
 # --- fakes and seeds -------------------------------------------------------------------
 
@@ -141,10 +143,12 @@ class FakeServer(TmuxServer):
         return self._listened
 
     def pane_facts(self, pane_id: str) -> PaneFacts | None:
+        """As the real one, which asks ``#{start_time}`` in the same ``display-message``."""
         self.asked.append(f"pane_facts:{pane_id}")
         if self._facts_raise:
             raise TmuxError("unexpected display-message output")
-        return self._panes.get(pane_id)
+        facts = self._panes.get(pane_id)
+        return None if facts is None else replace(facts, server_started=self._started)
 
     def started_at(self) -> datetime | None:
         self.asked.append("started_at")
@@ -559,7 +563,8 @@ def test_fleet_check_counts_a_row_older_than_its_server_as_gone(home: Path, tmp_
     assert "1 recorded live but the tmux pane is gone" in check.detail
     assert "manager" in check.detail and "coder-1" not in check.detail
     assert check.fix and "aisquare fleet reap --all" in check.fix
-    assert server.asked.count("started_at") == 1  # once per socket, not per row
+    # Said with each pane (`#{start_time}`): not asked on its own, per row or per socket.
+    assert server.asked.count("started_at") == 0
 
 
 def test_fleet_check_reads_empty_facts_as_a_gone_pane(home: Path, tmp_path: Path) -> None:
@@ -643,6 +648,80 @@ def test_fleet_check_does_not_call_a_server_whose_socket_file_is_gone_not_runnin
     assert "may still be running" not in check.detail
     assert check.fix and "SIGUSR1" not in check.fix
     assert check.fix.endswith("aisquare fleet reap --all --server-down")
+
+
+def test_fleet_check_tells_another_server_on_a_rows_socket_from_a_pane_that_is_gone(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Follow-up of #257: a server answers on the row's socket, holds no pane of the row's,
+    and started at another time than the row recorded: it took the path from the row's
+    server, which lost its socket file and may run on. Said so, with the way back first,
+    not as a pane that is gone for `reap --all` to record. A row that recorded no start
+    is judged by its own time, as before."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "this-boot")
+    then = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    project = _seed(tmp_path / "repo")
+    coder = _agent(project.id, "coder-1", "%2").model_copy(
+        update={"boot_id": "this-boot", "server_started_at": then}
+    )
+    _seed(tmp_path / "repo", coder)
+    server = FakeServer(
+        sessions=("asq-other",),
+        panes={},
+        started=then + timedelta(minutes=5),
+        listened="answers",
+    )
+
+    check = diagnostics._check_fleet(lambda socket: server)
+
+    assert check.status is CheckStatus.warn
+    assert "the tmux pane is gone" not in check.detail
+    assert "another tmux server answers on the socket of the private tmux server 'asq'" in (
+        check.detail
+    )
+    assert "may still be running: coder-1" in check.detail
+    assert check.fix and "SIGUSR1" in check.fix and "another server took" in check.fix
+    assert check.fix.index("SIGUSR1") < check.fix.index("--server-down"), "the way back first"
+    # Negative control: a row from before the start was recorded, on a server younger
+    # than it, is a pane that is gone, and the plain sweep records it.
+    with store_session() as store:
+        store.upsert_fleet_agent(coder.model_copy(update={"server_started_at": None}))
+
+    check = diagnostics._check_fleet(lambda socket: server)
+
+    assert "1 recorded live but the tmux pane is gone: coder-1" in check.detail
+    assert "another tmux server" not in check.detail
+    assert check.fix and "SIGUSR1" not in check.fix
+
+
+def test_fleet_check_asks_a_servers_start_only_where_no_pane_of_its_said_it(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 5: the check asked `started_at()` per address once a pane's facts
+    answered, though the facts carry the start (`PaneFacts.server_started`), and then the
+    one rule asked it again for each pane that was gone (`server_may_run`), through a
+    `SocketReads` of its own. Read where a pane said it, each server is asked at most once,
+    and here not at all, and a row another server answers for is still told apart."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "this-boot")
+    then = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    project = _seed(tmp_path / "repo")
+    alive = _agent(project.id, "coder-1", "%1")
+    taken = _agent(project.id, "coder-2", "%2").model_copy(
+        update={"boot_id": "this-boot", "server_started_at": then}
+    )
+    _seed(tmp_path / "repo", alive, taken)
+    server = FakeServer(
+        sessions=("asq-amber-otter",),
+        panes={"%1": _facts("%1")},
+        started=then + timedelta(minutes=5),
+        listened="answers",
+    )
+
+    check = diagnostics._check_fleet(lambda socket: server)
+
+    assert "another tmux server answers on the socket" in check.detail
+    assert "may still be running: coder-2" in check.detail and "coder-1" not in check.detail
+    assert server.asked.count("started_at") == 0, server.asked
 
 
 def test_fleet_check_does_not_vouch_for_a_server_that_is_silent_but_not_absent(
@@ -959,6 +1038,7 @@ def test_doctor_cwd_selects_the_project_for_the_project_scoped_checks(
     monkeypatch.setattr(snapshot_core, "can_pack", lambda: True)
     # Activate the orchestrator in `there` only, with an off-ladder live session.
     monkeypatch.setenv("AISQUARE_ROLE", "runner")
+    add_project(there)  # a role session joins a board only where the project was added
     team_service.hook_session_start("sess-there-1", there, "startup", model="claude-haiku-4-5")
     _ready_snapshot(_seed(there).id)
 
@@ -985,6 +1065,7 @@ def test_doctor_without_cwd_means_the_process_cwd(
     work.mkdir()
     monkeypatch.chdir(work)
     monkeypatch.setenv("AISQUARE_ROLE", "runner")
+    add_project(work)
     team_service.hook_session_start("sess-work-1", work, "startup", model="claude-haiku-4-5")
 
     implicit = _by_name(diagnostics.doctor())["agent harness"]
@@ -1317,8 +1398,8 @@ def test_the_fleet_terminal_row_never_starts_a_server_and_survives_an_unknown_te
 
 
 def test_the_fleet_terminal_row_comes_after_the_actionable_checks() -> None:
-    """It can warn (a server's kept prefix), and the fleet sidebar shows only the
-    first three not-ok rows in doctor order (``DOCTOR_LINES``): inserted beside
+    """It can warn (a server's kept prefix), and the not-ok rows are read in doctor
+    order (the fleet sidebar showed only the first three): inserted beside
     tmux, as #147 had it, that warning evicted one of brain / snapshot / a
     logged-out gh — the rows an operator can act on — from the one doctor
     surface visible without a click. So it waits with browser tools."""
@@ -1367,7 +1448,9 @@ def test_doctor_names_a_project_whose_manager_exited_while_its_agents_run(
     assert check.name == "fleet-manager" and check.status is CheckStatus.warn
     assert "the manager exited while agents are still running in: repo" in check.detail
     assert "1 agent(s) still running" in check.detail
-    assert check.fix and "aisquare fleet restart manager --project <name>" in check.fix
+    # Its own project named, not a placeholder to fill (review of #259, round 21).
+    ref = project.codename or project.id
+    assert check.fix and f"aisquare fleet restart --project {ref} manager" in check.fix
     assert "Restart on its row" in check.fix
     assert "fleet-manager" in _by_name(diagnostics.doctor()), "it reaches the real doctor"
 
@@ -1403,7 +1486,9 @@ def test_the_dead_manager_line_never_creates_the_home(isolated_home: Path) -> No
 # --- the projects line (#139) -------------------------------------------------------------------
 
 
-def test_doctor_counts_the_captured_directories_it_hides(home: Path, tmp_path: Path) -> None:
+def test_doctor_counts_the_captured_directories_it_hides(
+    home: Path, tmp_path: Path, project_capture: None
+) -> None:
     from aisquare.models import ProjectInfo
 
     assert diagnostics._check_captured_projects() == []  # nothing captured: silent
@@ -1461,9 +1546,10 @@ def test_doctor_counts_the_exited_agents_a_restart_would_resume(home: Path, tmp_
 
     assert check.name == "fleet-resume" and check.status is CheckStatus.ok
     assert check.detail.startswith("1 exited agent can be resumed")
-    assert "coder-1 (repo)" in check.detail
+    # Each with its own restart, naming its project (review of #259, round 21).
+    restart = f"`aisquare fleet restart --project {project.codename or project.id} coder-1`"
+    assert check.detail.endswith(f"starting over: {restart}"), check.detail
     assert "coder-2" not in check.detail and "coder-3" not in check.detail
-    assert "fleet restart <label>" in check.detail
     assert "fleet-resume" in _by_name(diagnostics.doctor()), "it reaches the real doctor"
     on_disk.unlink()
     assert diagnostics._check_resumable_agents() == [], "no transcript, nothing to resume"
@@ -1511,5 +1597,6 @@ def test_the_resume_line_reads_only_the_newest_row_under_each_label(
     [check] = diagnostics._check_resumable_agents()
 
     assert check.detail.startswith("1 exited agent can be resumed"), check.detail
-    assert "coder-2 (repo)" in check.detail and check.detail.count("coder-2") == 1
+    assert f"--project {project.codename or project.id} coder-2`" in check.detail
+    assert check.detail.count("coder-2") == 1
     assert "coder-1" not in check.detail, "live again: nothing to resume"

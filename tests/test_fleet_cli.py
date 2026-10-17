@@ -36,6 +36,7 @@ from aisquare.cli import fleet as fleet_cli
 from aisquare.cli.app import app
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession, TeamTask
 from aisquare.services import fleet as fleet_service
+from aisquare.services import install_route
 from aisquare.services.fleet import (
     FleetError,
     FleetUnavailable,
@@ -48,6 +49,7 @@ from aisquare.services.fleet import (
     SpawnReceipt,
     StopReceipt,
     TellResult,
+    Typed,
 )
 from tests.rendered import plain as _plain
 
@@ -202,6 +204,30 @@ def test_spawn_says_which_label_was_asked_when_the_fleet_suffixed_it(
     line = _plain(result.stdout)
     assert "✓ spawned coder-auth-2 (asked: coder-auth)" in line
     assert "⚠ label coder-auth is held by a live agent" in line
+
+
+def test_spawn_marks_a_share_made_into_its_account_as_done_not_as_a_warning(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final gate NIT 3: '⚠ accounts: <folder> is trusted on plain claude — now on account 2
+    too' read as a problem. A share that was made is a ✓ line; a note that something did
+    not happen keeps its ⚠."""
+    shared = "accounts: /work is trusted on plain claude — now on account 2 too"
+    receipt = SpawnReceipt(
+        agent=_agent("coder-1"),
+        asked_label=None,
+        tmux_session=SESSION,
+        notes=[shared, "the agent exited before the prompt could be typed"],
+        shared=[shared],
+    )
+    _install(monkeypatch, "spawn", receipt)
+
+    result = runner.invoke(app, ["fleet", "spawn", "coder"])
+
+    assert result.exit_code == 0, result.output
+    line = _plain(result.stdout)
+    assert f"✓ {shared}" in line and "⚠ accounts:" not in line
+    assert "⚠ the agent exited before the prompt could be typed" in line
 
 
 def test_spawn_with_no_asked_label_prints_no_asked_suffix(
@@ -488,7 +514,8 @@ def test_ls_with_no_agents_says_how_to_start_one(
 
     assert result.exit_code == 0, result.output
     assert "(no agents)" in result.stdout
-    assert "aisquare fleet spawn manager" in result.stdout
+    # Naming the project listed: alone, it spawned in the active one (#259, round 21).
+    assert "aisquare fleet spawn --project amber-otter manager" in result.stdout
 
 
 def test_ls_all_includes_ended_agents_and_plain_ls_does_not(
@@ -543,6 +570,32 @@ def test_ls_json_carries_the_project_and_every_agent_with_its_state(
     assert payload["agents"][1]["agent"]["exit_status"] == 0
 
 
+def test_ls_json_names_where_each_agents_server_is_asked(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`socket_at`, which 0.8.0 added to every agent without a CHANGELOG line (0.8.1 has
+    it): the path its tmux server is asked at (`tmux -S`), or null where it is asked by
+    its socket's name (`tmux -L`). The keys each agent has are pinned with it, so one
+    added or dropped is a change the CHANGELOG has to name: `held` since (review of #259,
+    round 1)."""
+    at = Path("/tmp/tmux-1000/asq")
+    agents = [
+        _status(_agent("coder-auth"), "working").model_copy(update={"socket_at": at}),
+        _status(_agent("manager", "manager", pane="%1"), "waiting"),
+    ]
+    _install(monkeypatch, "list_agents", agents)
+
+    result = runner.invoke(app, ["--json", "fleet", "ls"])
+
+    assert result.exit_code == 0, result.output
+    listed = json.loads(result.stdout)["agents"]
+    assert [agent["socket_at"] for agent in listed] == [str(at), None]
+    assert all(
+        set(agent) == {"agent", "state", "detail", "session", "tmux_session", "socket_at", "held"}
+        for agent in listed
+    ), listed
+
+
 def test_a_project_without_a_codename_has_no_session_yet(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -570,7 +623,7 @@ def test_a_project_without_a_codename_has_no_session_yet(
 def test_tell_reports_how_the_message_travelled(
     runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    tell = _install(monkeypatch, "tell", TellResult(delivered=True, how="typed into pane %7"))
+    tell = _install(monkeypatch, "tell", TellResult(typed="yes", how="typed into pane %7"))
 
     result = runner.invoke(app, ["fleet", "tell", "coder-auth", "ship it", "--as", "mgr"])
 
@@ -584,7 +637,7 @@ def test_tell_to_a_busy_agent_is_marked_as_a_note_not_a_delivery(
     runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tell = _install(
-        monkeypatch, "tell", TellResult(delivered=False, how="agent is working; filed a board note")
+        monkeypatch, "tell", TellResult(typed="no", how="agent is working; filed a board note")
     )
 
     result = runner.invoke(app, ["fleet", "tell", "coder-auth", "ship it"])
@@ -595,15 +648,39 @@ def test_tell_to_a_busy_agent_is_marked_as_a_note_not_a_delivery(
     assert tell.kwargs == {"sender": None}  # no --as: the user spoke
 
 
-def test_tell_json(runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch) -> None:
-    _install(monkeypatch, "tell", TellResult(delivered=False, how="filed a board note"))
+@pytest.mark.parametrize("typed", ["unsent", "maybe"])
+def test_tell_neither_typed_nor_noted_is_not_marked_as_a_note(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch, typed: Typed
+) -> None:
+    """Review of #259, round 12, 2/9: text pasted at its prompt with its Enter refused, or one
+    tmux did not answer in time with, printed `→`, which says "noted", where no note was
+    filed: the line says what is at its prompt."""
+    how = "pasted it at its prompt, but tmux could not press Enter (refused)"
+    _install(monkeypatch, "tell", TellResult(typed=typed, how=how))
+
+    result = runner.invoke(app, ["fleet", "tell", "coder-auth", "ship it"])
+
+    assert result.exit_code == 0, result.output
+    assert f"… coder-auth: {how}" in _plain(result.stdout)
+    assert "→" not in result.stdout and "✓" not in result.stdout
+
+
+@pytest.mark.parametrize("typed", ["yes", "no", "unsent", "maybe"])
+def test_tell_json(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch, typed: Typed
+) -> None:
+    """``typed`` is in it: a tell tmux did not answer in time read ``delivered: false`` as a
+    refusal does, and a script that retried on it typed the text twice (review of #259,
+    round 11, 9/13)."""
+    _install(monkeypatch, "tell", TellResult(typed=typed, how="filed a board note"))
 
     result = runner.invoke(app, ["--json", "fleet", "tell", "coder-auth", "ship it"])
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout) == {
         "label": "coder-auth",
-        "delivered": False,
+        "delivered": typed == "yes",
+        "typed": typed,
         "how": "filed a board note",
     }
 
@@ -709,7 +786,8 @@ def test_an_interrupted_shutdown_prints_how_far_it_got_and_exits_130(
     assert "⚠ fleet PARTLY shut down: 1 stopped" in out
     assert "💤 manager (exit 0)" in out, "the row already down is named"
     assert "🔓 1 claimed task(s) released back to the board" in out
-    assert "interrupted while stopping coder-auth" in out and "fleet ls --all" in out
+    assert "interrupted while stopping coder-auth" in out
+    assert "`aisquare fleet ls --project amber-otter --all` shows what is still running" in out
 
 
 def test_stop_confirms_and_passes_force_through(
@@ -727,6 +805,26 @@ def test_stop_confirms_and_passes_force_through(
     forced = runner.invoke(app, ["fleet", "stop", "coder-auth", "--force"])
     assert forced.exit_code == 0, forced.output
     assert stop.calls[-1] == ((PROJECT, "coder-auth"), {"force": True})
+
+
+@pytest.mark.parametrize("worktree", [True, False], ids=["worktree", "no-worktree"])
+def test_stop_says_reap_removes_the_worktree_of_an_agent_that_had_one(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch, worktree: bool
+) -> None:
+    """A stopped agent's worktree stays until its work is pushed and ``reap`` removes it;
+    nothing said so, so trees piled up (one night: 15 of them, 1.2 GB). The reap names the
+    stopped agent's project: alone, it walked the active project's rows, so after ``stop
+    --project web`` from another project's directory web's tree stayed (review of #259,
+    round 21)."""
+    agent = _agent("coder-auth", worktree=worktree, ended=True, exit_status=0)
+    _install(monkeypatch, "stop", StopReceipt(agent, []))
+    said = runner.invoke(app, ["fleet", "stop", "--project", "web", "coder-auth"]).stdout
+    hint = (
+        "· run `aisquare fleet reap --project amber-otter` to remove its worktree once its "
+        "work is pushed"
+    )
+    assert (hint in " ".join(said.split())) is worktree, said
+    assert resolved.calls[-1][0] == ("web",)
 
 
 def test_stop_json_returns_the_agent_row(
@@ -999,6 +1097,52 @@ def test_shutdown_all_never_resolves_a_project_and_a_clean_run_exits_zero(
     assert shutdown.args == (None,) and resolved.calls == []
 
 
+def test_shutdown_all_names_a_resume_for_each_project_whose_pause_was_not_settled(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 22, 7/9: round 21 named the scoped shutdown's project in the
+    pause warning's ``fleet resume``, and under ``--all`` dropped the command: the line
+    ended at "re-run once the store answers", with signals left set in several projects
+    and no way to clear them but the whole shutdown again. Each project whose signal could
+    not be read or cleared gets its own ``resume``; a lookup that failed whole names none."""
+    report = _report(
+        stopped=[_agent("coder-auth", ended=True)],
+        pause_scan_failed="api: could not be read (locked); tool: could not be cleared (locked)",
+        pause_unsettled=[PROJECT, UNNAMED],
+    )
+    _install(monkeypatch, "shutdown", report)
+
+    result = runner.invoke(app, ["fleet", "shutdown", "--all", "--yes"])
+
+    out = " ".join(_plain(result.stdout).split())
+    assert (
+        "re-run once the store answers, or clear them with "
+        "`aisquare fleet resume --project amber-otter`; "
+        "`aisquare fleet resume --project prj_02def`"
+    ) in out, out
+    assert resolved.calls == []
+
+    # Round 23, 7/10: `--json` names them too, as projects a script can resume: the display
+    # names `pause_scan_failed` joins are no `--project` reference.
+    payload = json.loads(
+        runner.invoke(app, ["--json", "fleet", "shutdown", "--all", "--yes"]).stdout
+    )
+    assert [(p["codename"], p["project"]["id"]) for p in payload["pause_unsettled"]] == [
+        ("amber-otter", PROJECT.id),
+        (None, UNNAMED.id),
+    ]
+
+    _install(monkeypatch, "shutdown", _report(pause_scan_failed="OperationalError: locked"))
+    whole = " ".join(
+        _plain(runner.invoke(app, ["fleet", "shutdown", "--all", "--yes"]).stdout).split()
+    )
+    assert "re-run once the store answers" in whole and "fleet resume" not in whole, whole
+    payload = json.loads(
+        runner.invoke(app, ["--json", "fleet", "shutdown", "--all", "--yes"]).stdout
+    )
+    assert payload["pause_unsettled"] == [], "a lookup that failed whole asked no project"
+
+
 def test_shutdown_json_carries_every_group_and_the_reasons(
     runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1030,6 +1174,7 @@ def test_shutdown_json_carries_every_group_and_the_reasons(
         "incomplete_projects",
         "late_scan_failed",
         "pause_scan_failed",
+        "pause_unsettled",
     }
     assert payload["stopped"][0]["label"] == "coder-auth"
     assert payload["recorded"] == [
@@ -1275,10 +1420,17 @@ def test_reap_server_down_reaches_the_service_as_a_keyword(
 
 
 def test_reap_json(runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each branch with its repo (review of #259, round 16): ``--all`` walks several, and a
+    bare ``git branch -D <branch>`` did not say where to run it."""
+    kept = WORKTREE.parent / "coder-open"
+    other = Path("/home/me/oss/my api")
     report = ReapReport(
         ended=[_agent("coder-auth", ended=True, exit_status=0)],
         lost=[],
         worktrees_removed=[WORKTREE],
+        worktrees_kept=[(kept, "uncommitted changes")],
+        branches_deleted=[(PROJECT.root, "fleet/amber-otter/auth")],
+        branches_kept=[(other, "fleet/ruby-fox/billing")],
     )
     _install(monkeypatch, "reap", report)
 
@@ -1290,13 +1442,33 @@ def test_reap_json(runner: CliRunner, resolved: Seen, monkeypatch: pytest.Monkey
         "ended",
         "lost",
         "worktrees_removed",
+        "worktrees_kept",
+        "branches_deleted",
+        "branches_kept",
         "claims_released",
         "release_failures",
+        "held",
     }
     assert [a["label"] for a in payload["ended"]] == ["coder-auth"]
     assert payload["claims_released"] == []
-    assert payload["lost"] == []
+    assert payload["lost"] == [] and payload["held"] == []
     assert payload["worktrees_removed"] == [str(WORKTREE)]
+    assert payload["worktrees_kept"] == [{"path": str(kept), "reason": "uncommitted changes"}]
+    assert payload["branches_deleted"] == [
+        {"repo": str(PROJECT.root), "branch": "fleet/amber-otter/auth"}
+    ]
+    assert payload["branches_kept"] == [{"repo": str(other), "branch": "fleet/ruby-fox/billing"}]
+
+    human = runner.invoke(app, ["fleet", "reap", "--all"])
+    said = " ".join(human.stdout.split())
+    assert f"🗑 {WORKTREE}" in human.stdout
+    assert f"🗑 branch fleet/amber-otter/auth in {PROJECT.root}" in said
+    assert f"⚠ kept {kept} — uncommitted changes" in human.stdout
+    assert f"· kept branch fleet/ruby-fox/billing in {other} — commits the default branch" in said
+    drop = install_route.command_line(
+        ["git", "-C", str(other), "branch", "-D", "fleet/ruby-fox/billing"]
+    )
+    assert f"`{drop}` drops it" in said, "and how to drop it, in its repo"
 
 
 def test_reap_names_a_refused_release_and_exits_1(
@@ -1429,7 +1601,7 @@ def test_pause_of_an_unknown_project_is_not_found(
         (["fleet", "spawn", "coder"], {"spawn": SpawnReceipt(_agent(), None, SESSION)}),
         (["fleet", "ls"], {"list_agents": [_status(_agent())]}),
         (["fleet", "status"], {"list_agents": []}),
-        (["fleet", "tell", "coder-auth", "hi"], {"tell": TellResult(True, "typed")}),
+        (["fleet", "tell", "coder-auth", "hi"], {"tell": TellResult("yes", "typed")}),
         (["fleet", "stop", "coder-auth"], {"stop": StopReceipt(_agent(), [])}),
         (["fleet", "attach"], {"attach_argv": list(ATTACH_ARGV)}),
         (["fleet", "reap"], {"reap": ReapReport()}),

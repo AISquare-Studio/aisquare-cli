@@ -27,6 +27,7 @@ from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.models import ClaudeUsage
 from aisquare.services import diagnostics as diagnostics_service
 from aisquare.services import fleet as fleet_service
+from aisquare.services import remote_needs
 from aisquare.services import team as team_service
 
 TORONTO = ZoneInfo("America/Toronto")
@@ -83,6 +84,21 @@ def test_format_reset_says_how_far_and_when(ahead: timedelta, expected: str) -> 
     assert format_reset(NOW + ahead, now=NOW) == expected
 
 
+@pytest.mark.parametrize(
+    ("ahead", "expected"),
+    [
+        (timedelta(minutes=20), "in 20m"),
+        (timedelta(hours=3, minutes=10), "in 3h 10m"),
+        (timedelta(days=2, hours=4), "in 2d 4h"),
+        (timedelta(minutes=-5), "now"),
+    ],
+)
+def test_format_reset_without_the_clock_says_only_how_far(ahead: timedelta, expected: str) -> None:
+    """For a reader whose clock is not this machine's: the Remote's phone tells the time
+    itself, from the instant, and read ``(17:10)`` as its own."""
+    assert format_reset(NOW + ahead, now=NOW, clock=False) == expected
+
+
 def test_format_reset_compares_dates_in_the_true_local_zone_across_a_dst_change() -> None:
     """Spring forward 2026-03-08: measured in the reset's fixed offset, "tomorrow" read as
     today and the weekday vanished — a bare clock time again (review of #205, second round)."""
@@ -121,7 +137,7 @@ def test_the_services_render_a_reset_through_the_same_formatter(
     assert "(Thu " in fleet_service._limit_detail(ahead, NOW)  # never a bare clock time
     assert fleet_service._limit_detail(None, NOW) == "usage limit"
     notice = core.LimitNotice("weekly", ahead)
-    line = team_service._limited_text("coder-1", "raw", notice, fleet=False)
+    line = team_service._limited_text("coder-1", "raw", notice, project=None)
     assert line.startswith("coder-1 hit its weekly limit · resets in 2d 4h (")
 
 
@@ -139,9 +155,11 @@ def test_both_surfaces_render_the_same_string() -> None:
     assert week == "35% · resets in 6d 12h (Tue 02:00)"
     from tests.test_ui_accounts import _status
 
-    line = accounts_view.account_line_text(_status(2, "two@example.com"), usage, now=NOW).plain
-    assert "session ▮▮▮▯▯ 68% · resets in 3h 10m (17:10)" in line  # 68 % rounds to three cells
-    assert "week ▮▮▯▯▯ 35% · resets in 6d 12h (Tue 02:00)" in line
+    cells = accounts_view.account_cells(_status(2, "two@example.com"), usage, now=NOW)
+    assert cells["session"].plain == "▮▮▮▯▯ 68%"  # 68 % rounds to three cells
+    assert cells["session-resets"].plain == "in 3h 10m (17:10)"
+    assert cells["week"].plain == "▮▮▯▯▯ 35%"
+    assert cells["week-resets"].plain == "in 6d 12h (Tue 02:00)"
 
 
 def _formats_a_reset_itself(node: ast.FunctionDef) -> bool:
@@ -166,7 +184,8 @@ def _formats_a_reset_itself(node: ast.FunctionDef) -> bool:
 
 
 @pytest.mark.parametrize(
-    "module", [accounts_cli, accounts_view, diagnostics_service, team_service, fleet_service]
+    "module",
+    [accounts_cli, accounts_view, diagnostics_service, team_service, fleet_service, remote_needs],
 )
 def test_neither_surface_keeps_a_formatter_of_its_own(module: ModuleType) -> None:
     """One formatter: a surface that spells ``%H:%M`` itself is the drift this fixes.

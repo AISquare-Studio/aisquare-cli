@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
@@ -12,6 +13,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.cli.watch import feed_line
 from aisquare.services import team as team_service
+from tests.projects import add_project
 
 
 @pytest.fixture(autouse=True)
@@ -19,6 +21,7 @@ def work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     work = tmp_path / "repo"
     work.mkdir()
     monkeypatch.chdir(work)
+    add_project(work)
     return work
 
 
@@ -564,3 +567,387 @@ def test_the_board_launcher_says_what_the_quit_could_not_save(
     monkeypatch.setattr(watch_mod, "_build_app_class", lambda interval: _Quit)
     watch_mod._run_tui(60.0)
     assert "⚠ the theme was not saved: state.json is not a JSON object" in capsys.readouterr().err
+
+
+async def _mouse(pilot: Any, kind: Any, x: int, y: int) -> None:
+    """One mouse event the way the driver delivers it — through ``App.on_event``.
+
+    ``Pilot``'s mouse helpers hand their events straight to the screen, past the
+    click-chain counter that turns two releases into a double click, and their
+    moves carry no button; a drag needs both (``tests/test_ui_shell.py`` says the same).
+    """
+    from tests.ui_workers import settle_page
+
+    pilot.app.post_message(kind(None, x, y, 0, 0, 1, False, False, False))
+    await pilot.app.wait_for_refresh()
+    await settle_page(pilot.app)
+
+
+async def _drag(pilot: Any, start: tuple[int, int], end: tuple[int, int]) -> None:
+    from textual import events
+
+    await _mouse(pilot, events.MouseDown, *start)
+    await _mouse(pilot, events.MouseMove, *end)
+    await _mouse(pilot, events.MouseUp, *end)
+
+
+def _board_sizes(app: Any) -> tuple[int, int, int]:
+    """(board column's width, detail pane's height, team block's height) as laid out."""
+    return (
+        app.query_one("#board-side").outer_size.width,
+        app.query_one("#detailwrap").outer_size.height,
+        app.query_one("#sessions").outer_size.height,
+    )
+
+
+def test_every_board_line_drags_and_each_size_comes_back_at_the_next_launch(
+    runner: CliRunner, work_dir: Path, isolated_home: Path
+) -> None:
+    """The human: every bar between the board's parts drags to resize — the detail pane up,
+    the board column against the live feed left and right, the team block over the tasks —
+    and the board shows those sizes again at the next launch."""
+    pytest.importorskip("textual", reason="the [tui] extra is not installed")
+    from aisquare.cli import watch as watch_mod
+    from aisquare.cli.ui.board import COLUMN_WIDTH_KEY, DETAIL_HEIGHT_KEY, TEAM_HEIGHT_KEY
+
+    team_service.activate()
+    app_cls = watch_mod._build_app_class(interval=60.0)
+
+    async def drag_all() -> tuple[tuple[int, int, int], tuple[int, int, int]]:
+        async with app_cls().run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app = pilot.app
+            before = _board_sizes(app)
+            side = app.query_one("#side-divider").region
+            await _drag(pilot, (side.x, 10), (70, 10))  # the column's right edge to column 70
+            detail = app.query_one("#detail-divider").region
+            await _drag(pilot, (10, detail.y), (10, 15))  # the detail pane's top up to row 15
+            team = app.query_one("#team-divider").region
+            await _drag(pilot, (10, team.y), (10, team.y + 5))  # the team block 5 rows taller
+            return before, _board_sizes(app)
+
+    async def relaunch() -> tuple[int, int, int]:
+        async with app_cls().run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            for divider in ("#side-divider", "#detail-divider", "#team-divider"):
+                handle = pilot.app.query_one(divider)
+                await handle.wait_for_refresh()  # the restore queued at mount has run
+                await handle.wait_for_refresh()  # and the layout it asked for is done
+            return _board_sizes(pilot.app)
+
+    before, dragged = asyncio.run(drag_all())
+    assert before == (48, 8, 3), "the premise: the stylesheet's sizes"
+    # 39 rows above the footer: a line at row 15 leaves the detail pane rows 16-38.
+    assert dragged == (70, 23, 8)
+    state = json.loads((isolated_home / "state.json").read_text())
+    assert (state[COLUMN_WIDTH_KEY], state[DETAIL_HEIGHT_KEY], state[TEAM_HEIGHT_KEY]) == (
+        70,
+        23,
+        8,
+    )
+    assert asyncio.run(relaunch()) == (70, 23, 8)
+
+
+def test_a_double_click_on_a_board_line_puts_the_stylesheet_size_back_and_forgets_it(
+    runner: CliRunner, work_dir: Path, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("textual", reason="the [tui] extra is not installed")
+    from textual import events
+    from textual.app import App as TextualApp
+
+    from aisquare.cli import watch as watch_mod
+    from aisquare.cli.ui.board import COLUMN_WIDTH_KEY, DETAIL_HEIGHT_KEY, TEAM_HEIGHT_KEY
+
+    team_service.activate()
+    # Two clicks read as a double click within this window; its length is not what this
+    # tests, so it is wide enough for a loaded runner.
+    monkeypatch.setattr(TextualApp, "CLICK_CHAIN_TIME_THRESHOLD", 5.0)
+    app_cls = watch_mod._build_app_class(interval=60.0)
+
+    async def drag_then_reset() -> tuple[tuple[int, int, int], tuple[int, int, int]]:
+        async with app_cls().run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app = pilot.app
+            side = app.query_one("#side-divider").region
+            await _drag(pilot, (side.x, 10), (70, 10))
+            detail = app.query_one("#detail-divider").region
+            await _drag(pilot, (10, detail.y), (10, 15))
+            team = app.query_one("#team-divider").region
+            await _drag(pilot, (10, team.y), (10, team.y + 5))
+            dragged = _board_sizes(app)
+            for x, y in ((70, 10), (10, 15), (10, team.y + 5)):
+                for _ in range(2):
+                    await _mouse(pilot, events.MouseDown, x, y)
+                    await _mouse(pilot, events.MouseUp, x, y)
+            return dragged, _board_sizes(app)
+
+    dragged, reset = asyncio.run(drag_then_reset())
+    assert dragged == (70, 23, 8), "the premise: every line moved"
+    assert reset == (48, 8, 3), "two clicks on each line: the stylesheet's sizes"
+    state = json.loads((isolated_home / "state.json").read_text())
+    assert not {COLUMN_WIDTH_KEY, DETAIL_HEIGHT_KEY, TEAM_HEIGHT_KEY} & state.keys(), (
+        "a reset forgets the size, so the next launch shows the stylesheet's"
+    )
+
+
+def test_b_hides_and_brings_back_the_board_column_every_time(
+    runner: CliRunner, work_dir: Path
+) -> None:
+    """``b`` with the tasks table focused hid the column the table is in, focus went to
+    nothing, and no later key reached the panel whose binding ``b`` is: the column stayed
+    hidden until a restart (found verifying the splitters). Focus now goes to the feed as
+    the column hides and back to the tasks as it returns — in select mode, to the frozen
+    feed that stands in for the live one."""
+    pytest.importorskip("textual", reason="the [tui] extra is not installed")
+    from aisquare.cli import watch as watch_mod
+
+    team_service.activate()
+    app_cls = watch_mod._build_app_class(interval=60.0)
+
+    async def press_b() -> list[tuple[bool, bool, str | None]]:
+        async with app_cls().run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app = pilot.app
+            app.query_one("#tasks").focus()
+            await pilot.pause()
+
+            def seen() -> tuple[bool, bool, str | None]:
+                focused = app.focused
+                return (
+                    app.query_one("#board-side").display,
+                    app.query_one("#side-divider").display,
+                    focused.id if focused is not None else None,
+                )
+
+            states = [seen()]
+            for _ in range(4):
+                await pilot.press("b")
+                await pilot.pause()
+                states.append(seen())
+            await pilot.press("v")  # select mode: the live feed gives way to its text
+            await pilot.pause()
+            await pilot.press("b")
+            await pilot.pause()
+            states.append(seen())
+            return states
+
+    states = asyncio.run(press_b())
+    assert states == [
+        (True, True, "tasks"),
+        (False, False, "feed"),
+        (True, True, "tasks"),
+        (False, False, "feed"),
+        (True, True, "tasks"),
+        (False, False, "feedtext"),
+    ]
+
+
+def test_the_board_lines_keep_the_feed_and_the_tasks_on_screen_whatever_the_size(
+    runner: CliRunner, work_dir: Path
+) -> None:
+    """A line dragged as far as it goes stops where the other side keeps its minimum — the
+    feed 32 columns, the board above the detail pane 8 rows, the tasks 4 — and a terminal
+    that shrinks re-clamps it; too narrow for the column, the column and its line hide."""
+    pytest.importorskip("textual", reason="the [tui] extra is not installed")
+    from aisquare.cli import watch as watch_mod
+
+    team_service.activate()
+    app_cls = watch_mod._build_app_class(interval=60.0)
+
+    async def push() -> dict[str, object]:
+        async with app_cls().run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app = pilot.app
+
+            def laid_out() -> tuple[int, int, int, int, int]:
+                return (
+                    app.query_one("#board-side").outer_size.width,
+                    app.query_one("#feedpane").outer_size.width,
+                    app.query_one("#detailwrap").outer_size.height,
+                    app.query_one("#board-main").outer_size.height,
+                    app.query_one("#tasks").outer_size.height,
+                )
+
+            seen: dict[str, object] = {}
+            team = app.query_one("#team-divider").region
+            await _drag(pilot, (10, team.y), (10, 20))  # the team block to 20 rows
+            seen["team"] = app.query_one("#sessions").outer_size.height
+            side = app.query_one("#side-divider").region
+            await _drag(pilot, (side.x, 10), (119, 10))  # the column all the way right
+            detail = app.query_one("#detail-divider").region
+            await _drag(pilot, (10, detail.y), (10, 0))  # the detail pane all the way up
+            seen["pushed"] = laid_out()
+            seen["team_squeezed"] = app.query_one("#sessions").outer_size.height
+            await pilot.resize_terminal(100, 30)
+            await pilot.pause()
+            await app.wait_for_refresh()
+            seen["shrunk"] = laid_out()
+            await pilot.resize_terminal(70, 30)
+            await pilot.pause()
+            seen["narrow"] = (
+                app.query_one("#board-side").display,
+                app.query_one("#side-divider").display,
+            )
+            await pilot.resize_terminal(120, 40)
+            # The panel's own Resize shows the column again, and on windows-latest it came
+            # after the pause: `b` found the column still hidden and showed it (CI run
+            # 39041194777). The press waits for the column it is about to hide.
+            side = app.query_one("#board-side")
+            for _ in range(100):
+                await pilot.pause(0.05)
+                if not side.has_class("collapsed"):
+                    break
+            seen["widened"] = not side.has_class("collapsed")
+            app.board.action_toggle_board()  # `b`
+            await pilot.pause()
+            seen["toggled"] = (
+                app.query_one("#board-side").display,
+                app.query_one("#side-divider").display,
+            )
+            return seen
+
+    seen = asyncio.run(push())
+    assert seen["team"] == 20, "the premise: the team block grew past its undragged ten rows"
+    # 120 columns: 87 + the line + 32 for the feed. 39 rows: 8 above, the line, 30 below.
+    assert seen["pushed"] == (87, 32, 30, 8, 4)
+    assert seen["team_squeezed"] == 3, "8 rows of board: the line and 4 rows of tasks left 3"
+    # 100 x 30: 67 + 1 + 32 columns; 29 rows are 8 + 1 + 20.
+    assert seen["shrunk"] == (67, 32, 20, 8, 4)
+    assert seen["narrow"] == (False, False), "the column and the line that resizes it hide"
+    assert seen["widened"], "the premise: 120 columns show the column again"
+    assert seen["toggled"] == (False, False)
+
+
+def _statuses_on_the_board(runner: CliRunner) -> dict[str, str]:
+    """One task in every state, by title; returns title → id."""
+    ids = {}
+    for title in ("plan it", "build it", "check it", "stuck on it", "after it", "ship it"):
+        ids[title] = _add(runner, title)
+    ids["wait for it"] = _add(runner, "wait for it", "--needs", ids["after it"])
+    runner.invoke(app, ["task", "claim", ids["build it"]])
+    runner.invoke(app, ["task", "claim", ids["check it"]])
+    runner.invoke(app, ["task", "review", ids["check it"]])
+    runner.invoke(app, ["task", "block", ids["stuck on it"], "--reason", "no key"])
+    runner.invoke(app, ["task", "done", ids["ship it"]])
+    dropped = _add(runner, "forget it")
+    runner.invoke(app, ["task", "drop", dropped])
+    ids["forget it"] = dropped
+    return ids
+
+
+def test_the_tasks_table_is_the_number_an_icon_and_the_title(
+    runner: CliRunner, work_dir: Path
+) -> None:
+    """The human: "status can be just icons, no text … so just id, status and title". The
+    number on the board, one icon per state (a todo waiting on a need gets its own), the
+    title; no who. The done archive keeps its time beside the same icons."""
+    pytest.importorskip("textual", reason="the [tui] extra is not installed")
+    from aisquare.cli import watch as watch_mod
+    from aisquare.cli.ui.board import STATUS_ICONS
+
+    team_service.activate()
+    ids = _statuses_on_the_board(runner)
+    numbers = {
+        title: json.loads(runner.invoke(app, ["--json", "task", "show", task]).stdout)["number"]
+        for title, task in ids.items()
+    }
+
+    def rows(table: Any) -> dict[str, tuple[str, str]]:
+        return {
+            str(row[2].plain): (str(row[0].plain), str(row[1].plain).strip())
+            for row in (table.get_row_at(i) for i in range(table.row_count))
+        }
+
+    async def drive() -> tuple[list[str], dict[str, tuple[str, str]], dict[str, tuple[str, str]]]:
+        app_cls = watch_mod._build_app_class(interval=60.0)
+        async with app_cls().run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            table = pilot.app.query_one("#tasks")
+            labels = [column.label.plain for column in table.columns.values()]
+            open_rows = rows(table)
+            pilot.app.board.action_toggle_done()
+            await pilot.pause()
+            return labels, open_rows, rows(table)
+
+    labels, open_rows, archive = asyncio.run(drive())
+    icon = {state: glyph for state, (glyph, _style, _meaning) in STATUS_ICONS.items()}
+    assert labels == ["#", "st", "title"]
+    assert open_rows == {
+        "plan it": (str(numbers["plan it"]), icon["todo"]),
+        "build it": (str(numbers["build it"]), icon["doing"]),
+        "check it": (str(numbers["check it"]), icon["review"]),
+        "stuck on it": (str(numbers["stuck on it"]), icon["blocked"]),
+        "after it": (str(numbers["after it"]), icon["todo"]),
+        "wait for it": (str(numbers["wait for it"]), icon["waiting"]),
+    }
+    assert set(archive) == {"ship it", "forget it"}
+    assert archive["ship it"][0] == str(numbers["ship it"])
+    assert archive["ship it"][1].startswith(icon["done"]) and ":" in archive["ship it"][1]
+    assert archive["forget it"][1].startswith(icon["dropped"])
+
+
+def test_a_long_title_is_cut_to_the_table_and_the_detail_says_the_rest(
+    runner: CliRunner, work_dir: Path
+) -> None:
+    """The title takes the rest of the width and ends in an ellipsis where it would not
+    fit — the table never scrolls sideways, even after the column is narrowed — and the
+    detail pane's header gives what the row left out: number, status, id, claimant."""
+    pytest.importorskip("textual", reason="the [tui] extra is not installed")
+    from aisquare.cli import watch as watch_mod
+
+    team_service.activate()
+    long_title = "wire the accounts page to the five-minute usage cache " * 3
+    task_id = _add(runner, long_title.strip())
+    runner.invoke(app, ["task", "claim", task_id])
+    number = json.loads(runner.invoke(app, ["--json", "task", "show", task_id]).stdout)["number"]
+
+    async def drive() -> tuple[str, int, str, int, str]:
+        app_cls = watch_mod._build_app_class(interval=60.0)
+        async with app_cls().run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            table = pilot.app.query_one("#tasks")
+            wide = (str(table.get_row_at(0)[2].plain), int(table.max_scroll_x))
+            side = pilot.app.query_one("#side-divider").region
+            await _drag(pilot, (side.x, 10), (36, 10))  # narrow the column
+            await pilot.pause()
+            narrow = (str(table.get_row_at(0)[2].plain), int(table.max_scroll_x))
+            await pilot.click("#tasks", offset=(6, 2))
+            await pilot.pause()
+            detail = str(pilot.app.board.detail_text).splitlines()[1]
+            return (*wide, *narrow, detail)
+
+    wide_title, wide_scroll, narrow_title, narrow_scroll, detail = asyncio.run(drive())
+    assert wide_title.endswith("…") and narrow_title.endswith("…")
+    assert len(narrow_title) < len(wide_title), "the title refits when the column narrows"
+    assert wide_scroll == 0 and narrow_scroll == 0, "never a sideways scroll"
+    assert detail.startswith(f"#{number} · doing · {task_id} · claimed by ")
+
+
+def test_question_mark_opens_the_boards_keys_and_its_icon_legend(
+    runner: CliRunner, work_dir: Path
+) -> None:
+    pytest.importorskip("textual", reason="the [tui] extra is not installed")
+    from textual.widgets import Static
+
+    from aisquare.cli import watch as watch_mod
+    from aisquare.cli.ui.board import STATUS_ICONS, BoardHelp
+
+    team_service.activate()
+
+    async def drive() -> tuple[bool, str, bool]:
+        app_cls = watch_mod._build_app_class(interval=60.0)
+        async with app_cls().run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("question_mark")
+            await pilot.pause()
+            opened = isinstance(pilot.app.screen, BoardHelp)
+            text = str(pilot.app.screen.query_one(Static).render())
+            await pilot.press("escape")
+            await pilot.pause()
+            return opened, text, isinstance(pilot.app.screen, BoardHelp)
+
+    opened, text, still_open = asyncio.run(drive())
+    assert opened and not still_open
+    for glyph, _style, meaning in STATUS_ICONS.values():
+        assert f"{glyph}" in text and meaning in text
+    assert "done archive" in text and "themes" in text

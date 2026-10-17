@@ -87,14 +87,17 @@ It reports every dependency and gives the exact command for anything missing.
 Update in place with `aisquare upgrade`. It keeps your extras and re-connects
 Claude Code's hooks. It runs for the uv tool install the one-liner makes; any
 other install is shown the exact command that updates it. Releases before 0.8.0
-have no `upgrade` yet: re-run the one-liner instead.
+have no `upgrade` yet: re-run the one-liner instead. It warns first, naming them,
+while fleet agents run or while Remote is on in another shell or another asq.
 
 Remove it with `aisquare uninstall`. It takes aisquare's hooks out of Claude
 Code, then removes the package of a uv tool install, whatever it was installed
 from; any other install, and any install on native Windows, is shown the
 command that removes it. It keeps `~/.aisquare` (your memory and boards) unless
 you add `--purge`, which also deletes the Claude Code plugin's answers about uv
-in `~/.cache/aisquare`, and it shows what it will do and asks first.
+in `~/.cache/aisquare`, and it shows what it will do and asks first. It refuses,
+naming them, while fleet agents run or while Remote is on in another shell or
+another asq ([Remote](remote.md)).
 
 ## Start the GUI
 

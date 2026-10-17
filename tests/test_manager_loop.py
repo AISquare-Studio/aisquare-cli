@@ -40,10 +40,12 @@ from aisquare.core import harness, paths
 from aisquare.core.config import AppConfig, ExplainabilitySettings, load_config, save_config
 from aisquare.core.ids import new_event_id
 from aisquare.core.store import store_session
-from aisquare.models import TeamEvent, TeamSession, TeamTask
+from aisquare.models import FleetAgent, TeamEvent, TeamSession, TeamTask
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from aisquare.services.fleet import FLEET_ROLES
+from tests.cycles import unscoped
+from tests.projects import add_project
 
 MANAGER = "aaaa1111-0000-0000-0000-000000000000"
 CODER = "bbbb2222-0000-0000-0000-000000000000"
@@ -63,6 +65,7 @@ def work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     work = tmp_path / "repo"
     work.mkdir()
     monkeypatch.chdir(work)
+    add_project(work)
     return work
 
 
@@ -76,7 +79,7 @@ def no_nudge(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
     """
     calls: list[tuple[str, str]] = []
 
-    def record(project_id: str, *, reason: str) -> bool:
+    def record(project_id: str, *, reason: str, board: str | None = None) -> bool:
         calls.append((project_id, reason))
         return False
 
@@ -176,6 +179,22 @@ def _decision(result: Any) -> dict[str, Any]:
     return parsed
 
 
+def _manager_row(work: Path) -> str:
+    """The manager session's own fleet row, on its board, as ``fleet spawn manager`` records
+    it; returns the row's project. A deferred wake nudges that row and no other (review of
+    #259, round 26, 7/11): a manager no row holds defers to its next prompt alone."""
+    session = _session(MANAGER)
+    with store_session() as store:
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_manager", project_id=session.project_id, label="manager",
+                role="manager", pane_id="%9", session_id=MANAGER, cwd=work,
+                board=session.project_id, created_at=datetime.now(tz=UTC),
+            )
+        )  # fmt: skip
+    return session.project_id
+
+
 def _fleet(runner: CliRunner, monkeypatch: pytest.MonkeyPatch, work: Path) -> None:
     _start(runner, monkeypatch, MANAGER, work, "manager")
     _start(runner, monkeypatch, CODER, work, "coder")
@@ -253,8 +272,8 @@ def test_stop_hook_active_defers_the_wakeup_to_the_next_prompt(
     ``test_the_stop_that_ends_a_continuation_schedules_the_rest`` below).
     """
     _fleet(runner, monkeypatch, work_dir)
+    project_id = _manager_row(work_dir)
     before = _session(MANAGER)
-    project_id = before.project_id
     task_id = _coder_reviews(work_dir)
     no_nudge.clear()  # the coder's own write-time nudge is not what is under test
 
@@ -691,7 +710,7 @@ def test_the_stop_that_ends_a_continuation_schedules_the_rest(
     2's nudge, which produces the ``UserPromptSubmit`` the delta rides on.
     """
     _fleet(runner, monkeypatch, work_dir)
-    project_id = _session(MANAGER).project_id
+    project_id = _manager_row(work_dir)
     seqs = [_emit_from_coder("question", f"question number {i}") for i in range(15)]
     assert _decision(_stop(runner, MANAGER, work_dir))["decision"] == BLOCK
     no_nudge.clear()
@@ -975,7 +994,7 @@ def test_the_nudge_comes_after_the_write_is_durable(
     task = _task(work_dir)
     seen: list[str] = []
 
-    def read_back(project_id: str, *, reason: str) -> bool:
+    def read_back(project_id: str, *, reason: str, board: str | None = None) -> bool:
         with store_session() as store:
             kinds = [e.kind for e in store.recent_events(project_id, limit=1)]
         seen.extend(kinds)
@@ -995,7 +1014,7 @@ def test_a_fleet_that_raises_costs_only_the_nudge(
     _fleet(runner, monkeypatch, work_dir)
     task = _task(work_dir)
 
-    def broken(project_id: str, *, reason: str) -> bool:
+    def broken(project_id: str, *, reason: str, board: str | None = None) -> bool:
         raise RuntimeError("tmux server gone")
 
     monkeypatch.setattr(fleet_service, "nudge_manager", broken)
@@ -1033,7 +1052,7 @@ def test_the_spy_is_pointed_at_the_real_seam(
 
     calls: list[str] = []
 
-    def record(project_id: str, *, reason: str) -> bool:
+    def record(project_id: str, *, reason: str, board: str | None = None) -> bool:
         calls.append(reason)
         return True
 
@@ -1047,7 +1066,7 @@ def test_the_spy_is_pointed_at_the_real_seam(
 
 
 def _cycle(role: str) -> str:
-    return " ".join(harness.role_cycle(role, "abcd1234"))
+    return " ".join(harness.role_cycle(role, "abcd1234", fleet=unscoped))
 
 
 def test_the_manager_cycle_names_fleet_spawn_and_the_two_prohibitions() -> None:
@@ -1084,8 +1103,8 @@ def test_the_manager_cycle_carries_the_loop_protocol() -> None:
 
 def test_the_tester_cycle_is_the_runners_shape() -> None:
     """`tester` is the fleet's name for `runner`: same lines, only the label differs."""
-    tester = harness.role_cycle("tester", "abcd1234")
-    runner_ = harness.role_cycle("runner", "abcd1234")
+    tester = harness.role_cycle("tester", "abcd1234", fleet=unscoped)
+    runner_ = harness.role_cycle("runner", "abcd1234", fleet=unscoped)
 
     assert tester and runner_
     assert tester[0].startswith("Your standing cycle (tester)")
@@ -1115,7 +1134,7 @@ def test_the_existing_roles_did_not_inherit_the_fleet_verbs(role: str) -> None:
 
 def test_every_fleet_role_has_a_briefing() -> None:
     for role in FLEET_ROLES:
-        lines = harness.role_cycle(role, "abcd1234")
+        lines = harness.role_cycle(role, "abcd1234", fleet=unscoped)
         assert lines, role
         assert any("abcd1234" in line for line in lines), role
 
@@ -1174,6 +1193,7 @@ def test_a_numbered_seat_gets_its_roles_standing_cycle_and_ladder(
     monkeypatch.setenv("AISQUARE_ROLE", "coder1")
     work = tmp_path / "seat-repo"
     work.mkdir()
+    add_project(work)
 
     board = team_service.hook_session_start(
         "5eaa0000-0000-0000-0000-000000000001",
@@ -1198,6 +1218,7 @@ def test_a_role_that_is_not_a_seat_of_a_real_role_gets_no_cycle(
     monkeypatch.setenv("AISQUARE_ROLE", "codr1")
     work = tmp_path / "typo-repo"
     work.mkdir()
+    add_project(work)
 
     board = team_service.hook_session_start(
         "5eaa0000-0000-0000-0000-000000000002",

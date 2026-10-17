@@ -26,6 +26,10 @@ from aisquare.core.redaction import _CREDENTIAL_RULES, _IDENTITY_RULES, redact
 from aisquare.models import RedactionLevel
 from aisquare.services import hooks as hooks_service
 
+# These record in a directory nobody added (``tmp_path``), as they were written to:
+# with ``[projects] capture`` on. What capture off records — nothing — is tests/test_hooks.py's.
+pytestmark = pytest.mark.usefixtures("project_capture")
+
 
 def _shaped(prefix: str, body: str) -> str:
     """Assemble a credential-shaped fixture instead of writing it as a literal.

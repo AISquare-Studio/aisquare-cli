@@ -4,14 +4,16 @@ docs/plans/fleet-tui.md §0 item 4 and §4.2: the findings are visible with the
 fix for each, and where the fix is one of our own commands it is one click
 (``services.onboarding.fix_commands`` decides which — everything else stays
 text). A click runs ``apply_fix`` in a thread worker with the project's cwd,
-then re-runs the doctor and posts :class:`DoctorRefreshed` so the shell and the
-sidebar's Doctor section can follow. The UI process never changes directory.
+then re-runs the doctor and posts :class:`DoctorRefreshed` so the shell's report
+can follow. The UI process never changes directory.
 
-asq's own Doctor (``machine=True``, never the Onboard or Project copies) also
-carries Update and Uninstall. Both hand the terminal over rather than run in
-here: the view posts :class:`DoctorView.HandOff`, the app quits, and ``run_ui``
-hands this terminal to ``aisquare upgrade --reopen`` or ``aisquare uninstall``,
-which show their plan and ask y/N themselves. An upgrade must not run under the
+asq's own Doctor (``machine=True``, never the Onboard copy) also carries a
+Re-run button — the shell runs the checks at start, when the page opens and
+after a fix, and this is the way to ask again — and Update and Uninstall.
+Those two hand the terminal over rather than run in here: the view posts
+:class:`DoctorView.HandOff`, the app quits, and ``run_ui`` hands this terminal
+to ``aisquare upgrade --reopen`` or ``aisquare uninstall``, which show their
+plan and ask y/N themselves. An upgrade must not run under the
 UI it replaces, and asq comes back after it.
 """
 
@@ -129,12 +131,17 @@ class DoctorView(VerticalScroll):
 
     DEFAULT_CSS = """
     DoctorView { padding: 1 2; }
+    DoctorView #doctor-scope { height: auto; margin-bottom: 1; text-style: bold; }
+    DoctorView #doctor-rerun { margin-bottom: 1; }
     DoctorView #doctor-status { height: auto; margin-top: 1; }
     DoctorView #doctor-fixes { height: auto; }
     DoctorView #doctor-fixes Button { margin: 1 1 0 0; }
     DoctorView #doctor-machine { height: auto; margin-top: 1; }
     DoctorView #doctor-machine Button { margin: 0 1 0 0; }
     """
+
+    class Rerun(Message):
+        """Re-run: the shell runs the checks again for the scope this report is about."""
 
     class HandOff(Message):
         """Update or Uninstall: quit asq and run ``aisquare <args>`` in this terminal."""
@@ -165,8 +172,19 @@ class DoctorView(VerticalScroll):
         self.fixes: dict[str, FixCommand] = {}
         """Button id → the fix it runs, for the report currently shown."""
         self.busy = False
+        self.about: str | None = None
+        """What the report on screen is about — a project's name, or "this machine" — named
+        in the machine Doctor's header (review of #261, m9: nothing on screen said which
+        project the rows described)."""
+        self._rerunning = False
+        """A run is under way and no report has arrived since: the status line says so."""
 
     def compose(self) -> ComposeResult:
+        if self.machine:
+            yield Static("", id="doctor-scope")
+            rerun = Button("Re-run checks", id="doctor-rerun")
+            rerun.tooltip = "Run every check again now"
+            yield rerun
         yield Static("", id="doctor-report")
         yield Static("", id="doctor-status")
         yield Vertical(id="doctor-fixes")
@@ -209,24 +227,58 @@ class DoctorView(VerticalScroll):
 
     # ---------------------------------------------------------------- the report
 
-    def show(self, checks: Iterable[DoctorCheck], *, cwd: Path | None = None) -> None:
-        """Replace the report (and, when given, the cwd the fixes run in).
+    def show(
+        self, checks: Iterable[DoctorCheck], *, cwd: Path | None = None, about: str | None = None
+    ) -> None:
+        """Replace the report (and, when given, the cwd the fixes run in and what it is about).
 
         ``cwd=None`` means "keep the one you have": most callers show a new
         report for the same project. A caller that has to go BACK to no project
         — the shell, when the report becomes the machine-wide one — sets
         :attr:`cwd` itself before calling this, or a project fix button would
-        stay armed on a root the user has left.
+        stay armed on a root the user has left. ``about=None`` keeps :attr:`about`.
         """
         if cwd is not None:
             self.cwd = cwd
+        if about is not None:
+            self.about = about
         self.checks = list(checks)
+        if self._rerunning:
+            self._rerunning = False
+            if self.is_mounted:
+                self._set_status(Text(""))
         if self.is_mounted:
             self._redraw()
 
+    def show_running(self, about: str | None = None) -> None:
+        """A run of the checks about ``about`` (default: :attr:`about`) is under way.
+
+        The report on screen stays until the run answers — the one from asq's start
+        is there at once when the page opens — and the status line says the checks
+        are running again, or for what, when the report shown is about something else.
+        """
+        about = about or self.about
+        self._rerunning = True
+        if not self.checks:
+            self.about = about  # nothing on screen is about anything else yet
+            status = "… running the checks"
+        elif about == self.about:
+            status = "… running the checks again"
+        else:
+            status = f"… running the checks for {about}"
+        if self.is_mounted:
+            self._set_status(Text(status, style="dim"))
+            self._show_about()
+
     def _redraw(self) -> None:
+        self._show_about()
         self.query_one("#doctor-report", Static).update(render_checks(self.checks))
         self.call_later(self._rebuild_fixes)
+
+    def _show_about(self) -> None:
+        if self.machine:
+            header = Text(f"checks for {self.about}") if self.about else Text("")
+            self.query_one("#doctor-scope", Static).update(header)
 
     async def _rebuild_fixes(self) -> None:
         """Replace the buttons for the report now shown.
@@ -264,6 +316,11 @@ class DoctorView(VerticalScroll):
     # ---------------------------------------------------------------- the click
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        if self.machine and event.button.id == "doctor-rerun":
+            event.stop()
+            self.show_running()
+            self.post_message(self.Rerun())
+            return
         hand_off = HAND_OFFS.get(event.button.id or "") if self.machine else None
         if hand_off is not None:
             # The app decides: it refuses while ANY Doctor view's fix is still writing.

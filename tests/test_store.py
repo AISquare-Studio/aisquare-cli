@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, tzinfo
 from pathlib import Path
 
@@ -231,6 +231,139 @@ def test_find_projects_by_name_and_id_prefix(store: ContextStore) -> None:
     assert store.find_projects("nope") == []
 
 
+def test_a_project_nickname_is_set_read_back_and_cleared(store: ContextStore) -> None:
+    named = store.set_project_nickname(PROJECT.id, "Auth rewrite — día 2 🚀")
+    assert named.nickname == "Auth rewrite — día 2 🚀"
+    assert named.codename is None, "the codename is not touched"
+    fetched = store.get_project(PROJECT.id)
+    assert fetched is not None and fetched.nickname == "Auth rewrite — día 2 🚀"
+    assert [p.nickname for p in store.list_projects(all=True)] == ["Auth rewrite — día 2 🚀"]
+    assert store.set_project_nickname(PROJECT.id, None).nickname is None
+
+
+def test_a_nickname_is_refused_for_a_forgotten_or_unknown_project(store: ContextStore) -> None:
+    """As ``update_project_layout`` refuses one: a rename from a stale frame would land
+    on the tombstone and come back with the revival."""
+    store.ensure_project(ProjectInfo(id="prj_gone", root=Path("/tmp/gone")))
+    store.forget_project("prj_gone")
+    with pytest.raises(KeyError):
+        store.set_project_nickname("prj_gone", "ghost")
+    with pytest.raises(KeyError):
+        store.set_project_nickname("prj_never", "ghost")
+    store.ensure_project(ProjectInfo(id="prj_gone", root=Path("/tmp/gone")))
+    revived = store.get_project("prj_gone")
+    assert revived is not None and revived.nickname is None
+
+
+def test_find_projects_matches_a_nickname_only_when_nothing_else_does(
+    store: ContextStore,
+) -> None:
+    """Exactly and case and all, after the id prefix, the folder name and the codename:
+    a nickname spelled like another project's codename leaves that project found."""
+    store.ensure_project(ProjectInfo(id="prj_other", root=Path("/tmp/other")))
+    store.set_codename(PROJECT.id, "amber-otter")
+    store.set_project_nickname("prj_other", "amber-otter")
+    assert [p.id for p in store.find_projects("amber-otter")] == [PROJECT.id]
+
+    store.set_project_nickname("prj_other", "billing: v2 [wip]")
+    assert [p.id for p in store.find_projects("billing: v2 [wip]")] == ["prj_other"]
+    assert store.find_projects("Billing: v2 [wip]") == []
+    assert store.find_projects("billing") == []
+
+    store.set_project_nickname(PROJECT.id, "billing: v2 [wip]")
+    both = store.find_projects("billing: v2 [wip]")
+    assert sorted(p.id for p in both) == sorted([PROJECT.id, "prj_other"]), "ambiguous"
+
+    store.forget_project("prj_other")
+    assert [p.id for p in store.find_projects("billing: v2 [wip]")] == [PROJECT.id]
+
+
+def test_a_key_pattern_holds_its_glob_characters_as_themselves(store: ContextStore) -> None:
+    """``_glob_escape`` took ``*``, ``?`` and ``[`` out of what it was given, where its
+    callers read it as standing for itself: ``x[1`` listed the keys under ``x1``, and a
+    purge of an id holding one would have taken the keys of the id without it (review of
+    #243, round 11, 8/9). Each stands for itself."""
+    for key in ("x[1/a", "x1/b", "x*/c", "xy/d", "signal/prj_a*/1", "signal/prj_ab/1"):
+        store.set_meta(key, "v")
+    assert list(store.list_meta("x[1")) == ["x[1/a"]
+    assert list(store.list_meta("x*")) == ["x*/c"]
+    assert list(store.list_meta("x?")) == []
+    for project_id in ("prj_a*", "prj_ab"):
+        store.ensure_project(ProjectInfo(id=project_id, root=Path(f"/tmp/{project_id}")))
+    assert store.purge_project("prj_a*")["team_meta"] == 1
+    assert list(store.list_meta("signal/")) == ["signal/prj_ab/1"]
+
+
+@pytest.mark.parametrize("ref", ["*", "?", "[", "*?[", ""])
+def test_a_ref_with_nothing_left_once_its_glob_characters_go_names_nothing(
+    store: ContextStore, ref: str
+) -> None:
+    """``*`` was an id prefix of every id: it named the one project, task or session a
+    store had, and was ambiguous with two, a refusal that listed every one of them, the
+    directories the hooks only captured included (review of #243, round 10, 7/7)."""
+    from aisquare.models import TeamSession, TeamTask
+
+    now = datetime.now(tz=UTC)
+    store.ensure_project(ProjectInfo(id="prj_captured", root=Path("/tmp/captured")))
+    for n in (1, 2):
+        store.upsert_task(
+            TeamTask(
+                id=f"tsk_{n}", project_id=PROJECT.id, key=f"k{n}", title=f"task {n}",
+                created_at=now, updated_at=now,
+            )
+        )  # fmt: skip
+        store.upsert_session(
+            TeamSession(
+                id=f"ses_{n}", project_id=PROJECT.id, role="coder",
+                started_at=now, last_seen_at=now,
+            )
+        )  # fmt: skip
+        store.add(_entry(f"entry {n}"))
+    assert store.find_projects(ref) == []
+    assert store.get_task(ref) is None, "nor any task by its tail"
+    assert store.get_session(ref) is None
+    assert store.get(ref) is None
+    assert store.get_task("tsk_1") is not None and store.get_task("1") is not None
+    assert [p.id for p in store.find_projects("prj_c*")] == ["prj_captured"]
+
+
+def test_a_task_or_session_lookup_kept_to_some_boards_finds_and_doubts_only_there(
+    store: ContextStore,
+) -> None:
+    """``project_ids`` keeps a lookup to those boards' rows, by id, prefix and tail alike,
+    and a prefix is ambiguous only among them: the remote's phone may reach only some boards
+    (review of #243, round 10, 5/7)."""
+    from aisquare.models import TeamSession, TeamTask
+
+    now = datetime.now(tz=UTC)
+    for task_id, board in (("tsk_shared_a1", PROJECT.id), ("tsk_shared_b2", "prj_captured")):
+        store.upsert_task(
+            TeamTask(
+                id=task_id, project_id=board, key=task_id, title=task_id,
+                created_at=now, updated_at=now,
+            )
+        )  # fmt: skip
+        store.upsert_session(
+            TeamSession(
+                id=task_id.replace("tsk", "ses"), project_id=board, role="coder",
+                started_at=now, last_seen_at=now,
+            )
+        )  # fmt: skip
+    mine = [PROJECT.id]
+    with pytest.raises(AmbiguousIdError):
+        store.get_task("tsk_shared")
+    task = store.get_task("tsk_shared", project_ids=mine)
+    assert task is not None and task.id == "tsk_shared_a1"
+    assert store.get_task("tsk_shared_b2", project_ids=mine) is None
+    assert store.get_task("b2", project_ids=mine) is None, "nor by its tail"
+    assert store.get_task("tsk_shared_b2", project_ids=[]) is None
+    with pytest.raises(AmbiguousIdError):
+        store.get_session("ses_shared")
+    session = store.get_session("ses_shared", project_ids=mine)
+    assert session is not None and session.id == "ses_shared_a1"
+    assert store.get_session("ses_shared_b2", project_ids=mine) is None
+
+
 def test_add_linked_repo_is_idempotent(store: ContextStore) -> None:
     updated = store.add_linked_repo(PROJECT.id, "git@github.com:acme/app.git")
     assert updated.linked_repos == ["git@github.com:acme/app.git"]
@@ -296,8 +429,12 @@ def test_migrations_reach_the_current_schema_version() -> None:
     # v20 project groups, pins and manual order (#140), v21 project destinations (#142),
     # v22 the revocations owed for keys the CLI minted (#142), v23 the one-time repair of
     # old tombstones (#139, #140), v24 the destination a project's key was attached for (#142),
-    # v25 where a fleet agent's server listened and in which boot (round 25 of #257)
-    assert version == SCHEMA_VERSION == 25
+    # v25 where a fleet agent's server listened and in which boot (round 25 of #257),
+    # v26 when that server started, the identity of the server its pane id names (follow-up),
+    # v27 a project's nickname, v28 which token took a usage reading (its fingerprint),
+    # v29 a task's number on its board, v30 its unique index, v31 the branch of a fleet
+    # agent's worktree (review of #259, round 15), v32 the board a fleet agent reads (round 25)
+    assert version == SCHEMA_VERSION == 32
 
 
 def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:
@@ -1805,6 +1942,27 @@ def test_v23_repairs_the_tombstones_older_cuts_left_holding_a_mark_or_a_place() 
         store.close()
 
 
+def test_v27_gives_a_project_from_before_it_no_nickname_and_room_for_one() -> None:
+    _at_version(
+        26,
+        after="""
+        INSERT INTO project (id, root, name, linked_repos, created_at, codename)
+        VALUES ('prj_old', '/w/old', 'old', '[]', '2026-09-01T00:00:00+00:00', 'amber-otter');
+    """,
+    )
+
+    with store_session() as store:
+        before = store.get_project("prj_old")
+        assert before is not None
+        assert (before.nickname, before.codename) == (None, "amber-otter")
+        assert store.set_project_nickname("prj_old", "the old one").nickname == "the old one"
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    finally:
+        raw.close()
+
+
 def test_v24_marks_the_keys_bound_to_their_destinations_deployment() -> None:
     """A binding named its deployment by target name alone, and the destination's ``stg``
     and the machine's ``stg`` can be two deployments (review of #203). v24 records the
@@ -1953,6 +2111,299 @@ def test_an_unreadable_snapshot_is_no_evidence_and_the_store_still_opens(
     assert everything == {"prj_snap", "prj_locked"}, "the unreadable one stays captured"
 
 
+# --- the reads a poller makes every few seconds (remote's needs scan) -------------------------
+
+
+def test_the_rows_that_ended_since_are_chosen_by_the_query(store: ContextStore) -> None:
+    """Every spawn, restart and switch leaves a row that is never deleted, so a reader that
+    wants the last day's endings must not build all of them to keep a few."""
+    from datetime import timedelta, timezone
+
+    from aisquare.models import FleetAgent
+
+    now = datetime.now(tz=UTC)
+    for n, ended in ((1, now - timedelta(days=2)), (2, now - timedelta(hours=1)), (3, None)):
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id=f"agt_{n}", project_id=PROJECT.id, label=f"coder-{n}", role="coder",
+                pane_id=f"%{n}", cwd=Path("/w"), created_at=now - timedelta(days=3),
+                ended_at=ended, exit_status=None if ended is None else 1,
+            )
+        )  # fmt: skip
+    since = now - timedelta(days=1)
+    assert [row.id for row in store.fleet_agents_ended_since(PROJECT.id, since)] == ["agt_2"]
+    toronto = since.astimezone(timezone(timedelta(hours=-4)))
+    assert [row.id for row in store.fleet_agents_ended_since(PROJECT.id, toronto)] == ["agt_2"]
+    assert store.fleet_agents_ended_since("prj_other", since) == []
+
+
+def test_the_sessions_seen_since_and_the_ones_named_are_chosen_by_the_query(
+    store: ContextStore,
+) -> None:
+    """Every Claude Code start leaves a session that is never deleted: the reader names the
+    old ones it needs (the authors of open board questions) and gets the recent ones."""
+    from datetime import timedelta
+
+    from aisquare.models import TeamSession
+
+    now = datetime.now(tz=UTC)
+    for n, seen in ((1, now - timedelta(days=2)), (2, now - timedelta(minutes=5)), (3, now)):
+        store.upsert_session(
+            TeamSession(
+                id=f"ses_{n}", project_id=PROJECT.id, role="coder",
+                started_at=seen, last_seen_at=seen,
+            )
+        )  # fmt: skip
+    recent = now - timedelta(minutes=30)
+    assert [s.id for s in store.team_sessions_seen_since(PROJECT.id, recent)] == ["ses_3", "ses_2"]
+    named = store.team_sessions_seen_since(PROJECT.id, recent, ids=["ses_1", "ses_2", "ses_9"])
+    assert [s.id for s in named] == ["ses_3", "ses_2", "ses_1"], "newest seen first, once each"
+    assert store.team_sessions_seen_since("prj_other", recent, ids=["ses_1"]) == []
+    alone = store.team_sessions_seen_since(PROJECT.id, None, ids=["ses_1", "ses_3", "ses_9"])
+    assert [s.id for s in alone] == ["ses_3", "ses_1"], "no window: the ones named, and only them"
+    assert store.team_sessions_seen_since(PROJECT.id, None) == []
+
+
+def _board(store: ContextStore, project_id: str, *events: tuple[str, str | None, datetime]) -> None:
+    """``(kind, session id, written at)`` events on ``project_id``'s board, in that order."""
+    from aisquare.core.ids import new_event_id
+    from aisquare.models import TeamEvent
+
+    for kind, session_id, at in events:
+        store.add_team_event(
+            TeamEvent(
+                id=new_event_id(), project_id=project_id, session_id=session_id, kind=kind,
+                text=kind, created_at=at,
+            )
+        )  # fmt: skip
+
+
+def test_the_events_since_a_time_are_the_kinds_asked_for_from_that_time_on(
+    store: ContextStore,
+) -> None:
+    """A board's last day, for a reader that asks every few seconds (remote's needs scan):
+    the agents' events of ``kinds``, the human's (no session) of ``human_kinds`` too, and
+    nothing written before ``since`` or on another board."""
+    from datetime import timedelta
+
+    now = datetime.now(tz=UTC)
+    store.ensure_project(ProjectInfo(id="prj_other", root=Path("/tmp/other")))
+    _board(
+        store,
+        PROJECT.id,
+        ("question", "ses_1", now - timedelta(days=2)),
+        ("question", "ses_1", now - timedelta(hours=3)),
+        ("note", "ses_1", now - timedelta(hours=2)),
+        ("note", None, now - timedelta(hours=2)),
+        ("decision", None, now - timedelta(hours=1)),
+        ("attention", None, now - timedelta(hours=1)),
+        ("result", "ses_2", now),
+    )
+    _board(store, "prj_other", ("question", "ses_9", now))
+    since = now - timedelta(days=1)
+    read = store.team_events_since(
+        PROJECT.id, since, kinds=["question", "result"], human_kinds=["note", "decision"]
+    )
+    assert [(e.kind, e.session_id) for e in read] == [
+        ("question", "ses_1"),
+        ("note", None),
+        ("decision", None),
+        ("result", "ses_2"),
+    ], "oldest first; an agent's note is not the human's"
+    assert all(event.created_at >= since for event in read)
+    assert store.team_events_since(PROJECT.id, now + timedelta(seconds=1), kinds=["result"]) == []
+    assert store.team_events_since(PROJECT.id, since, kinds=[]) == []
+
+
+def test_the_events_since_a_time_can_be_one_sessions_kinds_alone(store: ContextStore) -> None:
+    """Review of #259, round 28, 8/10: of a board remote's needs scan does not read whole, it
+    takes the posts of its own rows' sessions, the human's replies and the fleet's kinds. It
+    read the board's whole day for them and dropped the rest itself; the store reads only
+    those (``session_kinds`` of ``sessions``)."""
+    from datetime import timedelta
+
+    now = datetime.now(tz=UTC)
+    _board(
+        store,
+        PROJECT.id,
+        ("question", "ses_1", now - timedelta(hours=3)),
+        ("question", "ses_2", now - timedelta(hours=3)),
+        ("note", "ses_1", now - timedelta(hours=2)),
+        ("note", None, now - timedelta(hours=2)),
+        ("agent_exited", "ses_3", now - timedelta(hours=1)),
+        ("result", "ses_1", now),
+    )
+    since = now - timedelta(days=1)
+
+    read = store.team_events_since(
+        PROJECT.id,
+        since,
+        kinds=["agent_exited"],
+        human_kinds=["note"],
+        session_kinds=["question", "result"],
+        sessions=["ses_1"],
+    )
+
+    assert [(e.kind, e.session_id) for e in read] == [
+        ("question", "ses_1"),
+        ("note", None),
+        ("agent_exited", "ses_3"),
+        ("result", "ses_1"),
+    ], "ses_2's question and ses_1's own note are not asked for"
+    no_session = store.team_events_since(
+        PROJECT.id, since, kinds=[], session_kinds=["question"], sessions=[]
+    )
+    assert no_session == []
+
+
+def test_the_events_since_a_time_do_not_take_seq_order_for_stamp_order(
+    store: ContextStore,
+) -> None:
+    """Review of #259, round 6, 6/10: both reads started from, or stopped at, the newest event
+    stamped before ``since``, as if ``seq`` order were stamp order. A clock stepped back an
+    hour (NTP, a VM's snapshot) writes seq 11 at 11:00 after seq 10 at 12:00, and asked from
+    11:30 the read began past seq 11 and never saw seq 10, a question for the human and an
+    agent's last attention among them, for as long as the window asked held it."""
+    from datetime import timedelta
+
+    noon = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
+    _board(
+        store,
+        PROJECT.id,
+        ("question", "ses_1", noon - timedelta(hours=3)),
+        ("question", "ses_1", noon),  # seq 2, stamped before the clock stepped back
+        ("attention", "ses_2", noon + timedelta(minutes=1)),
+        ("note", "ses_1", noon - timedelta(hours=1)),  # the clock stepped back an hour
+    )
+    since = noon - timedelta(minutes=30)
+    read = store.team_events_since(PROJECT.id, since, kinds=["question", "attention"])
+    assert [(e.kind, e.created_at) for e in read] == [
+        ("question", noon),
+        ("attention", noon + timedelta(minutes=1)),
+    ]
+    found = store.newest_session_event(PROJECT.id, "ses_2", "attention", since=since)
+    assert found is not None and found.created_at == noon + timedelta(minutes=1)
+
+
+def test_a_store_already_at_v26_without_the_board_stamps_index_gets_it_at_its_next_open() -> None:
+    """An earlier 0.8.1 candidate stamped v26 without ``team_event_project_created``: the
+    presence pass adds it, and the reads since a time are narrowed by it from then on."""
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.execute("DROP INDEX team_event_project_created")
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    finally:
+        raw.close()
+    with store_session() as store:
+        assert store.missing_schema() == []
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        plan = raw.execute(
+            "EXPLAIN QUERY PLAN SELECT * FROM team_event WHERE project_id = 'p' "
+            "AND created_at >= 'x' ORDER BY seq"
+        ).fetchall()
+    finally:
+        raw.close()
+    assert "team_event_project_created" in str(plan), plan
+
+
+def _short_and_long_boards(store: ContextStore, now: datetime) -> int:
+    """``prj_short`` and ``prj_long``: the same last half hour, a question a minute, over 20
+    and 2 000 older notes. Returns how many questions that half hour holds."""
+    from datetime import timedelta
+
+    day = [("question", "ses_1", now - timedelta(minutes=n)) for n in range(30, 0, -1)]
+    for project_id, history in (("prj_short", 20), ("prj_long", 2_000)):
+        store.ensure_project(ProjectInfo(id=project_id, root=Path(f"/tmp/{project_id}")))
+        old = now - timedelta(days=30)
+        _board(
+            store,
+            project_id,
+            *[("note", "ses_1", old + timedelta(seconds=n)) for n in range(history)],
+        )
+        _board(store, project_id, *day)
+    return len(day)
+
+
+def _steps(store: ContextStore, read: Callable[[], object]) -> int:
+    """How many SQLite VM steps ``read`` took: what its queries cost, on any machine."""
+    connection = store._conn  # type: ignore[attr-defined]
+    counted = [0]
+
+    def step() -> int:
+        counted[0] += 1
+        return 0
+
+    connection.set_progress_handler(step, 1)
+    try:
+        read()
+    finally:
+        connection.set_progress_handler(None, 1)
+    return counted[0]
+
+
+def test_the_events_since_a_time_cost_that_time_not_the_boards_history(
+    store: ContextStore,
+) -> None:
+    """Filtered on ``created_at`` with no index on it, a read walks every event a board ever
+    had, which is never pruned. The ``(project_id, created_at)`` index narrows it to the
+    events since ``since``: a board with a hundred times the history costs the same."""
+    from datetime import timedelta
+
+    now = datetime.now(tz=UTC)
+    asked = _short_and_long_boards(store, now)
+    since = now - timedelta(days=1)
+    for project_id in ("prj_short", "prj_long"):
+        assert len(store.team_events_since(project_id, since, kinds=["question"])) == asked
+    short = _steps(store, lambda: store.team_events_since("prj_short", since, kinds=["question"]))
+    long = _steps(store, lambda: store.team_events_since("prj_long", since, kinds=["question"]))
+    assert long < short + 500, (short, long)
+
+
+def test_a_sessions_newest_event_of_a_kind_is_the_one_since_a_time(store: ContextStore) -> None:
+    """The session's newest event of the kind, when it was written at or after ``since``."""
+    from datetime import timedelta
+
+    now = datetime.now(tz=UTC)
+    _board(
+        store,
+        PROJECT.id,
+        ("attention", "ses_1", now - timedelta(hours=3)),
+        ("attention", "ses_1", now - timedelta(hours=1)),
+        ("attention", "ses_2", now - timedelta(minutes=30)),
+        ("limited", "ses_1", now - timedelta(minutes=20)),
+        ("note", None, now - timedelta(minutes=10)),
+    )
+    found = store.newest_session_event(
+        PROJECT.id, "ses_1", "attention", since=now - timedelta(hours=2)
+    )
+    assert found is not None and found.created_at == now - timedelta(hours=1)
+    later = now - timedelta(minutes=50)
+    assert store.newest_session_event(PROJECT.id, "ses_1", "attention", since=later) is None
+    assert store.newest_session_event(PROJECT.id, "ses_3", "attention", since=later) is None
+    assert store.newest_session_event("prj_other", "ses_1", "limited", since=later) is None
+
+
+def test_a_session_with_no_such_event_costs_the_time_asked_not_the_boards_history(
+    store: ContextStore,
+) -> None:
+    """Asked by the session and the kind alone, a session that has no such event walked
+    every event its board ever had to say so, every few seconds. The ``(project_id,
+    created_at)`` index narrows it to the events since ``since``: a hundred times the
+    history costs the same."""
+    from datetime import timedelta
+
+    now = datetime.now(tz=UTC)
+    _short_and_long_boards(store, now)
+    since = now - timedelta(days=1)
+    short = _steps(
+        store, lambda: store.newest_session_event("prj_short", "ses_9", "x", since=since)
+    )
+    long = _steps(store, lambda: store.newest_session_event("prj_long", "ses_9", "x", since=since))
+    assert long < short + 500, (short, long)
+
+
 # --- the launch spec and ui_state (#144) ----------------------------------------------------
 
 
@@ -1986,6 +2437,141 @@ def test_a_fleet_agents_launch_spec_round_trips_and_an_old_row_has_none(
     assert broken is not None and broken.launch_spec is None
 
 
+def _fleet_history(store: ContextStore, rows: int, *, projects: int = 1, labels: int = 7) -> None:
+    """``rows`` fleet rows over ``projects`` projects and ``labels`` labels each, a minute
+    apart, the newest of each label live: a fleet's spawns, restarts and switches, which
+    are never deleted."""
+    from datetime import timedelta
+
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    newest = {(f"prj_{i % projects}", f"coder-{i % labels}"): i for i in range(rows)}
+    store._conn.executemany(  # type: ignore[attr-defined]
+        "INSERT INTO fleet_agent (id, project_id, label, role, pane_id, cwd, created_at, "
+        "ended_at) VALUES (?, ?, ?, 'coder', '%1', '/w', ?, ?)",
+        [
+            (
+                f"agt_{i:06d}",
+                f"prj_{i % projects}",
+                f"coder-{i % labels}",
+                (start + timedelta(minutes=i)).isoformat(),
+                None
+                if newest[(f"prj_{i % projects}", f"coder-{i % labels}")] == i
+                else (start + timedelta(minutes=i, seconds=30)).isoformat(),
+            )
+            for i in range(rows)
+        ],
+    )
+
+
+def test_the_label_heads_are_every_live_row_and_each_labels_newest(store: ContextStore) -> None:
+    """``fleet_label_heads``: every live row, and the newest of each label, live or ended,
+    in every project, oldest first. A live row with a newer ended one of its label (a spawn
+    that failed after it) is both's, and so is a label all of whose rows ended."""
+    from datetime import timedelta
+
+    _fleet_history(store, 60, projects=3)
+    late = datetime(2026, 2, 1, tzinfo=UTC)
+    store._conn.executemany(  # type: ignore[attr-defined]
+        "INSERT INTO fleet_agent (id, project_id, label, role, pane_id, cwd, created_at, "
+        "ended_at) VALUES (?, ?, ?, 'coder', '%1', '/w', ?, ?)",
+        [
+            ("agt_failed", "prj_0", "coder-0", late.isoformat(), late.isoformat()),
+            ("agt_gone_1", "prj_1", "stopped", late.isoformat(), late.isoformat()),
+            ("agt_gone_2", "prj_1", "stopped", (late + timedelta(1)).isoformat(), late.isoformat()),
+        ],
+    )
+    every = store._conn.execute(  # type: ignore[attr-defined]
+        "SELECT id, project_id, label, created_at, ended_at FROM fleet_agent"
+    ).fetchall()
+    newest: dict[tuple[str, str], tuple[str, str]] = {}
+    for agent_id, project_id, label, created_at, _ended in every:
+        newest[(project_id, label)] = max(
+            newest.get((project_id, label), ("", "")), (created_at, agent_id)
+        )
+    expected = sorted(
+        (created_at, agent_id)
+        for agent_id, project_id, label, created_at, ended_at in every
+        if ended_at is None or newest[(project_id, label)] == (created_at, agent_id)
+    )
+
+    heads = store.fleet_label_heads()
+
+    assert [head.id for head in heads] == [agent_id for _created, agent_id in expected]
+    assert {"agt_failed", "agt_gone_2"} <= {head.id for head in heads}
+    assert "agt_gone_1" not in {head.id for head in heads}
+
+
+def test_forgotten_among_answers_for_ids_read_or_not(store: ContextStore) -> None:
+    """Review of #259, round 42, 11/11: a plain prune asks ``forgotten_among`` of candidates it
+    could not read at all (a read that leaves tombstones out), to tell a forgotten row from a
+    purged one. It answers for any ids: the tombstones among them, and neither a live row
+    nor one the store no longer holds."""
+    for project_id in ("prj_forgotten", "prj_purged"):
+        store.onboard_project(ProjectInfo(id=project_id, root=Path(f"/tmp/{project_id}")))
+        store.forget_project(project_id)
+    store.purge_project("prj_purged")
+    asked = [PROJECT.id, "prj_forgotten", "prj_purged", "prj_never"]
+
+    assert all(store.get_project(project_id) is None for project_id in asked[1:]), "unread"
+    assert store.forgotten_among(asked) == {"prj_forgotten"}
+
+
+def test_a_label_lookup_and_the_label_heads_pick_one_row_of_two_stamped_alike(
+    store: ContextStore,
+) -> None:
+    """Review of #259, round 41, 4/6: the heads break a tie on ``created_at`` with the greater
+    id, and ``fleet_agent_by_label``, the row a ``fleet stop`` or a ``restart`` by label acts
+    on, broke none: SQLite gave whichever row its plan reached first, and the holds could
+    judge one row while a restart acted on the other. Both give the greater id, whichever
+    was written first."""
+    stamped = datetime(2026, 2, 1, tzinfo=UTC).isoformat()
+    store._conn.executemany(  # type: ignore[attr-defined]
+        "INSERT INTO fleet_agent (id, project_id, label, role, pane_id, cwd, created_at, "
+        "ended_at) VALUES (?, 'prj_0', 'coder-1', 'coder', '%1', '/w', ?, ?)",
+        [("agt_b", stamped, stamped), ("agt_a", stamped, stamped)],
+    )
+
+    [head] = store.fleet_label_heads()
+    found = store.fleet_agent_by_label("prj_0", "coder-1", live_only=False)
+
+    assert found is not None
+    assert (head.id, found.id) == ("agt_b", "agt_b")
+
+
+def test_a_session_lookup_picks_the_greater_id_of_two_live_rows_stamped_alike(
+    store: ContextStore,
+) -> None:
+    """Review of #259, round 42, 7/11: ``fleet_agent_for_session``, which the session-start
+    hook, ``task next`` and the limit hand-over read, broke no tie on ``created_at``: for two
+    live rows on one session stamped alike, SQLite gave whichever its plan reached first. It
+    gives the greater id, as the label lookup and the label heads do, whichever was first."""
+    stamped = datetime(2026, 2, 1, tzinfo=UTC).isoformat()
+    store._conn.executemany(  # type: ignore[attr-defined]
+        "INSERT INTO fleet_agent (id, project_id, label, role, pane_id, cwd, created_at, "
+        "session_id) VALUES (?, 'prj_0', ?, 'coder', '%1', '/w', ?, 'ses_1')",
+        [("agt_b", "coder-2", stamped), ("agt_a", "coder-1", stamped)],
+    )
+
+    found = store.fleet_agent_for_session("ses_1")
+
+    assert found is not None and found.id == "agt_b"
+
+
+def test_the_label_heads_cost_grows_with_the_rows_not_their_square(store: ContextStore) -> None:
+    """Review of #259, round 37, 4/7: each label's newest was a correlated ``NOT EXISTS`` per
+    row, over the ``(project_id, created_at)`` index, which has no ``label``: quadratic in a
+    project's rows, 4.6 s at 20 000, on every ``project forget`` and ``prune`` and doctor's
+    capture-off line at each ``asq`` start. A window over the table is one pass and a
+    sort: four times the rows, a label for every five, cost about four times the steps,
+    not sixteen."""
+    _fleet_history(store, 500, labels=100)
+    small = _steps(store, store.fleet_label_heads)
+    store._conn.execute("DELETE FROM fleet_agent")  # type: ignore[attr-defined]
+    _fleet_history(store, 2000, labels=400)
+    large = _steps(store, store.fleet_label_heads)
+    assert large < small * 6, (small, large)
+
+
 def test_ui_state_is_a_key_value_memory(store: ContextStore) -> None:
     assert store.ui_state("fleet.selected") is None
     store.set_ui_state("fleet.selected", "project:prj_test")
@@ -1994,3 +2580,115 @@ def test_ui_state_is_a_key_value_memory(store: ContextStore) -> None:
     assert store.ui_state("fleet.selected") == "agent:prj_test/agt_1"
     store.set_ui_state("fleet.selected", None)
     assert store.ui_state("fleet.selected") is None
+
+
+def test_a_fleet_row_is_read_as_the_columns_it_is_written_with_whatever_follows_board(
+    store: ContextStore,
+) -> None:
+    """Review of #259, round 27, 7/7: the read list was the written one's text with
+    ``board`` cut off its end, so a column appended after it made every fleet read invalid
+    SQL. Both lists come from one tuple, and a read names each column as it is written."""
+    later = (*store_module._FLEET_AGENT_FIELDS, "later")
+    read = store_module._read_list(later, {"board": "COALESCE(board, project_id)"})
+    assert read.endswith(", COALESCE(board, project_id) AS board, later"), read
+
+    cursor = store._conn.execute(  # type: ignore[attr-defined]
+        f"SELECT {store_module._FLEET_AGENT_READ} FROM fleet_agent LIMIT 0"
+    )
+    named = tuple(column[0] for column in cursor.description)
+    assert named == store_module._FLEET_AGENT_FIELDS, named
+    assert ", ".join(named) == store_module._FLEET_AGENT_COLUMNS
+
+
+def test_a_store_without_team_session_still_reads_its_fleet_rows() -> None:
+    """Review of #259, round 27, 5/7: a row that recorded no board reads its session's, a
+    subquery on ``team_session``, and it was in every fleet read. On a store without that
+    table (doctor's damaged-store case, which the v32 backfill tolerates) every fleet read
+    failed, the live-only ones doctor's own checks make included. Such a store reads a row
+    with no board as its project's, as the backfill gives it there."""
+    from aisquare.models import FleetAgent
+
+    with store_session() as store:
+        store.ensure_project(PROJECT)
+        for n, board in ((1, None), (2, "prj_hub")):
+            store.upsert_fleet_agent(
+                FleetAgent(
+                    id=f"agt_{n}", project_id=PROJECT.id, label=f"coder-{n}", role="coder",
+                    pane_id=f"%{n}", cwd=Path("/w"), created_at=datetime.now(tz=UTC),
+                    board=board,
+                )
+            )  # fmt: skip
+    with sqlite3.connect(str(_db_path())) as raw:
+        raw.execute("UPDATE fleet_agent SET board = NULL WHERE id = 'agt_1'")  # 0.8.0's
+    raw.close()
+    with sqlite3.connect(str(_db_path())) as raw:
+        raw.execute("DROP TABLE team_session")
+    raw.close()
+
+    with store_session() as store:
+        assert "table team_session" in store.missing_schema()
+        live = {row.id: row.board for row in store.fleet_agents(PROJECT.id, live_only=True)}
+        assert live == {"agt_1": PROJECT.id, "agt_2": "prj_hub"}, live
+        assert [row.id for row in store.live_fleet_agents()] == ["agt_1", "agt_2"]
+        one = store.get_fleet_agent("agt_1")
+        assert one is not None and one.board == PROJECT.id
+        assert store.fleet_agent_boards(PROJECT.id) == sorted([PROJECT.id, "prj_hub"])
+        assert store.fleet_agent_by_label(PROJECT.id, "coder-2") is not None
+
+
+def test_fleet_board_is_a_live_rows_a_live_managers_first() -> None:
+    """Review of #259, round 30, 1/8: an ended row's board was the answer once no row was
+    live, so Remote kept a project's tabs on its last spawn's hub for as long as it ran no
+    agent. Only a live row's board is."""
+    from datetime import timedelta
+
+    from aisquare.models import FleetAgent
+
+    start = datetime.now(tz=UTC)
+
+    def row(n: int, role: str, board: str, *, ended: bool = False) -> FleetAgent:
+        return FleetAgent(
+            id=f"agt_{n}", project_id=PROJECT.id, label=f"{role}-{n}", role=role,
+            pane_id=f"%{n}", cwd=Path("/w"), created_at=start + timedelta(minutes=n),
+            board=board, ended_at=start + timedelta(hours=1) if ended else None,
+        )  # fmt: skip
+
+    with store_session() as store:
+        store.ensure_project(PROJECT)
+        assert store.fleet_board(PROJECT.id) is None, "before its first spawn"
+        store.upsert_fleet_agent(row(1, "manager", "prj_hub", ended=True))
+        assert store.fleet_board(PROJECT.id) is None, "an ended manager's hub is not it"
+        store.upsert_fleet_agent(row(2, "coder", PROJECT.id))
+        store.upsert_fleet_agent(row(3, "coder", "prj_b"))
+        store.upsert_fleet_agent(row(4, "coder", "prj_c", ended=True))
+        assert store.fleet_board(PROJECT.id) == "prj_b", "the newest live row's"
+        store.upsert_fleet_agent(row(0, "manager", "prj_m"))
+        assert store.fleet_board(PROJECT.id) == "prj_m", "a live manager's first"
+
+
+def test_fleet_manager_board_is_the_newest_manager_rows_a_live_one_first() -> None:
+    """Review of #259, round 32, 2/9: the board a pause is set on besides its homes is the one
+    a manager of the project reads, or the one a restart of its last one hands on. Only a
+    manager's: a coder never reads the pause."""
+    from datetime import timedelta
+
+    from aisquare.models import FleetAgent
+
+    start = datetime.now(tz=UTC)
+
+    def row(n: int, role: str, board: str, *, ended: bool = False) -> FleetAgent:
+        return FleetAgent(
+            id=f"agt_{n}", project_id=PROJECT.id, label=f"{role}-{n}", role=role,
+            pane_id=f"%{n}", cwd=Path("/w"), created_at=start + timedelta(minutes=n),
+            board=board, ended_at=start + timedelta(hours=1) if ended else None,
+        )  # fmt: skip
+
+    with store_session() as store:
+        store.ensure_project(PROJECT)
+        store.upsert_fleet_agent(row(9, "coder", "prj_c"))
+        assert store.fleet_manager_board(PROJECT.id) is None, "before its first manager"
+        store.upsert_fleet_agent(row(1, "manager", "prj_old", ended=True))
+        store.upsert_fleet_agent(row(2, "manager", "prj_hub", ended=True))
+        assert store.fleet_manager_board(PROJECT.id) == "prj_hub", "the newest, stopped"
+        store.upsert_fleet_agent(row(0, "manager", "prj_m"))
+        assert store.fleet_manager_board(PROJECT.id) == "prj_m", "a live one first"

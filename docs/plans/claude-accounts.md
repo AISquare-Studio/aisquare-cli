@@ -82,7 +82,8 @@ CI token, a different thing). Signing a slot in means running `claude` with the
 slot's two variables and letting its first-run flow send the user to the
 browser. The login has **landed** when the directory holds both files a signed-in
 Claude Code writes (`services.claude_accounts.sign_in_landed`); on macOS the
-credentials live in the Keychain, so the identity alone counts there.
+credentials are the login Keychain's item for that config dir
+(`core.claude_accounts.stored_login`, §11), with the file as its fallback.
 
 - **In the UI** (`cli/ui/views/accounts.py`): *+ Add Claude account* creates the
   slot, spawns a window in the fleet's tmux server (session `asq-accounts`)
@@ -165,7 +166,7 @@ test censuses (`tests/test_stubs.py`, `tests/test_no_traceback_on_a_damaged_stor
   (#146): `[accounts] pick = "headroom"`, and `fleet switch` for the running ones.
 - ~~The Settings tab could bind a default account per role~~ — done in §9
   (#145): the account select beside each role, `team bind <role> --account`.
-- Reading the macOS Keychain for usage.
+- ~~Reading the macOS Keychain for usage~~ — done in §11.
 
 ## 9. Choosing one: default, order, aliases (#145, 2026-09-13)
 
@@ -207,8 +208,8 @@ launching module decides an account any other way, with positive and negative
 controls (CONTRIBUTING, "Writing a guard that still guards").
 
 **References.** `--account` takes a slot number, an alias or a signed-in email
-everywhere. The three cannot collide: an alias must start with a letter and
-cannot contain `@` (`core.normalise_alias`, lowercase, ≤ 32). The project
+everywhere. The three cannot collide: an alias is never all digits and
+cannot contain `@` (`core.normalise_alias`, free text, case kept, ≤ 64). The project
 default is stored as the resolved slot number; the role binding is stored as
 typed, so renaming an alias changes what it means the way the operator expects.
 
@@ -345,3 +346,75 @@ kept, but this machine holds one login, so the cross-account leg has not been
 run; a resume that fails leaves a pane whose error is visible, and `--fresh` is
 the documented way around it. Copying transcripts between config directories
 was not done, per the issue.
+
+## 11. The macOS Keychain (2026-10-15)
+
+**The gap.** On macOS Claude Code keeps the OAuth login in the login Keychain,
+not in `.credentials.json`. The CLI did not read it, every account's row said
+only that, and a Mac saw no usage, no headroom and no Log in state for any
+account.
+
+**What Claude Code does** (read from its 2.1.300 bundle, the same since
+2.1.296): one generic-password item per config dir.
+
+- Service: `Claude Code-credentials`, plus `-<8 hex>` when a config dir is set:
+  the first eight hex digits of `sha256(dir.normalize("NFC"))`, where `dir` is
+  `CLAUDE_SECURESTORAGE_CONFIG_DIR` when set (an empty one means no suffix), else
+  the RAW `CLAUDE_CONFIG_DIR` (not resolved, no trailing slash stripped, no `~`
+  expanded; unset or empty means no suffix).
+- Account: `$USER`, else the login name; `claude-code-user` when that is not
+  `^[a-zA-Z0-9._-]+$`.
+- The item holds the JSON `.credentials.json` holds elsewhere. Claude Code writes
+  it with `security add-generic-password -U … -X <hex>`, so `/usr/bin/security`
+  is its creator and reads it without a prompt.
+
+**What aisquare does** (`core.claude_accounts`):
+
+- `stored_login(account)` is the one credential source. On macOS it reads the
+  item for the account (`keychain_service`: a managed slot hashes the
+  `CLAUDE_CONFIG_DIR` its launch is given, `launch_env`; the plain claude hashes
+  the shell's own, `plain_environment`), and falls back to `.credentials.json`
+  when there is no item (exit 44) or no login Keychain (37, 50). The file is
+  where Claude Code's `wx()` puts it: `CLAUDE_SECURESTORAGE_CONFIG_DIR` when set
+  (empty: `~/.claude`), else the config dir (`plaintext_credentials_path`). Linux
+  reads the config dir's file whatever that variable says, as it always has.
+- `read_keychain` runs `/usr/bin/security find-generic-password -a … -w -s …`
+  as an argument list, never a shell, with a five-second timeout. A locked
+  Keychain (36, an unlock dialog cancelled: 128, or `locked` in what it says),
+  one that refused (51, the Deny button) and anything else are `unreadable`,
+  with the row's words. The token is never
+  logged, printed, stored or put into a reason; the item's other secrets (the
+  refresh token, the MCP servers' tokens) are never lifted out of it.
+- A read is kept in the process for ten seconds, so the Accounts page's
+  two-second tick and a usage round, which reads each token three times, ask
+  the Keychain once. A refusal stands until someone asks again: a locked
+  Keychain in a desktop session may put its unlock dialog up on each read, and
+  asq's ticks would repeat it. Opening the Accounts page and **↻ Refresh usage**
+  forget them all (`forget_keychain_reads`, which also drops a read still in
+  flight: a generation counter), a sign-in's checks read afresh, and a command
+  is a process of its own.
+- `signed_in` is the identity plus a token, as on Linux. An `unreadable` login
+  still counts as signed in, with `token_state = "unreadable"`: its row says why
+  rather than offer a Log in that would not unlock anything.
+- The Accounts page's sign-in reads (the login a Log in is opened over, each
+  one-second poll, a fresh slot's discard) moved to thread workers, and each
+  asks the Keychain afresh. A login that cannot be read is never a landing: the
+  window keeps waiting. A Log in over one opens no window
+  (`LoginUnreadable`), since the window could not tell the stored login from a
+  new one. Cancel settles a fresh slot as the quit does: kept and wired when its
+  login landed after the last poll, else discarded (`settle_sign_in`).
+
+**Unverified, and said so.** This was built and tested on Linux, with the
+platform switched on and a fake `security` (`tests/test_claude_keychain.py`); the
+service names are checked against Claude Code's own code run in Node. It has not
+been run against a real Keychain. A sign-in window opened through tmux
+(`carry_environment`) carries a relative, `~`-written or slash-ended
+`CLAUDE_CONFIG_DIR` as an absolute path, which on macOS is another item than the
+plain claude's: a plain-slot Log in there does not close by itself (the
+CHANGELOG says so). Left as they are, each noted here:
+
+- A whitespace-only `CLAUDE_CONFIG_DIR` is unset to aisquare (`plain_environment`),
+  while Claude Code treats it as set and hashes it.
+- A removed slot's item stays in the Keychain, keyed on the slot's path, so a
+  later `accounts add` that reuses the number starts out signed in as the
+  removed account.

@@ -61,6 +61,9 @@ otherwise inherit a live identity:
 Excluded, nothing stripped — these are not model processes at all, and
 narrowing their environment would be change without a reason:
   * ``core/brain.py::gbrain_version`` — ``gbrain --version``, a string.
+  * ``core/claude_accounts.py::_ask_keychain`` — ``/usr/bin/security
+    find-generic-password`` on macOS: the Claude Code login an account's
+    Keychain item holds, read for its usage. No model.
   * ``core/agents.py::hook_binary_version`` — ``<hook's aisquare> --version``,
     a string: doctor asking another install of this CLI what version it is,
     so hooks that name a stale binary stop grading as healthy (#84).
@@ -68,7 +71,7 @@ narrowing their environment would be change without a reason:
     doctor's repomix line, which has to gate on the floor repomix declares
     (``node >= 22``) rather than on whether ``npx`` exists.
   * ``core/snapshot.py::head_sha`` and ``core/workspace.py::git_common_root`` —
-    ``git rev-parse``.
+    ``git rev-parse``; stripped, as every git seam is (:func:`git_env`).
   * ``services/ci_snapshot.py::_git`` — the CI test bed's snapshot plumbing
     (``stash create``, ``update-ref``, ``rev-parse``, ``remote get-url``). No
     model; stripped anyway because it runs inside a traced session's hook and
@@ -109,8 +112,11 @@ Excluded, the fleet's own plumbing (docs/plans/fleet-tui.md §3.4):
     same reason ``sdk_doctor`` is not.
   * ``cli/fleet.py::_exec_attach`` — ``tmux attach``, a terminal client.
   * ``services/fleet.py::_git`` — ``git worktree`` (add, remove, list) and the
-    branch queries behind ``fleet reap`` (§3.5); no model, not stripped, like
-    the other git seams.
+    branch queries behind ``fleet reap`` (§3.5); no model, stripped, as every git
+    seam is (:func:`git_env`).
+  * ``services/ngrok_tunnel.py::popen_tied`` — the R panel's ngrok, under the
+    parent that ends it with this process; a tunnel to ``127.0.0.1``, no model,
+    not stripped.
 
 Checked and NOT a seam, recorded so the next reader does not re-derive it:
   * ``services/project.py`` — catches ``subprocess.SubprocessError`` but starts
@@ -233,6 +239,11 @@ SEAMS: dict[str, Seam] = {
         strips_identity=True,
     ),
     "aisquare/core/brain.py::gbrain_version": Seam(EXCLUDED, "`gbrain --version`, a string"),
+    "aisquare/core/claude_accounts.py::_ask_keychain": Seam(
+        EXCLUDED,
+        "`/usr/bin/security find-generic-password` on macOS — reads the login Claude Code keeps "
+        "in an account's Keychain item, for its usage; a string, no model",
+    ),
     "aisquare/core/agents.py::hook_binary_version": Seam(
         EXCLUDED,
         "`<the aisquare a hook names> --version`, a string — doctor asking another "
@@ -240,12 +251,16 @@ SEAMS: dict[str, Seam] = {
         "grading as healthy (#84). An eager callback that exits before any command "
         "runs; no model process",
     ),
-    "aisquare/core/snapshot.py::head_sha": Seam(EXCLUDED, "`git rev-parse HEAD`"),
+    "aisquare/core/snapshot.py::head_sha": Seam(
+        EXCLUDED, "`git rev-parse HEAD`, in `git_env()`", strips_identity=True
+    ),
     "aisquare/core/snapshot.py::node_version": Seam(
         EXCLUDED, "`node --version`, a string — the floor repomix declares"
     ),
     "aisquare/core/snapshot.py::_run_repomix": Seam(EXCLUDED, "repomix packs files; no model"),
-    "aisquare/core/workspace.py::git_common_root": Seam(EXCLUDED, "`git rev-parse`"),
+    "aisquare/core/workspace.py::git_common_root": Seam(
+        EXCLUDED, "`git rev-parse`, in `git_env()`", strips_identity=True
+    ),
     "aisquare/services/ci_snapshot.py::_git": Seam(
         EXCLUDED,
         "git plumbing for the CI turn snapshot — a child of a traced hook is not the agent",
@@ -320,14 +335,21 @@ SEAMS: dict[str, Seam] = {
     "aisquare/services/fleet.py::_git": Seam(
         EXCLUDED,
         "`git worktree add/remove/list` and `git branch --merged` for the fleet's "
-        "per-coder worktrees (docs/plans/fleet-tui.md §3.5). No model process; not "
-        "stripped, like the other git seams",
+        "per-coder worktrees (docs/plans/fleet-tui.md §3.5). No model process; "
+        "stripped, as every git seam is (`git_env()`)",
+        strips_identity=True,
     ),
     "aisquare/core/tmux.py::_sysctl": Seam(
         EXCLUDED,
         "`sysctl -n kern.bootsessionuuid` (macOS) or `kern.boottime` (macOS, the BSDs), at a "
         "fleet spawn and when uninstall, upgrade and fleet shutdown ask whether an agent may "
         "still run; an identifier and a time, no model",
+    ),
+    "aisquare/services/ngrok_tunnel.py::popen_tied": Seam(
+        EXCLUDED,
+        "the R panel's ngrok, run by a small Python parent (`-I`) that ends its process "
+        "group once this process is gone. A tunnel to 127.0.0.1, never the model API; not "
+        "stripped, like `tmux attach`",
     ),
 }
 
@@ -344,3 +366,23 @@ def untraced_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
     """
     source = os.environ if base is None else base
     return {key: value for key, value in source.items() if key not in IDENTITY_ENV_VARS}
+
+
+def git_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment of every git command aisquare runs: ``base`` (default the current
+    environment) without the tracing identity (:func:`untraced_env`), with
+    ``GIT_OPTIONAL_LOCKS=0`` and ``GIT_TERMINAL_PROMPT=0``.
+
+    No git aisquare runs is a model process, and one started from a traced session's hook is
+    not the agent, so none keeps the identity. ``GIT_OPTIONAL_LOCKS=0``: a command that only
+    reads takes no optional lock, so a ``git status`` never writes the index back under the
+    developer's own git or a fleet agent's ``checkout`` (review of #259, round 20); the
+    variable, not ``--no-optional-locks``, which a git before 2.15 refuses (round 27, 4/7).
+    ``GIT_TERMINAL_PROMPT=0``: git fails rather than wait on a credential prompt no one sees.
+    The one place they are set: the fleet's seam and the CI snapshot's had drifted apart,
+    so a fix to one did not reach the other (round 28, 10/10).
+    """
+    env = untraced_env(base)
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env

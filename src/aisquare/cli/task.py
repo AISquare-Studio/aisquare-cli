@@ -31,7 +31,9 @@ app = typer.Typer(
     help="Shared team tasks: add is idempotent, claim is atomic.", no_args_is_help=True
 )
 
-TaskRef = Annotated[str, typer.Argument(help="Task id (prefix ok).")]
+TaskRef = Annotated[
+    str, typer.Argument(help="The task's number on this board (12 or #12), or its id (prefix ok).")
+]
 
 
 def _emit_task(task: TeamTask, *, verb: str) -> None:
@@ -48,7 +50,8 @@ def _emit_task(task: TeamTask, *, verb: str) -> None:
         typer.echo(json.dumps(payload))
     else:
         stdout_console().print(
-            f"✓ {verb}: {task.id} [{task.status}] {task.title}{receipt_suffix(delivery)}",
+            f"✓ {verb}: {team_service.task_label(task)} [{task.status}] {task.title}"
+            f"{receipt_suffix(delivery)}",
             markup=False,
         )
 
@@ -66,7 +69,10 @@ def add(
     ] = None,
     needs: Annotated[
         list[str] | None,
-        typer.Option("--needs", help="Task this one depends on (id prefix; repeat for several)."),
+        typer.Option(
+            "--needs",
+            help="Task this one depends on: its number (12, #12) or id (repeat for several).",
+        ),
     ] = None,
     as_session: SessionRef = None,
 ) -> None:
@@ -91,7 +97,9 @@ def add(
         typer.echo(json.dumps(payload))
     else:
         verb = "added" if created else "already tracked (idempotent)"
-        stdout_console().print(f"✓ {verb}: {task.id} {task.title}{receipt_suffix(delivery)}")
+        stdout_console().print(
+            f"✓ {verb}: {team_service.task_label(task)} {task.title}{receipt_suffix(delivery)}"
+        )
 
 
 @app.command("list")
@@ -117,6 +125,7 @@ def list_(
         stdout_console().print('No shared tasks yet. Add one with: aisquare task add "…"')
         return
     table = Table(show_header=True, header_style="bold")
+    table.add_column("#", no_wrap=True, justify="right")
     table.add_column("ID", no_wrap=True)
     table.add_column("STATUS", no_wrap=True)
     table.add_column("CLAIMED BY", no_wrap=True)
@@ -124,6 +133,7 @@ def list_(
     table.add_column("TITLE")
     for task in tasks:
         table.add_row(
+            f"#{task.number}" if task.number is not None else "",
             task.id,
             task.status,
             team_service.short_id(task.claimed_by) if task.claimed_by else "",
@@ -152,6 +162,8 @@ def show(ref: TaskRef) -> None:
     grid = Table.grid(padding=(0, 2))
     grid.add_column(style="bold")
     grid.add_column()
+    if task.number is not None:
+        grid.add_row("number", f"#{task.number}")
     grid.add_row("id", task.id)
     grid.add_row("key", task.key)
     grid.add_row("status", task.status)

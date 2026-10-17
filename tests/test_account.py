@@ -18,6 +18,7 @@ from aisquare.cli.app import app
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
 from aisquare.services.team import account_label, session_account
+from tests.projects import add_project
 
 
 @pytest.fixture
@@ -25,6 +26,7 @@ def work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     work = tmp_path / "repo"
     work.mkdir()
     monkeypatch.chdir(work)
+    add_project(work)
     return work
 
 

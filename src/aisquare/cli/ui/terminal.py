@@ -128,6 +128,7 @@ from textual import events
 from textual.actions import SkipAction
 from textual.app import App
 from textual.dom import NoScreen
+from textual.errors import NoWidget
 from textual.geometry import Offset, Region
 from textual.message import Message
 from textual.notifications import SeverityLevel
@@ -138,7 +139,6 @@ from textual.timer import Timer
 from textual.widget import Widget
 
 from aisquare.core.keys import (
-    ARGV_SEPARATOR,
     EXTENDED_MINIMUM,
     Drop,
     Translation,
@@ -532,6 +532,17 @@ def copy_pane_selection(app: App[Any]) -> bool:
     return False
 
 
+class InPlaceField:
+    """A field opened in place over a name, which a press anywhere outside it leaves.
+
+    Leaving it saves, as Enter does: its blur is the save. But Textual moves the
+    focus on a press only to a FOCUSABLE widget under it, and a page body that takes
+    none — a project with no manager yet, the Settings hub — left the field open,
+    unsaved and focused (validator of PR #261, MINOR 1). :class:`PaneScreen` hands the
+    focus on for such a press.
+    """
+
+
 class PaneScreen(Screen[None]):
     """The default screen of a :class:`SelectionHost`: one copy key for the whole app.
 
@@ -546,8 +557,35 @@ class PaneScreen(Screen[None]):
     from anywhere; only when no pane has one does Textual's copy run, and it
     never copies nothing.
 
-    It also keeps the clock the panes are ordered by (:meth:`watch_selections`).
+    It also keeps the clock the panes are ordered by (:meth:`watch_selections`), and a
+    press away from an :class:`InPlaceField` closes it (:meth:`_forward_event`).
     """
+
+    def _forward_event(self, event: events.Event) -> None:
+        """Textual's, then: a press outside the focused :class:`InPlaceField` that left it
+        focused — nothing focusable was under it — hands the focus to the field's holder,
+        its nearest focusable ancestor (the sidebar, the account's row), as Enter does.
+
+        ``Screen._forward_event`` is Textual's (8.2) one way in for every mouse event
+        — the driver's, from ``App.on_event``, and ``Pilot``'s, which skips the app —
+        and it focuses what a press lands on before any handler can stop the press.
+        """
+        press = event if isinstance(event, events.MouseDown) and not event.is_forwarded else None
+        super()._forward_event(event)
+        field = self.focused
+        if press is None or not isinstance(field, InPlaceField):
+            return
+        try:
+            under, _ = self.get_widget_at(press.x, press.y)
+        except NoWidget:
+            under = None
+        if under is field:
+            return
+        holder = next(
+            (node for node in field.ancestors if isinstance(node, Widget) and node.focusable),
+            None,
+        )
+        self.set_focus(holder, scroll_visible=False)
 
     def watch_selections(self, old: dict[Widget, Selection], new: dict[Widget, Selection]) -> None:
         """Stamp every pane whose highlight this write changed, as the write happens.
@@ -1989,12 +2027,10 @@ class TerminalPane(Widget, can_focus=True):
         try:
             if translation.kind == "key":
                 self.server.send_keys(self.pane_id, translation.value)
-            elif translation.value.endswith(ARGV_SEPARATOR):
-                # tmux reads an argument ending in ';' as a command separator, so
-                # ``send-keys -l -- ';'`` sends nothing: such text goes through the
-                # paste buffer (stdin, never argv) until core.tmux escapes it.
-                self.server.paste(self.pane_id, translation.value)
             else:
+                # Hex bytes (``send-keys -H``), which no tmux parser reads: a typed
+                # ``;`` arrives as itself, never as tmux's command separator, and is
+                # a keystroke, not a bracketed paste the agent would see as one.
                 self.server.send_literal(self.pane_id, translation.value)
         except TmuxUnavailable:
             self._fail(TMUX_UNAVAILABLE)
@@ -2157,6 +2193,14 @@ class TerminalPane(Widget, can_focus=True):
         the clipboard written by a gesture that was one left click (review of
         the eighth version; review of #135, second round, finding 2). Any other
         button breaks the run, so the next left click starts one afresh.
+
+        Timed by the event's own stamp, as Textual's ``event.chain`` is, which
+        :meth:`_on_click` reads to forward a double click: both take the time the
+        release was read, not the time a handler ran. Timed as this ran instead, a
+        loop held between two clicks 0.2 s apart (the 2 s refresh, a doctor run)
+        made them a double click to Textual, forwarded to the agent, and none here,
+        no word selected (review of #259, round 4). A test that must not depend on
+        how fast its runner turns the loop stamps the events with a clock it moves.
         """
         if event.button != 1:
             self._clicks = 0

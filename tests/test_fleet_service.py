@@ -12,6 +12,7 @@ fake forgot to override fails loudly instead of quietly reaching a real tmux.
 from __future__ import annotations
 
 import ast
+import errno
 import json
 import logging
 import os
@@ -5786,6 +5787,53 @@ def test_a_080_row_that_shows_it_read_its_own_board_is_filed_without_a_git_call(
         below.id: [tasked.id],
     }
     assert asked == [], "the store said: no git"
+
+
+@pytest.mark.parametrize("root", ["a symlink loop", "a mount that answers EIO"])
+def test_a_080_row_whose_root_cannot_be_asked_keeps_its_board_and_fails_no_forget(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    root: str,
+) -> None:
+    """Review of #259, round 39, 2/9: the rows that hold a board work out the checkout of a
+    0.8.0 row's project, and nothing caught what that raised. A root that became a symlink
+    loop (``Path.resolve`` raises ``RuntimeError`` on 3.11 and 3.12), or a mount answering
+    ``EIO``, ended ``project forget`` of any other project in a traceback. Such a root is no
+    evidence: the row keeps its board, and the forget goes through."""
+    from aisquare.core import orchestrator
+
+    below = _project_below(project)
+    agent = _coder(below)
+    _as_080_left_it(agent)
+    if root == "a symlink loop":
+        shutil.rmtree(below.root)
+        below.root.symlink_to(below.root)
+    else:
+        real = orchestrator.directory_project
+
+        def unanswered(cwd: Path | None = None) -> ProjectInfo:
+            if cwd == below.root:
+                raise OSError(errno.EIO, os.strerror(errno.EIO), str(cwd))
+            return real(cwd)
+
+        monkeypatch.setattr(orchestrator, "directory_project", unanswered)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    with store_session() as store:
+        unrelated = store.onboard_project(ProjectInfo(id=project_id_for(elsewhere), root=elsewhere))
+        rows = project_service.reading_rows(store)
+
+    project_service.forget_project(unrelated)
+
+    filed = {board: [row.id for row in theirs] for board, theirs in rows.items()}
+    if root != "a symlink loop":  # from 3.13 `resolve` returns a loop, and the walk finds repo
+        assert filed == {below.id: [agent.id]}
+    assert [agent.id] in filed.values()
+    with store_session() as store:
+        assert store.get_project(unrelated.id) is None, "forgotten"
 
 
 @pytest.mark.parametrize("verb", ["restart", "switch"])

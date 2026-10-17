@@ -2492,7 +2492,12 @@ def restart_board(store: ContextStore, agent: FleetAgent, checkouts: dict[str, s
     The store is asked first: a row that read its own board keeps it whatever the checkout
     is. Asked after the checkout, every 0.8.0 row, whose session registered on its own
     project's board, cost a ``git`` call a project on each ``project forget``, prune and
-    ``asq`` start (round 39, 1/9)."""
+    ``asq`` start (round 39, 1/9).
+
+    A root whose checkout cannot be worked out, a symlink loop (``Path.resolve`` raises on
+    3.11 and 3.12) or a mount that answers ``EIO``, is no evidence either, and the row's
+    board stands. Uncaught, one such project's root ended every other's ``project forget``
+    in a traceback, and doctor's capture-off line went without a word (round 39, 2/9)."""
     board = _board_of_row(agent)
     spec = agent.launch_spec
     if board != agent.project_id or (spec is not None and spec.hub is not None):
@@ -2501,10 +2506,11 @@ def restart_board(store: ContextStore, agent: FleetAgent, checkouts: dict[str, s
     if _read_its_own_board(store, agent, session):
         return board
     if board not in checkouts:
+        checkouts[board] = board
         project = store.get_project(board, include_forgotten=True)
-        checkouts[board] = (
-            board if project is None else orchestrator.directory_project(project.root).id
-        )
+        if project is not None:
+            with suppress(OSError, RuntimeError):
+                checkouts[board] = orchestrator.directory_project(project.root).id
     return checkouts[board]
 
 

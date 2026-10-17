@@ -815,6 +815,55 @@ def test_doctor_reads_the_rows_that_hold_a_board_once_a_run(
     assert "scratch" in check.detail and "tools" in check.detail and "notes" in check.detail
 
 
+def test_doctor_works_out_the_hold_of_each_captured_row_once_a_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 36, 8/9: doctor asked ``forget_refusals`` of the plan's held rows,
+    whose holds the plan had worked out already (``_holds``) and thrown away: each held row's
+    ``_busy`` ran again, its live agents queried and every label head scanned, on every
+    ``asq`` start. The plan gives them back. ``tools`` is held, ``scratch`` dropped and
+    ``notes`` kept for its context: each row's live agents are asked once, and the line is as
+    it was."""
+    from datetime import UTC, datetime
+
+    from aisquare.core.ids import new_agent_id
+    from aisquare.core.store import SqliteStore
+
+    rows: dict[str, ProjectInfo] = {}
+    for name in ("api", "notes", "scratch", "tools"):
+        (tmp_path / name).mkdir()
+        rows[name] = team_project(tmp_path / name)
+    with store_session() as store:
+        store.onboard_project(rows["api"])
+        for name in ("notes", "scratch", "tools"):
+            store.ensure_project(rows[name])
+        store.add(new_entry("a fact", "project", rows["notes"].id, [], "cli"))
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id=new_agent_id(), project_id=rows["api"].id, label="coder-1", role="coder",
+                pane_id="%1", cwd=rows["api"].root, created_at=datetime.now(tz=UTC),
+                board=rows["tools"].id,
+            )
+        )  # fmt: skip
+    [before] = diagnostics._check_captured_projects()
+    asked: list[str] = []
+    real = SqliteStore.fleet_agents
+
+    def counted(store: SqliteStore, project_id: str, **kwargs: Any) -> list[FleetAgent]:
+        if kwargs.get("live_only"):
+            asked.append(project_id)
+        return real(store, project_id, **kwargs)
+
+    monkeypatch.setattr(SqliteStore, "fleet_agents", counted)
+
+    [check] = diagnostics._check_captured_projects()
+
+    names = {row.id: name for name, row in rows.items()}
+    assert sorted(names[project_id] for project_id in asked) == ["notes", "scratch", "tools"]
+    assert check.detail == before.detail
+    assert "aisquare project forget" in check.detail and "tools" in check.detail
+
+
 def test_doctors_stop_for_a_captured_rows_agent_names_that_project(
     work_dir: Path, tmp_path: Path
 ) -> None:

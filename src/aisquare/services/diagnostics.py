@@ -1453,8 +1453,8 @@ def _check_captured_projects() -> list[DoctorCheck]:
     forget``, which drops one — and the rows with a live agent apart again, since
     ``forget`` refuses those until their agents are stopped (round 18).
 
-    What holds a row is the hold prune and forget ask
-    (:func:`~aisquare.services.project.forget_refusals`, of every captured row with the rows
+    What holds a row is the hold prune and forget ask (the plan's own, for its rows, and
+    :func:`~aisquare.services.project.forget_refusals` of the other captured rows, with the rows
     that prune drops gone, as prune decides it; asked so of the plan's rows alone, a row
     holding context was told to forget a stopped reader the prune it names drops, which then
     matched nothing: review of #259, round 36, 3/9): the board of another project's agents,
@@ -1480,14 +1480,20 @@ def _check_captured_projects() -> list[DoctorCheck]:
                 # by each, every project's label heads were read twice a run, and doctor
                 # runs at every `asq` start (review of #259, round 35, 6/8).
                 rows = project_service.reading_rows(store)
+                # The plan's held rows with what holds each, as prune decided it: asked again,
+                # each one's hold was worked out twice a run (review of #259, round 36, 8/9).
+                refused: dict[str, project_service.ProjectBusyError] = {}
                 plan = project_service.prune_candidates(
-                    missing=False, worktrees=False, captured_older_than=0, store=store, readers=rows
+                    missing=False,
+                    worktrees=False,
+                    captured_older_than=0,
+                    store=store,
+                    readers=rows,
+                    refused=refused,
                 )
                 planned = {c.project.id for c in plan}
                 dropped = {c.project.id for c in plan if not c.held}
-                refused = project_service.forget_refusals(
-                    store, [c.project for c in plan if c.held], dropping=dropped, readers=rows
-                ) | project_service.forget_refusals(
+                refused |= project_service.forget_refusals(
                     store,
                     [p for p in captured if p.id not in planned],
                     dropping=dropped,

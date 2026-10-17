@@ -571,6 +571,7 @@ def prune_candidates(
     captured_older_than: int | None = None,
     store: ContextStore | None = None,
     readers: Sequence[FleetAgent] | None = None,
+    refused: dict[str, ProjectBusyError] | None = None,
 ) -> list[PruneCandidate]:
     """The registrations ``project prune`` would drop, and why — nothing is changed.
 
@@ -593,6 +594,9 @@ def prune_candidates(
     (:func:`_is_dir`). In ``store`` when the caller has one open (doctor, round 19), and with
     the rows that hold a board when it read them (``readers``, :func:`reading_rows`): doctor
     asks :func:`forget_refusals` with them too, and read them once for each (round 35, 6/8).
+    With ``refused``, what holds each candidate prune keeps is put in it, by id, as
+    :func:`forget_refusals` gives it: doctor asked that of the plan's held rows again, the
+    hold of each worked out twice on every run (round 36, 8/9).
     """
 
     def plan(store: ContextStore) -> list[PruneCandidate]:
@@ -640,6 +644,8 @@ def prune_candidates(
             return found  # the rows that read a board are read for a candidate only
         rows = reading_rows(store) if readers is None else readers
         holds = _holds(store, [c.project for c in found], rows)
+        if refused is not None:
+            refused.update((key, busy) for key, busy in holds.items() if busy is not None)
         return [_held(c, holds[c.project.id]) for c in found]
 
     if store is not None:

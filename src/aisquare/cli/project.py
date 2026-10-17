@@ -320,13 +320,12 @@ def prune(
     if not missing and not worktrees and not captured_only:
         missing = worktrees = True
     days = _STALE_CAPTURE_DAYS if older_than is None else older_than
+    captured = days if captured_only else None
     candidates = project_service.prune_candidates(
-        missing=missing,
-        worktrees=worktrees,
-        captured_older_than=days if captured_only else None,
+        missing=missing, worktrees=worktrees, captured_older_than=captured
     )
     if yes:
-        emit_prune(project_service.prune(candidates, purge=purge))
+        emit_prune(project_service.prune(candidates, purge=purge, captured_older_than=captured))
         return
     plan = project_service.prune_plan(candidates, purge=purge)
     emit_prune(plan)
@@ -342,7 +341,7 @@ def prune(
     if not typer.confirm(f"Drop {droppable} {noun}?", default=False):
         stdout_console().print("nothing dropped")
         return
-    emit_prune(project_service.prune(candidates, purge=purge))
+    emit_prune(project_service.prune(candidates, purge=purge, captured_older_than=captured))
 
 
 # --- groups, pins and manual order (#140) ---------------------------------------------------

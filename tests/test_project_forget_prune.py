@@ -1438,6 +1438,103 @@ def test_prune_captured_only_drops_stale_captures_and_keeps_the_rest(
     assert _listed(runner) == {shown}
 
 
+@pytest.mark.parametrize("purge", [False, True], ids=["forget", "purge"])
+@pytest.mark.parametrize("since", ["onboarded", "an entry", "a prompt"])
+def test_a_prune_keeps_a_capture_that_stopped_being_stale_while_the_prompt_sat_open(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    project_capture: None,
+    purge: bool,
+    since: str,
+) -> None:
+    """Review of #259, round 37, 2/7: ``prune`` re-read what holds each candidate, as the
+    prompt may have sat open, but not why it was one. A capture added on purpose there
+    meanwhile (``project onboard``), or given an entry by a session, was forgotten anyway,
+    and under ``--purge`` the entry just saved went with it, and its data directory. Each
+    reason is re-read in the run's store: such a row is kept, as changed since the plan,
+    and so is one touched since, by the ``--older-than`` the plan was made with."""
+    from aisquare.core.entries import new_entry
+    from aisquare.services import project as project_service
+
+    scratch = _capture(runner, monkeypatch, tmp_path / "scratch")
+    other = _capture(runner, monkeypatch, tmp_path / "other")
+    long_ago = "2020-01-01T00:00:00+00:00"
+    for project_id in (scratch, other):
+        _raw_write("UPDATE project SET created_at = ? WHERE id = ?", (long_ago, project_id))
+        _raw_write("UPDATE prompt SET created_at = ? WHERE project_id = ?", (long_ago, project_id))
+    paths.project_data_dir(scratch).mkdir(parents=True, exist_ok=True)
+    real = project_service.prune_candidates
+
+    def the_prompt_sat_open(**kwargs: Any) -> list[Any]:
+        plan = real(**kwargs)
+        assert {c.project.id: c.reason for c in plan} == {
+            scratch: "captured",
+            other: "captured",
+        }, "the premise"
+        with store_session() as store:
+            if since == "onboarded":
+                row = store.get_project(scratch)
+                assert row is not None
+                store.onboard_project(row)
+            elif since == "an entry":
+                store.add(new_entry("saved meanwhile", "project", scratch, [], "cli"))
+            else:
+                store.add_prompt("a prompt meanwhile", scratch)
+        return plan
+
+    monkeypatch.setattr(project_service, "prune_candidates", the_prompt_sat_open)
+    flags = ["--purge"] if purge else []
+
+    result = runner.invoke(app, ["--json", "project", "prune", "--captured-only", *flags, "--yes"])
+
+    assert result.exit_code == 0, result.output
+    report = _json(result.stdout)
+    assert (report["dropped"], report["changed"], report["kept"]) == ([other], [scratch], [])
+    with store_session() as store:
+        assert store.get_project(scratch) is not None, "kept, not forgotten"
+        assert store.get_project(other, include_forgotten=purge) is None, "the other goes"
+        texts = [entry.text for entry in store.entries("project", project_id=scratch)]
+    assert texts == (["saved meanwhile"] if since == "an entry" else [])
+    assert paths.project_data_dir(scratch).is_dir(), "its data directory stays"
+
+
+def test_a_prune_keeps_a_missing_root_that_came_back_and_says_so(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 37, 2/7: a missing root back on disk while the confirmation sat
+    open, a network mount remounted, was forgotten all the same. It is kept, marked · and
+    said changed since the plan, and the summary counts it."""
+    from aisquare.services import project as project_service
+
+    ids = {name: _register(runner, monkeypatch, work_dir / name) for name in ("a", "b")}
+    monkeypatch.chdir(work_dir)
+    for name in ids:
+        shutil.rmtree(work_dir / name)
+    real = project_service.prune_candidates
+
+    def the_prompt_sat_open(**kwargs: Any) -> list[Any]:
+        plan = real(**kwargs)
+        assert {c.project.id for c in plan} == set(ids.values()), "the premise"
+        (work_dir / "a").mkdir()  # remounted
+        return plan
+
+    monkeypatch.setattr(project_service, "prune_candidates", the_prompt_sat_open)
+
+    result = runner.invoke(app, ["project", "prune", "--missing", "--yes"], env={"COLUMNS": "400"})
+
+    assert result.exit_code == 0, result.output
+    rows = {
+        name: next(line.split() for line in result.stdout.splitlines() if project in line)
+        for name, project in ids.items()
+    }
+    assert [rows[name][1] for name in ("a", "b")] == ["·", "✓"], result.stdout
+    said = " ".join(result.stdout.split())
+    assert "missing (kept: changed since the plan)" in said, said
+    assert "✓ forgot 1 registration" in said and "kept 1 that changed since the plan" in said
+    assert _listed(runner) == {ids["a"]}
+
+
 def test_an_empty_list_names_the_captured_directories_it_hides(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, project_capture: None
 ) -> None:

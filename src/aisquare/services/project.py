@@ -603,11 +603,7 @@ def prune_candidates(
         projects = store.list_projects(all=True)
         by_root = {project.root: project for project in projects}
         activity = store.project_activity() if captured_older_than is not None else {}
-        cutoff = (
-            (datetime.now(tz=UTC) - timedelta(days=captured_older_than)).isoformat()
-            if captured_older_than is not None
-            else None
-        )
+        cutoff = _captured_cutoff(captured_older_than)
         found: list[PruneCandidate] = []
 
         def candidate(
@@ -654,6 +650,41 @@ def prune_candidates(
         return plan(opened)
 
 
+def _captured_cutoff(days: int | None) -> str | None:
+    """The ISO stamp a ``captured`` candidate's last activity is older than, ``days`` ago;
+    ``None`` when no prune asked for captured rows."""
+    if days is None:
+        return None
+    return (datetime.now(tz=UTC) - timedelta(days=days)).isoformat()
+
+
+def _no_longer(
+    store: ContextStore,
+    candidate: PruneCandidate,
+    project: ProjectInfo,
+    activity: dict[str, str],
+    cutoff: str | None,
+) -> bool:
+    """Whether ``candidate``'s reason no longer holds of ``project``, its row as :func:`prune`
+    re-reads it: a capture added on purpose since (``project onboard``), given a context
+    entry or, with ``cutoff``, touched since it; a missing root back on disk; a worktree no
+    longer one, or whose principal is no longer registered, the only handle left on it."""
+    if candidate.reason == "captured":
+        return (
+            project.onboarded_at is not None
+            or store.has_entries(project.id)
+            or (cutoff is not None and activity.get(project.id, "") >= cutoff)
+        )
+    if candidate.reason == "missing":
+        return _is_dir(project.root)
+    principal = candidate.principal
+    return (
+        principal is None
+        or store.get_project(principal.id) is None
+        or worktree_principal(project.root) is None
+    )
+
+
 #: What ``stat`` says of a root that is gone: nothing there, a file where a directory on its
 #: path was, or a link that can never reach one.
 _GONE = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ELOOP})
@@ -693,7 +724,9 @@ def prune_plan(candidates: list[PruneCandidate], *, purge: bool) -> ProjectPrune
     )
 
 
-def prune(candidates: list[PruneCandidate], *, purge: bool) -> ProjectPruneReport:
+def prune(
+    candidates: list[PruneCandidate], *, purge: bool, captured_older_than: int | None = None
+) -> ProjectPruneReport:
     """Drop the candidates — the same forget as :func:`forget`, per registration.
 
     A candidate :func:`forget` refuses (:func:`_busy`: its live fleet agents, or another
@@ -706,17 +739,33 @@ def prune(candidates: list[PruneCandidate], *, purge: bool) -> ProjectPruneRepor
     A purge purges a candidate forgotten elsewhere while the prompt sat open too: passed
     over as gone, its rows and data directory stayed, beside "✓ purged", and no later prune
     lists a forgotten row to purge it (review of #259, round 36, 5/9).
+
+    Why each is a candidate is re-read too, before any goes (:func:`_no_longer`, with the
+    ``captured_older_than`` the plan was made with): a capture added on purpose or given an
+    entry while the prompt sat open, or a missing root that came back, is kept, as changed
+    since the plan (``changed``). Only its holds re-read, it was dropped anyway, and under
+    ``--purge`` the entries just saved went with it, and its data directory (review of #259,
+    round 37, 2/7).
     """
     dropped: list[str] = []
     kept: list[PruneCandidate] = []
     with store_session() as store:
         active_id = active_project(store).id
-        # Gone since the plan was made: nothing to drop, and no hold to decide.
-        here = [
-            c
+        rows = {
+            c.project.id: store.get_project(c.project.id, include_forgotten=purge)
             for c in candidates
-            if store.get_project(c.project.id, include_forgotten=purge) is not None
+        }
+        cutoff = _captured_cutoff(captured_older_than)
+        captured = cutoff is not None and any(c.reason == "captured" for c in candidates)
+        activity = store.project_activity() if captured else {}
+        # Gone since the plan was made: nothing to drop, and no hold to decide.
+        here = [c for c in candidates if rows[c.project.id] is not None]
+        changed = [
+            c.project.id
+            for c in here
+            if _no_longer(store, c, rows[c.project.id] or c.project, activity, cutoff)
         ]
+        here = [c for c in here if c.project.id not in changed]
         holds = _holds(store, [c.project for c in here], reading_rows(store)) if here else {}
         for candidate in here:
             project_id = candidate.project.id
@@ -738,6 +787,7 @@ def prune(candidates: list[PruneCandidate], *, purge: bool) -> ProjectPruneRepor
         candidates=candidates,
         dropped=dropped,
         kept=kept,
+        changed=changed,
         dry_run=False,
         purged=purge,
         active=active,

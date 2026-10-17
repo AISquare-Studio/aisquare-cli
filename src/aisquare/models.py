@@ -862,6 +862,10 @@ class ProjectPruneReport(BaseModel):
     """Ids dropped. Empty on a dry run."""
     kept: list[PruneCandidate] = Field(default_factory=list)
     """Candidates NOT dropped because fleet agents hold them (:attr:`PruneCandidate.held`)."""
+    changed: list[str] = Field(default_factory=list)
+    """Ids NOT dropped because why each was a candidate no longer held when the run re-read
+    it: added on purpose or given an entry since the plan, a root back on disk. Empty on a
+    dry run."""
     dry_run: bool = True
     purged: bool = False
     active: ProjectInfo | None = None

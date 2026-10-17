@@ -427,6 +427,7 @@ def emit_prune(report: ProjectPruneReport) -> None:
     # while the prompt sat open is in neither list, and was marked ✓ beside a count that left
     # it out (review of #259, round 35, 4/8).
     dropped = set(report.dropped)
+    changed = set(report.changed)
     table = Table(show_header=True, header_style="bold")
     table.add_column("", no_wrap=True)
     table.add_column("WHY", no_wrap=True)
@@ -446,12 +447,16 @@ def emit_prune(report: ProjectPruneReport) -> None:
             why += f" (kept: the fleet agents of {whose} read its board)"
         elif held is not None:
             why += f" (kept: {held.live_agents} live agent(s))"
+        elif project.id in changed:
+            # Added, given an entry or back on disk while the prompt sat open (round 37, 2/7).
+            why += " (kept: changed since the plan)"
         elif not report.dry_run and project.id not in dropped:
             # A purge purges a row forgotten since (round 36, 5/9): one it passes is gone.
             why += f" (gone already: {'purged' if report.purged else 'forgotten'} since the plan)"
         marker = ""
         if not report.dry_run:
-            marker = "✓" if project.id in dropped else "·" if held is not None else "-"
+            kept_here = held is not None or project.id in changed
+            marker = "✓" if project.id in dropped else "·" if kept_here else "-"
         table.add_row(
             marker, Text(why), Text(_project_name(project)), project.id, str(project.root)
         )
@@ -472,6 +477,8 @@ def emit_prune(report: ProjectPruneReport) -> None:
             f"  kept {hubs} whose board another project's fleet agents read, as a hub's — "
             "its row names each project"
         )
+    if report.changed:
+        console.print(f"  kept {len(report.changed)} that changed since the plan: no longer stale")
     if not report.purged and count:
         console.print(
             "  their context entries, prompt history and board rows stay in the store, hidden "

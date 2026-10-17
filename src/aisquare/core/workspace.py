@@ -74,20 +74,40 @@ def marks_project_root(directory: Path) -> bool:
     return False
 
 
+#: What Windows says of a path through a symlink loop (``ERROR_CANT_RESOLVE_FILENAME``),
+#: where POSIX says ``ELOOP``; 3.11's and 3.12's ``resolve`` read both as one.
+_WINERROR_CANT_RESOLVE_FILENAME = 1921
+
+
 def _resolved(path: Path) -> Path:
     """``path.resolve()``, a symlink loop on the way raised as ``OSError`` (``ELOOP``) on every
-    Python, as ``stat`` raises it.
+    Python, as ``stat`` raises it. A path that is missing still resolves: ``directory_project``
+    is asked of deleted roots.
 
     3.11 and 3.12 raise ``RuntimeError`` for one (from 3.13 ``resolve`` hands back the path
     as far as it got), and the readers of a stored root catch ``OSError`` for one that cannot
     be asked. One project root that became a loop turned each phone write that reaches a
     board into a 500, and a stale Reply's 409 into one; caught at one caller alone
     (``fleet.restart_board``, round 39, 2/9), the others still let it through (review of
-    #259, round 40, 3/6)."""
+    #259, round 40, 3/6).
+
+    So the loop is told by a ``stat`` of what ``resolve`` gave, as 3.11's and 3.12's own
+    ``resolve`` tells it, not by what ``resolve`` raises. Mapped from its ``RuntimeError``
+    alone, a loop raised nothing from 3.13, which CI runs: ``find_project_root`` walked from
+    it to the nearest ancestor with a marker, and a 0.8.0 row was filed under that board, a
+    phone could reach it, and a note named it (round 41, 1/6)."""
     try:
-        return path.resolve()
+        resolved = path.resolve()
     except RuntimeError as exc:
         raise OSError(errno.ELOOP, os.strerror(errno.ELOOP), str(path)) from exc
+    try:
+        os.stat(resolved)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP or (
+            getattr(exc, "winerror", 0) == _WINERROR_CANT_RESOLVE_FILENAME
+        ):
+            raise OSError(errno.ELOOP, os.strerror(errno.ELOOP), str(path)) from exc
+    return resolved
 
 
 def git_common_root(start: Path) -> Path | None:

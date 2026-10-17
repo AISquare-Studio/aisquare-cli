@@ -5904,9 +5904,7 @@ def test_a_080_row_whose_root_cannot_be_asked_keeps_its_board_and_fails_no_forge
     project_service.forget_project(unrelated)
 
     filed = {board: [row.id for row in theirs] for board, theirs in rows.items()}
-    if root != "a symlink loop":  # from 3.13 `resolve` returns a loop, and the walk finds repo
-        assert filed == {below.id: [agent.id]}
-    assert [agent.id] in filed.values()
+    assert filed == {below.id: [agent.id]}, "on every Python (round 41, 1/6)"
     with store_session() as store:
         assert store.get_project(unrelated.id) is None, "forgotten"
 

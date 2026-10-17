@@ -5,14 +5,16 @@ and 3.12, and returns the path from 3.13. Round 39 caught it around ``restart_bo
 checkout alone, and the other readers of a stored root, which catch ``OSError`` for one that
 cannot be asked, let it through: a phone write that reaches a board, a stale Reply, a prune
 (review of #259, round 40, 3/6). ``find_project_root`` and ``worktree_principal`` raise it as
-``OSError`` (``ELOOP``) where they resolve. From 3.13 these tests make ``resolve`` raise for
-the loop as 3.12's does.
+``OSError`` (``ELOOP``) where they resolve, on every Python: a real loop, ``resolve`` as the
+running interpreter has it. Made to raise as 3.12's from 3.13, these tests never saw 3.13's
+``resolve`` hand the loop back, and ``find_project_root`` walk from it to an ancestor's board
+(round 41, 1/6). Each looped root is below a directory with a marker, the board that walk
+lands on.
 """
 
 from __future__ import annotations
 
 import errno
-import sys
 from pathlib import Path
 
 import pytest
@@ -25,25 +27,20 @@ from aisquare.services import project as project_service
 from aisquare.services import remote_server
 
 
-def _loop(at: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """``at`` made a link to its sibling, which links back: ``a -> b -> a``. From 3.13
-    ``resolve`` raises for a path through it, as 3.11's and 3.12's do."""
+def _loop(at: Path) -> Path:
+    """``at`` made a link to its sibling, which links back: ``a -> b -> a``."""
     other = at.with_name(at.name + "-other")
     try:
         at.symlink_to(other)
         other.symlink_to(at)
     except OSError:
         pytest.skip("this platform cannot make the symlink")
-    if sys.version_info >= (3, 13):
-        resolve = Path.resolve
-        looped = (str(at), str(other))
+    return at
 
-        def resolve_as_3_12(self: Path, strict: bool = False) -> Path:
-            if str(self).startswith(looped):
-                raise RuntimeError(f"Symlink loop from {str(self)!r}")
-            return resolve(self, strict)
 
-        monkeypatch.setattr(Path, "resolve", resolve_as_3_12)
+def _marked(at: Path) -> Path:
+    """A directory with a ``.git`` marker, where a walk up from a loop below it lands."""
+    (at / ".git").mkdir(parents=True)
     return at
 
 
@@ -54,20 +51,31 @@ def _registered(root: Path) -> ProjectInfo:
         return store.onboard_project(ProjectInfo(id=project_id_for(root), root=root))
 
 
-def _became_a_loop(project: ProjectInfo, monkeypatch: pytest.MonkeyPatch) -> None:
+def _became_a_loop(project: ProjectInfo) -> None:
     project.root.rmdir()
-    _loop(project.root, monkeypatch)
+    _loop(project.root)
 
 
 def test_a_root_through_a_symlink_loop_is_an_oserror_where_it_is_resolved(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
-    loop = _loop(tmp_path / "loop", monkeypatch)
+    repo = _marked(tmp_path / "repo")
+    loop = _loop(repo / "loop")
 
     for resolving in (find_project_root, orchestrator.directory_project):
         with pytest.raises(OSError) as raised:
             resolving(loop)
         assert raised.value.errno == errno.ELOOP, resolving
+        with pytest.raises(OSError) as raised:
+            resolving(loop / "below")
+        assert raised.value.errno == errno.ELOOP, resolving
+
+
+def test_a_missing_root_is_no_loop(tmp_path: Path) -> None:
+    """A root that is gone still resolves: ``directory_project`` is asked of deleted roots."""
+    gone = tmp_path / "gone"
+
+    assert find_project_root(gone) == gone.resolve()
 
 
 def test_a_project_root_that_became_a_symlink_loop_adds_no_board_and_fails_no_reach(
@@ -75,15 +83,18 @@ def test_a_project_root_that_became_a_symlink_loop_adds_no_board_and_fails_no_re
 ) -> None:
     """A board write that names a task or an ``as`` works out the boards a phone may reach,
     and with them the one ``asq board`` shows in each project's root, under
-    ``suppress(OSError)``: one root that became a loop turned every such write into a 500."""
+    ``suppress(OSError)``: one root that became a loop turned every such write into a 500.
+    Walked from to its ancestor, it added that board, a project nobody added."""
     monkeypatch.delenv("AISQUARE_TEAM_HUB", raising=False)
-    looped = _registered(tmp_path / "looped")
+    repo = _marked(tmp_path / "repo")
+    looped = _registered(repo / "looped")
     fine = _registered(tmp_path / "fine")
-    _became_a_loop(looped, monkeypatch)
+    _became_a_loop(looped)
 
     reach = remote_server._remote_boards()
 
     assert {looped.id, fine.id} <= reach, reach
+    assert project_id_for(repo.resolve()) not in reach, reach
 
 
 def test_a_stale_reply_to_a_project_whose_root_became_a_symlink_loop_names_no_board(
@@ -92,22 +103,20 @@ def test_a_stale_reply_to_a_project_whose_root_became_a_symlink_loop_names_no_bo
     """The 409 of a Reply to a card gone from the feed names the board a note goes to; with
     no agent running, the one ``asq note`` in the project's root resolves. A root that
     became a loop is one that cannot be looked at, and names none, as ``EACCES`` does: it
-    turned the 409 into a 500."""
+    turned the 409 into a 500, and walked from, it named its ancestor's board."""
     monkeypatch.delenv("AISQUARE_TEAM_HUB", raising=False)
-    looped = _registered(tmp_path / "looped")
-    _became_a_loop(looped, monkeypatch)
+    looped = _registered(_marked(tmp_path / "repo") / "looped")
+    _became_a_loop(looped)
 
     assert remote_server._remote_note_board_name(looped, "coder-1") is None
 
 
-def test_a_worktree_whose_way_to_its_principal_loops_fails_no_prune(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_worktree_whose_way_to_its_principal_loops_fails_no_prune(tmp_path: Path) -> None:
     """``prune`` asks each root whether it is a worktree of a registered project, and its
     ``.git`` file names the principal: one whose way there loops ended the plan in a
     traceback. It names no principal, as a ``.git`` file that cannot be read does."""
     worktree = _registered(tmp_path / "wt")
-    loop = _loop(tmp_path / "repo", monkeypatch)
+    loop = _loop(tmp_path / "repo")
     (worktree.root / ".git").write_text(f"gitdir: {loop / '.git' / 'worktrees' / 'wt'}\n")
 
     assert worktree_principal(worktree.root) is None

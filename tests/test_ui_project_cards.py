@@ -606,7 +606,9 @@ def test_remove_names_the_command_that_brings_it_back_quoted(
     question = drive(go)
     onboard = install_route.command_line(["aisquare", "project", "onboard", str(project.root)])
     assert f"{onboard} brings it back" in question
-    assert "my app'" in question, "quoted: the space is inside the argument"
+    assert install_route.split_line(onboard)[-1] == str(project.root), (
+        "quoted: the space is inside the argument"
+    )
 
 
 def test_removing_the_last_project_shows_welcome(tmp_path: Path, script: Script) -> None:

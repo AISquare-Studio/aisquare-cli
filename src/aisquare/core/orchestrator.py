@@ -199,7 +199,8 @@ def directory_project(cwd: Path | None = None) -> ProjectInfo:
 
     One ``git`` call: ``find_project_root`` asks ``git_common_root`` first. Asked here
     first too, it ran twice for a directory that is not a git checkout (review of #259,
-    round 30, 7/8).
+    round 30, 7/8). A symlink loop on the way to ``cwd`` raises ``OSError``, as
+    ``find_project_root`` resolves it (round 40, 3/6).
     """
-    root = find_project_root((cwd or Path.cwd()).resolve())
+    root = find_project_root(cwd or Path.cwd())
     return ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])

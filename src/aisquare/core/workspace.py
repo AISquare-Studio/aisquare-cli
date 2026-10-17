@@ -8,7 +8,9 @@ A project's id is a stable hash of its resolved root path.
 
 from __future__ import annotations
 
+import errno
 import hashlib
+import os
 import subprocess
 from pathlib import Path
 
@@ -72,6 +74,22 @@ def marks_project_root(directory: Path) -> bool:
     return False
 
 
+def _resolved(path: Path) -> Path:
+    """``path.resolve()``, a symlink loop on the way raised as ``OSError`` (``ELOOP``) on every
+    Python, as ``stat`` raises it.
+
+    3.11 and 3.12 raise ``RuntimeError`` for one (from 3.13 ``resolve`` hands back the path
+    as far as it got), and the readers of a stored root catch ``OSError`` for one that cannot
+    be asked. One project root that became a loop turned each phone write that reaches a
+    board into a 500, and a stale Reply's 409 into one; caught at one caller alone
+    (``fleet.restart_board``, round 39, 2/9), the others still let it through (review of
+    #259, round 40, 3/6)."""
+    try:
+        return path.resolve()
+    except RuntimeError as exc:
+        raise OSError(errno.ELOOP, os.strerror(errno.ELOOP), str(path)) from exc
+
+
 def git_common_root(start: Path) -> Path | None:
     """The principal repository root for ``start``, resolving git worktrees.
 
@@ -126,7 +144,7 @@ def git_common_root(start: Path) -> Path | None:
     common_dir = Path(common)
     if not common_dir.is_absolute():
         here = start / common_dir
-        common_dir = (here if here.exists() or not up else start / up / common_dir).resolve()
+        common_dir = _resolved(here if here.exists() or not up else start / up / common_dir)
     if common_dir.name != ".git" and ".git" in common_dir.parts:
         # A submodule's common dir is <super>/.git/modules/<name> (deeper when
         # nested) — git bookkeeping, not anyone's project root. Bail to the
@@ -134,7 +152,7 @@ def git_common_root(start: Path) -> Path | None:
         return None
     # <principal>/.git → <principal>; a bare repo's common dir is the repo itself.
     root = common_dir.parent if common_dir.name == ".git" else common_dir
-    return root.resolve()
+    return _resolved(root)
 
 
 def find_project_root(start: Path) -> Path:
@@ -144,9 +162,10 @@ def find_project_root(start: Path) -> Path:
     principal checkout — a feature branch in ``../wt-auth`` shares the parent
     repo's context pool instead of starting empty. Falls back to the nearest
     ancestor carrying a project marker, then to ``start`` itself, so every
-    directory resolves to *some* project.
+    directory resolves to *some* project. A symlink loop on the way to ``start`` raises
+    ``OSError`` (:func:`_resolved`).
     """
-    start = start.resolve()
+    start = _resolved(start)
     common = git_common_root(start)
     if common is not None:
         return common
@@ -168,6 +187,10 @@ def worktree_principal(root: Path) -> Path | None:
     principal has been deleted, and covers a bare principal
     (``repo.git/worktrees/x``). Any other content is put to git itself, whose
     ``--git-common-dir`` differs from ``--git-dir`` exactly for a worktree.
+
+    A ``.git`` file whose way to the principal loops names none, as one that cannot be read:
+    raised (``RuntimeError`` on 3.11 and 3.12), it ended ``project prune`` in a traceback
+    (review of #259, round 40, 3/6).
     """
     dotgit = root / ".git"
     try:
@@ -176,6 +199,15 @@ def worktree_principal(root: Path) -> Path | None:
         text = dotgit.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
+    try:
+        return _principal_named(root, text)
+    except OSError:
+        return None
+
+
+def _principal_named(root: Path, text: str) -> Path | None:
+    """The principal repository the ``.git`` file of the worktree at ``root`` names (``text``
+    is its content), else ``None`` (:func:`worktree_principal`)."""
     for line in text.splitlines():
         if not line.startswith("gitdir:"):
             continue
@@ -185,9 +217,9 @@ def worktree_principal(root: Path) -> Path | None:
         if gitdir.parent.name == "worktrees":
             common = gitdir.parent.parent
             principal = common.parent if common.name == ".git" else common
-            return principal.resolve()
+            return _resolved(principal)
     principal_root = git_common_root(root)
-    if principal_root is None or principal_root == root.resolve():
+    if principal_root is None or principal_root == _resolved(root):
         return None
     return principal_root
 

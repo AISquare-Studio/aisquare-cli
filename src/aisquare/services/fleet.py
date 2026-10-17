@@ -2515,10 +2515,11 @@ def restart_board(store: ContextStore, agent: FleetAgent, checkouts: dict[str, s
     row that read ``repo``'s held ``repo/api``'s instead, and ``project forget repo`` was not
     refused, though a restart of it brought ``repo`` back (review of #259, round 38, 3/4).
 
-    A root whose checkout cannot be worked out, a symlink loop (``Path.resolve`` raises on
-    3.11 and 3.12) or a mount that answers ``EIO``, is no evidence either, and the row's
-    board stands. Uncaught, one such project's root ended every other's ``project forget``
-    in a traceback, and doctor's capture-off line went without a word (round 39, 2/9).
+    A root whose checkout cannot be worked out, a symlink loop (an ``OSError`` on every
+    Python, as ``find_project_root`` resolves it: round 40, 3/6) or a mount that answers
+    ``EIO``, is no evidence either, and the row's board stands. Uncaught, one such project's
+    root ended every other's ``project forget`` in a traceback, and doctor's capture-off line
+    went without a word (round 39, 2/9).
 
     Nor is a table the store lacks (doctor's damaged-store case, which every fleet read
     tolerates): without ``team_session`` the row shows no session, without ``team_task`` no
@@ -2532,7 +2533,7 @@ def restart_board(store: ContextStore, agent: FleetAgent, checkouts: dict[str, s
             checkouts[board] = board
             project = store.get_project(board, include_forgotten=True)
             if project is not None:
-                with suppress(OSError, RuntimeError):
+                with suppress(OSError):
                     checkouts[board] = orchestrator.directory_project(project.root).id
         return checkouts[board]
 

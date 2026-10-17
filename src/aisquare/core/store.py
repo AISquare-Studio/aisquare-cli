@@ -3851,7 +3851,7 @@ class SqliteStore:
         project, forgotten ones' included, oldest first: the rows a ``fleet stop`` or a
         ``restart`` by label acts on (:meth:`fleet_agent_by_label`), ended or not.
 
-        The rows that may read a board again (``services.project._reading_rows``): a restart
+        The rows that may read a board again (``services.project.reading_rows``): a restart
         of a stopped one starts its replacement under the hub its launch recorded. Picked in
         SQL: every spawn, restart and switch adds a row that is never deleted."""
         rows = self._conn.execute(

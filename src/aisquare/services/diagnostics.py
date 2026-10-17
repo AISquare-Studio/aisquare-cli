@@ -1474,15 +1474,19 @@ def _check_captured_projects() -> list[DoctorCheck]:
         with store_session() as store:
             captured = store.captured_projects()
             if captured and not capture:
+                # The rows that hold a board, read once for the plan and the refusals: read
+                # by each, every project's label heads were read twice a run, and doctor
+                # runs at every `asq` start (review of #259, round 35, 6/8).
+                rows = project_service.reading_rows(store)
                 plan = project_service.prune_candidates(
-                    missing=False, worktrees=False, captured_older_than=0, store=store
+                    missing=False, worktrees=False, captured_older_than=0, store=store, readers=rows
                 )
                 planned = {c.project.id for c in plan}
                 dropped = {c.project.id for c in plan if not c.held}
                 refused = project_service.forget_refusals(
-                    store, [c.project for c in plan if c.held], dropping=dropped
+                    store, [c.project for c in plan if c.held], dropping=dropped, readers=rows
                 ) | project_service.forget_refusals(
-                    store, [p for p in captured if p.id not in planned]
+                    store, [p for p in captured if p.id not in planned], readers=rows
                 )
                 holds = {project_id: busy.readers for project_id, busy in refused.items()}
     except Exception:  # the database line reports a broken store

@@ -411,7 +411,7 @@ def _busy(
     """Why ``project`` may not be forgotten now, or ``None``: its own live fleet rows
     (``live`` when the caller read them), else another project's that read its board
     (:func:`_board_readers`, of ``readers`` when the caller read them once for many
-    projects, :func:`_reading_rows`; a stopped one of a project in ``dropping``, forgotten
+    projects, :func:`reading_rows`; a stopped one of a project in ``dropping``, forgotten
     with it, is none).
 
     The one guard :func:`forget_project` (``project forget``, Remote's ``project/remove``)
@@ -459,22 +459,28 @@ def _holds(
 
 
 def forget_refusals(
-    store: ContextStore, projects: Sequence[ProjectInfo], *, dropping: Collection[str] = ()
+    store: ContextStore,
+    projects: Sequence[ProjectInfo],
+    *,
+    dropping: Collection[str] = (),
+    readers: Sequence[FleetAgent] | None = None,
 ) -> dict[str, ProjectBusyError]:
     """Why ``project forget`` of each of ``projects`` would be refused (:func:`_busy`), by id,
     for each one it would, with the projects of ``dropping`` forgotten first (as a prune
-    drops them: :func:`_holds`); the rows that hold a board read once for them all. For
-    doctor's capture-off line, which names what frees each captured row prune keeps."""
+    drops them: :func:`_holds`); the rows that hold a board read once for them all
+    (:func:`reading_rows`), or ``readers`` when the caller read them. For doctor's
+    capture-off line, which names what frees each captured row prune keeps."""
     if not projects:
         return {}
-    readers = _reading_rows(store)
+    if readers is None:
+        readers = reading_rows(store)
     refused = {
         project.id: _busy(store, project, readers, dropping=dropping) for project in projects
     }
     return {project_id: busy for project_id, busy in refused.items() if busy is not None}
 
 
-def _reading_rows(store: ContextStore) -> list[FleetAgent]:
+def reading_rows(store: ContextStore) -> list[FleetAgent]:
     """The fleet rows, in every project, whose recorded board holds a project
     (:func:`_board_readers`): the live ones, and each stopped one a ``restart`` acts on, the
     newest of its label (``ContextStore.fleet_label_heads``).
@@ -493,7 +499,7 @@ def _board_readers(
     readers: Sequence[FleetAgent] | None = None,
     dropping: Collection[str] = (),
 ) -> list[BoardReader]:
-    """Every other project whose fleet rows that hold a board (:func:`_reading_rows`, or
+    """Every other project whose fleet rows that hold a board (:func:`reading_rows`, or
     ``readers``) recorded ``project``'s, as a hub's (``FleetAgent.board``), with those rows,
     in the order of its first; ``[]`` for none. A stopped row of a project forgotten since,
     or forgotten with it (``dropping``), is none: nothing lists it to restart.
@@ -501,7 +507,7 @@ def _board_readers(
     Every one: the first alone, ``forget`` of a hub two projects read named one of them, and
     the forget it advised ended in a refusal naming the other (review of #259, round 35,
     2/8)."""
-    rows = _reading_rows(store) if readers is None else readers
+    rows = reading_rows(store) if readers is None else readers
     registered: dict[str, ProjectInfo | None] = {}
 
     def known(project_id: str) -> ProjectInfo | None:
@@ -537,6 +543,7 @@ def prune_candidates(
     worktrees: bool,
     captured_older_than: int | None = None,
     store: ContextStore | None = None,
+    readers: Sequence[FleetAgent] | None = None,
 ) -> list[PruneCandidate]:
     """The registrations ``project prune`` would drop, and why — nothing is changed.
 
@@ -556,7 +563,9 @@ def prune_candidates(
     rows alone on every run, and got a live-agent query for every project and a ``stat`` of
     every root, some on network mounts (review of #259, round 18). A root that cannot be
     asked (``EACCES``, a mount's ``EIO``) is not called missing, and fails no plan
-    (:func:`_is_dir`). In ``store`` when the caller has one open (doctor, round 19).
+    (:func:`_is_dir`). In ``store`` when the caller has one open (doctor, round 19), and with
+    the rows that hold a board when it read them (``readers``, :func:`reading_rows`): doctor
+    asks :func:`forget_refusals` with them too, and read them once for each (round 35, 6/8).
     """
 
     def plan(store: ContextStore) -> list[PruneCandidate]:
@@ -602,7 +611,8 @@ def prune_candidates(
                 candidate(project, "worktree", principal=principal)
         if not found:
             return found  # the rows that read a board are read for a candidate only
-        holds = _holds(store, [c.project for c in found], _reading_rows(store))
+        rows = reading_rows(store) if readers is None else readers
+        holds = _holds(store, [c.project for c in found], rows)
         return [_held(c, holds[c.project.id]) for c in found]
 
     if store is not None:
@@ -666,7 +676,7 @@ def prune(candidates: list[PruneCandidate], *, purge: bool) -> ProjectPruneRepor
         active_id = active_project(store).id
         # Gone since the plan was made: nothing to drop, and no hold to decide.
         here = [c for c in candidates if store.get_project(c.project.id) is not None]
-        holds = _holds(store, [c.project for c in here], _reading_rows(store)) if here else {}
+        holds = _holds(store, [c.project for c in here], reading_rows(store)) if here else {}
         for candidate in here:
             project_id = candidate.project.id
             held = _held(candidate, holds[project_id])

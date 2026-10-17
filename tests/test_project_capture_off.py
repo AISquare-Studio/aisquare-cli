@@ -676,6 +676,52 @@ def test_doctor_names_every_project_reading_a_captured_hub_with_what_frees_each(
         assert done.exit_code == 0, (name, done.output)
 
 
+def test_doctor_reads_the_rows_that_hold_a_board_once_a_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 35, 6/8: doctor's capture-off line read every project's fleet
+    label heads (``fleet_label_heads``, a ``FleetAgent`` built a head) in the plan's holds,
+    and again in ``forget_refusals``, and again since round 35's 2/8 asked the plan's held
+    rows apart: doctor runs at every ``asq`` start. A plan with a dropped row, a held one,
+    and a row it keeps for its context: read once, and the line as it was."""
+    from datetime import UTC, datetime
+
+    from aisquare.core.ids import new_agent_id
+    from aisquare.core.store import SqliteStore
+
+    rows: dict[str, ProjectInfo] = {}
+    for name in ("api", "notes", "scratch", "tools"):
+        (tmp_path / name).mkdir()
+        rows[name] = team_project(tmp_path / name)
+    with store_session() as store:
+        store.onboard_project(rows["api"])
+        for name in ("notes", "scratch", "tools"):
+            store.ensure_project(rows[name])
+        store.add(new_entry("a fact", "project", rows["notes"].id, [], "cli"))
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id=new_agent_id(), project_id=rows["api"].id, label="coder-1", role="coder",
+                pane_id="%1", cwd=rows["api"].root, created_at=datetime.now(tz=UTC),
+                board=rows["tools"].id,
+            )
+        )  # fmt: skip
+    [before] = diagnostics._check_captured_projects()
+    reads: list[int] = []
+    real = SqliteStore.fleet_label_heads
+
+    def counted(store: SqliteStore) -> list[FleetAgent]:
+        reads.append(1)
+        return real(store)
+
+    monkeypatch.setattr(SqliteStore, "fleet_label_heads", counted)
+
+    [check] = diagnostics._check_captured_projects()
+
+    assert len(reads) == 1, reads
+    assert check.detail == before.detail
+    assert "scratch" in check.detail and "tools" in check.detail and "notes" in check.detail
+
+
 def test_doctors_stop_for_a_captured_rows_agent_names_that_project(
     work_dir: Path, tmp_path: Path
 ) -> None:

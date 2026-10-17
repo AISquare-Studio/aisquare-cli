@@ -92,7 +92,7 @@ from aisquare.services.fleet import (
 )
 from tests import fakebin
 from tests.cycles import unscoped
-from tests.fsperms import can_symlink
+from tests.fsperms import can_deny_reads, can_symlink
 from tests.projects import add_project
 
 PYTHON_LAUNCHER = "python3"
@@ -5938,6 +5938,35 @@ def test_a_080_row_whose_root_is_gone_keeps_its_board_and_holds_no_ancestor(
 
     assert {board: [row.id for row in theirs] for board, theirs in rows.items()} == {
         own.id: [agent.id]
+    }
+    with store_session() as store:
+        assert store.get_project(project.id) is None, "forgotten"
+
+
+@pytest.mark.skipif(not can_deny_reads(), reason="mode 000 does not stop this user from reading")
+def test_a_080_row_whose_root_may_not_be_searched_keeps_its_board_on_every_python(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Review of #259, round 42, 5/11: a root that cannot be asked keeps its row's board only
+    while ``find_project_root`` raises for it, and from 3.14 ``Path.exists`` said False for
+    a marker under ``chmod 000``: the walk went on to the repository above, the stopped row
+    was filed under its board, and its ``project forget`` was refused. The markers are
+    stat-ed, so it raises on every Python: the row keeps its board, the forget goes through."""
+    below = _project_below(project)
+    agent = _coder(below)
+    _as_080_left_it(agent)
+    with store_session() as store:
+        store.end_fleet_agent(agent.id, exit_status=0)
+    below.root.chmod(0)
+    try:
+        with store_session() as store:
+            rows = project_service.reading_rows(store)
+        project_service.forget_project(project)
+    finally:
+        below.root.chmod(0o700)
+
+    assert {board: [row.id for row in theirs] for board, theirs in rows.items()} == {
+        below.id: [agent.id]
     }
     with store_session() as store:
         assert store.get_project(project.id) is None, "forgotten"

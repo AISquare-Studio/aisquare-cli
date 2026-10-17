@@ -52,6 +52,26 @@ def test_a_start_that_is_not_a_directory_is_its_own_root(tmp_path: Path, start: 
     assert find_project_root(app.parent) == home.resolve(), "a directory still walks"
 
 
+@pytest.mark.skipif(not can_deny_reads(), reason="mode 000 does not stop this user from reading")
+def test_a_start_that_may_not_be_searched_raises_on_every_python(tmp_path: Path) -> None:
+    """Review of #259, round 42, 5/11: whether ``locked`` has a marker cannot be asked, and
+    ``Path.exists`` raised for it up to 3.13 but says False from 3.14, where the walk went
+    on to the marked ancestor and a row of ``locked`` was filed under its board. The markers
+    are stat-ed, and what is not "gone" raises on every Python, the walk's "no evidence"."""
+    home = tmp_path / "home"
+    home.mkdir()
+    subprocess.run(["git", "init", "-q", str(home)], check=True, capture_output=True)
+    locked = home / "code" / "locked"
+    locked.mkdir(parents=True)
+    locked.chmod(0)
+    try:
+        with pytest.raises(PermissionError):
+            find_project_root(locked)
+        assert find_project_root(locked.parent) == home.resolve(), "beside it, the walk"
+    finally:
+        locked.chmod(0o700)
+
+
 def test_project_id_is_stable_and_path_specific(tmp_path: Path) -> None:
     other = tmp_path / "other"
     other.mkdir()

@@ -52,6 +52,24 @@ def _is_aisquare_home(candidate: Path) -> bool:
     return any((candidate / entry).exists() for entry in _HOME_LAYOUT)
 
 
+#: What ``stat`` says of a path that is gone: nothing there, a file where a directory on its
+#: path was, or a link that can never reach one.
+_GONE = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ELOOP})
+
+
+def _is_dir(root: Path) -> bool:
+    """Whether ``root`` is a directory; one that cannot be asked is taken to be one.
+
+    ``os.stat``, not ``Path.is_dir``: that raised for ``EACCES`` up to Python 3.13, and from
+    3.14 it is ``os.path.isdir``, which says False for any ``OSError``. On 3.14 a root under
+    a folder this user may not search, or on a mount that answered ``EIO``, was called
+    missing, and ``prune --missing`` dropped it (review of #259, round 19)."""
+    try:
+        return stat.S_ISDIR(os.stat(root).st_mode)
+    except OSError as exc:
+        return exc.errno not in _GONE
+
+
 def marks_project_root(directory: Path) -> bool:
     """Whether ``directory`` carries a project marker.
 
@@ -64,11 +82,21 @@ def marks_project_root(directory: Path) -> bool:
     never fires. It bites hardest on Windows, where ``tempfile`` lives under
     ``%USERPROFILE%``, but it is not a Windows bug: a POSIX user running
     ``aisquare`` from a markerless ``~/scratch`` hits exactly the same thing.
+
+    A marker that cannot be asked (``EACCES``, ``EIO``) raises ``OSError``, as one the walk
+    cannot see past: ``os.stat``, not ``Path.exists``, which raised for it up to Python 3.13
+    and from 3.14 says False for any ``OSError``. On 3.14 the walk went on from a root under
+    ``chmod 000`` to the nearest marked ancestor, and a 0.8.0 row was filed under that
+    board, whose ``project forget`` was refused (review of #259, round 42, 5/11).
     """
     for marker in ROOT_MARKERS:
         candidate = directory / marker
-        if not candidate.exists():
-            continue
+        try:
+            os.stat(candidate)
+        except OSError as exc:
+            if exc.errno in _GONE:
+                continue
+            raise
         if marker == ".aisquare" and _is_aisquare_home(candidate):
             continue
         return True
@@ -109,24 +137,6 @@ def _resolved(path: Path) -> Path:
         ):
             raise OSError(errno.ELOOP, os.strerror(errno.ELOOP), str(path)) from exc
     return resolved
-
-
-#: What ``stat`` says of a path that is gone: nothing there, a file where a directory on its
-#: path was, or a link that can never reach one.
-_GONE = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ELOOP})
-
-
-def _is_dir(root: Path) -> bool:
-    """Whether ``root`` is a directory; one that cannot be asked is taken to be one.
-
-    ``os.stat``, not ``Path.is_dir``: that raised for ``EACCES`` up to Python 3.13, and from
-    3.14 it is ``os.path.isdir``, which says False for any ``OSError``. On 3.14 a root under
-    a folder this user may not search, or on a mount that answered ``EIO``, was called
-    missing, and ``prune --missing`` dropped it (review of #259, round 19)."""
-    try:
-        return stat.S_ISDIR(os.stat(root).st_mode)
-    except OSError as exc:
-        return exc.errno not in _GONE
 
 
 def git_common_root(start: Path) -> Path | None:

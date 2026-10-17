@@ -2576,18 +2576,20 @@ def remote_project_ref(ref: str) -> ProjectInfo:
     each with the system's own words (``[Errno 13] Permission denied: '/root/.git'``) for
     a write that never began (sweeps 3 and 4 of #243). A bare ``~word`` with no home here
     is a name, as ``project forget`` reads it: a nickname is free text (review of #259,
-    round 43, 5/7). A loop is ``Path.resolve``'s
-    ``RuntimeError`` ("Symlink loop from ...") on Python 3.11 and 3.12, which CI runs,
-    and no error on 3.13. A registered root that became a loop still names its project, as
-    ``project forget`` reads it, on every Python: it is asked whether it is a directory
-    before it is resolved, and resolved first, it was 404 on 3.12 and removed on 3.13
-    (review of #259, round 41, 2/6). Asked with ``os.path.isdir``, as ``project.resolve``
-    asks, which says False for any ``OSError``: ``Path.is_dir`` raised ``PermissionError`` up
-    to 3.13 for a root under a folder this user may not search, which ``resolve`` finds and
-    ``prune --missing`` keeps, and the remove was 404 (round 43, 2/7). ``KeyError`` and
-    ``ValueError`` are
-    ``project_service.resolve``'s, for nothing and several matching, and a name is
-    :func:`_resolve_project`'s, :class:`NoSuchProject` and :class:`AmbiguousProject`.
+    round 43, 5/7). Whether it names a home is asked of the folder it expands to: POSIX
+    leaves ``~wip`` as it is, and Windows guesses a sibling of this user's profile,
+    ``C:\\Users\\wip``, an absolute path no project has, and the remove was 404 there. A
+    loop is ``Path.resolve``'s ``RuntimeError`` ("Symlink loop from ...") on Python 3.11 and
+    3.12, which CI runs, and no error on 3.13. A registered root that became a loop still
+    names its project, as ``project forget`` reads it, on every Python: it is asked whether
+    it is a directory before it is resolved, and resolved first, it was 404 on 3.12 and
+    removed on 3.13 (review of #259, round 41, 2/6). Asked with ``os.path.isdir``, as
+    ``project.resolve`` asks, which says False for any ``OSError``: ``Path.is_dir`` raised
+    ``PermissionError`` up to 3.13 for a root under a folder this user may not search, which
+    ``resolve`` finds and ``prune --missing`` keeps, and the remove was 404 (round 43, 2/7).
+    ``KeyError`` and ``ValueError`` are ``project_service.resolve``'s, for nothing and
+    several matching, and a name is :func:`_resolve_project`'s, :class:`NoSuchProject` and
+    :class:`AmbiguousProject`.
 
     A directory with no project of its own is looked up to the project it is in, which
     asks for its ``.git``: from Python 3.14 that answers "none" for a directory this
@@ -2605,12 +2607,13 @@ def remote_project_ref(ref: str) -> ProjectInfo:
     no_such = RequestError(404, "not_found", f"no project matches {ref!r}")
     if "\x00" in ref:
         raise RequestError(400, "invalid", NUL_IN_A_PATH.format(field="ref"))
+    bare = not any(separator in ref for separator in {"/", os.sep})
+    if bare and ref.startswith("~") and not os.path.isdir(os.path.expanduser(ref)):
+        return _resolve_project(ref)  # `~wip`, which names no home here: a nickname may
     try:
         path = Path(ref).expanduser()
-    except RuntimeError:  # ~user, for a user this machine does not have
-        if any(separator in ref for separator in {"/", os.sep}):
-            raise no_such from None
-        return _resolve_project(ref)  # `~wip`: no path, and a nickname may be
+    except RuntimeError:  # ~user/..., for a user this machine does not have
+        raise no_such from None
     if path.is_absolute():
         try:
             found = project_service.resolve(str(path))

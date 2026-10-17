@@ -2968,6 +2968,30 @@ def test_a_remove_naming_a_nickname_that_starts_with_a_tilde_removes_its_project
     assert [project.id for project in project_service.list_projects()] == [alpha.id]
 
 
+def test_a_remove_naming_a_tilde_nickname_windows_guesses_a_home_for_removes_its_project(
+    home: Path, runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 43 (Windows): POSIX leaves ``~wip`` unexpanded, and Windows
+    guesses a sibling of this user's profile for it, ``C:\\Users\\wip``, an absolute path no
+    project has: the remove was 404 there, where ``project forget ~wip`` finds the project.
+    A ``~word`` whose folder is not there is a name, whichever way it expands."""
+    alpha, beta = _projects(home, "code/alpha", "code/beta")
+    project_service.set_nickname(beta, "~wip")
+    expand = os.path.expanduser
+
+    def as_windows(path: str) -> str:
+        return str(home.parent / "wip") if path == "~wip" else expand(path)
+
+    monkeypatch.setattr(os.path, "expanduser", as_windows)
+    monkeypatch.chdir(alpha.root)
+    client = _project_writes(runtime, tmp_path)
+
+    removed = client.post(f"{base(runtime)}/api/project/remove", json={"ref": "~wip"})
+
+    assert removed.status_code == 200, removed.text
+    assert [project.id for project in project_service.list_projects()] == [alpha.id]
+
+
 def test_a_task_another_session_holds_is_refused_claim_lost(
     home: Path, runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

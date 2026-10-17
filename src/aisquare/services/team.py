@@ -1408,15 +1408,11 @@ def add_task(
     return fresh, created
 
 
-def list_tasks(
-    status: TaskStatus | None = None, cwd: Path | None = None, *, board_id: str | None = None
-) -> list[TeamTask]:
-    """The project's shared tasks, optionally filtered by status; ``board_id``'s, named
-    outright, as :func:`add_note` takes it."""
+def list_tasks(status: TaskStatus | None = None, cwd: Path | None = None) -> list[TeamTask]:
+    """The project's shared tasks, optionally filtered by status."""
     _require_enabled()
     with store_session() as store:
-        board = board_id if board_id is not None else _project(store, cwd).id
-        return list_tasks_in(store, board, status=status)
+        return list_tasks_in(store, _project(store, cwd).id, status=status)
 
 
 def list_tasks_in(

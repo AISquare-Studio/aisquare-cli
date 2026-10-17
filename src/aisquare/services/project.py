@@ -293,11 +293,15 @@ def _of(
             f"{reap} if they are already gone; if their tmux server is gone too, "
             f"{shutdown} records them"
         )
-    if stopped and reader is not None:
+    if reader is not None:
+        # Stopped, a live one is the newest of its label still, a restart away from this
+        # board: with its stop alone, the forget it advised was refused again, naming the
+        # stopped row (review of #259, round 36, 1/9).
         forget = install_route.command_line(["aisquare", "project", "forget", str(owner.root)])
+        then = "then " if stopped < len(agents) else ""
         ways.append(
-            "a restart of a stopped one starts it on this board again: forget "
-            f"{display_name(owner)} first if you are done with its agents ({forget})"
+            f"{then}forget {display_name(owner)} {'' if then else 'first '}if you are done "
+            f"with its agents ({forget}): a stopped one starts on this board again at a restart"
         )
     return f"{labels} — " + "; ".join(ways)
 

@@ -241,7 +241,7 @@ def test_forget_refuses_a_hub_whose_board_another_projects_live_agents_read(
         said = " ".join(refused.output.split())
         assert "alpha is the board beta's 2 live fleet agent(s) read: manager, coder1 —" in said
         assert f"fleet stop --project {beta} <label>" in said and "coder2" not in said
-        assert "coder0" not in said and "stopped" not in said
+        assert "coder0" not in said and "(stopped)" not in said
         as_json = runner.invoke(app, ["--json", "project", "forget", "alpha", *purge])
         assert _json(as_json.stdout) == {"error": "project_busy", "ref": alpha}
     assert _listed(runner) == {alpha, beta}
@@ -277,7 +277,7 @@ def test_forget_refuses_a_hub_a_restart_of_another_projects_stopped_agent_reads_
         assert refused.exit_code == 2, refused.output
         said = " ".join(refused.output.split())
         assert "beta's 3 fleet agent(s) read: manager (stopped)," in said and "stop the" not in said
-        assert "a restart of a stopped one starts it on this board again: forget beta first" in said
+        assert "forget beta first if you are done with its agents" in said, said
     assert _listed(runner) == {alpha, beta}
 
     assert runner.invoke(app, ["project", "forget", "beta"]).exit_code == 0
@@ -335,6 +335,47 @@ def test_forget_of_a_hub_two_projects_read_names_both_with_what_frees_each(
     assert runner.invoke(app, ["project", "forget", "api"]).exit_code == 0
     with store_session() as store:
         store.end_fleet_agent(coder.id, exit_status=0)  # a forgotten project's stopped row: none
+    assert runner.invoke(app, ["project", "forget", "tools"]).exit_code == 0
+
+
+@pytest.mark.parametrize("forgotten", [False, True], ids=["registered", "forgotten"])
+def test_forget_of_a_hub_a_running_reader_holds_gives_its_stop_and_then_its_forget(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch, forgotten: bool
+) -> None:
+    """Review of #259, round 36, 1/9: a reader whose rows were all live was told to stop them,
+    and no more. Stopped, a row is still the newest of its label, a restart away from the
+    hub, so ``forget tools`` was refused again after the stop, now naming web's forget. Its
+    forget comes after its stop, and after its onboard when it is forgotten: each step
+    followed in turn, the hub goes."""
+    from aisquare.services import install_route
+    from aisquare.services import project as project_service
+
+    tools = _register(runner, monkeypatch, work_dir / "tools")
+    web = _register(runner, monkeypatch, work_dir / "web")
+    with store_session() as store:
+        coder = store.upsert_fleet_agent(_agent(web, "coder1").model_copy(update={"board": tools}))
+        if forgotten:
+            store.forget_project(web)
+    forget = install_route.command_line(["aisquare", "project", "forget", str(work_dir / "web")])
+
+    refused = runner.invoke(app, ["project", "forget", "tools"])
+    assert refused.exit_code == 2, refused.output
+    said = " ".join(refused.output.split())
+    stop = said.index("stop them first (")
+    then = said.index(f"then forget web if you are done with its agents ({forget})")
+    assert stop < then, said
+    if forgotten:
+        assert said.index(project_service.onboard_command(work_dir / "web")) < stop, said
+        assert runner.invoke(app, ["project", "onboard", str(work_dir / "web")]).exit_code == 0
+
+    with store_session() as store:
+        store.end_fleet_agent(coder.id, exit_status=0)  # its stop
+    refused = runner.invoke(app, ["project", "forget", "tools"])
+    assert refused.exit_code == 2, "a stopped row holds the hub, as the forget step said"
+    assert f"forget web first if you are done with its agents ({forget})" in " ".join(
+        refused.output.split()
+    )
+    assert runner.invoke(app, ["project", "forget", str(work_dir / "web")]).exit_code == 0
     assert runner.invoke(app, ["project", "forget", "tools"]).exit_code == 0
 
 

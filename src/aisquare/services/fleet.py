@@ -2523,7 +2523,10 @@ def restart_board(store: ContextStore, agent: FleetAgent, checkouts: dict[str, s
     Python, as ``find_project_root`` resolves it: round 40, 3/6) or a mount that answers
     ``EIO``, is no evidence either, and the row's board stands. Uncaught, one such project's
     root ended every other's ``project forget`` in a traceback, and doctor's capture-off line
-    went without a word (round 39, 2/9).
+    went without a word (round 39, 2/9). Nor is a root that is gone (``project._is_dir``):
+    asked of it, ``find_project_root`` walked from the missing path to the nearest ancestor
+    with a marker, and a deleted ``~/code/app`` under a dotfiles ``~/.git`` filed its row
+    under ``~``, whose ``project forget`` was then refused (round 41, 3/6).
 
     Nor is a table the store lacks (doctor's damaged-store case, which every fleet read
     tolerates): without ``team_session`` the row shows no session, without ``team_task`` no
@@ -2536,7 +2539,7 @@ def restart_board(store: ContextStore, agent: FleetAgent, checkouts: dict[str, s
         if board not in checkouts:
             checkouts[board] = board
             project = store.get_project(board, include_forgotten=True)
-            if project is not None:
+            if project is not None and project_service._is_dir(project.root):
                 with suppress(OSError):
                     checkouts[board] = orchestrator.directory_project(project.root).id
         return checkouts[board]

@@ -5909,6 +5909,40 @@ def test_a_080_row_whose_root_cannot_be_asked_keeps_its_board_and_fails_no_forge
         assert store.get_project(unrelated.id) is None, "forgotten"
 
 
+def test_a_080_row_whose_root_is_gone_keeps_its_board_and_holds_no_ancestor(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Review of #259, round 41, 3/6: a root that is simply gone raises nothing, and its
+    checkout was asked of it: ``git`` failed there, and ``find_project_root`` walked from the
+    missing path to the nearest ancestor with a marker. For a project that was its own
+    repository that ancestor is unrelated, as a dotfiles ``~/.git`` is to ``~/code/app``:
+    the stopped row was filed under the ancestor's board, and its ``project forget`` was
+    refused, naming ``app``. A gone root is no evidence of a checkout: the row keeps its
+    board, and the ancestor's forget goes through."""
+    app = project.root / "app"  # its own repository, below one that holds it (``~``)
+    app.mkdir()
+    _git("init", "-q", "-b", "main", cwd=app)
+    _git("commit", "-q", "--allow-empty", "-m", "init", cwd=app)
+    own = team_project(app)
+    with store_session() as store:
+        store.onboard_project(own)
+    agent = _coder(own)
+    _as_080_left_it(agent)
+    with store_session() as store:
+        store.end_fleet_agent(agent.id, exit_status=0)
+    shutil.rmtree(app)
+
+    with store_session() as store:
+        rows = project_service.reading_rows(store)
+    project_service.forget_project(project)
+
+    assert {board: [row.id for row in theirs] for board, theirs in rows.items()} == {
+        own.id: [agent.id]
+    }
+    with store_session() as store:
+        assert store.get_project(project.id) is None, "forgotten"
+
+
 @pytest.mark.parametrize("table", ["team_session", "team_task"])
 def test_a_080_row_on_a_store_without_its_session_or_task_table_fails_no_forget_or_prune(
     tmux: FakeTmux,

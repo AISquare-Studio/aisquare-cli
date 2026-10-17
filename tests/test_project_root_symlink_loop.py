@@ -15,10 +15,13 @@ lands on.
 from __future__ import annotations
 
 import errno
+import json
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
+from aisquare.cli.app import app
 from aisquare.core import orchestrator
 from aisquare.core.store import store_session
 from aisquare.core.workspace import find_project_root, project_id_for, worktree_principal
@@ -109,6 +112,38 @@ def test_a_stale_reply_to_a_project_whose_root_became_a_symlink_loop_names_no_bo
     _became_a_loop(looped)
 
     assert remote_server._remote_note_board_name(looped, "coder-1") is None
+
+
+def test_forget_of_a_root_that_became_a_symlink_loop_forgets_it(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Doctor's capture-off line and ``ProjectBusyError`` print ``aisquare project forget
+    <root>`` for a row. For a root that became a loop, ``project.resolve`` resolved the path
+    raw, which raised ``RuntimeError`` on 3.11 and 3.12, and the forget ended in a traceback
+    (review of #259, round 41, 2/6). It is looked up as it is spelled."""
+    looped = _registered(tmp_path / "looped")
+    _became_a_loop(looped)
+
+    forgot = runner.invoke(app, ["--json", "project", "forget", str(looped.root)])
+
+    assert forgot.exit_code == 0, forgot.output
+    assert json.loads(forgot.stdout)["project"]["id"] == looped.id
+    with store_session() as store:
+        assert store.get_project(looped.id) is None
+
+
+def test_a_path_through_a_symlink_loop_that_names_no_project_is_not_found(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """A loop no registration has for a root falls through to the name lookup, which finds
+    nothing: the refusal of a ref that names no project, not a traceback."""
+    loop = _loop(tmp_path / "loop")
+
+    for ref in (loop, loop / "below"):
+        refused = runner.invoke(app, ["--json", "project", "forget", str(ref)])
+
+        assert refused.exit_code == 1, refused.output
+        assert json.loads(refused.stdout) == {"error": "not_found", "ref": str(ref)}
 
 
 def test_a_worktree_whose_way_to_its_principal_loops_fails_no_prune(tmp_path: Path) -> None:

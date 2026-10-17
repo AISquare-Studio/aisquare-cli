@@ -20,6 +20,7 @@ from aisquare.core.names import name_flaw
 from aisquare.core.state_file import StateUnwritableError
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.workspace import (
+    _resolved,
     active_project,
     find_project_root,
     pin_project,
@@ -179,11 +180,20 @@ def resolve(ref: str) -> ProjectInfo:
     worktree path finds its principal. A path that names no registration falls
     through to the name lookup: ``aisquare-cli`` is a directory AND a name.
     Raises ``KeyError`` when nothing matches and ``ValueError`` when several do.
+
+    A path through a symlink loop is looked up as it is spelled, made absolute: a root that
+    became one is the root registration resolved, which doctor's capture-off line and
+    :class:`ProjectBusyError` print for ``project forget``. Resolved raw, the loop raised
+    ``RuntimeError`` on 3.11 and 3.12, and that ``forget`` ended in a traceback (review of
+    #259, round 41, 2/6).
     """
     with store_session() as store:
         candidate = Path(ref).expanduser()
         if candidate.exists() or "/" in ref or ref.startswith("."):
-            root = candidate.resolve()
+            try:
+                root = _resolved(candidate)
+            except OSError:  # a symlink loop (ELOOP)
+                root = Path(os.path.abspath(candidate))
             found = store.get_project(project_id_for(root))
             if found is None and root.is_dir():
                 found = store.get_project(project_id_for(find_project_root(root)))

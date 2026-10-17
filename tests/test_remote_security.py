@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -2901,6 +2902,30 @@ def test_a_remove_naming_a_symlink_loop_is_not_found_on_every_python(
     assert "Symlink loop" not in refused.text
     assert [project.id for project in project_service.list_projects()] == [alpha.id]
     assert _audit_lines() == before
+
+
+def test_a_remove_naming_a_registered_root_that_became_a_symlink_loop_removes_it(
+    home: Path, runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A registered root that became a loop names its project, as ``project forget`` reads
+    it, on every Python. Resolved before it was asked whether it is a directory, the loop was
+    404 on 3.11 and 3.12, where ``resolve`` raises for it, and removed on 3.13 (review of
+    #259, round 41, 2/6)."""
+    alpha, beta = _projects(home, "code/alpha", "code/beta")
+    shutil.rmtree(beta.root)
+    other = beta.root.with_name("beta-other")
+    try:
+        beta.root.symlink_to(other)
+        other.symlink_to(beta.root)
+    except OSError:
+        pytest.skip("this account may not make a symlink here")
+    monkeypatch.chdir(alpha.root)
+    client = _project_writes(runtime, tmp_path)
+
+    removed = client.post(f"{base(runtime)}/api/project/remove", json={"ref": str(beta.root)})
+
+    assert removed.status_code == 200, removed.text
+    assert [project.id for project in project_service.list_projects()] == [alpha.id]
 
 
 def test_a_task_another_session_holds_is_refused_claim_lost(

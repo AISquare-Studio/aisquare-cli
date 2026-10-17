@@ -2571,7 +2571,10 @@ def remote_project_ref(ref: str) -> ProjectInfo:
     each with the system's own words (``[Errno 13] Permission denied: '/root/.git'``) for
     a write that never began (sweeps 3 and 4 of #243). A loop is ``Path.resolve``'s
     ``RuntimeError`` ("Symlink loop from ...") on Python 3.11 and 3.12, which CI runs,
-    and no error on 3.13. ``KeyError`` and ``ValueError`` are
+    and no error on 3.13. A registered root that became a loop still names its project, as
+    ``project forget`` reads it, on every Python: it is asked whether it is a directory
+    before it is resolved, and resolved first, it was 404 on 3.12 and removed on 3.13
+    (review of #259, round 41, 2/6). ``KeyError`` and ``ValueError`` are
     ``project_service.resolve``'s, for nothing and several matching, and a name is
     :func:`_resolve_project`'s, :class:`NoSuchProject` and :class:`AmbiguousProject`.
 
@@ -2598,7 +2601,7 @@ def remote_project_ref(ref: str) -> ProjectInfo:
     if path.is_absolute():
         try:
             found = project_service.resolve(str(path))
-            passed = found.root != path.resolve() and path.is_dir()
+            passed = path.is_dir() and found.root != path.resolve()
         except (OSError, RuntimeError):
             raise no_such from None
         if (passed and not _remote_may_look_inside(path)) or not _remote_reachable([found]):

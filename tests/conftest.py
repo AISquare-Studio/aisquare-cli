@@ -628,7 +628,7 @@ def no_detached_distill(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     from aisquare.services import distill
 
-    monkeypatch.setattr(distill, "spawn_drain", lambda cwd=None, *, root=None: None)
+    monkeypatch.setattr(distill, "spawn_drain", lambda cwd=None, *, root=None, board=None: None)
 
 
 @pytest.fixture

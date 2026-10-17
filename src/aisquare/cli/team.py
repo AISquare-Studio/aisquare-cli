@@ -1333,10 +1333,19 @@ def distill(
             "--all", help="Backfill: re-distill the whole pipe from the beginning (idempotent)."
         ),
     ] = False,
+    board: Annotated[
+        str | None,
+        typer.Option(
+            "--board",
+            hidden=True,
+            help="The board to drain, by project id, whatever this directory resolves: "
+            "the detached drain a board write spawns is told the board it wrote to.",
+        ),
+    ] = None,
 ) -> None:
     """Push undistilled notes/decisions/outcomes into the project brain now."""
     try:
-        count = team_service.distill_now(rescan=rescan)
+        count = team_service.distill_now(rescan=rescan, board=board)
     except STORE_ERRORS as exc:
         _fail_team(exc)
     if get_state().json_output:

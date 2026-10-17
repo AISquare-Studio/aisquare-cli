@@ -5976,9 +5976,11 @@ def test_a_note_on_a_forgotten_hub_is_drained_there_and_named_by_it(hubbed: _Hub
     from aisquare.services import distill as distill_service
 
     w = hubbed
-    drained: list[Path | None] = []
+    drained: list[tuple[Path | None, str | None]] = []
     w.monkeypatch.setattr(
-        distill_service, "spawn_drain", lambda cwd=None, *, root=None: drained.append(root)
+        distill_service,
+        "spawn_drain",
+        lambda cwd=None, *, root=None, board=None: drained.append((root, board)),
     )
     with store_session() as store:
         store.forget_project(w.hub.id)  # as 0.8.1 before round 32 allowed, to tidy the list
@@ -5986,7 +5988,7 @@ def test_a_note_on_a_forgotten_hub_is_drained_there_and_named_by_it(hubbed: _Hub
 
     team_service.add_note("ship it", to_role="coder-1", board_id=w.hub.id)
 
-    assert drained == [w.hub.root]
+    assert drained == [(w.hub.root, w.hub.id)]
     receipt = team_service.last_delivery()
     assert receipt is not None and (receipt.board_id, receipt.board_name) == (w.hub.id, "hub")
     with store_session() as store:

@@ -1296,7 +1296,7 @@ def add_note(
         )
     stored = _record_delivery(event, board)
     if kind in distill_service.DISTILL_KINDS:
-        distill_service.spawn_drain(root=board.root)
+        distill_service.spawn_drain(root=board.root, board=board.id)
     if kind in ("result", "question"):
         _nudge_manager(manager, reason=kind, board=board.id)
     elif _addressed_to_manager(to_role):
@@ -1556,7 +1556,7 @@ def finish_task(
     task, board, manager = _finish_task(
         ref, "done", "task_done", note=note, session_ref=session_ref, cwd=cwd
     )
-    distill_service.spawn_drain(root=board.root)
+    distill_service.spawn_drain(root=board.root, board=board.id)
     _nudge_manager(manager, reason="task_done", board=board.id)
     return task
 
@@ -1567,7 +1567,7 @@ def review_task(ref: str, *, note: str | None = None, session_ref: str | None = 
     task, board, manager = _finish_task(
         ref, "review", "task_review", note=note, session_ref=session_ref
     )
-    distill_service.spawn_drain(root=board.root)
+    distill_service.spawn_drain(root=board.root, board=board.id)
     _nudge_manager(manager, reason="task_review", board=board.id)
     return task
 
@@ -1597,7 +1597,7 @@ def reopen_task(ref: str, *, reason: str, session_ref: str | None = None) -> Tea
         )
         board = _board_of(store, reopened.project_id)
     _record_delivery(event, board)
-    distill_service.spawn_drain(root=board.root)
+    distill_service.spawn_drain(root=board.root, board=board.id)
     _nudge_manager(manager, reason="task_reopened", board=board.id)
     return reopened
 
@@ -1664,7 +1664,7 @@ def block_task(ref: str, *, reason: str, session_ref: str | None = None) -> Team
     task, board, manager = _finish_task(
         ref, "blocked", "task_blocked", note=reason, session_ref=session_ref
     )
-    distill_service.spawn_drain(root=board.root)
+    distill_service.spawn_drain(root=board.root, board=board.id)
     _nudge_manager(manager, reason="task_blocked", board=board.id)
     return task
 
@@ -1699,13 +1699,17 @@ def release_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
     return released
 
 
-def distill_now(cwd: Path | None = None, *, rescan: bool = False) -> int | None:
-    """Drain the pipe into the project brain synchronously (``team distill``).
+def distill_now(
+    cwd: Path | None = None, *, rescan: bool = False, board: str | None = None
+) -> int | None:
+    """Drain the pipe into the project brain synchronously (``team distill``): this
+    directory's board, or ``board``, the one a detached drain was spawned for
+    (``distill.spawn_drain``).
 
     ``None`` means another drain (usually a detached one) is already running.
     """
     _require_enabled()
-    return distill_service.drain(cwd, rescan=rescan)
+    return distill_service.drain(cwd, rescan=rescan, board=board)
 
 
 def recall(query: str, cwd: Path | None = None) -> str | None:
@@ -1720,7 +1724,7 @@ def recall(query: str, cwd: Path | None = None) -> str | None:
     with store_session() as store:
         backlog = distill_service.pending(store, project.id)
     if backlog:
-        distill_service.drain(cwd)  # a busy (None) drain still means progress
+        distill_service.drain(board=project.id)  # a busy (None) drain still means progress
     return brain.recall(project.id, query)
 
 
@@ -2460,8 +2464,8 @@ def hook_session_end(session_id: str, cwd: Path | None, *, reason: str | None = 
                     file=sys.stderr,
                 )
         root = _project_root(store, session.project_id)
-    # Safety drain: catch anything a per-command spawn missed this session.
-    distill_service.spawn_drain(cwd, root=root)
+    # Safety drain: catch anything a per-command spawn missed this session, on its board.
+    distill_service.spawn_drain(cwd, root=root, board=session.project_id)
 
 
 @dataclass(frozen=True)

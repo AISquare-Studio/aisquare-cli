@@ -9313,19 +9313,22 @@ def test_a_pause_goes_only_where_a_manager_of_the_project_reads_or_would_next(
     assert signals_on_the_old_hub() == 0, "neither the pause nor the resume reached it"
 
 
-def test_a_pause_before_the_first_manager_goes_where_the_live_coders_read(
+@pytest.mark.parametrize("manager", [False, True], ids=["no manager yet", "a stopped manager"])
+def test_a_pause_goes_where_the_live_coders_read(
     tmux: FakeTmux,
     claude_on_path: Path,
     project: ProjectInfo,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    manager: bool,
 ) -> None:
     """Review of #259, round 33, 4/10: since round 32 the pause goes on the newest manager
     row's board and the homes. A project with coders spawned under a hub and no manager yet
     had no manager row, and a pause from a plain shell went on the checkout's board alone;
     the manager spawned next from ``asq``, under the coders' hub, read none there and
-    staffed. With no manager row the boards its live rows recorded stand in; an ended row's
-    does not."""
+    staffed. The boards its live rows recorded are paused too; an ended row's are not.
+    Round 33 asked them only with no manager row at all, and a manager stopped last week on
+    the checkout's board left the coders' hub unpaused (round 34, 2/10)."""
     hub_root, old_root = tmp_path / "hub", tmp_path / "old-hub"
     hub_root.mkdir()
     old_root.mkdir()
@@ -9340,6 +9343,15 @@ def test_a_pause_before_the_first_manager_goes_where_the_live_coders_read(
                 ended_at=month_ago + timedelta(days=1), board=old.id,
             )
         )  # fmt: skip
+        if manager:  # last week's, from a plain shell: on the checkout's board
+            store.upsert_fleet_agent(
+                FleetAgent(
+                    id="agt_mgr", project_id=project.id, label=fleet_service.MANAGER_LABEL,
+                    role="manager", pane_id="%mgr", cwd=project.root, created_at=month_ago,
+                    ended_at=month_ago + timedelta(days=1), board=project.id,
+                )
+            )  # fmt: skip
+            assert store.fleet_manager_board(project.id) == project.id
     monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub_root))
     for _ in range(2):
         fleet_service.spawn(project, "coder", worktree=False)

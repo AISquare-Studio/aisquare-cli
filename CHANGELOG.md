@@ -602,8 +602,9 @@ all of them, and the fleet cleans up the worktrees it made.**
   - `fleet pause` sets the `fleet-paused` signal where the project's manager
     reads, or would next: the board its newest manager was spawned on (running
     or stopped, since a restart hands it on), its checkout's, and the one a spawn
-    from where you run it gives; before its first manager, the boards its
-    running agents read. A board only an old agent read is left alone. `fleet
+    from where you run it gives; and the boards its running agents read, where
+    a manager spawned beside them reads. A board only an old agent read is left
+    alone. `fleet
     resume` clears the pause wherever it is on, and only there, and `fleet
     shutdown` clears it too, whichever agents are still running, so the next
     manager spawned there is not paused. A pause signal that does not parse is

@@ -7317,14 +7317,17 @@ def _pause_boards(store: ContextStore, project: ProjectInfo, homes: Collection[s
     """The boards ``project``'s ``fleet-paused`` signal is set on: the ones a manager of it
     reads now or would read next. The board its newest manager row recorded, live or ended
     (:meth:`ContextStore.fleet_manager_board`, :func:`_board_of_row`), where it reads, or
-    where a ``restart`` of it puts its replacement; and ``homes`` (:func:`_pause_homes`),
-    where the next manager a spawn gives reads.
+    where a ``restart`` of it puts its replacement; the boards its live rows recorded, where
+    the manager spawned next beside them reads; and ``homes`` (:func:`_pause_homes`), where
+    the next manager a spawn from here gives reads.
 
-    Before its first manager, the boards its live rows recorded instead: its coders were
-    spawned where its manager will be, a hub this process may not export. Its homes alone, a
-    pause from a plain shell went on the checkout's board, and the manager spawned next from
+    The live rows' boards whether or not it ever had a manager: its coders were spawned where
+    its next manager will be, a hub this process may not export. Its homes alone, a pause
+    from a plain shell went on the checkout's board, and the manager spawned next from
     ``asq`` under the coders' hub read none there and staffed (review of #259, round 33,
-    4/10).
+    4/10). Asked only before its first manager, any manager row, one stopped last week on
+    the checkout's board included, left the coders' hub unpaused, as before (round 34,
+    2/10).
 
     Whether that manager is live and whether the caller exports the hub or not. Taken from
     the rows live at the moment, a pause set on a hub where the manager read was left on
@@ -7345,9 +7348,8 @@ def _pause_boards(store: ContextStore, project: ProjectInfo, homes: Collection[s
     (review of #259, round 25, 2/10). By what name: :func:`_pause_signals`.
     """
     manager = store.fleet_manager_board(project.id)
-    if manager is None:
-        return sorted({*store.fleet_agent_boards(project.id, live_only=True), *homes})
-    return sorted({manager, *homes})
+    live = store.fleet_agent_boards(project.id, live_only=True)
+    return sorted({*([manager] if manager is not None else []), *live, *homes})
 
 
 def _pause_signals(

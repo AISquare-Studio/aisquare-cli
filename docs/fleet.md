@@ -553,10 +553,9 @@ agents are not touched. Both take `--as SESSION`. The signal goes on the boards 
 manager of the project reads now or would read next: the one its newest manager
 was recorded at spawn to read, whether it still runs or not (a `restart` of it
 hands its replacement that board), the project's checkout's board and the one a
-spawn from here would give. Before the project's first manager, the boards its
-running agents read stand in for the first: a manager spawned the way its coders
-were reads where they do. A board only a coder, or a manager long since
-replaced, read is left alone. A pause signal of the project's that does not parse
+spawn from here would give, and the boards its running agents read, manager or
+not: a manager spawned the way its coders were reads where they do. A board only
+a stopped coder, or a manager long since replaced, read is left alone. A pause signal of the project's that does not parse
 on a board it would be set on is named, and nothing is set. `fleet resume` and `fleet shutdown` clear it wherever it is on under the
 project's name, from `asq` under a hub or a plain shell alike, and only there, so a
 resume puts no `off` in the prompts of agents on boards it was never paused on. On a board other

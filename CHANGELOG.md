@@ -504,9 +504,10 @@ all of them, and the fleet cleans up the worktrees it made.**
   `--purge`, a candidate another shell forgot meanwhile is purged if it is
   still stale, and otherwise left forgotten and said so. `--json` gains
   `changed`, the ids kept as changed since the plan, `root_gone`, those of them
-  that are worktrees whose tree went, and `forgotten`, the ids a `--purge` left
-  forgotten. An id the run did not drop is in `kept`, `changed` or `forgotten`,
-  or in none for a row gone since the plan.
+  that are worktrees whose tree went, and `forgotten`, the ids forgotten
+  elsewhere since the plan that the run left forgotten. An id the run did not
+  drop is in `kept`, `changed` or `forgotten`, or in none for a row purged since
+  the plan, and the table says which.
 
 ### Fixed
 - `fleet spawn` no longer starts a tmux server at a socket path a running

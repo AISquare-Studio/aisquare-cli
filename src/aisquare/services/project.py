@@ -792,7 +792,10 @@ def prune(
     reported so (``forgotten``): counted as changed, it was said kept, though no list shows
     it (round 39, 4/9). One kept because its root went, a worktree a prune not asked for
     missing roots no longer reads as one, is reported so (``root_gone``): said "no longer
-    stale", nothing told its user ``prune --missing`` drops it (round 39, 5/9).
+    stale", nothing told its user ``prune --missing`` drops it (round 39, 5/9). A plain run
+    passes over each one forgotten elsewhere, and reports it so too (``forgotten``), apart
+    from one purged: told by this run's ``--purge``, a purged row was said forgotten
+    (round 41, 6/6).
     """
     dropped: list[str] = []
     kept: list[PruneCandidate] = []
@@ -816,8 +819,12 @@ def prune(
         reread = {project_id: why(row) for project_id, row in here.items()}
         lapsed = [project_id for project_id, now in reread.items() if now is None]
         # Under --purge, one forgotten elsewhere meanwhile is left as it was found: not kept.
-        tombstoned = store.forgotten_among(lapsed) if purge and lapsed else set()
-        forgotten = [project_id for project_id in lapsed if project_id in tombstoned]
+        # Without it, one gone from a read that leaves tombstones out is forgotten or purged,
+        # and the tombstones tell which: said forgotten, a purged row read as one `project
+        # list --all` shows and an onboard brings back (round 41, 6/6).
+        asked = lapsed if purge else [c.project.id for c in candidates if c.project.id not in here]
+        tombstoned = store.forgotten_among(asked) if asked else set()
+        forgotten = [project_id for project_id in asked if project_id in tombstoned]
         changed = [project_id for project_id in lapsed if project_id not in tombstoned]
         # A worktree whose tree went is none now, and a run not asked for missing roots keeps it.
         planned = {c.project.id: c.reason for c in candidates}

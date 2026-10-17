@@ -872,10 +872,11 @@ class ProjectPruneReport(BaseModel):
     it: added on purpose or given an entry since the plan, a root back on disk. Empty on a
     dry run."""
     forgotten: list[str] = Field(default_factory=list)
-    """Ids a ``--purge`` run found forgotten elsewhere since the plan and no longer
-    candidates, and left as it found them: not purged, and not kept either (review of #259,
-    round 39, 4/9); one a candidate still is purged. Empty on a dry run, and without
-    ``--purge``, whose run passes over every row forgotten since."""
+    """Ids the run found forgotten elsewhere since the plan, and left as it found them: not
+    dropped, and not kept either (review of #259, round 39, 4/9). A ``--purge`` run purges
+    one a candidate still is, and lists the others; a plain run passes over, and lists,
+    each. A candidate in none of :attr:`dropped`, :attr:`kept`, :attr:`changed` and this is
+    gone: purged since the plan (round 41, 6/6). Empty on a dry run."""
     root_gone: list[str] = Field(default_factory=list)
     """Of :attr:`changed`, the worktrees whose tree went since the plan: none now, they are
     kept by a run not asked for missing roots, and ``prune --missing`` drops them (review of

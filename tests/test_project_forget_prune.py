@@ -1116,6 +1116,62 @@ def test_a_prune_marks_only_what_it_dropped_and_says_a_row_gone_already(
     assert "✓ forgot 2 registrations" in result.stdout
 
 
+@pytest.mark.parametrize("output", ["table", "json"])
+@pytest.mark.parametrize("elsewhere", ["forget", "purge"])
+def test_a_plain_prune_says_a_row_gone_since_the_plan_purged_or_forgotten_by_its_fate(
+    runner: CliRunner,
+    work_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    elsewhere: str,
+    output: str,
+) -> None:
+    """Review of #259, round 41, 6/6: a plain prune re-reads its candidates without their
+    tombstones, and passes over one gone from that read. Its label was chosen by the run's
+    ``--purge``, so a row another shell PURGED while the confirmation sat open was said
+    "gone already: forgotten since the plan": one ``project list --all`` shows and an
+    onboard brings back, though it is deleted. The run tells the two apart by the
+    tombstones, and ``--json`` lists the forgotten one in ``forgotten``."""
+    from aisquare.services import project as project_service
+
+    ids = {name: _register(runner, monkeypatch, work_dir / name) for name in ("a", "b")}
+    monkeypatch.chdir(work_dir)
+    for name in ids:
+        shutil.rmtree(work_dir / name)
+    real = project_service.prune_candidates
+
+    def the_prompt_sat_open(**kwargs: Any) -> list[Any]:
+        plan = real(**kwargs)
+        assert {c.project.id for c in plan} == set(ids.values()), "the premise"
+        with store_session() as store:
+            getattr(store, f"{elsewhere}_project")(ids["b"])  # another shell's
+        return plan
+
+    monkeypatch.setattr(project_service, "prune_candidates", the_prompt_sat_open)
+    flags = ["--json"] if output == "json" else []
+
+    result = runner.invoke(
+        app, [*flags, "project", "prune", "--missing", "--yes"], env={"COLUMNS": "400"}
+    )
+
+    assert result.exit_code == 0, result.output
+    with store_session() as store:
+        still = store.get_project(ids["b"], include_forgotten=True)
+    assert (still is None) is (elsewhere == "purge"), "the premise: deleted, or a tombstone"
+    if output == "json":
+        report = _json(result.stdout)
+        assert (report["dropped"], report["changed"], report["forgotten"]) == (
+            [ids["a"]],
+            [],
+            [ids["b"]] if elsewhere == "forget" else [],
+        )
+        return
+    marker = next(line.split() for line in result.stdout.splitlines() if ids["b"] in line)[1]
+    said = " ".join(result.stdout.split())
+    fate = "forgotten" if elsewhere == "forget" else "purged"
+    assert marker == "-" and f"(gone already: {fate} since the plan)" in said, said
+    assert "✓ forgot 1 registration" in said, said
+
+
 @pytest.mark.parametrize("elsewhere", ["forget", "purge"])
 def test_a_purge_purges_a_row_forgotten_since_the_plan_and_says_one_purged_already(
     runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch, elsewhere: str
@@ -1230,8 +1286,10 @@ def test_a_runs_candidate_it_did_not_re_read_as_one_carries_no_hold(
     root.mkdir()  # the missing root the plan saw, back on disk
     with store_session() as store:
         project = store.onboard_project(ProjectInfo(id=project_id_for(root), root=root))
-        if since != "changed":
+        if since == "forgotten":
             store.forget_project(project.id)
+        elif since == "gone":
+            store.purge_project(project.id)
     reader = ProjectInfo(id="prj_reader", root=work_dir / "reader")
     planned = PruneCandidate(project=project, reason="missing", live_agents=2, read_by=[reader])
     assert planned.held, "the premise: the plan held it"

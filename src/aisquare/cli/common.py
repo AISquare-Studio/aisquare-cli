@@ -457,10 +457,13 @@ def emit_prune(report: ProjectPruneReport) -> None:
             # Added, given an entry or back on disk while the prompt sat open (round 37, 2/7).
             why += " (kept: changed since the plan)"
         elif not report.dry_run and project.id not in dropped:
-            # A purge purges a row forgotten since (round 36, 5/9): one it passes is gone, or
-            # one no longer a candidate it left forgotten (round 39, 4/9).
-            purged = report.purged and project.id not in forgotten
-            why += f" (gone already: {'purged' if purged else 'forgotten'} since the plan)"
+            # By its fate, not this run's --purge (round 41, 6/6): one the run found forgotten
+            # (a purge purges one still stale, round 36, 5/9, and leaves the others, round 39,
+            # 4/9; a plain run passes over each), else one purged since the plan. Said
+            # forgotten whenever the run was plain, a purged row read as one an onboard
+            # brings back.
+            fate = "forgotten" if project.id in forgotten else "purged"
+            why += f" (gone already: {fate} since the plan)"
         marker = ""
         if not report.dry_run:
             kept_here = held is not None or project.id in changed

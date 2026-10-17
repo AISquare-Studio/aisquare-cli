@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import io
 import json
-import shlex
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -37,6 +36,7 @@ from aisquare.cli import fleet as fleet_cli
 from aisquare.cli.app import app
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession, TeamTask
 from aisquare.services import fleet as fleet_service
+from aisquare.services import install_route
 from aisquare.services.fleet import (
     FleetError,
     FleetUnavailable,
@@ -1465,7 +1465,9 @@ def test_reap_json(runner: CliRunner, resolved: Seen, monkeypatch: pytest.Monkey
     assert f"🗑 branch fleet/amber-otter/auth in {PROJECT.root}" in said
     assert f"⚠ kept {kept} — uncommitted changes" in human.stdout
     assert f"· kept branch fleet/ruby-fox/billing in {other} — commits the default branch" in said
-    drop = f"git -C {shlex.quote(str(other))} branch -D fleet/ruby-fox/billing"
+    drop = install_route.command_line(
+        ["git", "-C", str(other), "branch", "-D", "fleet/ruby-fox/billing"]
+    )
     assert f"`{drop}` drops it" in said, "and how to drop it, in its repo"
 
 

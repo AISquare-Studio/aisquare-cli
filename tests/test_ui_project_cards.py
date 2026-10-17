@@ -13,7 +13,6 @@ Click and where two at one spot become a double-click.
 
 from __future__ import annotations
 
-import shlex
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -40,6 +39,7 @@ from aisquare.cli.ui.views.agent import AgentView
 from aisquare.cli.ui.views.project import ProjectView
 from aisquare.core.store import store_session
 from aisquare.models import FleetAgent, ProjectInfo
+from aisquare.services import install_route
 from aisquare.services import project as project_service
 from tests.test_ui_shell import (
     PRIVATE_SOCKET,
@@ -592,7 +592,7 @@ def test_remove_names_the_command_that_brings_it_back_quoted(
     tmp_path: Path, script: Script
 ) -> None:
     """The way back is a command to copy: a root with a space is one argument in it, as in
-    the toast after the removal (``shlex.quote``)."""
+    the toast after the removal (``install_route.command_line``: this shell's quotes)."""
     (project,) = seed(tmp_path, ("prj_a", "my app", None))
 
     async def go(pilot: Pilot[None]) -> str:
@@ -604,7 +604,8 @@ def test_remove_names_the_command_that_brings_it_back_quoted(
         return shown(app.screen.query_one("#confirm-remove-text", Static))
 
     question = drive(go)
-    assert f"aisquare project onboard {shlex.quote(str(project.root))} brings it back" in (question)
+    onboard = install_route.command_line(["aisquare", "project", "onboard", str(project.root)])
+    assert f"{onboard} brings it back" in question
     assert "my app'" in question, "quoted: the space is inside the argument"
 
 

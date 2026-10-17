@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import shlex
 import stat
 import subprocess
 import sys
@@ -43,7 +42,7 @@ from aisquare.models import (
     TeamTask,
 )
 from aisquare.services import fleet as fleet_service
-from aisquare.services import remote_needs
+from aisquare.services import install_route, remote_needs
 from aisquare.services.remote_needs import (
     AgentNow,
     NeedsItem,
@@ -433,7 +432,9 @@ def test_an_agent_at_the_folder_trust_question_is_one_card_for_its_row() -> None
     assert item.kind == "permission" and item.id == later.id
     assert item.reason == "coder-1 is waiting for folder trust (Claude Code asks before it starts)"
     assert item.excerpt == detail
-    assert f"aisquare accounts trust {shlex.quote(str(PROJECT.root))}" in detail
+    assert (
+        install_route.command_line(["aisquare", "accounts", "trust", str(PROJECT.root)]) in detail
+    )
     assert item.answers == ()
     assert item.since == BORN and item.push_after == BORN + timedelta(seconds=30)
     # Control: the same state with any other detail is rule 8's dialog card, as before.

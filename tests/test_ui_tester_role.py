@@ -44,7 +44,7 @@ from aisquare.core.config import (
     save_config,
 )
 from aisquare.models import CheckStatus
-from aisquare.services import diagnostics
+from aisquare.services import diagnostics, install_route
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops as ops
 from aisquare.services.fleet import FLEET_ROLES
@@ -988,7 +988,7 @@ def test_the_register_hint_shell_quotes_the_target_name(
     explainability_service.store_api_key("wk-test")
     result = runner.invoke(app, ["explainability", "register", "--target", "prod west"])
     assert result.exit_code == 0, result.output
-    assert "register --target 'prod west' --role" in result.output
+    assert f"register --target {install_route.command_line(['prod west'])} --role" in result.output
     # and the printed command actually selects that target when followed
     followed = runner.invoke(
         app, ["explainability", "register", "--target", "prod west", "--role", "tester"]

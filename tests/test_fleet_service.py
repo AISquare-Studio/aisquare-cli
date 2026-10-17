@@ -17,7 +17,6 @@ import json
 import logging
 import os
 import re
-import shlex
 import shutil
 import socket
 import sqlite3
@@ -75,7 +74,7 @@ from aisquare.models import (
     TeamSession,
     TeamTask,
 )
-from aisquare.services import auto_mode, lifecycle
+from aisquare.services import auto_mode, install_route, lifecycle
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import project as project_service
@@ -17429,7 +17428,8 @@ def test_an_agent_at_the_trust_question_needs_the_human_until_it_is_answered(
 
     assert status.state == "attention"
     assert status.detail is not None and status.detail.startswith(TRUST_PROMPT)
-    assert f"aisquare accounts trust {shlex.quote(str(agent.cwd))}" in status.detail
+    trust = install_route.command_line(["aisquare", "accounts", "trust", str(agent.cwd)])
+    assert trust in status.detail
     assert fleet_service.status_of(agent).detail == status.detail
     # `fleet tell` files a board note instead of typing: Enter there picks "No, exit".
     told = fleet_service.tell(project, agent.label, "start on the task")
@@ -17574,7 +17574,8 @@ def test_spawn_never_types_its_prompt_into_the_trust_question(
     assert receipt.prompt_typed == "no"  # `Typed`: NOT typed, never "maybe" or "unsent"
     note = next(n for n in receipt.notes if "folder-trust question" in n)
     assert "NOT typed" in note
-    assert f"aisquare accounts trust {shlex.quote(str(receipt.agent.cwd))}" in note
+    trust = ["aisquare", "accounts", "trust", str(receipt.agent.cwd)]
+    assert install_route.command_line(trust) in note
     assert clock.now >= PROMPT_TIMEOUT, "waited for a human to answer it first"
 
 

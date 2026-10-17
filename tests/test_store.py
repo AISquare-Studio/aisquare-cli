@@ -2437,6 +2437,85 @@ def test_a_fleet_agents_launch_spec_round_trips_and_an_old_row_has_none(
     assert broken is not None and broken.launch_spec is None
 
 
+def _fleet_history(store: ContextStore, rows: int, *, projects: int = 1, labels: int = 7) -> None:
+    """``rows`` fleet rows over ``projects`` projects and ``labels`` labels each, a minute
+    apart, the newest of each label live: a fleet's spawns, restarts and switches, which
+    are never deleted."""
+    from datetime import timedelta
+
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    newest = {(f"prj_{i % projects}", f"coder-{i % labels}"): i for i in range(rows)}
+    store._conn.executemany(  # type: ignore[attr-defined]
+        "INSERT INTO fleet_agent (id, project_id, label, role, pane_id, cwd, created_at, "
+        "ended_at) VALUES (?, ?, ?, 'coder', '%1', '/w', ?, ?)",
+        [
+            (
+                f"agt_{i:06d}",
+                f"prj_{i % projects}",
+                f"coder-{i % labels}",
+                (start + timedelta(minutes=i)).isoformat(),
+                None
+                if newest[(f"prj_{i % projects}", f"coder-{i % labels}")] == i
+                else (start + timedelta(minutes=i, seconds=30)).isoformat(),
+            )
+            for i in range(rows)
+        ],
+    )
+
+
+def test_the_label_heads_are_every_live_row_and_each_labels_newest(store: ContextStore) -> None:
+    """``fleet_label_heads``: every live row, and the newest of each label, live or ended,
+    in every project, oldest first. A live row with a newer ended one of its label (a spawn
+    that failed after it) is both's, and so is a label all of whose rows ended."""
+    from datetime import timedelta
+
+    _fleet_history(store, 60, projects=3)
+    late = datetime(2026, 2, 1, tzinfo=UTC)
+    store._conn.executemany(  # type: ignore[attr-defined]
+        "INSERT INTO fleet_agent (id, project_id, label, role, pane_id, cwd, created_at, "
+        "ended_at) VALUES (?, ?, ?, 'coder', '%1', '/w', ?, ?)",
+        [
+            ("agt_failed", "prj_0", "coder-0", late.isoformat(), late.isoformat()),
+            ("agt_gone_1", "prj_1", "stopped", late.isoformat(), late.isoformat()),
+            ("agt_gone_2", "prj_1", "stopped", (late + timedelta(1)).isoformat(), late.isoformat()),
+        ],
+    )
+    every = store._conn.execute(  # type: ignore[attr-defined]
+        "SELECT id, project_id, label, created_at, ended_at FROM fleet_agent"
+    ).fetchall()
+    newest: dict[tuple[str, str], tuple[str, str]] = {}
+    for agent_id, project_id, label, created_at, _ended in every:
+        newest[(project_id, label)] = max(
+            newest.get((project_id, label), ("", "")), (created_at, agent_id)
+        )
+    expected = sorted(
+        (created_at, agent_id)
+        for agent_id, project_id, label, created_at, ended_at in every
+        if ended_at is None or newest[(project_id, label)] == (created_at, agent_id)
+    )
+
+    heads = store.fleet_label_heads()
+
+    assert [head.id for head in heads] == [agent_id for _created, agent_id in expected]
+    assert {"agt_failed", "agt_gone_2"} <= {head.id for head in heads}
+    assert "agt_gone_1" not in {head.id for head in heads}
+
+
+def test_the_label_heads_cost_grows_with_the_rows_not_their_square(store: ContextStore) -> None:
+    """Review of #259, round 37, 4/7: each label's newest was a correlated ``NOT EXISTS`` per
+    row, over the ``(project_id, created_at)`` index, which has no ``label``: quadratic in a
+    project's rows, 4.6 s at 20 000, on every ``project forget`` and ``prune`` and doctor's
+    capture-off line at each ``asq`` start. A window over the table is one pass and a
+    sort: four times the rows, a label for every five, cost about four times the steps,
+    not sixteen."""
+    _fleet_history(store, 500, labels=100)
+    small = _steps(store, store.fleet_label_heads)
+    store._conn.execute("DELETE FROM fleet_agent")  # type: ignore[attr-defined]
+    _fleet_history(store, 2000, labels=400)
+    large = _steps(store, store.fleet_label_heads)
+    assert large < small * 6, (small, large)
+
+
 def test_ui_state_is_a_key_value_memory(store: ContextStore) -> None:
     assert store.ui_state("fleet.selected") is None
     store.set_ui_state("fleet.selected", "project:prj_test")

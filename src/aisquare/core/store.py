@@ -3853,12 +3853,19 @@ class SqliteStore:
 
         The rows that may read a board again (``services.project.reading_rows``): a restart
         of a stopped one starts its replacement under the hub its launch recorded. Picked in
-        SQL: every spawn, restart and switch adds a row that is never deleted."""
+        SQL: every spawn, restart and switch adds a row that is never deleted.
+
+        Each label's newest by a window over the table, one pass and a sort. A correlated
+        ``NOT EXISTS`` asked for a newer row of the label per row, over an index with no
+        ``label``, and was quadratic in a project's rows: 4.6 s at 20 000, on every
+        ``project forget`` and ``prune`` and doctor's capture-off line at each ``asq`` start
+        (review of #259, round 37, 4/7). Two rows of a label stamped alike, which that
+        query gave both of, give the one of the greater id."""
         rows = self._conn.execute(
-            f"SELECT {self._fleet_agent_read} FROM fleet_agent "
-            "WHERE ended_at IS NULL OR NOT EXISTS (SELECT 1 FROM fleet_agent AS newer "
-            "WHERE newer.project_id = fleet_agent.project_id AND newer.label = fleet_agent.label "
-            "AND newer.created_at > fleet_agent.created_at) ORDER BY created_at, id"
+            f"SELECT {self._fleet_agent_read} FROM fleet_agent WHERE id IN ("
+            "SELECT id FROM (SELECT id, ended_at, ROW_NUMBER() OVER ("
+            "PARTITION BY project_id, label ORDER BY created_at DESC, id DESC) AS newest "
+            "FROM fleet_agent) WHERE ended_at IS NULL OR newest = 1) ORDER BY created_at, id"
         ).fetchall()
         return [_row_to_fleet_agent(row) for row in rows]
 

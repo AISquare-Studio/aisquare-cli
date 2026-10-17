@@ -148,6 +148,18 @@ def _resolved(path: Path) -> Path:
     return _resolved_dir(path)[0]
 
 
+def _resolved_or_spelled(path: Path) -> Path:
+    """:func:`_resolved` of ``path``; through a symlink loop, ``path`` as it is spelled, made
+    absolute. A stored root that became a loop is still the root registration resolved,
+    which doctor and ``ProjectBusyError`` print for ``project forget`` (``project.resolve``),
+    and a hub that became one still names a board (``orchestrator._hub_root``). One rule for
+    the two, which each spelled out (review of #259, round 43, 7/7)."""
+    try:
+        return _resolved(path)
+    except OSError:  # a symlink loop (ELOOP)
+        return Path(os.path.abspath(path))
+
+
 def _resolved_dir(path: Path) -> tuple[Path, bool]:
     """:func:`_resolved` of ``path``, and whether that is a directory (:func:`_is_dir`), from
     the one ``stat``: ``find_project_root`` asks both of its start, on every hook."""

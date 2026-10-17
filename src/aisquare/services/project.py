@@ -21,7 +21,7 @@ from aisquare.core.state_file import StateUnwritableError
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.workspace import (
     _is_dir,
-    _resolved,
+    _resolved_or_spelled,
     active_project,
     find_project_root,
     pin_project,
@@ -218,10 +218,7 @@ def resolve(ref: str) -> ProjectInfo:
             or any(sep in ref for sep in {"/", os.sep})
             or ref.startswith(".")
         ):
-            try:
-                root = _resolved(candidate)
-            except OSError:  # a symlink loop (ELOOP)
-                root = Path(os.path.abspath(candidate))
+            root = _resolved_or_spelled(candidate)
             found = store.get_project(project_id_for(root))
             if found is None and os.path.isdir(root):
                 with suppress(OSError):  # a checkout that cannot be asked

@@ -23,7 +23,7 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import orchestrator
+from aisquare.core import orchestrator, workspace
 from aisquare.core.store import store_session
 from aisquare.core.workspace import find_project_root, project_id_for, worktree_principal
 from aisquare.models import ProjectInfo
@@ -185,3 +185,31 @@ def test_a_worktree_whose_way_to_its_principal_loops_fails_no_prune(tmp_path: Pa
     plan = project_service.prune_candidates(missing=True, worktrees=True)
 
     assert worktree.id not in {candidate.project.id for candidate in plan}
+
+
+def test_a_root_and_a_hub_through_a_symlink_loop_are_read_by_one_rule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 43, 7/7: ``project.resolve`` and ``orchestrator._hub_root`` each
+    spelled out the loop's fallback, resolve or, through a loop, the path as spelled made
+    absolute. ``workspace._resolved_or_spelled`` is the one rule: a root that became a loop
+    and a hub set to it name one board, and no other module of the package spells it."""
+    import aisquare
+
+    looped = _registered(tmp_path / "looped")
+    _became_a_loop(looped)
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(looped.root))
+    plain = tmp_path / "plain"
+    plain.mkdir()
+
+    assert workspace._resolved_or_spelled(looped.root) == Path(os.path.abspath(looped.root))
+    assert workspace._resolved_or_spelled(plain) == plain.resolve()
+    assert project_service.resolve(str(looped.root)).id == looped.id
+    assert orchestrator.team_project(tmp_path).id == looped.id, "the hub names the same board"
+    package = Path(aisquare.__file__).parent
+    spelled = sorted(
+        path.relative_to(package).as_posix()
+        for path in package.rglob("*.py")
+        if "os.path.abspath(" in path.read_text(encoding="utf-8")
+    )
+    assert spelled == ["core/workspace.py"]

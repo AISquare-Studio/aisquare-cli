@@ -4962,6 +4962,35 @@ def test_a_reply_to_a_card_gone_from_the_feed_names_the_board_a_post_again_goes_
     assert noted == {p.id: [], hub.id: ["Postgres"]}, "where the refusal said it goes"
 
 
+def test_a_reply_to_a_card_gone_from_the_feed_names_a_board_no_agent_reads_by_its_nickname(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 36, 4/9: with no agent running in P, the 409's board was the
+    project ``asq note`` in P's root resolves (``_remote_board_project``), worked out from
+    the directory, with no nickname: "Post again to send it to p's board anyway" of the
+    project every list calls Billing, as the 409 says with an agent running. It is named by
+    its stored row."""
+    monkeypatch.delenv("AISQUARE_TEAM_HUB", raising=False)
+    with store_session() as store:
+        p = store.onboard_project(_rooted(tmp_path / "p"))
+        store.set_project_nickname(p.id, "Billing")
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path / "dist")
+    client = make_client(app)
+    assert unlock(client, runtime).status_code == 200
+    runtime.set_allow_write(True)
+    app.kit.lane_state["needs"] = RemoteNeedsWatcher(
+        app.kit, sources=remote_needs.live_needs_sources
+    )
+    reply = {"text": "Postgres", "kind": "note", "project": p.id, "to": "coder-1"}
+
+    gone = client.post(
+        f"{base(runtime)}/api/note", json={**reply, "needs_id": "ny_0000000000000000"}
+    )
+
+    assert (gone.status_code, gone.json()["error"]) == (409, "stale"), gone.text
+    assert gone.json()["board"] == "Billing", gone.json()
+
+
 def _hubbed_tasks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remote: str, *, end: str | None = None
 ) -> tuple[ProjectInfo, ProjectInfo, TeamTask]:

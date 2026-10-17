@@ -893,16 +893,23 @@ def _remote_card_board(target: ProjectInfo, needs_id: str, to: str | None) -> st
 def _remote_note_board_name(target: ProjectInfo, to: str | None) -> str | None:
     """The name of the board a note to ``to`` naming no card, row or session goes to
     (:func:`_remote_note_board`; with none, the one ``asq note`` in ``target``'s root
-    resolves, :func:`_remote_board_project`); ``None`` for a root that cannot be looked at."""
+    resolves, :func:`_remote_board_project`); ``None`` for a root that cannot be looked at.
+
+    Each by its stored row: the one worked out from the root carries no nickname, and the
+    409 said "p's board" of the project every list calls Billing, as it said with an agent
+    running (review of #259, round 36, 4/9)."""
     from aisquare.core.store import store_session
     from aisquare.services import project as project_service
+    from aisquare.services import team as team_service
 
     board = _remote_note_board(target, to)
     if board is None:
         try:
-            return project_service.display_name(_remote_board_project(target.root))
+            resolved = _remote_board_project(target.root)
         except OSError:
             return None
+        with store_session() as store:
+            return team_service._board_named(store, resolved).name
     with store_session() as store:
         found = store.get_project(board, include_forgotten=True)
     return project_service.display_name(found) if found is not None else board

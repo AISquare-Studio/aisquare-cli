@@ -658,7 +658,10 @@ def _why_stale(
     (``captured_older_than``), then a root no longer on disk (``missing``), then a worktree
     of another registered project (``worktrees``); what a reason was not asked for is not
     read. What the rules read of the store as a whole, each project's last activity and the
-    registered roots (of ``projects`` when the caller listed them), is read once here.
+    registered roots (of ``projects`` when the caller listed them), is read once: the roots on
+    the first worktree a principal is looked up for. Listed up front, every :func:`prune`
+    run under ``--worktrees``, which a plain prune asks, read every registration to re-read
+    the few candidates it was handed (review of #259, round 39, 6/9).
 
     The one place the rules are written: :func:`prune` asks them again of each candidate
     before any goes. Written out a second time there, inverted, the copies drifted, and a
@@ -666,10 +669,14 @@ def _why_stale(
     the plain prune asks for missing roots too (review of #259, round 38, 2/4 and 4/4)."""
     activity = store.project_activity() if captured_older_than is not None else {}
     cutoff = _captured_cutoff(captured_older_than)
-    by_root: dict[Path, ProjectInfo] = {}
-    if worktrees:
-        listed = store.list_projects(all=True) if projects is None else projects
-        by_root = {project.root: project for project in listed}
+    by_root: dict[Path, ProjectInfo] | None = None
+
+    def principal_at(root: Path) -> ProjectInfo | None:
+        nonlocal by_root
+        if by_root is None:
+            listed = store.list_projects(all=True) if projects is None else projects
+            by_root = {project.root: project for project in listed}
+        return by_root.get(root) or store.get_project(project_id_for(root))
 
     def why(project: ProjectInfo) -> PruneCandidate | None:
         if (
@@ -688,7 +695,7 @@ def _why_stale(
         principal_root = worktree_principal(project.root)
         if principal_root is None:
             return None
-        principal = by_root.get(principal_root) or store.get_project(project_id_for(principal_root))
+        principal = principal_at(principal_root)
         if principal is None or principal.id == project.id:
             return None
         return PruneCandidate(project=project, reason="worktree", principal=principal)

@@ -1674,6 +1674,48 @@ def test_a_prune_drops_a_worktree_whose_tree_went_while_the_prompt_sat_open(
     assert _listed(runner) == ({repo_id} if dropped else {repo_id, wt_id})
 
 
+@pytest.mark.parametrize(("candidate", "lists"), [("missing", 0), ("worktree", 1)])
+def test_a_prunes_run_lists_the_registrations_only_for_a_worktree_it_re_reads(
+    runner: CliRunner,
+    repo_and_worktree: tuple[Path, Path],
+    work_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    candidate: str,
+    lists: int,
+) -> None:
+    """Review of #259, round 39, 6/9: the run re-reads why each candidate is one by the plan's
+    rules (round 38, 4/4), which listed every registration (``list_projects(all=True)``,
+    captured rows too) for the worktree rule's roots up front: a full scan on each plain
+    prune, whose worktree rule is always asked, to re-read the few candidates it was handed.
+    The roots are listed on the first worktree a principal is looked up for, and once."""
+    from aisquare.core.store import SqliteStore
+    from aisquare.services import project as project_service
+
+    repo, worktree = repo_and_worktree
+    _register(runner, monkeypatch, repo)
+    if candidate == "worktree":
+        target = _register_worktree_as_its_own_project(worktree)
+    else:
+        target = _register(runner, monkeypatch, work_dir / "gone")
+        monkeypatch.chdir(work_dir)
+        shutil.rmtree(work_dir / "gone")
+    plan = project_service.prune_candidates(missing=True, worktrees=True)
+    assert [(c.project.id, c.reason) for c in plan] == [(target, candidate)], "the premise"
+    listed: list[dict[str, bool]] = []
+    real = SqliteStore.list_projects
+
+    def counted(self: SqliteStore, **kwargs: bool) -> list[ProjectInfo]:
+        listed.append(kwargs)
+        return real(self, **kwargs)
+
+    monkeypatch.setattr(SqliteStore, "list_projects", counted)
+
+    report = project_service.prune(plan, purge=False, missing=True, worktrees=True)
+
+    assert report.dropped == [target]
+    assert listed == [{"all": True}] * lists
+
+
 def test_a_worktrees_prune_says_a_worktree_whose_tree_went_is_kept_for_its_root_not_fresh(
     runner: CliRunner, repo_and_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:

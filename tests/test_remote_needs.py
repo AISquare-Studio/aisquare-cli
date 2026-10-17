@@ -4918,6 +4918,57 @@ def test_a_phones_reply_to_a_card_no_row_holds_is_posted_on_the_board_it_was_rea
     assert watcher.needs_items_now() == [], "answered where it was asked"
 
 
+@pytest.mark.parametrize("fails", [False, True], ids=["scans", "scan fails"])
+def test_a_reply_to_a_card_before_the_first_scan_scans_the_feed_first(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fails: bool
+) -> None:
+    """Review of #259, round 37, 1/7: a Reply to a card no row holds was looked up in the
+    feed as it was, and until the watcher's first scan after a (re)start the feed holds no
+    card: the Reply was a 409 ``stale``, the page dropped a card still open, and Post again
+    went to the board P's manager reads, which the asker never reads. ``needs/dismiss`` and
+    ``needs/answer`` scan a feed nothing has scanned; so does this. A scan that fails is a
+    503 ``unavailable``, and nothing is written."""
+    monkeypatch.delenv("AISQUARE_TEAM_HUB", raising=False)
+    with store_session() as store:
+        p = store.onboard_project(_rooted(tmp_path / "p"))
+        hub = _rooted(tmp_path / "hub")
+        store.ensure_project(hub)
+        _seat_up(store, _manager_of("p"), p, hub)
+        _seat_up(store, _Seat("p", "coder-1", asks=True, rowed=False), p, p)
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path / "dist")
+    client = make_client(app)
+    assert unlock(client, runtime).status_code == 200
+    runtime.set_allow_write(True)
+    (card,) = scan_needs_you(remote_needs.live_needs_sources(), now=datetime.now(UTC), dismissed=())
+
+    def sources() -> remote_needs.NeedsSources:
+        if fails:
+            raise OSError("the store is gone")
+        return remote_needs.live_needs_sources()
+
+    watcher = RemoteNeedsWatcher(app.kit, sources=sources)
+    app.kit.lane_state["needs"] = watcher
+    assert watcher.needs_scanned_at() is None, "a fresh start: nothing has scanned yet"
+    reply = {"text": "Postgres", "kind": "note", "project": p.id, "to": "coder-1"}
+
+    posted = client.post(f"{base(runtime)}/api/note", json={**reply, "needs_id": card.id})
+
+    with store_session() as store:
+        noted = {
+            board.id: [e.text for e in store.recent_events(board.id, limit=9) if e.kind == "note"]
+            for board in (p, hub)
+        }
+    if fails:
+        assert (posted.status_code, posted.json()["error"]) == (503, "unavailable"), posted.text
+        assert "the store is gone" in posted.json()["message"]
+        assert noted == {p.id: [], hub.id: []}
+    else:
+        assert posted.status_code == 200, posted.text
+        assert noted == {p.id: ["Postgres"], hub.id: []}, "on the board the card was read on"
+
+
 @pytest.mark.parametrize("to", ["coder-1", "manager"])
 def test_a_reply_to_a_card_gone_from_the_feed_names_the_board_a_post_again_goes_to(
     runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, to: str

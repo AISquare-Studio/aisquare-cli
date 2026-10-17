@@ -880,11 +880,22 @@ def _remote_card_board(target: ProjectInfo, needs_id: str, to: str | None) -> st
 
     Unnamed, that board was often not the one the card was read on, and Post again sent the
     note to it, which the asker never reads, while the page said "Posted on the board"
-    (round 35, 3/8): the page now says which board it posts on."""
+    (round 35, 3/8): the page now says which board it posts on.
+
+    A feed nothing has scanned yet is scanned first, as ``needs/dismiss`` and
+    ``needs/answer`` scan it (``needs_scan_for_request``), and a scan that fails is a 503
+    ``unavailable``. Read before it, the feed had no card at all for a few seconds after
+    Remote started: a Reply then was a 409 ``stale``, the page dropped a card still open,
+    and its Post again went to a board the asker may not read (round 37, 1/7)."""
     from aisquare.services import remote_needs
 
     kit = _WRITE_KIT.get()
-    found = None if kit is None else remote_needs._needs_watcher(kit).needs_lookup(needs_id)
+    watcher = None if kit is None else remote_needs._needs_watcher(kit)
+    if watcher is not None and watcher.needs_scanned_at() is None:
+        failed = watcher.needs_scan_for_request()
+        if failed is not None:
+            raise RequestError(503, "unavailable", str(failed))
+    found = None if watcher is None else watcher.needs_lookup(needs_id)
     item = None if found is None else found[0]
     if item is None or item.project_id != target.id or item.board is None:
         said = "that card is gone from the feed — nothing was posted (the 'needs_id' field)"

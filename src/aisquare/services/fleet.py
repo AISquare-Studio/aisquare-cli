@@ -7231,8 +7231,9 @@ def pause(project: ProjectInfo, *, session_ref: str | None = None) -> None:
     """Set the project's ``fleet-paused`` board signal — its manager spawns nothing while it
     is on.
 
-    On the board its newest manager row recorded, its checkout's and the one a spawn from
-    here gives (:func:`_pause_boards`), by the project's own name there
+    On the board its newest manager row recorded, the boards its live rows recorded, its
+    checkout's and the one a spawn from here gives (:func:`_pause_boards`), by the project's
+    own name there
     (:func:`_pause_signals`): under a hub the hub's board, where every other fleet project's
     manager reads its own project's pause, not this one."""
     _set_pause(project, "on", session_ref)
@@ -7356,9 +7357,11 @@ def _pause_boards(store: ContextStore, project: ProjectInfo, homes: Collection[s
     (:func:`_pause_where_on`), so a board no manager of the project reads any more needs
     none: set on every board any row ever recorded, ``fleet pause -P a`` put ``a``'s pause,
     and its resume the ``off``, in the next prompt of every agent on every hub ``a`` ever
-    ran under (round 32, 2/9). Only a manager reads the pause, so a coder's board is not
-    one. A ``SELECT`` each, so no row is built: every spawn, restart and switch adds a row that
-    is never deleted (round 26, 10/11).
+    ran under (round 32, 2/9). Only a manager reads the pause, so a board only a stopped
+    coder, or a manager long since replaced, recorded is not one; a live coder's is, where
+    the manager spawned next beside it reads (round 35, 8/8). A ``SELECT`` each, so no row
+    is built: every spawn, restart and switch adds a row that is never deleted (round 26,
+    10/11).
 
     A signal is the board's (docs/fleet.md, "Under a hub: one board, many fleet projects"),
     and the manager asks its own session's board, as its cycle line tells it to. Set, read

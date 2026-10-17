@@ -10154,6 +10154,32 @@ def test_a_pause_or_resume_on_a_damaged_store_is_not_told_to_try_again(
     assert "try again" not in told.stdout
 
 
+def test_where_a_pause_goes_is_said_with_the_live_rows_boards_wherever_it_is_said() -> None:
+    """Review of #259, round 35, 8/8: since round 34 (2/10) a pause goes on the boards a
+    project's live rows recorded, manager or not, but ``pause``, ``_pause_boards`` and the
+    two store reads it asks still said the old rule: a coder's board is not one, the live
+    rows' boards only while the project has no manager row, a pause besides its homes on the
+    manager's board alone. Someone who trusted them expected ``fleet pause`` to leave a live
+    coder's hub alone. Each says the live rows' boards, as docs/fleet.md does."""
+    said = {
+        name: " ".join((doc or "").split())
+        for name, doc in (
+            ("pause", fleet_service.pause.__doc__),
+            ("_pause_boards", fleet_service._pause_boards.__doc__),
+            ("fleet_agent_boards", SqliteStore.fleet_agent_boards.__doc__),
+            ("fleet_manager_board", SqliteStore.fleet_manager_board.__doc__),
+        )
+    }
+    assert "the boards its live rows recorded" in said["pause"], said["pause"]
+    assert "a live coder's is" in said["_pause_boards"]
+    assert "a coder's board is not one" not in said["_pause_boards"]
+    assert "while the project has no manager row" not in said["fleet_agent_boards"]
+    assert "besides its manager's and its homes" in said["fleet_agent_boards"]
+    assert "besides its homes and the boards its live rows recorded" in said["fleet_manager_board"]
+    docs = " ".join((Path(__file__).parents[1] / "docs" / "fleet.md").read_text().split())
+    assert "running or not, the boards its running agents recorded, and the ones a spawn" in docs
+
+
 def test_shutdown_reports_a_pause_signal_it_could_not_read_or_clear(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

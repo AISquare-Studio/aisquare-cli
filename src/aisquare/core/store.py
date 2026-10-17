@@ -3882,8 +3882,9 @@ class SqliteStore:
         sorted; ``[]`` before its first spawn.
 
         The boards a phone may reach for the project (``services.remote_server``'s
-        ``_remote_boards``); the live ones, those a pause goes to while the project has no
-        manager row (``services.fleet._pause_boards``). Distinct in SQL: every spawn, restart
+        ``_remote_boards``); the live ones, which a pause goes to besides its manager's and
+        its homes (``services.fleet._pause_boards``), whether the project ever had a manager
+        row or not. Distinct in SQL: every spawn, restart
         and switch adds a row that is never deleted, and :meth:`fleet_agents` builds them all.
         """
         clause = " AND ended_at IS NULL" if live_only else ""
@@ -3918,8 +3919,8 @@ class SqliteStore:
         its manager reads, or the one a ``restart`` of its last one hands the replacement
         (``services.fleet._board_and_hub``); ``None`` before its first manager.
 
-        Where a pause is set besides its homes (``services.fleet._pause_boards``). Picked in
-        SQL, as :meth:`fleet_board` is.
+        Where a pause is set besides its homes and the boards its live rows recorded
+        (``services.fleet._pause_boards``). Picked in SQL, as :meth:`fleet_board` is.
         """
         row = self._conn.execute(
             f"SELECT {self._fleet_agent_board} AS board FROM fleet_agent "

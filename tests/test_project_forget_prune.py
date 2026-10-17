@@ -888,6 +888,35 @@ def test_forget_of_a_path_it_may_not_search_forgets_or_refuses_it_with_no_traceb
         assert _json(result.stdout) == {"error": "not_found", "ref": ref}
 
 
+def test_every_surface_names_a_forget_through_one_builder(tmp_path: Path) -> None:
+    """Review of #259, round 42, 8/11: a prune's root-gone hint, ``BoardReader.frees`` (which
+    ``ProjectBusyError`` words) and doctor's capture-off line each built ``aisquare project
+    forget <root>`` by hand, beside ``onboard_command``, which exists so that every surface
+    quotes a root by one rule (round 20). ``forget_command`` builds it, ``--purge`` before
+    the root, and no other module spells the command."""
+    import aisquare
+    from aisquare.services import install_route
+    from aisquare.services import project as project_service
+
+    root = tmp_path / "my app"
+    for purge, flags in ((False, []), (True, ["--purge"])):
+        line = project_service.forget_command(root, purge=purge)
+        assert install_route.split_line(line) == [
+            "aisquare",
+            "project",
+            "forget",
+            *flags,
+            str(root),
+        ]
+    package = Path(aisquare.__file__).parent
+    spelled = sorted(
+        path.relative_to(package).as_posix()
+        for path in package.rglob("*.py")
+        if '"project", "forget"' in path.read_text(encoding="utf-8")
+    )
+    assert spelled == ["services/project.py"]
+
+
 def test_prune_with_nothing_to_drop_says_so(runner: CliRunner) -> None:
     result = runner.invoke(app, ["project", "prune"])
     assert result.exit_code == 0, result.output

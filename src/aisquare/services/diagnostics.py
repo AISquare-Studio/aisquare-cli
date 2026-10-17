@@ -1555,9 +1555,7 @@ def _left_from_before_capture(
         # Each row's own, every row, as the stop below (review of #259, round 22): "aisquare
         # project forget <directory>, for each" beside names shown by directory gave two rows
         # called scratch no directory to pass, and a fourth row none at all.
-        forgets = [
-            install_route.command_line(["aisquare", "project", "forget", str(p.root)]) for p in kept
-        ]
+        forgets = [project_service.forget_command(p.root) for p in kept]
         drop = f"drop it with {forgets[0]}" if one else f"drop them ({'; '.join(forgets)})"
         which = (
             f"{len(kept)} more"

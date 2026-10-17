@@ -497,14 +497,10 @@ def emit_prune(report: ProjectPruneReport) -> None:
         # deletes each one's entries, prompts and data directory (round 41, 5/6). With this
         # run's --purge: a plain forget only forgets them, and nothing lists a forgotten row
         # to purge it after (round 40, 2/6).
-        from aisquare.services import install_route  # lazy: see project_for_ref
+        from aisquare.services.project import forget_command  # lazy: see project_for_ref
 
         roots = {candidate.project.id: candidate.project.root for candidate in report.candidates}
-        purge = ["--purge"] if report.purged else []
-        forgets = [
-            install_route.command_line(["aisquare", "project", "forget", *purge, str(roots[gone])])
-            for gone in report.root_gone
-        ]
+        forgets = [forget_command(roots[gone], purge=report.purged) for gone in report.root_gone]
         drop = f"drop it: {forgets[0]}" if len(forgets) == 1 else f"drop them: {'; '.join(forgets)}"
         console.print(
             f"  kept {len(report.root_gone)} whose root went since the plan, which this prune "

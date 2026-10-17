@@ -119,6 +119,14 @@ def onboard_command(root: Path) -> str:
     return install_route.command_line(["aisquare", "project", "onboard", str(root)])
 
 
+def forget_command(root: Path, *, purge: bool = False) -> str:
+    """``aisquare project forget [--purge] <root>``, quoted for this shell, as
+    :func:`onboard_command` names an add: a prune's root-gone hint, :meth:`BoardReader.frees`
+    and doctor's capture-off line each built it by hand (review of #259, round 42, 8/11)."""
+    purged = ["--purge"] if purge else []
+    return install_route.command_line(["aisquare", "project", "forget", *purged, str(root)])
+
+
 class NotAdded(RuntimeError):
     """A deliberate action needs a project row, capture is off, and nobody added this one."""
 
@@ -269,9 +277,7 @@ class BoardReader(NamedTuple):
         return Frees(
             onboard=onboard_command(self.project.root) if self.forgotten else None,
             stop=fleet_command("stop", self.project) + " <label>" if self.has_live else None,
-            forget=install_route.command_line(
-                ["aisquare", "project", "forget", str(self.project.root)]
-            ),
+            forget=forget_command(self.project.root),
         )
 
 

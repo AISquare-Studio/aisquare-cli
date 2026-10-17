@@ -10759,6 +10759,52 @@ def test_a_squash_merged_branch_goes_where_a_top_level_path_is_named_like_the_de
     assert _git("branch", "--list", branch, cwd=project.root) == ""
 
 
+def test_a_reap_with_every_recorded_branch_swept_asks_no_tree_about_branches(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 35, 5/8: round 34 asked every tree what it has out or is
+    rebasing (``git worktree list``, up to four state files a tree) before the sweep's early
+    return. Ended rows are kept for good, so once a project's merged branches were swept,
+    every later reap asked them all for nothing, a live coder's own ``fleet/…`` branch
+    keeping the listing from coming back empty. With no recorded branch left, the sweep asks
+    neither ``--merged`` nor the trees."""
+    _remote(project, tmp_path)
+    agent = fleet_service.spawn(project, "coder", label="coder-done").agent
+    _commit(agent.cwd, "done.txt")
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=agent.cwd)
+    _git("push", "-q", "origin", "HEAD:feat/done", cwd=agent.cwd)
+    fleet_service.stop(project, agent.label, force=True)
+    _git("merge", "-q", "--ff-only", branch, cwd=project.root)
+    assert fleet_service.reap(project).branches_deleted == [(project.root, branch)]
+    fleet_service.spawn(project, "coder", label="coder-live")  # a fleet/… branch of its own
+    asked: list[Path] = []
+    real = fleet_service._branches_in_use
+
+    def counted(root: Path, common: Path) -> set[str] | None:
+        asked.append(root)
+        return real(root, common)
+
+    monkeypatch.setattr(fleet_service, "_branches_in_use", counted)
+    gits: list[tuple[str, ...]] = []
+    real_git = fleet_service._git
+
+    def counted_git(cwd: Path, *args: str) -> object:
+        gits.append(args)
+        return real_git(cwd, *args)
+
+    monkeypatch.setattr(fleet_service, "_git", counted_git)
+
+    again = fleet_service.reap(project)
+
+    assert again.branches_deleted == [] and again.branches_kept == []
+    assert asked == [], "no recorded branch left to judge"
+    assert not any(arg.startswith("--merged=") for args in gits for arg in args), gits
+
+
 def test_a_kept_branch_costs_a_reap_one_git_call_pushed_and_none_unpushed(
     tmux: FakeTmux,
     claude_on_path: Path,

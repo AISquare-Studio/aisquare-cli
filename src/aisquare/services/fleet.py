@@ -1741,12 +1741,18 @@ def _sweep_fleet_branches(
     }
     if not recorded:
         return
-    every = _fleet_branches(root)
-    merged = _fleet_branches(root, f"--merged={default}")
-    out = _branches_in_use(root, common)
-    if not every or merged is None or out is None:
+    # Of the recorded ones, those still there: ended rows are kept for good, so `recorded`
+    # is never empty again once a project ran a coder, and with them all swept, the trees
+    # were asked (`git worktree list` and their state files) on every reap for nothing
+    # (review of #259, round 35, 5/8).
+    every = {b: tip for b, tip in (_fleet_branches(root) or {}).items() if b in recorded}
+    if not every:
         return
-    asked = {b: tip for b, tip in every.items() if b in recorded and b not in out}
+    merged = _fleet_branches(root, f"--merged={default}")
+    out = None if merged is None else _branches_in_use(root, common)
+    if merged is None or out is None:
+        return
+    asked = {b: tip for b, tip in every.items() if b not in out}
     squashed = _squashed(root, {b: tip for b, tip in asked.items() if b not in merged}, default)
     done: list[str] = []
     for branch in asked:

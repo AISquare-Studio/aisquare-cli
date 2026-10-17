@@ -5750,6 +5750,44 @@ def test_a_080_row_a_restart_moves_to_the_checkouts_board_holds_the_checkout_aga
         assert store.get_project(project.id) is not None, "not forgotten"
 
 
+def test_a_080_row_that_shows_it_read_its_own_board_is_filed_without_a_git_call(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 39, 1/9: the rows that hold a board worked out each 0.8.0 row's
+    checkout (a ``git`` call) before asking the store whether the row read its own board,
+    and a row that did keeps it whatever the checkout is. Every 0.8.0 row's session
+    registered on its project's board, so each ``project forget``, prune and ``asq`` start
+    ran ``git`` once a project. A session registered on the board, or a task on it, says
+    so: no ``git``."""
+    from aisquare.core import orchestrator
+
+    below = _project_below(project)
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(below.root))
+    task = _add_task(below, "api's own task")
+    tasked = _coder(below, task_id=task.id)
+    monkeypatch.delenv("AISQUARE_TEAM_HUB")
+    registered = _coder(project)
+    _with_transcript(registered, None)  # its session, registered on its project's board
+    for each in (registered, tasked):
+        _as_080_left_it(each)
+    asked: list[Path | None] = []
+    real = orchestrator.directory_project
+
+    def counted(cwd: Path | None = None) -> ProjectInfo:
+        asked.append(cwd)
+        return real(cwd)
+
+    monkeypatch.setattr(orchestrator, "directory_project", counted)
+    with store_session() as store:
+        rows = project_service.reading_rows(store)
+
+    assert {board: [row.id for row in theirs] for board, theirs in rows.items()} == {
+        project.id: [registered.id],
+        below.id: [tasked.id],
+    }
+    assert asked == [], "the store said: no git"
+
+
 @pytest.mark.parametrize("verb", ["restart", "switch"])
 def test_a_replacement_that_could_not_take_the_task_is_refused_before_the_stop(
     tmux: FakeTmux,

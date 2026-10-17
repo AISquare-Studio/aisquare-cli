@@ -2487,21 +2487,25 @@ def restart_board(store: ContextStore, agent: FleetAgent, checkouts: dict[str, s
     ``checkouts`` keeps each project's checkout (a ``git`` call) as it is worked out, for a
     caller asking of every row (``project.reading_rows``). Filed under the row's own board, a
     row that read ``repo``'s held ``repo/api``'s instead, and ``project forget repo`` was not
-    refused, though a restart of it brought ``repo`` back (review of #259, round 38, 3/4)."""
+    refused, though a restart of it brought ``repo`` back (review of #259, round 38, 3/4).
+
+    The store is asked first: a row that read its own board keeps it whatever the checkout
+    is. Asked after the checkout, every 0.8.0 row, whose session registered on its own
+    project's board, cost a ``git`` call a project on each ``project forget``, prune and
+    ``asq`` start (round 39, 1/9)."""
     board = _board_of_row(agent)
     spec = agent.launch_spec
     if board != agent.project_id or (spec is not None and spec.hub is not None):
+        return board
+    session = store.get_session(agent.session_id) if agent.session_id else None
+    if _read_its_own_board(store, agent, session):
         return board
     if board not in checkouts:
         project = store.get_project(board, include_forgotten=True)
         checkouts[board] = (
             board if project is None else orchestrator.directory_project(project.root).id
         )
-    checkout = checkouts[board]
-    if checkout == board:
-        return board
-    session = store.get_session(agent.session_id) if agent.session_id else None
-    return board if _read_its_own_board(store, agent, session) else checkout
+    return checkouts[board]
 
 
 def _task_for(store: ContextStore, board_id: str, task_id: str | None) -> TeamTask | None:

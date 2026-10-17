@@ -162,7 +162,8 @@ def _resolved_or_spelled(path: Path) -> Path:
 
 def _resolved_dir(path: Path) -> tuple[Path, bool]:
     """:func:`_resolved` of ``path``, and whether that is a directory (:func:`_is_dir`), from
-    the one ``stat``: ``find_project_root`` asks both of its start, on every hook."""
+    the one ``stat``: ``find_project_root`` asks both of its start, on every hook. A start
+    that is gone is asked whether it is below a loop (:func:`_below_a_loop`)."""
     try:
         resolved = path.resolve()
     except RuntimeError as exc:
@@ -170,10 +171,28 @@ def _resolved_dir(path: Path) -> tuple[Path, bool]:
     try:
         mode = os.stat(resolved).st_mode
     except OSError as exc:
-        if _loops(exc):
+        if _loops(exc) or (_gone(exc) and _below_a_loop(resolved)):
             raise OSError(errno.ELOOP, os.strerror(errno.ELOOP), str(path)) from exc
         return resolved, not _gone(exc)
     return resolved, stat.S_ISDIR(mode)
+
+
+def _below_a_loop(path: Path) -> bool:
+    """Whether the nearest folder above ``path``, which ``stat`` calls gone, that ``stat``
+    answers for is a symlink loop. Windows says a path below a loop is not found, where POSIX
+    says ``ELOOP`` of it, and ``find_project_root`` took it there for a gone root of its own
+    rather than raising, as it does for the loop itself (review of #259, round 43, Windows
+    CI)."""
+    for parent in path.parents:
+        try:
+            os.stat(parent)
+        except OSError as exc:
+            if _loops(exc):
+                return True
+            if _gone(exc):
+                continue
+        return False
+    return False
 
 
 def git_common_root(start: Path) -> Path | None:

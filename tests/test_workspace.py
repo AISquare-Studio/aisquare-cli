@@ -111,6 +111,38 @@ def test_a_windows_symlink_loop_is_gone_to_every_stat_of_a_root_or_marker(
     assert workspace._is_dir(tmp_path / "root") is False
 
 
+def test_a_path_windows_calls_not_found_below_a_symlink_loop_raises_as_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 43, Windows CI: a path below a loop is ``ELOOP`` to POSIX's
+    ``stat``, and not found to Windows', where ``find_project_root`` took it for a gone root
+    of its own rather than raising, as it does for the loop itself. A start that is gone is
+    asked whether the nearest folder above it that answers is a loop."""
+    loop = tmp_path / "loop"
+    below = loop / "below"
+
+    class Windows:
+        """``os`` as the lookup sees it, with Windows' answers for a loop and a path below."""
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(os, name)
+
+        def stat(self, path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+            if Path(path) == loop:
+                raise _WindowsLoop(errno.EINVAL, "cannot be resolved by the system", str(path))
+            if Path(path) in {below, below / "deeper"}:
+                raise FileNotFoundError(errno.ENOENT, "The system cannot find the path", str(path))
+            return os.stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(workspace, "os", Windows())
+
+    for start in (below, below / "deeper"):
+        with pytest.raises(OSError) as raised:
+            find_project_root(start)
+        assert raised.value.errno == errno.ELOOP, start
+    assert find_project_root(tmp_path / "gone") == (tmp_path / "gone").resolve(), "no loop"
+
+
 def test_a_checkout_is_looked_up_with_one_stat_of_its_start_and_none_of_gits_answers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -844,6 +844,14 @@ class PruneCandidate(BaseModel):
     """For a ``worktree`` candidate, the registered project it is a worktree of."""
     live_agents: int = 0
     """Live fleet agents on the registration. Non-zero means prune keeps it."""
+    read_by: ProjectInfo | None = None
+    """Another project whose fleet agents read this registration's board, as a hub's
+    (``project forget`` refuses it too). Set means prune keeps it."""
+
+    @property
+    def held(self) -> bool:
+        """Whether prune keeps it: live agents of its own, or another project's on its board."""
+        return bool(self.live_agents) or self.read_by is not None
 
 
 class ProjectPruneReport(BaseModel):
@@ -853,7 +861,7 @@ class ProjectPruneReport(BaseModel):
     dropped: list[str] = Field(default_factory=list)
     """Ids dropped. Empty on a dry run."""
     kept: list[PruneCandidate] = Field(default_factory=list)
-    """Candidates NOT dropped because they have live fleet agents."""
+    """Candidates NOT dropped because fleet agents hold them (:attr:`PruneCandidate.held`)."""
     dry_run: bool = True
     purged: bool = False
     active: ProjectInfo | None = None

@@ -430,7 +430,9 @@ def emit_prune(report: ProjectPruneReport) -> None:
         why: str = candidate.reason
         if candidate.principal is not None:
             why = f"worktree of {_project_name(candidate.principal)}"
-        if project.id in kept:
+        if project.id in kept and candidate.read_by is not None:
+            why += f" (kept: the board {_project_name(candidate.read_by)}'s fleet agents read)"
+        elif project.id in kept:
             why += f" (kept: {candidate.live_agents} live agent(s))"
         marker = "" if report.dry_run else ("·" if project.id in kept else "✓")
         table.add_row(
@@ -443,8 +445,16 @@ def emit_prune(report: ProjectPruneReport) -> None:
     noun = "registration" if count == 1 else "registrations"
     what = "purged" if report.purged else "forgot"
     console.print(f"✓ {what} {count} {noun}")
-    if report.kept:
-        console.print(f"  kept {len(report.kept)} with live fleet agents — stop or reap them first")
+    hubs = sum(candidate.read_by is not None for candidate in report.kept)
+    if len(report.kept) > hubs:
+        console.print(
+            f"  kept {len(report.kept) - hubs} with live fleet agents — stop or reap them first"
+        )
+    if hubs:
+        console.print(
+            f"  kept {hubs} whose board another project's fleet agents read, as a hub's — "
+            "its row names that project"
+        )
     if not report.purged and count:
         console.print(
             "  their context entries, prompt history and board rows stay in the store, hidden "

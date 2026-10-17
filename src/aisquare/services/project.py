@@ -7,6 +7,7 @@ import os
 import shutil
 import stat
 import subprocess
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -236,6 +237,7 @@ class ProjectBusyError(Exception):
         )
         self.project = project
         self.agents = agents
+        self.reader = reader
 
 
 def display_name(project: ProjectInfo) -> str:
@@ -312,14 +314,12 @@ def forget_project(project: ProjectInfo, *, purge: bool = False) -> ProjectForge
     (:func:`_board_readers`): a restart or a switch of one gives its replacement that hub,
     whose ``launch`` adds the board it joins (``team on``), and a hub forgotten to tidy the
     list came back on it with nothing to say why (review of #259, round 32, 3/9). Not
-    added, with ``[projects] capture`` off, the board refuses every write of theirs."""
+    added, with ``[projects] capture`` off, the board refuses every write of theirs. Both
+    refusals are :func:`_busy`'s, which :func:`prune` asks too."""
     with store_session() as store:
-        live = store.fleet_agents(project.id, live_only=True)
-        if live:
-            raise ProjectBusyError(project, live)
-        reader, reading = _board_readers(store, project)
-        if reader is not None:
-            raise ProjectBusyError(project, reading, reader=reader)
+        busy = _busy(store, project)
+        if busy is not None:
+            raise busy
         was_active = active_project(store).id == project.id
         removed = store.purge_project(project.id) if purge else {}
         if not purge:
@@ -337,14 +337,43 @@ def forget_project(project: ProjectInfo, *, purge: bool = False) -> ProjectForge
     )
 
 
+def _busy(
+    store: ContextStore, project: ProjectInfo, readers: Sequence[FleetAgent] | None = None
+) -> ProjectBusyError | None:
+    """Why ``project`` may not be forgotten now, or ``None``: its own live fleet rows, else
+    another project's that read its board (:func:`_board_readers`, of ``readers`` when the
+    caller read them once for many projects, :func:`_reading_rows`).
+
+    The one guard :func:`forget_project` (``project forget``, Remote's ``project/remove``)
+    and :func:`prune` ask. Asked only in ``forget``, ``prune --missing --purge`` of a hub
+    whose folder held no code purged the board another project's live agents were claiming
+    tasks on, and a prune without ``--purge`` tombstoned it, which ``forget`` refuses
+    (review of #259, round 33, 2/10)."""
+    live = store.fleet_agents(project.id, live_only=True)
+    if live:
+        return ProjectBusyError(project, live)
+    reader, reading = _board_readers(store, project, readers)
+    if reader is not None:
+        return ProjectBusyError(project, reading, reader=reader)
+    return None
+
+
+def _reading_rows(store: ContextStore) -> list[FleetAgent]:
+    """The fleet rows, in every project, whose recorded board holds a project
+    (:func:`_board_readers`): the live ones."""
+    return store.live_fleet_agents()
+
+
 def _board_readers(
-    store: ContextStore, project: ProjectInfo
+    store: ContextStore, project: ProjectInfo, readers: Sequence[FleetAgent] | None = None
 ) -> tuple[ProjectInfo | None, list[FleetAgent]]:
-    """The first other project whose live fleet rows recorded ``project``'s board, as a hub's
-    (``FleetAgent.board``), and those rows; ``(None, [])`` for none."""
+    """The first other project whose fleet rows that hold a board (:func:`_reading_rows`, or
+    ``readers``) recorded ``project``'s, as a hub's (``FleetAgent.board``), and those rows;
+    ``(None, [])`` for none."""
+    rows = _reading_rows(store) if readers is None else readers
     reading = [
         row
-        for row in store.live_fleet_agents()
+        for row in rows
         if row.project_id != project.id and (row.board or row.project_id) == project.id
     ]
     if not reading:
@@ -394,15 +423,17 @@ def prune_candidates(
             else None
         )
         found: list[PruneCandidate] = []
+        readers: list[FleetAgent] | None = None  # read once, for the first candidate
 
         def candidate(
             project: ProjectInfo, reason: PruneReason, principal: ProjectInfo | None = None
         ) -> None:
-            live = len(store.fleet_agents(project.id, live_only=True))
+            nonlocal readers
+            if readers is None:
+                readers = _reading_rows(store)
+            busy = _busy(store, project, readers)
             found.append(
-                PruneCandidate(
-                    project=project, reason=reason, principal=principal, live_agents=live
-                )
+                _held(PruneCandidate(project=project, reason=reason, principal=principal), busy)
             )
 
         for project in projects:
@@ -456,11 +487,21 @@ def _is_dir(root: Path) -> bool:
         return exc.errno not in _GONE
 
 
+def _held(candidate: PruneCandidate, busy: ProjectBusyError | None) -> PruneCandidate:
+    """``candidate`` with what holds it (:func:`_busy`): its live agents, or the project whose
+    agents read its board; as it was when nothing does."""
+    if busy is None:
+        return candidate.model_copy(update={"live_agents": 0, "read_by": None})
+    if busy.reader is not None:
+        return candidate.model_copy(update={"live_agents": 0, "read_by": busy.reader})
+    return candidate.model_copy(update={"live_agents": len(busy.agents), "read_by": None})
+
+
 def prune_plan(candidates: list[PruneCandidate], *, purge: bool) -> ProjectPruneReport:
     """The dry-run report: what ``prune`` would drop and what it would keep."""
     return ProjectPruneReport(
         candidates=candidates,
-        kept=[candidate for candidate in candidates if candidate.live_agents],
+        kept=[candidate for candidate in candidates if candidate.held],
         dry_run=True,
         purged=purge,
     )
@@ -469,22 +510,24 @@ def prune_plan(candidates: list[PruneCandidate], *, purge: bool) -> ProjectPrune
 def prune(candidates: list[PruneCandidate], *, purge: bool) -> ProjectPruneReport:
     """Drop the candidates — the same forget as :func:`forget`, per registration.
 
-    A candidate with live fleet agents is KEPT and reported rather than failing
+    A candidate :func:`forget` refuses (:func:`_busy`: its live fleet agents, or another
+    project's that read its board, as a hub's) is KEPT and reported rather than failing
     the whole sweep: the point of a prune over hundreds of registrations is
-    that one busy project does not stop the other three hundred. Liveness is
+    that one busy project does not stop the other three hundred. What holds it is
     re-read here, not trusted from the plan, since a prompt may have sat open.
     """
     dropped: list[str] = []
     kept: list[PruneCandidate] = []
     with store_session() as store:
         active_id = active_project(store).id
+        readers = _reading_rows(store)
         for candidate in candidates:
             project_id = candidate.project.id
             if store.get_project(project_id) is None:
                 continue  # already gone since the plan was made
-            live = len(store.fleet_agents(project_id, live_only=True))
-            if live:
-                kept.append(candidate.model_copy(update={"live_agents": live}))
+            held = _held(candidate, _busy(store, candidate.project, readers))
+            if held.held:
+                kept.append(held)
                 continue
             if purge:
                 store.purge_project(project_id)

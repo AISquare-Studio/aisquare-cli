@@ -764,6 +764,49 @@ def test_prune_keeps_a_candidate_with_live_agents_and_says_so(
     del gone
 
 
+@pytest.mark.parametrize("purge", [[], ["--purge"]], ids=["forget", "purge"])
+def test_prune_keeps_a_hub_whose_board_another_projects_agents_read(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch, purge: list[str]
+) -> None:
+    """Review of #259, round 33, 2/10: round 32's refusal of a board another project's live
+    agents read was in ``project forget`` alone. ``prune`` asked only for the candidate's own
+    live rows: a hub whose folder held no code, deleted, was ``missing``, and ``prune
+    --missing --purge --yes`` deleted the tasks, events and sessions of the board beta's
+    manager and coders were claiming tasks on. Without ``--purge`` it was tombstoned, as
+    ``forget`` refuses. Both ask one guard, so a hub is kept and named, plan and sweep."""
+    hub = _register(runner, monkeypatch, work_dir / "hub")
+    beta = _register(runner, monkeypatch, work_dir / "beta")
+    gone = _register(runner, monkeypatch, work_dir / "gone")
+    monkeypatch.chdir(work_dir)
+    shutil.rmtree(work_dir / "hub")
+    shutil.rmtree(work_dir / "gone")
+    with store_session() as store:
+        store.upsert_fleet_agent(_agent(beta, "manager").model_copy(update={"board": hub}))
+        now = datetime.now(tz=UTC)
+        store.upsert_task(
+            TeamTask(
+                id=new_task_id(), project_id=hub, key="t1", title="beta's work",
+                created_at=now, updated_at=now,
+            )
+        )  # fmt: skip
+
+    plan = runner.invoke(app, ["--json", "project", "prune", "--missing", *purge])
+    (kept,) = _json(plan.stdout)["kept"]
+    assert (kept["project"]["id"], kept["read_by"]["id"], kept["live_agents"]) == (hub, beta, 0)
+    result = runner.invoke(app, ["project", "prune", "--missing", "--yes", *purge])
+
+    assert result.exit_code == 0, result.output
+    said = " ".join(result.stdout.split())
+    assert "missing (kept: the board beta's fleet agents" in said, said  # cut to the width
+    assert "kept 1 whose board another project's fleet agents read, as a hub's" in said
+    assert _listed(runner) == {hub, beta}
+    with store_session() as store:
+        assert [t.title for t in store.team_tasks(hub)] == ["beta's work"]
+        assert (store.get_project(gone, include_forgotten=True) is None) == bool(purge)
+    forget = runner.invoke(app, ["--json", "project", "forget", hub, *purge])
+    assert _json(forget.stdout) == {"error": "project_busy", "ref": hub}, "the same guard"
+
+
 def test_prune_moves_the_pin_when_it_drops_the_active_project(
     runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

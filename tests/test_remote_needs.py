@@ -4991,6 +4991,38 @@ def test_a_reply_to_a_card_gone_from_the_feed_names_a_board_no_agent_reads_by_it
     assert gone.json()["board"] == "Billing", gone.json()
 
 
+@pytest.mark.parametrize("end", [None, "exit"], ids=["running", "no agent running"])
+def test_the_board_a_stale_reply_names_is_resolved_and_named_in_one_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, end: str | None
+) -> None:
+    """Review of #259, round 36, 9/9: the 409's board name was looked up in a store of its
+    own, by a lookup that wrote ``team._board_of`` out again, right after the one
+    ``_remote_note_board`` closed. Both are one store now, and the name is ``_board_of``'s,
+    as the board writes name a board, by its nickname: the manager's hub with it running,
+    else P's own board, the one ``asq note`` in P's root resolves (4/9)."""
+    from aisquare.core import store as core_store
+    from aisquare.services import remote_server
+
+    p, hub, _ = _hubbed_tasks(tmp_path, monkeypatch, "none", end=end)
+    with store_session() as store:
+        store.set_project_nickname(p.id, "Billing")
+        store.set_project_nickname(hub.id, "Tools")
+    opens = 0
+    real_open = core_store.open_store
+
+    def counting_open() -> Any:
+        nonlocal opens
+        opens += 1
+        return real_open()
+
+    monkeypatch.setattr(core_store, "open_store", counting_open)
+
+    named = remote_server._remote_note_board_name(p, "manager")
+
+    assert named == ("Tools" if end is None else "Billing")
+    assert opens == 1, f"one store, not {opens}"
+
+
 def _hubbed_tasks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remote: str, *, end: str | None = None
 ) -> tuple[ProjectInfo, ProjectInfo, TeamTask]:

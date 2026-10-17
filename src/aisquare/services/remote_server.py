@@ -718,7 +718,9 @@ def _remote_recorded_board(
     return store.get_project(recorded, include_forgotten=True)
 
 
-def _remote_note_board(project: ProjectInfo, to: str | None) -> str | None:
+def _remote_note_board(
+    project: ProjectInfo, to: str | None, store: ContextStore | None = None
+) -> str | None:
     """The board a note naming no agent row or session goes to: with ``to`` the label of one
     of ``project``'s running agents, the board that row recorded (``fleet._board_of_row``),
     as ``fleet tell`` files its note there (``fleet._file_note``); else the Board tab's
@@ -731,15 +733,17 @@ def _remote_note_board(project: ProjectInfo, to: str | None) -> str | None:
 
     The label's board is ``fleet tell``'s (``fleet._note_board``), and both are looked up in
     one store: a store each, a note to a role opened two before ``add_note`` opened its own
-    (round 31, 6/7)."""
+    (round 31, 6/7). Through ``store`` when the caller holds one open, else its own."""
     from aisquare.core.store import store_session
     from aisquare.services.fleet import _note_board
 
-    with store_session() as store:
-        addressed = None if to is None else _note_board(store, project, to)
-        if addressed is not None:
-            return addressed
-        recorded = _remote_recorded_board(project, store)
+    if store is None:
+        with store_session() as opened:
+            return _remote_note_board(project, to, opened)
+    addressed = None if to is None else _note_board(store, project, to)
+    if addressed is not None:
+        return addressed
+    recorded = _remote_recorded_board(project, store)
     return None if recorded is None else recorded.id
 
 
@@ -897,22 +901,21 @@ def _remote_note_board_name(target: ProjectInfo, to: str | None) -> str | None:
 
     Each by its stored row: the one worked out from the root carries no nickname, and the
     409 said "p's board" of the project every list calls Billing, as it said with an agent
-    running (review of #259, round 36, 4/9)."""
+    running (review of #259, round 36, 4/9). Resolved and named in one store, by the
+    helpers the board writes name a board with (``team._board_of``, ``team._board_named``):
+    its own lookup, in a second store, wrote ``_board_of`` out again (round 36, 9/9)."""
     from aisquare.core.store import store_session
-    from aisquare.services import project as project_service
     from aisquare.services import team as team_service
 
-    board = _remote_note_board(target, to)
-    if board is None:
+    with store_session() as store:
+        board = _remote_note_board(target, to, store)
+        if board is not None:
+            return team_service._board_of(store, board).name
         try:
             resolved = _remote_board_project(target.root)
         except OSError:
             return None
-        with store_session() as store:
-            return team_service._board_named(store, resolved).name
-    with store_session() as store:
-        found = store.get_project(board, include_forgotten=True)
-    return project_service.display_name(found) if found is not None else board
+        return team_service._board_named(store, resolved).name
 
 
 def _remote_number_board(store: ContextStore, session: str | None, project: str | None) -> str:

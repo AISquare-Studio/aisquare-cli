@@ -285,6 +285,59 @@ def test_forget_refuses_a_hub_a_restart_of_another_projects_stopped_agent_reads_
     assert _listed(runner) == set()
 
 
+def test_forget_of_a_hub_two_projects_read_names_both_with_what_frees_each(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 35, 2/8: the refusal named the first project whose rows read the
+    hub, alone. Tools is read by api's stopped manager and by web's running coder: the
+    refusal named api and its forget, and once api was forgotten, forget of tools was
+    refused again, naming web. Every reader is named, each with what frees it: web's stop,
+    api's forget. A reader that is forgotten, its coder still running, is told to be
+    onboarded first: no fleet command finds a forgotten project."""
+    from aisquare.services import install_route
+    from aisquare.services import project as project_service
+
+    tools = _register(runner, monkeypatch, work_dir / "tools")
+    api = _register(runner, monkeypatch, work_dir / "api")
+    web = _register(runner, monkeypatch, work_dir / "web")
+    with store_session() as store:
+        manager = store.upsert_fleet_agent(
+            _agent(api, "manager").model_copy(update={"board": tools})
+        )
+        store.end_fleet_agent(manager.id, exit_status=0)
+        coder = store.upsert_fleet_agent(_agent(web, "coder1").model_copy(update={"board": tools}))
+        known = {each.id: each for each in store.list_projects(all=True)}
+
+    def forget(name: str) -> str:
+        return install_route.command_line(["aisquare", "project", "forget", str(work_dir / name)])
+
+    refused = runner.invoke(app, ["project", "forget", "tools"])
+    assert refused.exit_code == 2, refused.output
+    said = " ".join(refused.output.split())
+    assert "tools is the board api's 1 fleet agent(s) read: manager (stopped) — " in said, said
+    assert f"forget api first if you are done with its agents ({forget('api')})" in said, said
+    assert (
+        "It is also the board web's 1 live fleet agent(s) read: coder1 — stop them first " in said
+    )
+    assert f"({project_service.fleet_command('stop', known[web])} <label>)" in said, said
+    with store_session() as store:
+        [busy] = project_service.forget_refusals(store, [known[tools]]).values()
+    assert [reader.project.id for reader in busy.readers] == [api, web]
+    assert [(r.has_live, r.forgotten) for r in busy.readers] == [(False, False), (True, False)]
+
+    with store_session() as store:
+        store.forget_project(web)  # its coder still running: a forgotten project's rows hold
+    refused = runner.invoke(app, ["project", "forget", "tools"])
+    said = " ".join(refused.output.split())
+    onboard = project_service.onboard_command(work_dir / "web")
+    assert f"coder1 — web is forgotten: {onboard} adds it back first; stop them first" in said, said
+
+    assert runner.invoke(app, ["project", "forget", "api"]).exit_code == 0
+    with store_session() as store:
+        store.end_fleet_agent(coder.id, exit_status=0)  # a forgotten project's stopped row: none
+    assert runner.invoke(app, ["project", "forget", "tools"]).exit_code == 0
+
+
 def test_forgets_help_and_docs_say_a_stopped_reader_holds_a_hub_too() -> None:
     """Review of #259, round 34, 8/10: since round 33 (3/10) the refusal covers the stopped
     rows a restart would start under the hub, but ``project forget``'s help, its service's
@@ -855,7 +908,8 @@ def test_prune_keeps_a_hub_whose_board_another_projects_agents_read(
 
     plan = runner.invoke(app, ["--json", "project", "prune", "--missing", *purge])
     (kept,) = _json(plan.stdout)["kept"]
-    assert (kept["project"]["id"], kept["read_by"]["id"], kept["live_agents"]) == (hub, beta, 0)
+    readers = [reader["id"] for reader in kept["read_by"]]
+    assert (kept["project"]["id"], readers, kept["live_agents"]) == (hub, [beta], 0)
     result = runner.invoke(app, ["project", "prune", "--missing", "--yes", *purge])
 
     assert result.exit_code == 0, result.output
@@ -940,15 +994,15 @@ def test_a_prune_of_a_hub_and_its_reader_decides_every_hold_before_either_goes(
     plan = project_service.prune_candidates(missing=True, worktrees=False)
     by_id = {c.project.id: c for c in plan}
     assert set(by_id) == {hub, beta}
-    readers = {p: c.read_by.id for p, c in by_id.items() if c.read_by is not None}
-    assert readers == ({hub: beta, beta: gamma} if held else {}), "the plan"
+    readers = {p: [r.id for r in c.read_by] for p, c in by_id.items() if c.read_by}
+    assert readers == ({hub: [beta], beta: [gamma]} if held else {}), "the plan"
     ordered = sorted(plan, key=lambda c: (c.project.id == hub) != hub_first)
     assert ordered[0].project.id == (hub if hub_first else beta)
 
     report = project_service.prune(ordered, purge=False)
 
     assert sorted(report.dropped) == ([] if held else sorted([hub, beta])), "as the plan said"
-    assert {c.project.id: c.read_by.id for c in report.kept if c.read_by} == readers
+    assert {c.project.id: [r.id for r in c.read_by] for c in report.kept if c.read_by} == readers
     assert _listed(runner) == ({hub, beta, gamma} if held else {gamma})
 
 

@@ -268,8 +268,9 @@ all of them, and the fleet cleans up the worktrees it made.**
   <root>` brings it back. A project with live agents is refused, naming them.
   So is a hub another project's agents read, live or stopped (a restart starts
   a stopped one under its hub again); `project forget` refuses it, and `project
-  prune` keeps it, `--purge` included, naming the project that reads it, unless
-  that project's agents are all stopped and the same prune drops it too.
+  prune` keeps it, `--purge` included, naming every project that reads it, each
+  with what frees it, unless that project's agents are all stopped and the same
+  prune drops it too.
 - **⚙ Settings in the sidebar** opens a hub with **App settings**,
   **Accounts** and **Doctor**. Under it is a dim status line,
   `● aisquare  ● 2× claude ⚠`:

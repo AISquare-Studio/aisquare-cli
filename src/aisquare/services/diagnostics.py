@@ -1453,13 +1453,15 @@ def _check_captured_projects() -> list[DoctorCheck]:
     forget``, which drops one — and the rows with a live agent apart again, since
     ``forget`` refuses those until their agents are stopped (round 18).
 
-    What holds a row is the hold prune and forget ask (``held`` on the plan's rows,
-    :func:`~aisquare.services.project.forget_refusals` for the rest): the board of another
-    project's agents, live or a restart away, as a hub's, is one. Asked of the row's own live
-    agents alone, a hub prune keeps was counted under "drop them" after every prune, as the
-    live agents' rows were before round 17, and the rows apart were told to stop their own
-    agents, which they had none of; they are named apart again, with the project that reads
-    each and the way out ``forget`` names (review of #259, round 34, 3/10).
+    What holds a row is the hold prune and forget ask
+    (:func:`~aisquare.services.project.forget_refusals`, of the plan's rows with the rows that
+    prune drops gone, as prune decides it): the board of another project's agents, live or a
+    restart away, as a hub's, is one. Asked of the row's own live agents alone, a hub prune
+    keeps was counted under "drop them" after every prune, as the live agents' rows were
+    before round 17, and the rows apart were told to stop their own agents, which they had
+    none of; they are named apart again, with the projects that read each and the way out
+    ``forget`` names (review of #259, round 34, 3/10): every project, each with its stop when
+    its agents run, and its onboard when it is forgotten (round 35, 2/8).
     """
     if _uncreated_home("projects") is not None:
         return []
@@ -1468,7 +1470,7 @@ def _check_captured_projects() -> list[DoctorCheck]:
         # opened for one line (review of #259, round 19).
         capture = project_service.capture_on()
         plan: list[PruneCandidate] = []
-        holds: dict[str, ProjectInfo | None] = {}
+        holds: dict[str, list[project_service.BoardReader]] = {}
         with store_session() as store:
             captured = store.captured_projects()
             if captured and not capture:
@@ -1476,12 +1478,13 @@ def _check_captured_projects() -> list[DoctorCheck]:
                     missing=False, worktrees=False, captured_older_than=0, store=store
                 )
                 planned = {c.project.id for c in plan}
+                dropped = {c.project.id for c in plan if not c.held}
                 refused = project_service.forget_refusals(
+                    store, [c.project for c in plan if c.held], dropping=dropped
+                ) | project_service.forget_refusals(
                     store, [p for p in captured if p.id not in planned]
                 )
-                holds = {c.project.id: c.read_by for c in plan if c.held} | {
-                    project_id: busy.reader for project_id, busy in refused.items()
-                }
+                holds = {project_id: busy.readers for project_id, busy in refused.items()}
     except Exception:  # the database line reports a broken store
         return []
     if not captured:
@@ -1500,21 +1503,23 @@ def _check_captured_projects() -> list[DoctorCheck]:
 
 
 def _left_from_before_capture(
-    captured: list[ProjectInfo], plan: list[PruneCandidate], holds: Mapping[str, ProjectInfo | None]
+    captured: list[ProjectInfo],
+    plan: list[PruneCandidate],
+    holds: Mapping[str, Sequence[project_service.BoardReader]],
 ) -> str:
     """The capture-off line: the rows ``prune --captured-only --older-than 0`` drops (``plan``
     is what it would do), with that command, and apart from them the rows it keeps, by name:
     those holding saved context with ``project forget``, and those ``forget`` refuses
-    (``holds``, by id: the project whose fleet agents read the row's board, or ``None`` for
-    its own live ones), with what frees each first.
+    (``holds``, by id: the projects whose fleet agents read the row's board, or none for its
+    own live ones), with what frees each first.
 
     Each part put together once from its noun, verb and pronoun: the kept part was written
     out twice, in near-identical branches, and a wording fix had to be made in each (review
     of #259, round 18)."""
     dropped = {c.project.id for c in plan if c.reason == "captured" and c.project.id not in holds}
     held = [p for p in captured if p.id not in dropped and p.id not in holds]
-    working = [p for p in captured if p.id in holds and holds[p.id] is None]
-    read = [p for p in captured if holds.get(p.id) is not None]
+    working = [p for p in captured if p.id in holds and not holds[p.id]]
+    read = [p for p in captured if holds.get(p.id)]
     left = "left from before project capture was turned off"
     listed = "listed only by aisquare project list --all"
     parts: list[str] = []
@@ -1546,21 +1551,13 @@ def _left_from_before_capture(
         )
         then = "" if parts else f"{listed}; "
         if why == "hub":
-            # The project whose agents read each, and its forget, as `ProjectBusyError` names
-            # them: a restart of a stopped one starts it under the hub again.
-            readers = {reader.id: reader for p in kept if (reader := holds.get(p.id)) is not None}
-            them = len(readers) == 1
-            whose = ", ".join(project_service.display_name(r) for r in readers.values())
-            frees = "; ".join(
-                install_route.command_line(["aisquare", "project", "forget", str(r.root)])
-                for r in readers.values()
-            )
+            # Every project whose agents read each, and what frees it, as `ProjectBusyError`
+            # names them: a restart of a stopped one starts it under the hub again.
+            agents, frees = _what_frees(kept, holds)
             what = (
-                f"{'is the board' if one else 'are the boards'} another project's fleet agents "
-                f"read ({whose}), running or stopped, which {prune} keeps and aisquare project "
-                f"forget refuses: {names} — {then}once you are done with "
-                f"{'its' if them else 'their'} agents, forget {'it' if them else 'them'} first "
-                f"({frees}), then {drop}"
+                f"{'is the board' if one else 'are the boards'} {agents}, running or stopped, "
+                f"which {prune} keeps and aisquare project forget refuses: {names} — "
+                f"{then}{frees}, then {drop}"
             )
         elif why == "agents":
             # With the project named, as `ProjectBusyError` names it (review of #259, round 19):
@@ -1580,6 +1577,56 @@ def _left_from_before_capture(
             )
         parts.append(f"{which} {what}")
     return "; ".join(parts)
+
+
+def _what_frees(
+    kept: Sequence[ProjectInfo], holds: Mapping[str, Sequence[project_service.BoardReader]]
+) -> tuple[str, str]:
+    """``<whose> fleet agents read (<projects>)`` of the boards ``kept`` (``holds``), every
+    project named, and what frees them, as ``ProjectBusyError`` names it: each one's stop
+    when its agents run, since ``forget`` refuses a project with live agents; its onboard
+    when it is forgotten, since ``forget`` and ``fleet`` find no such project; then its
+    forget, since a restart of a stopped one starts it under the hub again.
+
+    The first reader of a row alone, with its forget alone, a row two projects read was
+    refused again after it, naming the other; a reader whose agents ran was refused its
+    forget, with no stop given; and a forgotten one's forget matched nothing (review of #259,
+    round 35, 2/8)."""
+    readers: dict[str, ProjectInfo] = {}
+    running: set[str] = set()
+    forgotten: set[str] = set()
+    for reader in (reader for p in kept for reader in holds[p.id]):
+        readers.setdefault(reader.project.id, reader.project)
+        if reader.has_live:
+            running.add(reader.project.id)
+        if reader.forgotten:
+            forgotten.add(reader.project.id)
+    them = len(readers) == 1
+    steps: list[str] = []
+    if forgotten:
+        adds = "; ".join(
+            project_service.onboard_command(r.root) for r in readers.values() if r.id in forgotten
+        )
+        ones = "it" if them else "the forgotten " + ("one" if len(forgotten) == 1 else "ones")
+        steps.append(f"add {ones} back ({adds})")
+    if running:
+        stops = "; ".join(
+            project_service.fleet_command("stop", r) + " <label>"
+            for r in readers.values()
+            if r.id in running
+        )
+        steps.append(f"stop the running ones ({stops})")
+    frees = "; ".join(
+        install_route.command_line(["aisquare", "project", "forget", str(r.root)])
+        for r in readers.values()
+    )
+    steps.append(f"forget {'it' if them else 'them'} ({frees})")
+    whose = ", ".join(project_service.display_name(r) for r in readers.values())
+    agents = "another project's" if them else "other projects'"
+    return f"{agents} fleet agents read ({whose})", (
+        f"once you are done with {'its' if them else 'their'} agents, "
+        f"{', '.join(steps[:-1])}{' and ' if len(steps) > 1 else ''}{steps[-1]}"
+    )
 
 
 def _directories(count: int) -> str:

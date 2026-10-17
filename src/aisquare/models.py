@@ -844,14 +844,14 @@ class PruneCandidate(BaseModel):
     """For a ``worktree`` candidate, the registered project it is a worktree of."""
     live_agents: int = 0
     """Live fleet agents on the registration. Non-zero means prune keeps it."""
-    read_by: ProjectInfo | None = None
-    """Another project whose fleet agents read this registration's board, as a hub's
-    (``project forget`` refuses it too). Set means prune keeps it."""
+    read_by: list[ProjectInfo] = Field(default_factory=list)
+    """The other projects whose fleet agents read this registration's board, as a hub's
+    (``project forget`` refuses it too), every one. Any means prune keeps it."""
 
     @property
     def held(self) -> bool:
         """Whether prune keeps it: live agents of its own, or another project's on its board."""
-        return bool(self.live_agents) or self.read_by is not None
+        return bool(self.live_agents) or bool(self.read_by)
 
 
 class ProjectPruneReport(BaseModel):

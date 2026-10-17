@@ -435,8 +435,9 @@ def emit_prune(report: ProjectPruneReport) -> None:
         if candidate.principal is not None:
             why = f"worktree of {_project_name(candidate.principal)}"
         held = kept.get(project.id)
-        if held is not None and held.read_by is not None:
-            why += f" (kept: the board {_project_name(held.read_by)}'s fleet agents read)"
+        if held is not None and held.read_by:
+            whose = ", ".join(_project_name(reader) for reader in held.read_by)
+            why += f" (kept: the board {whose}'s fleet agents read)"
         elif held is not None:
             why += f" (kept: {held.live_agents} live agent(s))"
         marker = "" if report.dry_run else ("·" if held is not None else "✓")
@@ -450,7 +451,7 @@ def emit_prune(report: ProjectPruneReport) -> None:
     noun = "registration" if count == 1 else "registrations"
     what = "purged" if report.purged else "forgot"
     console.print(f"✓ {what} {count} {noun}")
-    hubs = sum(candidate.read_by is not None for candidate in report.kept)
+    hubs = sum(bool(candidate.read_by) for candidate in report.kept)
     if len(report.kept) > hubs:
         console.print(
             f"  kept {len(report.kept) - hubs} with live fleet agents — stop or reap them first"
@@ -458,7 +459,7 @@ def emit_prune(report: ProjectPruneReport) -> None:
     if hubs:
         console.print(
             f"  kept {hubs} whose board another project's fleet agents read, as a hub's — "
-            "its row names that project"
+            "its row names each project"
         )
     if not report.purged and count:
         console.print(

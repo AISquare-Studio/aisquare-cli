@@ -10,6 +10,7 @@ import subprocess
 from collections.abc import Collection, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import NamedTuple
 
 from aisquare.core import paths
 from aisquare.core import snapshot as snapshot_core
@@ -208,48 +209,97 @@ def fleet_command(verb: str, project: ProjectInfo, *words: str) -> str:
     return install_route.command_line(["aisquare", "fleet", verb, "--project", ref, *words])
 
 
+class BoardReader(NamedTuple):
+    """A project whose fleet rows hold another's board, as a hub's (:func:`_board_readers`)."""
+
+    project: ProjectInfo
+    rows: list[FleetAgent]
+    """Its rows that do: live, or a stopped one a ``restart`` acts on."""
+    forgotten: bool
+    """Registered no more (or never): no ``fleet`` command finds it, nor ``project forget``,
+    until it is onboarded again. Only its live rows hold the board then."""
+
+    @property
+    def has_live(self) -> bool:
+        """Whether any of :attr:`rows` is live, so a ``fleet stop`` frees it."""
+        return any(row.ended_at is None for row in self.rows)
+
+
 class ProjectBusyError(Exception):
-    """The project has live fleet agents, or another project's (``reader``'s) fleet agents
-    read its board, as a hub's, live or a restart away, so forgetting it would strand them."""
+    """The project has live fleet agents, or other projects' (``readers``') fleet agents
+    read its board, as a hub's, live or a restart away, so forgetting it would strand them.
+
+    Every reader, each with what frees it: named by the first one alone, the refusal of a
+    hub two projects read sent the user through the first one's forget into a second
+    refusal, naming the other (review of #259, round 35, 2/8)."""
 
     def __init__(
-        self, project: ProjectInfo, agents: list[FleetAgent], *, reader: ProjectInfo | None = None
+        self,
+        project: ProjectInfo,
+        agents: Sequence[FleetAgent] = (),
+        *,
+        readers: Sequence[BoardReader] = (),
     ) -> None:
-        stopped = sum(agent.ended_at is not None for agent in agents)
-        labels = ", ".join(
-            agent.label + (" (stopped)" if agent.ended_at is not None else "") for agent in agents
+        if readers:
+            message = f"{display_name(project)} is the board " + ". It is also the board ".join(
+                _read_by(reader) for reader in readers
+            )
+        else:
+            message = f"{display_name(project)} has {len(agents)} live fleet agent(s): " + (
+                _of(project, agents)
+            )
+        super().__init__(message)
+        self.project = project
+        self.agents = list(agents) or [row for reader in readers for row in reader.rows]
+        self.readers = list(readers)
+
+
+def _read_by(reader: BoardReader) -> str:
+    """``<reader>'s <n> [live ]fleet agent(s) read: <labels> — <ways>``, of
+    :class:`ProjectBusyError`."""
+    stopped = any(row.ended_at is not None for row in reader.rows)
+    return (
+        f"{display_name(reader.project)}'s {len(reader.rows)} {'' if stopped else 'live '}"
+        f"fleet agent(s) read: {_of(reader.project, reader.rows, reader=reader)}"
+    )
+
+
+def _of(
+    owner: ProjectInfo, agents: Sequence[FleetAgent], *, reader: BoardReader | None = None
+) -> str:
+    """``<labels> — <ways>``: ``agents``, rows of ``owner``, and what frees the board they hold
+    (``reader``, or ``owner``'s own when ``None``)."""
+    stopped = sum(agent.ended_at is not None for agent in agents)
+    labels = ", ".join(
+        agent.label + (" (stopped)" if agent.ended_at is not None else "") for agent in agents
+    )
+    ways: list[str] = []
+    if reader is not None and reader.forgotten:
+        # No fleet command finds a forgotten project (`find_projects`), so its stop would say
+        # "no project matches" (review of #259, round 35, 2/8).
+        ways.append(
+            f"{display_name(owner)} is forgotten: {onboard_command(owner.root)} adds it back first"
         )
+    if not stopped or stopped < len(agents):
         # `reap` is named for rows whose SERVER still answers — it refuses to end a
         # row on a server it cannot reach, and an operator following that advice
         # after a hand-run `tmux kill-server` reaped nothing, twice. The scoped
         # `fleet shutdown` is the command that can, on their word.
-        owner = project if reader is None else reader
         shutdown = fleet_command("shutdown", owner)
         stop = fleet_command("stop", owner)
         reap = fleet_command("reap", owner)
-        has = (
-            f"{display_name(project)} has {len(agents)} live fleet agent(s)"
-            if reader is None
-            else f"{display_name(project)} is the board {display_name(reader)}'s "
-            f"{len(agents)} {'' if stopped else 'live '}fleet agent(s) read"
+        ways.append(
+            f"stop {'the live ones' if stopped else 'them'} first ({stop} <label>), or run "
+            f"{reap} if they are already gone; if their tmux server is gone too, "
+            f"{shutdown} records them"
         )
-        ways: list[str] = []
-        if not stopped or stopped < len(agents):
-            ways.append(
-                f"stop {'the live ones' if stopped else 'them'} first ({stop} <label>), or run "
-                f"{reap} if they are already gone; if their tmux server is gone too, "
-                f"{shutdown} records them"
-            )
-        if stopped and reader is not None:
-            forget = install_route.command_line(["aisquare", "project", "forget", str(reader.root)])
-            ways.append(
-                "a restart of a stopped one starts it on this board again: forget "
-                f"{display_name(reader)} first if you are done with its agents ({forget})"
-            )
-        super().__init__(f"{has}: {labels} — " + "; ".join(ways))
-        self.project = project
-        self.agents = agents
-        self.reader = reader
+    if stopped and reader is not None:
+        forget = install_route.command_line(["aisquare", "project", "forget", str(owner.root)])
+        ways.append(
+            "a restart of a stopped one starts it on this board again: forget "
+            f"{display_name(owner)} first if you are done with its agents ({forget})"
+        )
+    return f"{labels} — " + "; ".join(ways)
 
 
 def display_name(project: ProjectInfo) -> str:
@@ -372,10 +422,10 @@ def _busy(
     2/10)."""
     own = store.fleet_agents(project.id, live_only=True) if live is None else live
     if own:
-        return ProjectBusyError(project, list(own))
-    reader, reading = _board_readers(store, project, readers, dropping)
-    if reader is not None:
-        return ProjectBusyError(project, reading, reader=reader)
+        return ProjectBusyError(project, own)
+    reading = _board_readers(store, project, readers, dropping)
+    if reading:
+        return ProjectBusyError(project, readers=reading)
     return None
 
 
@@ -409,15 +459,18 @@ def _holds(
 
 
 def forget_refusals(
-    store: ContextStore, projects: Sequence[ProjectInfo]
+    store: ContextStore, projects: Sequence[ProjectInfo], *, dropping: Collection[str] = ()
 ) -> dict[str, ProjectBusyError]:
-    """Why ``project forget`` of each of ``projects`` alone would be refused (:func:`_busy`),
-    by id, for each one it would; the rows that hold a board read once for them all. For
-    doctor's capture-off line, which names the forget of each captured row prune keeps."""
+    """Why ``project forget`` of each of ``projects`` would be refused (:func:`_busy`), by id,
+    for each one it would, with the projects of ``dropping`` forgotten first (as a prune
+    drops them: :func:`_holds`); the rows that hold a board read once for them all. For
+    doctor's capture-off line, which names what frees each captured row prune keeps."""
     if not projects:
         return {}
     readers = _reading_rows(store)
-    refused = {project.id: _busy(store, project, readers) for project in projects}
+    refused = {
+        project.id: _busy(store, project, readers, dropping=dropping) for project in projects
+    }
     return {project_id: busy for project_id, busy in refused.items() if busy is not None}
 
 
@@ -439,29 +492,43 @@ def _board_readers(
     project: ProjectInfo,
     readers: Sequence[FleetAgent] | None = None,
     dropping: Collection[str] = (),
-) -> tuple[ProjectInfo | None, list[FleetAgent]]:
-    """The first other project whose fleet rows that hold a board (:func:`_reading_rows`, or
-    ``readers``) recorded ``project``'s, as a hub's (``FleetAgent.board``), and those rows;
-    ``(None, [])`` for none. A stopped row of a project forgotten since, or forgotten with
-    it (``dropping``), is none: nothing lists it to restart."""
+) -> list[BoardReader]:
+    """Every other project whose fleet rows that hold a board (:func:`_reading_rows`, or
+    ``readers``) recorded ``project``'s, as a hub's (``FleetAgent.board``), with those rows,
+    in the order of its first; ``[]`` for none. A stopped row of a project forgotten since,
+    or forgotten with it (``dropping``), is none: nothing lists it to restart.
+
+    Every one: the first alone, ``forget`` of a hub two projects read named one of them, and
+    the forget it advised ended in a refusal naming the other (review of #259, round 35,
+    2/8)."""
     rows = _reading_rows(store) if readers is None else readers
-    reading = [
-        row
-        for row in rows
-        if row.project_id != project.id
-        and (row.board or row.project_id) == project.id
-        and (
-            row.ended_at is None
-            or (row.project_id not in dropping and store.get_project(row.project_id) is not None)
-        )
-    ]
-    if not reading:
-        return None, []
-    first = reading[0]
-    reader = store.get_project(first.project_id, include_forgotten=True) or ProjectInfo(
-        id=first.project_id, root=first.cwd
-    )
-    return reader, [row for row in reading if row.project_id == first.project_id]
+    registered: dict[str, ProjectInfo | None] = {}
+
+    def known(project_id: str) -> ProjectInfo | None:
+        if project_id not in registered:
+            registered[project_id] = store.get_project(project_id)
+        return registered[project_id]
+
+    reading: dict[str, list[FleetAgent]] = {}
+    for row in rows:
+        if (
+            row.project_id != project.id
+            and (row.board or row.project_id) == project.id
+            and (
+                row.ended_at is None
+                or (row.project_id not in dropping and known(row.project_id) is not None)
+            )
+        ):
+            reading.setdefault(row.project_id, []).append(row)
+    found: list[BoardReader] = []
+    for project_id, theirs in reading.items():
+        info = known(project_id)
+        if info is None:
+            info = store.get_project(project_id, include_forgotten=True) or ProjectInfo(
+                id=project_id, root=theirs[0].cwd
+            )
+        found.append(BoardReader(info, theirs, forgotten=known(project_id) is None))
+    return found
 
 
 def prune_candidates(
@@ -563,13 +630,14 @@ def _is_dir(root: Path) -> bool:
 
 
 def _held(candidate: PruneCandidate, busy: ProjectBusyError | None) -> PruneCandidate:
-    """``candidate`` with what holds it (:func:`_busy`): its live agents, or the project whose
+    """``candidate`` with what holds it (:func:`_busy`): its live agents, or the projects whose
     agents read its board; as it was when nothing does."""
     if busy is None:
-        return candidate.model_copy(update={"live_agents": 0, "read_by": None})
-    if busy.reader is not None:
-        return candidate.model_copy(update={"live_agents": 0, "read_by": busy.reader})
-    return candidate.model_copy(update={"live_agents": len(busy.agents), "read_by": None})
+        return candidate.model_copy(update={"live_agents": 0, "read_by": []})
+    if busy.readers:
+        read_by = [reader.project for reader in busy.readers]
+        return candidate.model_copy(update={"live_agents": 0, "read_by": read_by})
+    return candidate.model_copy(update={"live_agents": len(busy.agents), "read_by": []})
 
 
 def prune_plan(candidates: list[PruneCandidate], *, purge: bool) -> ProjectPruneReport:

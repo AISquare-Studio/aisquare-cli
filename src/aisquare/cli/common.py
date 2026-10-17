@@ -489,9 +489,12 @@ def emit_prune(report: ProjectPruneReport) -> None:
         stale_no_more = len(report.changed) - len(report.root_gone)
         console.print(f"  kept {stale_no_more} that changed since the plan: no longer stale")
     if report.root_gone:
+        # With this run's --purge: a plain prune only forgets them, and nothing lists a
+        # forgotten row to purge it after (round 40, 2/6).
+        purge = " --purge" if report.purged else ""
         console.print(
             f"  kept {len(report.root_gone)} whose root went since the plan, which this prune "
-            "did not ask for — drop them: aisquare project prune --missing"
+            f"did not ask for — drop them: aisquare project prune --missing{purge}"
         )
     if not report.purged and count:
         console.print(

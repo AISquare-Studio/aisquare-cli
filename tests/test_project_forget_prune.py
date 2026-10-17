@@ -1751,14 +1751,23 @@ def test_a_prunes_run_lists_the_registrations_only_for_a_worktree_it_re_reads(
     assert listed == [{"all": True}] * lists
 
 
+@pytest.mark.parametrize("purge", [False, True], ids=["forget", "purge"])
 def test_a_worktrees_prune_says_a_worktree_whose_tree_went_is_kept_for_its_root_not_fresh(
-    runner: CliRunner, repo_and_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+    runner: CliRunner,
+    repo_and_worktree: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    purge: bool,
 ) -> None:
     """Review of #259, round 39, 5/9: asked for worktrees alone, a worktree whose tree went
     while the confirmation sat open is kept (round 38, 2/4), and was said "kept: changed
     since the plan" beside "kept 1 that changed since the plan: no longer stale". Its
     registration names a directory that is gone, which only ``--missing`` drops, and nothing
-    said so. The row says its root went, and the summary names the prune that drops it."""
+    said so. The row says its root went, and the summary names the prune that drops it.
+
+    With this run's ``--purge`` (round 40, 2/6): named without it, the prune it advised after
+    a purge only forgot the row, its entries, prompts, board rows and data directory stayed,
+    and nothing could purge it then (no list shows a forgotten row, and its root is gone)."""
+    from aisquare.core.store import store_session
     from aisquare.services import project as project_service
 
     repo, worktree = repo_and_worktree
@@ -1773,8 +1782,9 @@ def test_a_worktrees_prune_says_a_worktree_whose_tree_went_is_kept_for_its_root_
 
     monkeypatch.setattr(project_service, "prune_candidates", the_prompt_sat_open)
 
+    flags = ["--purge"] if purge else []
     result = runner.invoke(
-        app, ["project", "prune", "--worktrees", "--yes"], env={"COLUMNS": "400"}
+        app, ["project", "prune", "--worktrees", *flags, "--yes"], env={"COLUMNS": "400"}
     )
 
     assert result.exit_code == 0, result.output
@@ -1782,7 +1792,18 @@ def test_a_worktrees_prune_says_a_worktree_whose_tree_went_is_kept_for_its_root_
     said = " ".join(result.stdout.split())
     assert marker == "·" and "(kept: its root went since the plan)" in said, said
     assert "kept 1 whose root went since the plan" in said, said
-    assert "aisquare project prune --missing" in said and "no longer stale" not in said, said
+    advised = said.split("drop them: ", 1)[1].split(" --yes")[0].split()
+    assert advised == ["aisquare", "project", "prune", "--missing", *flags], said
+    assert "no longer stale" not in said, said
+
+    monkeypatch.setattr(project_service, "prune_candidates", real)
+    followed = runner.invoke(app, [*advised[1:], "--yes"])
+
+    assert followed.exit_code == 0, followed.output
+    with store_session() as store:
+        assert store.get_project(wt_id) is None, "dropped"
+        kept = store.get_project(wt_id, include_forgotten=True)
+    assert (kept is None) is purge, "purged, or only forgotten"
 
 
 @pytest.mark.parametrize(

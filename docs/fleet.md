@@ -1044,8 +1044,9 @@ right-click too) opens its menu: *Rename*, *Pin*, *Open settings* and *Remove
 from fleet…*, which asks first, then forgets the project as `aisquare project
 forget` does. Its folder and history are kept, and `aisquare project onboard
 <root>` brings it back. A project with live agents is refused, naming them and
-`fleet shutdown`, and so is a hub whose board another project's live agents
-read: a restart or a switch of one would add it back.
+`fleet shutdown`, and so is a hub whose board another project's agents read,
+live or stopped (a restart would start them under it again): a restart or a
+switch of one would add it back.
 
 **Codename.** Every project that enters the fleet gets an `adjective-animal`
 codename — `amber-otter` — matching `^[a-z]{3,7}-[a-z]{3,7}$`, from two

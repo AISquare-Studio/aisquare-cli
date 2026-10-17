@@ -322,11 +322,12 @@ def forget_project(project: ProjectInfo, *, purge: bool = False) -> ProjectForge
     reads its ``ref`` without the server's working directory, which :func:`resolve` would
     read a path against.
 
-    Refused too while another project's live fleet agents read its board, as a hub's
-    (:func:`_board_readers`): a restart or a switch of one gives its replacement that hub,
-    whose ``launch`` adds the board it joins (``team on``), and a hub forgotten to tidy the
-    list came back on it with nothing to say why (review of #259, round 32, 3/9). Not
-    added, with ``[projects] capture`` off, the board refuses every write of theirs. Both
+    Refused too while another project's fleet agents read its board, as a hub's
+    (:func:`_board_readers`), live or stopped (a restart would start them under it again:
+    round 33, 3/10): a restart or a switch of one gives its replacement that hub, whose
+    ``launch`` adds the board it joins (``team on``), and a hub forgotten to tidy the list
+    came back on it with nothing to say why (review of #259, round 32, 3/9). Not added,
+    with ``[projects] capture`` off, the board refuses every write of theirs. Both
     refusals are :func:`_busy`'s, which :func:`prune` asks too."""
     with store_session() as store:
         busy = _busy(store, project)

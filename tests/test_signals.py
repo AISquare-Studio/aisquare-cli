@@ -159,7 +159,7 @@ def test_signal_validation_runs_before_any_store_is_opened(
 def test_a_store_held_signal_write_clears_the_previous_receipt(
     runner: CliRunner, work_dir: Path
 ) -> None:
-    """Round 5. ``set_signal_in`` publishes no receipt of its own — nobody to
+    """Round 5. ``set_signals_in`` publishes no receipt of its own — nobody to
     hand it to — but it must not leave an EARLIER write's receipt standing, or a
     reader after a ``fleet shutdown --all`` that cleared eight pauses reads the
     receipt of a different write."""
@@ -168,7 +168,7 @@ def test_a_store_held_signal_write_clears_the_previous_receipt(
     assert team_service._DELIVERY.get() is not None, "the premise: a receipt stands"
     with store_session() as store:
         project = store.list_projects(all=True)[0]  # the hook captured it (#139)
-        team_service.set_signal_in(store, project.id, "ready", "off")
+        team_service.set_signals_in(store, [(project.id, "ready")], "off")
     assert team_service._DELIVERY.get() is None, "cleared, so nothing reads it as this write's"
     assert team_service.read_signal("ready", cwd=work_dir).value == "off"  # type: ignore[union-attr]
 

@@ -5731,7 +5731,7 @@ def _clear_pause(projects: Sequence[ProjectInfo], report: ShutdownReport) -> Non
     open their own — connect, WAL switch, migrations — so an ``--all`` shutdown
     paid two opens per project here on top of the rows'; the signals are read
     and cleared through the store this holds, by project id
-    (:func:`services.team.board_signals_in`, :func:`services.team.set_signal_in`),
+    (:func:`services.team.board_signals_in`, :func:`services.team.set_signals_in`),
     which also keeps the shutdown from contending with the hooks of the agents
     it is still stopping (review of #203, round 4).
 
@@ -7247,7 +7247,11 @@ def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> Non
     sorted before it, ``fleet pause`` then ended in a traceback, ``--json`` printed nothing,
     and the project was paused on some boards and not on others (review of #259, round 33,
     1/10). Another project's that does not parse is no concern of this one's
-    (:func:`team.board_signals_in`).
+    (:func:`team.board_signals_in`). Every board's is written in one transaction through the
+    store the boards were worked out in (:func:`team.set_signals_in`): one ``set_signal`` a
+    board, each in a store of its own, a store error on a later board (``database is
+    locked``) left the earlier ones set and ended in a traceback all the same (round 34,
+    5/10); it rolls every one back now, and is said as a ``FleetError``.
 
     Each write is a ``signal`` event in the delta of every session on that board. Off on
     every board one of the project's rows ever recorded, ``fleet resume -P a`` put
@@ -7259,20 +7263,20 @@ def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> Non
     ``--json`` printed nothing (round 31, 2/7).
     """
     team = _team()
+    doing = "set" if value == "on" else "clear"
     try:
-        # The team off: `set_signal` refuses before any store opens.
-        signals = [(project.id, PAUSE_SIGNAL)]
-        if orchestrator.team_enabled():
-            homes = _pause_homes(project) if value == "on" else set()
-            unreadable: list[tuple[str, str]] = []
-            with store_session() as store:
-                states = team.board_signals_in(store, unreadable=unreadable)
-                if value == "on":
-                    signals = _pause_signals(store, project, homes)
-                else:
-                    signals = _pause_where_on(project, states)
-                    if session_ref is not None and store.get_session(session_ref) is None:
-                        raise KeyError(session_ref)
+        if not orchestrator.team_enabled():
+            raise team.TeamDisabledError  # refused before any store opens
+        homes = _pause_homes(project) if value == "on" else set()
+        unreadable: list[tuple[str, str]] = []
+        with store_session() as store:
+            states = team.board_signals_in(store, unreadable=unreadable)
+            if value == "on":
+                signals = _pause_signals(store, project, homes)
+            else:
+                signals = _pause_where_on(project, states)
+                if session_ref is not None and store.get_session(session_ref) is None:
+                    raise KeyError(session_ref)
             broken = [
                 where
                 for where in _pause_where_on(project, unreadable)
@@ -7280,10 +7284,13 @@ def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> Non
             ]
             if broken:
                 named = ", ".join(f"{name} on {board}" for board, name in broken)
-                doing = "set" if value == "on" else "clear"
                 raise FleetError(f"cannot {doing} the pause: {named} could not be read")
-        for board, name in signals:
-            team.set_signal(name, value, session_ref=session_ref, project_id=board)
+            team.set_signals_in(store, signals, value, session_ref=session_ref)
+    except sqlite3.Error as exc:  # a locked store, say: every write rolled back
+        raise FleetError(
+            f"cannot {doing} the pause: the store refused it ({type(exc).__name__}: {exc}) — "
+            "nothing was written; try again"
+        ) from exc
     except team.TeamDisabledError as exc:
         raise FleetError(f"cannot set the pause signal: {exc}") from exc
     except AmbiguousIdError as exc:
@@ -7398,10 +7405,9 @@ def _is_pause_of(project: ProjectInfo, board: str, name: str) -> bool:
 
 
 def _clear_pause_signal(store: ContextStore, signals: Sequence[tuple[str, str]]) -> None:
-    """Set each of ``signals`` (board, name) OFF through ``store`` — the write half of the
-    pause for the same pass; ``resume`` is the command's own door."""
-    for board, name in signals:
-        _team().set_signal_in(store, board, name, "off")
+    """Set each of ``signals`` (board, name) OFF through ``store``, all or none — the write
+    half of the pause for the same pass; ``resume`` is the command's own door."""
+    _team().set_signals_in(store, signals, "off")
 
 
 def nudge_manager(project_id: str, *, reason: str, board: str | None = None) -> bool:

@@ -9998,6 +9998,52 @@ def test_a_pause_whose_own_signal_does_not_parse_on_a_board_it_goes_to_sets_none
     assert sorted(_paused_on(w)) == sorted([w.hub.id, w.fleet.id])
 
 
+@pytest.mark.parametrize("verb", ["pause", "resume"])
+def test_a_pause_or_resume_the_store_refuses_on_a_later_board_writes_none(
+    hubbed: _Hubbed, runner: CliRunner, verb: str
+) -> None:
+    """Review of #259, round 34, 5/10: round 33 made a pause all-or-nothing only when a
+    signal blob did not parse. Each board's was still one ``set_signal`` in a store of its
+    own, so a store error on the board sorted last (``database is locked`` while many
+    agents' hooks write) left the board before it paused, and ``fleet pause`` ended in a
+    traceback, ``--json`` printing nothing. Every board's is written in one transaction in
+    the store the boards were worked out in: refused, none is, and it is said."""
+    w = hubbed
+    if verb == "resume":
+        fleet_service.pause(w.fleet)
+    before = sorted(_paused_on(w))
+    last = max(w.hub.id, w.fleet.id)  # the boards are written in this order
+    raw = sqlite3.connect(str(paths.db_path()))
+    with raw:
+        raw.execute(
+            "CREATE TRIGGER refuse_last BEFORE INSERT ON team_event "
+            f"WHEN NEW.project_id = '{last}' AND NEW.kind = 'signal' "
+            "BEGIN SELECT RAISE(ABORT, 'database is locked'); END"
+        )
+    raw.close()
+    signals = {board.id: _events(board, "signal") for board in (w.hub, w.fleet)}
+
+    with pytest.raises(FleetError) as refused:
+        getattr(fleet_service, verb)(w.fleet)
+    doing = "set" if verb == "pause" else "clear"
+    assert str(refused.value).startswith(f"cannot {doing} the pause: the store refused it")
+    assert "database is locked" in str(refused.value) and "nothing was written" in str(
+        refused.value
+    )
+    told = runner.invoke(app, ["--json", "fleet", verb, "-P", w.fleet.id])
+    assert told.exit_code != 0 and isinstance(told.exception, SystemExit), told.output
+    assert "the store refused it" in json.loads(told.stdout)["detail"]
+    assert sorted(_paused_on(w)) == before, "the board before it was not written either"
+    assert {board.id: _events(board, "signal") for board in (w.hub, w.fleet)} == signals
+
+    raw = sqlite3.connect(str(paths.db_path()))
+    with raw:
+        raw.execute("DROP TRIGGER refuse_last")
+    raw.close()
+    getattr(fleet_service, verb)(w.fleet)
+    assert sorted(_paused_on(w)) == ([] if verb == "resume" else sorted([w.hub.id, w.fleet.id]))
+
+
 def test_shutdown_reports_a_pause_signal_it_could_not_read_or_clear(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

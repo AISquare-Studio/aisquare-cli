@@ -608,7 +608,9 @@ all of them, and the fleet cleans up the worktrees it made.**
     resume` clears the pause wherever it is on, and only there, and `fleet
     shutdown` clears it too, whichever agents are still running, so the next
     manager spawned there is not paused. A pause signal that does not parse is
-    named and nothing is written, on pause and resume alike. On a board other projects read too
+    named and nothing is written, on pause and resume alike, and so is one the
+    store refuses on any board (a locked database, say): every board's signal is
+    written in one transaction, or none is. On a board other projects read too
     (the hub's, under a hub) the signal is the project's own,
     `fleet-paused.<project id>`, and its manager's cycle names it, so pausing,
     resuming or shutting down one project leaves the others' managers alone.

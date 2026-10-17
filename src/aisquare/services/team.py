@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import EllipsisType
-from typing import Final, NamedTuple
+from typing import Any, Final, NamedTuple
 
 from aisquare.core import brain, harness, insights, orchestrator, workspace
 from aisquare.core import claude_accounts as claude_accounts_core
@@ -1071,23 +1071,37 @@ def set_signal(
     return state, prev
 
 
-def set_signal_in(store: ContextStore, project_id: str, name: str, value: str) -> None:
-    """:func:`set_signal` for ``project_id`` through a store the CALLER holds open.
+def set_signals_in(
+    store: ContextStore,
+    signals: Sequence[tuple[str, str]],
+    value: str,
+    *,
+    session_ref: str | None = None,
+) -> None:
+    """:func:`set_signal` of each (project id, name) of ``signals`` to ``value``, through a
+    store the CALLER holds open, in ONE transaction: every one is set, or none is.
 
-    For a pass over many projects — ``fleet shutdown`` clearing every confirmed
-    project's pause — which used to open a connection per project through
-    :func:`set_signal` (connect, WAL switch, migrations each time) on top of one
-    per row it ended (review of #203, round 4). Same validation, same
-    one-transaction write; no delivery receipt is published, because the caller
-    is not the ``team signal`` command and there is nobody to hand it to — and
-    the receipt of an EARLIER write in this process is cleared, so nothing reads
-    it as this one's (round 5). Returns nothing: its one caller reads nothing.
+    For a write to many boards — a project's pause, one signal on each board it lives on,
+    and ``fleet shutdown`` clearing every confirmed project's — which used to open a
+    connection a signal through :func:`set_signal` (connect, WAL switch, migrations each
+    time; review of #203, round 4), and committed each on its own: a store error part-way
+    (``database is locked`` while many agents' hooks write) left the project paused on the
+    boards before it and not on the rest, and ``fleet pause`` ended in a traceback (review
+    of #259, round 34, 5/10). Same validation, of every one before anything is written;
+    ``session_ref`` is ``--as``, resolved as :func:`set_signal` resolves it. No delivery
+    receipt is published, because the caller is not the ``team signal`` command and there
+    is nobody to hand it to — and the receipt of an EARLIER write in this process is
+    cleared, so nothing reads it as this one's (round 5 of #203). Returns nothing: its
+    callers read nothing.
     """
     _require_enabled()
-    _validate_signal(name, value)
+    for _, name in signals:
+        _validate_signal(name, value)
     _DELIVERY.set(None)
-    board = _board_of(store, project_id)
-    _write_signal(store, board, None, name, value)
+    session = _resolve_session(store, session_ref)
+    _write_signals(
+        store, [(_board_of(store, board), name) for board, name in signals], session, value
+    )
 
 
 def _validate_signal(name: str, value: str) -> None:
@@ -1108,42 +1122,55 @@ def _write_signal(
     name: str,
     value: str,
 ) -> tuple[SignalState, str | None, TeamEvent]:
-    """The one write behind :func:`set_signal` and :func:`set_signal_in`.
+    """The one write behind :func:`set_signal`: :func:`_write_signals` of one."""
+    return _write_signals(store, [(board, name)], session, value)[0]
+
+
+def _write_signals(
+    store: ContextStore,
+    signals: Sequence[tuple[_Board, str]],
+    session: TeamSession | None,
+    value: str,
+) -> list[tuple[SignalState, str | None, TeamEvent]]:
+    """Set each (board, name) of ``signals`` to ``value`` in one transaction
+    (``ContextStore.add_signal_events``): each one's state, the value it replaced, and its
+    event.
 
     Validation is the CALLER's, before it opens or resolves anything:
     ``_board`` runs ``ensure_project``, which revives a forgotten project's
     tombstone, so a signal that was going to be refused used to register the
     directory first (review of the fold).
     """
-    key = _signal_key(board.id, name)
-    prior = store.get_meta(key)
-    prev = _signal_state(name, prior).value if prior is not None else None
-    text = f"{name}: {value}" if prev is None else f"{name}: {value} (was {prev})"
     now = _now()
-    event = store.add_signal_event(
-        TeamEvent(
+    by = session.id if session else None
+    priors: list[str | None] = []
+    writes: list[tuple[TeamEvent, str, dict[str, Any]]] = []
+    for board, name in signals:
+        key = _signal_key(board.id, name)
+        prior = store.get_meta(key)
+        prev = _signal_state(name, prior).value if prior is not None else None
+        text = f"{name}: {value}" if prev is None else f"{name}: {value} (was {prev})"
+        event = TeamEvent(
             id=new_event_id(),
             project_id=board.id,
-            session_id=session.id if session else None,
+            session_id=by,
             kind="signal",
             text=text,
             created_at=now,
-        ),
-        key,
-        {
-            "value": value,
-            "session_id": session.id if session else None,
-            "updated_at": now.isoformat(),
-        },
-    )
-    state = SignalState(
-        name=name,
-        value=value,
-        set_by=session.id if session else None,
-        seq=event.seq,
-        updated_at=now,
-    )
-    return state, prev, event
+        )
+        priors.append(prev)
+        writes.append(
+            (event, key, {"value": value, "session_id": by, "updated_at": now.isoformat()})
+        )
+    events = store.add_signal_events(writes)
+    return [
+        (
+            SignalState(name=name, value=value, set_by=by, seq=event.seq, updated_at=now),
+            prev,
+            event,
+        )
+        for (_, name), prev, event in zip(signals, priors, events, strict=True)
+    ]
 
 
 def read_signal(
@@ -1165,7 +1192,7 @@ def read_signal(
 
 def read_signal_in(store: ContextStore, project_id: str, name: str) -> SignalState | None:
     """:func:`read_signal` for ``project_id`` through a store the CALLER holds open
-    (see :func:`set_signal_in` for why)."""
+    (see :func:`set_signals_in` for why)."""
     _require_enabled()
     return _read_signal(store, project_id, name)
 
@@ -1174,7 +1201,7 @@ def board_signals_in(
     store: ContextStore, *, unreadable: list[tuple[str, str]] | None = None
 ) -> dict[tuple[str, str], SignalState]:
     """Every board's named states, by (board id, name), through a store the CALLER holds open
-    (see :func:`set_signal_in`): one read of them all, for a caller that looks a name up on
+    (see :func:`set_signals_in`): one read of them all, for a caller that looks a name up on
     whichever boards hold it. A fleet project's pause is named for its project on each board
     (``harness.pause_signal``), so the boards it is on are those that hold it by that name
     (``fleet._pause_where_on``).

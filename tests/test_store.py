@@ -2523,6 +2523,25 @@ def test_a_label_lookup_and_the_label_heads_pick_one_row_of_two_stamped_alike(
     assert (head.id, found.id) == ("agt_b", "agt_b")
 
 
+def test_a_session_lookup_picks_the_greater_id_of_two_live_rows_stamped_alike(
+    store: ContextStore,
+) -> None:
+    """Review of #259, round 42, 7/11: ``fleet_agent_for_session``, which the session-start
+    hook, ``task next`` and the limit hand-over read, broke no tie on ``created_at``: for two
+    live rows on one session stamped alike, SQLite gave whichever its plan reached first. It
+    gives the greater id, as the label lookup and the label heads do, whichever was first."""
+    stamped = datetime(2026, 2, 1, tzinfo=UTC).isoformat()
+    store._conn.executemany(  # type: ignore[attr-defined]
+        "INSERT INTO fleet_agent (id, project_id, label, role, pane_id, cwd, created_at, "
+        "session_id) VALUES (?, 'prj_0', ?, 'coder', '%1', '/w', ?, 'ses_1')",
+        [("agt_b", "coder-2", stamped), ("agt_a", "coder-1", stamped)],
+    )
+
+    found = store.fleet_agent_for_session("ses_1")
+
+    assert found is not None and found.id == "agt_b"
+
+
 def test_the_label_heads_cost_grows_with_the_rows_not_their_square(store: ContextStore) -> None:
     """Review of #259, round 37, 4/7: each label's newest was a correlated ``NOT EXISTS`` per
     row, over the ``(project_id, created_at)`` index, which has no ``label``: quadratic in a

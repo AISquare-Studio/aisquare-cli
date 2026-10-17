@@ -3985,11 +3985,17 @@ class SqliteStore:
         limit hand-over, asking with the board's project, found no row and never switched
         the agent (review of #259, round 23). A session id names one session wherever it
         sits, so the row recorded against it is that session's.
+
+        Two live rows on one session stamped alike (a resume that keeps the session id
+        before the old row ends) give the one of the greater id, as :meth:`fleet_agent_by_label`
+        and :meth:`fleet_label_heads` pick: with no tie-break SQLite gave whichever its plan
+        reached first, and the hand-over could act on another row than a ``fleet stop`` or
+        ``restart`` by label (review of #259, round 42, 7/11).
         """
         row = self._conn.execute(
             f"SELECT {self._fleet_agent_read} FROM fleet_agent "
             "WHERE session_id = ? AND ended_at IS NULL "
-            "ORDER BY created_at DESC LIMIT 1",
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
             (session_id,),
         ).fetchone()
         return _row_to_fleet_agent(row) if row is not None else None

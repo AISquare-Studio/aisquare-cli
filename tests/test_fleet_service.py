@@ -9407,6 +9407,45 @@ def test_a_pause_or_resume_as_a_prefix_of_two_sessions_is_refused_as_ambiguous(
     assert json.loads(result.stdout) == {"error": "fleet_error", "detail": ambiguous}
 
 
+@pytest.mark.parametrize("paused", [False, True], ids=["nothing on", "paused"])
+def test_a_resume_looks_its_session_up_once(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    paused: bool,
+) -> None:
+    """Review of #259, round 35, 7/8: since round 34 ``team.set_signals_in`` resolves
+    ``--as`` itself, with no signal to write too, and refuses an unknown or ambiguous one as
+    ``resume``'s own check did; that check, kept from when nothing was written with nothing
+    on, looked the session up a second time on every resume. Once, and still refused."""
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        store.upsert_session(
+            TeamSession(
+                id="ses_one", project_id=project.id, role="manager", started_at=now,
+                last_seen_at=now,
+            )
+        )  # fmt: skip
+    if paused:
+        fleet_service.pause(project)
+    asked: list[str] = []
+    real = SqliteStore.get_session
+
+    def counted(store: SqliteStore, ref: str) -> TeamSession | None:
+        asked.append(ref)
+        return real(store, ref)
+
+    monkeypatch.setattr(SqliteStore, "get_session", counted)
+
+    fleet_service.resume(project, session_ref="ses_one")
+
+    assert asked == ["ses_one"], asked
+    assert not fleet_service.is_paused(project)
+    with pytest.raises(FleetError, match="unknown session 'ses_none'"):
+        fleet_service.resume(project, session_ref="ses_none")
+
+
 def test_a_pause_is_read_and_cleared_by_its_name_on_any_board_with_no_git(
     hubbed: _Hubbed, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

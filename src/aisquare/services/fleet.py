@@ -7267,10 +7267,12 @@ def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> Non
     every board one of the project's rows ever recorded, ``fleet resume -P a`` put
     ``fleet-paused.a: off`` in the next prompt of every agent on every hub ``a`` ever ran
     under, where it had never been paused (review of #259, round 30, 5/8). With nothing on,
-    ``--as`` is still checked: an unknown session is refused, as a write refuses it, and so
-    is a prefix of several, as :func:`_task_for` refuses one of a task. Left to the CLI,
-    which catches only ``FleetError``, ``fleet resume --as ses_a`` ended in a traceback, and
-    ``--json`` printed nothing (round 31, 2/7).
+    ``--as`` is still checked (:func:`team.set_signals_in` resolves it with no signal to
+    write): an unknown session is refused, as a write refuses it, and so is a prefix of
+    several, as :func:`_task_for` refuses one of a task. Left to the CLI, which catches only
+    ``FleetError``, ``fleet resume --as ses_a`` ended in a traceback, and ``--json`` printed
+    nothing (round 31, 2/7). Checked here too, it was looked up twice on every resume (round
+    35, 7/8).
     """
     team = _team()
     doing = "set" if value == "on" else "clear"
@@ -7285,8 +7287,6 @@ def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> Non
                 signals = _pause_signals(store, project, homes)
             else:
                 signals = _pause_where_on(project, states)
-                if session_ref is not None and store.get_session(session_ref) is None:
-                    raise KeyError(session_ref)
             broken = [
                 where
                 for where in _pause_where_on(project, unreadable)

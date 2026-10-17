@@ -423,6 +423,10 @@ def emit_prune(report: ProjectPruneReport) -> None:
     # agent(s)" beside a summary that named a hub (review of #259, round 34, 6/10). A dry
     # run's ``kept`` is the plan's own.
     kept = {candidate.project.id: candidate for candidate in report.kept}
+    # A run marks what it dropped, not what it did not keep: a candidate forgotten elsewhere
+    # while the prompt sat open is in neither list, and was marked ✓ beside a count that left
+    # it out (review of #259, round 35, 4/8).
+    dropped = set(report.dropped)
     table = Table(show_header=True, header_style="bold")
     table.add_column("", no_wrap=True)
     table.add_column("WHY", no_wrap=True)
@@ -440,7 +444,11 @@ def emit_prune(report: ProjectPruneReport) -> None:
             why += f" (kept: the board {whose}'s fleet agents read)"
         elif held is not None:
             why += f" (kept: {held.live_agents} live agent(s))"
-        marker = "" if report.dry_run else ("·" if held is not None else "✓")
+        elif not report.dry_run and project.id not in dropped:
+            why += " (gone already: forgotten since the plan)"
+        marker = ""
+        if not report.dry_run:
+            marker = "✓" if project.id in dropped else "·" if held is not None else "-"
         table.add_row(
             marker, Text(why), Text(_project_name(project)), project.id, str(project.root)
         )

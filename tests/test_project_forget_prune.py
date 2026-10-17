@@ -963,6 +963,43 @@ def test_a_prune_says_why_it_kept_a_row_as_the_run_read_it_not_the_plan(
     assert _listed(runner) == {hub, beta}
 
 
+def test_a_prune_marks_only_what_it_dropped_and_says_a_row_gone_already(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 35, 4/8: a run marked ✓ every candidate it did not keep. One
+    another shell forgot while the confirmation sat open is in neither ``dropped`` nor
+    ``kept``, since ``prune`` passes over it, and it was marked ✓ too: three ✓ beside "✓
+    forgot 2 registrations". ✓ is what the run dropped, · what it kept, and the row gone
+    already is marked - and says so."""
+    from aisquare.services import project as project_service
+
+    ids = {name: _register(runner, monkeypatch, work_dir / name) for name in ("a", "b", "c")}
+    monkeypatch.chdir(work_dir)
+    for name in ids:
+        shutil.rmtree(work_dir / name)
+    real = project_service.prune_candidates
+
+    def the_prompt_sat_open(**kwargs: Any) -> list[Any]:
+        plan = real(**kwargs)
+        assert {c.project.id for c in plan} == set(ids.values()), "the premise"
+        with store_session() as store:
+            store.forget_project(ids["b"])  # another shell's forget
+        return plan
+
+    monkeypatch.setattr(project_service, "prune_candidates", the_prompt_sat_open)
+
+    result = runner.invoke(app, ["project", "prune", "--missing", "--yes"], env={"COLUMNS": "400"})
+
+    assert result.exit_code == 0, result.output
+    rows = {
+        name: next(line.split() for line in result.stdout.splitlines() if project in line)
+        for name, project in ids.items()
+    }
+    assert [rows[name][1] for name in ("a", "b", "c")] == ["✓", "-", "✓"], result.stdout
+    assert "(gone already: forgotten since the plan)" in " ".join(result.stdout.split())
+    assert "✓ forgot 2 registrations" in result.stdout
+
+
 @pytest.mark.parametrize("held", [False, True], ids=["its reader goes", "its reader stays"])
 @pytest.mark.parametrize("hub_first", [True, False], ids=["hub first", "reader first"])
 def test_a_prune_of_a_hub_and_its_reader_decides_every_hold_before_either_goes(

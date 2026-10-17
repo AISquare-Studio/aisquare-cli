@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,25 @@ def test_root_is_nearest_marker_ancestor(tmp_path: Path) -> None:
 
 def test_root_falls_back_to_start_without_marker(tmp_path: Path) -> None:
     assert find_project_root(tmp_path) == tmp_path.resolve()
+
+
+@pytest.mark.parametrize("start", ["deleted", "a file"])
+def test_a_start_that_is_not_a_directory_is_its_own_root(tmp_path: Path, start: str) -> None:
+    """Review of #259, round 42, 3/11: a stored root is asked of after its folder is gone, and
+    the walk from it landed on the nearest marked ancestor, a dotfiles ``~/.git`` for a
+    deleted ``~/code/app``, whose board a restart, a pause and the phone then read. A start
+    that is not a directory has no checkout to look up from: neither ``git`` nor the walk."""
+    home = tmp_path / "home"
+    home.mkdir()
+    subprocess.run(["git", "init", "-q", str(home)], check=True, capture_output=True)
+    app = home / "code" / "app"
+    app.parent.mkdir()
+    if start == "a file":
+        app.write_text("", encoding="utf-8")
+
+    assert find_project_root(app) == app.resolve()
+    assert find_project_root(app / "below") == (app / "below").resolve()
+    assert find_project_root(app.parent) == home.resolve(), "a directory still walks"
 
 
 def test_project_id_is_stable_and_path_specific(tmp_path: Path) -> None:

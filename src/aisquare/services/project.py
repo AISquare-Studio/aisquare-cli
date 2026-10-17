@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import errno
 import os
 import shutil
-import stat
 import subprocess
 from collections.abc import Callable, Collection, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
@@ -20,6 +18,7 @@ from aisquare.core.names import name_flaw
 from aisquare.core.state_file import StateUnwritableError
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.workspace import (
+    _is_dir,
     _resolved,
     active_project,
     find_project_root,
@@ -718,24 +717,6 @@ def _why_stale(
         return PruneCandidate(project=project, reason="worktree", principal=principal)
 
     return why
-
-
-#: What ``stat`` says of a root that is gone: nothing there, a file where a directory on its
-#: path was, or a link that can never reach one.
-_GONE = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ELOOP})
-
-
-def _is_dir(root: Path) -> bool:
-    """Whether ``root`` is a directory; one that cannot be asked is taken to be one.
-
-    ``os.stat``, not ``Path.is_dir``: that raised for ``EACCES`` up to Python 3.13, and from
-    3.14 it is ``os.path.isdir``, which says False for any ``OSError``. On 3.14 a root under
-    a folder this user may not search, or on a mount that answered ``EIO``, was called
-    missing, and ``prune --missing`` dropped it (review of #259, round 19)."""
-    try:
-        return stat.S_ISDIR(os.stat(root).st_mode)
-    except OSError as exc:
-        return exc.errno not in _GONE
 
 
 def _held(candidate: PruneCandidate, busy: ProjectBusyError | None) -> PruneCandidate:

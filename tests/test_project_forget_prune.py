@@ -33,7 +33,7 @@ from aisquare.core import paths
 from aisquare.core.ids import new_agent_id, new_event_id, new_task_id
 from aisquare.core.state_file import StateUnwritableError, read_state
 from aisquare.core.store import SqliteStore, store_session
-from aisquare.core.workspace import pinned_project_id, project_id_for, worktree_principal
+from aisquare.core.workspace import _is_dir, pinned_project_id, project_id_for, worktree_principal
 from aisquare.models import FleetAgent, ProjectInfo, TeamEvent, TeamSession, TeamTask
 from tests.fsperms import can_deny_reads
 from tests.test_worktree import _git
@@ -1928,7 +1928,7 @@ def test_a_prunes_run_reads_a_lapsed_rows_project_and_its_root_once(
     assert [(c.project.id, c.reason) for c in plan] == [(wt_id, "worktree")], "the premise"
     shutil.rmtree(worktree)  # reaped while the prompt sat open
     asked: list[str] = []
-    real_get, real_is_dir = SqliteStore.get_project, project_service._is_dir
+    real_get, real_is_dir = SqliteStore.get_project, _is_dir
 
     def get_project(self: SqliteStore, project_id: str, **kwargs: bool) -> ProjectInfo | None:
         if project_id == wt_id:

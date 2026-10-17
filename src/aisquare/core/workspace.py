@@ -11,6 +11,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import os
+import stat
 import subprocess
 from pathlib import Path
 
@@ -110,6 +111,24 @@ def _resolved(path: Path) -> Path:
     return resolved
 
 
+#: What ``stat`` says of a path that is gone: nothing there, a file where a directory on its
+#: path was, or a link that can never reach one.
+_GONE = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ELOOP})
+
+
+def _is_dir(root: Path) -> bool:
+    """Whether ``root`` is a directory; one that cannot be asked is taken to be one.
+
+    ``os.stat``, not ``Path.is_dir``: that raised for ``EACCES`` up to Python 3.13, and from
+    3.14 it is ``os.path.isdir``, which says False for any ``OSError``. On 3.14 a root under
+    a folder this user may not search, or on a mount that answered ``EIO``, was called
+    missing, and ``prune --missing`` dropped it (review of #259, round 19)."""
+    try:
+        return stat.S_ISDIR(os.stat(root).st_mode)
+    except OSError as exc:
+        return exc.errno not in _GONE
+
+
 def git_common_root(start: Path) -> Path | None:
     """The principal repository root for ``start``, resolving git worktrees.
 
@@ -184,8 +203,18 @@ def find_project_root(start: Path) -> Path:
     ancestor carrying a project marker, then to ``start`` itself, so every
     directory resolves to *some* project. A symlink loop on the way to ``start`` raises
     ``OSError`` (:func:`_resolved`).
+
+    A ``start`` that is not a directory (:func:`_is_dir`) is its own root, with no ``git``
+    and no walk: a deleted project folder is asked of, as a stored root (``fleet``'s
+    restarts and pauses, Remote's Board and Tasks tabs and ``done #N``). Walked from, a
+    deleted ``~/code/app`` under a dotfiles ``~/.git`` resolved to ``~``: a restart moved its
+    agent onto ``~``'s board, or refused it the task on ``app``'s, and the phone read and
+    closed ``~``'s tasks for ``app``. Guarded in ``fleet.restart_board`` alone (round 41,
+    3/6), the holds and the restart read different boards (review of #259, round 42, 3/11).
     """
     start = _resolved(start)
+    if not _is_dir(start):
+        return start
     common = git_common_root(start)
     if common is not None:
         return common

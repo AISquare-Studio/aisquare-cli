@@ -5943,6 +5943,37 @@ def test_a_080_row_whose_root_is_gone_keeps_its_board_and_holds_no_ancestor(
         assert store.get_project(project.id) is None, "forgotten"
 
 
+def test_a_restart_the_holds_and_a_pause_read_a_gone_roots_own_board_not_its_ancestors(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 42, 3/11: round 41 kept a gone root's row on its board in
+    ``restart_board`` alone. A restart (``_board_and_hub``) and a pause (``_pause_homes``)
+    still asked ``directory_project`` of the deleted ``~/code/app``, which walked to the
+    dotfiles ``~/.git``: the holds filed the row under ``app`` while its restart moved it onto
+    ``~``'s board, and the pause went on ``~``'s. ``find_project_root`` walks from no start
+    that is not a directory, and each reads ``app``'s own board."""
+    monkeypatch.delenv("AISQUARE_TEAM_HUB", raising=False)
+    app = project.root / "app"  # its own repository, below one that holds it (``~``)
+    app.mkdir()
+    _git("init", "-q", "-b", "main", cwd=app)
+    _git("commit", "-q", "--allow-empty", "-m", "init", cwd=app)
+    own = team_project(app)
+    with store_session() as store:
+        store.onboard_project(own)
+    agent = _coder(own)
+    _as_080_left_it(agent)  # no session on its own board, no task: read from the checkout
+    shutil.rmtree(app)
+
+    with store_session() as store:
+        row = _row(agent.id)
+        board_and_hub = fleet_service._board_and_hub(store, own, row, None)
+        filed = fleet_service.restart_board(store, row, {})
+
+    assert board_and_hub == (own.id, ""), "not the ancestor's board"
+    assert filed == own.id
+    assert fleet_service._pause_homes(own) == {own.id}
+
+
 @pytest.mark.parametrize("table", ["team_session", "team_task"])
 def test_a_080_row_on_a_store_without_its_session_or_task_table_fails_no_forget_or_prune(
     tmux: FakeTmux,

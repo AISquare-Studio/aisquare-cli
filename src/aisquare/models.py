@@ -873,6 +873,10 @@ class ProjectPruneReport(BaseModel):
     candidates, and left as it found them: not purged, and not kept either (review of #259,
     round 39, 4/9); one a candidate still is purged. Empty on a dry run, and without
     ``--purge``, whose run passes over every row forgotten since."""
+    root_gone: list[str] = Field(default_factory=list)
+    """Of :attr:`changed`, the worktrees whose tree went since the plan: none now, they are
+    kept by a run not asked for missing roots, and ``prune --missing`` drops them (review of
+    #259, round 39, 5/9). Empty on a dry run."""
     dry_run: bool = True
     purged: bool = False
     active: ProjectInfo | None = None

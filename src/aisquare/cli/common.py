@@ -429,6 +429,7 @@ def emit_prune(report: ProjectPruneReport) -> None:
     dropped = set(report.dropped)
     changed = set(report.changed)
     forgotten = set(report.forgotten)
+    root_gone = set(report.root_gone)
     table = Table(show_header=True, header_style="bold")
     table.add_column("", no_wrap=True)
     table.add_column("WHY", no_wrap=True)
@@ -448,6 +449,10 @@ def emit_prune(report: ProjectPruneReport) -> None:
             why += f" (kept: the fleet agents of {whose} read its board)"
         elif held is not None:
             why += f" (kept: {held.live_agents} live agent(s))"
+        elif project.id in root_gone:
+            # Not "changed since the plan" alone: its root went, and --missing drops it (round
+            # 39, 5/9).
+            why += " (kept: its root went since the plan)"
         elif project.id in changed:
             # Added, given an entry or back on disk while the prompt sat open (round 37, 2/7).
             why += " (kept: changed since the plan)"
@@ -480,8 +485,14 @@ def emit_prune(report: ProjectPruneReport) -> None:
             f"  kept {hubs} whose board another project's fleet agents read, as a hub's — "
             "its row names each project"
         )
-    if report.changed:
-        console.print(f"  kept {len(report.changed)} that changed since the plan: no longer stale")
+    if len(report.changed) > len(report.root_gone):
+        stale_no_more = len(report.changed) - len(report.root_gone)
+        console.print(f"  kept {stale_no_more} that changed since the plan: no longer stale")
+    if report.root_gone:
+        console.print(
+            f"  kept {len(report.root_gone)} whose root went since the plan, which this prune "
+            "did not ask for — drop them: aisquare project prune --missing"
+        )
     if not report.purged and count:
         console.print(
             "  their context entries, prompt history and board rows stay in the store, hidden "

@@ -1668,8 +1668,44 @@ def test_a_prune_drops_a_worktree_whose_tree_went_while_the_prompt_sat_open(
 
     assert result.exit_code == 0, result.output
     report = _json(result.stdout)
-    assert (report["dropped"], report["changed"]) == (([wt_id], []) if dropped else ([], [wt_id]))
+    assert (report["dropped"], report["changed"], report["root_gone"]) == (
+        ([wt_id], [], []) if dropped else ([], [wt_id], [wt_id])
+    )
     assert _listed(runner) == ({repo_id} if dropped else {repo_id, wt_id})
+
+
+def test_a_worktrees_prune_says_a_worktree_whose_tree_went_is_kept_for_its_root_not_fresh(
+    runner: CliRunner, repo_and_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 39, 5/9: asked for worktrees alone, a worktree whose tree went
+    while the confirmation sat open is kept (round 38, 2/4), and was said "kept: changed
+    since the plan" beside "kept 1 that changed since the plan: no longer stale". Its
+    registration names a directory that is gone, which only ``--missing`` drops, and nothing
+    said so. The row says its root went, and the summary names the prune that drops it."""
+    from aisquare.services import project as project_service
+
+    repo, worktree = repo_and_worktree
+    wt_id = _register_worktree_as_its_own_project(worktree)
+    _register(runner, monkeypatch, repo)
+    real = project_service.prune_candidates
+
+    def the_prompt_sat_open(**kwargs: Any) -> list[Any]:
+        plan = real(**kwargs)
+        shutil.rmtree(worktree)  # reaped
+        return plan
+
+    monkeypatch.setattr(project_service, "prune_candidates", the_prompt_sat_open)
+
+    result = runner.invoke(
+        app, ["project", "prune", "--worktrees", "--yes"], env={"COLUMNS": "400"}
+    )
+
+    assert result.exit_code == 0, result.output
+    marker = next(line.split() for line in result.stdout.splitlines() if wt_id in line)[1]
+    said = " ".join(result.stdout.split())
+    assert marker == "·" and "(kept: its root went since the plan)" in said, said
+    assert "kept 1 whose root went since the plan" in said, said
+    assert "aisquare project prune --missing" in said and "no longer stale" not in said, said
 
 
 @pytest.mark.parametrize(

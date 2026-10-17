@@ -766,7 +766,9 @@ def prune(
     worktree whose tree went meanwhile is missing now (round 38, 2/4 and 4/4). One a
     ``--purge`` finds forgotten elsewhere and no longer a candidate is left forgotten, and
     reported so (``forgotten``): counted as changed, it was said kept, though no list shows
-    it (round 39, 4/9).
+    it (round 39, 4/9). One kept because its root went, a worktree a prune not asked for
+    missing roots no longer reads as one, is reported so (``root_gone``): said "no longer
+    stale", nothing told its user ``prune --missing`` drops it (round 39, 5/9).
     """
     dropped: list[str] = []
     kept: list[PruneCandidate] = []
@@ -777,18 +779,25 @@ def prune(
             store, missing=missing, worktrees=worktrees, captured_older_than=captured_older_than
         )
         # Gone since the plan was made: nothing to drop, and no hold to decide.
-        here = [
-            row
+        here = {
+            row.id: row
             for c in candidates
             if (row := store.get_project(c.project.id, include_forgotten=purge)) is not None
-        ]
-        reread = {row.id: why(row) for row in here}
+        }
+        reread = {project_id: why(row) for project_id, row in here.items()}
         lapsed = [project_id for project_id, now in reread.items() if now is None]
         # Under --purge, one forgotten elsewhere meanwhile is left as it was found: not kept.
         forgotten = [
             project_id for project_id in lapsed if purge and store.get_project(project_id) is None
         ]
         changed = [project_id for project_id in lapsed if project_id not in forgotten]
+        # A worktree whose tree went is none now, and a run not asked for missing roots keeps it.
+        planned = {c.project.id: c.reason for c in candidates}
+        root_gone = [
+            project_id
+            for project_id in changed
+            if planned[project_id] == "worktree" and not _is_dir(here[project_id].root)
+        ]
         still = [now for now in reread.values() if now is not None]
         holds = _holds(store, [c.project for c in still], reading_rows(store)) if still else {}
         for candidate in still:
@@ -813,6 +822,7 @@ def prune(
         kept=kept,
         changed=changed,
         forgotten=forgotten,
+        root_gone=root_gone,
         dry_run=False,
         purged=purge,
         active=active,

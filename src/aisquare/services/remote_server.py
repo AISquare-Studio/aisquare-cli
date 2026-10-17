@@ -2579,7 +2579,11 @@ def remote_project_ref(ref: str) -> ProjectInfo:
     and no error on 3.13. A registered root that became a loop still names its project, as
     ``project forget`` reads it, on every Python: it is asked whether it is a directory
     before it is resolved, and resolved first, it was 404 on 3.12 and removed on 3.13
-    (review of #259, round 41, 2/6). ``KeyError`` and ``ValueError`` are
+    (review of #259, round 41, 2/6). Asked with ``os.path.isdir``, as ``project.resolve``
+    asks, which says False for any ``OSError``: ``Path.is_dir`` raised ``PermissionError`` up
+    to 3.13 for a root under a folder this user may not search, which ``resolve`` finds and
+    ``prune --missing`` keeps, and the remove was 404 (round 43, 2/7). ``KeyError`` and
+    ``ValueError`` are
     ``project_service.resolve``'s, for nothing and several matching, and a name is
     :func:`_resolve_project`'s, :class:`NoSuchProject` and :class:`AmbiguousProject`.
 
@@ -2606,7 +2610,7 @@ def remote_project_ref(ref: str) -> ProjectInfo:
     if path.is_absolute():
         try:
             found = project_service.resolve(str(path))
-            passed = path.is_dir() and found.root != path.resolve()
+            passed = os.path.isdir(path) and found.root != path.resolve()
         except (OSError, RuntimeError):
             raise no_such from None
         if (passed and not _remote_may_look_inside(path)) or not _remote_reachable([found]):

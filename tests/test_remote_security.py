@@ -2928,6 +2928,29 @@ def test_a_remove_naming_a_registered_root_that_became_a_symlink_loop_removes_it
     assert [project.id for project in project_service.list_projects()] == [alpha.id]
 
 
+@pytest.mark.skipif(not can_deny_reads(), reason="chmod(0) denies nothing here (root, or NTFS)")
+def test_a_remove_naming_a_registered_root_under_a_folder_it_may_not_search_removes_it(
+    home: Path, runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 43, 2/7: round 41 asked the ref whether it is a directory first,
+    with ``Path.is_dir``, which raised ``PermissionError`` up to 3.13 for a root under a
+    folder this user may not search: 404 ``not_found`` for a project ``project forget`` finds,
+    and removed on 3.14. ``os.path.isdir``, as ``project.resolve`` asks, removes it on every
+    Python."""
+    alpha, beta = _projects(home, "code/alpha", "code/locked/beta")
+    monkeypatch.chdir(alpha.root)
+    client = _project_writes(runtime, tmp_path)
+    locked = beta.root.parent
+    locked.chmod(0)
+    try:
+        removed = client.post(f"{base(runtime)}/api/project/remove", json={"ref": str(beta.root)})
+    finally:
+        locked.chmod(0o700)
+
+    assert removed.status_code == 200, removed.text
+    assert [project.id for project in project_service.list_projects()] == [alpha.id]
+
+
 def test_a_task_another_session_holds_is_refused_claim_lost(
     home: Path, runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

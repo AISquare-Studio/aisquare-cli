@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 from collections.abc import Callable, Collection, Mapping, Sequence
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
@@ -186,17 +187,28 @@ def resolve(ref: str) -> ProjectInfo:
     :class:`ProjectBusyError` print for ``project forget``. Resolved raw, the loop raised
     ``RuntimeError`` on 3.11 and 3.12, and that ``forget`` ended in a traceback (review of
     #259, round 41, 2/6).
+
+    So is a path that cannot be asked (``EACCES``, ``EIO``): ``os.path``, which says False
+    for one, where ``Path.exists`` and ``Path.is_dir`` raised up to 3.13, and a checkout git
+    and the markers cannot be asked of is none. Doctor and :class:`ProjectBusyError` print
+    the ``forget`` of a root under a folder this user may not search, which ``prune
+    --missing`` keeps, and it ended in a traceback (round 42, 4/11).
     """
     with store_session() as store:
         candidate = Path(ref).expanduser()
-        if candidate.exists() or any(sep in ref for sep in {"/", os.sep}) or ref.startswith("."):
+        if (
+            os.path.exists(candidate)
+            or any(sep in ref for sep in {"/", os.sep})
+            or ref.startswith(".")
+        ):
             try:
                 root = _resolved(candidate)
             except OSError:  # a symlink loop (ELOOP)
                 root = Path(os.path.abspath(candidate))
             found = store.get_project(project_id_for(root))
-            if found is None and root.is_dir():
-                found = store.get_project(project_id_for(find_project_root(root)))
+            if found is None and os.path.isdir(root):
+                with suppress(OSError):  # a checkout that cannot be asked
+                    found = store.get_project(project_id_for(find_project_root(root)))
             if found is not None:
                 return found
         return _one_match(store, ref)

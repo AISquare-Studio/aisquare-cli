@@ -852,6 +852,43 @@ def test_prune_never_calls_a_root_it_may_not_search_missing(tmp_path: Path) -> N
     assert [(c.project.id, c.reason) for c in plan] == [("prj_gone", "missing")]
 
 
+def test_forget_of_a_path_it_may_not_search_forgets_or_refuses_it_with_no_traceback(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Review of #259, round 42, 4/11: ``prune --missing`` keeps a root under a folder this
+    user may not search (above), and doctor and ``ProjectBusyError`` print ``project forget
+    <root>`` for it. ``project.resolve`` asked ``Path.exists`` of it, which raised
+    ``PermissionError`` up to 3.13, and so did the checkout of a ``chmod 000`` folder
+    nothing registered, through its markers, on every Python: a traceback. The registered
+    root is forgotten; the others are refused as naming no project."""
+    if sys.platform == "win32" or not can_deny_reads():
+        pytest.skip("needs a folder this user cannot search")
+    locked = tmp_path / "locked"
+    there = locked / "there"
+    there.mkdir(parents=True)
+    sealed = tmp_path / "sealed"  # stat-able, but nothing inside it can be asked
+    sealed.mkdir()
+    with store_session() as store:
+        kept = store.onboard_project(ProjectInfo(id=project_id_for(there), root=there))
+    locked.chmod(0)
+    sealed.chmod(0)
+    try:
+        forgot = runner.invoke(app, ["--json", "project", "forget", str(there)])
+        refused = {
+            ref: runner.invoke(app, ["--json", "project", "forget", ref])
+            for ref in (str(locked / "other"), str(sealed))
+        }
+    finally:
+        locked.chmod(0o700)
+        sealed.chmod(0o700)
+
+    assert forgot.exit_code == 0, forgot.output
+    assert _json(forgot.stdout)["project"]["id"] == kept.id
+    for ref, result in refused.items():
+        assert result.exit_code == 1, (ref, result.output)
+        assert _json(result.stdout) == {"error": "not_found", "ref": ref}
+
+
 def test_prune_with_nothing_to_drop_says_so(runner: CliRunner) -> None:
     result = runner.invoke(app, ["project", "prune"])
     assert result.exit_code == 0, result.output

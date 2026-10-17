@@ -255,7 +255,8 @@ all of them, and the fleet cleans up the worktrees it made.**
   double-click a card's title (or `F2`) and type, where Enter or a click away
   saves and Esc cancels. Emoji are fine, joined ones (👩‍💻, 🏳️‍🌈) included. A
   name with an invisible formatting character (a bidi control, a zero-width
-  space) is refused, as are bytes the terminal could not decode. The project's *Settings* tab sets it too. The sidebar,
+  space, a variation selector after a letter) is refused, as are bytes the
+  terminal could not decode. The project's *Settings* tab sets it too. The sidebar,
   `project list`, `fleet ls` and `project info` show it, and `--project`
   accepts it when no id prefix, folder name or codename matches first. Cards no
   longer show the codename; the *Settings* tab names it, beside the tmux session
@@ -265,6 +266,9 @@ all of them, and the fleet cleans up the worktrees it made.**
   from fleet…*, which asks first and then forgets the project as `project
   forget` does. Its folder and history are kept, and `aisquare project onboard
   <root>` brings it back. A project with live agents is refused, naming them.
+  So is a hub another project's agents read, live or stopped (a restart starts
+  a stopped one under its hub again); `project forget` refuses it, and `project
+  prune` keeps it, `--purge` included, naming the project that reads it.
 - **⚙ Settings in the sidebar** opens a hub with **App settings**,
   **Accounts** and **Doctor**. Under it is a dim status line,
   `● aisquare  ● 2× claude ⚠`:
@@ -465,7 +469,8 @@ all of them, and the fleet cleans up the worktrees it made.**
   branch lacks, so a coder spawned again for its task checks it out and carries
   on with them. A kept branch is named on every reap, with its repo and `git -C
   <repo> branch -D` to drop it. Reap never deleted a branch before, and deletes no other: not one
-  made by hand, nor one an agent left for another. A tree with uncommitted changes, an untracked file that is not
+  made by hand, nor one an agent left for another, nor one whose tip moved after
+  reap judged it (the next reap judges it again). A tree with uncommitted changes, an untracked file that is not
   ignored, or unpushed commits is kept and named with why; push it, and the
   next `reap` removes it. `--json` adds `worktrees_kept`, and `branches_deleted`
   and `branches_kept` (each `{repo, branch}`), beside `worktrees_removed`. A live agent's tree is never
@@ -593,11 +598,15 @@ all of them, and the fleet cleans up the worktrees it made.**
   - `fleet spawn --task` in a project rooted in a sub-folder of its
     repository, or at a linked worktree, finds the task on the checkout's
     board, where that project's manager and sessions add tasks.
-  - `fleet pause` and `fleet resume` set the `fleet-paused` signal on every
-    board the project's agents read, where its manager looks for it, and
-    `fleet shutdown` clears it there, whichever agents are still running: a
-    pause set where a manager that has since stopped read is cleared too, so
-    the next manager spawned there is not paused. On a board other projects read too
+  - `fleet pause` sets the `fleet-paused` signal where the project's manager
+    reads, or would next: the board its newest manager was spawned on (running
+    or stopped, since a restart hands it on), its checkout's, and the one a spawn
+    from where you run it gives; before its first manager, the boards its
+    running agents read. A board only an old agent read is left alone. `fleet
+    resume` clears the pause wherever it is on, and only there, and `fleet
+    shutdown` clears it too, whichever agents are still running, so the next
+    manager spawned there is not paused. A pause signal that does not parse is
+    named and nothing is written, on pause and resume alike. On a board other projects read too
     (the hub's, under a hub) the signal is the project's own,
     `fleet-paused.<project id>`, and its manager's cycle names it, so pausing,
     resuming or shutting down one project leaves the others' managers alone.
@@ -620,7 +629,10 @@ all of them, and the fleet cleans up the worktrees it made.**
     hand-over says so, a parked agent's limit card keeps its id, and a
     coder's question there is a card unless its manager reads that board.
     The phone's Reply to such a card is posted on that board too, where the
-    agent reads it, and the card stays when the reply could not be posted.
+    agent reads it, and the card stays when the reply could not be posted. A
+    Reply to the card of a session no agent row holds (one you launched by hand)
+    is posted on the board the card was read on, which the machine looks up by
+    the card; a card gone from the feed is refused, and nothing is posted.
   - Remote's Board and Tasks tabs show the board the project's agents read, as
     recorded when they were spawned, and a note from the Board tab is posted
     there, even when Remote runs under another hub, or none. A claim or a

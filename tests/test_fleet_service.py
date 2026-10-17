@@ -92,7 +92,7 @@ from aisquare.services.fleet import (
 )
 from tests import fakebin
 from tests.cycles import unscoped
-from tests.fsperms import can_deny_reads, can_symlink
+from tests.fsperms import can_deny_reads, can_symlink, remove_tree
 from tests.projects import add_project
 
 PYTHON_LAUNCHER = "python3"
@@ -5930,7 +5930,7 @@ def test_a_080_row_whose_root_is_gone_keeps_its_board_and_holds_no_ancestor(
     _as_080_left_it(agent)
     with store_session() as store:
         store.end_fleet_agent(agent.id, exit_status=0)
-    shutil.rmtree(app)
+    remove_tree(app)  # a checkout with a commit: its objects are read-only
 
     with store_session() as store:
         rows = project_service.reading_rows(store)
@@ -5991,7 +5991,7 @@ def test_a_restart_the_holds_and_a_pause_read_a_gone_roots_own_board_not_its_anc
         store.onboard_project(own)
     agent = _coder(own)
     _as_080_left_it(agent)  # no session on its own board, no task: read from the checkout
-    shutil.rmtree(app)
+    remove_tree(app)  # a checkout with a commit: its objects are read-only
 
     with store_session() as store:
         row = _row(agent.id)

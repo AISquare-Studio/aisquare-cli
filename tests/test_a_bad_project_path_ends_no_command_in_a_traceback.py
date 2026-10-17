@@ -18,7 +18,6 @@ state a root can be in, a column.
 from __future__ import annotations
 
 import json
-import shutil
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -37,7 +36,7 @@ from aisquare.services import project as project_service
 from aisquare.services import remote_server
 from aisquare.services.remote_server import Runtime, build_app, live_writes
 from tests import fakebin
-from tests.fsperms import can_deny_reads, can_symlink
+from tests.fsperms import can_deny_reads, can_symlink, remove_tree
 from tests.remote_kit_helpers import base, make_client, make_runtime, unlock
 from tests.test_fleet_service import FakeClock, FakeTmux, _as_080_left_it, _git
 
@@ -99,7 +98,7 @@ class Fleet:
             return str(self.root)
         if state == "a symlink loop" and not can_symlink():
             pytest.skip("this machine cannot make a symlink")
-        shutil.rmtree(self.root)
+        remove_tree(self.root)
         if state == "a file":
             self.root.write_text("", encoding="utf-8")
         elif state == "a symlink loop":

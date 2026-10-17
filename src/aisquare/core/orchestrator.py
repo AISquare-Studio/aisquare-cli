@@ -30,7 +30,7 @@ import os
 import sys
 from pathlib import Path
 
-from aisquare.core.workspace import find_project_root, project_id_for
+from aisquare.core.workspace import _resolved, find_project_root, project_id_for
 from aisquare.models import ProjectInfo
 
 _OFF_VALUES = {"0", "false", "no", "off"}
@@ -140,7 +140,23 @@ def team_hub() -> Path | None:
     hub = os.environ.get(TEAM_HUB_ENV_VAR, "").strip()
     if not hub or not Path(hub).expanduser().is_absolute():
         return None
-    return Path(hub).expanduser().resolve()
+    return _hub_root(hub)
+
+
+def _hub_root(hub: str) -> Path:
+    """The board root an absolute ``hub`` names, resolved as every project root is
+    (``workspace._resolved``). Through a symlink loop, as it is spelled, made absolute, as
+    ``project.resolve`` reads a root that became one: resolved raw, the loop raised
+    ``RuntimeError`` on 3.11 and 3.12, which the readers that skip a root they cannot ask
+    (``suppress(OSError)``) let through, and every phone board write that works out its
+    reach was a 500; from 3.13 ``resolve`` handed back the path as far as it got. A hub is a
+    board's name, and one that does not exist names it too: like a relative one, a bad hub
+    costs no command (review of #259, round 42, 6/11)."""
+    path = Path(hub).expanduser()
+    try:
+        return _resolved(path)
+    except OSError:  # a symlink loop (ELOOP)
+        return Path(os.path.abspath(path))
 
 
 #: Relative hub values already reported, so a command that resolves the board
@@ -184,7 +200,7 @@ def team_project(cwd: Path | None = None) -> ProjectInfo:
             )
         hub = ""
     if hub:
-        root = Path(hub).expanduser().resolve()
+        root = _hub_root(hub)
         return ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
     return directory_project(cwd)
 

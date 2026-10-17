@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import errno
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -83,6 +84,28 @@ def test_a_missing_root_is_no_loop(tmp_path: Path) -> None:
 
     assert find_project_root(gone) == gone.resolve()
     assert orchestrator.directory_project(gone).root == gone.resolve()
+
+
+def test_a_hub_that_became_a_symlink_loop_names_its_board_as_spelled_on_every_python(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 42, 6/11: the hub was resolved raw, the one root that was. A hub
+    that became a loop raised ``RuntimeError`` on 3.11 and 3.12, which the readers that skip
+    a root they cannot ask do not catch: a phone board write works out its reach through
+    the hub (``_remote_boards``), and each was a 500. From 3.13 ``resolve`` handed the loop
+    back. It names its board as it is spelled, made absolute, on every Python, as
+    ``project.resolve`` reads a root that became a loop, and the window a spawn sets it on
+    reads the same board."""
+    hub = _loop(tmp_path / "hub")
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))
+    as_spelled = Path(os.path.abspath(hub))
+
+    board = orchestrator.team_project(tmp_path)
+    reach = remote_server._remote_boards()
+
+    assert (board.root, board.id) == (as_spelled, project_id_for(as_spelled))
+    assert orchestrator.window_team_hub() == str(as_spelled)
+    assert board.id in reach
 
 
 def test_a_project_root_that_became_a_symlink_loop_adds_no_board_and_fails_no_reach(

@@ -208,6 +208,7 @@ def test_codex_headroom_is_read_offline_on_a_plain_doctor_run(
 
     assert check is not None and check.name == "codex-account-headroom"
     assert check.status.value == "ok"
+    assert "percent USED (85% used is the line)" in check.detail, "as the Claude row says it"
     assert f"account {weekly.slot} week 30% used (70% left)" in check.detail
     assert f"account {both.slot} 95%" in check.detail
     names = {c.name for c in diagnostics.doctor()}
@@ -226,7 +227,8 @@ def test_codex_headroom_warns_when_every_codex_account_is_over_the_line(
     check = diagnostics._agent_account_headroom_check(CODEX)
 
     assert check is not None and check.status.value == "warn"
-    assert "every Codex account is at or over 85%" in check.detail
+    assert "every Codex account has used 85% or more of a window" in check.detail
+    assert "at or over" not in check.detail, "USED, as the Claude row says it"
     assert check.fix is not None and "aisquare accounts add --agent codex" in check.fix
     assert no_network == []
 

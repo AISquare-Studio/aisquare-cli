@@ -19,8 +19,9 @@ from textual.notifications import SeverityLevel
 from textual.pilot import Pilot
 from textual.widgets import Button, Input, Select, Static, Switch
 
-from aisquare.cli.ui.views.app_settings import AppSettingsView, ConfirmReset
+from aisquare.cli.ui.views.app_settings import ON_LIMIT_MODES, AppSettingsView, ConfirmReset
 from aisquare.core import paths
+from aisquare.core.agent_adapters import adapters
 from aisquare.core.config import AppConfig, load_config, overrides, save_config
 from aisquare.services import fleet as fleet_service
 from aisquare.services import settings as settings_service
@@ -636,3 +637,13 @@ def test_role_names_modes_and_bindings_written_by_hand_are_shown_as_text_not_mar
     assert saved.fleet.max_agents_per_project == 5
     assert saved.fleet.roles["a[/b]c"].permission_mode == "x[/y]", "the hand edit stands"
     assert saved.team.profiles["a[/b]c"].account == "w[/z]"
+
+
+def test_the_usage_limit_choices_name_no_agent() -> None:
+    """SCOPE #113, 0.8.1 item 19: *wait* read "Claude Code continues by itself", which a
+    Codex agent does not (it waits for its next prompt). The choice is every agent's."""
+    said = " ".join(label for label, _value in ON_LIMIT_MODES)
+    for adapter in adapters():
+        assert adapter.label not in said, adapter.label
+        assert adapter.binary not in said.split(), adapter.binary
+    assert [value for _label, value in ON_LIMIT_MODES] == ["wait", "switch"]

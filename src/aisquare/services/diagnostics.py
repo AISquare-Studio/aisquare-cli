@@ -2196,8 +2196,8 @@ def _agent_account_headroom_check(agent: str) -> DoctorCheck | None:
     if measured and all(pct >= settings.switch_at for _, pct in measured):
         return _warn(
             name,
-            f"every {label} account is at or over {settings.switch_at}% of a window, as its "
-            f"newest session recorded it: {summary}",
+            f"every {label} account has used {settings.switch_at}% or more of a window, as "
+            f"its newest session recorded it: {summary}",
             f"Add or sign in another account (aisquare accounts add --agent {agent}), or wait "
             "for a reset — a fleet spawned now has nowhere to switch to",
         )
@@ -2210,8 +2210,8 @@ def _agent_account_headroom_check(agent: str) -> DoctorCheck | None:
         )
     return _ok(
         name,
-        f"windows as each account's newest session recorded them ({settings.switch_at}% is "
-        f"the line): {summary}",
+        f"windows as each account's newest session recorded them, percent USED "
+        f"({settings.switch_at}% used is the line): {summary}",
     )
 
 

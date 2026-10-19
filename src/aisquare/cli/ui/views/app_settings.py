@@ -110,10 +110,12 @@ PICK_MODES: tuple[tuple[str, str], ...] = (
 )
 """``[accounts] pick`` (#146): how a launch chooses when nothing names an account."""
 ON_LIMIT_MODES: tuple[tuple[str, str], ...] = (
-    ("wait for the reset (Claude Code continues by itself)", "wait"),
+    ("wait for the reset, on the same account", "wait"),
     ("switch to the account with headroom", "switch"),
 )
-"""``[accounts] on_limit``: what the fleet does when an agent's turn ends on a usage limit."""
+"""``[accounts] on_limit``: what the fleet does when an agent's turn ends on a usage limit.
+Said of every agent alike: what an agent does at the reset is its own (Claude Code goes on
+by itself; a Codex agent waits for its next prompt), so no option names one."""
 _ID_KEPT = re.compile(r"[A-Za-z0-9-]")
 """The characters of a role name its widget ids keep as they are (:func:`widget_suffix`)."""
 SANDBOX_OPTIONS = [

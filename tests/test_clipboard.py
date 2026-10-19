@@ -639,20 +639,26 @@ def test_flush_waits_for_the_queued_copies_and_no_longer_than_it_is_told(
 @pytest.mark.parametrize(
     ("env", "terminal"),
     [
-        ({"TERM_PROGRAM": "Apple_Terminal"}, "Terminal.app"),
-        ({"TERM_PROGRAM": "iTerm.app"}, "iTerm2"),
-        ({"LC_TERMINAL": "iTerm2"}, "iTerm2"),  # over SSH: macOS's ssh sends LC_*
-        ({"TERM_PROGRAM": "tmux", "LC_TERMINAL": "iTerm2"}, "iTerm2"),
+        ({"TERM_PROGRAM": "Apple_Terminal"}, "drops"),
+        ({"TERM_PROGRAM": "iTerm.app"}, "asks"),
+        ({"LC_TERMINAL": "iTerm2"}, "asks"),  # over SSH: macOS's ssh sends LC_*
+        ({"TERM_PROGRAM": "tmux", "LC_TERMINAL": "iTerm2"}, "asks"),
         ({"TERM_PROGRAM": "WezTerm", "LC_TERMINAL": "iTerm2"}, "accepts"),
         ({"TERM_PROGRAM": "ghostty"}, "accepts"),
+        ({"GHOSTTY_RESOURCES_DIR": "/x"}, "accepts"),
+        ({"WEZTERM_EXECUTABLE": "/x"}, "accepts"),
         ({"KITTY_WINDOW_ID": "1", "TERM": "xterm-kitty"}, "accepts"),
+        # kitty started from a Terminal.app shell keeps its TERM_PROGRAM: kitty wins.
+        ({"KITTY_WINDOW_ID": "1", "TERM_PROGRAM": "Apple_Terminal"}, "accepts"),
         ({"TERM": "xterm-kitty"}, "accepts"),  # kitty over SSH: ssh carries TERM
         ({"TERM": "foot"}, "accepts"),
+        ({"TERM": "alacritty"}, "accepts"),
         ({"WT_SESSION": "c0ffee"}, "accepts"),
         # Over SSH from Terminal.app: ssh sends no TERM_PROGRAM, and TERM names nobody.
         ({"TERM": "xterm-256color"}, "unknown"),
         ({}, "unknown"),
         ({"TERM_PROGRAM": "vscode"}, "unknown"),
+        ({"VTE_VERSION": "7800"}, "unknown"),
         # A multiplexer between keeps or passes OSC 52 by its own setting.
         ({"TERM_PROGRAM": "tmux", "TERM": "tmux-256color"}, "unknown"),
         ({"TMUX": "/tmp/tmux-1/default,1,0", "KITTY_WINDOW_ID": "1"}, "unknown"),
@@ -663,6 +669,19 @@ def test_osc52_is_dropped_taken_or_unknown_by_what_the_environment_names(
     env: dict[str, str], terminal: str
 ) -> None:
     assert osc52_terminal(env) == terminal
+
+
+def test_one_table_names_the_terminal_for_doctor_and_for_the_clipboard() -> None:
+    """Doctor's table and the clipboard's disagreed (review of #266, round 1): now both
+    read ``core.terminal.SIGNS``. The toast's wording names Terminal.app for "drops" and
+    iTerm2 for "asks", so each is the only terminal with that answer."""
+    from aisquare.core.terminal import SIGNS, outer_terminal
+
+    assert {sign.name for sign in SIGNS if sign.osc52 == "drops"} == {"Terminal.app"}
+    assert {sign.name for sign in SIGNS if sign.osc52 == "asks"} == {"iTerm2"}
+    stale = {"KITTY_WINDOW_ID": "1", "TERM_PROGRAM": "Apple_Terminal"}
+    assert outer_terminal(stale) == ("kitty", True)
+    assert osc52_terminal(stale) == "accepts"
 
 
 def test_a_copy_only_osc52_carried_says_what_became_of_it(

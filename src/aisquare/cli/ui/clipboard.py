@@ -35,11 +35,13 @@ HEDGED_TIMEOUT = 8.0
 """Seconds a copy only OSC 52 carried to an unnamed terminal stays on screen."""
 
 _MISSED = {
-    "Terminal.app": (
+    # Keyed by core.terminal.Osc52: Terminal.app is the one terminal that drops OSC 52,
+    # iTerm2 the one that asks for a setting (tests/test_clipboard.py holds the table to it).
+    "drops": (
         "the copy did not reach the clipboard: Terminal.app ignores an app's clipboard"
         " writes. Hold Fn while you drag to select, then press Cmd+C."
     ),
-    "iTerm2": (
+    "asks": (
         "the copy did not reach the clipboard: iTerm2 drops an app's clipboard writes"
         " unless Settings > General > Selection > 'Applications in terminal may access"
         " clipboard' is on. Or hold Option while you drag to select, then press Cmd+C."

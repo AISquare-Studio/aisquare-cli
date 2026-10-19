@@ -37,6 +37,7 @@ from aisquare.core import tmux as tmux_core
 from aisquare.core.config import FleetSettings
 from aisquare.core.ids import new_agent_id
 from aisquare.core.store import store_session
+from aisquare.core.terminal import outer_terminal
 from aisquare.core.tmux import PaneFacts, SocketAnswer, TmuxError, TmuxServer, TmuxUnavailable
 from aisquare.core.workspace import project_id_for
 from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, ProjectInfo, Snapshot
@@ -1428,7 +1429,7 @@ def test_the_fleet_terminal_row_comes_after_the_actionable_checks() -> None:
     ],
 )
 def test_outer_terminal_recognition(env: dict[str, str], name: str, kitty: bool | None) -> None:
-    assert diagnostics.outer_terminal(env) == (name, kitty)
+    assert outer_terminal(env) == (name, kitty)
 
 
 # --- the dead-manager line (#138) --------------------------------------------------------

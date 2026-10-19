@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Literal
 
 from aisquare.core.browser import REMOTE_MARKERS
+from aisquare.core.terminal import sign_of
 
 log = logging.getLogger(__name__)
 
@@ -70,15 +71,9 @@ _BINFMT = Path("/proc/sys/fs/binfmt_misc")
 _WINDOWS_CLIP = Path("/mnt/c/Windows/System32/clip.exe")
 """Where WSL reaches ``clip.exe`` when ``appendWindowsPath`` keeps Windows off PATH."""
 
-Osc52Terminal = Literal["Terminal.app", "iTerm2", "accepts", "unknown"]
-"""What becomes of an OSC 52 write (:func:`osc52_terminal`): dropped by the terminal
-named, taken by a terminal known to take it, or nobody can say."""
-
-_ACCEPTING_PROGRAMS = ("WezTerm", "ghostty")
-"""``TERM_PROGRAM`` of the terminals that take an OSC 52 write as they come."""
-
-_ACCEPTING_TERMS = ("xterm-kitty", "xterm-ghostty", "wezterm", "foot", "foot-extra")
-"""Their own ``TERM``: kitty, Ghostty, WezTerm and foot, which ssh carries to the host."""
+Osc52Fate = Literal["accepts", "drops", "asks", "unknown"]
+"""What becomes of an OSC 52 write here (:func:`osc52_terminal`): ``core.terminal.Osc52``
+for a terminal it names, ``"unknown"`` where nothing says."""
 
 
 @dataclass(frozen=True)
@@ -400,40 +395,33 @@ def _stop(process: subprocess.Popen[bytes], tool: str) -> None:
             process.stdin.close()
 
 
-def osc52_terminal(env: Mapping[str, str]) -> Osc52Terminal:
+def osc52_terminal(env: Mapping[str, str]) -> Osc52Fate:
     """What becomes of an OSC 52 write here, as far as the environment says.
 
-    Terminal.app and iTerm2 drop it as they come. ``TERM_PROGRAM`` names them locally;
-    over SSH or inside the user's own tmux it reads nothing or ``tmux``, and iTerm2's
-    ``LC_TERMINAL`` — an ``LC_*`` variable, which macOS's ssh sends by default — still
-    names iTerm2. A multiplexer in between (tmux, screen) keeps or passes the write by
-    its own setting, so nothing behind one is known to take it. Known to take it:
-    WezTerm and Ghostty by ``TERM_PROGRAM``, kitty by ``KITTY_WINDOW_ID``, Windows
-    Terminal by ``WT_SESSION``, and kitty, Ghostty, WezTerm and foot by the ``TERM``
-    they set, which ssh carries. Anything else is ``"unknown"``: Terminal.app over SSH
-    among them, whose ``TERM_PROGRAM`` ssh does not send.
+    The terminal is the first of ``core.terminal.SIGNS`` the environment shows — the
+    table doctor names the terminal by, so terminal-specific variables outrank a
+    ``TERM_PROGRAM`` an outer shell left behind. Terminal.app drops the write, iTerm2
+    takes it only with its own setting on, and kitty, Ghostty, WezTerm, foot,
+    alacritty and Windows Terminal take it. A multiplexer in between (tmux, screen)
+    keeps or passes it by its own setting, so nothing behind one is known to take it.
+    Anything else is ``"unknown"``: Terminal.app over SSH among them, whose
+    ``TERM_PROGRAM`` ssh does not send.
     """
-    program = env.get("TERM_PROGRAM", "")
+    sign = sign_of(env)
+    fate: Osc52Fate = "unknown" if sign is None or sign.osc52 is None else sign.osc52
+    if fate == "accepts" and _multiplexed(env):
+        return "unknown"
+    return fate
+
+
+def _multiplexed(env: Mapping[str, str]) -> bool:
     term = env.get("TERM", "")
-    if program == "Apple_Terminal":
-        return "Terminal.app"
-    if program == "iTerm.app" or (program in ("", "tmux") and env.get("LC_TERMINAL") == "iTerm2"):
-        return "iTerm2"
-    if (
-        program == "tmux"
+    return bool(
+        env.get("TERM_PROGRAM") == "tmux"
         or env.get("TMUX")
         or env.get("STY")
         or term.startswith(("tmux", "screen"))
-    ):
-        return "unknown"
-    if (
-        program in _ACCEPTING_PROGRAMS
-        or env.get("KITTY_WINDOW_ID")
-        or env.get("WT_SESSION")
-        or term in _ACCEPTING_TERMS
-    ):
-        return "accepts"
-    return "unknown"
+    )
 
 
 Done = Callable[[bool], None]

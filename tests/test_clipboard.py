@@ -114,11 +114,21 @@ def test_linux_picks_wl_copy_then_xclip_then_xsel_by_display(
     assert writer.payload(TEXT) == TEXT.encode("utf-8")
 
 
+def _binfmt(root: Path, *entries: str) -> Path:
+    """A mounted binfmt_misc holding ``entries``."""
+    binfmt = root / "binfmt_misc"
+    binfmt.mkdir()
+    for name in ("status", "register", *entries):
+        (binfmt / name).write_text("enabled\n")
+    return binfmt
+
+
 def test_wsl_writes_with_clip_exe_in_utf16_after_a_bom(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``clip.exe`` reads stdin in the console's codepage unless it is told UTF-16."""
     monkeypatch.setattr(clipboard, "_WINDOWS_CLIP", tmp_path / "no-clip.exe")
+    monkeypatch.setattr(clipboard, "_BINFMT", _binfmt(tmp_path, "WSLInterop"))
     wsl = {"WSL_DISTRO_NAME": "Ubuntu", "WAYLAND_DISPLAY": "wayland-0", "DISPLAY": ":0"}
     writer = pick_writer(wsl, platform="linux", which=tools("clip.exe", "wl-copy"))
     assert writer is not None and writer.argv == ("/fake/bin/clip.exe",)
@@ -143,6 +153,51 @@ def test_the_bom_is_an_escape_in_the_source_not_an_invisible_character() -> None
     assert '"\\ufeff"' in source
 
 
+@pytest.mark.parametrize(
+    ("entries", "env", "interop"),
+    [
+        (("WSLInterop",), {}, True),
+        (("WSLInterop-late",), {}, True),
+        ((), {"WSL_INTEROP": "/run/WSL/1_interop"}, False),  # binfmt_misc says off
+        (None, {"WSL_INTEROP": "/run/WSL/1_interop"}, True),  # not mounted: the variable says
+        (None, {}, False),
+    ],
+    ids=["registered", "registered-late", "off", "unmounted-variable", "unmounted-nothing"],
+)
+def test_wsl_interop_is_known_by_binfmt_misc_else_by_its_variable(
+    entries: tuple[str, ...] | None,
+    env: dict[str, str],
+    interop: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binfmt = tmp_path / "unmounted" if entries is None else _binfmt(tmp_path, *entries)
+    monkeypatch.setattr(clipboard, "_BINFMT", binfmt)
+    assert clipboard.wsl_interop(env) is interop
+
+
+def test_with_interop_off_wsl_writes_with_wslg_s_tools_not_clip_exe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``[interop] enabled=false`` leaves clip.exe on disk under /mnt/c, and running it
+    fails with ENOEXEC at every copy (review of #266, round 1)."""
+    clip = tmp_path / "clip.exe"
+    clip.write_bytes(b"")
+    monkeypatch.setattr(clipboard, "_WINDOWS_CLIP", clip)
+    monkeypatch.setattr(clipboard, "_BINFMT", _binfmt(tmp_path))
+    wslg = {"WSL_DISTRO_NAME": "Ubuntu", "WAYLAND_DISPLAY": "wayland-0", "DISPLAY": ":0"}
+    writer = pick_writer(wslg, platform="linux", which=tools("clip.exe", "wl-copy"))
+    assert writer is not None and writer.argv[0] == "/fake/bin/wl-copy"
+    with_x = pick_writer(
+        {"WSL_DISTRO_NAME": "Ubuntu", "DISPLAY": ":0"}, platform="linux", which=tools("xclip")
+    )
+    assert with_x is not None and with_x.argv[0] == "/fake/bin/xclip"
+    assert (
+        pick_writer({"WSL_DISTRO_NAME": "Ubuntu"}, platform="linux", which=tools("clip.exe"))
+        is None
+    )
+
+
 def test_wsl_is_known_by_its_variables_or_by_the_kernel(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -151,6 +206,7 @@ def test_wsl_is_known_by_its_variables_or_by_the_kernel(
     assert clipboard.in_wsl({"WSL_DISTRO_NAME": "Ubuntu"})
     assert clipboard.in_wsl({"WSL_INTEROP": "/run/WSL/1_interop"})
     assert not clipboard.in_wsl({}), "no /proc/version to read"
+    monkeypatch.setattr(clipboard, "_BINFMT", _binfmt(tmp_path, "WSLInterop-late"))
     version.write_text("Linux version 6.6.87.2-microsoft-standard-WSL2 (gcc 11.2.0)\n")
     assert clipboard.in_wsl({})
     with_x = pick_writer({"DISPLAY": ":0"}, platform="linux", which=tools("clip.exe", "xclip"))
@@ -310,6 +366,7 @@ def test_clip_exe_is_handed_utf16_that_round_trips(
 ) -> None:
     fake = install(tmp_path, monkeypatch, "clip.exe", platform="linux")
     monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+    monkeypatch.setattr(clipboard, "_BINFMT", _binfmt(tmp_path, "WSLInterop"))
     writer = clipboard.local_writer()
     assert writer is not None and clipboard.write(writer, TEXT)
     assert fake.payloads() == [b"\xff\xfe" + TEXT.encode("utf-16-le")]

@@ -61,6 +61,9 @@ _PROC = Path("/proc")
 _PROC_VERSION = Path("/proc/version")
 """Says ``microsoft`` on a WSL kernel, where ``WSL_DISTRO_NAME`` may not have been passed."""
 
+_BINFMT = Path("/proc/sys/fs/binfmt_misc")
+"""Where WSL registers the handler that runs Windows programs, while interop is on."""
+
 _WINDOWS_CLIP = Path("/mnt/c/Windows/System32/clip.exe")
 """Where WSL reaches ``clip.exe`` when ``appendWindowsPath`` keeps Windows off PATH."""
 
@@ -182,18 +185,34 @@ def in_wsl(env: Mapping[str, str]) -> bool:
     return False
 
 
+def wsl_interop(env: Mapping[str, str]) -> bool:
+    """Whether this WSL can run Windows programs at all.
+
+    ``[interop] enabled=false`` in wsl.conf leaves ``/mnt/c`` mounted and ``clip.exe`` on
+    disk, and running it fails with ENOEXEC: every copy then logged a failure, and the
+    WSLg ``wl-copy`` that would have worked was never tried (review of #266, round 1).
+    Interop on registers ``WSLInterop`` (``WSLInterop-late`` on newer WSL) in
+    binfmt_misc; with binfmt_misc not mounted to say, ``WSL_INTEROP`` is the sign.
+    """
+    if (_BINFMT / "status").exists():
+        return any((_BINFMT / name).exists() for name in ("WSLInterop", "WSLInterop-late"))
+    return bool(env.get("WSL_INTEROP"))
+
+
 def pick_writer(
     env: Mapping[str, str],
     *,
     platform: str,
     which: Callable[[str], str | None] | None = None,
     wsl: bool | None = None,
+    interop: bool | None = None,
 ) -> Writer | None:
     """The native tool that writes the clipboard here, or ``None`` when there is none.
 
     ``pbcopy`` reads stdin in the locale's encoding, which is MacRoman with no locale
     set, so it is run under a UTF-8 one. ``clip.exe`` gets UTF-16LE after a BOM
-    (:attr:`Writer.bom`); with no ``clip.exe`` a WSLg session still has the Linux tools.
+    (:attr:`Writer.bom`), when WSL can run it (:func:`wsl_interop`, or ``interop`` when
+    given); without it a WSLg session still has the Linux tools.
     ``wl-copy`` and ``xclip`` stay alive after the write to serve the selection, which
     is why :func:`write` never reads their output. ``wsl`` is :func:`in_wsl`'s answer,
     asked only when this is Linux and the caller did not give it. ``which`` is
@@ -208,7 +227,7 @@ def pick_writer(
         return Writer((found,), env=(("LC_ALL", "en_US.UTF-8"),)) if found else None
     if not platform.startswith("linux"):
         return None
-    if in_wsl(env) if wsl is None else wsl:
+    if (in_wsl(env) if wsl is None else wsl) and (wsl_interop(env) if interop is None else interop):
         found = which("clip.exe") or (str(_WINDOWS_CLIP) if _WINDOWS_CLIP.is_file() else None)
         if found:
             return Writer((found,), encoding="utf-16-le", bom=True)

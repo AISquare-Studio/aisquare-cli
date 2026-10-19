@@ -72,7 +72,9 @@ class ClipboardApp(App[ReturnType]):
 
     Textual's write is kept — the OSC 52, which is the only route over SSH, and
     ``App.clipboard``, which ``Input``'s paste reads — and on a local session the
-    native tool runs too, off the event loop (``core.clipboard.submit``).
+    native tool runs too, off the event loop (``core.clipboard.submit``). The loop
+    neither scans PATH nor starts a process: the clipboard thread finds the tool, and
+    the loop reads only what it found (``core.clipboard.cached_writer``).
     """
 
     @dataclass
@@ -109,11 +111,10 @@ class ClipboardApp(App[ReturnType]):
             return
         super().copy_to_clipboard(text)
         told = (toast, characters(text) if sent is None else sent, timeout)
-        writer = clipboard.local_writer()
-        if writer is None:
+        if clipboard.cached_writer() is None:  # known: no native route here
             self._tell_copy(*told, landed=False)
             return
-        clipboard.submit(writer, text, partial(self._native_done, *told))
+        clipboard.submit(text, partial(self._native_done, *told))
 
     def _native_done(
         self, toast: str | None, sent: str, timeout: float | None, landed: bool

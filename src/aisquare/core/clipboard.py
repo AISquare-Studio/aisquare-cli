@@ -27,8 +27,10 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Literal
 
@@ -40,6 +42,10 @@ WRITE_TIMEOUT = 2.0
 KILL_WAIT = 1.0
 """Seconds a killed tool gets to exit: one stuck in uninterruptible sleep never does, and
 waiting on it without a bound held up every later copy for good."""
+
+RECHECK = 60.0
+"""Seconds a "no tool here" answer stands before the clipboard thread looks again, so a
+tool installed while the app runs is found without a restart."""
 
 _PROC_VERSION = Path("/proc/version")
 """Says ``microsoft`` on a WSL kernel, where ``WSL_DISTRO_NAME`` may not have been passed."""
@@ -94,7 +100,7 @@ def pick_writer(
     env: Mapping[str, str],
     *,
     platform: str,
-    which: Callable[[str], str | None] = shutil.which,
+    which: Callable[[str], str | None] | None = None,
     wsl: bool | None = None,
 ) -> Writer | None:
     """The native tool that writes the clipboard here, or ``None`` when there is none.
@@ -104,8 +110,13 @@ def pick_writer(
     (:attr:`Writer.bom`); with no ``clip.exe`` a WSLg session still has the Linux tools.
     ``wl-copy`` and ``xclip`` stay alive after the write to serve the selection, which
     is why :func:`write` never reads their output. ``wsl`` is :func:`in_wsl`'s answer,
-    asked only when this is Linux and the caller did not give it.
+    asked only when this is Linux and the caller did not give it. ``which`` is
+    ``shutil.which`` unless given.
+
+    It scans PATH and reads files, so the event loop never calls it: the clipboard
+    thread does (:func:`_resolve`).
     """
+    which = shutil.which if which is None else which
     if platform == "darwin":
         found = which("pbcopy")
         return Writer((found,), env=(("LC_ALL", "en_US.UTF-8"),)) if found else None
@@ -126,10 +137,86 @@ def pick_writer(
 
 
 def local_writer() -> Writer | None:
-    """The native tool for THIS session: none over SSH, else :func:`pick_writer`'s."""
+    """The native tool for THIS session: none over SSH, else :func:`pick_writer`'s.
+
+    It asks the system, so it runs on the clipboard thread only (:func:`_resolve`).
+    """
     if is_remote(os.environ):
         return None
     return pick_writer(os.environ, platform=sys.platform)
+
+
+class Ask(Enum):
+    """:func:`cached_writer`'s answer when nothing is known yet for this environment."""
+
+    WORKER = "worker"
+    """The clipboard thread finds out, at the copy that needs it."""
+
+
+_KEY_VARIABLES = (
+    "PATH",
+    "SSH_CONNECTION",
+    "SSH_TTY",
+    "WAYLAND_DISPLAY",
+    "DISPLAY",
+    "WSL_DISTRO_NAME",
+    "WSL_INTEROP",
+)
+"""Every variable :func:`local_writer`'s answer depends on: a change to one asks again."""
+
+_cache: tuple[tuple[str, ...], Writer | None, float] | None = None
+"""``(environment key, writer, when found)``, the last answer :func:`_resolve` found."""
+_cache_lock = threading.Lock()
+_clock = time.monotonic
+
+
+def _writer_key() -> tuple[str, ...]:
+    return (sys.platform, *(os.environ.get(name, "") for name in _KEY_VARIABLES))
+
+
+def cached_writer() -> Writer | Ask | None:
+    """The writer last found for this environment, read without asking the system.
+
+    No PATH scan, no file read, no process: the event loop calls this at every copy,
+    and a ``which`` there cost a drag release several to tens of milliseconds on WSL,
+    where every Windows PATH directory is a stat over 9p (review of #266, round 1).
+    :attr:`Ask.WORKER` when nothing is known for the environment as it is now (a
+    variable in :data:`_KEY_VARIABLES` changed, the last write failed, or a "no tool"
+    answer is older than :data:`RECHECK`).
+    """
+    return _known()
+
+
+def _known() -> Writer | Ask | None:
+    """:func:`cached_writer`'s answer, which the clipboard thread asks under its own name."""
+    key = _writer_key()
+    with _cache_lock:
+        if _cache is None or _cache[0] != key:
+            return Ask.WORKER
+        _, writer, found = _cache
+    if writer is None and _clock() - found > RECHECK:
+        return Ask.WORKER
+    return writer
+
+
+def forget_writer() -> None:
+    """Drop the cached answer: the next copy's writer is looked for again."""
+    global _cache
+    with _cache_lock:
+        _cache = None
+
+
+def _resolve() -> Writer | None:
+    """On the clipboard thread: the writer for this environment, cached or found now."""
+    global _cache
+    known = _known()
+    if not isinstance(known, Ask):
+        return known
+    key = _writer_key()
+    writer = local_writer()
+    with _cache_lock:
+        _cache = (key, writer, _clock())
+    return writer
 
 
 def write(writer: Writer, text: str, *, timeout: float | None = None) -> bool:
@@ -233,13 +320,16 @@ def osc52_terminal(env: Mapping[str, str]) -> Osc52Terminal:
 Done = Callable[[bool], None]
 """Told, on the worker thread, whether the native write took the text."""
 
-_jobs: queue.SimpleQueue[tuple[Writer, str, Done]] = queue.SimpleQueue()
+_jobs: queue.SimpleQueue[tuple[str, Done]] = queue.SimpleQueue()
 _worker: threading.Thread | None = None
 _worker_lock = threading.Lock()
 
 
-def submit(writer: Writer, text: str, done: Done) -> None:
-    """Write ``text`` with ``writer`` on the clipboard thread, after the write in progress.
+def submit(text: str, done: Done) -> None:
+    """Write ``text`` on the clipboard thread, after the write in progress.
+
+    The thread finds the writer (:func:`_resolve`): finding it scans PATH and reads
+    files, which the event loop must never wait on. No writer is a ``False``.
 
     One thread: two copies made in quick succession each spawn a tool, and run side by
     side the first could finish last and leave its own text on the clipboard. Copies
@@ -248,7 +338,7 @@ def submit(writer: Writer, text: str, done: Done) -> None:
     its outcome (:func:`_drain`). ``done`` is called on that thread once it is known.
     """
     global _worker
-    _jobs.put((writer, text, done))
+    _jobs.put((text, done))
     with _worker_lock:
         if _worker is None or not _worker.is_alive():
             _worker = threading.Thread(target=_drain, name="clipboard", daemon=True)
@@ -270,13 +360,16 @@ def _drain() -> None:
         with contextlib.suppress(queue.Empty):
             while True:
                 batch.append(_jobs.get_nowait())
-        writer, text, _ = batch[-1]
+        text, _ = batch[-1]
         try:
-            landed = write(writer, text)
+            writer = _resolve()
+            landed = writer is not None and write(writer, text)
+            if writer is not None and not landed:
+                forget_writer()  # gone, or broken: look again at the next copy
         except Exception:
             log.warning("clipboard: a write failed unexpectedly", exc_info=True)
             landed = False
-        for _, _, done in batch:
+        for _, done in batch:
             try:
                 done(landed)
             except Exception:

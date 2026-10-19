@@ -30,6 +30,8 @@ module is imported at the top of a test module, never inside a test (:func:`inst
 says so when it was)."""
 REAL_OSC52_TERMINAL = clipboard.osc52_terminal
 """The same, for the classifier the fixture answers "accepts" for."""
+REAL_CACHED_WRITER = clipboard.cached_writer
+"""The same, for the cache the fixture says holds no tool."""
 
 NEEDS_POSIX = pytest.mark.skipif(
     sys.platform == "win32", reason="the fake tool is a /bin/sh script on PATH"
@@ -112,7 +114,8 @@ def install(
     own ``pbcopy`` — cannot be found behind it. SSH's variables are cleared: the suite
     may run over SSH, and the native route stands down there.
     """
-    assert REAL_LOCAL_WRITER.__module__ == REAL_OSC52_TERMINAL.__module__ == clipboard.__name__, (
+    reals = (REAL_LOCAL_WRITER, REAL_OSC52_TERMINAL, REAL_CACHED_WRITER)
+    assert {real.__module__ for real in reals} == {clipboard.__name__}, (
         "tests.fake_clipboard was first imported inside a test, after the suite's stand-in"
         " replaced local_writer: import it at the top of the test module"
     )
@@ -137,4 +140,6 @@ def install(
     monkeypatch.setattr(sys, "platform", platform)
     monkeypatch.setattr(clipboard, "local_writer", REAL_LOCAL_WRITER)
     monkeypatch.setattr(clipboard, "osc52_terminal", REAL_OSC52_TERMINAL)
+    monkeypatch.setattr(clipboard, "cached_writer", REAL_CACHED_WRITER)
+    clipboard.forget_writer()
     return fake

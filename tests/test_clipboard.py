@@ -16,11 +16,14 @@ test_ui_remote.
 from __future__ import annotations
 
 import base64
+import os
+import shutil
 import subprocess
 import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 from textual.geometry import Offset
@@ -41,6 +44,10 @@ ITERM_MISSED = missed_copy({"TERM_PROGRAM": "iTerm.app"})
 
 def osc52(text: str) -> str:
     return f"\x1b]52;c;{base64.b64encode(text.encode('utf-8')).decode('ascii')}\a"
+
+
+TOOLS = ("pbcopy", "clip.exe", "wl-copy", "xclip", "xsel")
+"""Every clipboard tool ``pick_writer`` asks ``which`` for."""
 
 
 def tools(*names: str) -> Callable[[str], str | None]:
@@ -244,6 +251,7 @@ def test_the_clipboard_thread_outlives_a_write_that_raises(
         return True
 
     monkeypatch.setattr(clipboard, "write", write)
+    monkeypatch.setattr(clipboard, "local_writer", lambda: Writer(("/fake/bin/pbcopy",)))
     told: list[tuple[str, bool]] = []
     threads: list[int] = []
 
@@ -254,9 +262,11 @@ def test_the_clipboard_thread_outlives_a_write_that_raises(
 
         return tell
 
-    writer = Writer(("/fake/bin/pbcopy",))
-    clipboard.submit(writer, "boom", done("boom"))
-    clipboard.submit(writer, "after", done("after"))
+    clipboard.submit("boom", done("boom"))
+    deadline = time.monotonic() + 5
+    while not told and time.monotonic() < deadline:
+        time.sleep(0.01)
+    clipboard.submit("after", done("after"))
     deadline = time.monotonic() + 5
     while len(told) < 2 and time.monotonic() < deadline:
         time.sleep(0.01)
@@ -270,11 +280,9 @@ def test_two_quick_writes_leave_the_second_on_the_clipboard(
 ) -> None:
     """The first write is the slower one: run side by side, it would land last."""
     fake = install(tmp_path, monkeypatch, behaviour="slow-first")
-    writer = clipboard.local_writer()
-    assert writer is not None
     told: list[bool] = []
-    clipboard.submit(writer, "first", told.append)
-    clipboard.submit(writer, "second", told.append)
+    clipboard.submit("first", told.append)
+    clipboard.submit("second", told.append)
     deadline = time.monotonic() + 10
     while len(told) < 2 and time.monotonic() < deadline:
         time.sleep(0.02)
@@ -290,19 +298,17 @@ def test_copies_queued_behind_a_slow_write_are_written_once_as_the_newest(
     turn, for a clipboard that holds only the last (review of #266, round 1). The ones
     the newest overtook are still told, in order, with its outcome."""
     fake = install(tmp_path, monkeypatch, behaviour="slow-first")
-    writer = clipboard.local_writer()
-    assert writer is not None
     told: list[tuple[str, bool]] = []
 
     def done(label: str) -> Callable[[bool], None]:
         return lambda landed: told.append((label, landed))
 
-    clipboard.submit(writer, "first", done("first"))
+    clipboard.submit("first", done("first"))
     deadline = time.monotonic() + 10
     while fake.started() < 1 and time.monotonic() < deadline:
         time.sleep(0.01)
     for label in ("second", "third", "fourth"):
-        clipboard.submit(writer, label, done(label))
+        clipboard.submit(label, done(label))
     while len(told) < 4 and time.monotonic() < deadline:
         time.sleep(0.01)
     assert told == [("first", True), ("second", True), ("third", True), ("fourth", True)]
@@ -339,6 +345,52 @@ def test_a_tool_that_will_not_die_is_left_behind_after_a_bounded_wait(
     assert time.monotonic() - started < 1
     assert waits == [clipboard.KILL_WAIT]
     assert "left behind" in caplog.text
+
+
+@NEEDS_POSIX
+def test_the_writer_found_is_kept_for_the_environment_and_forgotten_when_it_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = install(tmp_path, monkeypatch)
+    assert clipboard.cached_writer() is clipboard.Ask.WORKER, "nothing known before a copy"
+    told: list[bool] = []
+    clipboard.submit(TEXT, told.append)
+    deadline = time.monotonic() + 10
+    while not told and time.monotonic() < deadline:
+        time.sleep(0.01)
+    known = clipboard.cached_writer()
+    assert isinstance(known, Writer) and known.argv[0].endswith("/pbcopy")
+    display = os.environ.get("DISPLAY")
+    monkeypatch.setenv("DISPLAY", f"{display or ''}:1")  # an environment it was not found for
+    assert clipboard.cached_writer() is clipboard.Ask.WORKER
+    if display is None:
+        monkeypatch.delenv("DISPLAY")
+    else:
+        monkeypatch.setenv("DISPLAY", display)
+    assert clipboard.cached_writer() == known
+    fake.behaviour = "fail"  # broken, or gone: looked for again at the next copy
+    clipboard.submit(TEXT, told.append)
+    while len(told) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert told == [True, False]
+    assert clipboard.cached_writer() is clipboard.Ask.WORKER
+
+
+def test_no_tool_found_is_looked_for_again_after_a_while(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tool installed while the app runs is found without a restart."""
+    install(tmp_path, monkeypatch, "not-pbcopy", only=True)
+    now = [1000.0]
+    monkeypatch.setattr(clipboard, "_clock", lambda: now[0])
+    told: list[bool] = []
+    clipboard.submit(TEXT, told.append)
+    deadline = time.monotonic() + 10
+    while not told and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert told == [False] and clipboard.cached_writer() is None
+    now[0] += clipboard.RECHECK + 1
+    assert clipboard.cached_writer() is clipboard.Ask.WORKER
 
 
 # --- what becomes of an OSC 52 ---------------------------------------------------------
@@ -514,6 +566,53 @@ def test_a_textual_input_copy_puts_the_exact_text_on_pbcopy(
     assert _osc52s(writes) == [osc52(TEXT)]
     assert held == TEXT, "App.clipboard, which Input's paste reads, is still set"
     assert notices == []
+
+
+@NEEDS_POSIX
+def test_no_path_scan_and_no_process_ever_runs_on_the_event_loop(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding the tool scans PATH, reads /proc and, on WSL, stats every Windows PATH
+    directory over 9p: several to tens of milliseconds inside a mouse handler, at every
+    copy (review of #266, round 1). The clipboard thread finds it and writes with it;
+    the loop reads only what was found."""
+    board = install(tmp_path, monkeypatch)
+    threads: list[tuple[str, int]] = []
+    real_which, real_popen = shutil.which, subprocess.Popen
+    real_local_writer = clipboard.local_writer
+
+    def which(name: str, *args: Any, **kwargs: Any) -> str | None:
+        if name in TOOLS:  # the harness asks for tmux on the loop, which is not ours
+            threads.append(("which", threading.get_ident()))
+        return real_which(name, *args, **kwargs)
+
+    def local_writer() -> Writer | None:
+        threads.append(("local_writer", threading.get_ident()))
+        return real_local_writer()
+
+    def popen(argv: Any, *args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
+        threads.append(("Popen", threading.get_ident()))
+        return real_popen(argv, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "which", which)
+    monkeypatch.setattr(clipboard, "local_writer", local_writer)
+    monkeypatch.setattr(subprocess, "Popen", popen)
+
+    async def drive() -> int:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            loop = threading.get_ident()
+            await wait_until(pilot, lambda: synced(host.pane))
+            await drag(pilot, host.pane, (0, 0), (11, 0))
+            await wait_until(pilot, lambda: len(host.notices) == 1)
+            await drag(pilot, host.pane, (0, 1), (5, 1))  # the second: the writer is known
+            await wait_until(pilot, lambda: len(host.notices) == 2)
+            return loop
+
+    loop = run(drive())
+    assert board.texts() == [TEXT, "second"]
+    assert {kind for kind, _ in threads} == {"which", "local_writer", "Popen"}, threads
+    assert all(thread != loop for _, thread in threads), threads
 
 
 @NEEDS_POSIX

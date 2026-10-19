@@ -604,13 +604,16 @@ def no_native_clipboard(monkeypatch: pytest.MonkeyPatch) -> None:
     desktop. Left to it, the pane tests would overwrite the developer's clipboard
     hundreds of times, and each copy's toast would wait on a real process. Here a copy
     carries OSC 52 alone, to a terminal known to take it (``osc52_terminal``), so its
-    toast is the caller's own "copied …" that the gesture tests assert. The tests of
-    the native route and of the other terminals put both real functions back, beside
-    a fake tool on PATH (tests/fake_clipboard.py).
+    toast is the caller's own "copied …" that the gesture tests assert, raised at once
+    (``cached_writer`` says no tool, so nothing waits on the clipboard thread). The
+    tests of the native route and of the other terminals put the real functions back,
+    beside a fake tool on PATH (tests/fake_clipboard.py).
     """
     from aisquare.core import clipboard
 
+    clipboard.forget_writer()
     monkeypatch.setattr(clipboard, "local_writer", lambda: None)
+    monkeypatch.setattr(clipboard, "cached_writer", lambda: None)
     monkeypatch.setattr(clipboard, "osc52_terminal", lambda env: "accepts")
 
 

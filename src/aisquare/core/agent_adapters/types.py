@@ -149,11 +149,15 @@ class AgentCapabilities:
     Code's ``CLAUDE_CONFIG_DIR`` stays as the shell or the binding wrote it."""
     native_telemetry: bool = False
     """The agent exports OpenTelemetry to a local receiver AISquare starts
-    (:meth:`AgentAdapter.telemetry_args`)."""
+    (:meth:`AgentAdapter.telemetry_args`). Remote's explainability card judges its sessions
+    by that lane, not the proxy's (``services.explainability_ops._check_lane``)."""
     own_doctor_check: bool = False
     """``services.diagnostics`` has a dedicated check for this agent (Claude Code's hook
     timeouts, plugin route and config-dir siblings), so the per-adapter row skips it."""
     model_proxy: bool = False
+    """Its model traffic goes through AISquare's explainability proxy (Claude Code's, by
+    ``ANTHROPIC_BASE_URL``): the lane the doctor's proxy check and Remote's explainability
+    card judge its sessions by (``services.explainability_ops._check_lane``)."""
     model_ladders: bool = False
     """AISquare's role model ladder and its probe choose the model (Claude Code); an
     agent without keeps its native default unless a model is pinned."""
@@ -196,7 +200,10 @@ class AgentCapabilities:
     nothing drawn over it, where a typed line and its Enter land as a prompt: read in
     place of :attr:`idle_prompt_mark` alone, which an agent may draw only in one of its
     layouts (Codex's ``? for shortcuts``, absent under ``--no-alt-screen``, measured on
-    0.162.1)."""
+    0.162.1). Remote's agent actions read the agent's screen by it too: a quiet pane at
+    that prompt is at rest, and anything else drawn over the prompt (a dialog, a draft) is
+    one they refuse to type into or ``/exit`` through (``services.remote_needs.
+    _needs_screen_drawn``)."""
     legacy_fleet_args: bool = False
     """``fleet.roles.<role>.extra_args`` and ``permission_mode`` are in this agent's
     vocabulary (they predate adapters and are Claude Code's); another agent takes only
@@ -573,9 +580,10 @@ class AgentAdapter(Protocol):
     """What the fleet types into the agent's prompt to end the session gracefully, so its
     ``SessionEnd`` hook runs (``/exit``)."""
     key_spellings: Mapping[str, str]
-    """tmux key names this agent reads under another spelling, which the fleet UI's pane
-    sends instead (``core.keys.translate``): Codex submits on ``S-Enter`` and takes
-    ``C-j`` as its newline. Empty where every key means what tmux names it."""
+    """tmux key names this agent reads under another spelling, which the fleet UI's pane and
+    Remote's key pad send instead (``core.keys.translate``, ``services.remote_server.
+    remote_keys_spelled``): Codex submits on ``S-Enter`` and takes ``C-j`` as its newline.
+    Empty where every key means what tmux names it."""
 
     @property
     def accounts(self) -> AgentAccounts | None:

@@ -231,6 +231,12 @@ _WRAPPED = "    "
 IDLE_PROMPT_MARK = "? for shortcuts"
 """The hint Codex's footer ends its screen with at an empty prompt, in its alternate screen
 (the default): a draft in the composer, or a dialog, takes its place (0.162.1)."""
+#: What ends that screen in place of :data:`IDLE_PROMPT_MARK` once one Esc was pressed at the
+#: empty prompt of a session with a turn behind it, until the next key: the same prompt, where
+#: a typed line and its Enter land as one. A second Esc opens its transcript, where Enter
+#: rewinds (``Browsing transcript · … ↵ rewind · esc back``). Never drawn over a draft
+#: (0.162.1, measured under tmux).
+_ESC_AGAIN = "esc again to edit previous message"
 #: What Codex's empty composer reads: its placeholder, the same in every session, and the
 #: one a follow-up shows (0.162.1).
 _PLACEHOLDERS = frozenset({"Ask Codex to do anything", "Ask a follow-up question"})
@@ -242,7 +248,10 @@ def idle_on_screen(rows: Sequence[str]) -> bool:
 
     Measured on 0.162.1 under tmux. In its alternate screen (the default) the last row is
     the footer's :data:`IDLE_PROMPT_MARK`, which a draft in the composer, or any dialog,
-    replaces. In the terminal's own (``--no-alt-screen``) the footer has no such hint: the
+    replaces, or, after one Esc there, its ``esc again to edit previous message``
+    (:data:`_ESC_AGAIN`), the prompt all the same (Remote's Interrupt & tell sends that Esc
+    before its line, and so does a phone's key pad). In the terminal's own
+    (``--no-alt-screen``) the footer has no such hint: the
     last chevron row (U+203A) is then the empty composer's placeholder with the footer
     alone under it (``<model> <effort> · <directory>``). A dialog's last chevron row is its
     chosen option, its other options and its key hint under it (``1. Switch to
@@ -253,7 +262,7 @@ def idle_on_screen(rows: Sequence[str]) -> bool:
     lines = [row.rstrip() for row in rows if row.strip()]
     if not lines:
         return False
-    if lines[-1].strip().startswith(IDLE_PROMPT_MARK):
+    if lines[-1].strip().startswith((IDLE_PROMPT_MARK, _ESC_AGAIN)):
         return True
     composer = next(
         (index for index in range(len(lines) - 1, -1, -1) if lines[index].startswith(_CHEVRON)),

@@ -76,7 +76,7 @@ if TYPE_CHECKING:
     from starlette.responses import Response
     from starlette.routing import BaseRoute
 
-    from aisquare.core.agent_adapters.types import AgentTranscript, AnswerKind
+    from aisquare.core.agent_adapters.types import AgentAdapter, AgentTranscript, AnswerKind
     from aisquare.core.config import AccountsSettings
     from aisquare.core.tmux import TmuxServer
     from aisquare.services.fleet import PaneWrite
@@ -371,6 +371,13 @@ class AgentNow:
     items: tuple[NeedsItem, ...]
     """Every current item of this project whose ``agent`` is this label, project-level kinds
     included, and dismissed ones too: a dismissal hides a card, it does not close a dialog."""
+    screen: tuple[str, ...] | None = None
+    """The rows the agent's pane shows, read for an agent whose adapter tells its empty
+    prompt from its screen (``capabilities.idle_on_screen`` or ``idle_prompt_mark``:
+    Codex's), whose pane is its own; ``None`` for any other (:func:`_needs_screen_drawn`)."""
+    screen_unread: bool = False
+    """Such an agent's screen, which tmux would not show: nothing here says whether it sits
+    at its empty prompt (:func:`needs_unseen`)."""
 
 
 def _needs_lists_every(project_id: str) -> bool:
@@ -3202,14 +3209,31 @@ def _needs_snapshot(
     now: datetime,
 ) -> AgentNow:
     """The snapshot of ``status``'s row, with tmux asked about its pane only where the
-    derivation vouched for it: a live row that reads none of :data:`_NEEDS_PANE_UNVOUCHED`."""
-    pane_is_agent, pane_quiet = False, None
+    derivation vouched for it: a live row that reads none of :data:`_NEEDS_PANE_UNVOUCHED`.
+
+    The pane of an agent whose adapter reads its empty prompt off its screen
+    (:func:`_needs_screen_reader`) is read too, once it is the agent's, as plain text
+    (``TmuxServer.screen_text``, as ``fleet._idle_screen`` reads it; the capture the phone
+    draws keeps its escapes, and ``? for shortcuts`` came bold): what the predicates go by
+    for it (:func:`_needs_screen_drawn`). One tmux would not show is ``screen_unread``:
+    unknown is not an empty prompt, and the agent is one nothing here reads
+    (:func:`needs_unseen`), typed into only behind an Escape.
+    """
+    from aisquare.core.tmux import TmuxError
+
+    pane_is_agent, pane_quiet, screen, unread = False, None, None, False
     if (
         status is not None
         and status.agent.ended_at is None
         and status.state not in _NEEDS_PANE_UNVOUCHED
     ):
         pane_is_agent, pane_quiet = _needs_pane_now(_needs_pane_server(status), status.agent, now)
+        if pane_is_agent and _needs_screen_reader(status) is not None:
+            try:
+                screen = tuple(_needs_pane_server(status).screen_text(status.agent.pane_id))
+            except TmuxError as exc:
+                log.debug("remote: %s's screen could not be read: %s", status.agent.label, exc)
+                unread = True
     return AgentNow(
         project=project,
         status=status,
@@ -3217,6 +3241,8 @@ def _needs_snapshot(
         pane_is_agent=pane_is_agent,
         pane_quiet=pane_quiet,
         items=items,
+        screen=screen,
+        screen_unread=unread,
     )
 
 
@@ -3270,10 +3296,18 @@ def needs_dialog_open(snap: AgentNow) -> bool:
     An action that would type an Enter asks :func:`needs_tool_pending` as well.
     A tail whose walk ran out before the newest message (:func:`_needs_cut_short`) may hold
     a pending tool it did not read, and counts as one here.
+
+    An agent whose adapter reads its empty prompt off its screen is answered by its screen
+    where that settles it (:func:`_needs_screen_drawn`): its quiet empty prompt shows none,
+    anything else drawn over that prompt is one, read before what the board and its
+    transcript say.
     """
     status = snap.status
     if status is None or not snap.pane_is_agent:
         return False
+    drawn = _needs_screen_drawn(snap)
+    if drawn is not None:
+        return drawn
     pending = bool(_needs_pending(snap.tail, status.agent)) or _needs_cut_short(
         snap.tail, status.agent
     )
@@ -3303,10 +3337,14 @@ def needs_tool_pending(snap: AgentNow) -> bool:
     answer "1. Yes", takes it for a prompt. Tools older than the row do not count
     (a resumed session's leftovers), and neither does a pane that is not the
     agent's. A tail whose walk ran out before the newest message
-    (:func:`_needs_cut_short`) may hold one it did not read, so it counts.
+    (:func:`_needs_cut_short`) may hold one it did not read, so it counts. An agent whose
+    screen shows its quiet empty prompt (:func:`_needs_screen_drawn`) has none: a tool at
+    work redraws its pane, and a prompt for one is drawn over that empty prompt.
     """
     status = snap.status
     if status is None or not snap.pane_is_agent:
+        return False
+    if _needs_screen_drawn(snap) is False:
         return False
     return bool(_needs_pending(snap.tail, status.agent)) or _needs_cut_short(
         snap.tail, status.agent
@@ -3326,11 +3364,17 @@ def needs_unseen(snap: AgentNow) -> bool:
     #243, round 7). A session whose transcript cannot be read hides a tool use's first
     seconds the same way. Such an agent is a dialog that may be up: nothing is typed
     into it without an Escape before it.
+
+    Never an agent whose screen was read (:attr:`AgentNow.screen`): its screen says
+    whether it sits at its empty prompt, and a Codex fires no hook before its first
+    prompt, so it has no board session until then. Always one whose screen tmux would not
+    show (:attr:`AgentNow.screen_unread`): its board and transcript do not see the dialog
+    Codex opens after a turn's ``Stop``.
     """
     status = snap.status
-    if status is None or not snap.pane_is_agent:
+    if status is None or not snap.pane_is_agent or snap.screen is not None:
         return False
-    return status.session is None or snap.tail is None
+    return status.session is None or snap.tail is None or snap.screen_unread
 
 
 def needs_at_input_prompt(snap: AgentNow) -> bool:
@@ -3352,10 +3396,21 @@ def needs_at_input_prompt(snap: AgentNow) -> bool:
     No hook follows a local command either (``/model``, ``/mcp``, a ``/compact``, whose
     ``SessionStart`` marks the session ``working`` again), and its records read as the
     human's prompt of a turn under way, for the same 30 minutes (sweep 4 of #243).
+
+    An agent whose adapter reads its empty prompt off its screen is at it when its quiet
+    screen shows it (:func:`_needs_screen_drawn`), whatever the board and its transcript
+    say. Codex's hooks fire nothing before its first prompt, so a fresh Codex had no
+    session to go by and was refused. And a dialog Codex opens after a turn's ``Stop``,
+    which no hook reports (its ``Switch to gpt-6-luna for lower credit usage?``, its
+    hook review), sits quiet under a row that reads ``waiting``: prompt mode pasted
+    into it, and its Enter picked for the human.
     """
     status = snap.status
     if status is None or not snap.pane_is_agent or snap.pane_quiet is not True:
         return False
+    drawn = _needs_screen_drawn(snap)
+    if drawn is not None:
+        return not drawn
     if needs_dialog_open(snap) or snap.tail is None or needs_unseen(snap):
         return False
     if _needs_pending(snap.tail, status.agent) or _needs_cut_short(snap.tail, status.agent):
@@ -3373,6 +3428,45 @@ def _needs_nothing_said(tail: TranscriptTail, agent: FleetAgent) -> bool:
     if tail.empty:
         return True
     return tail.newest_at is not None and tail.newest_at < agent.created_at
+
+
+def _needs_screen_reader(status: FleetAgentStatus) -> AgentAdapter | None:
+    """The adapter of ``status``'s row when it reads the agent's empty prompt off its screen
+    (``capabilities.idle_on_screen`` or ``idle_prompt_mark``: Codex's), else ``None``."""
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    adapter = recorded_adapter(status.agent.agent)
+    if adapter is None:
+        return None
+    capabilities = adapter.capabilities
+    readable = capabilities.idle_on_screen is not None or bool(capabilities.idle_prompt_mark)
+    return adapter if readable else None
+
+
+def _needs_screen_drawn(snap: AgentNow) -> bool | None:
+    """Whether the agent's screen (:attr:`AgentNow.screen`) shows something drawn over its
+    empty prompt, where a typed line and its Enter would answer it: ``True`` for a screen
+    neither at that prompt nor running a turn (``capabilities.working_on_screen``),
+    ``False`` for its empty prompt in a quiet pane (``fleet._idle_screen``), and ``None``
+    where the screen does not settle it: none was read, or a turn is on it.
+
+    Codex's empty prompt holds through a turn, its status line above the composer, so the
+    pane's quiet tells a turn from rest; a dialog of its own replaces that prompt (its
+    folder-trust and hook-review dialogs, ``Switch to gpt-6-luna for lower credit usage?``
+    after a turn's ``Stop``, its approval view), and so does a draft in its composer, which
+    a typed line would join (measured on 0.162.1)."""
+    from aisquare.services import fleet as fleet_service
+
+    status = snap.status
+    if snap.screen is None or status is None:
+        return None
+    adapter = _needs_screen_reader(status)
+    if adapter is None:
+        return None
+    if fleet_service._idle_screen(adapter, snap.screen):
+        return False if snap.pane_quiet is True else None
+    working = adapter.capabilities.working_on_screen
+    return None if working is not None and working(snap.screen) else True
 
 
 def needs_item_current(snap: AgentNow, item_id: str) -> bool:

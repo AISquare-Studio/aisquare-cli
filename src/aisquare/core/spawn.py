@@ -79,6 +79,9 @@ narrowing their environment would be change without a reason:
   * ``core/snapshot.py::_run_repomix`` — repomix packs files; no model.
   * ``core/editor.py::edit_text`` — the operator's ``$EDITOR``. It is theirs,
     and it should get their environment.
+  * ``core/clipboard.py::write`` — the platform's clipboard tool (``pbcopy``,
+    ``clip.exe``, ``wl-copy``, ``xclip``, ``xsel``), handed a copy's text on
+    stdin. No model.
   * ``cli/watch.py::action_open_transcript`` — a pager/viewer on a file.
   * ``core/paths.py::restrict_to_owner`` — ``icacls``, locking the
     credentials file to this account on Windows. A permissions tool, not a
@@ -268,6 +271,9 @@ SEAMS: dict[str, Seam] = {
     ),
     "aisquare/core/editor.py::edit_text": Seam(
         EXCLUDED, "the operator's $EDITOR — it is theirs, it gets their environment"
+    ),
+    "aisquare/core/clipboard.py::write": Seam(
+        EXCLUDED, "the platform's clipboard tool, handed a copy's text on stdin; no model"
     ),
     "aisquare/cli/watch.py::action_open_transcript": Seam(
         EXCLUDED, "a pager/viewer on a transcript file"

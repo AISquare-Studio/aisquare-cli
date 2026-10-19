@@ -330,6 +330,16 @@ AMBIENT_ENV_VARS = (
     "EDITOR",  # core.editor: a seam that escapes its patch launches the real one
     "VISUAL",  # same
     "TERM",  # rendering assertions vary by terminal
+    # What a copy's toast says becomes of an OSC 52 (`core.clipboard.osc52_terminal`):
+    # the tests that ask it, with the real classifier back, would read the terminal
+    # that ran the suite — Terminal.app's "did not reach the clipboard", or kitty's
+    # "copied" where an unnamed terminal's hedge is asserted. TMUX and TERM, which it
+    # reads too, are above.
+    "TERM_PROGRAM",
+    "LC_TERMINAL",
+    "KITTY_WINDOW_ID",
+    "WT_SESSION",
+    "STY",
     "TMUX_TMPDIR",  # core.tmux socket path
     "TMUX",  # services.fleet: shutdown's "inside the fleet's own server" guard
     # How a terminal renders. Read by the libraries rather than by `src/`, which
@@ -583,6 +593,25 @@ def no_real_keychain(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     core.forget_keychain_reads()
     yield
     core.forget_keychain_reads()
+
+
+@pytest.fixture(autouse=True)
+def no_native_clipboard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never write the clipboard of the machine the suite runs on.
+
+    On a local session every copy in the TUI also runs the platform's clipboard tool
+    (``core.clipboard.local_writer``): ``pbcopy`` on a Mac, ``wl-copy`` on a Wayland
+    desktop. Left to it, the pane tests would overwrite the developer's clipboard
+    hundreds of times, and each copy's toast would wait on a real process. Here a copy
+    carries OSC 52 alone, to a terminal known to take it (``osc52_terminal``), so its
+    toast is the caller's own "copied …" that the gesture tests assert. The tests of
+    the native route and of the other terminals put both real functions back, beside
+    a fake tool on PATH (tests/fake_clipboard.py).
+    """
+    from aisquare.core import clipboard
+
+    monkeypatch.setattr(clipboard, "local_writer", lambda: None)
+    monkeypatch.setattr(clipboard, "osc52_terminal", lambda env: "accepts")
 
 
 @pytest.fixture(autouse=True)

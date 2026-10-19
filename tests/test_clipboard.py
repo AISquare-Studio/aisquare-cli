@@ -16,6 +16,8 @@ test_ui_remote.
 from __future__ import annotations
 
 import base64
+import subprocess
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -211,6 +213,55 @@ def test_a_tool_that_is_missing_fails_or_hangs_is_false_and_never_raises(
     assert time.monotonic() - started < 5, "a hung tool is stopped at the timeout"
     assert fake.calls() == []
     assert [record.levelname for record in caplog.records] == ["WARNING"], caplog.text
+
+
+def test_a_write_that_raises_anything_is_false_and_logged(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``os.environ`` changed by another thread while it is copied raises RuntimeError,
+    as does a spawn during interpreter shutdown; neither may escape (review of #266)."""
+
+    def raising(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("dictionary changed size during iteration")
+
+    monkeypatch.setattr(subprocess, "run", raising)
+    monkeypatch.setattr(subprocess, "Popen", raising)
+    assert clipboard.write(Writer(("/fake/bin/pbcopy",), env=(("LC_ALL", "C"),)), TEXT) is False
+    assert [record.levelname for record in caplog.records] == ["WARNING"], caplog.text
+
+
+def test_the_clipboard_thread_outlives_a_write_that_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A copy whose write blew up is still told, and the next copy still runs on the same
+    thread: dead, the thread took that copy's toast with it."""
+    calls: list[str] = []
+
+    def write(writer: Writer, text: str, **kwargs: object) -> bool:
+        calls.append(text)
+        if text == "boom":
+            raise RuntimeError("not caught by write itself")
+        return True
+
+    monkeypatch.setattr(clipboard, "write", write)
+    told: list[tuple[str, bool]] = []
+    threads: list[int] = []
+
+    def done(label: str) -> Callable[[bool], None]:
+        def tell(landed: bool) -> None:
+            told.append((label, landed))
+            threads.append(threading.get_ident())
+
+        return tell
+
+    writer = Writer(("/fake/bin/pbcopy",))
+    clipboard.submit(writer, "boom", done("boom"))
+    clipboard.submit(writer, "after", done("after"))
+    deadline = time.monotonic() + 5
+    while len(told) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert told == [("boom", False), ("after", True)]
+    assert calls == ["boom", "after"] and len(set(threads)) == 1
 
 
 @NEEDS_POSIX

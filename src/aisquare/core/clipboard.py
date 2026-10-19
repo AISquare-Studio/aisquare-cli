@@ -136,6 +136,10 @@ def write(writer: Writer, text: str, *, timeout: float | None = None) -> bool:
     replaced it, so a read of either waited that long. The tool runs in a session of
     its own, so neither the terminal's hangup nor a suspend of this app stops that
     child. ``timeout`` defaults to :data:`WRITE_TIMEOUT`, read at the call.
+
+    Whatever goes wrong is a ``False``: an ``os.environ`` that another thread changes
+    while it is copied raises ``RuntimeError``, and so does a spawn during interpreter
+    shutdown (review of #266, round 1).
     """
     tool = writer.argv[0]
     try:
@@ -152,7 +156,10 @@ def write(writer: Writer, text: str, *, timeout: float | None = None) -> bool:
     except subprocess.TimeoutExpired:
         log.warning("clipboard: %s did not finish in time and was stopped", tool)
         return False
-    except (OSError, ValueError, subprocess.SubprocessError):
+    except OSError as error:
+        log.warning("clipboard: %s could not be run: %s", tool, error)
+        return False
+    except Exception:
         log.warning("clipboard: %s could not be run", tool, exc_info=True)
         return False
     if done.returncode != 0:
@@ -221,9 +228,14 @@ def submit(writer: Writer, text: str, done: Done) -> None:
 
 
 def _drain() -> None:
+    """The clipboard thread: nothing it runs may end it, or a copy's toast never comes."""
     while True:
         writer, text, done = _jobs.get()
-        landed = write(writer, text)
+        try:
+            landed = write(writer, text)
+        except Exception:
+            log.warning("clipboard: a write failed unexpectedly", exc_info=True)
+            landed = False
         try:
             done(landed)
         except Exception:

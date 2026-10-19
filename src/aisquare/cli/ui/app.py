@@ -2011,6 +2011,7 @@ def _writing_workers() -> dict[str, str]:
         agent,
         doctor,
         explainability,
+        fleet_bulk,
         onboard,
         project,
         settings,
@@ -2028,6 +2029,7 @@ def _writing_workers() -> dict[str, str]:
         settings.NICKNAME_WORKER: "a project's rename",
         agent.STOP_WORKER: "an agent's stop",
         agent.RESTART_WORKER: "an agent's restart",
+        fleet_bulk.BULK_WORKER: "Settings ▸ Fleet's restart or stop of every agent",
         explainability.SAVE_WORKER: "Explainability's setup",
         explainability.REGISTER_WORKER: "Explainability's registration",
         explainability.SHIP_WORKER: "Explainability's ship",
@@ -2056,6 +2058,7 @@ def _waited_reads() -> dict[str, str]:
         app_settings,
         doctor,
         explainability,
+        fleet_bulk,
         welcome,
     )
 
@@ -2071,6 +2074,7 @@ def _waited_reads() -> dict[str, str]:
         agent.LABELS_WORKER: "an agent's account names",
         board.LABELS_WORKER: "a board's account names",
         explainability.STATUS_WORKER: "Explainability's status",
+        fleet_bulk.PLAN_WORKER: "Settings ▸ Fleet's read of the running agents",
         app_settings.ACCOUNTS_WORKER: "App settings' accounts",
         welcome.worker_name("look"): "Welcome's checks",
         welcome.worker_name("candidates"): "Welcome's folder list",

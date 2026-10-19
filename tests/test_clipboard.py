@@ -384,6 +384,46 @@ def test_inside_the_user_s_tmux_the_writer_is_never_taken_from_the_cache(
     assert clipboard.cached_writer() is clipboard.Ask.WORKER
 
 
+@NEEDS_POSIX
+def test_a_test_s_copy_can_reach_no_tool_but_the_fake(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``install`` kept the developer's DISPLAY and WAYLAND_DISPLAY, so on a Linux desktop
+    a copy made with the real ``local_writer`` back ran their own ``wl-copy`` and
+    overwrote their clipboard — what ``no_native_clipboard`` exists to prevent (review
+    of #266, round 1)."""
+    desktop = tmp_path / "desktop-bin"
+    desktop.mkdir()
+    for tool in ("wl-copy", "xclip", "xsel", "clip.exe"):
+        (desktop / tool).write_text("#!/bin/sh\nexit 0\n")
+        (desktop / tool).chmod(0o755)
+    monkeypatch.setenv("PATH", f"{desktop}{os.pathsep}{os.environ.get('PATH', '')}")
+    for name, value in {
+        "WAYLAND_DISPLAY": "wayland-0",
+        "DISPLAY": ":0",
+        "WSL_DISTRO_NAME": "U",
+    }.items():
+        monkeypatch.setenv(name, value)
+    install(tmp_path, monkeypatch, platform="linux")  # the fake is pbcopy: nothing on Linux
+    assert clipboard.local_writer() is None
+
+
+@NEEDS_POSIX
+def test_a_pinned_fake_needs_no_platform_patched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A FleetApp test runs Remote's threads, which read ``sys.platform`` themselves: the
+    copy test patched it to "darwin" for seconds around the press (review of #266)."""
+    platform = sys.platform
+    fake = install(tmp_path, monkeypatch, platform=None, pin=True)
+    assert sys.platform == platform
+    writer = clipboard.local_writer()
+    assert writer is not None and clipboard.write(writer, TEXT)
+    assert fake.texts() == [TEXT]
+    monkeypatch.setenv("SSH_CONNECTION", "10.0.0.2 52144 10.0.0.1 22")
+    assert clipboard.local_writer() is None, "remote stays remote"
+
+
 # --- the write itself ------------------------------------------------------------------
 
 

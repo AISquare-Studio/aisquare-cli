@@ -106,15 +106,25 @@ def install(
     monkeypatch: pytest.MonkeyPatch,
     name: str = "pbcopy",
     *,
-    platform: str = "darwin",
+    platform: str | None = "darwin",
     behaviour: str = "",
     only: bool = False,
+    pin: bool = False,
 ) -> FakeClipboard:
     """A fake ``name`` on PATH, and the native route and the real terminal switched back on.
 
     ``only`` makes it the only directory on PATH, so a real tool of that name — a Mac's
-    own ``pbcopy`` — cannot be found behind it. An SSH server above the suite does not
-    make the session remote: the native route would stand down for it.
+    own ``pbcopy`` — cannot be found behind it. Nothing else can be found either: the
+    display and WSL variables are cleared and the files WSL is read from point at
+    nothing, so on a Linux desktop the developer's own ``wl-copy`` or ``xclip`` never
+    runs (review of #266, round 1); a test that wants one of those routes sets its
+    variables after this. An SSH server above the suite does not make the session
+    remote: the native route would stand down for it.
+
+    ``platform`` is what ``sys.platform`` reads, process-wide, for the rest of the test;
+    ``None`` leaves it alone. ``pin`` skips the search altogether — ``local_writer``
+    answers the fake — for a test whose app runs threads that read ``sys.platform``
+    too (Remote's, in ``FleetApp``).
     """
     reals = (REAL_LOCAL_WRITER, REAL_OSC52_TERMINAL, REAL_CACHED_WRITER)
     assert {real.__module__ for real in reals} == {clipboard.__name__}, (
@@ -137,10 +147,21 @@ def install(
     fake.behaviour = behaviour
     path = str(bin_dir) if only else str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
     monkeypatch.setenv("PATH", path)
+    for name_ in ("DISPLAY", "WAYLAND_DISPLAY", "WSL_DISTRO_NAME", "WSL_INTEROP"):
+        monkeypatch.delenv(name_, raising=False)
+    for seam in ("_PROC_VERSION", "_BINFMT", "_WINDOWS_CLIP"):
+        monkeypatch.setattr(clipboard, seam, root / "nowhere" / seam)
     # The suite may run over SSH or under sudo: an sshd above it is not the test's.
     monkeypatch.setattr(clipboard, "_under_ssh_server", lambda pid=None: False)
-    monkeypatch.setattr(sys, "platform", platform)
-    monkeypatch.setattr(clipboard, "local_writer", REAL_LOCAL_WRITER)
+    if platform is not None:
+        monkeypatch.setattr(sys, "platform", platform)
+    if pin:
+        pinned = clipboard.Writer((str(tool),))
+        monkeypatch.setattr(
+            clipboard, "local_writer", lambda: None if clipboard.is_remote(os.environ) else pinned
+        )
+    else:
+        monkeypatch.setattr(clipboard, "local_writer", REAL_LOCAL_WRITER)
     monkeypatch.setattr(clipboard, "osc52_terminal", REAL_OSC52_TERMINAL)
     monkeypatch.setattr(clipboard, "cached_writer", REAL_CACHED_WRITER)
     clipboard.forget_writer()

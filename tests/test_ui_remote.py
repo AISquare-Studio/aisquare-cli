@@ -455,8 +455,9 @@ def test_copy_puts_the_link_on_the_native_clipboard_beside_osc52_and_says_so_onc
     """Hotfix 0.8.2: on a Mac the link reached only the OSC 52, which Terminal.app ignores,
     and "Link copied" was said all the same. The host carries the text outside ASCII, so a
     tool reading the wrong encoding would mangle it."""
-    platform = sys.platform
-    board = install(tmp_path, monkeypatch, platform=platform)
+    # Pinned, so sys.platform is never patched while Remote's threads run (review of
+    # #266, round 1): remote_server takes macOS-only paths, through libc, on "darwin".
+    board = install(tmp_path, monkeypatch, platform=None, pin=True)
 
     async def go(pilot: Pilot[None]) -> tuple[str | None, list[str], list[str]]:
         app = pilot.app
@@ -474,15 +475,12 @@ def test_copy_puts_the_link_on_the_native_clipboard_beside_osc52_and_says_so_onc
         assert app._driver is not None
         monkeypatch.setattr(app._driver, "write", writes.append)
         before = len(toasts(app))
-        # A Mac for the copy alone: Remote's start reads macOS's ACLs through its libc.
-        monkeypatch.setattr(sys, "platform", "darwin")
         modal.query_one("#remote-copy", Button).press()
         for _ in range(100):
             if len(toasts(app)) > before:
                 break
             await pilot.pause(0.05)
         await pilot.pause(0.2)
-        monkeypatch.setattr(sys, "platform", platform)
         return app.remote.link_url(), toasts(app)[before:], [w for w in writes if "\x1b]52;" in w]
 
     link, told, osc52 = drive(go, tunnel=fake_tunnel_factory(url=f"https://{TEXT}.ngrok-free.dev"))

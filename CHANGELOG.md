@@ -30,8 +30,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Terminal.app never implemented OSC 52 and iTerm2 drops it unless its clipboard
   setting is on, so ⌘V pasted what the clipboard held before. On a local session
   a copy now also goes through the platform's own tool (`pbcopy` on macOS,
-  `clip.exe` on WSL, and on Linux `wl-copy` under Wayland, else `xclip` or
-  `xsel` under X), and still as OSC 52. On a remote session (over SSH, under
+  `clip.exe` on Windows and on WSL with interop on, and on Linux and the BSDs
+  `wl-copy` under Wayland, else `xclip` or `xsel` under X), and still as OSC 52. On a remote session (over SSH, under
   `sudo` or `su` there, in a tmux last attached over SSH, or in a Codespace) OSC
   52 is the only route. The
   toast says "copied" only when the copy can have landed: the native tool took

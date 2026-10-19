@@ -7,11 +7,13 @@ clipboard" is on, so on a Mac every copy said "copied" and left the clipboard as
 (hotfix 0.8.2). Windows Terminal accepts OSC 52, which is why WSL2 never showed it.
 
 So a copy on a LOCAL session also runs the native tool (:func:`pick_writer`): macOS
-``pbcopy``; WSL ``clip.exe``; Linux ``wl-copy`` under Wayland, else ``xclip`` or
-``xsel`` with an X display. Over SSH (:func:`is_remote`) the native clipboard is the
-wrong machine's, and OSC 52 is the only route. The write runs on one worker thread
-(:func:`submit`), in the order the copies were made, each bounded by
-:data:`WRITE_TIMEOUT`; a failure is logged and told to the caller, never raised.
+``pbcopy``; Windows and WSL ``clip.exe``; Linux and the BSDs ``wl-copy`` under
+Wayland, else ``xclip`` or ``xsel`` with an X display. On a remote session
+(:func:`session_is_remote`) the native clipboard is the wrong machine's, and OSC 52
+is the only route. Everything that asks the system — finding the tool, writing with
+it — runs on one worker thread (:func:`submit`), the newest waiting copy first, each
+write bounded by :data:`WRITE_TIMEOUT`; a failure is logged and told to the caller,
+never raised.
 
 Nothing here knows Textual: the app half, OSC 52 and the toast, is
 ``aisquare.cli.ui.clipboard``.
@@ -210,7 +212,9 @@ def pick_writer(
     """The native tool that writes the clipboard here, or ``None`` when there is none.
 
     ``pbcopy`` reads stdin in the locale's encoding, which is MacRoman with no locale
-    set, so it is run under a UTF-8 one. ``clip.exe`` gets UTF-16LE after a BOM
+    set, so it is run under a UTF-8 one. ``clip.exe`` — native Windows, where
+    ``aisquare watch`` and asq's Welcome page run in a conhost that knows no OSC 52,
+    and WSL — gets UTF-16LE after a BOM
     (:attr:`Writer.bom`), when WSL can run it (:func:`wsl_interop`, or ``interop`` when
     given); without it a WSLg session still has the Linux tools.
     ``wl-copy`` and ``xclip`` stay alive after the write to serve the selection, which
@@ -225,12 +229,18 @@ def pick_writer(
     if platform == "darwin":
         found = which("pbcopy")
         return Writer((found,), env=(("LC_ALL", "en_US.UTF-8"),)) if found else None
-    if not platform.startswith("linux"):
-        return None
-    if (in_wsl(env) if wsl is None else wsl) and (wsl_interop(env) if interop is None else interop):
+    if platform == "win32":
+        found = which("clip.exe")
+        return Writer((found,), encoding="utf-16-le", bom=True) if found else None
+    if (
+        platform.startswith("linux")
+        and (in_wsl(env) if wsl is None else wsl)
+        and (wsl_interop(env) if interop is None else interop)
+    ):
         found = which("clip.exe") or (str(_WINDOWS_CLIP) if _WINDOWS_CLIP.is_file() else None)
         if found:
             return Writer((found,), encoding="utf-16-le", bom=True)
+    # Linux, WSLg, the BSDs and the other unixes: the Wayland tool, else the X ones.
     if env.get("WAYLAND_DISPLAY") and (found := which("wl-copy")):
         return Writer((found, "--type", "text/plain"))
     if env.get("DISPLAY"):

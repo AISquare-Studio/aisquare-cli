@@ -215,10 +215,32 @@ def test_wsl_is_known_by_its_variables_or_by_the_kernel(
     assert not clipboard.in_wsl({})
 
 
-@pytest.mark.parametrize("platform", ["win32", "freebsd14", "cygwin"])
-def test_elsewhere_there_is_no_native_writer(platform: str) -> None:
-    every = tools("pbcopy", "clip.exe", "wl-copy", "xclip", "xsel")
-    assert pick_writer({"DISPLAY": ":0"}, platform=platform, which=every) is None
+def test_native_windows_writes_with_clip_exe_in_utf16_after_a_bom() -> None:
+    """``aisquare watch`` and asq's Welcome page run on native Windows, in a conhost that
+    knows no OSC 52: the board's ``c`` changed nothing there (review of #266, round 1)."""
+    writer = pick_writer({}, platform="win32", which=tools("clip.exe", "xclip"))
+    assert writer == Writer(("/fake/bin/clip.exe",), encoding="utf-16-le", bom=True)
+    assert writer.payload(TEXT) == b"\xff\xfe" + TEXT.encode("utf-16-le")
+    assert pick_writer({"DISPLAY": ":0"}, platform="win32", which=tools("xclip")) is None
+
+
+@pytest.mark.parametrize(
+    ("platform", "env", "found", "argv"),
+    [
+        ("freebsd14", X11, ("xclip", "xsel"), XCLIP),
+        ("openbsd7", X11, ("xsel",), XSEL),
+        ("netbsd10", WAYLAND, ("wl-copy",), WL_COPY),
+        ("freebsd14", {}, ("wl-copy", "xclip", "xsel"), None),
+    ],
+    ids=["freebsd-xclip", "openbsd-xsel", "netbsd-wayland", "no-display"],
+)
+def test_the_bsds_write_with_the_wayland_or_x_tools_as_linux_does(
+    platform: str, env: dict[str, str], found: tuple[str, ...], argv: tuple[str, ...] | None
+) -> None:
+    writer = pick_writer(env, platform=platform, which=tools(*found))
+    assert (writer.argv if writer else None) == (
+        None if argv is None else (f"/fake/bin/{argv[0]}", *argv[1:])
+    )
 
 
 @NEEDS_POSIX

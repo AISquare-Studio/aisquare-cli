@@ -1571,8 +1571,9 @@ everywhere.
 a standing highlight, the mirror of Claude Code's own selection, the board's
 `c`, the Remote panel's link, a text field's copy — goes two ways at once. On a
 local session it goes to the system clipboard through the platform's own tool:
-`pbcopy` on macOS, `clip.exe` on WSL, and on Linux `wl-copy` under Wayland,
-else `xclip` or `xsel` under X. It is also sent as OSC 52, which your *outer*
+`pbcopy` on macOS; `clip.exe` on Windows, and on WSL while interop is on; and
+on Linux (WSLg included) and the BSDs `wl-copy` under Wayland, else `xclip` or
+`xsel` under X. It is also sent as OSC 52, which your *outer*
 terminal turns into a clipboard write if it accepts it: Windows Terminal,
 kitty, ghostty, wezterm and foot do, iTerm2 only with its clipboard setting on,
 and Terminal.app never. On a remote session the native tool would write the

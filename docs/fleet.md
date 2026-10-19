@@ -1442,21 +1442,23 @@ transcript to select *in Claude Code*, which copies on release by itself
 (double- and triple-click are its word and line selection). Claude's own copy
 runs `wl-copy`/`xclip` in the agent's environment — the tmux server's, which may
 have no display — and inside tmux writes the tmux paste buffer, so after a
-left-button release the UI reads tmux's buffers and mirrors one written since the
-press to your clipboard (OSC 52), the same way its own copies arrive — the same
-words selected twice included, and a copy that lands as late as about 0.65 s
-after the release, unless you press a mouse button first. Claude Code's selection
+left-button release the UI reads tmux's buffers and copies one written since the
+press to your clipboard by the route its own copies take (*Where a copy goes*,
+below) — the same words selected twice included, and a copy that lands as late
+as about 0.65 s after the release, unless you press a mouse button first. Claude
+Code's selection
 is copy-only by design: there is no "select in the prompt and paste over it"
 in Claude Code in any terminal. While such a program owns the mouse the UI's
 own drag-select stands down; **shift+drag** is the one gesture that always
 selects locally, in every pane, and copies on release. In a pane whose program
 does not track the mouse (a shell, the classic renderer) nothing changed:
 Drag to select text in a pane (double-click selects a word): it is copied to
-your clipboard on release (OSC 52 — your terminal has to accept it; Windows
-Terminal, kitty, wezterm, iTerm2 and foot do), and ctrl+c or cmd+c copies it
+your clipboard on release (*Where a copy goes*, below), and ctrl+c copies it
 again while the highlight stands — from the pane or from the sidebar — and then
 clears it (when two panes hold a highlight, the one made most recently goes
-first). Only a left-button drag is a copy, so a right-click over a highlight
+first). cmd+c does the same in a terminal that passes it on; Terminal.app and
+iTerm2 keep it as their own Copy (*Copy and paste on macOS*, below). Only a
+left-button drag is a copy, so a right-click over a highlight
 leaves your clipboard alone — and a right click followed by a left click is one
 click, not a double click — and so does a drag somewhere else entirely while a
 highlight stands. The highlight does not outlive what it means: typing or
@@ -1492,6 +1494,37 @@ keyboard protocol (kitty, ghostty, wezterm, foot, recent alacritty): in
 VTE-based terminals and Windows Terminal, shift+enter arrives as plain enter
 and the UI never fakes it — `\` then Enter inserts a newline in Claude Code
 everywhere.
+
+**Where a copy goes.** Every copy the UI makes — a release in a pane, ctrl+c on
+a standing highlight, the mirror of Claude Code's own selection, the board's
+`c`, the Remote panel's link, a text field's copy — goes two ways at once. On a
+local session it goes to the system clipboard through the platform's own tool:
+`pbcopy` on macOS, `clip.exe` on WSL, and on Linux `wl-copy`, else `xclip`,
+else `xsel`. It is also sent as OSC 52, which your *outer* terminal turns into
+a clipboard write if it accepts it: Windows Terminal, kitty, ghostty, wezterm
+and foot do, iTerm2 only with its clipboard setting on, and Terminal.app never.
+Over SSH (`SSH_CONNECTION` or `SSH_TTY` set) the native tool would write the
+remote machine's clipboard, not yours, so OSC 52 is the only route. The toast
+after a copy says when it did not land, rather than "copied".
+
+**Copy and paste on macOS.** Run on your Mac, every copy in `asq` reaches the
+clipboard through `pbcopy`, in any terminal. Over SSH only OSC 52 can carry it
+back, so the terminal decides:
+
+- *Terminal.app* never implemented OSC 52. A copy over SSH does not reach your
+  clipboard, and the toast says so; select with the terminal itself instead
+  (below).
+- *iTerm2* accepts it only with *Settings › General › Selection › Applications
+  in terminal may access clipboard* turned on.
+- *Ghostty, kitty and WezTerm* accept it out of the box.
+
+⌘C is Terminal.app's and iTerm2's own Copy, so it never reaches `asq`, and it
+does not need to: a drag copies on release with no key, and ctrl+c copies a
+standing highlight again. ⌘V does reach `asq`, as a bracketed paste, and
+pastes into the focused pane or field. To select with the terminal itself while
+`asq` has the mouse, hold Option while dragging in iTerm2, or Fn in
+Terminal.app on most Macs (users report it; Apple does not document it); then
+⌘C copies that selection as it would anywhere else.
 
 The alt chord's limits are the terminal's and Textual's key parser's, not this
 UI's, and they were measured against the parser (`tests/test_keys.py` feeds it

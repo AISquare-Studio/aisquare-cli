@@ -3465,14 +3465,20 @@ def _needs_screen_says(status: FleetAgentStatus) -> bool:
 def _needs_undrawn(status: FleetAgentStatus, rows: Sequence[str]) -> bool:
     """Whether ``rows`` show the row's agent at work or at its empty prompt, by its own reading
     of its screen: no dialog drawn for a card's keys to answer, whatever option row the
-    conversation above may hold."""
+    conversation above may hold.
+
+    Read without the escapes ``capture-pane -e`` keeps (:data:`_ESCAPES`), as the fleet reads
+    them (``TmuxServer.screen_text``): Codex draws its status line and its composer styled
+    (``\x1b[2mWorking\x1b[0m``, a bold chevron), and its readers, given the rows as captured,
+    found neither (measured on 0.162.1)."""
     from aisquare.core.agent_adapters import recorded_adapter
 
     adapter = recorded_adapter(status.agent.agent)
     if adapter is None:
         return False
+    plain = [_ESCAPES.sub("", row) for row in rows]
     working, idle = adapter.capabilities.working_on_screen, adapter.capabilities.idle_on_screen
-    return (working is not None and working(rows)) or (idle is not None and idle(rows))
+    return (working is not None and working(plain)) or (idle is not None and idle(plain))
 
 
 def _needs_screen_now(status: FleetAgentStatus) -> list[str] | None:

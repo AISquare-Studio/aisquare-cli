@@ -513,41 +513,58 @@ def test_load_older_on_a_codex_rollout_reads_one_budget_a_page_and_reaches_its_s
 
 # --- a quick answer waits for the dialog it answers ------------------------------------------
 
-#: Codex 0.162.1's screens under tmux (``--no-alt-screen``), measured: a command at work in
-#: Plan mode, and the question view ``request_user_input`` draws once its hooks have run.
+#: Codex 0.162.1's screens as ``capture-pane -e`` gives them (``--no-alt-screen``), measured:
+#: a command at work, its status line and composer styled, and the question view
+#: ``request_user_input`` draws once its hooks have run.
+_DIM, _BOLD, _OFF = "\x1b[2m", "\x1b[1m", "\x1b[0m"
 WORKING_SCREEN = [
     "  >_ OpenAI Codex (v0.162.1)",
     "     ~/alpha",
-    "\u203a ASK",
-    "• Working (2s • esc to interrupt) · 1 background terminal running · /ps to view",
-    "\u203a Ask Codex to do anything",
-    "  local-fixture medium · ~/alpha · ← for agents                      Plan mode",
+    f"{_BOLD}\u203a{_OFF} ASK",
+    f"\u2022 {_DIM}Working{_OFF} {_DIM}(2s \u2022 {_OFF}{_BOLD}esc{_OFF}{_DIM} to interrupt)"
+    f" \u00b7 1 background terminal running \u00b7 /ps to view \u00b7 /stop to close{_OFF}",
+    f"{_BOLD}\u203a{_OFF} {_DIM}Ask Codex to do anything{_OFF}",
+    "  local-fixture medium \u00b7 ~/alpha \u00b7 \u2190 for agents              Plan mode",
+]
+#: The same, below the agent's words with a numbered list in them: a row ``1. …`` that a
+#: dialog's first option would look like, so only Codex's own reading of its screen (its
+#: working line) says no dialog is drawn.
+LISTED_SCREEN = [
+    *WORKING_SCREEN[:3],
+    "\u2022 Two steps:",
+    "  1. Make it blue",
+    "  2. Ship it",
+    *WORKING_SCREEN[3:],
 ]
 QUESTION_SCREEN = [
     "  >_ OpenAI Codex (v0.162.1)",
     "     ~/alpha",
-    "\u203a ASK",
+    f"{_BOLD}\u203a{_OFF} ASK",
     "  Question 1/1 (1 unanswered)",
-    "  Which colour should the button be?",
-    "  \u203a 1. Red (Recommended)  Warm and loud",
-    "    2. Blue               Calm",
-    "    3. None of the above  Optionally, add details in notes (tab)",
-    "  tab to add notes | enter to submit answer | esc to interrupt",
+    f"  {_BOLD}Which colour should the button be?{_OFF}",
+    f"  {_BOLD}\u203a 1. Red (Recommended){_OFF}  {_DIM}Warm and loud{_OFF}",
+    f"    2. Blue               {_DIM}Calm{_OFF}",
+    f"    3. None of the above  {_DIM}Optionally, add details in notes (tab){_OFF}",
+    f"  {_DIM}tab to add notes | enter to submit answer | esc to interrupt{_OFF}",
 ]
 
 
+@pytest.mark.parametrize("early_screen", [WORKING_SCREEN, LISTED_SCREEN], ids=["working", "listed"])
 def test_a_codex_questions_digit_waits_until_its_view_is_drawn(
     tmp_path: Path,
     project: ProjectInfo,
     tmux: FakeTmux,
     runtime: Runtime,
     monkeypatch: pytest.MonkeyPatch,
+    early_screen: list[str],
 ) -> None:
     """Codex records ``request_user_input`` as it streams and draws its question view only
     once the call's PreToolUse hook has run: the card came first, and its ``2`` tapped at
     once was typed into the composer under the view, which waited on, unanswered (measured
     on 0.162.1, the live test of this page). With Codex's screen at work, the tap is refused
-    as no prompt, nothing typed; with its view drawn, the digit goes in."""
+    as no prompt, nothing typed, also under a numbered list of the agent's that looks like
+    a dialog's first option, and read as tmux captures it, escapes and all; with its view
+    drawn, the digit goes in."""
     now = datetime.now(UTC)
     rollout, records = _moment(tmp_path, "question", now - timedelta(seconds=1))
     asked_at = _stamp(records[-1])
@@ -559,7 +576,7 @@ def test_a_codex_questions_digit_waits_until_its_view_is_drawn(
     client = make_client(build_app(runtime, dist_dir=tmp_path))
     assert unlock(client, runtime).status_code == 200
     api = f"{base(runtime)}/api"
-    tmux.screen = list(WORKING_SCREEN)
+    tmux.screen = list(early_screen)
     (card,) = client.get(f"{api}/needs").json()["items"]
     assert card["kind"] == "question" and card["answers"][1] == {"label": "Blue", "keys": ["2"]}
 

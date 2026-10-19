@@ -1,4 +1,5 @@
-"""The Accounts page and its sidebar section, driven headless through Textual's Pilot.
+"""The Accounts page — opened from the status line under ⚙ Settings — driven headless
+through Textual's Pilot.
 
 docs/plans/claude-accounts.md. The shell is the real ``FleetApp`` with the
 Accounts reader scripted (``accounts=``), the AISquare session scripted through
@@ -17,7 +18,9 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import os
+import queue
 import sys
 import threading
 import time
@@ -27,30 +30,36 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 import pytest
+from textual import events
 from textual.containers import Vertical
+from textual.geometry import Region
 from textual.pilot import Pilot
 from textual.widgets import Button, Static
 from textual.worker import Worker, WorkerState
+from typer.testing import CliRunner
 
-from aisquare.cli.ui.app import ACCOUNTS_WORKER, FleetApp
-from aisquare.cli.ui.sidebar import AccountsSection, AccountsSelected, AccountsTitle
+from aisquare.cli.app import app as cli_app
+from aisquare.cli.ui.app import ACCOUNTS_WORKER, SIDEBAR_WIDTH_KEY, FleetApp
+from aisquare.cli.ui.sidebar import SETTINGS_KEY, AccountsSelected, StatusLine
 from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.cli.ui.views.accounts import (
+    COLUMNS,
     SIGN_IN_WORKER,
     USAGE_WORKER,
     AccountRow,
-    AccountsChanged,
     AccountsView,
-    account_line_text,
+    account_cells,
     aisquare_status_text,
     grant_text,
-    summarise,
+    needs_login,
     usage_bar,
 )
 from aisquare.core import browser, credentials, paths
 from aisquare.core import claude_accounts as core
 from aisquare.core import tmux as tmux_core
+from aisquare.core.config import FleetSettings
+from aisquare.core.state_file import update_state
 from aisquare.core.store import store_session
 from aisquare.core.tmux import Completed, TmuxServer, WindowInfo
 from aisquare.models import (
@@ -72,6 +81,11 @@ T = TypeVar("T")
 SIZE = (140, 40)
 PRIVATE_SOCKET = f"asq-test-{os.getpid()}-ui-accounts"
 NOW = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
+#: How long a scripted read or write holds before it lets go on its own, and how long a test
+#: waits for an event it is owed. Every test lets its holds go and is owed only what comes, so
+#: only a run already gone wrong waits it out. Generous, as a short one is a race with the
+#: runner: on windows-latest a 5 s hold ran out while a test was still typing.
+HOLD_S = 60.0
 
 
 # --- fixtures and helpers --------------------------------------------------------------------
@@ -185,11 +199,12 @@ def drive(
 ) -> T:
     """Run ``fn`` against a mounted ``FleetApp`` whose Accounts reader answers ``overview``.
 
-    The start-up doctor run has been painted before ``fn`` starts. Painting its report
-    resizes the Doctor section above the Accounts section and moves it (from row 30 to
-    row 34 here), and a report that landed between the press and the click of
-    ``open_accounts`` moved the section out from under the pointer: the click reached
-    another row and the page never opened (reproduced with every worker held 0.3 s).
+    The start-up doctor run has been painted before ``fn`` starts. Its report once
+    resized the sidebar's Doctor section, above an Accounts section, and a report that
+    landed between the press and the click of ``open_accounts`` moved the row out from
+    under the pointer: the click reached another row and the page never opened. Both
+    sections are gone — their pages open from ⚙ Settings — and the wait stays, so
+    nothing the start-up run paints lands in the middle of a gesture.
     """
     frame = overview if overview is not None else _overview(_status(1, "me@example.com"))
 
@@ -240,22 +255,66 @@ def fleet_app(pilot: Pilot[None]) -> FleetApp:
 
 
 async def open_accounts(pilot: Pilot[None]) -> AccountsView:
-    """Click the section and wait for the page: the click posts ``AccountsSelected`` to the
-    app, whose handler mounts the page, so one pause could return before it existed."""
+    """Click the status line under *⚙ Settings* and wait for the page: the click posts
+    ``AccountsSelected`` to the app, whose handler mounts the page, so one pause could
+    return before it existed."""
     app = fleet_app(pilot)
-    await pilot.click(app.query_one(AccountsSection))
+    await pilot.click(app.query_one(StatusLine))
     await settle(app)
     view = app.query_one("#accounts", AccountsView)
     assert app.current_view() is view
     return view
 
 
+async def press(pilot: Pilot[None], selector: str) -> None:
+    """Click a row's button as a person would: the table scrolls sideways when the page is
+    narrower than it, so the button is scrolled into view first.
+
+    Once the table has stopped moving. A frame that disables the focused button (*Default*,
+    on the row that became the default) moves the focus along the row, and Textual scrolls
+    the table to it smoothly. A click aimed mid-scroll pressed down on the button and let go
+    over its neighbour, so nothing was pressed: on windows-latest the ▼ never moved its slot
+    (CI run 38571988017; reproduced with Textual's idle check reading a 15.6 ms CPU clock).
+    """
+    button = fleet_app(pilot).query_one(selector, Button)
+    await pilot.wait_for_scheduled_animations()
+    button.scroll_visible(animate=False, immediate=True)
+    await pilot.pause()
+    await pilot.click(button)
+
+
+async def rename(pilot: Pilot[None], slot: int) -> None:
+    """Double-click the slot's name, as a person opens its field (scrolled into view first:
+    a button pressed at the far end of the table scrolls it sideways, once the table has
+    stopped moving, as in :func:`press`), and wait until the field has the focus: keys
+    typed before it did went to the row (``ork`` for ``work``, every message held 20 ms).
+    The settle waits for no worker, since a test may be holding one on purpose."""
+    app = fleet_app(pilot)
+    name = app.query_one(f"#account-name-{slot}", accounts_view.NameCell)
+    await pilot.wait_for_scheduled_animations()
+    name.scroll_visible(animate=False, immediate=True)
+    await pilot.pause()
+    await pilot.double_click(name)
+    alias = app.query_one(f"#account-alias-{slot}", accounts_view.AliasInput)
+    await settle_until(app, lambda: app.focused is alias, group=_NO_WORKER)
+
+
+_NO_WORKER = "no worker"
+"""A group no worker is in: a settle passed it waits for the messages alone."""
+
+
 def row(view: AccountsView, slot: int) -> AccountRow:
     return view.query_one(f"#account-row-{slot}", AccountRow)
 
 
+def cells(view: AccountsView, slot: int) -> dict[str, str]:
+    """What each of the row's cells shows, keyed like ``COLUMNS``."""
+    return {column.key: shown(row(view, slot).cell(column.key)) for column in COLUMNS}
+
+
 def line(view: AccountsView, slot: int) -> str:
-    return shown(row(view, slot).query_one(".account-line", Static))
+    """The row's non-empty cells, two spaces apart: one string to search."""
+    return "  ".join(text for text in cells(view, slot).values() if text)
 
 
 def notice(view: AccountsView) -> str:
@@ -264,61 +323,11 @@ def notice(view: AccountsView) -> str:
 
 def painted(view: AccountsView, *slots: int) -> bool:
     """Whether the rows of ``slots`` show what their usage reading answered, not the
-    ``usage: …`` of a reading still owed: what the usage tests wait for (``settle_until``)."""
-    return all("usage: …" not in line(view, slot) for slot in slots)
+    ``reading usage…`` of a reading still owed: what the usage tests wait for (``settle_until``)."""
+    return all(cells(view, slot)["status"] != "reading usage…" for slot in slots)
 
 
 # --- pure helpers --------------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("changed", [False, True])
-def test_slow_accounts_refresh_finishes_without_cancelling_or_spawning_more_threads(
-    no_network: dict[str, Any],
-    changed: bool,
-) -> None:
-    no_network["session"] = _session()
-    started, release = threading.Event(), threading.Event()
-    calls = 0
-    first = _overview(_status(1, "slow@example.com"))
-    second = _overview(_status(1, "refreshed@example.com"))
-
-    def accounts() -> AccountsOverview:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            started.set()
-            if not release.wait(timeout=10):
-                raise TimeoutError("test did not release the account reader")
-            return first
-        return second
-
-    async def run() -> None:
-        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=accounts)
-        async with app.run_test(size=SIZE) as pilot:
-            try:
-                assert await asyncio.to_thread(started.wait, 3)
-                for _ in range(5):
-                    app.refresh_accounts()
-                    await pilot.pause()
-                assert calls == 1
-                if changed:
-                    app.on_accounts_changed(AccountsChanged())
-                    app.on_accounts_changed(AccountsChanged())
-                release.set()
-                await settle(app)
-                await pilot.pause()
-                await settle(app)
-                # main's rule (`FleetApp.refresh_accounts`): however many ticks the wait
-                # outlived, they owe ONE read after it, and a change asked for meanwhile is
-                # that same read; never a thread per tick.
-                assert calls == 2 and app.accounts_overview == second
-                assert "refreshed@example.com" in shown(
-                    app.query_one(AccountsSection).query_one(".accounts-line", Static)
-                )
-            finally:
-                release.set()
-
-    asyncio.run(run())
 
 
 def test_usage_bar_fills_five_cells_and_colours_by_pressure() -> None:
@@ -333,35 +342,69 @@ def test_usage_bar_fills_five_cells_and_colours_by_pressure() -> None:
     assert styles[12] == "green" and styles[60] == "yellow" and styles[95] == "bold red"
 
 
-def test_account_line_says_who_what_plan_and_how_much() -> None:
+def test_account_cells_say_who_what_plan_how_much_and_what_is_wrong() -> None:
     usage = ClaudeUsage(
         available=True,
         session_percent=12,
-        session_resets_at=NOW,
+        session_resets_at=NOW + timedelta(hours=3, minutes=10),
         week_percent=40,
-        week_resets_at=NOW,
+        week_resets_at=NOW + timedelta(days=6, hours=12),
     )
-    signed = account_line_text(_status(2, "two@example.com"), usage).plain
-    assert signed.startswith("  2  account 2")  # two blanks: no default badge
-    assert "two@example.com" in signed and "max 5x" in signed
-    assert "session ▮▯▯▯▯ 12%" in signed and "week ▮▮▯▯▯ 40%" in signed
-    assert "resets" in signed
+    cut = account_cells(_status(2, "two@example.com"), usage, now=NOW)
+    signed = {key: text.plain for key, text in cut.items()}
+    assert signed["default"] == "" and signed["slot"] == "2" and signed["name"] == "account 2"
+    assert signed["email"] == "two@example.com" and signed["plan"] == "max 5x"
+    assert signed["session"] == "▮▯▯▯▯ 12%" and signed["week"] == "▮▮▯▯▯ 40%"  # USED
+    assert signed["session-resets"].startswith("in 3h 10m")
+    assert signed["week-resets"].startswith("in 6d 12h (")
+    assert signed["status"] == ""  # nothing wrong, and no pace to project
+    assert list(signed) == [column.key for column in COLUMNS]
 
-    pending = account_line_text(_status(2, "two@example.com"), None).plain
-    assert "usage: …" in pending and "▮" not in pending
+    def status_of(status: ClaudeAccountStatus, reading: ClaudeUsage | None) -> str:
+        return account_cells(status, reading)["status"].plain
 
+    pending = account_cells(_status(2, "two@example.com"), None)
+    assert pending["session"].plain == "…" and pending["status"].plain == "reading usage…"
     unavailable = ClaudeUsage(available=False, reason="HTTP 503 from the usage endpoint")
-    assert "usage: HTTP 503" in account_line_text(_status(2, "two@example.com"), unavailable).plain
+    assert status_of(_status(2, "two@example.com"), unavailable) == (
+        "usage: HTTP 503 from the usage endpoint"
+    )
+    assert account_cells(_status(2, "two@example.com"), unavailable)["session"].plain == "—"
 
-    absent = account_line_text(_status(3, None), usage).plain
-    assert absent.startswith("  3  account 3") and "not signed in" in absent
-    assert "▮" not in absent and "max" not in absent  # nothing about a login that is not there
+    absent = {k: t.plain for k, t in account_cells(_status(3, None), usage).items()}
+    assert absent["name"] == "account 3" and absent["status"] == "not signed in"
+    assert absent["email"] == absent["plan"] == absent["session"] == absent["week"] == ""
 
     expired = _status(1, "me@example.com", token_state="expired")
-    assert "token expired" in account_line_text(expired, None).plain
+    assert status_of(expired, None) == "⚠ token expired"
     logged_out = _status(2, "two@example.com", signed_in=False)
-    assert "token missing" in account_line_text(logged_out, usage).plain
-    assert "▮" not in account_line_text(logged_out, usage).plain
+    assert status_of(logged_out, usage) == "⚠ token missing"
+    assert "▮" not in "".join(t.plain for t in account_cells(logged_out, usage).values())
+    rejected = ClaudeUsage(available=False, reason="the token was rejected", needs_login=True)
+    assert status_of(_status(2, "two@example.com"), rejected) == "⚠ token rejected"
+    off = _arranged(_status(2, "two@example.com", token_state="expired"), disabled=True)
+    assert status_of(off, None) == "⚠ token expired · disabled"  # the thing to fix first
+    starred = _arranged(_status(1, "me@example.com"), is_default=True, alias="Work laptop")
+    assert account_cells(starred, usage)["default"].plain == "★"
+    assert account_cells(starred, usage)["name"].plain == "Work laptop"
+    for text in account_cells(starred, usage).values():  # ellipsised in its cell, never wrapped
+        assert text.no_wrap and text.overflow == "ellipsis"
+
+
+def test_log_in_is_offered_for_no_login_a_missing_an_expired_or_a_rejected_token() -> None:
+    fine = ClaudeUsage(available=True, session_percent=1, week_percent=1)
+    rejected = ClaudeUsage(available=False, reason="the token was rejected", needs_login=True)
+    offline = ClaudeUsage(available=False, reason="could not reach the usage endpoint")
+    locked = ClaudeUsage(available=False, reason=core.KEYCHAIN_LOCKED)
+    assert needs_login(_status(3, None), None)  # never signed in
+    assert needs_login(_status(2, "two@example.com", signed_in=False), fine)  # token missing
+    assert needs_login(_status(2, "two@example.com", token_state="expired"), None)
+    assert needs_login(_status(2, "two@example.com"), rejected)  # 401
+    # Negatives: a working login, one whose reading is owed, an endpoint that is down, and
+    # a login in a locked macOS Keychain: none is a log-in to do.
+    for reading in (fine, None, offline, locked):
+        assert not needs_login(_status(2, "two@example.com"), reading), reading
+    assert not needs_login(_status(1, "me@example.com", token_state="unreadable"), locked)
 
 
 def test_aisquare_status_text_covers_every_source() -> None:
@@ -389,56 +432,40 @@ def test_grant_text_puts_the_code_first_and_says_what_the_browser_did() -> None:
     assert "Waiting for the approval" in grant_text(grant, opened=None).plain
 
 
-def test_summarise_names_the_worst_thing_first() -> None:
-    both = summarise(_overview(_status(1, "me@example.com"), _status(2, "two@x")), _session())
-    assert both.aisquare is True
-    assert both.line is not None and both.line.plain == "2 Claude · me@example.com"
-
-    gap = summarise(_overview(_status(1, "me@example.com"), _status(3, None)), _session())
-    assert gap.line is not None and gap.line.plain == "1 Claude · ⚠ #3 no login"
-
-    no_aisquare = summarise(_overview(_status(1, "me@example.com")), None)
-    assert no_aisquare.aisquare is False
-    assert no_aisquare.line is not None
-    assert no_aisquare.line.plain == "1 Claude · AISquare: sign in"
-
-    missing = summarise(_overview(installed=False), None)
-    assert missing.line is not None and missing.line.plain == "⚠ no coding agent installed"
-
-    unreadable = summarise(None, None, session_known=False)
-    assert unreadable.aisquare is None
-    assert unreadable.line is not None and "unreadable" in unreadable.line.plain
-    # Every line fits the section's 28 columns without an ellipsis.
-    for summary in (both, gap, no_aisquare, missing):
-        assert summary.line is not None and len(summary.line.plain) <= 28
-
-
-# --- the sidebar section and the page -----------------------------------------------------------
-
-
-def test_the_section_summarises_and_opens_the_page(no_network: dict[str, Any]) -> None:
+def test_the_status_line_says_aisquare_and_opens_the_page_with_settings_selected(
+    no_network: dict[str, Any],
+) -> None:
+    """The human: "clicking on that should directly take me to accounts page but still that
+    line wont be highlighted/in focus, still settings would be in focus"."""
     no_network["session"] = _session()
     overview = _overview(_status(1, "me@example.com"), _status(2, "two@example.com"))
 
-    async def go(pilot: Pilot[None]) -> tuple[str, str, str | None, list[str], str, str]:
+    async def go(pilot: Pilot[None]) -> tuple[Any, ...]:
         app = fleet_app(pilot)
-        title = shown(app.query_one(AccountsTitle))
-        detail = shown(app.query_one(AccountsSection).query_one(".accounts-line", Static))
+        signed_in = app.sidebar.aisquare
         before = app.content.current
         view = await open_accounts(pilot)
         rows = [line(view, 1), line(view, 2)]
         status = shown(view.query_one("#aisquare-status", Static))
         claude = shown(view.query_one("#claude-title", Static))
-        return title, detail, before, rows, status, claude
+        return signed_in, before, rows, status, claude, app.sidebar.selected_key, app.focused
 
-    title, detail, before, rows, status, claude = drive(go, overview=overview)
-    assert title == "Accounts  ✓ AISquare"
-    assert detail == "2 Claude · me@example.com"
+    signed_in, before, rows, status, claude, selected, focused = drive(go, overview=overview)
+    assert signed_in is True  # the AISquare dot is green
     assert before == "welcome"
-    assert rows[0].startswith("  1  plain claude") and "me@example.com" in rows[0]
-    assert rows[1].startswith("  2  account 2") and "two@example.com" in rows[1]
+    assert selected == SETTINGS_KEY  # Settings is the highlighted row, not the line
+    assert not isinstance(focused, StatusLine)
+    assert rows[0].startswith("1  plain claude") and "me@example.com" in rows[0]
+    assert rows[1].startswith("2  account 2") and "two@example.com" in rows[1]
     assert "Signed in as me@aisquare.studio" in status
     assert claude.startswith("Claude Code 2.1.266")
+
+
+def _claude_count(app: FleetApp) -> int | None:
+    """How many Claude accounts the frame the shell painted last holds: what a test watches
+    to see an accounts read land, now the sidebar carries no line of its frame."""
+    overview = app.accounts_overview
+    return None if overview is None else len(overview.accounts)
 
 
 def test_the_shells_tick_reads_the_accounts_off_the_ui_thread_and_paints_the_answer(
@@ -462,32 +489,31 @@ def test_the_shells_tick_reads_the_accounts_off_the_ui_thread_and_paints_the_ans
         threads.append(threading.current_thread().name)
         if hold.is_set():
             asked.set()
-            release.wait(10)
+            release.wait(HOLD_S)
         return frames[0]
 
-    async def run() -> tuple[str, bool, str, str]:
+    async def run() -> tuple[int | None, bool, int | None, int | None]:
         app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=reader)
         async with app.run_test(size=SIZE) as pilot:
             await accounts_read(app)
-            detail = app.query_one(AccountsSection).query_one(".accounts-line", Static)
-            first = shown(detail)
+            first = _claude_count(app)
             hold.set()
             frames.pop(0)
             try:
                 app.refresh_data()  # the two-second tick, with the registry held
-                held = await asyncio.to_thread(asked.wait, 5)
+                held = await asyncio.to_thread(asked.wait, HOLD_S)
                 await pilot.pause()
-                while_held = shown(detail)
+                while_held = _claude_count(app)
             finally:
                 release.set()
             await accounts_read(app)
-            return first, held, while_held, shown(detail)
+            return first, held, while_held, _claude_count(app)
 
     first, held, while_held, after = asyncio.run(run())
     assert threads and threading.main_thread().name not in threads, threads
     assert held, "the tick asked for the accounts"
-    assert first == while_held == "1 Claude · me@example.com"  # the last frame, kept
-    assert after == "2 Claude · me@example.com"  # the answer, painted when it came
+    assert first == while_held == 1  # the last frame, kept
+    assert after == 2  # the answer, painted when it came
 
 
 def test_ticks_while_the_accounts_read_waits_let_it_answer_and_read_once_more_after_it(
@@ -520,42 +546,41 @@ def test_ticks_while_the_accounts_read_waits_let_it_answer_and_read_once_more_af
         try:
             if n:
                 asked[n].set()
-                gates[n].wait(10)  # as a writer holds the lock
+                gates[n].wait(HOLD_S)  # as a writer holds the lock
             emails = ["me@example.com", *(f"{i}@example.com" for i in range(2, n + 2))]
             return _overview(*(_status(i, email) for i, email in enumerate(emails, 1)))
         finally:
             with counting:
                 running[0] -= 1
 
-    async def run() -> tuple[str, str, str]:
+    async def run() -> tuple[int | None, int | None, int | None]:
         app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=reader)
         async with app.run_test(size=SIZE) as pilot:
             await accounts_read(app)
-            detail = app.query_one(AccountsSection).query_one(".accounts-line", Static)
             hold.set()
             try:
                 app.refresh_data()  # a tick: the first held read waits on the registry
-                assert await asyncio.to_thread(asked[1].wait, 5), "the tick asked"
+                assert await asyncio.to_thread(asked[1].wait, HOLD_S), "the tick asked"
                 app.refresh_data()  # two more ticks while it waits
                 app.refresh_data()
                 await pilot.pause()
-                while_held = shown(detail)
+                while_held = _claude_count(app)
                 gates[1].set()  # the writer lets go
                 # The read the ticks were owed starts once the first one's answer is painted.
-                assert await asyncio.to_thread(asked[2].wait, 5), "a read after the wait"
+                assert await asyncio.to_thread(asked[2].wait, HOLD_S), "a read after the wait"
                 await pilot.pause()
-                answered = shown(detail)
+                answered = _claude_count(app)
                 gates[2].set()
                 await accounts_read(app)
             finally:
                 for gate in gates.values():
                     gate.set()
-            return while_held, answered, shown(detail)
+            return while_held, answered, _claude_count(app)
 
     while_held, answered, after = asyncio.run(run())
-    assert while_held == "1 Claude · me@example.com"  # the last frame, kept
-    assert answered == "2 Claude · me@example.com"  # the waiting read's answer, painted
-    assert after == "3 Claude · me@example.com"  # and the one read after it
+    assert while_held == 1  # the last frame, kept
+    assert answered == 2  # the waiting read's answer, painted
+    assert after == 3  # and the one read after it
     assert peak[0] == 1, f"{peak[0]} reads at once"
     assert held == [1, 2], held  # three ticks during one wait cost one more read
 
@@ -582,19 +607,18 @@ def test_a_tick_the_app_handles_before_a_reads_answer_still_lets_that_answer_pai
             held.append(len(held) + 1)
             n = held[-1]
             asked[n].set()
-            gates[n].wait(10)  # as a writer holds the lock
+            gates[n].wait(HOLD_S)  # as a writer holds the lock
         emails = ["me@example.com", *(f"{i}@example.com" for i in range(2, n + 2))]
         return _overview(*(_status(i, email) for i, email in enumerate(emails, 1)))
 
-    async def run() -> tuple[str, str]:
+    async def run() -> tuple[int | None, int | None]:
         app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=reader)
         async with app.run_test(size=SIZE) as pilot:
             await accounts_read(app)
-            detail = app.query_one(AccountsSection).query_one(".accounts-line", Static)
             hold.set()
             try:
                 app.refresh_data()  # a tick: the first held read waits on the registry
-                assert await asyncio.to_thread(asked[1].wait, 5), "the tick asked"
+                assert await asyncio.to_thread(asked[1].wait, HOLD_S), "the tick asked"
                 [first] = [
                     w for w in app.workers if w.group == ACCOUNTS_WORKER and not w.is_finished
                 ]
@@ -608,61 +632,78 @@ def test_a_tick_the_app_handles_before_a_reads_answer_still_lets_that_answer_pai
                     app.refresh_data()
 
                 app.call_later(tick_ahead_of_the_answer)
-                assert await asyncio.to_thread(asked[2].wait, 5), "the tick read again"
+                assert await asyncio.to_thread(asked[2].wait, HOLD_S), "the tick read again"
                 await pilot.pause()
-                answered = shown(detail)
+                answered = _claude_count(app)
                 gates[2].set()
                 await accounts_read(app)
             finally:
                 for gate in gates.values():
                     gate.set()
-            return answered, shown(detail)
+            return answered, _claude_count(app)
 
     answered, after = asyncio.run(run())
-    assert answered == "2 Claude · me@example.com"  # the first read's answer, painted
-    assert after == "3 Claude · me@example.com"  # and the tick's read after it
+    assert answered == 2  # the first read's answer, painted
+    assert after == 3  # and the tick's read after it
     assert held == [1, 2], held
 
 
-def test_buttons_follow_each_slots_state() -> None:
+def offered(view: AccountsView, slot: int, stem: str) -> bool:
+    """Whether the row offers button ``stem``: shown and pressable. A button that does not
+    apply keeps its place (invisible, disabled), so the action column stays aligned."""
+    button = row(view, slot).query_one(f"#account-{stem}-{slot}", Button)
+    return button.visible and not button.disabled
+
+
+def test_buttons_follow_each_slots_state(no_network: dict[str, Any]) -> None:
+    no_network["usage"] = lambda account: (
+        ClaudeUsage(available=False, reason="the token was rejected", needs_login=True)
+        if account.slot == 4
+        else ClaudeUsage(available=True, session_percent=10, week_percent=10)
+    )
     overview = _overview(
-        _status(1, "me@example.com"), _status(2, "two@example.com"), _status(3, None)
+        _status(1, "me@example.com"),
+        _status(2, "two@example.com"),
+        _status(3, None),
+        _status(4, "four@example.com"),
+        _status(5, "five@example.com", token_state="expired"),
+        _status(6, "six@example.com", signed_in=False),
     )
 
     async def go(pilot: Pilot[None]) -> dict[int, tuple[bool, bool]]:
+        app = fleet_app(pilot)
         view = await open_accounts(pilot)
+        await settle_until(app, lambda: painted(view, 1, 2, 4, 5))
         return {
-            slot: (
-                row(view, slot).query_one(f"#account-sign-in-{slot}", Button).display,
-                row(view, slot).query_one(f"#account-remove-{slot}", Button).display,
-            )
-            for slot in (1, 2, 3)
+            slot: (offered(view, slot, "login"), offered(view, slot, "remove"))
+            for slot in range(1, 7)
         }
 
     buttons = drive(go, overview=overview)
     assert buttons[1] == (False, False)  # signed in, and never ours to remove
     assert buttons[2] == (False, True)  # signed in, ours
-    assert buttons[3] == (True, True)  # needs a sign-in, ours
+    assert buttons[3] == (True, True)  # never signed in
+    assert buttons[4] == (True, True)  # signed in, but the endpoint rejected the token (401)
+    assert buttons[5] == (True, True)  # signed in, the token expired
+    assert buttons[6] == (True, True)  # a login recorded, its token gone
 
 
 def test_without_claude_code_the_page_says_how_to_install_and_add_is_disabled() -> None:
     overview = _overview(_status(1, None, signed_in=False), installed=False)
 
-    async def go(pilot: Pilot[None]) -> tuple[str, bool, str, str]:
+    async def go(pilot: Pilot[None]) -> tuple[str, bool, bool | None]:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
         return (
             shown(view.query_one("#claude-title", Static)),
             view.query_one("#claude-add", Button).disabled,
-            shown(app.query_one(AccountsTitle)),
-            shown(app.query_one(AccountsSection).query_one(".accounts-line", Static)),
+            app.sidebar.aisquare,
         )
 
-    claude, disabled, title, detail = drive(go, overview=overview)
+    claude, disabled, signed_in = drive(go, overview=overview)
     assert "Claude Code is not installed" in claude and core.INSTALL_COMMAND in claude
     assert disabled
-    # Neither agent is here (the overview has no Codex install): nothing to sign in with.
-    assert title == "Accounts  ✗ AISquare" and detail == "⚠ no coding agent installed"
+    assert signed_in is False  # the status line's AISquare dot is red
 
 
 def test_usage_is_fetched_only_for_signed_in_slots_and_painted_into_their_rows(
@@ -686,8 +727,8 @@ def test_usage_is_fetched_only_for_signed_in_slots_and_painted_into_their_rows(
 
     calls, first, second, third = drive(go, overview=overview)
     assert calls == [1, 2]  # slot 3 has no token to ask with
-    assert "session ▮▯▯▯▯ 12%" in first and "week ▮▮▯▯▯ 40%" in first
-    assert "session ▮▮▮▮▮ 90%" in second
+    assert "▮▯▯▯▯ 12%" in first and "▮▮▯▯▯ 40%" in first
+    assert "▮▮▮▮▮ 90%" in second
     assert "▮" not in third and "not signed in" in third
 
 
@@ -703,14 +744,12 @@ def test_usage_that_cannot_be_read_says_why_on_the_row(no_network: dict[str, Any
     assert "usage: the stored token has expired" in drive(go)
 
 
-def test_a_keychain_backed_account_is_asked_and_its_row_says_why(
+def test_an_account_in_a_locked_keychain_is_asked_and_its_row_says_why(
     no_network: dict[str, Any],
 ) -> None:
-    """macOS: signed in, no credentials file — the service's reason must reach the row."""
-    no_network["usage"] = ClaudeUsage(
-        available=False, reason="credentials are in the macOS Keychain, which the CLI does not read"
-    )
-    overview = _overview(_status(1, "me@example.com", token_state="missing"))
+    """macOS: signed in, its Keychain locked — the service's reason must reach the row."""
+    no_network["usage"] = ClaudeUsage(available=False, reason=core.KEYCHAIN_LOCKED)
+    overview = _overview(_status(1, "me@example.com", token_state="unreadable"))
 
     async def go(pilot: Pilot[None]) -> tuple[list[int], str]:
         app = fleet_app(pilot)
@@ -719,9 +758,9 @@ def test_a_keychain_backed_account_is_asked_and_its_row_says_why(
         return no_network["usage_calls"], line(view, 1)
 
     calls, first = drive(go, overview=overview)
-    assert calls == [1]  # asked, although its token state is "missing"
-    assert "usage: credentials are in the macOS Keychain" in first
-    assert "usage: …" not in first
+    assert calls == [1]  # asked, although its token could not be read
+    assert "usage: the login Keychain is locked — unlock it" in first
+    assert "reading usage…" not in first
 
 
 def test_a_page_on_screen_before_its_first_frame_reads_the_usage_when_the_frame_comes(
@@ -739,14 +778,16 @@ def test_a_page_on_screen_before_its_first_frame_reads_the_usage_when_the_frame_
 
     def reader() -> AccountsOverview:
         asked.set()
-        release.wait(10)  # as a writer holds the registry's lock
+        release.wait(HOLD_S)  # as a writer holds the registry's lock
         return overview
 
     async def run() -> tuple[bool, list[int], str]:
         app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=reader)
         async with app.run_test(size=SIZE):
             try:
-                assert await asyncio.to_thread(asked.wait, 5), "the shell asked for the accounts"
+                assert await asyncio.to_thread(asked.wait, HOLD_S), (
+                    "the shell asked for the accounts"
+                )
                 app.post_message(AccountsSelected())  # what a click on the section posts
                 # Only the usage group is waited for: the held read is the point.
                 await settle_until(
@@ -803,6 +844,47 @@ def test_a_slot_that_signs_in_on_a_later_frame_is_read_when_that_frame_comes(
     assert sorted(signed_in) == [1, 1, 2]  # every signed-in slot, read when slot 2 came
     assert again == signed_in  # a frame with no new signed-in slot asked nothing
     assert "usage: scripted: no fetch" in two
+
+
+def test_a_page_shown_before_its_first_frame_reads_the_usage_when_the_frame_lands(
+    no_network: dict[str, Any],
+) -> None:
+    """``on_show`` starts the usage reading, and has no slots to ask about on a page shown
+    before its first frame: opened while the shell's first accounts read still waits, as a
+    remembered Accounts page is at launch, or with its ``Show`` handled while the app's
+    handler still awaited the mount (windows-latest, CI runs 36078630575 and 37719330211).
+    The frame painted the rows, and they said ``usage: …`` until the minute tick. The read
+    is held here as a busy registry holds it."""
+    no_network["usage"] = ClaudeUsage(
+        available=True, session_percent=60, session_resets_at=NOW + timedelta(hours=3)
+    )
+    release = threading.Event()
+
+    def reader() -> AccountsOverview:
+        release.wait(HOLD_S)
+        return _overview(_status(1, "me@example.com"), _status(2, "two@example.com"))
+
+    async def run() -> tuple[list[int], list[int], str]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=reader)
+        async with app.run_test(size=SIZE) as pilot:
+            try:
+                await pilot.pause()
+                app.post_message(AccountsSelected())  # as a launch restores the page
+                await settle_page(app, group=USAGE_WORKER)
+                view = app.query_one("#accounts", AccountsView)
+                assert app.current_view() is view and view._on_screen, "the page is up"
+                assert view.overview is None, "and the first read still waits"
+                while_held = list(no_network["usage_calls"])
+            finally:
+                release.set()
+            await accounts_read(app)  # the first frame, painted
+            await settle_page(app, group=USAGE_WORKER)  # and the reading it started
+            return while_held, sorted(no_network["usage_calls"]), line(view, 1)
+
+    while_held, calls, first = asyncio.run(run())
+    assert while_held == []  # no slots to ask about yet
+    assert calls == [1, 2]
+    assert "▮▮▮▯▯ 60%" in first and "reading usage…" not in first
 
 
 # --- AISquare: the device flow as a card --------------------------------------------------------
@@ -869,7 +951,7 @@ def test_sign_in_shows_the_code_then_the_new_session(
         monkeypatch, no_network, outcome={"access_token": "aisq_new", "expires_in": 1}
     )
 
-    async def go(pilot: Pilot[None]) -> tuple[str, str, bool, str]:
+    async def go(pilot: Pilot[None]) -> tuple[str, str, bool, bool | None]:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
         assert not view.query_one("#aisquare-sign-out", Button).display  # nobody to sign out
@@ -881,10 +963,10 @@ def test_sign_in_shows_the_code_then_the_new_session(
             shown(view.query_one("#aisquare-status", Static)),
             notice(view),
             view.query_one("#aisquare-code", Static).display,
-            shown(app.query_one(AccountsTitle)),
+            app.sidebar.aisquare,
         )
 
-    status, said, code_shown, title = drive(go)
+    status, said, code_shown, signed_in = drive(go)
     assert seen == ["wait:WDJB-MJHT", "complete:aisq_new"]
     # The browser helper decides (an explicit BROWSER beats the headless heuristics),
     # so it is asked even where is_headless() says no.
@@ -892,7 +974,7 @@ def test_sign_in_shows_the_code_then_the_new_session(
     assert "Signed in as new@aisquare.studio" in status
     assert said == "✓ Signed in to AISquare as new@aisquare.studio"
     assert not code_shown  # the card folds away once the session is stored
-    assert "✓ AISquare" in title  # the section was re-read from the stored session
+    assert signed_in is True  # the status line was re-read from the stored session
 
 
 def test_a_sign_in_whose_token_could_not_be_restricted_says_so_on_the_page(
@@ -1021,6 +1103,7 @@ def test_sign_out_takes_the_keys_the_cli_minted_with_it_as_logout_does(
     ]
     with store_session() as store:
         for project, uid in zip(projects, ("key-web", "key-api"), strict=True):
+            store.onboard_project(project)  # a destination is an added project's (#139)
             destinations.choose(
                 store,
                 project,
@@ -1166,11 +1249,11 @@ def test_quitting_mid_sign_in_cancels_the_device_flow(
         await pilot.click("#aisquare-sign-in")
         # The quit must land while the wait runs. The press reaches the page as a message
         # and the flow is a thread, so the wait's own start is what this waits for, bounded.
-        assert await asyncio.to_thread(waiting.wait, 5), "the sign-in never reached its wait"
+        assert await asyncio.to_thread(waiting.wait, HOLD_S), "the sign-in never reached its wait"
 
     drive(go)  # the app exits here: the view unmounts while the wait is in flight
 
-    assert released.wait(5), "the wait never noticed the page had gone"
+    assert released.wait(HOLD_S), "the wait never noticed the page had gone"
     assert observed["cancelled"] is True
     assert seen == []  # complete_sign_in never ran: nothing was stored
 
@@ -1190,7 +1273,13 @@ def _script_claude_sign_in(
     (with every message held 15 ms).
     """
     monkeypatch.setattr(accounts_view, "LOGIN_POLL_SECONDS", 3600.0)
-    seen: dict[str, Any] = {"opened": [], "completed": [], "abandoned": [], "landed_polls": 0}
+    seen: dict[str, Any] = {
+        "opened": [],
+        "config": [],
+        "completed": [],
+        "abandoned": [],
+        "landed_polls": 0,
+    }
     account = ClaudeAccount(
         slot=2,
         config_dir=tmp_path / "claude-accounts" / "2",
@@ -1204,9 +1293,14 @@ def _script_claude_sign_in(
         return account
 
     def open_window(
-        acct: ClaudeAccount, server: TmuxServer, *, cwd: Path | None = None
+        acct: ClaudeAccount,
+        server: TmuxServer,
+        *,
+        cwd: Path | None = None,
+        config: FleetSettings | None = None,
     ) -> WindowInfo:
         seen["opened"].append((acct.slot, server.socket, cwd))
+        seen["config"].append(config)
         return WindowInfo(
             session=accounts_service.SIGN_IN_SESSION,
             window_id="@7",
@@ -1218,8 +1312,9 @@ def _script_claude_sign_in(
             activity=False,
         )
 
-    def landed(acct: ClaudeAccount) -> ClaudeIdentity | None:
+    def landed(acct: ClaudeAccount, *, since: str | None = None) -> ClaudeIdentity | None:
         seen["landed_polls"] += 1
+        seen["since"] = since
         return ClaudeIdentity(email="two@example.com") if lands else None
 
     def complete(acct: ClaudeAccount) -> ClaudeAccountStatus:
@@ -1262,13 +1357,55 @@ def test_add_opens_a_watched_window_and_records_the_account_when_the_login_lands
     box_shown, attached, header, box_after, said = drive(go)
     assert seen["begin"] is None  # + means a fresh slot
     assert seen["opened"] == [(2, PRIVATE_SOCKET, None)]
+    # The page's one read of [fleet], so the check before a server starts reads no other.
+    assert [type(config) for config in seen["config"]] == [FleetSettings]
     assert box_shown and attached == "%7"
-    assert header.startswith("Signing in to account 2")
+    assert header.startswith("Logging in to account 2")
+    assert "type /login if Claude Code does not prompt you" in header
+    assert seen["since"] is None  # a fresh slot has no earlier login to tell apart
     assert seen["landed_polls"] == 1 and seen["completed"] == [2] and seen["abandoned"] == []
     assert not box_after  # the window is closed the moment the login lands…
     killed = [argv for argv in no_real_tmux if "kill-window" in argv]
     assert killed and killed[0][killed[0].index("-t") + 1] == "%7"  # …and killed in tmux
     assert said.startswith("✓ account 2: two@example.com")
+
+
+def test_a_log_in_reads_the_stored_login_and_polls_off_the_ui_thread(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_real_tmux: list[tuple[str, ...]]
+) -> None:
+    """On macOS the stored login is a Keychain read, a subprocess of up to five seconds:
+    the fingerprint a *Log in* opens over and every poll of its window are read in thread
+    workers, never on the UI thread, and the window opens once the fingerprint is read."""
+    seen = _script_claude_sign_in(monkeypatch, tmp_path, lands=True)
+    threads: dict[str, list[bool]] = {"fingerprint": [], "landed": []}
+    landed = accounts_service.sign_in_landed
+
+    def fingerprint(acct: ClaudeAccount) -> str:
+        threads["fingerprint"].append(threading.current_thread() is threading.main_thread())
+        return "stale-digest"
+
+    def poll(acct: ClaudeAccount, *, since: str | None = None) -> ClaudeIdentity | None:
+        threads["landed"].append(threading.current_thread() is threading.main_thread())
+        return landed(acct, since=since)
+
+    monkeypatch.setattr(accounts_service, "login_fingerprint", fingerprint)
+    monkeypatch.setattr(accounts_service, "sign_in_landed", poll)
+
+    async def go(pilot: Pilot[None]) -> tuple[str | None, bool]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        view.begin_claude_sign_in(2)
+        await settle(app)
+        assert view.login is not None
+        since = view.login.since
+        view._poll_login()
+        await settle(app)
+        return since, view.login is None
+
+    since, closed = drive(go)
+    assert since == "stale-digest" and seen["since"] == "stale-digest"
+    assert threads == {"fingerprint": [False], "landed": [False]}
+    assert closed and seen["completed"] == [2]
 
 
 def test_a_window_that_closes_without_a_login_discards_the_fresh_slot(
@@ -1294,6 +1431,32 @@ def test_a_window_that_closes_without_a_login_discards_the_fresh_slot(
     assert not box
 
 
+def test_a_sign_in_window_the_fleet_refuses_is_said_and_its_fresh_slot_discarded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review of #259, round 3: the sign-in window opens as every window at the fleet's
+    socket does (``fleet.open_window``), which refuses a socket path a running server lost
+    with a ``FleetError``. The page caught a ``TmuxError`` only, so that refusal would have
+    ended asq with a traceback. It is said, as tmux's own refusal is."""
+    seen = _script_claude_sign_in(monkeypatch, tmp_path, lands=False)
+    why = "not started: the tmux server that manager (repo) runs on lost its socket file"
+
+    def refused(acct: ClaudeAccount, server: TmuxServer, **_kwargs: object) -> None:
+        raise fleet_service.FleetError(why)
+
+    monkeypatch.setattr(accounts_service, "open_sign_in_window", refused)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, bool, object]:
+        view = await open_accounts(pilot)
+        await pilot.click("#claude-add")
+        await settle(fleet_app(pilot))
+        return notice(view), view.query_one("#login-box", Vertical).display, view.login
+
+    said, box, login = drive(go)
+    assert said == f"✗ could not open a sign-in window: {why}"
+    assert seen["abandoned"] == [2] and not box and login is None
+
+
 def test_cancel_stops_a_sign_in_and_a_sign_in_of_an_existing_slot_is_never_discarded(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1302,7 +1465,7 @@ def test_cancel_stops_a_sign_in_and_a_sign_in_of_an_existing_slot_is_never_disca
 
     async def go(pilot: Pilot[None]) -> tuple[int | None, str]:
         view = await open_accounts(pilot)
-        await pilot.click("#account-sign-in-2")
+        await press(pilot, "#account-login-2")
         await settle(fleet_app(pilot))
         begun = seen.get("begin", "never")
         assert view.login is not None and not view.login.fresh
@@ -1314,6 +1477,228 @@ def test_cancel_stops_a_sign_in_and_a_sign_in_of_an_existing_slot_is_never_disca
     assert begun == 2  # the row's button signs THAT slot in
     assert seen["abandoned"] == []  # an existing slot is kept, login or not
     assert said.startswith("sign-in cancelled — cancelled; nothing changed")
+
+
+def test_cancel_after_the_login_landed_keeps_the_new_slot_and_wires_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review of #263, M1: Claude Code stored the login after the window's last poll, and
+    the user pressed Cancel. The slot is settled as the quit settles it: kept, and wired."""
+    seen = _script_claude_sign_in(monkeypatch, tmp_path, lands=False)
+    landed = {"now": False}
+    monkeypatch.setattr(
+        accounts_service,
+        "sign_in_landed",
+        lambda acct, since=None: ClaudeIdentity(email="two@example.com") if landed["now"] else None,
+    )
+
+    async def go(pilot: Pilot[None]) -> str:
+        view = await open_accounts(pilot)
+        await pilot.click("#claude-add")
+        await settle(fleet_app(pilot))
+        assert view.login is not None and view.login.fresh
+        landed["now"] = True  # after the last poll, before the next
+        await pilot.click("#login-cancel")
+        await settle(fleet_app(pilot))
+        return notice(view)
+
+    said = drive(go)
+    assert seen["completed"] == [2] and seen["abandoned"] == []
+    assert said == "✓ account 2: the login had landed — kept as two@example.com"
+
+
+@pytest.mark.parametrize("fails", ["its hooks", "the login's read"])
+def test_a_cancel_whose_settling_fails_never_says_nothing_changed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fails: str
+) -> None:
+    """Review of #259, round 16: settling a cancelled fresh slot that raised read as "sign-in
+    cancelled — cancelled; nothing changed", its reason lost with the worker's result. A
+    login that had landed was kept, and its hooks had failed: that is said as the sign-in
+    itself says it. A login that could not even be read leaves the slot as it is, and says
+    so, with the cancel's reason."""
+    seen = _script_claude_sign_in(monkeypatch, tmp_path, lands=False)
+    landed = {"now": False}
+
+    def poll(acct: ClaudeAccount, *, since: str | None = None) -> ClaudeIdentity | None:
+        if not landed["now"]:
+            return None
+        if fails == "the login's read":
+            raise PermissionError(13, "Permission denied", ".claude.json")
+        return ClaudeIdentity(email="two@example.com")
+
+    def unwired(acct: ClaudeAccount) -> ClaudeAccountStatus:
+        raise OSError("settings.json is read-only")
+
+    monkeypatch.setattr(accounts_service, "sign_in_landed", poll)
+    monkeypatch.setattr(accounts_service, "complete_sign_in", unwired)
+
+    async def go(pilot: Pilot[None]) -> str:
+        view = await open_accounts(pilot)
+        await pilot.click("#claude-add")
+        await settle(fleet_app(pilot))
+        assert view.login is not None and view.login.fresh
+        landed["now"] = True  # after the last poll, before the next
+        await pilot.click("#login-cancel")
+        await settle(fleet_app(pilot))
+        return notice(view)
+
+    said = " ".join(drive(go).split())
+    assert seen["abandoned"] == [] and "nothing changed" not in said, said
+    if fails == "its hooks":
+        assert said.startswith(
+            "⚠ signed in, but aisquare's hooks did not install: settings.json is read-only"
+        ), said
+    else:
+        assert said.startswith("✗ sign-in cancelled — cancelled; whether its login landed"), said
+        assert "Permission denied" in said and "the new slot is left as it is" in said
+
+
+def test_a_poll_that_raises_is_said_once_and_the_window_waits_on(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review of #259, round 16: a poll that raised (a ``.claude.json`` it may not read, or
+    one half written) read as "not landed" without a word, and each tick failed the same
+    way: a user who had finished signing in watched "waiting for the log-in below…" until
+    they cancelled. It is said, once a window, and the window, its Claude Code still
+    running, waits on."""
+    _script_claude_sign_in(monkeypatch, tmp_path, lands=False)
+
+    def unreadable(acct: ClaudeAccount, *, since: str | None = None) -> ClaudeIdentity | None:
+        raise PermissionError(13, "Permission denied", ".claude.json")
+
+    alive = tmux_core.PaneFacts(
+        pane_id="%7",
+        width=80,
+        height=24,
+        cursor_x=0,
+        cursor_y=0,
+        cursor_visible=True,
+        alternate_on=False,
+        history_size=0,
+        dead=False,
+        dead_status=None,
+        in_mode=False,
+        current_command="claude",
+        title="",
+    )
+    monkeypatch.setattr(accounts_service, "sign_in_landed", unreadable)
+    monkeypatch.setattr(TmuxServer, "pane_facts", lambda self, pane_id: alive)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str, bool]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await pilot.click("#claude-add")
+        await settle(app)
+        view._poll_login()
+        await settle(app)
+        first = notice(view)
+        view._notice("something since")
+        view._poll_login()  # fails the same way
+        await settle(app)
+        return first, notice(view), view.login is not None
+
+    first, after, waiting = drive(go)
+    said = " ".join(first.split())
+    assert said.startswith("⚠ account 2: could not tell whether the log-in landed"), said
+    assert "Permission denied" in said and "still waiting" in said
+    assert after == "something since", "said once a window"
+    assert waiting
+
+
+def test_a_poll_that_raises_is_said_of_the_window_it_was_asked_for(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review of #259, round 17: a poll that raised returned nothing that named its window,
+    so the stale-answer guard, which held for an answer, did not hold for a failure. A poll
+    asked for window A that raised after A was cancelled and window B opened set B's
+    ``poll_failed`` and said "could not tell whether the log-in landed" of B's account, and
+    B's own failure later was never said. A failure names its window as an answer does.
+
+    Held and waited for for :data:`HOLD_S`, and the wait is the event loop's: with 5 s, and
+    a thread of the loop's executor to wait in, the poll had not started by then on every
+    windows-latest run. Its worker queues on that executor too, behind the wait itself."""
+    _script_claude_sign_in(monkeypatch, tmp_path, lands=False)
+    asked = threading.Event()
+    gate = threading.Event()
+
+    def unreadable_once_let_go(
+        acct: ClaudeAccount, *, since: str | None = None
+    ) -> ClaudeIdentity | None:
+        asked.set()
+        gate.wait(HOLD_S)
+        raise PermissionError(13, "Permission denied", ".claude.json")
+
+    alive = tmux_core.PaneFacts(
+        pane_id="%7",
+        width=80,
+        height=24,
+        cursor_x=0,
+        cursor_y=0,
+        cursor_visible=True,
+        alternate_on=False,
+        history_size=0,
+        dead=False,
+        dead_status=None,
+        in_mode=False,
+        current_command="claude",
+        title="",
+    )
+    monkeypatch.setattr(accounts_service, "sign_in_landed", unreadable_once_let_go)
+    monkeypatch.setattr(TmuxServer, "pane_facts", lambda self, pane_id: alive)
+    monkeypatch.setattr(accounts_view, "LOGIN_POLL_SECONDS", 3600.0)  # ticks taken by hand
+
+    async def go(pilot: Pilot[None]) -> tuple[str, bool, str, bool]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await pilot.click("#claude-add")
+        await settle(app)
+        view._notice("before")
+        view._poll_login()  # asked for this window, A
+        deadline = time.monotonic() + HOLD_S
+        while not asked.is_set() and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert asked.is_set(), "the poll never started"
+        first = view.login
+        assert first is not None
+        view.login = dataclasses.replace(first)  # A gone, B open, while A's poll runs
+        gate.set()
+        await settle(app)
+        during = notice(view)
+        b = view.login
+        assert b is not None
+        b_marked = b.poll_failed
+        view._poll_login()  # B's own poll fails: said, of B
+        await settle(app)
+        return during, b_marked, notice(view), b.poll_failed
+
+    during, b_marked, after, b_failed = drive(go)
+    assert during == "before" and not b_marked, "A's failure said nothing of B"
+    said = " ".join(after.split())
+    assert said.startswith("⚠ account 2: could not tell whether the log-in landed"), said
+    assert b_failed
+
+
+def test_a_log_in_over_a_login_the_keychain_will_not_show_opens_no_window(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review of #263, n4: the window could not tell the login stored from a new one, and
+    would close on the old one at its first poll as "signed in"."""
+    seen = _script_claude_sign_in(monkeypatch, tmp_path, lands=True)
+
+    def unreadable(acct: ClaudeAccount) -> str | None:
+        raise accounts_service.LoginUnreadable(core.KEYCHAIN_LOCKED)
+
+    monkeypatch.setattr(accounts_service, "login_fingerprint", unreadable)
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, str]:
+        view = await open_accounts(pilot)
+        view.begin_claude_sign_in(2)
+        await settle(fleet_app(pilot))
+        return view.login is None and not view.query_one("#login-box").display, notice(view)
+
+    closed, said = drive(go)
+    assert closed and seen["opened"] == [] and seen["landed_polls"] == 0
+    assert said == f"✗ account 2: no log-in opened — {core.KEYCHAIN_LOCKED}"
 
 
 def test_quitting_mid_claude_sign_in_closes_the_window_and_discards_the_fresh_slot(
@@ -1342,7 +1727,7 @@ def test_quitting_after_the_login_landed_records_it_instead(
     monkeypatch.setattr(
         accounts_service,
         "sign_in_landed",
-        lambda acct: ClaudeIdentity(email="two@example.com") if landed["now"] else None,
+        lambda acct, since=None: ClaudeIdentity(email="two@example.com") if landed["now"] else None,
     )
 
     async def go(pilot: Pilot[None]) -> None:
@@ -1355,6 +1740,112 @@ def test_quitting_after_the_login_landed_records_it_instead(
     drive(go)
 
     assert seen["completed"] == [2] and seen["abandoned"] == []
+
+
+def test_log_in_over_a_rejected_token_waits_for_a_fresh_login_and_the_row_recovers(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch, no_network: dict[str, Any]
+) -> None:
+    """The human: "it does tell me when something is logged out or login has expired etc,
+    make that also surface a login button next to it that I can click on and then go through
+    reauthing myself". The real service in a home of the test's own: a signed-in slot whose
+    token the endpoint refuses (401) offers *Log in*; the window it opens is not closed by
+    the stale login still on disk, only by a fresh one; then the row reads again and is
+    itself — bars back, *Log in* gone."""
+    from tests.test_claude_accounts import _installed, _sign_in
+
+    _installed(monkeypatch)
+    monkeypatch.setattr(accounts_view, "LOGIN_POLL_SECONDS", 3600.0)  # ticks taken by hand
+    account = core.create_account()
+    _sign_in(account, "two@example.com")
+    accounts_service.set_alias("2", "Work laptop")  # named: every line here says so
+    stale = accounts_service.login_fingerprint(account)
+    fresh_token = "sk-ant-oat01-fresh"
+
+    def reading(acct: ClaudeAccount) -> ClaudeUsage:
+        creds = core.credentials(acct)
+        if creds is not None and creds.access_token == fresh_token:
+            return ClaudeUsage(available=True, session_percent=40, week_percent=12)
+        return ClaudeUsage(available=False, reason="the token was rejected", needs_login=True)
+
+    no_network["usage"] = reading
+    opened: list[int] = []
+
+    def open_window(
+        acct: ClaudeAccount,
+        server: TmuxServer,
+        *,
+        cwd: Path | None = None,
+        config: FleetSettings | None = None,
+    ) -> Any:
+        opened.append(acct.slot)
+        return WindowInfo(
+            session=accounts_service.SIGN_IN_SESSION,
+            window_id="@7",
+            name="account-2",
+            pane_id="%7",
+            dead=False,
+            dead_status=None,
+            current_command="claude",
+            activity=False,
+        )
+
+    alive = tmux_core.PaneFacts(
+        pane_id="%7",
+        width=80,
+        height=24,
+        cursor_x=0,
+        cursor_y=0,
+        cursor_visible=True,
+        alternate_on=False,
+        history_size=0,
+        dead=False,
+        dead_status=None,
+        in_mode=False,
+        current_command="claude",
+        title="",
+    )
+    monkeypatch.setattr(accounts_service, "open_sign_in_window", open_window)
+    monkeypatch.setattr(TmuxServer, "pane_facts", lambda self, pane_id: alive)
+
+    async def run() -> dict[str, Any]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=accounts_service.overview)
+        async with app.run_test(size=(240, 40)) as pilot:
+            await settle(app)
+            view = await open_accounts(pilot)
+            await settle_until(app, lambda: painted(view, 2))
+            out: dict[str, Any] = {"before": (cells(view, 2), offered(view, 2, "login"))}
+            await press(pilot, "#account-login-2")
+            await settle(app)
+            out["header"] = shown(view.query_one("#login-header", Static))
+            out["since"] = view.login.since if view.login is not None else None
+            view._poll_login()  # the stale login is still on disk: not this log-in's
+            await settle(app)
+            out["stale"] = (view.login is not None, view.query_one("#login-box").display)
+            data = json.loads(core.credentials_path(account).read_text())
+            data["claudeAiOauth"]["accessToken"] = fresh_token  # Claude Code logged in again
+            core.credentials_path(account).write_text(json.dumps(data))
+            view._poll_login()
+            await settle(app)
+            await accounts_read(app)
+            await settle_until(app, lambda: painted(view, 2) and not offered(view, 2, "login"))
+            out["after"] = (cells(view, 2), offered(view, 2, "login"), view.login is None)
+            out["notice"] = notice(view)
+            return out
+
+    out = asyncio.run(run())
+    before, offered_before = out["before"]
+    assert before["status"] == "⚠ token rejected" and before["session"] == "—"
+    assert offered_before  # Log in, beside the status that says why
+    assert opened == [2]  # the row's own slot, in the login pane
+    assert out["header"].startswith("Logging in to Work laptop")
+    assert "type /login if Claude Code does not prompt you" in out["header"]
+    assert stale is not None and out["since"] == stale  # watched for a login other than this
+    assert out["stale"] == (True, True)  # the window stayed open over the stale token
+    after, offered_after, closed = out["after"]
+    assert closed  # the fresh login closed the window…
+    assert after["status"] == "" and after["session"] == "▮▮▯▯▯ 40%"  # …and the row is itself
+    assert not offered_after
+    assert "✓ Work laptop: two@example.com · hooks installed" in out["notice"]
 
 
 def test_remove_runs_the_service_and_reports_where_the_directory_went(
@@ -1375,7 +1866,7 @@ def test_remove_runs_the_service_and_reports_where_the_directory_went(
     async def go(pilot: Pilot[None]) -> str:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
-        await pilot.click("#account-remove-2")
+        await press(pilot, "#account-remove-2")
         await settle(app)
         await pilot.pause()
         return notice(view)
@@ -1421,7 +1912,7 @@ def test_the_default_is_starred_named_by_its_alias_and_its_row_hides_the_default
         order = [r.slot for r in view.rows()]
         buttons = {
             slot: (
-                row(view, slot).query_one(f"#account-default-{slot}", Button).display,
+                offered(view, slot, "default"),
                 row(view, slot).query_one(f"#account-up-{slot}", Button).disabled,
                 row(view, slot).query_one(f"#account-down-{slot}", Button).disabled,
                 str(row(view, slot).query_one(f"#account-toggle-{slot}", Button).label),
@@ -1431,12 +1922,42 @@ def test_the_default_is_starred_named_by_its_alias_and_its_row_hides_the_default
         return [line(view, slot) for slot in order], buttons
 
     lines, buttons = drive(go, overview=overview)
-    assert lines[0].startswith("★ 2  work") and "two@example.com" in lines[0]  # the default, first
-    assert lines[1].startswith("  1  plain claude")  # no star: not the default
-    assert lines[2].startswith("  3  account 3") and "disabled" in lines[2]
-    assert buttons[2] == (False, True, False, "Disable")  # default hidden; first: ↑ disabled
+    assert lines[0].startswith("★  2  work") and "two@example.com" in lines[0]  # the default, first
+    assert lines[1].startswith("1  plain claude")  # no star: not the default
+    assert lines[2].startswith("3  account 3") and "disabled" in lines[2]
+    assert buttons[2] == (False, True, False, "Disable")  # no Default; first: ↑ disabled
     assert buttons[1] == (True, False, False, "Disable")  # middle: both arrows live
     assert buttons[3] == (True, False, True, "Enable")  # last: ↓ disabled; disabled → Enable
+
+
+def test_an_emoji_name_shows_whole_and_every_column_stays_under_its_header() -> None:
+    """A compound emoji (joined by U+200D) is one character on screen, two cells wide, and
+    Rich measures it so: the name cell draws it whole, and every column of its row starts
+    where the header's does, as the plain rows' do."""
+    name = "\U0001f469\u200d\U0001f4bb ops \U0001f3f3\ufe0f\u200d\U0001f308"
+    overview = _overview(
+        _arranged(_status(1, "me@example.com"), position=1),
+        _arranged(_status(2, "two@example.com"), alias=name, position=2),
+        _arranged(_status(3, "three@example.com"), alias="work", position=3),
+    )
+
+    async def go(pilot: Pilot[None]) -> tuple[str, list[int], dict[int, list[int]]]:
+        view = await open_accounts(pilot)
+        header = view.query_one(accounts_view.AccountsHeader)
+        # Log in is offered on none of these rows, signed in all three: it is not drawn.
+        columns = [cell.region.x for cell in header.query(".cell").exclude(".col-login")]
+        rows = {
+            slot: [cell.region.x for cell in row(view, slot).query(".cell").exclude(".col-login")]
+            for slot in (1, 2, 3)
+        }
+        named = view.query_one("#account-name-2", accounts_view.NameCell)
+        (strip,) = named.render_lines(Region(0, 0, named.size.width, 1))
+        return strip.text, columns, rows
+
+    drawn, columns, rows = drive(go, overview=overview)
+    assert drawn.rstrip() == name, "whole: no joiner dropped, nothing cut"
+    assert len(columns) == len(accounts_view.LAYOUT) - 1
+    assert rows == {1: columns, 2: columns, 3: columns}, "every column under its header"
 
 
 def test_default_move_and_disable_buttons_write_through_the_service_and_refresh(
@@ -1471,7 +1992,7 @@ def test_default_move_and_disable_buttons_write_through_the_service_and_refresh(
     async def go(pilot: Pilot[None]) -> tuple[str, list[int], str]:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
-        await pilot.click("#account-default-2")
+        await press(pilot, "#account-default-2")
         await settle(app)
         await pilot.pause()
         after_default = notice(view)
@@ -1480,9 +2001,9 @@ def test_default_move_and_disable_buttons_write_through_the_service_and_refresh(
         app.refresh_accounts()
         await accounts_read(app)
         order = [r.slot for r in view.rows()]
-        await pilot.click("#account-down-2")
+        await press(pilot, "#account-down-2")
         await settle(app)
-        await pilot.click("#account-toggle-1")
+        await press(pilot, "#account-toggle-1")
         await settle(app)
         await pilot.pause()
         return after_default, order, notice(view)
@@ -1558,7 +2079,7 @@ def test_two_quick_arrange_clicks_write_in_turn_and_both_report(
             inside.append(name)
             if hold:
                 first_in.set()
-                release.wait(timeout=5)
+                release.wait(timeout=HOLD_S)
             inside.remove(name)
 
         return run
@@ -1575,7 +2096,7 @@ def test_two_quick_arrange_clicks_write_in_turn_and_both_report(
 
         monkeypatch.setattr(view, "_notice", spy)
         view.arrange_accounts(write("first", hold=True), done="✓ slot 3 moved up once")
-        assert await asyncio.to_thread(first_in.wait, 5)  # the first write is under way…
+        assert await asyncio.to_thread(first_in.wait, HOLD_S)  # the first write is under way…
         view.arrange_accounts(write("second", hold=False), done="✓ slot 3 moved up twice")
         await asyncio.sleep(0.2)  # …and the second click's thread has had its chance to start
         release.set()
@@ -1589,6 +2110,974 @@ def test_two_quick_arrange_clicks_write_in_turn_and_both_report(
         "✓ slot 3 moved up once",
         "✓ slot 3 moved up twice",
     ]
+
+
+# --- naming: Rename ↔ `aisquare accounts alias` ---------------------------------------------------
+
+
+def _registry_frame() -> AccountsOverview:
+    """Every slot the registry holds, as the shell's reader folds it: aliases and all.
+
+    No slot is signed in, so no usage is read; what these tests read is the label.
+    """
+    return _overview(
+        *(
+            ClaudeAccountStatus(account=account, label=core.label(account), hooks_installed=True)
+            for account in accounts_service.list_accounts()
+        )
+    )
+
+
+def drive_registry(fn: Callable[[Pilot[None]], Awaitable[T]]) -> T:
+    """``drive``, with the shell reading the real registry (in ``fake_home``) on every frame."""
+
+    async def run() -> T:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=_registry_frame)
+        async with app.run_test(size=SIZE) as pilot:
+            await settle(app)
+            return await fn(pilot)
+
+    return asyncio.run(run())
+
+
+class HeldReads:
+    """The shell's accounts reader over the real registry, with reads a test can hold.
+
+    While ``holding``, a read takes its frame from the registry FIRST, as a read
+    that started then would see it, and then waits at a gate (one per read, queued
+    on ``gates``) until the test opens it, so that frame paints when the test says.
+    """
+
+    def __init__(self) -> None:
+        self.holding = False
+        self.gates: queue.Queue[threading.Event] = queue.Queue()
+        self.made: list[threading.Event] = []  # every gate, taken off the queue or not
+
+    def __call__(self) -> AccountsOverview:
+        frame = _registry_frame()
+        if self.holding:
+            gate = threading.Event()
+            self.made.append(gate)
+            self.gates.put(gate)
+            gate.wait(timeout=HOLD_S)
+        return frame
+
+    async def next_held(self) -> threading.Event:
+        """The gate of the next read to start holding (``queue.Empty`` after :data:`HOLD_S`)."""
+        return await asyncio.to_thread(self.gates.get, True, HOLD_S)
+
+    def open_all(self) -> None:
+        self.holding = False
+        for gate in self.made:
+            gate.set()
+
+
+def drive_held(reads: HeldReads, fn: Callable[[Pilot[None]], Awaitable[T]]) -> T:
+    """``drive_registry``, with ``reads`` as the shell's accounts reader."""
+
+    async def run() -> T:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=reads)
+        async with app.run_test(size=SIZE) as pilot:
+            await settle(app)
+            try:
+                return await fn(pilot)
+            finally:
+                reads.open_all()
+                await settle(app)
+
+    return asyncio.run(run())
+
+
+def field(view: AccountsView, slot: int) -> accounts_view.AliasInput:
+    return row(view, slot).query_one(f"#account-alias-{slot}", accounts_view.AliasInput)
+
+
+def aliases() -> dict[int, str | None]:
+    return {account.slot: account.alias for account in accounts_service.list_accounts()}
+
+
+def heard(view: AccountsView, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Every notice the page gives from here on, with its tone."""
+    said: list[tuple[str, str]] = []
+    real_notice = view._notice
+
+    def spy(text: str, tone: str = "dim") -> None:
+        said.append((text, tone))
+        real_notice(text, tone)
+
+    monkeypatch.setattr(view, "_notice", spy)
+    return said
+
+
+def slow_set_alias(monkeypatch: pytest.MonkeyPatch) -> tuple[threading.Event, threading.Event]:
+    """``set_alias`` held at its door until the test opens it: a write waiting on a busy store.
+
+    Returns ``(entered, release)``: set when the write is under way, and the gate it waits on.
+    """
+    entered, release = threading.Event(), threading.Event()
+    real_set_alias = accounts_service.set_alias
+
+    def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
+        entered.set()
+        release.wait(timeout=HOLD_S)
+        return real_set_alias(ref, alias)
+
+    monkeypatch.setattr(accounts_service, "set_alias", set_alias)
+    return entered, release
+
+
+def test_every_row_is_renamed_in_place_by_double_click_enter_or_f2() -> None:
+    """The human: "double clicking on their title … lets me rename them in place". Every
+    row, slot 1 and a slot with no login included; Enter or F2 on a focused row too. There
+    is no Rename button any more: the name is the handle."""
+    overview = _overview(
+        _status(1, "me@example.com"), _status(2, "two@example.com"), _status(3, None)
+    )
+
+    async def go(pilot: Pilot[None]) -> dict[str, Any]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        seen: dict[str, Any] = {
+            "buttons": [b.id for b in view.query(Button) if "rename" in (b.id or "")]
+        }
+        await pilot.click("#account-name-2")  # one click: the row, focused, not renamed
+        await pilot.pause()
+        seen["single"] = (app.focused is row(view, 2), row(view, 2).renaming)
+        for slot, how in ((1, "double"), (2, "enter"), (3, "f2")):
+            if how == "double":
+                await rename(pilot, slot)
+            else:
+                row(view, slot).focus()
+                await pilot.pause()
+                await pilot.press(how)
+                await pilot.pause()
+            seen[how] = (
+                row(view, slot).renaming,
+                app.focused is field(view, slot),
+                field(view, slot).placeholder,
+                row(view, slot).query_one(accounts_view.NameCell).display,
+            )
+            await pilot.press("escape")
+            await pilot.pause()
+        return seen
+
+    seen = drive(go, overview=overview)
+    assert seen["buttons"] == []
+    assert seen["single"] == (True, False)
+    for how in ("double", "enter", "f2"):  # open, focused, the hint, and the label it covers
+        assert seen[how] == (True, True, core.ALIAS_HINT, False), how
+
+
+def test_the_fields_hint_is_the_one_the_cli_gives(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``aisquare accounts alias --help``, its refusal and the field say the same words."""
+    monkeypatch.setenv("COLUMNS", "200")  # one line of help per argument, so the words are whole
+    helped = runner.invoke(cli_app, ["accounts", "alias", "--help"])
+    assert helped.exit_code == 0, helped.output
+    assert f"The name: {core.ALIAS_HINT}" in helped.output
+    assert core.ALIAS_HINT == "any name up to 64 characters, not only digits, no @"
+    assert core.normalise_alias("  Has Space ") == "Has Space"  # free text, trimmed, case kept
+
+
+def test_rename_opens_one_focused_field_prefilled_with_the_alias() -> None:
+    overview = _overview(
+        _arranged(_status(1, "me@example.com"), position=1),
+        _arranged(_status(2, "two@example.com"), alias="work", position=2),
+    )
+
+    async def go(pilot: Pilot[None]) -> list[tuple[bool, bool, str, bool]]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        seen: list[tuple[bool, bool, str, bool]] = []
+        for slot in (2, 1):
+            await rename(pilot, slot)
+            await pilot.pause()
+            other = 1 if slot == 2 else 2
+            seen.append(
+                (
+                    row(view, slot).renaming,
+                    row(view, other).renaming,
+                    field(view, slot).value,
+                    app.focused is field(view, slot),
+                )
+            )
+        tooltip = field(view, 1).tooltip
+        assert isinstance(tooltip, str) and core.ALIAS_HINT in tooltip
+        return seen
+
+    seen = drive(go, overview=overview)
+    assert seen[0] == (True, False, "work", True)  # the name it has, ready to edit
+    assert seen[1] == (True, False, "plain claude", True)  # its built-in name; row 2's closed
+
+
+def test_enter_names_the_slot_through_the_service_off_the_ui_thread_and_the_row_says_it(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    core.create_account()
+    calls: list[tuple[str, str | None, bool]] = []
+    real_set_alias = accounts_service.set_alias
+
+    def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
+        calls.append((ref, alias, threading.current_thread() is threading.main_thread()))
+        return real_set_alias(ref, alias)
+
+    monkeypatch.setattr(accounts_service, "set_alias", set_alias)
+
+    async def go(pilot: Pilot[None]) -> tuple[list[tuple[str, str]], bool, bool, str, str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        before = line(view, 2)
+        said = heard(view, monkeypatch)
+        await rename(pilot, 2)
+        await pilot.press(*"Work", "space", *"laptop", "enter")  # replaces the selected name
+        await settle(app)  # the write, then the frame AccountsChanged asked for
+        await accounts_read(app)
+        back = app.focused is row(view, 2)
+        return said, row(view, 2).renaming, back, before, line(view, 2)
+
+    said, still_open, back_on_row, before, after = drive_registry(go)
+    assert calls == [("2", "Work laptop", False)]  # the service, once, never on the UI thread
+    assert said == [("✓ slot 2 is now called Work laptop", "ok")]  # free text, case kept
+    assert not still_open
+    assert back_on_row  # the field had the focus, so its row gets it back
+    assert aliases() == {1: None, 2: "Work laptop"}
+    assert before.startswith("2  account 2")
+    assert after.startswith("2  Work laptop")  # the next frame's label, not a guess
+
+
+def test_a_blank_name_clears_the_alias(fake_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    core.create_account()
+    accounts_service.set_alias("2", "work")
+
+    async def go(pilot: Pilot[None]) -> tuple[str, list[tuple[str, str]], bool, str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        said = heard(view, monkeypatch)
+        await rename(pilot, 2)
+        prefilled = field(view, 2).value
+        field(view, 2).value = "   "  # blank, not merely empty
+        await pilot.press("enter")
+        await settle(app)
+        await accounts_read(app)
+        return prefilled, said, row(view, 2).renaming, line(view, 2)
+
+    prefilled, said, still_open, after = drive_registry(go)
+    assert prefilled == "work"
+    assert said == [("✓ slot 2: alias cleared", "ok")]
+    assert not still_open
+    assert aliases() == {1: None, 2: None}
+    assert after.startswith("2  account 2")
+
+
+def test_a_press_outside_the_name_on_nothing_focusable_saves_it(fake_home: Path) -> None:
+    """Leaving the field saves — its blur — but Textual moves the focus on a press only to a
+    FOCUSABLE widget under it: one on the page's own margin left the field open, unsaved
+    and focused, as on a project's page (validator of PR #261, MINOR 1). The press hands the
+    focus to the row, as Enter does, and saves."""
+    core.create_account()
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, bool, bool, str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await rename(pilot, 2)
+        await pilot.press(*"Work")  # over the name, all of it selected
+        x, y = view.region.offset  # the page's padding, top left
+        nothing_focusable = app.screen.get_focusable_widget_at(x, y) is None
+        await pilot.click(view, offset=(0, 0))
+        await settle(app)
+        await accounts_read(app)
+        return nothing_focusable, row(view, 2).renaming, app.focused is row(view, 2), line(view, 2)
+
+    nothing_focusable, still_open, on_row, after = drive_registry(go)
+    assert nothing_focusable, "the premise: the press lands on nothing Textual would focus"
+    assert not still_open and on_row
+    assert aliases() == {1: None, 2: "Work"}
+    assert after.startswith("2  Work")
+
+
+@pytest.mark.parametrize(
+    "typed",
+    ["123", "me@example.com", "a" + "b" * 64, "Work", "WORK"],
+    ids=["digits", "email", "65-long", "taken", "taken-in-another-case"],
+)
+def test_a_name_the_service_refuses_is_said_and_the_field_stays_open_to_correct_it(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch, typed: str
+) -> None:
+    core.create_account()
+    core.create_account()
+    accounts_service.set_alias("3", "work")
+    with pytest.raises((ValueError, accounts_service.AccountsError)) as refused:
+        accounts_service.set_alias("2", typed)  # what the service says, to compare the page with
+    before = aliases()
+
+    async def go(pilot: Pilot[None]) -> tuple[list[tuple[str, str]], bool, str, bool]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        said = heard(view, monkeypatch)
+        await rename(pilot, 2)
+        field(view, 2).value = typed
+        await pilot.press("enter")
+        await settle(app)
+        await accounts_read(app)  # the frame after the refusal leaves the field alone too
+        return said, row(view, 2).renaming, field(view, 2).value, app.focused is field(view, 2)
+
+    said, still_open, value, focused = drive_registry(go)
+    assert said == [(f"✗ {refused.value}", "error")]
+    assert (still_open, value, focused) == (True, typed, True)  # as typed, ready to fix
+    assert aliases() == before == {1: None, 2: None, 3: "work"}  # nothing written
+
+
+def test_a_write_that_lands_after_the_user_moved_away_leaves_the_focus_where_they_put_it(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Success handed the focus back to *Rename* whenever the field was open, so a slow write
+    pulled the user back from the sidebar they had gone to meanwhile (review of #258)."""
+    core.create_account()
+    entered, release = slow_set_alias(monkeypatch)
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, bool, bool, str | None]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        try:
+            await rename(pilot, 2)
+            await pilot.press(*"work", "enter")
+            assert await asyncio.to_thread(entered.wait, HOLD_S)  # the write is under way…
+            app.sidebar.focus()  # …and the user goes to the sidebar before it lands
+            await pilot.pause()
+            moved = app.focused is app.sidebar
+        finally:
+            release.set()
+        await settle(app)
+        await pilot.pause()
+        return moved, row(view, 2).renaming, app.focused is app.sidebar, aliases()[2]
+
+    moved, still_open, stayed, saved = drive_registry(go)
+    assert moved  # the precondition: the focus really was elsewhere when the write landed
+    assert not still_open and saved == "work"  # the write landed and closed the field…
+    assert stayed  # …without taking the focus back from the sidebar
+
+
+def test_text_typed_while_the_write_waits_is_kept_as_the_next_name(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The field stays live while its write waits; success closed it and emptied it whatever
+    it said by then, so a typo fixed after Enter was thrown away unsaved (review of #258).
+    It closes only on the text it saved, and a second Enter saves the rest."""
+    core.create_account()
+    entered, release = slow_set_alias(monkeypatch)
+
+    async def go(
+        pilot: Pilot[None],
+    ) -> tuple[tuple[bool, str, bool, str | None], bool, list[tuple[str, str]], str | None]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        said = heard(view, monkeypatch)
+        try:
+            await rename(pilot, 2)
+            await pilot.press(*"work", "enter")
+            assert await asyncio.to_thread(entered.wait, HOLD_S)
+            await pilot.press("s")  # typed while the first write waits
+        finally:
+            release.set()
+        await settle(app)
+        await pilot.pause()
+        kept = (
+            row(view, 2).renaming,
+            field(view, 2).value,
+            app.focused is field(view, 2),
+            aliases()[2],
+        )
+        await pilot.press("enter")  # the second Enter saves it, and its success closes the field
+        await settle(app)
+        await pilot.pause()
+        return kept, row(view, 2).renaming, said, aliases()[2]
+
+    kept, still_open, said, saved = drive_registry(go)
+    assert kept == (True, "works", True, "work")  # the first write landed; the edit was kept
+    assert not still_open and saved == "works"
+    assert said == [("✓ slot 2 is now called work", "ok"), ("✓ slot 2 is now called works", "ok")]
+
+
+def test_rename_reopened_while_a_write_is_on_its_way_shows_that_name_and_enter_keeps_it(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rename prefilled from the frame, which predates a write still on its way: reopened
+    mid-write the field said the old name (none), stayed open when the write landed, and an
+    Enter taken as "confirm" cleared the name just saved (review of #258, round 3)."""
+    core.create_account()
+    entered, release = slow_set_alias(monkeypatch)
+
+    async def go(
+        pilot: Pilot[None],
+    ) -> tuple[str, tuple[bool, str, str | None], bool, str | None, list[tuple[str, str]]]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        said = heard(view, monkeypatch)
+        try:
+            await rename(pilot, 2)
+            await pilot.press(*"work", "enter")
+            assert await asyncio.to_thread(entered.wait, HOLD_S)  # the write is on its way…
+            await pilot.press("escape")
+            await rename(pilot, 2)  # …and Rename is opened again before it lands
+            await pilot.pause()
+            reopened = field(view, 2).value
+        finally:
+            release.set()
+        await settle(app)
+        await pilot.pause()
+        landed = (row(view, 2).renaming, field(view, 2).value, aliases()[2])
+        await pilot.press("enter")  # taken as "confirm"
+        await settle(app)
+        await pilot.pause()
+        return reopened, landed, row(view, 2).renaming, aliases()[2], said
+
+    reopened, landed, still_open, saved, said = drive_registry(go)
+    assert reopened == "work"  # the name on its way, not the frame's (none)
+    assert landed == (True, "work", "work")  # landed; the reopened field is the user's, and stays
+    assert not still_open and saved == "work"  # Enter kept the name rather than clearing it
+    assert said[-1] == ("✓ slot 2 is now called work", "ok")
+
+
+def test_rename_reopened_after_its_write_landed_but_before_the_next_frame_says_the_saved_name(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The write had reported and the shell's re-read was still waiting (a busy store): the
+    row still had the frame from before the write, so Rename reopened prefilled with the old
+    name, and an Enter taken as "confirm" put it back (review of #258, round 4; the tester's
+    repro). The row now says what the service stored, from the moment the write lands."""
+    core.create_account()
+    core.create_account()
+    accounts_service.set_alias("3", "work")
+    reads = HeldReads()
+    calls: list[tuple[str, str | None]] = []
+    real_set_alias = accounts_service.set_alias
+
+    def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
+        calls.append((ref, alias))
+        return real_set_alias(ref, alias)
+
+    monkeypatch.setattr(accounts_service, "set_alias", set_alias)
+
+    async def go(pilot: Pilot[None]) -> tuple[tuple[str, str | None, str], str, str | None]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        said = heard(view, monkeypatch)
+        await rename(pilot, 3)  # "work"
+        await pilot.press("end", *["backspace"] * 4, *"late")
+        reads.holding = True  # the re-read the write asks for waits, as on a busy store
+        await pilot.press("enter")
+        await settle_until(
+            app, lambda: said and not row(view, 3).renaming, group=accounts_view.RENAME_WORKER
+        )
+        await reads.next_held()  # the write landed; its frame has not painted
+        landed = (said[-1][0], aliases()[3], line(view, 3))
+        await rename(pilot, 3)
+        await pilot.pause()
+        reopened = field(view, 3).value
+        await pilot.press("enter")  # the user "confirms" what the field shows
+        await settle_until(
+            app, lambda: not row(view, 3).renaming, group=accounts_view.RENAME_WORKER
+        )
+        return landed, reopened, aliases()[3]
+
+    landed, reopened, after = drive_held(reads, go)
+    said, saved, label = landed
+    assert said == "✓ slot 3 is now called late" and saved == "late"
+    assert label.startswith("3  late")  # the service's answer, before any frame says it
+    assert reopened == "late"  # not the frame's "work"
+    # Enter kept it, and wrote nothing: the name the field opened with is no change.
+    assert after == "late" and calls == [("3", "late")]
+
+
+def test_a_frame_read_before_the_write_and_painted_after_it_does_not_bring_the_old_name_back(
+    fake_home: Path,
+) -> None:
+    """The shell reads one frame at a time, so a tick's read can start before a rename's write
+    and paint after it, with the name from before. That frame must not put the old name back
+    on the row or in Rename's prefill — nor may the shell re-handing it on a click. The read
+    after it started after the write and has the last word, another terminal's rename
+    included (review of #258, round 4)."""
+    core.create_account()
+    core.create_account()
+    accounts_service.set_alias("3", "work")
+    reads = HeldReads()
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str, str, str, str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        reads.holding = True
+        app.refresh_accounts()  # a tick: its read takes the registry now ("work")…
+        stale = await reads.next_held()  # …and waits
+        await rename(pilot, 3)
+        await pilot.press("end", *["backspace"] * 4, *"late", "enter")
+        await settle_until(
+            app, lambda: not row(view, 3).renaming, group=accounts_view.RENAME_WORKER
+        )
+        accounts_service.set_alias("3", "other")  # then another terminal renames it
+        stale.set()  # the tick's frame, from before the write, paints…
+        fresh = await reads.next_held()  # …(the read owed after it starts once it has)
+        await pilot.pause()
+        after_stale = line(view, 3)
+        await pilot.click(app.query_one(StatusLine))  # the shell re-hands that frame
+        await settle_until(app, lambda: True, group=accounts_view.RENAME_WORKER)
+        after_rehand = line(view, 3)
+        await rename(pilot, 3)
+        await pilot.pause()
+        prefill = field(view, 3).value
+        await pilot.press("escape")
+        reads.holding = False
+        fresh.set()  # the read that started after the write ("other") paints
+        await accounts_read(app)
+        return after_stale, after_rehand, prefill, line(view, 3), aliases()[3] or ""
+
+    after_stale, after_rehand, prefill, after_fresh, stored = drive_held(reads, go)
+    assert after_stale.startswith("3  late")  # not the "work" the stale frame carried
+    assert after_rehand.startswith("3  late")
+    assert prefill == "late"
+    assert stored == "other" and after_fresh.startswith("3  other")  # the frames' word again
+
+
+def test_a_slot_removed_while_its_field_is_open_is_said_and_its_row_leaves(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    second = core.create_account()
+
+    async def go(pilot: Pilot[None]) -> tuple[list[tuple[str, str]], list[int], list[int]]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        said = heard(view, monkeypatch)
+        await rename(pilot, 2)
+        await pilot.press(*"work")
+        accounts_service.remove(second)  # `aisquare accounts remove 2`, in another terminal
+        before = [r.slot for r in view.rows()]  # no frame since: the row is still here
+        await pilot.press("enter")
+        await settle(app)  # the refusal, then the frame AccountsChanged asked for
+        await accounts_read(app)
+        return said, before, [r.slot for r in view.rows()]
+
+    said, before, after = drive_registry(go)
+    with pytest.raises(accounts_service.NoSuchAccount) as vanished:
+        accounts_service.set_alias("2", "work")  # what the service says, to compare the page with
+    assert before == [1, 2]
+    assert said == [(f"✗ {vanished.value}", "error")]
+    assert after == [1]  # the next frame took the row away, and its field with it
+    assert aliases() == {1: None}  # the name landed nowhere else
+
+
+def test_a_rename_waits_its_turn_behind_an_arrange_write_still_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """*Rename* takes the same lock as *Default* and the arrows, so a rename pressed while an
+    arrangement is still writing writes after it, not beside it, and both report.
+
+    The negative half waits for the rename to ASK for the lock, not for a sleep to pass: after
+    200 ms a rename that took no lock and had not reached ``set_alias`` yet read the same as
+    one held at the lock (review of #258, round 3). Asked, it cannot write before ``release``.
+    """
+    default_in, release = threading.Event(), threading.Event()
+    order: list[str] = []
+
+    class SpyLock:
+        """``view._arranging``, counting each attempt to take it before it is taken."""
+
+        def __init__(self, lock: threading.Lock) -> None:
+            self.lock = lock
+            self.attempts = 0
+            self.second = threading.Event()  # the rename's, behind Default's
+
+        def __enter__(self) -> None:
+            self.attempts += 1
+            if self.attempts == 2:
+                self.second.set()
+            self.lock.acquire()
+
+        def __exit__(self, *exc: object) -> None:
+            self.lock.release()
+
+    def set_default(ref: str | None, *, project: Any = None) -> None:
+        order.append(f"default {ref}: start")
+        default_in.set()
+        # Held until the test lets go (its ``finally``), however slow the runner. Held 5 s, it
+        # ended by itself on windows-latest while the name was still being typed, and the
+        # rename wrote behind it before the test looked (CI run 38571988017). The bound only
+        # keeps a broken test from hanging, and says so.
+        let_go = release.wait(timeout=HOLD_S)
+        order.append(
+            f"default {ref}: end" if let_go else f"default {ref}: gave up after {HOLD_S:.0f} s"
+        )
+
+    def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
+        order.append(f"alias {ref} {alias}")
+        return _status(2, "two@example.com").account.model_copy(update={"alias": alias})
+
+    monkeypatch.setattr(accounts_service, "set_default", set_default)
+    monkeypatch.setattr(accounts_service, "set_alias", set_alias)
+    overview = _overview(_status(1, "me@example.com"), _status(2, "two@example.com"))
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, list[str], list[tuple[str, str]]]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        said = heard(view, monkeypatch)
+        spy = SpyLock(view._arranging)
+        monkeypatch.setattr(view, "_arranging", spy)
+        try:
+            await press(pilot, "#account-default-2")
+            assert await asyncio.to_thread(default_in.wait, HOLD_S)  # Default is writing…
+            await rename(pilot, 2)
+            await pilot.press(*"work", "enter")
+            asked = await asyncio.to_thread(
+                spy.second.wait, HOLD_S
+            )  # …and the rename asks for the lock
+            waiting = list(order)
+        finally:
+            release.set()
+        await settle(app)
+        await pilot.pause()
+        return asked, waiting, said
+
+    asked, waiting, said = drive(go, overview=overview)
+    assert asked  # the rename went to the lock Default held…
+    assert waiting == ["default 2: start"]  # …and had not written when Default let go
+    assert order == ["default 2: start", "default 2: end", "alias 2 work"]
+    assert said == [
+        ("✓ slot 2 is the machine default", "ok"),
+        ("✓ slot 2 is now called work", "ok"),
+    ]
+
+
+def test_leaving_the_field_saves_it_once_and_leaving_it_unchanged_writes_nothing(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Enter or focus-out saves (the contract). Clicking another row saves what was typed;
+    leaving the name as it opened writes nothing and just closes; and a field the terminal
+    took the focus from (the window went to the background) is not a field the user left."""
+    core.create_account()
+    core.create_account()
+    calls: list[tuple[str, str | None]] = []
+    real_set_alias = accounts_service.set_alias
+
+    def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
+        calls.append((ref, alias))
+        return real_set_alias(ref, alias)
+
+    monkeypatch.setattr(accounts_service, "set_alias", set_alias)
+
+    async def go(pilot: Pilot[None]) -> dict[str, Any]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        said = heard(view, monkeypatch)
+        out: dict[str, Any] = {}
+        await rename(pilot, 2)
+        await pilot.press(*"Home")
+        app.post_message(events.AppBlur())  # the terminal loses the focus mid-typing…
+        await pilot.pause()
+        out["app blur"] = (row(view, 2).renaming, list(calls))
+        app.post_message(events.AppFocus())  # …and gets it back, the field with it
+        await pilot.pause()
+        await pilot.click("#account-name-3")  # the user leaves for another row
+        await settle(app)
+        await accounts_read(app)
+        out["left"] = (row(view, 2).renaming, aliases()[2], line(view, 2), list(said))
+        await rename(pilot, 3)
+        await pilot.click("#account-name-2")  # left as it opened ("account 3")
+        await settle(app)
+        out["unchanged"] = (row(view, 3).renaming, aliases()[3], len(calls))
+        await rename(pilot, 3)
+        await pilot.press(*"42")  # refused: all digits
+        await pilot.click("#account-name-2")
+        await settle(app)
+        await accounts_read(app)
+        out["refused"] = (row(view, 3).renaming, aliases()[3], said[-1])
+        return out
+
+    out = drive_registry(go)
+    assert out["app blur"] == (True, [])  # still open, nothing written
+    still_open, saved, shown_line, said = out["left"]
+    assert not still_open and saved == "Home" and shown_line.startswith("2  Home")
+    assert said == [("✓ slot 2 is now called Home", "ok")]
+    assert calls[0] == ("2", "Home")
+    assert out["unchanged"] == (False, None, 1)  # closed, and no second write
+    refused_open, refused_alias, refused_said = out["refused"]
+    # Refused after the user left: the field is not left open behind them; the notice says why.
+    assert not refused_open and refused_alias is None
+    assert refused_said[1] == "error" and "slot number" in refused_said[0]
+
+
+def test_escape_while_a_write_is_on_its_way_does_not_say_nothing_changed(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Esc closes the field; it cannot call back a write Enter already sent. It said "rename
+    cancelled — nothing changed", and then the write landed (review of #258, the tester)."""
+    core.create_account()
+    entered, release = slow_set_alias(monkeypatch)
+
+    async def go(pilot: Pilot[None]) -> tuple[list[tuple[str, str]], bool, str | None]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        said = heard(view, monkeypatch)
+        try:
+            await rename(pilot, 2)
+            await pilot.press(*"work", "enter")
+            assert await asyncio.to_thread(entered.wait, HOLD_S)  # the write is on its way…
+            await pilot.press("escape")  # …when Esc is pressed
+            await pilot.pause()
+            closed = not row(view, 2).renaming
+        finally:
+            release.set()
+        await settle(app)
+        await pilot.pause()
+        return said, closed, aliases()[2]
+
+    said, closed, saved = drive_registry(go)
+    assert closed and saved == "work"  # the field closed, and the write landed all the same
+    assert said == [
+        (
+            "slot 2: field closed — the name already sent is still being saved; its result follows",
+            "dim",
+        ),
+        ("✓ slot 2 is now called work", "ok"),
+    ]
+    assert not any("nothing changed" in text for text, _ in said)
+
+
+def test_escape_closes_the_field_and_writes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        accounts_service, "set_alias", lambda ref, alias: calls.append((ref, alias))
+    )
+    overview = _overview(_status(1, "me@example.com"), _status(2, "two@example.com"))
+
+    async def go(pilot: Pilot[None]) -> tuple[str, bool, bool, str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await rename(pilot, 2)
+        await pilot.press(*"home")
+        app.refresh_accounts()  # the shell's tick lands mid-typing…
+        await accounts_read(app)
+        typed = field(view, 2).value  # …and leaves what is being typed alone
+        await pilot.press("escape")
+        await settle(app)
+        return typed, row(view, 2).renaming, app.focused is row(view, 2), notice(view)
+
+    typed, still_open, back_on_row, said = drive(go, overview=overview)
+    assert typed == "home"
+    assert not still_open and back_on_row  # closed, and the focus is back on its row
+    assert calls == []
+    assert said == "slot 2: rename cancelled — nothing changed"
+
+
+def _table_frame() -> AccountsOverview:
+    """Rows whose values differ in every length a cell can: a long name and email, no plan, the
+    star, a disabled slot, an unsigned slot, an expired token."""
+    return _overview(
+        _arranged(_status(1, "me@example.com"), is_default=True, position=1),
+        _arranged(
+            _status(2, "a.very.long.address@subdomain.example.com", subscription=None),
+            alias="Work laptop — the one on the desk upstairs",
+            position=2,
+        ),
+        _arranged(_status(3, None), position=3),
+        _arranged(_status(4, "four@example.com", token_state="expired"), disabled=True, position=4),
+    )
+
+
+def _table_usage(account: ClaudeAccount) -> ClaudeUsage:
+    if account.slot == 2:
+        return ClaudeUsage(available=False, reason="the token was rejected", needs_login=True)
+    return ClaudeUsage(
+        available=True,
+        session_percent=7 if account.slot == 1 else 100,
+        session_resets_at=NOW + timedelta(minutes=12),
+        week_percent=64,
+        week_resets_at=NOW + timedelta(days=6, hours=12),
+    )
+
+
+def _columns_at(view: AccountsView) -> dict[str, list[tuple[int, int]]]:
+    """Each line's ``(x, width)`` per data column — the header's first, then each row's — and
+    every button's, by id stem, so *Log in*'s column and the arranging buttons are held to
+    the same rule (``header-login`` is the header's gap over *Log in*)."""
+    header = view.query_one("#claude-header")
+    lines: dict[str, list[tuple[int, int]]] = {
+        "header": [
+            (cell.region.x, cell.region.width)
+            for cell in header.query(".cell")
+            if not cell.has_class("col-login")
+        ],
+        "header-login": [(cell.region.x, cell.region.width) for cell in header.query(".col-login")],
+    }
+    for account_row in view.rows():
+        spans = [
+            (cell.region.x, cell.region.width)
+            for cell in account_row.query(".cell")
+            if cell.parent is account_row and not isinstance(cell, Button)
+        ]
+        lines[f"row {account_row.slot}"] = spans
+        for button in account_row.query(Button):
+            if button.visible:  # a hidden one keeps its place but has no region to measure
+                stem = (button.id or "").rsplit("-", 1)[0]
+                lines.setdefault(stem, []).append((button.region.x, button.region.width))
+    return lines
+
+
+@pytest.mark.parametrize("size", [(100, 40), (140, 40), (240, 40)], ids=["100", "140", "240"])
+def test_the_table_lines_its_columns_up_on_every_row_whatever_the_values(
+    no_network: dict[str, Any], size: tuple[int, int]
+) -> None:
+    """The human: "the usage of daily and weekly although correct is rendered as a string
+    making it very messy, instead put it into a neat table so everything is well aligned".
+    Measured, not looked at: every column starts at the same x on the header and on every
+    row, at its fixed width, one line high; a long name or email ends in "…" rather than
+    wrapping or pushing the next column; the name's field, open, covers the name's cell and
+    moves nothing; scrolled sideways, the header moves with the rows."""
+    no_network["usage"] = _table_usage
+
+    async def run() -> dict[str, Any]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=_table_frame)
+        async with app.run_test(size=size) as pilot:
+            await settle(app)
+            view = await open_accounts(pilot)
+            await settle_until(app, lambda: painted(view, 1, 2, 4))
+            out: dict[str, Any] = {"closed": _columns_at(view)}
+            out["heights"] = [r.region.height for r in view.rows()]
+            out["header"] = [shown(c) for c in view.query_one("#claude-header").query(Static)]
+            out["name 2"] = row(view, 2).cell("name").render_line(0).text
+            out["email 2"] = row(view, 2).cell("email").render_line(0).text
+            name_box = row(view, 2).query_one(".col-name").region
+            await rename(pilot, 2)
+            out["open"] = _columns_at(view)
+            out["field"] = (field(view, 2).region, name_box)
+            await pilot.press("escape")
+            table = view.query_one("#claude-table")
+            out["scrolls"] = table.max_scroll_x
+            table.scroll_to(x=table.max_scroll_x, animate=False, immediate=True)
+            await pilot.pause()
+            out["scrolled"] = _columns_at(view)
+            return out
+
+    out = asyncio.run(run())
+    closed = out["closed"]
+    widths = [column.width for column in accounts_view.LAYOUT if column.key != "login"]
+    for name, spans in closed.items():
+        if name.startswith("account-"):  # one button on every row that offers it
+            assert len(set(spans)) == 1, name  # the action column lines up too
+        elif name == "header-login":  # the gap over Log in is where Log in is
+            assert spans == closed["account-login"][:1], name
+        else:
+            assert spans == closed["header"], name  # every column at the header's x
+            assert [width for _, width in spans] == widths, name
+    starts = [x for x, _ in closed["header"]]
+    assert starts == sorted(starts) and len(set(starts)) == len(starts)  # left to right
+    assert out["heights"] == [1, 1, 1, 1]  # never wrapped onto a second line
+    assert out["header"][5:9] == ["session used", "week used", "status", ""]  # USED; Log in
+    assert out["header"][9:] == ["session resets", "week resets"]  # then when each resets
+    assert out["name 2"].rstrip().endswith("…") and out["email 2"].rstrip().endswith("…")
+    assert out["open"] == closed  # the open field moved no column on any row…
+    field_region, name_box = out["field"]
+    assert field_region == name_box  # …and sits exactly in the name's cell
+    assert len(closed["account-login"]) == 3  # rejected, unsigned and expired: Log in on each
+    for name, spans in out["scrolled"].items():  # scrolled sideways, all lines moved as one
+        if name.startswith("row "):
+            assert spans == out["scrolled"]["header"], name
+    if size[0] >= 240:
+        assert out["scrolls"] == 0  # it fits: nothing scrolls
+    else:
+        assert out["scrolls"] > 0 and out["scrolled"] != closed
+
+
+def test_an_expired_rows_status_and_log_in_are_on_screen_at_160_columns_unscrolled(
+    no_network: dict[str, Any],
+) -> None:
+    """The human: "it does tell me when something is logged out or login has expired etc,
+    make that also surface a login button next to it". At 160 columns with the sidebar at
+    its default width the status and *Log in* sat past the right edge, behind both resets
+    columns (the tester's measure). They come before the resets now: on screen, no scroll."""
+    no_network["usage"] = _table_usage
+
+    async def run() -> dict[str, Any]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=_table_frame)
+        async with app.run_test(size=(160, 50)) as pilot:
+            await settle(app)
+            view = await open_accounts(pilot)
+            await settle_until(app, lambda: painted(view, 1, 2, 4))
+            table = view.query_one("#claude-table")
+            seen = table.scrollable_content_region
+            expired = row(view, 4)  # slot 4: the token expired
+            status, login = expired.cell("status"), expired.query_one("#account-login-4", Button)
+            return {
+                "sidebar": app.sidebar.outer_size.width,
+                "scroll": table.scroll_x,
+                "status": (shown(status), seen.contains_region(status.region)),
+                "login": (
+                    offered(view, 4, "login"),
+                    seen.contains_region(login.region),
+                    login.region.right <= app.size.width,
+                    login.region.x - status.region.right,
+                ),
+            }
+
+    out = asyncio.run(run())
+    assert out["sidebar"] == 30 and out["scroll"] == 0  # the default sidebar; never scrolled
+    text, status_seen = out["status"]
+    assert text.startswith("⚠ token expired") and status_seen
+    offered_here, login_seen, on_screen, gap = out["login"]
+    assert offered_here and login_seen and on_screen
+    assert gap == 1  # right beside the status: one cell apart
+
+
+@pytest.mark.parametrize(
+    ("size", "sidebar"),
+    [((90, 40), None), ((100, 40), None), ((140, 40), None), ((100, 40), 48), ((240, 40), None)],
+    ids=["90x40", "100x40", "140x40", "100x40-sidebar48", "240x40"],
+)
+def test_every_button_can_be_reached_at_any_width(
+    no_network: dict[str, Any], size: tuple[int, int], sidebar: int | None
+) -> None:
+    """The table is wider than a narrow page, so it scrolls sideways as one; every offered
+    button, focused (Tab, or a click after scrolling), is brought wholly into view inside the
+    page, a sidebar dragged wider included (review of #258, round 5). Where it fits, nothing
+    scrolls and nothing moves."""
+    if sidebar is not None:
+        update_state(SIDEBAR_WIDTH_KEY, sidebar)  # restored at launch, as a drag left it
+    no_network["usage"] = _table_usage
+
+    async def run() -> tuple[int, int, list[str], int]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=_table_frame)
+        async with app.run_test(size=size) as pilot:
+            await settle(app)
+            view = await open_accounts(pilot)
+            await settle_until(app, lambda: painted(view, 1, 2, 4))
+            table = view.query_one("#claude-table")
+            unreachable: list[str] = []
+            reached = 0
+            for account_row in view.rows():
+                for button in account_row.query(Button):
+                    if not (button.visible and not button.disabled):
+                        continue
+                    button.focus()  # Textual scrolls the focused widget into view…
+                    await pilot.pause()
+                    await pilot.wait_for_scheduled_animations()  # …smoothly: let it arrive
+                    seen = table.scrollable_content_region
+                    if not (
+                        seen.contains_region(button.region)
+                        and button.region.right <= view.region.right
+                    ):
+                        unreachable.append(
+                            f"{button.id} at {button.region}, the table shows {seen}"
+                        )
+                    reached += 1
+            return app.sidebar.outer_size.width, table.max_scroll_x, unreachable, reached
+
+    width, scrolls, unreachable, reached = asyncio.run(run())
+    if sidebar is not None:
+        assert width == sidebar  # the precondition: the sidebar really was that wide
+    assert reached >= 15  # Log in on three rows, Default on three, both arrows, Remove…
+    assert unreachable == []  # every button, focused, is wholly in view
+    if size[0] >= 240:
+        assert scrolls == 0
+    else:
+        assert scrolls > 0
 
 
 # --- the pace of the five-hour window (#146) ------------------------------------------------------
@@ -1621,8 +3110,8 @@ def test_the_row_says_how_long_the_window_has_at_the_current_pace(
         recorded.append(account.slot)
         return real_usage(account, **kwargs)
 
-    # The tick fetches through `read_usage(record=False)` and records in one store
-    # session of its own (third round): the reading is spied, the sample is checked below.
+    # The tick fetches through `cached_usage`, whose round records every answered reading
+    # in one store session (third round): the reading is spied, the sample is checked below.
     monkeypatch.setattr(accounts_service, "usage", usage_spy)
     monkeypatch.setattr(
         accounts_service, "usage_trend", lambda slot, latest, **kwargs: trends.get(slot)
@@ -1638,11 +3127,11 @@ def test_the_row_says_how_long_the_window_has_at_the_current_pace(
 
     one, two = drive(go, overview=overview)
     assert sorted(recorded) == [1, 2]  # every signed-in slot was read…
-    with store_session() as store:  # …and SAMPLED, in the page's one store open
+    with store_session() as store:  # …and SAMPLED, in the round's one store open
         assert len(store.usage_samples(1, since=NOW - timedelta(days=1))) == 1
         assert len(store.usage_samples(2, since=NOW - timedelta(days=1))) == 1
-    assert "session ▮▮▮▯▯ 60%" in one and "≈ 1.3 h to the limit" in one
-    assert "session ▮▮▮▯▯ 60%" in two and "to the limit" not in two  # no trend yet: no claim
+    assert "▮▮▮▯▯ 60%" in one and "≈ 1.3 h to the limit" in one
+    assert "▮▮▮▯▯ 60%" in two and "to the limit" not in two  # no trend yet: no claim
 
 
 def test_a_row_that_leaves_takes_its_projection_with_it(

@@ -122,7 +122,8 @@ home this machine connected, and in each Codex account home under
 rewritten hooks as a new definition, and the report says when to review them
 again in its `/hooks`. It runs for the uv tool install the one-liner makes; any
 other install is shown the exact command that updates it. Releases before 0.8.0
-have no `upgrade` yet: re-run the one-liner instead.
+have no `upgrade` yet: re-run the one-liner instead. It warns first, naming them,
+while fleet agents run or while Remote is on in another shell or another asq.
 
 Remove it with `aisquare uninstall`. It takes aisquare's hooks out of Claude
 Code and Codex (`~/.codex`, `~/.codex*`, `$CODEX_HOME`, the Codex account
@@ -135,7 +136,9 @@ aisquare` for a Codex home's `[mcp_servers.aisquare]`, and the plugin's
 uninstall. It never rewrites those files, Codex's `config.toml` included. It
 keeps `~/.aisquare` (your memory and boards) unless you add `--purge`, which
 also deletes the Claude Code plugin's answers about uv in `~/.cache/aisquare`,
-and it shows what it will do and asks first.
+and it shows what it will do and asks first. It refuses, naming them, while
+fleet agents run or while Remote is on in another shell or another asq
+([Remote](remote.md)).
 
 ## Start the GUI
 

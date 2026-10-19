@@ -43,7 +43,9 @@ CODEX = _get_adapter("codex")
 
 
 @pytest.fixture(autouse=True)
-def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, project_capture: None) -> None:
+    """Every directory a hooked session runs in is captured, as these tests were written
+    against (``project_capture``: off is 0.8.1's default)."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(agents, "_home", lambda: tmp_path)
     monkeypatch.setenv("AISQUARE_HARNESS_PROBE", "0")

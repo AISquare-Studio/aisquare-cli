@@ -148,7 +148,8 @@ used to call that green.
 
 Two ways not to get it wrong:
 
-- **In `asq`** — the Explainability tab's **Setup** form fills it in from the
+- **In `asq`** — the **Setup** form on a project's *AISquare* tab (its
+  Explainability section) fills it in from the
   gateway you type. Leave the proxy field blank. Three things about that form
   worth knowing before the first press:
   - The **deployment** field names the entry these settings belong to. It does
@@ -350,7 +351,7 @@ project's key. A key for ANOTHER workspace traces nothing until that workspace
 knows this machine's agent identities — every span is refused 409
 `agent_not_registered` — so run `explainability register` there once;
 `register [--project P]` registers under the same project's key. `status`
-shows the origin for that project, and each project page's Explainability tab
+shows the origin for that project, and each project page's *AISquare* tab
 shows the key its launches use — the project they join from the page's root,
 so the hub's under `$AISQUARE_TEAM_HUB` — and a *Register roster* button that
 registers under it. The **Setup** form's workspace key field attaches a key to

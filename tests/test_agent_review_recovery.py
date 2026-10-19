@@ -42,7 +42,9 @@ CODEX = _get_adapter("codex")
 
 
 @pytest.fixture(autouse=True)
-def isolated_agents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def isolated_agents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, project_capture: None) -> None:
+    """Every directory a hooked session runs in is captured, as these tests were written
+    against (``project_capture``: off is 0.8.1's default)."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(agents, "_home", lambda: tmp_path)
     monkeypatch.setenv("AISQUARE_TEAM", "1")
@@ -120,7 +122,7 @@ def test_bad_native_effort_cannot_create_a_worktree_window_or_live_row(
     monkeypatch.setattr(fleet, "server", lambda config: tmux)
     monkeypatch.setattr(agent_launch, "executable", lambda selected: "/fixture/agent")
     worktree = Mock(side_effect=AssertionError("worktree created before validation"))
-    monkeypatch.setattr(fleet, "_ensure_worktree", worktree)
+    monkeypatch.setattr(fleet, "_worktree_for", worktree)
     project = team_project(tmp_path)
     with pytest.raises(fleet.FleetError, match="reasoning effort"):
         fleet.spawn(project, "coder", agent="codex", worktree=True)

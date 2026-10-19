@@ -32,6 +32,123 @@ def test_load_missing_file_returns_defaults() -> None:
     assert load_config() == AppConfig()
 
 
+def test_the_file_is_parsed_again_only_when_its_bytes_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 18: asq's refresh tick asked config.toml for the fleet's, the
+    roles', the accounts' and the capture setting, and each ask parsed and validated the
+    whole file; only ``capture`` had a memo. ``load_config`` keeps its last parse, keyed by
+    the file's bytes: a rewrite in place to the same size, with the same inode and mtime as
+    a write within one tick of the kernel's coarse clock has, is read for what it says."""
+    import os
+
+    from aisquare.core import config as config_core
+
+    real = config_core._parse_toml
+    parses: list[bytes] = []
+
+    def counted(raw: bytes) -> dict[str, object]:
+        parses.append(raw)
+        return real(raw)
+
+    monkeypatch.setattr(config_core, "_parse_toml", counted)
+    path = tmp_path / "config.toml"
+    path.write_text("[fleet]\nmax_agents_per_project = 4\n", encoding="utf-8")
+
+    assert [load_config(path).fleet.max_agents_per_project for _ in range(3)] == [4, 4, 4]
+    assert len(parses) == 1, "parsed once"
+
+    seen = path.stat()
+    with path.open("r+b") as handle:  # in place: the same inode
+        handle.write(b"[fleet]\nmax_agents_per_project = 5\n")
+    os.utime(path, ns=(seen.st_atime_ns, seen.st_mtime_ns))
+    again = path.stat()
+    assert (again.st_ino, again.st_size, again.st_mtime_ns) == (
+        seen.st_ino,
+        seen.st_size,
+        seen.st_mtime_ns,
+    )
+    assert load_config(path).fleet.max_agents_per_project == 5
+    assert len(parses) == 2, "and again once its bytes changed"
+
+
+def test_each_load_hands_out_its_own_config(tmp_path: Path) -> None:
+    """The kept parse is never handed out: a caller changes what it loaded and saves it, and a
+    change it did not save is not what the next load reads."""
+    path = tmp_path / "config.toml"
+    path.write_text("[fleet]\nmax_agents_per_project = 4\n", encoding="utf-8")
+
+    first = load_config(path)
+    first.fleet.max_agents_per_project = 9  # a nested model: a shallow copy would share it
+
+    second = load_config(path)
+    assert second.fleet.max_agents_per_project == 4
+    assert second is not first and second.fleet is not first.fleet
+
+
+def test_a_reader_that_only_reads_is_handed_the_kept_parse_uncopied(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 19: every load deep-copied the kept parse, so ``capture_on()``
+    copied the whole model for one bool, several times a session start and on asq's every
+    refresh tick. A reader that only reads (``copy=False``) is handed the kept parse; a
+    caller that may change what it loads still gets its own."""
+    from aisquare.core import config as config_core
+    from aisquare.services import project as project_service
+
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("[projects]\ncapture = true\n", encoding="utf-8")
+    real = AppConfig.model_copy
+    copies: list[int] = []
+
+    def counted(self: AppConfig, *args: object, **kwargs: object) -> AppConfig:
+        copies.append(1)
+        return real(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(config_core.AppConfig, "model_copy", counted)
+
+    assert [project_service.capture_on() for _ in range(3)] == [True, True, True]
+    assert copies == [], "copied for a read"
+    assert load_config(path, copy=False) is load_config(path, copy=False)
+    mine = load_config(path)
+    assert mine is not load_config(path, copy=False) and copies
+
+
+def test_a_read_only_load_in_one_load_never_shares_the_kept_parse(tmp_path: Path) -> None:
+    """Review of #259, round 20: ``one_load`` keeps what the first load in its block returned
+    and hands it to every later load there, ``copy=True`` ones too. A ``copy=False`` load
+    first (``capture_on()``) put the kept parse itself in it; a caller later in the block that
+    changed its config changed the kept parse, and every load of the same bytes, in any
+    caller, then had the change until the file's bytes changed."""
+    from aisquare.core.config import one_load
+
+    path = tmp_path / "config.toml"
+    path.write_text("[fleet]\nmax_agents_per_project = 4\n", encoding="utf-8")
+
+    with one_load():
+        load_config(path, copy=False)
+        mine = load_config(path)
+        mine.fleet.max_agents_per_project = 9  # a change it never saves
+
+    assert load_config(path, copy=False).fleet.max_agents_per_project == 4
+    assert load_config(path).fleet.max_agents_per_project == 4
+
+
+def test_a_file_that_will_not_parse_is_read_again_each_load(tmp_path: Path) -> None:
+    """Nothing is kept of a load that raised: the next load reads the file again, and a
+    broken file after a good one raises rather than handing out the good one."""
+    path = tmp_path / "config.toml"
+    path.write_text("[fleet\n", encoding="utf-8")
+    with pytest.raises(tomllib.TOMLDecodeError):
+        load_config(path)
+    path.write_text("[fleet]\nmax_agents_per_project = 4\n", encoding="utf-8")
+    assert load_config(path).fleet.max_agents_per_project == 4
+    path.write_text("[fleet\n", encoding="utf-8")
+    with pytest.raises(tomllib.TOMLDecodeError):
+        load_config(path)
+
+
 def test_an_unknown_key_in_the_file_still_loads(tmp_path: Path) -> None:
     # The safety net under every key this schema has ever dropped, and the
     # reason `team.bins` could simply be deleted instead of deprecated. Extras
@@ -285,7 +402,10 @@ def test_a_reviewer_saved_with_the_former_restricted_default_loads_with_a_shell(
     assert reviewer.worktree is True, "only the old default goes; the rest stays as saved"
     save_config(loaded, target)
     saved = tomllib.loads(target.read_text(encoding="utf-8"))
-    assert saved["fleet"]["roles"]["reviewer"]["extra_args"] == list(REVIEWER_ARGS)
+    assert saved["fleet"]["roles"]["reviewer"]["extra_args"] == list(REVIEWER_ARGS), (
+        "today's default, in the reviewer's table written whole for older builds"
+    )
+    assert load_config(target).fleet.roles["reviewer"].extra_args == list(REVIEWER_ARGS)
 
 
 def test_the_built_in_reviewer_keeps_its_shell_and_is_denied_the_tools_that_edit() -> None:

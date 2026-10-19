@@ -263,10 +263,15 @@ def test_a_plugin_only_home_is_configured_once_its_hooks_are_trusted(
 
 
 def test_an_installed_hook_command_reaches_its_adapter(
-    adapter: AgentAdapter, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    adapter: AgentAdapter,
+    tmp_path: Path,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    project_capture: None,
 ) -> None:
     """The command the hooks file holds, run as the agent runs it, lands on the board:
-    ``aisquare hook <subcommand>`` decodes with the adapter that installed it."""
+    ``aisquare hook <subcommand>`` decodes with the adapter that installed it, in a
+    directory its hooks capture (``project_capture``: off is 0.8.1's default)."""
     monkeypatch.setenv("AISQUARE_TEAM", "1")
     monkeypatch.setenv("AISQUARE_ROLE", "coder")
     home = _home(adapter, tmp_path)

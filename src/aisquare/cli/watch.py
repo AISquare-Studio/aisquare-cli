@@ -117,15 +117,21 @@ def _event_detail(event: TeamEvent, roles: dict[str, str]) -> Text:
 
 
 def _task_detail(task: TeamTask, statuses: dict[str, str]) -> Text:
+    """A task in full: its title, then ``#12 · doing · tsk_… · claimed by …`` — what the
+    board's table leaves out (the number and an icon are all a row shows) — then the rest."""
     text = Text()
     text.append(f"{task.title}\n", style="bold")
-    text.append(f"{task.id} · [{task.status}] · key={task.key}", style="dim")
-    if task.role:
-        text.append(f" · for {task.role}", style="dim")
+    if task.number is not None:
+        text.append(f"#{task.number} · ", style="bold")
+    text.append(task.status, style="bold")
+    text.append(f" · {task.id}", style="dim")
     if task.claimed_by:
-        text.append(f"\nclaimed by {team_service.short_id(task.claimed_by)}")
+        text.append(f" · claimed by {team_service.short_id(task.claimed_by)}")
         if task.claim_expires_at:
             text.append(f" (lease until {local_time(task.claim_expires_at):%H:%M})", style="dim")
+    if task.role:
+        text.append(f" · for {task.role}", style="dim")
+    text.append(f" · key={task.key}", style="dim")
     if task.needs:
         waiting = set(unmet_needs(task, statuses))
         text.append("\nneeds: ")
@@ -145,13 +151,24 @@ _STATE_CHIP = {
     "attention": ("🔔 NEEDS YOU", "bold red"),
     # The two #146 states, so the one surface an operator leaves running does
     # not print a bare dim word for a parked agent (review of #205, second round).
-    "limited": ("⏳ limited — `aisquare fleet switch <label>`", "magenta"),
+    "limited": ("⏳ limited", "magenta"),  # and the switch that moves it (`_session_lines`)
     "switching": ("⇄ switching accounts", "magenta dim"),
 }
 
 
-def _session_lines(sessions: list[TeamSession], labels: Mapping[int, str] | None = None) -> Text:
+def _session_lines(
+    sessions: list[TeamSession],
+    labels: Mapping[int, str] | None = None,
+    *,
+    switches: Mapping[str, str] | None = None,
+) -> Text:
     """The sessions block: who is here, in what state, on which account, how long ago.
+
+    A ``limited`` session is told the ``fleet switch`` that moves it, from ``switches``
+    (``team_service.fleet_switches``): its own fleet row's project and label. Alone, the
+    command switched the active project's agent (review of #259, round 21); named by the
+    board's project, it was the hub's under ``AISQUARE_TEAM_HUB``, where no agent is (round
+    22). A session with none shows the chip alone.
 
     The account is named by ``labels`` (``services.claude_accounts.slot_labels``
     — the alias, as every other surface shows it; review of #205, third round).
@@ -177,6 +194,9 @@ def _session_lines(sessions: list[TeamSession], labels: Mapping[int, str] | None
         text.append(f"{emoji} {session.role}·{team_service.short_id(session.id)}", style=style)
         chip, chip_style = _STATE_CHIP.get(session.state, (session.state, "dim"))
         text.append(f"  {chip}", style=chip_style)
+        switch = (switches or {}).get(session.id) if session.state == "limited" else None
+        if switch is not None:
+            text.append(f" — `{switch}`", style=chip_style)
         if session.state == "limited" and session.limit_resets_at is not None:
             text.append(f" (resets {format_reset(session.limit_resets_at)})", style="magenta")
         label = team_service.account_label(session.account, labels)
@@ -290,13 +310,14 @@ def _build_app_class(interval: float) -> Any:
     """
     from textual.app import App as TextualApp
     from textual.app import ComposeResult
+    from textual.binding import Binding
     from textual.containers import Vertical
     from textual.screen import ModalScreen
     from textual.widgets import Footer, OptionList, Static
     from textual.widgets.option_list import Option
 
     from aisquare.cli.ui.autosave import Autosave
-    from aisquare.cli.ui.board import BoardPanel
+    from aisquare.cli.ui.board import BoardHelp, BoardPanel
     from aisquare.cli.ui.theme import theme_autosave
 
     class ThemePicker(ModalScreen[None]):
@@ -346,6 +367,7 @@ def _build_app_class(interval: float) -> Any:
             ("q", "quit", "quit"),
             ("t", "pick_theme", "themes"),
             ("s", "screenshot", "screenshot"),
+            Binding("question_mark", "help", "help", key_display="?"),
         ]
 
         @property
@@ -378,6 +400,18 @@ def _build_app_class(interval: float) -> Any:
 
         def action_pick_theme(self) -> None:
             self.push_screen(ThemePicker())
+
+        def action_help(self) -> None:
+            """``?``: the board's keys and what each task icon means."""
+            self.push_screen(
+                BoardHelp(
+                    (
+                        ("t", "themes (applied live, autosaved)"),
+                        ("s", "save a screenshot of the board"),
+                        ("q", "quit"),
+                    )
+                )
+            )
 
         def action_change_theme(self) -> None:
             # The command palette's "Change theme" lands here — route it to
@@ -424,7 +458,7 @@ def _run_tui(interval: float) -> None:
 def board_frame(height: int, width: int) -> Text:
     """One fallback frame: header, sessions, open tasks, then as many recent
     events as the remaining terminal rows can hold."""
-    project, sessions, tasks, events = team_service.board_data(events=200)
+    project, sessions, tasks, events, switches = team_service.board_read(events=200)
     text = Text(no_wrap=True, overflow="ellipsis")
     text.append(
         f"aisquare board — {project.root.name or project.id} — {datetime.now():%H:%M:%S}\n",
@@ -433,7 +467,7 @@ def board_frame(height: int, width: int) -> Text:
     live_sessions = [s for s in sessions if s.ended_at is None]
     text.append("sessions\n", style="bold cyan")
     if live_sessions:
-        text.append(_session_lines(sessions))
+        text.append(_session_lines(sessions, switches=switches))
     else:
         text.append("  (none live)\n", style="dim")
     statuses = {t.id: t.status for t in tasks}

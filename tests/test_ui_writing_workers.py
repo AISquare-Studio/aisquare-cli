@@ -28,21 +28,15 @@ from aisquare.cli.ui import app as ui_app
 from aisquare.cli.ui import board
 from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.cli.ui.views import agent as agent_view
+from aisquare.cli.ui.views import app_settings as app_settings_view
 from aisquare.cli.ui.views import explainability as explainability_view
-from aisquare.cli.ui.views import project as project_view
-from aisquare.cli.ui.views import settings as settings_view
 from aisquare.cli.ui.views import welcome as welcome_view
 from aisquare.core import paths
 from aisquare.core.store import store_session
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import diagnostics, first_run
 from tests.test_claude_accounts import NOW
-from tests.test_claude_accounts import fake_home as _redirected_home
 from tests.test_usage_aware_accounts import _payload, _slot, _Usage
-
-#: The sibling file's redirected home, re-exported so pytest collects it here: the
-#: accounts test below writes Claude Code's files, and none may land in the developer's.
-fake_home = _redirected_home
 
 
 def _module_name(path: Path) -> str:
@@ -180,8 +174,8 @@ def test_the_overdue_toast_names_every_read_it_waits_for_in_words() -> None:
 
 def test_the_accounts_readers_write_the_store_so_update_waits_for_them(fake_home: Path) -> None:
     """Round 19 of #257: listed here as readers, a usage reading and the reads of the slots
-    let Update quit under them. A usage reading records a sample per account
-    (``read_usage_with_trends``), and a read of the slots, which the shell's header,
+    let Update quit under them. A usage reading records a sample per account it fetches
+    (``cached_usage_with_trends``, the page's), and a read of the slots, which the shell's header,
     Settings, the board and an agent's page each run, adds a registry row for a slot that
     has none (``_arranged``)."""
     account = _slot("work@example.com", "tok-work")
@@ -189,7 +183,7 @@ def test_the_accounts_readers_write_the_store_so_update_waits_for_them(fake_home
         assert store.claude_accounts() == []
 
     accounts_service.slot_labels()
-    accounts_service.read_usage_with_trends(
+    accounts_service.cached_usage_with_trends(
         [account], now=NOW, fetch=_Usage({"tok-work": _payload(40)})
     )
 
@@ -199,7 +193,7 @@ def test_the_accounts_readers_write_the_store_so_update_waits_for_them(fake_home
     readers = {
         accounts_view.USAGE_WORKER,
         ui_app.ACCOUNTS_WORKER,
-        settings_view.ACCOUNTS_WORKER,
+        app_settings_view.ACCOUNTS_WORKER,
         board.LABELS_WORKER,
         agent_view.LABELS_WORKER,
     }
@@ -209,9 +203,9 @@ def test_the_accounts_readers_write_the_store_so_update_waits_for_them(fake_home
 def test_the_doctor_reads_the_slots_and_writes_the_store_so_update_waits_for_it(
     fake_home: Path,
 ) -> None:
-    """Round 20 of #257: the shell's and a project tab's Doctor were listed as runs that
-    only read, but once the store exists the accounts' checks list the slots, which adds a
-    registry row for a slot that has none, as the accounts' readers do."""
+    """Round 20 of #257: the shell's Doctor (and a project tab's, which has since gone) was
+    listed as a run that only reads, but once the store exists the accounts' checks list the
+    slots, which adds a registry row for a slot that has none, as the accounts' readers do."""
     account = _slot("work@example.com", "tok-work")
     with store_session() as store:
         assert store.claude_accounts() == []
@@ -220,8 +214,7 @@ def test_the_doctor_reads_the_slots_and_writes_the_store_so_update_waits_for_it(
 
     with store_session() as store:
         assert account.slot in {row.slot for row in store.claude_accounts()}, "reconciled"
-    doctors = {ui_app._DOCTOR_WORKER, project_view.DOCTOR_WORKER}
-    assert doctors <= WAITED, doctors - WAITED
+    assert ui_app._DOCTOR_WORKER in WAITED
 
 
 def test_welcomes_folder_check_opens_the_store_so_update_waits_for_it(tmp_path: Path) -> None:

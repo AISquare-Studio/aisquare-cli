@@ -44,9 +44,10 @@ class UnknownWrapperError(ValueError):
     """A default names an agent, but does not identify an arbitrary executable."""
 
     def __init__(self, binary: str, role: str) -> None:
-        import shlex
+        from aisquare.services.install_route import command_line
 
-        self.fix = shlex.join(
+        # A line to paste, quoted for this shell (cmd.exe or PowerShell on Windows).
+        self.fix = command_line(
             ["aisquare", "team", "bind", role, "--agent", DEFAULT_AGENT, "--bin", binary]
         )
         super().__init__(
@@ -231,13 +232,13 @@ def resolve(
 def _undeclared_binding(
     chosen: harness.BinaryResolution, adapter: AgentAdapter, role: str
 ) -> ValueError:
-    import shlex
+    from aisquare.services.install_route import command_line
 
     where = {
         "env": harness._bin_env_var(role),
         "env:global": harness._BIN_ENV_GLOBAL,
     }.get(chosen.source, f"team.profiles.{role}.bin")
-    declare = shlex.join(
+    declare = command_line(
         ["aisquare", "team", "bind", role, "--agent", adapter.id, "--bin", chosen.binary]
     )
     return ValueError(

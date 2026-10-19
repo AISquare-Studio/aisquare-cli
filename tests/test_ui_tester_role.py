@@ -44,10 +44,11 @@ from aisquare.core.config import (
     save_config,
 )
 from aisquare.models import CheckStatus
-from aisquare.services import diagnostics
+from aisquare.services import diagnostics, install_route
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops as ops
 from aisquare.services.fleet import FLEET_ROLES
+from tests.cycles import unscoped
 
 ROLE = "ui-tester"
 
@@ -74,7 +75,7 @@ def test_the_ladder_is_the_verifiers_ladder() -> None:
 
 def test_a_seat_is_briefed_as_the_role() -> None:
     assert harness.base_role("ui-tester3") == ROLE
-    text = " ".join(harness.role_cycle("ui-tester3", "abcd1234"))
+    text = " ".join(harness.role_cycle("ui-tester3", "abcd1234", fleet=unscoped))
     assert text.startswith("Your standing cycle (ui-tester)")
     assert "Stay in your lane (ui-tester)" in text
 
@@ -83,7 +84,7 @@ def test_a_seat_is_briefed_as_the_role() -> None:
 
 
 def test_the_briefing_verifies_in_a_real_browser_and_measures() -> None:
-    text = " ".join(harness.role_cycle(ROLE, "abcd1234"))
+    text = " ".join(harness.role_cycle(ROLE, "abcd1234", fleet=unscoped))
     assert "task next --status review" in text
     assert '"UI: …"' in text, "it takes the tasks the planner marked for it"
     assert "REAL browser" in text
@@ -95,14 +96,14 @@ def test_the_briefing_verifies_in_a_real_browser_and_measures() -> None:
 
 
 def test_the_briefing_degrades_honestly_without_a_browser() -> None:
-    text = " ".join(harness.role_cycle(ROLE, "abcd1234"))
+    text = " ".join(harness.role_cycle(ROLE, "abcd1234", fleet=unscoped))
     assert "No browser tool answers?" in text
     assert "UI not browser-verified in this window" in text
     assert "never done" in text, "a UI task without a browser is reopened, not passed"
 
 
 def test_the_briefing_is_read_only_and_pre_fills_the_session_id() -> None:
-    text = " ".join(harness.role_cycle(ROLE, "abcd1234"))
+    text = " ".join(harness.role_cycle(ROLE, "abcd1234", fleet=unscoped))
     assert "never edit" in text and "never push" in text
     assert "--as abcd1234" in text
 
@@ -113,7 +114,7 @@ def test_the_briefing_says_which_build_it_verified() -> None:
     it into the coder's tree, and it opens a URL, sees a working page, measures
     it honestly and `task done`s with genuine evidence of the PRE-change build.
     """
-    text = " ".join(harness.role_cycle(ROLE, "abcd1234"))
+    text = " ".join(harness.role_cycle(ROLE, "abcd1234", fleet=unscoped))
     assert "no worktree" in text
     assert "SAY WHICH BUILD" in text and "branch or commit" in text
     assert "<url>" in text, "the note carries the URL it verified"
@@ -125,7 +126,7 @@ def test_the_briefing_can_reach_past_the_head_of_the_review_pool() -> None:
     offset) and `--claim` is refused for review tasks, so a non-UI task at the
     head made this cycle stop — with the `UI:` task it owns sitting behind it.
     """
-    text = " ".join(harness.role_cycle(ROLE, "abcd1234"))
+    text = " ".join(harness.role_cycle(ROLE, "abcd1234", fleet=unscoped))
     assert "HEAD of the review pool" in text
     assert "aisquare board" in text and "by id" in text
 
@@ -135,7 +136,7 @@ def test_the_briefing_does_not_claim_an_enforcement_it_does_not_have() -> None:
     "Read-only" was claimed and enforced nowhere. `--restricted` is not the fix:
     it removes the Bash this role's own verdict commands need.
     """
-    text = " ".join(harness.role_cycle(ROLE, "abcd1234"))
+    text = " ".join(harness.role_cycle(ROLE, "abcd1234", fleet=unscoped))
     assert "ASKED to be read-only" in text
     assert "nothing here enforces it" in text
     assert "--restricted" not in text
@@ -147,10 +148,10 @@ def test_the_runner_names_a_verdict_for_a_ui_task_it_cannot_verify() -> None:
     the sentence that forbids rubber-stamping. The ui-tester's identical
     situation is explicit ("never done"), and one fact must not resolve two ways.
     """
-    text = " ".join(harness.role_cycle("runner", "abcd1234"))
+    text = " ".join(harness.role_cycle("runner", "abcd1234", fleet=unscoped))
     assert 'task reopen <id> --reason "UI not browser-verified"' in text
     assert "never done" in text
-    tester = " ".join(harness.role_cycle("tester", "abcd1234"))
+    tester = " ".join(harness.role_cycle("tester", "abcd1234", fleet=unscoped))
     assert 'task reopen <id> --reason "UI not browser-verified"' in tester, (
         "`tester` is the fleet's name for `runner` and shares the rule"
     )
@@ -162,7 +163,7 @@ def test_the_runner_does_not_defer_ui_tasks_to_a_stale_ui_tester() -> None:
     routed `UI:` work to a verifier that no longer exists. Presence is not
     availability: a stale row means the runner reopens the task itself."""
     for role in ("runner", "tester"):
-        text = " ".join(harness.role_cycle(role, "abcd1234"))
+        text = " ".join(harness.role_cycle(role, "abcd1234", fleet=unscoped))
         assert "NOT marked (stale)" in text, role
         assert "not an available one" in text, role
         # the board is where staleness is visible — the briefing names the marker it prints
@@ -173,20 +174,20 @@ def test_the_manager_names_the_build_when_it_spawns_a_ui_tester() -> None:
     """The tester's documented workaround, which the ui-tester needs more: it
     measures a page instead of running a suite, so it fails SILENTLY against the
     wrong tree."""
-    text = " ".join(harness.role_cycle("manager", "abcd1234"))
+    text = " ".join(harness.role_cycle("manager", "abcd1234", fleet=unscoped))
     assert "fleet spawn ui-tester --prompt" in text
     assert "branch or worktree" in text and "URL" in text
 
 
 def test_the_other_roles_know_the_ui_tester_exists() -> None:
-    planner = " ".join(harness.role_cycle("planner", "abcd1234"))
+    planner = " ".join(harness.role_cycle("planner", "abcd1234", fleet=unscoped))
     assert '"UI: …"' in planner and "browser steps" in planner, "the planner marks UI work"
-    runner = " ".join(harness.role_cycle("runner", "abcd1234"))
+    runner = " ".join(harness.role_cycle("runner", "abcd1234", fleet=unscoped))
     assert "belongs to the ui-tester" in runner
     assert "not browser-verified" in runner, "a runner alone says what it did not check"
-    manager = " ".join(harness.role_cycle("manager", "abcd1234"))
+    manager = " ".join(harness.role_cycle("manager", "abcd1234", fleet=unscoped))
     assert "fleet spawn ui-tester" in manager
-    reviewer = " ".join(harness.role_cycle("reviewer", "abcd1234"))
+    reviewer = " ".join(harness.role_cycle("reviewer", "abcd1234", fleet=unscoped))
     assert "no ui-tester evidence" in reviewer and "request-changes" in reviewer
 
 
@@ -992,7 +993,7 @@ def test_the_register_hint_shell_quotes_the_target_name(
     explainability_service.store_api_key("wk-test")
     result = runner.invoke(app, ["explainability", "register", "--target", "prod west"])
     assert result.exit_code == 0, result.output
-    assert "register --target 'prod west' --role" in result.output
+    assert f"register --target {install_route.command_line(['prod west'])} --role" in result.output
     # and the printed command actually selects that target when followed
     followed = runner.invoke(
         app, ["explainability", "register", "--target", "prod west", "--role", "tester"]

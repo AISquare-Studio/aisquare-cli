@@ -11,11 +11,13 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
+from aisquare.core import workspace
 from aisquare.core.orchestrator import team_project
 from aisquare.core.workspace import find_project_root
 
@@ -128,6 +130,109 @@ def test_team_and_context_agree_inside_a_submodule(
 ) -> None:
     _, sub = repo_with_submodule
     assert team_project(sub).root == find_project_root(sub)
+
+
+@pytest.mark.parametrize("layout", ["submodule-worktree", "moved-principal", "windows-gitdir"])
+def test_a_worktree_git_gives_no_principal_is_its_own_root(
+    layout: str,
+    repo_with_worktree: tuple[Path, Path],
+    repo_with_submodule: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A linked worktree of a submodule (``git_common_root`` leaves it to the marker walk),
+    one whose principal moved, and one whose ``gitdir:`` is a Windows path read from WSL
+    are each their own root, whether git answers or not: a checkout, which ``serve
+    --stdio`` activates in, never git's bookkeeping or a directory that is not there
+    (review of #243, round 13, 1/4)."""
+    repo, worktree = repo_with_worktree
+    _, sub = repo_with_submodule
+    if layout == "submodule-worktree":
+        start = tmp_path / "dep-wt"
+        _git("worktree", "add", "-q", str(start), "-b", "wt", cwd=sub)
+    elif layout == "moved-principal":
+        repo.rename(tmp_path / "moved")
+        start = worktree
+    else:
+        start = tmp_path / "wsl"
+        start.mkdir()
+        (start / ".git").write_text("gitdir: C:/Users/me/repo/.git/worktrees/wsl\n")
+    assert find_project_root(start) == start.resolve(), "with git"
+    monkeypatch.setattr(workspace, "git_common_root", lambda start: None)
+    assert find_project_root(start) == start.resolve(), "with git failing"
+    assert team_project(start).root == start.resolve()
+
+
+def test_a_worktree_resolves_on_a_git_that_does_not_know_no_optional_locks(
+    repo_with_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 26, 11/11: ``--no-optional-locks`` on ``rev-parse`` changed
+    nothing, as ``rev-parse`` takes no optional lock, and git before 2.15 exits 129 on it,
+    which read as "not a work tree": every linked worktree, a fleet agent's among them, had
+    a board of its own. Asked without it, a git that does not know the flag still answers."""
+    repo, worktree = repo_with_worktree
+    real = subprocess.run
+
+    def before_2_15(argv: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(argv, list) and argv[:1] == ["git"] and "--no-optional-locks" in argv:
+            return subprocess.CompletedProcess(argv, 129, "", "unknown option: --no-optional-locks")
+        return real(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", before_2_15)
+
+    assert workspace.git_common_root(worktree) == repo.resolve()
+    assert team_project(worktree).root == repo.resolve()
+
+
+def test_a_git_before_2_5_that_echoes_the_option_leaves_the_root_to_the_markers(
+    repo_with_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 28, 6/10: from git 1.8.5 to 2.4, ``rev-parse`` does not know
+    ``--git-common-dir`` and echoes it back, exit 0, so ``git_common_root`` returned
+    ``<start>/--git-common-dir``, a directory that is not there, as the root of every project
+    every hook resolved. Such a git has no linked worktrees: the root is the marker walk's."""
+    repo, _worktree = repo_with_worktree
+    start = repo / "src"
+    start.mkdir()
+    real = subprocess.run
+
+    def before_2_5(argv: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(argv, list) and argv[:1] == ["git"] and "--git-common-dir" in argv:
+            return subprocess.CompletedProcess(argv, 0, "--git-common-dir\n", "")
+        return real(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", before_2_5)
+
+    assert workspace.git_common_root(start) is None
+    assert find_project_root(start) == repo.resolve()
+
+
+@pytest.mark.parametrize("git", ["this git", "2.5 to 2.12"])
+def test_a_subdirectory_of_the_checkout_resolves_to_the_checkout(
+    repo_with_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, git: str
+) -> None:
+    """Review of #259, round 29, 4/8: from git 2.5 to 2.12, ``rev-parse --git-common-dir``
+    run in a subdirectory answers relative to the top level (``.git``), not to where it ran
+    (``../../.git``, git 2.13 on). Joined to the subdirectory, ``repo/api/x`` was its own
+    root, whatever markers ``repo/api`` held, and read another board than ``repo``. The way
+    up to the top level, asked in the same call, finds the checkout."""
+    repo, _worktree = repo_with_worktree
+    start = repo / "api" / "x"
+    start.mkdir(parents=True)
+    (repo / "api" / "pyproject.toml").write_text("", encoding="utf-8")  # a marker below repo
+    real = subprocess.run
+
+    def before_2_13(argv: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(argv, list) and argv[:1] == ["git"] and "--git-common-dir" in argv:
+            return subprocess.CompletedProcess(argv, 0, ".git\n../../\n", "")
+        return real(argv, *args, **kwargs)
+
+    if git == "2.5 to 2.12":
+        monkeypatch.setattr(subprocess, "run", before_2_13)
+
+    assert workspace.git_common_root(start) == repo.resolve()
+    assert find_project_root(start) == repo.resolve()
+    assert team_project(start).root == repo.resolve()
 
 
 def test_a_plain_repo_is_still_its_own_root(tmp_path: Path) -> None:

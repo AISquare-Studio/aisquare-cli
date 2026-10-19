@@ -141,6 +141,8 @@ DOCUMENTED = (
     # The live-wiring handoff: doctor, the hooks by hand, metrics — all meant to
     # be typed against the staging server.
     "docs/ci-live-wiring-handoff.md",
+    # Phone control: serve, allow-write, needs, revoke, regenerate-password.
+    "docs/remote.md",
 )
 
 #: Directories the staleness sweep never enters. Everything else under the repo
@@ -930,7 +932,10 @@ CENSUS = {
     # three commands are the README's now. Re-measure when they grow.
     "docs/install.md": (3, 3),
     "docs/memory.md": (23, 0),
-    "docs/orchestration.md": (50, 2),
+    # Re-measured 2026-10-13 at (52, 3) when rc/0.8.1 moved #243's Phone control
+    # section here from the README, where it sat among this page's sections: its
+    # `remote serve` and `allow-write on`, and the `aisquare-cli[remote]` install.
+    "docs/orchestration.md": (52, 3),
     # One resolved line, and it is the command tree's root (`aisquare` alone in
     # the bare fence); the tree itself is checked by the tree tests instead.
     "docs/reference.md": (1, 1),
@@ -961,6 +966,9 @@ CENSUS = {
     # Measured 2026-09-02: eight commands, two path mentions (`../aisquare-ci`,
     # `src/aisquare/...`).
     "docs/ci-live-wiring-handoff.md": (8, 2),
+    # Measured 2026-10-07, the day it was written: nine commands, and two
+    # mentions (the `aisquare-cli[remote]` requirement, `~/.aisquare/remote-dist`).
+    "docs/remote.md": (9, 2),
 }
 
 

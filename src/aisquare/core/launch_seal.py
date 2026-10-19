@@ -114,12 +114,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import re
 import tempfile
-import time
 from collections.abc import Callable, Collection, Iterator
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -127,7 +125,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from aisquare.core import orchestrator, paths
 from aisquare.core.atomic import write_replacing
-from aisquare.core.locking import lock_exclusive, unlock
+from aisquare.core.locking import holding
 from aisquare.models import LaunchSpec
 
 _log = logging.getLogger(__name__)
@@ -173,6 +171,12 @@ class WindowPlace(BaseModel):
     created_at: datetime
     """The row's own: after the window existed, so a server started later holds none of
     its panes (``services.fleet._outlived``)."""
+    server_started_at: datetime | None = None
+    """When the server the window was made on started, as tmux answered the spawner: the
+    identity of the server its pane id names, since every server numbers from ``%0``. A
+    server at the socket that started at any other time is another
+    (``services.fleet._started_after``); ``None`` in a record written before it was kept,
+    judged by :attr:`created_at` alone."""
     session: str | None = None
     """The name of the tmux session the window was made in, as tmux answered (``fleet
     rename`` renames it with the session); for reports and ``fleet attach``'s line."""
@@ -229,6 +233,8 @@ class SessionPlace(BaseModel):
     name: str
     created_at: datetime
     """When it was recorded: a server that started later holds none of it."""
+    server_started_at: datetime | None = None
+    """When its server started, as tmux answered (:attr:`WindowPlace.server_started_at`)."""
 
 
 class WindowEntry(BaseModel):
@@ -242,6 +248,8 @@ class WindowEntry(BaseModel):
     session_id: str
     pane_id: str
     created_at: datetime
+    server_started_at: datetime | None = None
+    """When its server started, as tmux answered (:attr:`WindowPlace.server_started_at`)."""
 
 
 class ProjectSessions(BaseModel):
@@ -627,33 +635,14 @@ _LOCK_WAIT_S = 5.0
 @contextmanager
 def _locked(path: Path) -> Iterator[None]:
     """Hold ``<path>.lock`` exclusively for the block, waiting at most :data:`_LOCK_WAIT_S`
-    (``core.locking``: non-blocking, polled, dropped by the OS if the holder dies) while
-    another holds it; raises ``OSError`` when it cannot be had. Only a held lock is waited
-    on (``state_file._HELD``): a home whose filesystem refuses ``flock`` (``ENOLCK``,
-    ``EOPNOTSUPP`` on NFS or SMB) will not grant it on a retry, and waited 5 s in every hook
-    for nothing (review r10 of #113, finding 12). Only processes outside the sandbox take
-    it (the directory is read-only in it)."""
-    from aisquare.core.state_file import _HELD
-
-    lock = path.with_name(f"{path.name}.lock")
-    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        deadline = time.monotonic() + _LOCK_WAIT_S
-        while True:
-            try:
-                lock_exclusive(fd)
-                break
-            except OSError as exc:
-                if exc.errno not in _HELD or time.monotonic() >= deadline:
-                    raise
-                time.sleep(0.02)
-        try:
-            yield
-        finally:
-            with suppress(OSError):
-                unlock(fd)
-    finally:
-        os.close(fd)
+    (``core.locking.holding``: non-blocking, polled, dropped by the OS if the holder dies)
+    while another holds it; raises ``OSError`` when it cannot be had (``TimeoutError`` when
+    held past the wait). Only a held lock is waited on (``core.locking._HELD``): a home whose
+    filesystem refuses ``flock`` (``ENOLCK``, ``EOPNOTSUPP`` on NFS or SMB) will not grant it
+    on a retry, and waited 5 s in every hook for nothing (review r10 of #113, finding 12).
+    Only processes outside the sandbox take it (the directory is read-only in it)."""
+    with holding(path.with_name(f"{path.name}.lock"), wait_s=_LOCK_WAIT_S, mode=0o600):
+        yield
 
 
 def _rewrite(agent_id: str, change: Callable[[LaunchRecord], LaunchRecord | None]) -> None:

@@ -229,7 +229,11 @@ def test_fleet_does_not_validate_fragments_after_creating_a_worktree(
     monkeypatch.setattr(fleet, "server", lambda config: tmux)
     monkeypatch.setattr(fleet, "is_git_project", lambda root: True)
     tree = Mock(return_value=tmp_path)
-    monkeypatch.setattr(fleet, "_ensure_worktree", tree)
+    monkeypatch.setattr(fleet, "_worktree_for", tree)
+    # The repository's own `.git`, where the branch lock a spawn holds over its tree lives.
+    common = tmp_path / "common.git"
+    common.mkdir()
+    monkeypatch.setattr(fleet, "_git_common_dir", lambda root: common)
     fleet.spawn(team_project(tmp_path), "coder", worktree=True)
     assert tree.call_count == 1 and len(tmux.spawned) == 1
     command = tmux.spawned[0]["command"]
@@ -413,7 +417,7 @@ def test_dogfooded_schemas_reach_the_next_unused_migration(
 ) -> None:
     from aisquare.core import store as module
 
-    # #113's own steps under its own stamps; the merge appended them as v26-v28.
+    # #113's own steps under its own stamps; the merges appended them as v26-v28, then v33-v35.
     database = _dogfooded_113(version)
     monkeypatch.setattr(
         module, "_MIGRATIONS", (*module._MIGRATIONS, "CREATE TABLE next_feature (id TEXT);")

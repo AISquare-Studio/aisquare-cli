@@ -32,6 +32,10 @@ from tests.stub_ci_server import StubCI, live_descriptor, serve
 
 from .test_shipping_redaction import SECRETS
 
+# These record in a directory nobody added (``tmp_path``), as they were written to:
+# with ``[projects] capture`` on. What capture off records — nothing — is tests/test_hooks.py's.
+pytestmark = pytest.mark.usefixtures("project_capture")
+
 
 @pytest.fixture
 def stub() -> Iterator[StubCI]:
@@ -215,6 +219,97 @@ def test_the_default_descriptor_pushes_on_prompts_only_and_announces_the_tool(
     assert start.trigger == "session_start"
     assert start.client_reason is ClientReason.trigger_not_in_descriptor
     assert start.instruction_version == ci_augment.INSTRUCTION_VERSION
+
+
+def test_a_session_start_that_records_its_turn_captures_its_directory_first(
+    wired: StubCI, isolated_home: Path, tmp_path: Path
+) -> None:
+    """Review of #259, round 19: the team hook captured the directory at every session
+    start until it captured only for a board (round 18). A session start in a directory
+    with no board and no role then wrote its turn for a project with no row, which
+    ``metrics show --project`` could not reach. The turn's project is captured with it."""
+    from aisquare.core.store import store_session
+
+    hooks_service.session_start_context(tmp_path, session_id=SESSION)
+
+    start = _turn()
+    with store_session() as store:
+        row = store.get_project(start.project_id)
+        assert store.team_sessions(start.project_id) == [], "the premise: no board"
+    assert row is not None and row.onboarded_at is None, "captured, not added"
+
+
+def test_a_session_start_with_a_board_and_ci_captures_its_directory_once(
+    wired: StubCI, isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 20: ``_session_start_ci`` opened a store session of its own and
+    captured the directory, an upsert and a commit, on every session start with CI on, the
+    team hook's capture of the same directory moments earlier included. A fleet starting its
+    agents took the store's write lock twice for each. The directory is written once, by
+    whichever captures it first, and not at all once its row is there; nor does CI open a
+    session of its own then."""
+    import contextlib
+
+    from aisquare.core.store import SqliteStore, store_session
+
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")  # a board: the team hook captures first
+    real_write, real_session = SqliteStore.ensure_project, store_session
+    writes: list[str] = []
+    sessions: list[int] = []
+
+    def ensure_project(self: SqliteStore, project: ProjectInfo) -> None:
+        writes.append(project.id)
+        real_write(self, project)
+
+    @contextlib.contextmanager
+    def session() -> Iterator[Any]:
+        sessions.append(1)
+        with real_session() as store:
+            yield store
+
+    monkeypatch.setattr(SqliteStore, "ensure_project", ensure_project)
+    monkeypatch.setattr(hooks_service, "store_session", session)
+
+    hooks_service.session_start_context(tmp_path, session_id=SESSION)
+
+    start = _turn()
+    with store_session() as store:
+        assert store.team_sessions(start.project_id), "the premise: the team hook wrote"
+    assert writes == [start.project_id], "captured once"
+    writes.clear()
+    sessions.clear()
+
+    hooks_service.session_start_context(tmp_path, session_id=SESSION, source="resume")
+
+    assert writes == [], "its row is there: nothing to capture"
+    assert len(sessions) == 1, "CI asked the store again"
+
+
+def test_with_capture_off_only_a_project_added_on_purpose_consults_or_records(
+    wired: StubCI, isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``[projects] capture`` off, the default (this module's mark turns it on): in a
+    directory nobody added neither hook consults the server or writes a row — the row
+    would be a turn of a project that does not exist. Once it is added, both do."""
+    from aisquare.core.store import store_session
+    from aisquare.core.workspace import current_project
+    from aisquare.services import project as project_service
+
+    monkeypatch.setattr(project_service, "capture_on", lambda: False)
+    assert hooks_service.session_start_context(tmp_path, session_id=SESSION) == ""
+    assert hooks_service.prompt_submitted("one", tmp_path, session_id=SESSION) == ""
+    assert wired.call_count == 0 and wired.descriptor_fetches == 0
+    assert metrics_service.recent(session_id=SESSION) == []
+    with store_session() as store:
+        assert store.list_projects(all=True, include_forgotten=True) == [], "nor a project"
+
+    with store_session() as store:
+        store.onboard_project(current_project(tmp_path))
+    assert RECALL_TOOL in hooks_service.session_start_context(tmp_path, session_id=SESSION)
+    hooks_service.prompt_submitted("two", tmp_path, session_id=SESSION)
+    assert wired.call_count == 1
+    turns = metrics_service.recent(session_id=SESSION)
+    assert len(turns) == 2 and {t.trigger for t in turns} == {"prompt_submit", "session_start"}
 
 
 def test_the_descriptor_is_fetched_once_and_reused(

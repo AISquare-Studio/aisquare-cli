@@ -16,6 +16,7 @@ from aisquare.cli.app import app
 from aisquare.core import paths
 from aisquare.core.store import store_session
 from aisquare.models import ProjectInfo
+from aisquare.services import install_route
 
 
 @pytest.fixture
@@ -206,7 +207,8 @@ def test_a_filter_that_matches_nothing_says_so_not_that_nothing_is_registered(
     assert runner.invoke(app, ["project", "group", "create", "empty set"]).exit_code == 0
     grouped = shown("--group", "empty set")
     assert grouped == (
-        "No projects in group empty set — add one: aisquare project group add 'empty set' <project>"
+        "No projects in group empty set — add one: aisquare project group add "
+        f"{install_route.command_line(['empty set'])} <project>"
     ), grouped
     assert runner.invoke(app, ["project", "group", "create", "site", "web"]).exit_code == 0
     both = shown("--group", "site", "--pinned")

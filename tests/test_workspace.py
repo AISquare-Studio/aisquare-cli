@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import errno
+import os
+import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from aisquare.core import workspace
 from aisquare.core.ids import PROJECT_PREFIX
 from aisquare.core.state_file import StateUnwritableError
 from aisquare.core.store import store_session
@@ -30,6 +35,143 @@ def test_root_is_nearest_marker_ancestor(tmp_path: Path) -> None:
 
 def test_root_falls_back_to_start_without_marker(tmp_path: Path) -> None:
     assert find_project_root(tmp_path) == tmp_path.resolve()
+
+
+@pytest.mark.parametrize("start", ["deleted", "a file"])
+def test_a_start_that_is_not_a_directory_is_its_own_root(tmp_path: Path, start: str) -> None:
+    """Review of #259, round 42, 3/11: a stored root is asked of after its folder is gone, and
+    the walk from it landed on the nearest marked ancestor, a dotfiles ``~/.git`` for a
+    deleted ``~/code/app``, whose board a restart, a pause and the phone then read. A start
+    that is not a directory has no checkout to look up from: neither ``git`` nor the walk."""
+    home = tmp_path / "home"
+    home.mkdir()
+    subprocess.run(["git", "init", "-q", str(home)], check=True, capture_output=True)
+    app = home / "code" / "app"
+    app.parent.mkdir()
+    if start == "a file":
+        app.write_text("", encoding="utf-8")
+
+    assert find_project_root(app) == app.resolve()
+    assert find_project_root(app / "below") == (app / "below").resolve()
+    assert find_project_root(app.parent) == home.resolve(), "a directory still walks"
+
+
+@pytest.mark.skipif(not can_deny_reads(), reason="mode 000 does not stop this user from reading")
+def test_a_start_that_may_not_be_searched_raises_on_every_python(tmp_path: Path) -> None:
+    """Review of #259, round 42, 5/11: whether ``locked`` has a marker cannot be asked, and
+    ``Path.exists`` raised for it up to 3.13 but says False from 3.14, where the walk went
+    on to the marked ancestor and a row of ``locked`` was filed under its board. The markers
+    are stat-ed, and what is not "gone" raises on every Python, the walk's "no evidence"."""
+    home = tmp_path / "home"
+    home.mkdir()
+    subprocess.run(["git", "init", "-q", str(home)], check=True, capture_output=True)
+    locked = home / "code" / "locked"
+    locked.mkdir(parents=True)
+    locked.chmod(0)
+    try:
+        with pytest.raises(PermissionError):
+            find_project_root(locked)
+        assert find_project_root(locked.parent) == home.resolve(), "beside it, the walk"
+    finally:
+        locked.chmod(0o700)
+
+
+class _WindowsLoop(OSError):
+    """What Windows raises for a path through a symlink loop: ``ERROR_CANT_RESOLVE_FILENAME``,
+    with an ``errno`` other than ``ELOOP``."""
+
+    winerror = 1921
+
+
+def test_a_windows_symlink_loop_is_gone_to_every_stat_of_a_root_or_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 43, 6/7: ``_resolved_dir`` knows a Windows loop by its
+    ``winerror``, and ``_GONE`` alone did not. On Windows a looping ``<dir>/.git`` raised out
+    of the walk, which ``Path.exists`` ignored up to 3.13, and a root that became a loop was
+    taken for a directory, which ``prune --missing`` then never offered. Both read it gone."""
+    marked = tmp_path / "marked"
+    marked.mkdir()
+    looped = {marked / ".git", tmp_path / "root"}
+
+    class Loops:
+        """``os`` as the lookup sees it, with Windows' loop for the paths in ``looped``."""
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(os, name)
+
+        def stat(self, path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+            if Path(path) in looped:
+                raise _WindowsLoop(errno.EINVAL, "cannot be resolved by the system", str(path))
+            return os.stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(workspace, "os", Loops())
+
+    assert workspace.marks_project_root(marked) is False
+    assert workspace._is_dir(tmp_path / "root") is False
+
+
+def test_a_path_windows_calls_not_found_below_a_symlink_loop_raises_as_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 43, Windows CI: a path below a loop is ``ELOOP`` to POSIX's
+    ``stat``, and not found to Windows', where ``find_project_root`` took it for a gone root
+    of its own rather than raising, as it does for the loop itself. A start that is gone is
+    asked whether the nearest folder above it that answers is a loop."""
+    loop = tmp_path / "loop"
+    below = loop / "below"
+
+    class Windows:
+        """``os`` as the lookup sees it, with Windows' answers for a loop and a path below."""
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(os, name)
+
+        def stat(self, path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+            if Path(path) == loop:
+                raise _WindowsLoop(errno.EINVAL, "cannot be resolved by the system", str(path))
+            if Path(path) in {below, below / "deeper"}:
+                raise FileNotFoundError(errno.ENOENT, "The system cannot find the path", str(path))
+            return os.stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(workspace, "os", Windows())
+
+    for start in (below, below / "deeper"):
+        with pytest.raises(OSError) as raised:
+            find_project_root(start)
+        assert raised.value.errno == errno.ELOOP, start
+    assert find_project_root(tmp_path / "gone") == (tmp_path / "gone").resolve(), "no loop"
+
+
+def test_a_checkout_is_looked_up_with_one_stat_of_its_start_and_none_of_gits_answers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 42, 9/11: every hook asks ``find_project_root``, which stat-ed its
+    start for a loop and again for a directory, and ``git_common_root`` stat-ed git's common
+    dir and root for a loop, which git cannot answer with: it fails instead. The start is
+    stat-ed once, for both, and git's answers not at all. The lookup's own ``stat`` calls are
+    counted: 3.11's and 3.12's ``Path.resolve`` makes its own, which no change here can
+    spare."""
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    seen: list[Path] = []
+
+    class Counted:
+        """``os`` as the lookup sees it, its ``stat`` calls written down."""
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(os, name)
+
+        def stat(self, path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+            seen.append(Path(path))
+            return os.stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(workspace, "os", Counted())
+    root = find_project_root(repo / "src")
+
+    assert root == repo.resolve()
+    assert seen == [(repo / "src").resolve()]
 
 
 def test_project_id_is_stable_and_path_specific(tmp_path: Path) -> None:

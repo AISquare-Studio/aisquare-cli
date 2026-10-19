@@ -12,8 +12,7 @@ from textual.app import App
 from textual.pilot import Pilot
 from textual.widgets import Button, Select
 
-from aisquare.cli.ui.views.project import ProjectView
-from aisquare.cli.ui.views.settings import SettingsView
+from aisquare.cli.ui.views.app_settings import AppSettingsView
 from aisquare.cli.ui.views.spawn import SpawnScreen
 from aisquare.core import paths
 from aisquare.core.agent_adapters import get_adapter
@@ -21,24 +20,21 @@ from aisquare.core.config import RoleLaunchProfile, load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.models import FleetAgent
 from aisquare.services import fleet
-from tests.test_ui_project import Host, drive
+from tests.test_ui_app_settings import AppHost, drive
 
 
-def test_ui_settings_persist_mixed_agents_and_native_permissions(tmp_path: Path) -> None:
-    project = team_project(tmp_path)
-
-    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
-        host.query_one(ProjectView).active = "tab-settings"
+def test_ui_settings_persist_mixed_agents_and_native_permissions() -> None:
+    async def scenario(pilot: Pilot[None], host: AppHost) -> list[tuple[str, str]]:
         await pilot.pause()
         host.query_one("#default-agent", Select).value = "codex"
-        host.query_one("#family-reviewer", Select).value = "claude-code"
-        host.query_one("#sandbox-coder", Select).value = "workspace-write"
-        host.query_one("#approval-coder", Select).value = "on-request"
+        host.query_one("#role-family-reviewer", Select).value = "claude-code"
+        host.query_one("#role-sandbox-coder", Select).value = "workspace-write"
+        host.query_one("#role-approval-coder", Select).value = "on-request"
         host.query_one("#save-settings", Button).press()
         await pilot.pause()
         return host.notices
 
-    assert any("saved" in message for message, _ in drive(project, scenario))
+    assert any("saved" in message for message, _ in drive(scenario))
     config = load_config()
     assert config.agents.default == "codex"
     assert config.team.profiles["reviewer"].agent == "claude-code"
@@ -52,10 +48,9 @@ def test_settings_render_reload_and_refuse_saving_a_damaged_config(tmp_path: Pat
     broken = '[fleet]\nmax_agents_per_project = "nope"\n'
     config_path.write_text(broken)
 
-    async def scenario(pilot: Pilot[None], host: Host) -> None:
-        host.query_one(ProjectView).active = "tab-settings"
+    async def scenario(pilot: Pilot[None], host: AppHost) -> None:
         await pilot.pause()
-        view = host.query_one(SettingsView)
+        view = host.query_one(AppSettingsView)
         assert "Showing defaults" in view._config_error
         assert view.query_one("#default-agent", Select).value == ""
         view.reload_form()
@@ -68,7 +63,7 @@ def test_settings_render_reload_and_refuse_saving_a_damaged_config(tmp_path: Pat
         assert view._config_error == ""
         assert view.query_one("#default-agent", Select).value == "codex"
 
-    drive(team_project(tmp_path), scenario)
+    drive(scenario)
 
 
 def test_settings_preserve_unknown_choices_on_mount_reload_and_save(tmp_path: Path) -> None:
@@ -79,14 +74,13 @@ def test_settings_preserve_unknown_choices_on_mount_reload_and_save(tmp_path: Pa
     config.fleet.roles["coder"].approval_policy = "future-approval"
     save_config(config)
 
-    async def scenario(pilot: Pilot[None], host: Host) -> None:
-        host.query_one(ProjectView).active = "tab-settings"
+    async def scenario(pilot: Pilot[None], host: AppHost) -> None:
         await pilot.pause()
-        view = host.query_one(SettingsView)
+        view = host.query_one(AppSettingsView)
         assert view.query_one("#default-agent", Select).value == "future-agent"
-        assert view.query_one("#family-coder", Select).value == "future-role-agent"
-        assert view.query_one("#sandbox-coder", Select).value == "future-scope"
-        assert view.query_one("#approval-coder", Select).value == "future-approval"
+        assert view.query_one("#role-family-coder", Select).value == "future-role-agent"
+        assert view.query_one("#role-sandbox-coder", Select).value == "future-scope"
+        assert view.query_one("#role-approval-coder", Select).value == "future-approval"
         config.agents.default = "newer-agent"
         config.team.profiles["coder"].agent = "newer-role-agent"
         config.fleet.roles["coder"].sandbox = "newer-scope"
@@ -102,7 +96,7 @@ def test_settings_preserve_unknown_choices_on_mount_reload_and_save(tmp_path: Pa
         assert saved.fleet.roles["coder"].sandbox == "newer-scope"
         assert saved.fleet.roles["coder"].approval_policy == "newer-approval"
 
-    drive(team_project(tmp_path), scenario)
+    drive(scenario)
 
 
 def test_settings_never_persist_an_uninitialized_selection(
@@ -116,17 +110,16 @@ def test_settings_never_persist_an_uninitialized_selection(
     config.fleet.roles["coder"].permission_mode = "plan"
     save_config(config)
 
-    async def scenario(pilot: Pilot[None], host: Host) -> None:
-        host.query_one(ProjectView).active = "tab-settings"
+    async def scenario(pilot: Pilot[None], host: AppHost) -> None:
         await pilot.pause()
-        view = host.query_one(SettingsView)
+        view = host.query_one(AppSettingsView)
         lookup = view.query_one
         selectors = (
             "#default-agent",
-            "#family-coder",
-            "#sandbox-coder",
-            "#approval-coder",
-            "#perm-coder",
+            "#role-family-coder",
+            "#role-sandbox-coder",
+            "#role-approval-coder",
+            "#role-perm-coder",
         )
         uninitialized = {
             key: Select([("valid", "valid")], value="missing", allow_blank=False)
@@ -155,7 +148,7 @@ def test_settings_never_persist_an_uninitialized_selection(
         assert saved.fleet.roles["coder"].approval_policy == "on-request"
         assert saved.fleet.roles["coder"].permission_mode == "plan"
 
-    drive(team_project(tmp_path), scenario)
+    drive(scenario)
 
 
 def test_spawn_dialog_uses_selected_agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -200,11 +193,10 @@ def test_settings_round_trip_the_empty_native_permission_mode(tmp_path: Path) ->
     config.fleet.roles["coder"].permission_mode = ""
     save_config(config)
 
-    async def scenario(pilot: Pilot[None], host: Host) -> None:
-        host.query_one(ProjectView).active = "tab-settings"
+    async def scenario(pilot: Pilot[None], host: AppHost) -> None:
         await pilot.pause()
-        view = host.query_one(SettingsView)
-        control = view.query_one("#perm-coder", Select)
+        view = host.query_one(AppSettingsView)
+        control = view.query_one("#role-perm-coder", Select)
         assert control.value == "" and control.value is not Select.NULL
         view.query_one("#save-settings", Button).press()
         await pilot.pause()
@@ -215,6 +207,6 @@ def test_settings_round_trip_the_empty_native_permission_mode(tmp_path: Path) ->
         )
         view.reload_form()
         await pilot.pause()
-        assert view.query_one("#perm-coder", Select).value == ""
+        assert view.query_one("#role-perm-coder", Select).value == ""
 
-    drive(team_project(tmp_path), scenario)
+    drive(scenario)

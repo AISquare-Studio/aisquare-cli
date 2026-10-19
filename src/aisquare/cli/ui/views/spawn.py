@@ -12,7 +12,7 @@ the same arguments, so a refusal reads as the command's.
 The controls follow the agent the launch will start: the one picked, else the one
 ``agent_launch.resolve`` gives the role in this project. Only that agent's accounts
 are offered (a launch refuses another agent's), and only its permission controls
-are shown. What the role's settings would pass is under them (``settings.launch_line``).
+are shown. What the role's settings would pass is under them (``app_settings.launch_line``).
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Select, Static
 from textual.worker import Worker, WorkerState
 
-from aisquare.cli.ui.views.settings import (
+from aisquare.cli.ui.views.app_settings import (
     APPROVAL_OPTIONS,
     INTENTS,
     SANDBOX_OPTIONS,

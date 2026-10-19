@@ -48,8 +48,9 @@ from aisquare.core.agent_adapters import recorded_adapter
 from aisquare.core.agent_adapters.types import PermissionIntent
 from aisquare.core.config import FleetRoleSettings, FleetSettings
 from aisquare.core.store import store_session
-from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, TeamSession
+from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, ProjectInfo, TeamSession
 from aisquare.services import explainability as explainability_service
+from aisquare.services import project as project_service
 from aisquare.services import team as team_service
 
 #: The SDK-side report: the proxy's fixed total timeouts on non-streaming
@@ -230,8 +231,9 @@ def auto_roles(config: FleetSettings | None = None) -> list[str]:
     ]
 
 
-def running_in_auto() -> list[str]:
-    """The live fleet agents LAUNCHED in ``auto``, as ``label (project)``.
+def running_in_auto() -> list[tuple[FleetAgent, ProjectInfo]]:
+    """The live fleet agents LAUNCHED in ``auto``, each with its project: the doctor line
+    names them as ``label (project)`` and gives each the restart that names both.
 
     Read off each row's launch spec, which a restart replays (#144), so a role
     moved off ``auto`` in the config does not reach them: the doctor line read
@@ -247,7 +249,7 @@ def running_in_auto() -> list[str]:
     try:
         with store_session() as store:
             return [
-                f"{agent.label} ({project.root.name or project.id})"
+                (agent, project)
                 for project in store.list_projects(include_forgotten=True)
                 for agent in store.fleet_agents(project.id, live_only=True)
                 if agent.launch_spec is not None
@@ -278,13 +280,20 @@ def exposed(baseline: Baseline) -> bool:
 _RESTART_OFF_AUTO = "--permission-mode acceptEdits"
 
 
+def _restart_off_auto(project: ProjectInfo, label: str) -> str:
+    """``fleet restart`` of the agent ``label`` with :data:`_RESTART_OFF_AUTO`, naming its
+    ``project``: alone, it restarted the active project's (review of #259, round 21)."""
+    return project_service.fleet_command("restart", project, label, *_RESTART_OFF_AUTO.split())
+
+
 def _mode_step(role: str, config: FleetSettings) -> str:
     """The step that takes ``role`` off ``auto`` — one that works on THIS config.
 
-    ``aisquare config set`` only writes a key the loaded config already has,
-    and a config file with its own ``[fleet.roles]`` holds only the roles it
-    lists; the others run on the built-in ``auto`` with no table to set. For
-    those the step is the table itself, because the command would answer
+    ``aisquare config set`` only writes a key the loaded config already has.
+    The fleet's own roles always have one (the system defaults are laid under
+    the file), but a role outside them — a harness role spawned into the fleet
+    — has no table unless the file adds one, and runs on the built-in ``auto``.
+    For those the step is the table itself, because the command would answer
     "unknown config key" — named as a header and a key, never as one line:
     TOML ends a table header at its line, so ``[fleet.roles.x] permission_mode
     = …`` pasted as printed does not parse, and a config that does not parse
@@ -305,21 +314,25 @@ def _mode_step(role: str, config: FleetSettings) -> str:
     )
 
 
-def _remedy(roles: list[str], config: FleetSettings) -> str:
-    restart = f"aisquare fleet restart <label> {_RESTART_OFF_AUTO}"
+def _remedy(
+    roles: list[str], config: FleetSettings, running: list[tuple[FleetAgent, ProjectInfo]]
+) -> str:
+    """The doctor line's fix. ``running`` are the agents launched in ``auto``, each restarted
+    by a command of its own, naming its project and label."""
+    restarts = "; ".join(_restart_off_auto(project, agent.label) for agent, project in running)
     if roles:
         # The example names a role `config set` can reach, when one of them is.
         settable = [candidate for candidate in roles if candidate in config.roles]
         role = (settable or roles)[0]
+        running_too = f"; the running agents: {restarts}" if restarts else ""
         mode = (
             f"a non-classifier mode for the fleet roles — {_mode_step(role, config)} (per "
-            f"spawn: aisquare fleet spawn <role> --permission-mode acceptEdits; a running "
-            f"agent: {restart})"
+            f"spawn: `fleet spawn`'s {_RESTART_OFF_AUTO}{running_too})"
         )
     else:
         # Every role is off `auto` already; what is left are agents launched in it,
         # which no role's config reaches (#144).
-        mode = f"a non-classifier mode for the agents launched in auto — {restart}"
+        mode = f"a non-classifier mode for the agents launched in auto — {restarts}"
     return (
         f"Until the proxy fix ({SDK_ISSUE_URL}), one of: {mode}; a lighter Claude config dir "
         "for the fleet's account (fewer MCP connectors — their schemas are most of the "
@@ -356,7 +369,8 @@ def doctor_check() -> DoctorCheck | None:
         roles = auto_roles(fleet)
     except Exception:  # a config that will not load is the config line's report
         return None
-    running = running_in_auto()
+    rows = running_in_auto()
+    running = [f"{agent.label} ({project.root.name or project.id})" for agent, project in rows]
     if not roles and not running:
         return None
     baseline = measure_baseline()
@@ -374,7 +388,7 @@ def doctor_check() -> DoctorCheck | None:
             f"{baseline.describe()} ({SDK_ISSUE})"
         )
         return DoctorCheck(
-            name=CHECK_NAME, status=CheckStatus.warn, detail=detail, fix=_remedy(roles, fleet)
+            name=CHECK_NAME, status=CheckStatus.warn, detail=detail, fix=_remedy(roles, fleet, rows)
         )
     if baseline.predicted is None:
         detail = (
@@ -383,7 +397,7 @@ def doctor_check() -> DoctorCheck | None:
             f"been measured to fail the classifier's non-streaming request ({SDK_ISSUE})"
         )
         return DoctorCheck(
-            name=CHECK_NAME, status=CheckStatus.warn, detail=detail, fix=_remedy(roles, fleet)
+            name=CHECK_NAME, status=CheckStatus.warn, detail=detail, fix=_remedy(roles, fleet, rows)
         )
     if baseline.predicted >= REFUSED_ABOVE_TOKENS:
         detail = (
@@ -393,7 +407,7 @@ def doctor_check() -> DoctorCheck | None:
             f"request, so tool calls are refused from the first one ({SDK_ISSUE})"
         )
         return DoctorCheck(
-            name=CHECK_NAME, status=CheckStatus.warn, detail=detail, fix=_remedy(roles, fleet)
+            name=CHECK_NAME, status=CheckStatus.warn, detail=detail, fix=_remedy(roles, fleet, rows)
         )
     detail = (
         f"{who} in auto mode behind the explainability proxy; session baseline "
@@ -428,7 +442,12 @@ def spawn_evidence(mode: str | None) -> Baseline | None:
 
 
 def spawn_note(
-    baseline: Baseline | None, *, role: str, label: str, config: FleetSettings
+    baseline: Baseline | None,
+    *,
+    role: str,
+    label: str,
+    config: FleetSettings,
+    project: ProjectInfo,
 ) -> str | None:
     """A receipt note for a spawn in ``auto`` mode that the evidence says will be refused.
 
@@ -469,7 +488,7 @@ def spawn_note(
     return (
         f"auto mode behind the explainability proxy: {why} — expect its tool calls to be refused "
         f"({SDK_ISSUE}); set a non-classifier mode for {role} ({_mode_step(role, config)}) and "
-        f"`aisquare fleet restart {label} {_RESTART_OFF_AUTO}` (its session resumes), or see "
+        f"`{_restart_off_auto(project, label)}` (its session resumes), or see "
         f"`aisquare doctor` ({CHECK_NAME})"
     )
 
@@ -532,7 +551,7 @@ def record_refusals(session_id: str) -> int:
             count = transcripts.refusal_count(transcript, since=since or 0)
             if count < REFUSAL_THRESHOLD or (recorded is not None and since is None):
                 return count
-            agent = store.fleet_agent_for_session(session.project_id, session.id)
+            agent = store.fleet_agent_for_session(session.id)
             if _handing_over(session, agent) or not store.replace_session_state(
                 session.id, session.state, "attention"
             ):
@@ -543,10 +562,13 @@ def record_refusals(session_id: str) -> int:
                 return count
             label = agent.label if agent is not None else (session.label or session.id[:8])
             step = None
-            if agent is not None:
+            # The row's own project: under a hub the session's is the hub's board, and the
+            # restart named there found no agent (review of #259, round 23).
+            project = store.get_project(agent.project_id) if agent is not None else None
+            if agent is not None and project is not None:
                 from aisquare.services import fleet as fleet_service  # lazy: fleet imports us
 
-                step = _mode_step(agent.role, fleet_service.settings())
+                step = (_mode_step(agent.role, fleet_service.settings()), project)
             store.set_meta(key, datetime.now(tz=UTC).isoformat())
             team_service._emit(
                 store,
@@ -593,16 +615,18 @@ def _counted_from(recorded: str | None) -> int | None:
         return None
 
 
-def _blocked_text(label: str, count: int, *, step: str | None) -> str:
-    """The board line; ``step`` is a fleet agent's way off ``auto``, ``None`` for any other row."""
+def _blocked_text(label: str, count: int, *, step: tuple[str, ProjectInfo] | None) -> str:
+    """The board line; ``step`` is a fleet agent's way off ``auto`` and its project, which the
+    restart names, ``None`` for any other row."""
     head = (
         f"{label}: auto mode is refusing its tool calls behind the explainability proxy "
         f"({count} refusals: 'cannot determine the safety of Bash') — the classifier's "
         f"non-streaming request fails at this session's size ({SDK_ISSUE})"
     )
     if step is not None:
+        mode, project = step
         return (
-            head + f" · set a non-classifier mode ({step}) and `aisquare fleet restart {label} "
-            f"{_RESTART_OFF_AUTO}` (its session resumes), or run it untraced"
+            head + f" · set a non-classifier mode ({mode}) and "
+            f"`{_restart_off_auto(project, label)}` (its session resumes), or run it untraced"
         )
     return head + " · restart it with --permission-mode acceptEdits, or untraced"

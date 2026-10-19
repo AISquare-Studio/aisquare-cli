@@ -207,7 +207,7 @@ def test_real_claude_code_keeps_its_folder_trust_dialog_and_gets_the_spawn_promp
         thread.join(timeout=30)
         assert not failed, failed
         [receipt] = spawned
-        assert receipt.prompt_typed is True, receipt.notes
+        assert receipt.prompt_typed == "yes", receipt.notes
         native.until(lambda: prompt in prompts(), 20, "the prompt as its first message", pane)
         assert prompts().count(prompt) == 1, "once, whole"
         facts = native.srv.pane_facts(pane)
@@ -245,7 +245,7 @@ def test_real_claude_code_whose_start_the_board_cannot_see_gets_the_prompt_past_
         thread.join(timeout=30)
         assert not failed, failed
         [receipt] = spawned
-        assert receipt.prompt_typed is True, receipt.notes
+        assert receipt.prompt_typed == "yes", receipt.notes
         native.until(lambda: "hello from the spawn" in screen(pane), 20, "the prompt", pane)
         facts = native.srv.pane_facts(pane)
         assert facts is not None and not facts.dead

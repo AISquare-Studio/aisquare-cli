@@ -89,6 +89,11 @@ def _plan_json(plan: lifecycle_service.UpgradePlan) -> dict[str, Any]:
         "hooks_left": [_site_json(site) for site in plan.left],
         "live_agents": list(plan.live_agents),
         "fleet_error": plan.fleet_error,
+        "remote": plan.remote,
+        # The roles a move back ignores the file-bound variables of, each with its keys.
+        "env_files_dropped": list(plan.env_files_dropped),
+        # The settings a move back reads from that release's defaults, not this one's.
+        "config_defaults_lost": list(plan.config_defaults_lost),
     }
 
 
@@ -208,11 +213,19 @@ def _emit_plan(plan: lifecycle_service.UpgradePlan) -> None:
 
 
 def _fleet_lines(plan: lifecycle_service.UpgradePlan) -> None:
-    """The live fleet, said before anything is installed: in the plan, and under --yes."""
+    """The live fleet, a Remote on elsewhere, the role bindings a move back ignores and what
+    it reads otherwise in config.toml, said before anything is installed: in the plan, and
+    under --yes."""
     if plan.fleet_warning is not None:
         _say(f"⚠ {plan.fleet_warning}")
     elif plan.fleet_error is not None:
         _say(f"⚠ the fleet's agents could not be counted ({plan.fleet_error}); make sure none run")
+    if plan.remote_warning is not None:
+        _say(f"⚠ {plan.remote_warning}")
+    if plan.env_files_warning is not None:
+        _say(f"⚠ {plan.env_files_warning}")
+    if plan.config_warning is not None:
+        _say(f"⚠ {plan.config_warning}")
 
 
 def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
@@ -243,6 +256,9 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
                 ],
                 "hooks_left": [_site_json(site) for site in plan.left],
                 "live_agents": list(plan.live_agents),
+                "remote": plan.remote,
+                "env_files_dropped": list(plan.env_files_dropped),
+                "config_defaults_lost": list(plan.config_defaults_lost),
                 "notes": list(report.notes),
             }
         )
@@ -421,9 +437,10 @@ def upgrade(
             _say("dry run: nothing installed — re-run with --yes to upgrade")
             return
         running = len(plan.live_agents)
-        during = (
-            f" while {running} fleet agent{'s run' if running != 1 else ' runs'}" if running else ""
-        )
+        busy = [f"{running} fleet agent{'s run' if running != 1 else ' runs'}"] if running else []
+        if plan.remote is not None:
+            busy.append("Remote is on")
+        during = f" while {' and '.join(busy)}" if busy else ""
         move = (
             f"Move aisquare {plan.current} back to {plan.destination}"
             if plan.backwards
@@ -550,6 +567,7 @@ def _uninstall_plan_json(plan: lifecycle_service.UninstallPlan) -> dict[str, Any
         "live_agents": list(plan.live_agents),
         "unlistened": plan.unlistened,
         "fleet_error": plan.fleet_error,
+        "remote": plan.remote,
         "refusal": None if refusal is None else {"error": refusal.error, "message": str(refusal)},
     }
 

@@ -13,6 +13,8 @@ without any command or hook ever waiting on gbrain.
 
 from __future__ import annotations
 
+import logging
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -20,6 +22,8 @@ from pathlib import Path
 from aisquare.core import brain, orchestrator, selfcli, spawn
 from aisquare.core.store import ContextStore, store_session
 from aisquare.models import TeamEvent
+
+_log = logging.getLogger(__name__)
 
 # Deliberate team communication and task outcomes distill; presence churn,
 # focus flickers and permission notices do not.
@@ -48,8 +52,9 @@ def pending(store: ContextStore, project_id: str) -> int:
     return max(0, store.latest_seq(project_id) - watermark)
 
 
-def drain(cwd: Path | None = None, *, rescan: bool = False) -> int | None:
-    """Distill everything new on this project's pipe; returns pages written.
+def drain(cwd: Path | None = None, *, rescan: bool = False, board: str | None = None) -> int | None:
+    """Distill everything new on this project's pipe, or ``board``'s, named outright; returns
+    pages written.
 
     ``rescan`` restarts from the beginning of the pipe (a backfill — safe,
     since page slugs are event ids, so re-distilling updates in place).
@@ -60,47 +65,67 @@ def drain(cwd: Path | None = None, *, rescan: bool = False) -> int | None:
     """
     if not brain.brain_enabled() or brain.gbrain_version() is None:
         return 0
-    project = orchestrator.team_project(cwd)
+    project_id = board if board is not None else orchestrator.team_project(cwd).id
     written = 0
-    with brain.drain_lock(project.id) as won:
+    with brain.drain_lock(project_id) as won:
         if not won:
             return None
         with store_session() as store:
             if rescan:
-                store.set_meta(_watermark_key(project.id), "0")
-            roles = {s.id: s.role for s in store.team_sessions(project.id)}
+                store.set_meta(_watermark_key(project_id), "0")
+            roles = {s.id: s.role for s in store.team_sessions(project_id)}
             while True:
-                watermark = int(store.get_meta(_watermark_key(project.id)) or 0)
-                events = store.events_since(project.id, watermark, limit=_BATCH)
+                watermark = int(store.get_meta(_watermark_key(project_id)) or 0)
+                events = store.events_since(project_id, watermark, limit=_BATCH)
                 if not events:
                     return written
                 for event in events:
                     if event.kind in DISTILL_KINDS:
                         page = _compose(event, roles.get(event.session_id or ""))
-                        if not brain.distill_page(project.id, _slug(event), page):
+                        if not brain.distill_page(project_id, _slug(event), page):
                             return written  # watermark holds; retry next drain
                         written += 1
-                    store.set_meta(_watermark_key(project.id), str(event.seq))
+                    store.set_meta(_watermark_key(project_id), str(event.seq))
                 if len(events) < _BATCH:
                     return written
 
 
-def spawn_drain(cwd: Path | None = None, *, root: Path | None = None) -> None:
+def spawn_drain(
+    cwd: Path | None = None, *, root: Path | None = None, board: str | None = None
+) -> None:
     """Kick off a detached drain; returns immediately, never raises.
 
     This runs on durable-mutation hot paths, so it must not shell out:
     the gbrain gate is a PATH lookup (the worker re-verifies the version),
     and callers pass the already-resolved project ``root`` to spare a
     ``git rev-parse`` subprocess.
+
+    ``board``, the board the write went to, is handed to the worker
+    (``team distill --board``), which drains it whatever its directory and
+    environment resolve: ``root`` is only its working directory, the board's
+    where it has one. Left to work it out again, the worker under the caller's
+    ``AISQUARE_TEAM_HUB`` drained the hub's board, and with none the checkout's
+    of ``root``, which is not a hub's rooted in a sub-folder or a worktree: a
+    note ``fleet tell`` or the phone filed on another board than the caller's
+    was distilled from the wrong pipe (review of #259, round 33, 5/10).
+
+    Told its board, the worker's directory names nothing, and one gone from disk (a hub
+    folder cleaned up, a root moved while its row stays) is not used: ``Popen`` refused it
+    with ``FileNotFoundError``, the drain was dropped without a word, and that board's
+    notes and results were never distilled (round 37, 3/7). It runs where this process
+    does then, and a worker that cannot be started at all is logged.
     """
     if not brain.brain_enabled() or shutil.which("gbrain") is None:
         return
-    if root is None:
+    if root is None and board is None:
         root = orchestrator.team_project(cwd).root
+    if board is not None and root is not None and not os.path.isdir(root):
+        root = None
+    named = [] if board is None else ["--board", board]
     try:
         subprocess.Popen(
-            selfcli.isolated_argv_for(["--quiet", "team", "distill"]),
-            cwd=str(root),
+            selfcli.isolated_argv_for(["--quiet", "team", "distill", *named]),
+            cwd=None if root is None else str(root),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
@@ -111,8 +136,11 @@ def spawn_drain(cwd: Path | None = None, *, root: Path | None = None) -> None:
             # attach its gbrain work to a Run that may already have ended.
             env=spawn.untraced_env(),
         )
-    except OSError:
-        return
+    except OSError as exc:
+        again = "aisquare team distill" + ("" if board is None else f" --board {board}")
+        _log.warning(
+            "the board's distill drain could not be started (%s); `%s` runs it", exc, again
+        )
 
 
 def _slug(event: TeamEvent) -> str:

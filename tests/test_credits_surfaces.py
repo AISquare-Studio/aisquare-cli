@@ -19,7 +19,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli import auth as auth_cli
 from aisquare.cli.app import app
-from aisquare.cli.ui.sidebar import DoctorSection
+from aisquare.cli.ui.sidebar import SettingsRow
 from aisquare.cli.ui.views.accounts import credits_text
 from aisquare.core.config import load_config
 from aisquare.core.store import store_session
@@ -515,7 +515,7 @@ def test_another_sign_in_while_the_page_is_hidden_never_shows_the_last_ones_bars
         view.refresh_readings()  # the minute tick: a reading for the first session goes out
         try:
             assert await asyncio.to_thread(asked.wait, 5), "the tick asked for the credits"
-            await pilot.click(app_.query_one(DoctorSection))
+            await pilot.click(app_.query_one(SettingsRow))  # away from the page: the hub
             await pilot.pause()
             assert app_.current_view() is not view
             current["session"] = other  # `aisquare login` as someone else, in another terminal

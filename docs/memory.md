@@ -43,6 +43,11 @@ aisquare why                       # explain the last injection
 aisquare log                       # your captured prompt history, per project
 ```
 
+Prompts are recorded only in a project you added (`aisquare project onboard`,
+`init`, Welcome or `+` in `asq`, a fleet spawn): a hooked session anywhere else
+keeps nothing. `[projects] capture = true` records them in every directory, as
+0.8.0 did ([fleet](fleet.md#naming)).
+
 The **active project** is whichever repo contains your working directory, or
 the one you pin with `aisquare project switch <name>`. Everything —
 context, snapshots, prompt history, team state — scopes to it consistently.
@@ -60,7 +65,12 @@ the root is registered again; `--purge` deletes them and the snapshot too), and
 `aisquare project prune` sweeps the stale ones: roots that no longer exist, and
 worktrees of a repository that is itself registered. It shows the plan and asks
 before dropping anything; off a terminal it is a dry run unless `--yes`. Both
-refuse a project that has live fleet agents.
+refuse a project that has live fleet agents (`prune` keeps it and says so), and
+a hub whose board another project's fleet agents read: running ones, and stopped
+ones a restart would start under it again. `forget` names them, and what frees
+it. A `prune` that drops the reading project too, its agents all stopped, drops
+the hub with it: every hold is decided before anything goes, so the plan and
+the sweep agree.
 
 ```sh
 aisquare project forget ../old-checkout       # one registration; --purge deletes its history too

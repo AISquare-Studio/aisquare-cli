@@ -7,7 +7,7 @@ this file holds their Codex counterparts and the control beside each: a Codex
 slot never reaches a Claude row, and no Codex row ever sends a request — its
 usage is the newest ``token_count`` its own sessions recorded.
 
-Every test runs in a redirected home (``fake_home`` from the sibling file): the
+Every test runs in a redirected home (``fake_home`` from tests/conftest.py): the
 Codex homes below are slots under the test's own ``AISQUARE_HOME``, written
 with a synthetic ``auth.json`` (an unsigned id token carrying claims only) and a
 synthetic rollout. Nothing reads the developer's ``~/.codex``.
@@ -32,10 +32,8 @@ from aisquare.services import claude_accounts as service
 from aisquare.services import diagnostics
 from aisquare.services import settings as settings_service
 from tests.test_claude_accounts import _sign_in
-from tests.test_claude_accounts import fake_home as _redirected_home
 
-#: The sibling file's redirected home, re-exported so pytest collects it here too.
-fake_home = _redirected_home
+# `fake_home`, the redirected home, is tests/conftest.py's since 0.8.1.
 
 CODEX = "codex"
 
@@ -210,7 +208,7 @@ def test_codex_headroom_is_read_offline_on_a_plain_doctor_run(
 
     assert check is not None and check.name == "codex-account-headroom"
     assert check.status.value == "ok"
-    assert f"account {weekly.slot} week 30%" in check.detail
+    assert f"account {weekly.slot} week 30% used (70% left)" in check.detail
     assert f"account {both.slot} 95%" in check.detail
     names = {c.name for c in diagnostics.doctor()}
     assert "codex-account-headroom" in names
@@ -352,7 +350,9 @@ def test_a_limited_codex_agent_is_named_on_a_codex_row_not_the_claude_one(
     limits = checks["codex-account-limits"]
     assert limits.status.value == "warn"
     assert "parked on a Codex usage limit" in limits.detail and "coder-codex" in limits.detail
-    assert limits.fix is not None and "aisquare fleet switch <label>" in limits.fix
+    # The command for the row, as the Claude row names its own (0.8.1: `fleet_command`).
+    assert limits.fix is not None and "aisquare fleet switch --project" in limits.fix
+    assert "coder-codex" in limits.fix
     assert "claude-account-limits" not in {c.name for c in diagnostics._claude_accounts_checks()}
 
     _limited(work, "sess-claude", "coder-claude", None)  # a row that names no agent is Claude's

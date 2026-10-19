@@ -36,6 +36,7 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
+from tests.projects import add_project
 
 
 @pytest.fixture(autouse=True)
@@ -43,6 +44,7 @@ def work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     work = tmp_path / "repo"
     work.mkdir()
     monkeypatch.chdir(work)
+    add_project(work)
     return work
 
 

@@ -30,10 +30,11 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import sys
 import threading
 import time
 from collections import Counter
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -41,12 +42,15 @@ from typing import Any, ClassVar
 
 from rich.text import Text
 from textual import events
-from textual.app import ComposeResult
+from textual.app import ComposeResult, SystemCommand
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, VerticalScroll
 from textual.css.query import NoMatches
 from textual.dom import DOMNode
-from textual.screen import ModalScreen
+from textual.geometry import Region
+from textual.message import Message
+from textual.notifications import SeverityLevel
+from textual.screen import ModalScreen, Screen
 from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Footer, Static
@@ -54,6 +58,7 @@ from textual.worker import Worker, WorkerState, WorkType
 from textual.worker_manager import WorkerManager
 
 from aisquare.cli.ui.autosave import Autosave
+from aisquare.cli.ui.board import BoardPanel, board_help
 from aisquare.cli.ui.divider import Divider, floor_of
 from aisquare.cli.ui.groups import (
     DropGroup,
@@ -65,56 +70,88 @@ from aisquare.cli.ui.groups import (
     TogglePin,
     UndoLayout,
 )
+from aisquare.cli.ui.project_menu import PIN, REMOVE, RENAME, SETTINGS, ConfirmRemove, ProjectMenu
+from aisquare.cli.ui.remote_control import SWITCHES, RemoteController, ngrok_ends_with
 from aisquare.cli.ui.sidebar import (
+    HEADROOM_DOT,
+    RED,
+    SETTINGS_KEY,
+    TIMES,
     AccountsSelected,
     AddProject,
     AgentSelected,
+    AppSettingsSelected,
     DoctorSelected,
+    OpenProjectMenu,
+    ProjectCard,
+    ProjectRenamed,
     ProjectSelected,
+    RenameProject,
     ResizeSidebar,
+    SettingsRow,
+    SettingsSelected,
     Sidebar,
     SpawnAgent,
-    accounts_summary_text,
 )
 from aisquare.cli.ui.terminal import EscapeToSidebar, SelectionHost, TerminalPane
 from aisquare.cli.ui.theme import ThemePicker, restore_theme, theme_autosave
-from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, read_session, summarise
+from aisquare.cli.ui.ticks import while_running
+from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, UsageRead, read_session
 from aisquare.cli.ui.views.agent import AgentRestarted, AgentView
+from aisquare.cli.ui.views.app_settings import AppSettingsView
 from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
 from aisquare.cli.ui.views.onboard import OnboardFailed, OnboardView, ProjectOnboarded
 from aisquare.cli.ui.views.project import ProjectView
+from aisquare.cli.ui.views.remote import RemotePanel
+from aisquare.cli.ui.views.settings_hub import SettingsHubView
 from aisquare.cli.ui.views.welcome import WelcomeView
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, store_session
 from aisquare.models import (
     AccountsOverview,
     CheckStatus,
+    ClaudeAccount,
     DoctorCheck,
     FleetAgentStatus,
+    HeadroomSummary,
+    ProjectForgetReport,
     ProjectInfo,
 )
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import diagnostics, project_groups
 from aisquare.services import fleet as fleet_service
+from aisquare.services import project as project_service
 
 DoctorRunner = Callable[[], list[DoctorCheck]]
-"""What the Doctor section runs: ``diagnostics.doctor`` in production, a stub in tests."""
+"""What the Doctor page runs: ``diagnostics.doctor`` in production, a stub in tests."""
 
 AccountsReader = Callable[[], AccountsOverview]
-"""What the Accounts section reads: ``claude_accounts.overview`` in production, a stub in tests."""
+"""What the Accounts page reads: ``claude_accounts.overview`` in production, a stub in tests."""
+
+HeadroomReader = Callable[[Sequence[ClaudeAccount] | None], HeadroomSummary]
+"""What the status line's Claude dot reads: ``claude_accounts.read_fleet_headroom`` (through
+the five-minute usage cache) in production, a stub in tests."""
 
 _DoctorReport = tuple[Path | None, list[DoctorCheck]]
 """What the doctor worker hands back: the scope it ran for, and its checks."""
 
 _DOCTOR_WORKER = "doctor"
 ACCOUNTS_WORKER = "shell-accounts"
-"""The thread worker that reads the Accounts section's frame (``FleetApp.refresh_accounts``)."""
+"""The thread worker that reads the accounts' frame (``FleetApp.refresh_accounts``)."""
+HEADROOM_WORKER = "sidebar-headroom"
+"""The thread worker that reads the status line's headroom (``FleetApp.refresh_headroom``)."""
+HEADROOM_SECONDS = 60.0
+"""How often the status line's headroom is re-read — never on the two-second tick. A read
+goes to the network only for an account whose cached usage is over five minutes old."""
+PROJECT_REMOVE_WORKER = "project-remove"
+"""The thread worker a card's *Remove from fleet…* forgets its project on (``project forget``)."""
 _QUIT_POLL = 0.1
 """Seconds between the looks a hand-over takes at the reads it waits out (``_exit_when_read``)."""
 _HAND_OFF_PATIENCE = 10.0
 """Seconds a hand-over waits for the reads running before it names them and can be called off."""
-_CHECK_SYMBOL = {CheckStatus.ok: "✓", CheckStatus.warn: "⚠", CheckStatus.fail: "✗"}
-_CHECK_STYLE = {CheckStatus.ok: "green", CheckStatus.warn: "yellow", CheckStatus.fail: "bold red"}
+_hand_off_clock: Callable[[], float] = time.monotonic
+"""What a hand-over's wait is timed by: the injection point a test's own clock takes, so the
+seconds its toast names are the test's, not a runner's (a slow one said 1 s for 0)."""
 
 SIDEBAR_WIDTH_KEY = "sidebar_width"
 """The ``state.json`` key the navigator's width is remembered under (#137) — beside
@@ -140,8 +177,8 @@ UNDO_DEPTH = 50
 """How many layout gestures ``u`` can walk back in one session (#140)."""
 
 SELECTED_KEY = "fleet.selected"
-"""``ui_state`` key for what is open: ``project:<id>``, ``agent:<project>/<id>``,
-``accounts`` or ``doctor:<project or ''>`` (#144)."""
+"""``ui_state`` key for what is open: ``project:<id>``, ``agent:<project>/<id>``, ``settings``
+(the hub), ``app-settings``, ``accounts`` or ``doctor:<project or ''>`` (#144)."""
 SHOW_CAPTURED_KEY = "fleet.show_captured"
 
 
@@ -182,29 +219,46 @@ class FleetSnapshot:
         return next((s for s in self.agents.get(project_id, []) if s.agent.id == agent_id), None)
 
 
+class RemoteNews(Message):
+    """What the Remote controller says the human should hear (``RemoteController.on_news``),
+    posted from whichever thread learned it: ``post_message`` is safe from any thread.
+    ``done``: what a control's write did (``RemoteController.on_done``), said in any case."""
+
+    def __init__(self, text: str, trouble: bool, *, done: bool = False) -> None:
+        super().__init__()
+        self.text = text
+        self.trouble = trouble
+        self.done = done
+
+
 class HelpScreen(ModalScreen[None]):
-    """The keys, in one place. Esc, q or ? closes."""
+    """The keys, in one place. Esc, q or ? closes; opened from the board, it shows the
+    Board section first — the icon legend sat ~45 lines down, below the fold."""
 
     CSS = """
     HelpScreen { align: center middle; }
-    #helpbox { width: 64; height: auto; border: heavy $accent; background: $surface;
-               padding: 1 2; }
+    #helpbox { width: 78; height: auto; max-height: 90%; border: heavy $accent;
+               background: $surface; padding: 1 2; }
+    #helpbox Static { height: auto; }
     """
     BINDINGS: ClassVar = [
         ("escape", "close_help", "close"),
         ("q", "close_help", "close"),
         ("question_mark", "close_help", "close"),
     ]
+    BOARD_HEADING: ClassVar[str] = "Board (a project's Board tab, and aisquare board -w)"
 
-    def __init__(self, escape_key: str) -> None:
+    def __init__(self, escape_key: str, *, at_board: bool = False, capturing: bool = False) -> None:
         super().__init__()
         self.escape_key = escape_key
+        self.at_board = at_board
+        self.capturing = capturing
 
     def compose(self) -> ComposeResult:
         text = Text()
         text.append("aisquare fleet — keys\n\n", style="bold")
         for key, what in (
-            ("click", "select a project, an agent, Accounts, Doctor; + onboards a project"),
+            ("click", "select a project or an agent; ⚙ Settings; + onboards a project"),
             ("↑ ↓ Enter", "move over the sidebar and open the row under the cursor"),
             # Arranging the sidebar (#140): every one of these has a CLI twin.
             ("shift+↑ ↓", "move the row under the cursor one place"),
@@ -213,23 +267,83 @@ class HelpScreen(ModalScreen[None]):
             ("m", "mark the card under the cursor, as shift+click does"),
             ("shift+g", "group the marked cards; Esc clears the marks"),
             ("drag title", "move a card or a group header to a new place"),
+            ("F2 dblclick", "rename the card in place: Enter or a click away saves, Esc cancels"),
+            (". ⋯ r-click", "the card's menu: rename, pin, settings, remove from the fleet"),
             (self.escape_key.upper(), "hand focus from an agent's pane back to the sidebar"),
             ("wheel", "scroll an agent pane; shift/alt+PgUp/PgDn too, shift+Home/End"),
             ("drag", "select text in a pane (double-click: a word) — copied on release"),
             ("divider", "drag the line beside the sidebar to resize it; double-click puts it back"),
             ("> < =", "from the sidebar: widen, narrow, reset the divider"),
             ("t", "themes (applied live, autosaved)"),
+            ("R", "remote control — the fleet on your phone: link, QR, password, devices"),
             ("r", "refresh now"),
-            ("a", "show or hide the captured directories (never added)"),
+            # Only while `[projects] capture` is on: off, nothing is captured to show.
+            *(
+                [("a", "show or hide the captured directories (never added)")]
+                if self.capturing
+                else []
+            ),
             ("+  w", "onboard a project · back to the Welcome page"),
             ("F1", "command palette"),
             ("q", "quit — from the sidebar; inside a pane every key goes to the agent"),
+            ("?", "this help — from anywhere but an agent's pane"),
         ):
             text.append(f"  {key:<11}", style="bold cyan")
             text.append(f" {what}\n")
+        text.append(f"\n{self.BOARD_HEADING}\n", style="bold")
+        text.append_text(board_help())
+        text.append("\nAccounts (⚙ Settings ▸ Accounts)\n", style="bold")
+        text.append(f"  {'F2 dblclick':<11}", style="bold cyan")
+        text.append(" rename an account in place; Enter on its row does too\n")
+        text.append("\nBeside ⚙ Settings\n", style="bold")
+        text.append(f"  {'✗ 1  ⚠ 2':<11}", style="bold cyan")
+        text.append(" what the doctor's last run found; its page has the report\n")
+        text.append("\nThe line under ⚙ Settings", style="bold")
+        text.append(" (a click on it opens Accounts)\n", style="dim")
+        text.append("  ● aisquare", style="bold cyan")
+        text.append("  green signed in · red signed out · grey not known\n")
+        text.append("  ● 3", style="bold cyan")
+        text.append(f"{TIMES} claude", style="bold cyan")
+        text.append("  usable Claude accounts; the dot is the room LEFT across them:\n")
+        text.append("     each account 100 - max(session % used, week % used), averaged —\n")
+        text.append("     ")
+        # The line's own dots, so the legend paints exactly what the line does.
+        for level, what in (
+            ("good", "over 50 %"),
+            ("fair", "25-50 %"),
+            ("low", "5-25 %"),
+            ("critical", "under 5 %"),
+        ):
+            dot, colour = HEADROOM_DOT[level]
+            text.append(dot, style=colour)
+            text.append(f" {what}  ")
+        text.append("💀 none left  ")
+        dot, colour = HEADROOM_DOT["unknown"]
+        text.append(dot, style=colour)
+        text.append(" usage could not be read (offline, a locked Keychain, nothing usable)\n")
+        text.append("     ")
+        text.append("●", style=RED)
+        text.append(" and ⚠ — accounts that need a login (signed out, token expired or refused);\n")
+        text.append("     the dot is red when every enabled account needs one\n")
         text.append("\nEsc closes this", style="dim")
-        with Vertical(id="helpbox"):
+        with VerticalScroll(id="helpbox"):
             yield Static(text)
+
+    def on_mount(self) -> None:
+        if self.at_board:
+            # Once laid out: until then the box has nothing to scroll.
+            self.call_after_refresh(self._show_the_board)
+
+    def _show_the_board(self) -> None:
+        """Scroll the Board heading to the top. It is found among the lines as laid out:
+        keys above it wrap at the box's width, and its line in the text was rows short."""
+        box = self.query_one("#helpbox", VerticalScroll)
+        keys = box.query_one(Static)
+        lines = keys.render_lines(Region(0, 0, keys.size.width, keys.size.height))
+        row = next(
+            (y for y, line in enumerate(lines) if line.text.startswith(self.BOARD_HEADING)), 0
+        )
+        box.scroll_to(y=row, animate=False)
 
     def action_close_help(self) -> None:
         self.dismiss(None)
@@ -442,7 +556,7 @@ class _WorkerThreads(WorkerManager):
 
         return counted
 
-    def running(self) -> set[str]:
+    def still_running(self) -> set[str]:
         """The names of the thread workers a quit would cut off: still to start, running, or
         cancelled with their callable still running."""
         with self._lock:
@@ -491,6 +605,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         Binding("q", "quit", "quit"),
         Binding("ctrl+q", "quit", "quit", show=False),
         Binding("t", "pick_theme", "theme"),
+        # Off the footer, which must fit 80 columns; the ? screen and the palette list it.
+        Binding("R", "remote_panel", "remote", show=False),
         Binding("r", "refresh_now", "refresh"),
         Binding("a", "toggle_captured", "captured", show=False),
         Binding("plus", "add_project", "add project", show=False, key_display="+"),
@@ -501,8 +617,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         {
             "quit",
             "pick_theme",
+            "remote_panel",
             "refresh_now",
-            "help",
             "command_palette",
             "change_theme",
             "toggle_captured",
@@ -519,15 +635,30 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         doctor: DoctorRunner | None = diagnostics.doctor,
         escape_key: str | None = None,
         accounts: AccountsReader | None = accounts_service.overview,
+        headroom: HeadroomReader | None = accounts_service.read_fleet_headroom,
+        headroom_seconds: float = HEADROOM_SECONDS,
+        remote: RemoteController | None = None,
     ) -> None:
         super().__init__()
         self._workers = self._worker_threads = _WorkerThreads(self)
         """Textual's own manager, which ``self.workers`` reads, and the threads it ran."""
         self._hand_off_since = 0.0
-        """When the pending hand-over was asked for (``time.monotonic``)."""
+        """When the pending hand-over was asked for (``_hand_off_clock``)."""
         self._hand_off_overdue = False
         """The pending hand-over has waited ``_HAND_OFF_PATIENCE``: a second press calls it off."""
         self._hand_off_poll: Timer | None = None
+        self.remote = remote if remote is not None else RemoteController()
+        """The Remote (``R``) model — one per app, so the tunnel outlives the dialog."""
+        self._remote_savers = {
+            key: Autosave(self, key, what=what) for key, what in SWITCHES.items()
+        }
+        """Remote's switches' saves, and its deadline's, as the theme's (``autosave.py``)."""
+        self.remote.save_switch = self._save_remote_switch
+        self.remote.on_news = self._post_remote_news
+        self.remote.on_done = self._post_remote_done
+        # A start saves its switch here once its deadline is written on the controller's
+        # writer thread, in order with a turn-off's own save (post_message is thread-safe).
+        self.remote.call_back = self.call_later
         self.refresh_seconds = refresh_seconds
         self._doctor = doctor
         self._accounts = accounts
@@ -537,14 +668,30 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """The accounts read in flight, or the last one; only one runs at a time."""
         self._accounts_owed = False
         """A frame was asked for while a read was in flight: read once more after it."""
+        self._headroom = headroom
+        self.headroom_seconds = headroom_seconds
+        self._headroom_worker: Worker[tuple[HeadroomSummary, bool]] | None = None
+        """The headroom read in flight, or the last one; only one runs at a time."""
+        self._headroom_owed = False
+        """A headroom read was asked for while one ran: read once more after it."""
+        self._headroom_due = True
+        """Read the headroom once the next accounts frame lands: the first frame at start,
+        and the one after the Accounts page changed something (``AccountsChanged``)."""
         self.escape_key = escape_key or fleet_service.settings().escape_key
         self.snapshot: FleetSnapshot | None = None
         """The last frame that was read successfully; ``None`` before the first."""
         self.store_error: str | None = None
         """Why the newest refresh kept the previous frame, or ``None`` when it did not."""
         self.doctor_checks: list[DoctorCheck] = []
+        """The newest report on the Doctor page; its ✗/⚠ counts are beside *⚙ Settings*."""
         self.doctor_scope: str | None = None
-        """The project the Doctor section is about; ``None`` = global checks."""
+        """The project the doctor answers for when it NEXT runs — the one most recently
+        selected; ``None`` = global checks. Selecting changes it and runs nothing: the
+        report on screen keeps the root it ran in (:attr:`_doctor_root`), so its fixes
+        never run in the project just selected."""
+        self._doctor_root: Path | None = None
+        """The root the report on screen — or the run under way — is about: the cwd its
+        project fixes run in. Set only when a run starts, never by a selection."""
         self._doctor_worker: Worker[Any] | None = None
         """The newest doctor run; an older one's result is not ours to paint."""
         self._theme_restored = False
@@ -554,6 +701,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         once the screen is gone."""
         self.show_captured = False
         """Whether the sidebar also lists the directories sessions merely ran in (#139)."""
+        self.capturing = False
+        """``[projects] capture``, read at each refresh. Off, the default, the captured rows
+        are never listed, whatever ``show_captured`` says, and ``a`` is no key."""
         self._undo: list[project_groups.UndoEntry] = []
         """The layout gestures of this session, newest last; ``u`` reverts the last (#140)."""
 
@@ -564,7 +714,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             yield Sidebar(id="sidebar")
             # The partition is a widget, not a border: drag it, or step it with
             # < > = from the sidebar; the width is remembered (#137).
-            yield Divider("#sidebar", state_key=SIDEBAR_WIDTH_KEY, id="divider")
+            yield Divider(
+                "#sidebar", state_key=SIDEBAR_WIDTH_KEY, what="the navigator's width", id="divider"
+            )
             with ContentSwitcher(id="content", initial="welcome"):
                 yield WelcomeView(escape_key=self.escape_key, id="welcome")
                 # The Onboard view is built on the first `+` (on_add_project): its
@@ -577,14 +729,29 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         restore_theme(self)
         self._theme_restored = True
         self.show_captured = _ui_state(SHOW_CAPTURED_KEY) == "1"
+        self.capturing = project_service.capture_on()
         self.refresh_data()
         self.set_interval(self.refresh_seconds, self.refresh_data)
-        self.run_doctor()
-        self._restore_selection()
+        # The status line's headroom is the usage cache's, on its own slow clock: never
+        # on the two-second tick, which would ask the network as often as it went stale.
+        # Its first read waits for the first accounts frame, whose signed-out slots it
+        # counts (`_accounts_read`); with no accounts reader there is no frame to wait for.
+        if self._accounts is None:
+            self.refresh_headroom()
+        self.set_interval(self.headroom_seconds, self.refresh_headroom)
+        # The doctor runs ONCE at start, about the project the restored view shows;
+        # a restored Doctor page runs it itself, as opening it does.
+        if not self._restore_selection():
+            self.run_doctor()
+        # wait=False here and below: a Remote that stops runs down on a thread of its own,
+        # since stopping uvicorn and ngrok froze the fleet UI for seconds (r3 review of #243).
+        self.remote.restore(wait=False)
+        self.set_interval(30.0, self._remote_auto_off)
+        self.set_interval(30.0, self.remote.revive_tunnel_if_dead)
 
     # --- what was open (#144) ---------------------------------------------------------
 
-    def _restore_selection(self) -> None:
+    def _restore_selection(self) -> bool:
         """Reopen the view that was open when the UI last ran, if its row is still there.
 
         Read from the store's ``ui_state`` (v18), never from a file the UI
@@ -592,29 +759,43 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         shares it. A remembered agent whose row has left the frame falls back
         to its project; a project that is gone falls back to the welcome view,
         and the memory is dropped rather than retried every launch.
+
+        The doctor's scope is set here, not when the posted selection lands, so
+        the one run at start is about the restored project. Whether the Doctor
+        page is the view reopened is the answer: opening it runs the checks.
         """
         remembered = _ui_state(SELECTED_KEY)
         if not remembered or self.snapshot is None:
-            return
+            return False
         kind, _, ident = remembered.partition(":")
         if kind == "agent":
             project_id, _, agent_id = ident.partition("/")
             if self.snapshot.agent(project_id, agent_id) is not None:
+                self.doctor_scope = project_id
                 self.post_message(AgentSelected(project_id, agent_id))
-                return
+                return False
             if self.snapshot.project(project_id) is not None:
+                self.doctor_scope = project_id
                 self.post_message(ProjectSelected(project_id))
-                return
+                return False
         elif kind == "project" and self.snapshot.project(ident) is not None:
+            self.doctor_scope = ident
             self.post_message(ProjectSelected(ident))
-            return
+            return False
+        elif kind == "settings":
+            self.post_message(SettingsSelected())
+            return False
+        elif kind == "app-settings":
+            self.post_message(AppSettingsSelected())
+            return False
         elif kind == "accounts":
             self.post_message(AccountsSelected())
-            return
+            return False
         elif kind == "doctor":
             self.post_message(DoctorSelected(ident or None))
-            return
+            return True
         _remember_ui_state(SELECTED_KEY, None)
+        return False
 
     def _remember_selection(self, value: str | None) -> None:
         _remember_ui_state(SELECTED_KEY, value)
@@ -642,6 +823,16 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         unquittable (at mount the sidebar has focus, so this is only the
         fallback).
         """
+        if action == "help":
+            # `?` from anywhere it is not typing: the board, a form's button, a list —
+            # never an agent's pane, where every key is the agent's. An Input keeps it
+            # itself (``check_consume_key``).
+            focused = self.focused
+            return focused is None or not any(
+                isinstance(node, TerminalPane) for node in (focused, *focused.ancestors)
+            )
+        if action == "toggle_captured" and not self.capturing:
+            return False  # nothing is captured, so there is nothing to show (#139)
         if action not in self.SIDEBAR_ACTIONS:
             return True
         focused = self.focused
@@ -665,6 +856,47 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         # stays-open picker instead of textual's pick-and-close one.
         self.action_pick_theme()
 
+    # --- remote (R) ------------------------------------------------------------------
+
+    def action_remote_panel(self) -> None:
+        self.push_screen(RemotePanel(self.remote))
+
+    def _save_remote_switch(self, key: str, value: object) -> None:
+        """A Remote switch's save, as the theme's: on a thread of its own, a refusal toasted
+        once and said again at quit. Saved where it changed, it waited for ``state.json``'s
+        lock on Textual's thread, two seconds a key while another process held it (r3 review
+        of #243: nothing that stops or saves Remote may hold that thread)."""
+        self._remote_savers[key].remember(value)
+
+    def _post_remote_news(self, text: str, trouble: bool) -> None:
+        self.post_message(RemoteNews(text, trouble))
+
+    def _post_remote_done(self, text: str, trouble: bool) -> None:
+        self.post_message(RemoteNews(text, trouble, done=True))
+
+    def on_remote_news(self, news: RemoteNews) -> None:
+        """Toast what Remote says, unless the R panel is open, whose status line says it:
+        a Remote that did not come back at start, a tunnel that did not come up, auto-off.
+        Said only there, the human found out from the phone, away from the desk (sweep of
+        #243). What a control's write did (a new passphrase, a revoke) is said in any case:
+        no line of the panel says it."""
+        if not news.done and isinstance(self.screen, RemotePanel):
+            return
+        severity: SeverityLevel = "warning" if news.trouble else "information"
+        self.notify(news.text, title="Remote", severity=severity, timeout=10, markup=False)
+
+    def _remote_auto_off(self) -> None:
+        """The 30 s auto-off check; a Remote whose timer ran out stops without this thread."""
+        self.remote.enforce_auto_off(wait=False)
+
+    def get_system_commands(self, screen: Screen[Any]) -> Iterable[SystemCommand]:
+        yield from super().get_system_commands(screen)
+        yield SystemCommand(
+            "Remote control",
+            "Remote on/off, link + QR, password, devices (R)",
+            self.action_remote_panel,
+        )
+
     def watch_theme(self, theme_name: str) -> None:
         # Fires on ANY theme change (our picker or the palette): every change is
         # the save. Not while the saved theme is being restored at mount.
@@ -675,6 +907,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self._theme_autosave.remember(theme_name)
 
     def on_unmount(self) -> None:
+        # The TUI is leaving: no ngrok may outlive it. The saved switches stay, so a
+        # Remote that was on comes back on at the next start (restore()). It stops on a
+        # thread of its own, started first so the saves below overlap it; run_ui waits
+        # for it once the terminal is back.
+        self.remote.shutdown_for_exit(wait=False)
         # Every saver — the theme's here, the divider's — started first and joined
         # against ONE deadline, so quit waits once, not once per preference.
         self.unsaved = Autosave.flush_all(self)
@@ -682,11 +919,30 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     # --- help / refresh ---------------------------------------------------------------
 
     def action_help(self) -> None:
-        self.push_screen(HelpScreen(self.escape_key))
+        self.push_screen(
+            HelpScreen(
+                self.escape_key, at_board=self._focus_on_the_board(), capturing=self.capturing
+            )
+        )
+
+    def _focus_on_the_board(self) -> bool:
+        """Whether the focus is on a project's Board tab — its table, or the tab row on it."""
+        for node in self.focused.ancestors_with_self if self.focused is not None else ():
+            if isinstance(node, BoardPanel):
+                return True
+            if isinstance(node, ProjectView):
+                return node.active == "tab-board"
+        return False
 
     def action_refresh_now(self) -> None:
+        """The fleet, now. Not the doctor: it runs at start, when its page opens, after a fix
+        and from its Re-run button — seconds of git/tmux/claude probing per run."""
         self.refresh_data()
-        self.run_doctor()
+
+    def _listing_captured(self) -> bool:
+        """Whether the sidebar lists the captured directories: ``a`` showed them, and capture
+        is on. A ``show_captured`` saved while it was on lists nothing once it is off."""
+        return self.show_captured and self.capturing
 
     def action_toggle_captured(self) -> None:
         """Show, or hide again, the captured directories the sidebar leaves out (#139).
@@ -706,6 +962,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
     # --- data ---------------------------------------------------------------------------
 
+    @while_running
     def refresh_data(self) -> None:
         """Re-read projects and agents; keep (and label) the last frame if the store is busy.
 
@@ -713,9 +970,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         (:class:`_WorkerThreads`), and this one ends on the UI thread before any quit.
         """
         sidebar = self.sidebar
+        self.capturing = project_service.capture_on()
         try:
             with store_session() as store:
-                projects = store.list_projects(all=self.show_captured)
+                projects = store.list_projects(all=self._listing_captured())
                 groups = store.project_groups()
         except Exception as exc:  # the store is briefly unavailable — keep what is shown
             self.store_error = f"{type(exc).__name__}: {exc}"
@@ -747,7 +1005,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.refresh_accounts()
 
     def refresh_accounts(self) -> None:
-        """Re-read the Claude accounts OFF the UI thread; the section and the page follow.
+        """Re-read the Claude accounts OFF the UI thread; the status line and the page follow.
 
         ``accounts_service.overview`` reads the registry through ``context.db``
         and reconciles it as it reads: a slot ``+ Add`` just made gets its row,
@@ -809,13 +1067,79 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             session = read_session()
         except Exception:  # read_session never raises; belt to its braces
             session, session_known = None, False
-        summary = summarise(overview, session, session_known=session_known)
-        sidebar.show_accounts_summary(accounts_summary_text(summary.aisquare), summary.line)
+        sidebar.show_aisquare((session is not None) if session_known else None)
         if overview is not None:
             for view in self.query(AccountsView):
                 view.show(overview)
+        # The read owed first: an AccountsChanged that landed while this read was in flight
+        # asked for the frame AFTER the change, and the headroom it is due waits for that
+        # frame — spent on this one, the ⚠ lagged a sign-out by a minute (review of #261, N1).
         if self._accounts_owed:
             self.refresh_accounts()  # the ticks this read outlived: one read, after it
+        elif self._headroom_due:
+            self._headroom_due = False
+            self.refresh_headroom()
+
+    @while_running
+    def refresh_headroom(self) -> None:
+        """Re-read the status line's headroom OFF the UI thread; :meth:`_headroom_read` paints it.
+
+        Through the usage cache (``claude_accounts.read_fleet_headroom``): the network is
+        asked only for an account whose reading is over five minutes old, and never from
+        the two-second tick — this runs once the first accounts frame lands, every
+        :attr:`headroom_seconds`, after the Accounts page changed something, and when its
+        usage read lands (``UsageRead``: the same cache, no request). The accounts are the
+        last frame's, so what the dot counts is what the page lists.
+
+        The ⚠ counts every enabled slot that needs a login — the page's *Log in* rows: an
+        expired or refused token is in the summary (its reading says so), and a signed-out
+        slot, which the reader never asks, is added from the frame (review of #261, m2).
+
+        One read at a time. One asked for while another runs is owed, and made once that
+        one has painted, as :meth:`refresh_accounts` does: a login landing mid-read is
+        counted then, not a minute later (review of #261, m3).
+        """
+        if self._headroom is None:
+            return
+        reading = self._headroom_worker
+        if reading is not None and not reading.is_finished:
+            self._headroom_owed = True
+            return
+        self._headroom_owed = False
+        overview = self.accounts_overview
+        accounts = None if overview is None else [status.account for status in overview.accounts]
+        enabled = (
+            [] if overview is None else [s for s in overview.accounts if not s.account.disabled]
+        )
+        signed_out = sum(1 for s in enabled if not s.signed_in)
+        read_headroom = self._headroom
+
+        def read() -> tuple[HeadroomSummary, bool]:
+            summary = read_headroom(accounts)
+            if signed_out:
+                needs = summary.needs_login + signed_out
+                summary = summary.model_copy(update={"needs_login": needs})
+            # Every enabled slot needs a login — the one case the dot is red for want of
+            # one; an unreadable slot beside a signed-out one is grey with the ⚠ (N2).
+            return summary, bool(enabled) and summary.needs_login >= len(enabled)
+
+        self._headroom_worker = self.run_worker(
+            read,
+            name=HEADROOM_WORKER,
+            group=HEADROOM_WORKER,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _headroom_read(self, event: Worker.StateChanged) -> None:
+        """Paint the headroom a read answered (a read that failed leaves the dot as it was),
+        then make the read that was owed while it ran, if one was."""
+        result = event.worker.result
+        if event.state is WorkerState.SUCCESS and isinstance(result, tuple):
+            summary, every_needs_login = result
+            self.sidebar.show_headroom(summary, every_needs_login=every_needs_login)
+        if event.state in (WorkerState.SUCCESS, WorkerState.ERROR) and self._headroom_owed:
+            self.refresh_headroom()
 
     def _feed_open_views(self, snapshot: FleetSnapshot) -> None:
         """Hand every open Project/Agent view its row from the new frame.
@@ -849,8 +1173,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             if fresh_project is None:
                 continue  # the row has left the frame: keep what the view has
             if fresh_project != project_view.project:
-                # A new codename or root: the view re-reads what depends on it.
-                project_view.project = fresh_project
+                # A new codename, root or nickname: the view re-reads what depends on it.
+                project_view.refresh_project(fresh_project)
             if snapshot.notices.get(fresh_project.id) is not None:
                 continue  # we could not ask — not "the fleet answered: none"
             # ProjectView.show() is the MANAGER status renderer; the snapshot
@@ -860,43 +1184,39 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     # --- doctor -------------------------------------------------------------------------
 
     def _scoped_project(self) -> ProjectInfo | None:
-        """The project the Doctor section is about, or ``None`` for the global checks.
+        """The project the next doctor run is about, or ``None`` for the global checks.
 
-        One place for it: the run needs its root as the doctor's ``cwd``, and the
-        views need the same root as the cwd their project-scoped fix buttons run
-        in — the two must never disagree.
+        One place for it: :meth:`run_doctor` takes its root as the doctor's ``cwd``
+        and keeps the same root as :attr:`_doctor_root`, the cwd the report's
+        project-scoped fix buttons run in — the two must never disagree.
         """
         snapshot = self.snapshot
         if snapshot is None or not self.doctor_scope:
             return None
         return snapshot.project(self.doctor_scope)
 
-    def _scope_root(self) -> Path | None:
-        """The root the Doctor section's checks and fixes belong to right now."""
-        project = self._scoped_project()
-        return project.root if project is not None else None
-
     def run_doctor(self) -> None:
-        """Run the checks off the UI thread; ``on_worker_state_changed`` paints them.
+        """Run the checks for :attr:`doctor_scope` off the UI thread; the worker state paints them.
 
-        The result carries the SCOPE it was run for, and the newest run is
-        remembered. Without both, a report that finished while the user was
-        selecting another project was painted as the new scope's: the filter was
-        the worker NAME alone and ``show_doctor`` re-reads ``_scoped_project()``
-        at paint time, so the old project's findings were handed the new
-        project's root and a one-click project fix would have run in the wrong
-        one — the hazard ``show_doctor``'s own comment warns about. Reachable
-        because ``on_project_selected`` awaits ``add_content`` before
-        ``_set_doctor_scope``, and a worker that has already left RUNNING is
-        past cancelling.
+        Called at start, when the Doctor page opens, after a one-click fix and
+        from the page's Re-run button — nowhere else: a run is seconds of
+        git/tmux/claude probing, and selecting a project or pressing ``r`` must
+        not pay for it.
+
+        The result carries the SCOPE it was run for, the newest run is
+        remembered, and :attr:`_doctor_root` — what the report's fixes run in —
+        moves only here. Without all three, a report that finished after the
+        scope had changed was painted with the new scope's root, and a one-click
+        project fix would have run in the wrong project.
         """
         if self._doctor is None:
             return
         injected: DoctorRunner = self._doctor
         project = self._scoped_project()
         scope: Path | None = project.root if project is not None else None
+        self._doctor_root = scope
         # An injected fake keeps its own signature and stays global; it is still
-        # tagged with the scope its report is ABOUT, which is what the tab and
+        # tagged with the scope its report is ABOUT, which is what the page and
         # the fix buttons are keyed on.
         runner: Callable[[], _DoctorReport] = lambda: (scope, injected())  # noqa: E731
         if project is not None and self._doctor is diagnostics.doctor:
@@ -911,6 +1231,16 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             thread=True,
             exit_on_error=False,
         )
+        self.query_one("#doctor", DoctorView).show_running(self._doctor_subject(scope))
+
+    def _doctor_subject(self, root: Path | None) -> str:
+        """What a report about ``root`` is about, as the Doctor page's header names it: the
+        project's name, or "this machine" for the global checks."""
+        if root is None:
+            return "this machine"
+        snapshot = self.snapshot
+        project = next((p for p in snapshot.projects if p.root == root), None) if snapshot else None
+        return project_service.display_name(project) if project is not None else root.name
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         """Paint what the app's own workers answered: the accounts read and the doctor.
@@ -925,6 +1255,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """
         if not self.is_running:
             return
+        if event.worker.name == PROJECT_REMOVE_WORKER:
+            self._project_removal(event)
+            return
         if event.worker.name == ACCOUNTS_WORKER:
             # Every read's answer, not only the newest read's: a worker is finished
             # before its StateChanged is handled, so a tick handled in between
@@ -933,53 +1266,50 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             # (`refresh_accounts`), so answers arrive in the order they were read.
             self._accounts_read(event)
             return
+        if event.worker.name == HEADROOM_WORKER:
+            self._headroom_read(event)
+            return
         if event.worker.name != _DOCTOR_WORKER:
             return
         if event.worker is not self._doctor_worker:
-            return  # a superseded run: the newest one owns the section
+            return  # a superseded run: the newest one owns the page
         if event.state is WorkerState.SUCCESS:
             report = _doctor_report(event.worker.result)
-            if report is None or report[0] != self._scope_root():
-                return  # a report about a scope the user has left is not ours to paint
+            if report is None or report[0] != self._doctor_root:
+                return  # a report about a scope the newest run left is not ours to paint
             self.show_doctor(report[1])
         elif event.state is WorkerState.ERROR:
             self.show_doctor_failure(f"{type(event.worker.error).__name__}: {event.worker.error}")
 
     def show_doctor(self, checks: list[DoctorCheck]) -> None:
+        """Paint a report about :attr:`_doctor_root` on the Doctor page, and its counts beside
+        *⚙ Settings* and the hub's Doctor link."""
         self.doctor_checks = checks
-        project = self._scoped_project()
-        root = project.root if project is not None else None
-        self._feed_doctor(self.query_one("#doctor", DoctorView), checks, root)
-        # The scoped project's own Doctor tab shows the same report. Only that
-        # project's: another open ProjectView's tab must not be handed a report
-        # about a different root — its fixes would run in the wrong one.
-        if project is not None:
-            for view in self.query(ProjectView):
-                if view.project.id == project.id:
-                    for tab in view.query(DoctorView):
-                        self._feed_doctor(tab, checks, root)
-        counts = {status: 0 for status in CheckStatus}
-        for check in checks:
-            counts[check.status] += 1
-        worst = sorted(
-            (c for c in checks if c.status is not CheckStatus.ok),
-            key=lambda c: c.status is not CheckStatus.fail,
+        self._feed_doctor(
+            self.query_one("#doctor", DoctorView),
+            checks,
+            self._doctor_root,
+            self._doctor_subject(self._doctor_root),
         )
-        lines: list[Text] = []
-        for check in worst:
-            line = Text()
-            line.append(f"{_CHECK_SYMBOL[check.status]} ", style=_CHECK_STYLE[check.status])
-            line.append(f"{check.name}: {check.detail}")
-            lines.append(line)
-        sidebar = self.sidebar
-        sidebar.show_doctor_summary(
-            counts[CheckStatus.ok], counts[CheckStatus.warn], counts[CheckStatus.fail], lines=lines
-        )
-        sidebar.show_doctor_notice(None)
+        self._show_doctor_findings()
+
+    def _show_doctor_findings(self) -> None:
+        """The newest report's ✗/⚠ counts on *⚙ Settings* and on the hub's Doctor link.
+
+        The doctor runs at start with its page hidden, and these are the only places
+        that say what it found before someone opens the page (review of #261, m9).
+        """
+        failing = sum(check.status is CheckStatus.fail for check in self.doctor_checks)
+        warning = sum(check.status is CheckStatus.warn for check in self.doctor_checks)
+        self.query_one(SettingsRow).show_findings(failing, warning)
+        for hub in self.query(SettingsHubView):
+            hub.show_findings(failing, warning)
 
     @staticmethod
-    def _feed_doctor(view: DoctorView, checks: list[DoctorCheck], root: Path | None) -> None:
-        """Hand a Doctor view the report AND the root its project fixes run in.
+    def _feed_doctor(
+        view: DoctorView, checks: list[DoctorCheck], root: Path | None, about: str
+    ) -> None:
+        """Hand a Doctor view the report, what it is about AND the root its project fixes run in.
 
         Without the root every ``scope == "project"`` fix renders disabled with
         "(select a project first)" — while a project is selected — so the
@@ -989,21 +1319,22 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         machine-wide one, or a button would run in a project the user has left.
         """
         view.cwd = root
-        view.show(checks)
+        view.show(checks, about=about)
 
     def show_doctor_failure(self, reason: str) -> None:
-        """Doctor itself crashed: say so where the counts would be, and in the view."""
-        self.sidebar.show_doctor_notice(f"doctor could not run — {reason}")
+        """Doctor itself crashed: say so on the Doctor page, as its one finding."""
+        self.doctor_checks = [
+            DoctorCheck(
+                name="doctor",
+                status=CheckStatus.fail,
+                detail=f"the checks crashed: {reason}",
+                fix="Run it in a terminal for the full traceback: aisquare doctor",
+            )
+        ]
         self.query_one("#doctor", DoctorView).show(
-            [
-                DoctorCheck(
-                    name="doctor",
-                    status=CheckStatus.fail,
-                    detail=f"the checks crashed: {reason}",
-                    fix="Run it in a terminal for the full traceback: aisquare doctor",
-                )
-            ]
+            self.doctor_checks, about=self._doctor_subject(self._doctor_root)
         )
+        self._show_doctor_findings()
 
     # --- selection → content ----------------------------------------------------------
 
@@ -1031,7 +1362,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         view_id = f"project-{project.id}"
         await self._show(view_id, lambda: ProjectView(project, id=view_id))
         self.sidebar.select(f"project:{project.id}")
-        self._set_doctor_scope(project.id)
+        self.doctor_scope = project.id
         self._remember_selection(f"project:{project.id}")
 
     async def on_agent_selected(self, event: AgentSelected) -> None:
@@ -1042,7 +1373,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         view_id = f"agent-{status.agent.id}"
         await self._show(view_id, lambda: AgentView(status, id=view_id))
         self.sidebar.select(f"agent:{status.agent.id}")
-        self._set_doctor_scope(event.project_id)
+        self.doctor_scope = event.project_id
         self._remember_selection(f"agent:{event.project_id}/{status.agent.id}")
         self._focus_pane(view_id)
 
@@ -1089,7 +1420,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         view_id = f"agent-{status.agent.id}"
         await self._show(view_id, lambda: AgentView(status, id=view_id))
         self.sidebar.select(f"agent:{status.agent.id}")
-        self._set_doctor_scope(started.project_id)
+        self.doctor_scope = started.project_id
         self._remember_selection(f"agent:{started.project_id}/{status.agent.id}")
         self._focus_pane(view_id)
 
@@ -1121,7 +1452,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self._layout(lambda s: project_groups.step_group(s, event.ident, event.delta), "move")
         else:
             # One step is one row ON SCREEN: the captured rows count only while `a` shows them.
-            shown = self.show_captured
+            shown = self._listing_captured()
             self._layout(
                 lambda s: project_groups.step(s, event.ident, event.delta, all=shown), "move"
             )
@@ -1216,6 +1547,134 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.refresh_data()
         self.notify(f"undid: {done}", timeout=4, markup=False)
 
+    # --- a card's name and menu ------------------------------------------------------------
+
+    def on_rename_project(self, event: RenameProject) -> None:
+        """A card's name field was saved: write the nickname, as ``aisquare project rename``.
+
+        On this thread, as every sidebar gesture's write is (:meth:`_layout`): one row,
+        and the card already says the new name. A refusal says why and reopens the
+        field with what was typed, to correct.
+        """
+        project = self.snapshot.project(event.project_id) if self.snapshot else None
+        if project is None:
+            self.notify("that project is no longer listed", severity="warning", timeout=4)
+            return
+        try:
+            renamed = project_service.set_nickname(project, event.typed)
+        except KeyError:
+            self.notify("that project is no longer listed", severity="warning", timeout=4)
+            self.refresh_data()
+            return
+        except Exception as exc:  # too long, a control character, or the store said no
+            self.notify(f"not renamed: {exc}", severity="error", timeout=6, markup=False)
+            self.refresh_data()  # the card says the stored name again
+            self.sidebar.open_rename(project.id, event.typed)
+            return
+        self.post_message(ProjectRenamed(renamed))
+
+    def on_project_renamed(self, event: ProjectRenamed) -> None:
+        """A nickname was written — a card, its menu, a Settings tab: every name says it now."""
+        self.refresh_data()
+
+    def on_open_project_menu(self, event: OpenProjectMenu) -> None:
+        """⋯, ``.`` or a right-click on a card: its menu, then what was chosen in it."""
+        project = self.snapshot.project(event.project_id) if self.snapshot else None
+        if project is None:
+            self.notify("that project is no longer listed", severity="warning", timeout=4)
+            return
+        project_id = project.id
+
+        def confirmed(yes: bool | None) -> None:
+            if yes:
+                self._remove_project(project_id)
+
+        def chosen(choice: str | None) -> None:
+            if choice == RENAME:
+                # Once the menu has gone: closing it hands the focus back to the sidebar.
+                self.call_after_refresh(self.sidebar.open_rename, project_id)
+            elif choice == PIN:
+                self.on_toggle_pin(TogglePin("project", project_id))
+            elif choice == SETTINGS:
+                self.call_later(self._open_settings, project_id)
+            elif choice == REMOVE:
+                self.push_screen(ConfirmRemove(project), confirmed)
+
+        self.push_screen(ProjectMenu(project, event.anchor), chosen)
+
+    async def _open_settings(self, project_id: str) -> None:
+        """The menu's *Open settings*: the project's page, on its Settings tab."""
+        await self.on_project_selected(ProjectSelected(project_id))
+        try:
+            view = self.content.get_child_by_id(f"project-{project_id}")
+        except NoMatches:
+            return
+        if isinstance(view, ProjectView):
+            view.active = "tab-settings"
+
+    def _remove_project(self, project_id: str) -> None:
+        """*Remove from fleet…*, confirmed: ``aisquare project forget``, off the UI thread.
+
+        Refused (``ProjectBusyError``) while the project has live agents; the toast
+        names them and the way out.
+        """
+        project = self.snapshot.project(project_id) if self.snapshot else None
+        if project is None:
+            self.notify("that project is no longer listed", severity="warning", timeout=4)
+            return
+        target = project
+        self.run_worker(
+            lambda: project_service.forget_project(target),
+            name=PROJECT_REMOVE_WORKER,
+            group=PROJECT_REMOVE_WORKER,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _project_removal(self, event: Worker.StateChanged) -> None:
+        result = event.worker.result
+        if event.state is WorkerState.SUCCESS and isinstance(result, ProjectForgetReport):
+            removed = result.project
+            back = project_service.onboard_command(removed.root)
+            self.notify(
+                f"✓ {project_service.display_name(removed)} removed from the fleet — "
+                f"its folder and history are kept; {back} brings it back",
+                timeout=8,
+                markup=False,
+            )
+            self.call_later(self._forget_views, removed.id)
+        elif event.state is WorkerState.ERROR:
+            error = event.worker.error
+            said = (
+                str(error)
+                if isinstance(error, project_service.ProjectBusyError)
+                else (f"could not remove it: {type(error).__name__}: {error}")
+            )
+            self.notify(said, title="not removed", severity="error", timeout=12, markup=False)
+
+    async def _forget_views(self, project_id: str) -> None:
+        """A removed project leaves the screen: its card with the next frame, its page and
+        its agents' panes now. What was open on it moves to the next project in the list,
+        else the one before it, else Welcome."""
+        order = [card.project.id for card in self.sidebar.query(ProjectCard)]
+        self.refresh_data()
+        views = [
+            view
+            for view in self.content.children
+            if view.id == f"project-{project_id}"
+            or (isinstance(view, AgentView) and view.status.agent.project_id == project_id)
+        ]
+        if self.current_view() in views:
+            at = order.index(project_id) if project_id in order else len(order)
+            nearby = [*order[at + 1 :], *reversed(order[:at])]
+            listed = [pid for pid in nearby if self.snapshot and self.snapshot.project(pid)]
+            if listed:
+                await self.on_project_selected(ProjectSelected(listed[0]))
+            else:
+                await self.action_welcome()
+        for view in views:
+            await view.remove()
+
     def on_spawn_agent(self, event: SpawnAgent) -> None:
         from aisquare.cli.ui.views.spawn import SpawnScreen
 
@@ -1228,11 +1687,30 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                 severity="warning",
             )
 
+    async def on_settings_selected(self, event: SettingsSelected) -> None:
+        """*⚙ Settings*: the hub, with the keyboard on its first link when it came from the
+        keyboard (the sidebar had it)."""
+        from_keyboard = self.focused is self.sidebar
+        await self._show("settings-hub", lambda: SettingsHubView(id="settings-hub"))
+        self._show_doctor_findings()  # a hub built just now has not been told yet
+        self.sidebar.select(SETTINGS_KEY)
+        self._remember_selection("settings")
+        if from_keyboard:
+            self.query_one("#settings-hub", SettingsHubView).focus_first()
+
+    async def on_app_settings_selected(self, event: AppSettingsSelected) -> None:
+        """The hub's *App settings*: the machine-wide settings, under *⚙ Settings*."""
+        await self._show("app-settings", lambda: AppSettingsView(id="app-settings"))
+        self.sidebar.select(SETTINGS_KEY)
+        self._remember_selection("app-settings")
+
     async def on_accounts_selected(self, event: AccountsSelected) -> None:
+        """The Accounts page — from the hub or the status line; *⚙ Settings* stays the
+        highlighted row either way, the page being one of Settings' own."""
         await self._show(
             "accounts", lambda: AccountsView(escape_key=self.escape_key, id="accounts")
         )
-        self.sidebar.select("accounts")
+        self.sidebar.select(SETTINGS_KEY)
         self._remember_selection("accounts")
         view = self.query_one("#accounts", AccountsView)
         if self.accounts_overview is not None:
@@ -1242,14 +1720,36 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             view.begin_claude_sign_in(event.sign_in)
 
     def on_accounts_changed(self, event: AccountsChanged) -> None:
-        """The page added, removed or signed in something: the section follows at once."""
+        """The page added, removed or signed in something: the status line follows once the
+        frame that shows it is read (a slot signed out or in counts in the ⚠ from it)."""
+        if self._accounts is None:
+            self.refresh_headroom()
+            return
+        self._headroom_due = True
         self.refresh_accounts()
 
+    def on_usage_read(self, event: UsageRead) -> None:
+        """The Accounts page read usage (a tick, or *↻ Refresh usage*): the dot reads the
+        same cache now, at no request, rather than up to a minute later (review of #261, m3)."""
+        self.refresh_headroom()
+
     async def on_doctor_selected(self, event: DoctorSelected) -> None:
+        """Open the Doctor page and run the checks — opening it is what asks for them.
+
+        About ``event.project_id``, or, when that is ``None``, the project most
+        recently selected (the machine's checks when there is none).
+        """
+        scope = event.project_id if event.project_id is not None else self.doctor_scope
         await self._show("doctor")
-        self.sidebar.select("doctor")
-        self.doctor_scope = event.project_id
-        self._remember_selection(f"doctor:{event.project_id or ''}")
+        self.sidebar.select(SETTINGS_KEY)
+        self.doctor_scope = scope
+        self._remember_selection(f"doctor:{scope or ''}")
+        self.run_doctor()
+
+    def on_doctor_view_rerun(self, event: DoctorView.Rerun) -> None:
+        """The Doctor page's Re-run: the checks again, for :attr:`doctor_scope` — the scope
+        the page's report is about, since opening the page is what last set it."""
+        event.stop()
         self.run_doctor()
 
     async def on_project_onboarded(self, event: ProjectOnboarded) -> None:
@@ -1297,6 +1797,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         await self._show("welcome")
         self.sidebar.select(None)
         self._remember_selection(None)
+        # The page says which project step 1 is on from its ``on_show``, but Textual sends
+        # ``Show`` by comparing one layout with the next: a page hidden and shown again
+        # before the next layout pass is sent none, and the doctor kept the scope of the
+        # page just left (~1 in 6 runs of the welcome tests). Asked here as well.
+        self.query_one(WelcomeView).tell_chosen()
 
     def on_welcome_view_progress(self, event: WelcomeView.Progress) -> None:
         """Welcome added a project or started an agent: the sidebar shows it now."""
@@ -1309,7 +1814,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     def on_welcome_view_chosen(self, event: WelcomeView.Chosen) -> None:
         """While Welcome is shown, the Doctor answers for the project its step 2 answers for."""
         if self.content.current == "welcome":
-            self._set_doctor_scope(event.project_id)
+            self.doctor_scope = event.project_id
 
     hand_off: tuple[str, ...] | None = None
     """The ``aisquare`` command this terminal goes to when asq quits (``run_ui``)."""
@@ -1344,7 +1849,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.notify(f"{running} is still running — try again when it ends", severity="warning")
             return
         self.hand_off = event.args
-        self._hand_off_since = time.monotonic()
+        self._hand_off_since = _hand_off_clock()
         self._hand_off_overdue = False
         if self._holding_the_quit():
             self.notify("asq quits once the reads running end", timeout=4)
@@ -1365,9 +1870,17 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         running = self._holding_the_quit()
         if not running:
             self._worker_threads.drop_held()
+            if self.hand_off[:1] == ("uninstall",):
+                # Off, not only stopped as a quit leaves it: every phone signed out (its
+                # farewell drained before the exec, run_ui) and the switch saved off. Stopped,
+                # remote.json kept the devices, the link and the passphrase past an Uninstall
+                # without --purge, and the first asq after a reinstall brought Remote back,
+                # its phones let in by their cookies (review of #259, remote focus, 12/12).
+                # An Update's asq --reopen brings it back, read-only.
+                self.remote.turn_off(wait=False)
             self.exit()
             return
-        waited = time.monotonic() - self._hand_off_since
+        waited = _hand_off_clock() - self._hand_off_since
         if not self._hand_off_overdue and waited >= _HAND_OFF_PATIENCE:
             self._hand_off_overdue = True
             self.notify(
@@ -1415,7 +1928,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         Every worker the UI starts is a thread worker (tests/test_ui_writing_workers.py);
         the hand-over tests run both kinds.
         """
-        return sorted(self._worker_threads.running() - _cut_off_workers())
+        return sorted(self._worker_threads.still_running() - _cut_off_workers())
 
     def _work_running(self, named: dict[str, str]) -> str | None:
         """What work of ``named`` still runs, in the toast's words, else ``None``."""
@@ -1433,18 +1946,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         one about another root — the Onboard view's, for the project it just
         registered — means our own report is stale, so we re-run ours.
         """
-        if event.cwd == self._scope_root():
+        if event.cwd == self._doctor_root:
             self.show_doctor(list(event.checks))
         else:
-            self.run_doctor()
-
-    def _set_doctor_scope(self, project_id: str | None) -> None:
-        changed = project_id != self.doctor_scope
-        self.doctor_scope = project_id
-        self.sidebar.set_doctor_scope(project_id)
-        if changed:
-            # The counts, the report and the fixes' cwd are all about the scope:
-            # a new one makes what is on screen a report about another project.
             self.run_doctor()
 
     # --- for tests and callers --------------------------------------------------------
@@ -1479,6 +1983,7 @@ def _writing_workers() -> dict[str, str]:
         explainability,
         onboard,
         project,
+        settings,
         welcome,
     )
 
@@ -1492,6 +1997,7 @@ def _writing_workers() -> dict[str, str]:
         welcome.worker_name("manager"): "a manager start",
         welcome.worker_name("coders"): "the coders' start",
         project.SPAWN_WORKER: "a manager start",
+        settings.NICKNAME_WORKER: "a project's rename",
         agent.STOP_WORKER: "an agent's stop",
         agent.RESTART_WORKER: "an agent's restart",
         explainability.SAVE_WORKER: "Explainability's setup",
@@ -1499,8 +2005,11 @@ def _writing_workers() -> dict[str, str]:
         explainability.SHIP_WORKER: "Explainability's ship",
         accounts.SIGN_OUT_WORKER: "an AISquare sign-out",
         accounts.COMPLETE_WORKER: "a Claude sign-in",
+        accounts.ABANDON_WORKER: "a Claude sign-in's discard",
         accounts.REMOVE_WORKER: "an account's removal",
         accounts.ARRANGE_WORKER: "an account change",
+        accounts.RENAME_WORKER: "an account's rename",
+        PROJECT_REMOVE_WORKER: "a project's removal",
     }
 
 
@@ -1516,10 +2025,9 @@ def _waited_reads() -> dict[str, str]:
     from aisquare.cli.ui.views import (
         accounts,
         agent,
+        app_settings,
         doctor,
         explainability,
-        project,
-        settings,
         spawn,
         welcome,
     )
@@ -1527,14 +2035,16 @@ def _waited_reads() -> dict[str, str]:
     return {
         _DOCTOR_WORKER: "the doctor's checks",
         ACCOUNTS_WORKER: "the accounts' read",
+        HEADROOM_WORKER: "the accounts' headroom",
         doctor.ROUTE_WORKER: "how aisquare was installed",
-        project.DOCTOR_WORKER: "a project's checks",
         accounts.USAGE_WORKER: "the accounts' usage",
         accounts.CREDITS_WORKER: "the workspaces' credits",
+        accounts.LOGIN_OPEN_WORKER: "a Claude log-in's stored login",
+        accounts.LOGIN_POLL_WORKER: "a Claude sign-in's check",
         agent.LABELS_WORKER: "an agent's account names",
         board.LABELS_WORKER: "a board's account names",
         explainability.STATUS_WORKER: "Explainability's status",
-        settings.ACCOUNTS_WORKER: "the Settings tab's accounts",
+        app_settings.ACCOUNTS_WORKER: "App settings' accounts",
         welcome.worker_name("look"): "Welcome's checks",
         welcome.worker_name("candidates"): "Welcome's folder list",
         welcome.worker_name("validate"): "Welcome's folder check",
@@ -1563,15 +2073,88 @@ def _cut_off_workers() -> frozenset[str]:
     return frozenset({accounts.SIGN_IN_WORKER})
 
 
+REMOTE_QUIT_QUIET_SECONDS = 0.5
+"""How long ``run_ui`` waits for a Remote still stopping before it says that it is."""
+
+_HANDED_OVER = {"upgrade": "Update", "uninstall": "Uninstall"}
+"""The Doctor's button for each command it hands over (``doctor.HAND_OFFS``)."""
+
+
+def _hand_off_undone(hand_off: tuple[str, ...]) -> str:
+    """What a Ctrl-C in the quit's waits says of the hand-over it ends: that the Update or
+    Uninstall did not run, and the command that runs it, with this process's global flags.
+
+    The Ctrl-C ends the process at once (``remote_server._remote_quit_now``), and said
+    nothing of it: a user who pressed it to hurry the upgrade along could not tell that
+    ``aisquare upgrade`` never ran (round 4 of #259). ``--reopen`` is asq's own, to open it
+    again once the command is done, and not asked of a command typed in a shell.
+    """
+    from aisquare.core import selfcli
+    from aisquare.services import install_route
+
+    args = [arg for arg in hand_off if arg != "--reopen"]
+    button = _HANDED_OVER.get(args[0], args[0]) if args else "the hand-over"
+    command = install_route.command_line(["aisquare", *selfcli.global_flags(), *args])
+    return f"⚠ {button} did not run: asq quit at the Ctrl-C — `{command}` runs it"
+
+
 def run_ui(**options: Any) -> None:
-    """Run the fleet UI until the user quits; then say what its last saves could not land."""
+    """Run the fleet UI until the user quits; then say what its last saves could not land,
+    see out a phone's write that still runs, saying so (a Ctrl-C there quits at once), and
+    hand the terminal to the command Update or Uninstall asked for, if one did, once the R
+    panel's own writes of ``remote.json`` have landed and the pushes sent to the phones have
+    gone out.
+
+    A Remote that was on stops on a thread of its own at quit (``on_unmount``), so the
+    screen did not freeze while uvicorn and ngrok wound down; the process waits for
+    them here, with the terminal back, and never ends before its ngrok. A Ctrl-C in
+    that wait quits at once as well, its ngrok stopped first: a phone's write still
+    running is what holds a stop up (uvicorn waits for the request), and raised out of
+    here the Ctrl-C was Click's "Aborted!", after which Python's exit waited for the
+    write all the same, silently. What the quit could not save is said before either
+    wait, so a quit at once keeps it; an Update or Uninstall it drops is said as it quits
+    (:func:`_hand_off_undone`). A hangup or a SIGTERM ends the process as ever, its ngrok
+    first (``ngrok_ends_with``).
+    """
+    from aisquare.services import remote_server
+
     app = FleetApp(**options)
-    app.run()
-    for line in app.unsaved:
-        stderr_console().print(f"⚠ {line}", markup=False, highlight=False)
-    # The terminal is ours again: give it to the command. Read with getattr so an
-    # app still needs only `run()` and `unsaved` to be run here.
-    hand_off = getattr(app, "hand_off", None)
+    with ngrok_ends_with():
+        app.run()
+        # Read with getattr so an app still needs only `run()`, `unsaved` and `remote` to be
+        # run here.
+        hand_off = getattr(app, "hand_off", None)
+        undone = None if hand_off is None else _hand_off_undone(hand_off)
+        for line in app.unsaved:
+            stderr_console().print(f"⚠ {line}", markup=False, highlight=False)
+        try:
+            if not app.remote.wait_until_off(REMOTE_QUIT_QUIET_SECONDS):
+                stderr_console().print("stopping Remote (its server and ngrok)…", markup=False)
+                app.remote.wait_until_off()
+            if hand_off is not None:
+                # The R panel's writes of remote.json (the write switch, a revoke) run on a
+                # thread an exit joins and the exec skips; the stop above waited for them
+                # only when this asq served Remote (round 4 of #259).
+                app.remote.writes_done()
+        except KeyboardInterrupt:
+            try:  # the thread that would stop ngrok ends with the process
+                app.remote.stop_tunnel_now()
+            finally:
+                remote_server._remote_quit_now(undone)
+        # A phone's write still running would hold the exit as long as it runs: said, not silent.
+        remote_server.remote_wait_for_writes(undone)
+        if hand_off is not None:
+            # The "Remote is off" a turn-off or the quit's auto-off sent the phones goes out on
+            # a daemon thread, which an exit waits for (`push_drain`, at exit) and the exec
+            # would kill mid-send (round 5 of #259).
+            pushes = sys.modules.get("aisquare.services.remote_push")  # loaded by all that push
+            try:
+                if pushes is not None:
+                    pushes.push_drain()
+            except KeyboardInterrupt:
+                remote_server._remote_quit_now(undone)
+    # The terminal is ours again, and Remote, its ngrok, the panel's writes, the phones' and
+    # the pushes are done: give it to the command, whose exec skips what an exit would run.
     if hand_off is not None:
         from aisquare.core import selfcli
 

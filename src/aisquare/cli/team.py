@@ -11,7 +11,9 @@ import os
 import re
 import shlex
 import sqlite3
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Annotated, Any, NoReturn
 
 import typer
@@ -33,10 +35,13 @@ from aisquare.core.store import (
     is_corrupt_error,
     is_locked_error,
     store_recovery,
+    store_session,
 )
-from aisquare.services import agent_launch, explainability_ops, store_broker
+from aisquare.models import ProjectInfo, TeamEvent, TeamSession, TeamTask
+from aisquare.services import agent_launch, explainability_ops, install_route, store_broker
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
+from aisquare.services import project as project_service
 from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
 from aisquare.services.store_broker import OutOfScope
@@ -60,6 +65,7 @@ STORE_ERRORS = (
     TeamDisabledError,
     ForeignSessionError,
     OutOfScope,
+    project_service.NotAdded,
     KeyError,
     AmbiguousIdError,
     DeliveryUnconfirmedError,
@@ -79,6 +85,8 @@ def _fail_team(exc: Exception, ref: str | None = None) -> NoReturn:
         if team_service.brokered():
             store_broker.record_refusal(exc.kind, str(exc))
         fail(str(exc), error="out_of_scope")
+    if isinstance(exc, project_service.NotAdded):
+        fail(str(exc), error="not_added", ref=str(exc.project.root), detail=str(exc))
     if isinstance(exc, AmbiguousIdError):
         fail(f"'{exc.ref}' is ambiguous — use more characters", error="ambiguous_id", ref=exc.ref)
     if isinstance(exc, DeliveryUnconfirmedError):
@@ -117,6 +125,8 @@ def _fail_team(exc: Exception, ref: str | None = None) -> NoReturn:
         # NOT retryable (no such table, readonly, disk full): a distinct code,
         # with the real cause preserved for --json callers.
         fail(f"context store error: {exc}", error="store_error", detail=str(exc))
+    if isinstance(exc, team_service.NoSuchTaskNumber):
+        fail(str(exc), error="not_found", ref=f"#{exc.number}")  # never looked for elsewhere
     if isinstance(exc, KeyError):
         missing = ref if ref is not None else str(exc)
         fail(f"nothing matches '{missing}'", error="not_found", ref=missing)
@@ -238,11 +248,47 @@ def _bin_env_hint(role: str) -> str:
 
 
 def _parse_env(pairs: list[str]) -> dict[str, str]:
-    """``KEY=VALUE`` pairs from the command line, or a usage error."""
+    """``KEY=VALUE`` pairs from the command line, or a usage error: a pair with no ``=``, or a
+    KEY that is not a variable name a shell can set (:func:`harness.is_env_name`). Every
+    pair here ends up in ``team spawn``'s printed shell line, bound (``team bind``) or not,
+    where such a key broke the paste, or ran as shell code (review of #259, round 3)."""
     try:
-        return harness.parse_env_pairs(pairs)
+        parsed = harness.parse_env_pairs(pairs)
     except ValueError as exc:
         fail(str(exc), error="bad_env_pair")
+    for key in parsed:
+        if not harness.is_env_name(key):
+            message = f"{key!r} is not a variable name: {_ENV_NAME_RULE}"
+            fail(message, error="bad_env_pair", detail=message)
+    return parsed
+
+
+_ENV_NAME_RULE = "letters, digits and _, not starting with a digit"
+
+
+def _joins_no_board() -> str | None:
+    """Why a session started from ``team spawn``'s printed line joins no board, or ``None``
+    when it joins one (or the board is off, which ``launch`` says itself).
+
+    With ``[projects] capture`` off a role session's hooks join only a project someone
+    added, and printing adds nothing: in a directory nobody added, the pasted line started a
+    planner with no board, no tasks and no protocol, and nothing said why (review of #259,
+    round 17). Read without a write, and fail-open: a store that cannot be read is the
+    session's own to report.
+    """
+    if not orchestrator.team_enabled():
+        return None
+    try:
+        with store_session() as store:
+            project = orchestrator.team_project(None)
+            if project_service.tracked(store, project):
+                return None
+    except Exception:
+        return None
+    return (
+        f"{project_service.NotAdded(project)} — until then the session this line starts "
+        "joins no board (--exec adds it, as `aisquare team on` does)"
+    )
 
 
 @app.command("spawn")
@@ -386,6 +432,24 @@ def spawn(
             f"role bindings: config unreadable ({launch_profile.notice}) — launching unbound",
             err=True,
         )
+    if launch_profile.refusal is not None:
+        fail(launch_profile.refusal, error="env_file_unreadable", detail=launch_profile.refusal)
+    # A key written into config.toml by hand (`team bind` refuses one) is set as a shell word
+    # in the line below, where it is no assignment: refused, as no paste could start the role.
+    unnamed = sorted(
+        key
+        for key in {*launch_profile.env, *launch_profile.env_files}
+        if not harness.is_env_name(key)
+    )
+    if unnamed:
+        message = (
+            f"{role_name}'s binding sets {', '.join(map(repr, unnamed))}, which a shell line "
+            f"cannot set ({_ENV_NAME_RULE}) — unbind it: "
+            + install_route.command_line(
+                ["aisquare", "team", "bind", role_name, "--unset", unnamed[0]]
+            )
+        )
+        fail(message, error="bad_env_key", detail=message)
     # Role defaults were resolved before normalization. They precede any native
     # literal separator, and stand down for explicit flags or their opt-outs.
     for note in defaults.notes:
@@ -411,21 +475,22 @@ def spawn(
         )
     if binary.source != "default":
         banner = f"{banner}  ·  binary {binary.binary} [{binary.source}]"
-    if launch_profile.env:
+    if launch_profile.env or launch_profile.env_files:
         # Name the KEYS with their provenance, not the values: values are paths
         # and tokens, and a banner meant for a terminal should not be where a
         # credential path first becomes shoulder-readable. The full command
         # below carries the values for anyone who wants to paste it.
         shown = ", ".join(
             f"{key} [{launch_profile.env_sources.get(key, 'config')}]"
-            for key in sorted(launch_profile.env)
+            for key in sorted({*launch_profile.env, *launch_profile.env_files})
         )
         banner = f"{banner}  ·  env {shown}"
     # Every paste takes the same identity, environment, and telemetry path as
     # launch. No eval exports survive in the caller's shell between pastes.
     # Carry the resolved argv as a whole: replaying a saved native -- before
     # our model flags would turn those flags into prompt text. Launch must not
-    # prepend the saved arguments again to this complete command.
+    # prepend the saved arguments again to this complete command. A variable bound
+    # to a file is read by the paste itself (`_reading_env_files`), never printed.
     command = shlex.join(
         selfcli.argv_for(
             [
@@ -447,7 +512,13 @@ def spawn(
             ]
         )
     )
+    command = _reading_env_files(command, launch_profile.env_files)
     argv = [argv[0], *agent_launch.mcp_args(selected), *argv[1:]]
+    # A printed line adds nothing (below): say when the session it starts will join no board,
+    # under --json as `not_added`.
+    unjoined = None if execute else _joins_no_board()
+    if unjoined is not None and not get_state().json_output:
+        typer.echo(f"⚠ {unjoined}", err=True)
     if get_state().json_output:
         typer.echo(
             json.dumps(
@@ -464,9 +535,11 @@ def spawn(
                     "agent_source": selected.source,
                     "binary_source": binary.source,
                     "env": launch_profile.env,
+                    "env_files": launch_profile.env_files,
                     "env_sources": launch_profile.env_sources,
                     "extra_args": launch_profile.args,
                     "command": command,
+                    "not_added": unjoined,
                 }
             )
         )
@@ -495,6 +568,18 @@ def spawn(
                 f"aisquare team bind {role_name} --bin <command>.",
                 error="agent_binary_missing",
             )
+        # The session joins this project's board, as `aisquare launch`'s does, and with
+        # `[projects] capture` off a board needs its project added: started here, the
+        # spawn adds it (`team on`), fail-open as launch's is. A printed line is run
+        # later, or never, so printing adds nothing.
+        try:
+            team_service.activate()
+        except TeamDisabledError:
+            pass
+        except Exception as exc:
+            typer.echo(
+                f"board: context.db unreadable ({exc}) — launching without a board row", err=True
+            )
         env = dict(os.environ)
         env["AISQUARE_ROLE"] = role_name
         # The operator's variables, carried verbatim. We do not validate them:
@@ -502,6 +587,7 @@ def spawn(
         # ones name a directory that ought to exist is exactly the coupling
         # this design removes.
         env.update(launch_profile.env)
+        env.update(launch_profile.file_env)
         parent_run = agent_launch.launch_identity(env, selected, orchestrator.team_project().root)
         if tracing is not None and tracing.enabled and selected.adapter.capabilities.model_proxy:
             # Same seam as ``aisquare launch``: wire_session fails open, so a
@@ -620,6 +706,49 @@ def _fleet_model_status(selected: agent_launch.ResolvedAgent, role: str) -> dict
     return row
 
 
+def _reading_env_files(command: str, env_files: Mapping[str, str]) -> str:
+    """``command`` with each variable bound to a file (``env_files``) read by the paste itself,
+    through ``aisquare team read-env-file`` (:func:`read_env_file_command`), so by the one
+    reader ``--exec``, ``aisquare launch`` and ``fleet spawn`` use (``harness.read_env_file``):
+    never its value in the line, and a file that cannot be read or holds nothing refusing the
+    line, naming the variable, rather than starting the role without it. In a subshell, so
+    the paste sets nothing in the shell it is pasted into.
+
+    It was ``KEY="$(cat path)"`` before the command: a file gone or emptied since it was
+    printed started the role with ``KEY`` empty, the other login the refusal exists to
+    prevent, said by a ``cat:`` line alone (review of #259, round 2). Rounds 2 and 3 then
+    read it in shell, which still read it otherwise: every CR and NUL in the file deleted,
+    UTF-16 undecoded (its NULs dropped, so a non-ASCII token came out mangled), and a value
+    of spaces taken where ``launch`` refuses it as empty (round 4).
+    """
+    if not env_files:
+        return command
+    reads = [
+        f'{key}="$(aisquare team read-env-file {shlex.quote(key)} {shlex.quote(path)})" '
+        f"&& export {key}"
+        for key, path in env_files.items()
+    ]
+    return f"({' && '.join([*reads, command])})"
+
+
+@app.command("read-env-file", hidden=True)
+def read_env_file_command(key: str, path: str) -> None:
+    """Print what ``path`` binds ``key`` to, read as a launch reads it (``harness.read_env_file``);
+    exit 1 naming ``key`` when the file cannot be read or holds nothing.
+
+    Plumbing for the line ``team spawn`` prints (:func:`_reading_env_files`), which reads a
+    file-bound secret with it, so that a paste and ``--exec`` read one file one way. Kept
+    hidden: ``team bind --env-file`` is what a person types. Later releases must keep it, or
+    a line printed by this one stops starting its role.
+    """
+    try:
+        value = harness.read_env_file(path)
+    except ValueError as exc:
+        typer.echo(f"{key}: {path} {exc} — the role does not start without it", err=True)
+        raise typer.Exit(1) from None
+    typer.echo(value, nl=False)
+
+
 @app.command("harness")
 @agent_launch.selection_snapshot()
 def harness_status() -> None:
@@ -629,6 +758,8 @@ def harness_status() -> None:
     rows: list[dict[str, Any]] = []
     base, base_source = harness.base_effort()
     for name, profile in harness.ROLE_PROFILES.items():
+        # Once per role, for the JSON and the text alike: each resolve reads every
+        # secret file the role's binding names (`env_files`).
         try:
             selected = agent_launch.resolve(name)
             resolution = agent_launch.model_for(
@@ -664,6 +795,13 @@ def harness_status() -> None:
                 "binary": selected.binary.binary,
                 "binary_source": selected.binary.source,
                 "env": selected.profile.env,
+                # The keys read from a file, each to its path, never its value: without
+                # them a role bound with `--env-file GH_TOKEN=…` showed no GH_TOKEN
+                # here, while the text matrix named it (review of #259, round 1).
+                "env_files": selected.profile.env_files,
+                # Why the role will not launch, when it will not: a file-bound key whose
+                # file cannot be read (review of #259, round 3). `null` otherwise.
+                "refusal": selected.profile.refusal,
                 "extra_args": selected.profile.args,
                 # The role's OWN flags, the third axis of "what will this role
                 # launch with". Without it the matrix reported `extra_args: []`
@@ -705,7 +843,9 @@ def harness_status() -> None:
             console.print(f"{row['role']:<10} ⚠ {row['detail']} Fix: {row['fix']}", markup=False)
             continue
         ladder = "→".join(row["ladder"]) or "native default"
-        env_keys = ",".join(sorted(row["env"]))
+        # Keys only, a file-bound one's too: the values are paths and tokens, and this is
+        # a terminal.
+        env_keys = ",".join(sorted({*row["env"], *row["env_files"]}))
         env_note = f" env={env_keys}" if env_keys else ""
         # ...and hid the role's own flags, the axis this matrix is read for
         # after a ui-tester did or did not open a browser.
@@ -719,6 +859,8 @@ def harness_status() -> None:
         )
         for note in row["notes"]:
             console.print(f"  {note}", markup=False)
+        if row["refusal"] is not None:
+            console.print(f"  ⚠ {row['refusal']}", markup=False)
         fleet_row = row["fleet"]
         if "error" in fleet_row:
             console.print(f"  fleet: {fleet_row['error']}", markup=False)
@@ -773,6 +915,16 @@ def bind(
             metavar="KEY=VALUE",
         ),
     ] = None,
+    env_file_pairs: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--env-file",
+            help="KEY=PATH: this role launches with KEY set to the file's text, read at each "
+            "launch and never printed (repeatable), for a secret such as the reviewer's "
+            "GH_TOKEN. PATH may use ~ and $VAR. A file that cannot be read refuses the launch.",
+            metavar="KEY=PATH",
+        ),
+    ] = None,
     extra_args: Annotated[
         list[str] | None,
         typer.Option("--arg", help="Extra argument this role launches with (repeatable)."),
@@ -780,7 +932,9 @@ def bind(
     unset: Annotated[
         list[str] | None,
         typer.Option(
-            "--unset", help="Remove one env key from this role (repeatable).", metavar="KEY"
+            "--unset",
+            help="Remove one env key, or env file, from this role (repeatable).",
+            metavar="KEY",
         ),
     ] = None,
     clear: Annotated[
@@ -820,6 +974,16 @@ def bind(
     expansion happens at launch, which is what lets one binding follow you
     across machines with different homes.
 
+    ``--env-file`` binds a variable whose value is a secret to the file holding
+    it, read at every launch, so config.toml and every printed line hold the
+    path alone. A reviewer that can comment but not push or merge::
+
+        aisquare team bind reviewer \\
+          --env-file GH_TOKEN='~/.config/aisquare/reviewer-gh-token'
+
+    The file is read now as well, so a typo fails here rather than every later
+    launch of the role.
+
     ``--account`` is the one binding the CLI DOES interpret: it names a Claude
     account the CLI owns (``aisquare accounts``), resolved at every launch by
     the same resolver ``launch --account`` and ``fleet spawn`` use, and it
@@ -839,12 +1003,28 @@ def bind(
     else:
         if account is not None and clear_account:
             fail("--account and --clear-account are mutually exclusive", error="usage")
-        if not any((agent, agent_bin, env_pairs, extra_args, unset, account, clear_account)):
+        if not any(
+            (agent, agent_bin, env_pairs, env_file_pairs, extra_args, unset, account, clear_account)
+        ):
             fail(
-                "nothing to bind — pass --bin, --env, --arg, --unset, --account, "
+                "nothing to bind — pass --bin, --env, --env-file, --arg, --unset, --account, "
                 "--clear-account or --clear",
                 error="nothing_to_bind",
             )
+        env_files: dict[str, str] = {}
+        for key, typed in _parse_env(env_file_pairs or []).items():
+            # Read NOW, as --account is resolved now: a typo is a usage error rather than
+            # a binding that refuses every later launch of the role.
+            where = harness.expand_value(typed)
+            try:
+                harness.read_env_file(where)
+            except ValueError as exc:
+                message = f"--env-file {key}: {where} {exc}"
+                fail(message, error="env_file_unreadable", detail=message)
+            # Kept as typed where that names a full path (`~`, `$HOME`: portable), else as
+            # the file read here: kept relative, every launch looked for it in its own
+            # working directory, and the role's window refused (review of #259, round 3).
+            env_files[key] = typed if Path(where).is_absolute() else str(Path(where).absolute())
         if account is not None:
             # Resolved NOW, so a typo is a usage error rather than a binding
             # that refuses every later launch of the role.
@@ -865,6 +1045,7 @@ def bind(
                     agent_bin=agent_bin,
                     agent=agent,
                     env=_parse_env(env_pairs or []),
+                    env_files=env_files,
                     unset=unset or [],
                     args=extra_args or [],
                     account=account,
@@ -899,6 +1080,7 @@ def _describe(profile: RoleLaunchProfile) -> str:
         f"agent={profile.agent}" if profile.agent else "",
         f"bin={profile.bin}" if profile.bin else "",
         "  ".join(f"{key}={value}" for key, value in sorted(profile.env.items())),
+        "  ".join(f"{key}<{path}" for key, path in sorted(profile.env_files.items())),
         f"args={shlex.join(profile.args)}" if profile.args else "",
         f"account={profile.account}" if profile.account else "",
     ]
@@ -962,7 +1144,8 @@ def log(
         str | None, typer.Option("--kind", help="Only this kind (note, decision, task_done, …).")
     ] = None,
     task: Annotated[
-        str | None, typer.Option("--task", help="Only events about this task (id prefix).")
+        str | None,
+        typer.Option("--task", help="Only events about this task (#12, 12, or id prefix)."),
     ] = None,
     as_session: SessionRef = None,
 ) -> None:
@@ -1120,11 +1303,6 @@ def signals(as_session: SessionRef = None) -> None:
         console.print(_signal_line(state), markup=False)
 
 
-def _fmt_idle(minutes: int) -> str:
-    """Render an idle span the way the board's ``_age`` does (12m, 3h07m)."""
-    return f"{minutes}m" if minutes < 60 else f"{minutes // 60}h{minutes % 60:02d}m"
-
-
 @app.command("prune")
 def prune(
     older_than: Annotated[
@@ -1207,7 +1385,7 @@ def prune(
         bullet = "·" if report.dry_run else "✓"
         console.print(
             f"  {bullet} {team_service.short_id(entry.id)} ({entry.role}) — "
-            f"dark {_fmt_idle(entry.idle_minutes)}{claims}",
+            f"dark {team_service.minutes_text(entry.idle_minutes)}{claims}",
             markup=False,
         )
     count = len(report.pruned)
@@ -1238,10 +1416,19 @@ def distill(
             "--all", help="Backfill: re-distill the whole pipe from the beginning (idempotent)."
         ),
     ] = False,
+    board: Annotated[
+        str | None,
+        typer.Option(
+            "--board",
+            hidden=True,
+            help="The board to drain, by project id, whatever this directory resolves: "
+            "the detached drain a board write spawns is told the board it wrote to.",
+        ),
+    ] = None,
 ) -> None:
     """Push undistilled notes/decisions/outcomes into the project brain now."""
     try:
-        count = team_service.distill_now(rescan=rescan)
+        count = team_service.distill_now(rescan=rescan, board=board)
     except STORE_ERRORS as exc:
         _fail_team(exc)
     if get_state().json_output:
@@ -1279,7 +1466,7 @@ def note(
     text: Annotated[str, typer.Argument(help="The note/decision/question/result to share.")],
     as_session: SessionRef = None,
     task: Annotated[
-        str | None, typer.Option("--task", help="Task this note is about (id prefix).")
+        str | None, typer.Option("--task", help="Task this note is about (#12, 12, or id prefix).")
     ] = None,
     to: Annotated[
         str | None, typer.Option("--to", help="Address a role (planner/coder/runner/…).")
@@ -1309,6 +1496,21 @@ def note(
         )
 
 
+def board_json(
+    project: ProjectInfo,
+    sessions: list[TeamSession],
+    tasks: list[TeamTask],
+    events: list[TeamEvent],
+) -> dict[str, object]:
+    """The ``board --json`` payload — shared with the Remote Control server verbatim."""
+    return {
+        "project": project.model_dump(mode="json"),
+        "sessions": [s.model_dump(mode="json") for s in sessions],
+        "tasks": [t.model_dump(mode="json") for t in tasks],
+        "events": [e.as_envelope().model_dump(mode="json") for e in events],
+    }
+
+
 def board(
     watch: Annotated[
         bool, typer.Option("--watch", "-w", help="Full-screen live board; Ctrl-C exits.")
@@ -1329,16 +1531,7 @@ def board(
         _fail_team(exc)
     warn_board_scope(None)
     if get_state().json_output:
-        typer.echo(
-            json.dumps(
-                {
-                    "project": project.model_dump(mode="json"),
-                    "sessions": [s.model_dump(mode="json") for s in sessions],
-                    "tasks": [t.model_dump(mode="json") for t in tasks],
-                    "events": [e.as_envelope().model_dump(mode="json") for e in events],
-                }
-            )
-        )
+        typer.echo(json.dumps(board_json(project, sessions, tasks, events)))
         return
     if not sessions and not tasks:
         stdout_console().print(

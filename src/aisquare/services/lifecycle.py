@@ -20,7 +20,7 @@ import shutil
 import sqlite3
 import sys
 import tomllib
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
@@ -35,14 +35,22 @@ from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.config import (
     AppConfig,
     ExplainabilitySettings,
+    defaults_a_whole_file_reader_lacks,
     load_config,
     save_config,
 )
 from aisquare.core.store import store_session
-from aisquare.core.tmux import SocketAnswer, TmuxError, TmuxServer, boot_id, server_may_run
+from aisquare.core.tmux import (
+    SocketAnswer,
+    SocketReads,
+    TmuxError,
+    TmuxServer,
+    asking_server,
+    server_may_run,
+)
 from aisquare.core.version import DISTRIBUTION, __version__
-from aisquare.core.workspace import current_project
-from aisquare.models import ClaudeIdentity, SetupReport
+from aisquare.core.workspace import project_id_for
+from aisquare.models import ClaudeIdentity, ProjectInfo, SetupReport
 from aisquare.services import agents as agents_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import install_route, onboarding
@@ -117,7 +125,12 @@ def initialize(
     moot for now). ``reinit`` resets ``config.toml`` to defaults. Agents named via
     ``--agent`` are connected (hooks installed + context ingested); cloud auth is
     not wired yet.
+
+    ``path`` is refused unless it is a folder (``project.NotAFolder``), before anything is
+    written: a file or a mistyped folder was registered as a project of its own (review of
+    #259, round 43, 3/7).
     """
+    root = project_service.typed_root(path)
     home = paths.aisquare_home()
     already_initialized = paths.config_path().exists() or paths.db_path().exists()
     paths.ensure_home()
@@ -141,7 +154,7 @@ def initialize(
     if reinit or not paths.config_path().exists():
         save_config(AppConfig(), discard_unreadable=unreadable is not None)
 
-    project = current_project(path)
+    project = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
     with store_session() as store:
         store.onboard_project(project)  # init is the deliberate add (#139)
 
@@ -352,6 +365,9 @@ class UpgradePlan:
     """Live fleet agents, counted as uninstall counts them (:func:`running_fleet`)."""
     fleet_error: str | None = None
     """Why the fleet's live agents could not be counted, when they could not."""
+    remote: str | None = None
+    """The Remote that is on for this home in another process, named (:func:`running_remote`);
+    ``None`` when none is."""
     pin_refused: bool = False
     """Whether :attr:`reason` is that ``--version`` cannot pick a release for this route
     (``install_route.pin_refusal``): Homebrew's, a checkout's or a local source's."""
@@ -360,6 +376,14 @@ class UpgradePlan:
     reinstall's Python, or the uv cutoff, excludes it, or PyPI does not list it. The first
     two are :attr:`reason` too when the route is otherwise one ``aisquare upgrade`` runs;
     an index set up for it may list what PyPI does not."""
+    config_defaults_lost: tuple[str, ...] = ()
+    """The settings a move back to a release that reads config.toml whole
+    (:data:`LAST_WHOLE_CONFIG` and earlier) takes from that release's defaults, not this
+    one's, as the file says nothing of them: ``accounts.pick default (here headroom)``."""
+    env_files_dropped: tuple[str, ...] = ()
+    """The roles bound to a file (``RoleLaunchProfile.env_files``) that a move back to a
+    release before :data:`FIRST_ENV_FILES` ignores, each with its variables:
+    ``reviewer (GH_TOKEN)``."""
 
     @property
     def runnable(self) -> bool:
@@ -388,6 +412,67 @@ class UpgradePlan:
             f"({', '.join(self.live_agents)}): a hook {'they fire' if count != 1 else 'it fires'} "
             "while the install is being replaced fails, and that turn's board update is lost. "
             f"To be safe, stop {'them' if count != 1 else 'it'} first: {FLEET_SHUTDOWN}"
+        )
+
+    @property
+    def remote_warning(self) -> str | None:
+        """What upgrading now costs the Remote on in another process, or ``None`` when none is.
+
+        Said, as :attr:`fleet_warning` is, rather than refused, which uninstall does: the
+        install is away only while it is replaced. Its process keeps the release it started
+        with, and what it has not imported yet it imports from the new one (follow-up of
+        #259)."""
+        if self.remote is None:
+            return None
+        return (
+            f"Remote is on ({self.remote}): while the install is being replaced, its page and "
+            f"what phones ask of it can fail, and after that it runs {self.current} over the new "
+            f"install's files until it is started again. To be safe, turn it off first: "
+            f"{REMOTE_OFF}"
+        )
+
+    @property
+    def config_warning(self) -> str | None:
+        """What a move back reads differently in config.toml, or ``None`` when nothing.
+
+        This release's file holds only what the user changed, over defaults built in; a
+        release up to :data:`LAST_WHOLE_CONFIG` reads it with its own defaults instead, so
+        the settings the file leaves to today's defaults change with the move (review of
+        #261, M2). Said, as :attr:`fleet_warning` is, rather than refused: nothing is lost,
+        and the way forward again reads the file as before.
+        """
+        if not self.config_defaults_lost:
+            return None
+        first = self.config_defaults_lost[0].split()[0]
+        return (
+            f"{self.target} reads config.toml without this release's defaults under it, so "
+            f"what your file leaves to them takes {self.target}'s there: "
+            f"{', '.join(self.config_defaults_lost)}. Your own settings read the same in "
+            f"both; to keep one of these there, set it after the move (`aisquare config set "
+            f"{first} …`)"
+        )
+
+    @property
+    def env_files_warning(self) -> str | None:
+        """What a move back costs the roles bound to a file, or ``None`` when it costs none.
+
+        A release before :data:`FIRST_ENV_FILES` ignores the keys its config does not know,
+        so such a role launches there with whatever value the launching shell has: for a
+        reviewer bound to a token that cannot push, often one that can. 0.8.1 refuses an
+        unreadable file to prevent exactly that, and the move back said nothing of it
+        (review of #259, round 2). Said, as :attr:`fleet_warning` is, rather than refused:
+        the bindings stay in config.toml for the way forward again.
+        """
+        if not self.env_files_dropped:
+            return None
+        one = len(self.env_files_dropped) == 1
+        return (
+            f"{self.target} predates `team bind --env-file` (new in {FIRST_ENV_FILES}) and "
+            f"ignores {'that binding' if one else 'those bindings'}: "
+            f"{', '.join(self.env_files_dropped)} would launch there with whatever value the "
+            "launching shell has, such as a GH_TOKEN that can push. The "
+            f"{'binding stays' if one else 'bindings stay'} in config.toml, read again from "
+            f"{FIRST_ENV_FILES} on"
         )
 
     @property
@@ -502,8 +587,11 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
             reason = reason or pin_unmet
     refresh: tuple[HookSite, ...] = ()
     left: tuple[HookSite, ...] = ()
+    dropped: tuple[str, ...] = ()
     live: tuple[str, ...] = ()
     fleet_error: str | None = None
+    remote: str | None = None
+    lost: tuple[str, ...] = ()
     if reason is None:
         refresh, left = refresh_sites(route.facts)
         if target is not None:
@@ -514,7 +602,12 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
             # home's on a move back to a release with no Codex hooks.
             refresh, held = _held_by_target(refresh, target)
             left = (*left, *held)
+        if target is not None and reads_config_whole(target):
+            lost = _config_defaults_lost()
+        if target is not None and lacks_env_files(target):
+            dropped = _env_file_bindings()
         live, _unlistened, fleet_error = running_fleet()
+        remote = running_remote()
     return UpgradePlan(
         route=route,
         current=__version__,
@@ -529,6 +622,9 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
         left=left,
         live_agents=live,
         fleet_error=fleet_error,
+        remote=remote,
+        config_defaults_lost=lost,
+        env_files_dropped=dropped,
     )
 
 
@@ -562,7 +658,7 @@ def lacks_refresh_hooks(release: str) -> bool:
 
 #: The last release with no Codex hooks: an install of it, or of one before it, has none to
 #: write, and its ``agents refresh-hooks codex`` fails.
-LAST_WITHOUT_CODEX_HOOKS = "0.8.0"
+LAST_WITHOUT_CODEX_HOOKS = "0.8.1"
 
 
 def lacks_agent_hooks(agent: str, release: str) -> bool:
@@ -590,6 +686,46 @@ def _held_by_target(
         else:
             kept.append(site)
     return tuple(kept), tuple(held)
+
+
+def reads_config_whole(release: str) -> bool:
+    """Whether ``release`` reads config.toml as it stands, without the system defaults under
+    it: :data:`LAST_WHOLE_CONFIG` and earlier."""
+    return install_route.is_newer(release, LAST_WHOLE_CONFIG) is False
+
+
+def _config_defaults_lost() -> tuple[str, ...]:
+    """Each setting a release that :func:`reads_config_whole` reads otherwise
+    (:attr:`UpgradePlan.config_defaults_lost`); none when the config cannot be read, which
+    says nothing either way."""
+    try:
+        config = load_config()
+    except Exception:
+        return ()
+    return tuple(
+        f"{key} {theirs} (here {ours})"
+        for key, ours, theirs in defaults_a_whole_file_reader_lacks(config)
+    )
+
+
+def lacks_env_files(release: str) -> bool:
+    """Whether ``release`` predates ``env_files`` bindings (:data:`FIRST_ENV_FILES`), whose
+    keys its config then ignores."""
+    return install_route.is_newer(FIRST_ENV_FILES, release) is True
+
+
+def _env_file_bindings() -> tuple[str, ...]:
+    """Each role bound to a file, with its variables (:attr:`UpgradePlan.env_files_dropped`);
+    none when the config cannot be read, which says nothing either way."""
+    try:
+        profiles = load_config().team.profiles
+    except Exception:
+        return ()
+    return tuple(
+        f"{role} ({', '.join(sorted(profile.env_files))})"
+        for role, profile in sorted(profiles.items())
+        if profile.env_files
+    )
 
 
 def _left_by_move_back(site: HookSite, target: str) -> HookSite:
@@ -956,8 +1092,8 @@ def upgrade(plan: UpgradePlan, *, to_stderr: bool = False) -> UpgradeReport:
         held = f"{which} is {latest}; " if pypis else ""
         notes.append(f"{held}uv picks {version} here{now}")
     notes.append(
-        f"asq and `aisquare serve` processes that were already running keep {plan.current} "
-        "until they are restarted"
+        f"asq, `aisquare serve` and `aisquare remote serve` processes that were already "
+        f"running keep {plan.current} until they are restarted"
     )
     if version is not None and lacks_refresh_hooks(version):
         # A move back to a release before `agents refresh-hooks`: the plan left every site,
@@ -1062,6 +1198,10 @@ def _verify(plan: UpgradePlan, ran: install_route.InstallRoute) -> tuple[str | N
 REFRESH_HOOKS = ("agents", "refresh-hooks", HOOK_AGENT)
 #: The first release with ``agents refresh-hooks``: 0.7.0, on PyPI, has none.
 FIRST_REFRESH_HOOKS = "0.8.0"
+#: The last release that reads config.toml as it stands: those after lay it over defaults.
+LAST_WHOLE_CONFIG = "0.8.0"
+#: The first release that reads ``env_files`` (``team bind --env-file``): 0.8.0 ignores it.
+FIRST_ENV_FILES = "0.8.1"
 
 
 def refresh_hooks_argv(agent: str = HOOK_AGENT) -> tuple[str, ...]:
@@ -1140,6 +1280,10 @@ HOME_MARKERS = ("config.toml", "context.db", "agents.json")
 
 FLEET_SHUTDOWN = "aisquare fleet shutdown --all --yes"
 FLEET_FORGET = f"{FLEET_SHUTDOWN} --forget"
+REMOTE_OFF = (
+    "press Ctrl-C where `aisquare remote serve` runs, or turn Remote off in that asq's R panel"
+)
+"""How a Remote that is on in another process is turned off (:func:`running_remote`)."""
 
 
 class UninstallRefused(RuntimeError):
@@ -1242,9 +1386,14 @@ class UninstallPlan:
     ``fleet shutdown`` can then stop none of them, and only its ``--forget`` ends their rows
     (round 27 of #257)."""
     unreached: tuple[str, ...] = ()
-    """Those of :attr:`live_agents` whose server's socket is gone or could not be asked: no
-    tmux client reaches them, so ``fleet shutdown`` leaves them live, and only its
-    ``--forget`` ends their rows (round 27 of #257)."""
+    """Those of :attr:`live_agents` whose server's socket is gone or could not be asked, or
+    has another server on it than the one they were started on: no tmux client reaches
+    them, so ``fleet shutdown`` leaves them live, and only its ``--forget`` ends their rows
+    (round 27 of #257; follow-up)."""
+    taken: tuple[str, ...] = ()
+    """Those of :attr:`unreached` whose socket has another server on it: the way back to
+    their own server, ``SIGUSR1``, waits until no server answers there, as tmux's handler
+    takes the path from whatever listens on it (review of #259, round 3)."""
     listening: tuple[str, ...] = ()
     """The rest of :attr:`live_agents`: a server answers on their socket, so ``--forget``
     leaves them live. Sorted per row, never by subtracting :attr:`unreached` from
@@ -1267,6 +1416,9 @@ class UninstallPlan:
     codex_accounts: tuple[Path, ...] = ()
     """The Codex account homes inside the home (:func:`_codex_account_dirs`), each with its
     sign-in: a purge deletes them with it."""
+    remote: str | None = None
+    """The Remote that is on for this home in another process, named (:func:`running_remote`);
+    ``None`` when none is. It refuses the run, as a running fleet agent does."""
 
     @property
     def package_command(self) -> str:
@@ -1386,18 +1538,39 @@ class UninstallPlan:
             unreached = ""
             if self.unreached:
                 # `fleet shutdown` cannot reach them, and leaves them live: said, with the
-                # two ways on (round 27 of #257).
+                # two ways on (round 27 of #257). tmux's SIGUSR1 handler unlinks whatever is
+                # at the path and binds it, so sent while another server listens there it
+                # hands that server's path to the old one, and every agent on it is the one
+                # no client reaches: only once no server answers (review of #259, round 3),
+                # as `stop`, `shutdown`, `reap` and the doctor say.
                 one = len(self.unreached) == 1
+                once = ""
+                if self.taken:
+                    once = (
+                        " once no server answers on that socket"
+                        if len(self.taken) == len(self.unreached)
+                        else f" (for {', '.join(self.taken)}, once no server answers on its socket)"
+                    )
                 unreached = (
                     f"; it cannot reach {', '.join(self.unreached)}, as the socket "
-                    f"{'its' if one else 'their'} tmux server listened on is gone or could not "
-                    f"be asked. If {'it is' if one else 'they are'} still running, send that "
-                    f"server SIGUSR1, which makes tmux create its socket again, and run it "
-                    f"again; if not, end {'its row' if one else 'their rows'} on your word: "
-                    f"{FLEET_FORGET}"
+                    f"{'its' if one else 'their'} tmux server listened on is gone, could not "
+                    f"be asked, or has another server on it. If {'it is' if one else 'they are'} "
+                    f"still running, send that server SIGUSR1{once}, which makes tmux create "
+                    f"its socket again, and run it again; if not, end "
+                    f"{'its row' if one else 'their rows'} on your word: {FLEET_FORGET}"
                 )
             return UninstallRefused(
                 f"{running} Stop them first: {FLEET_SHUTDOWN}{unreached}", error="fleet_running"
+            )
+        if self.remote is not None:
+            # Refused as the fleet is: with the package gone, nothing is left to turn it off,
+            # sign its phones out or switch its writes off, and its link and passphrase work
+            # for as long as it runs (follow-up of #259).
+            return UninstallRefused(
+                f"Remote is on ({self.remote}): with aisquare gone, nothing could turn it off, "
+                f"sign its phones out or switch its writes off, and its link and passphrase "
+                f"would work for as long as it runs. Turn it off first: {REMOTE_OFF}",
+                error="remote_on",
             )
         if self.purge and self.purge_refusal is not None:
             return UninstallRefused(
@@ -2164,13 +2337,19 @@ _LIVE_ROWS = (
     "SELECT f.label, f.tmux_socket, p.root, f.created_at, {recorded} FROM fleet_agent AS f "
     "LEFT JOIN project AS p ON p.id = f.project_id WHERE f.ended_at IS NULL"
 )
-#: The facts a row has recorded since v25 (``FleetAgent.socket_path``, ``.boot_id``), and
-#: what a store from before them answers in their place: nothing recorded.
-_RECORDED = "f.socket_path, f.boot_id"
-_NOTHING_RECORDED = "NULL, NULL"
-#: One live fleet row: ``(label (project), socket, created, socket path, boot id)``, the last
-#: two what its spawn recorded of where its server listened and in which boot, else ``None``.
-_LiveRow = tuple[str, str, datetime | None, Path | None, str | None]
+#: The facts a row has recorded since v26 (``FleetAgent.socket_path``, ``.boot_id``,
+#: ``.server_started_at``), then what a v25 store answers in their place, then a store from
+#: before them: nothing recorded. Tried in that order, so a store this plan does not migrate
+#: answers with everything it has (round 25 of #257; follow-up).
+_RECORDED = (
+    "f.socket_path, f.boot_id, f.server_started_at",
+    "f.socket_path, f.boot_id, NULL",
+    "NULL, NULL, NULL",
+)
+#: One live fleet row: ``(label (project), socket, created, socket path, boot id, server
+#: started)``, the last three what its spawn recorded of where its server listened, in which
+#: boot, and when that server started, else ``None``.
+_LiveRow = tuple[str, str, datetime | None, Path | None, str | None, datetime | None]
 
 
 def _siblings_hiding_hooks() -> list[Path]:
@@ -2219,12 +2398,14 @@ def _live_fleet_agents() -> tuple[tuple[_LiveRow, ...], str | None]:
         return (), str(exc) or type(exc).__name__
     try:
         connection.execute("PRAGMA query_only = ON")
-        try:
-            rows = connection.execute(_LIVE_ROWS.format(recorded=_RECORDED)).fetchall()
-        except sqlite3.OperationalError as exc:
-            if "no such column" not in str(exc):
-                raise
-            rows = connection.execute(_LIVE_ROWS.format(recorded=_NOTHING_RECORDED)).fetchall()
+        for recorded in _RECORDED:
+            try:
+                rows = connection.execute(_LIVE_ROWS.format(recorded=recorded)).fetchall()
+            except sqlite3.OperationalError as exc:
+                if "no such column" not in str(exc) or recorded == _RECORDED[-1]:
+                    raise
+                continue
+            break
     except sqlite3.OperationalError as exc:
         if "no such table" in str(exc):
             return (), None  # a store from before the fleet: nothing can be live
@@ -2233,19 +2414,47 @@ def _live_fleet_agents() -> tuple[tuple[_LiveRow, ...], str | None]:
         return (), str(exc) or type(exc).__name__
     finally:
         connection.close()
+    shown = _shown_as(tuple((label, root) for label, _, root, *_ in rows))
     return (
         tuple(
             (
-                f"{label} ({Path(root).name if root else 'unknown project'})",
+                shown[label, root],
                 socket_name or "asq",
                 _created(created),
                 Path(path) if path else None,
                 booted or None,
+                _created(started) if started else None,
             )
-            for label, socket_name, root, created, path, booted in rows
+            for label, socket_name, root, created, path, booted, started in rows
         ),
         None,
     )
+
+
+def _shown_as(rows: Sequence[tuple[str, str | None]]) -> dict[tuple[str, str | None], str]:
+    """How each live row ``(label, project root)`` is named in the plan: ``<label>
+    (<folder>)``, as the refusal reads at a glance, or ``<label> (<root path>)`` where
+    that would collide.
+
+    A label names only its project's folder, and two projects can sit in folders of one
+    name (``~/work/api``, ``~/oss/api``): with a live manager each, the refusal printed
+    ``manager (api)`` twice, and ``--json``'s ``live_agents`` could not tell them apart
+    either (round 29 of #257; follow-up). A row with no project is ``unknown project``,
+    which has no root to show.
+    """
+    folders: dict[tuple[str, str], set[str]] = {}
+    for label, root in rows:
+        if root:
+            folders.setdefault((label, Path(root).name), set()).add(root)
+    shown: dict[tuple[str, str | None], str] = {}
+    for label, root in rows:
+        if not root:
+            shown[label, root] = f"{label} (unknown project)"
+        elif len(folders[label, Path(root).name]) > 1:
+            shown[label, root] = f"{label} ({root})"
+        else:
+            shown[label, root] = f"{label} ({Path(root).name})"
+    return shown
 
 
 def _created(value: object) -> datetime | None:
@@ -2269,24 +2478,26 @@ def _tmux_unusable() -> str | None:
     return None
 
 
-def _may_run(row: _LiveRow, this_boot: str | None) -> SocketAnswer | None:
+def _may_run(row: _LiveRow, reads: SocketReads | None = None) -> SocketAnswer | None:
     """Whether the agent of live ``row`` may still be running, and why; ``None`` when it
     cannot be. :func:`~aisquare.core.tmux.server_may_run`, the rule ``fleet shutdown`` asks
     too, so a row counted here is never one it ends as gone (round 27 of #257): one whose
     socket is gone counts until ``fleet shutdown --forget`` ends it on the operator's word,
-    unless it recorded no boot and predates this one (round 28).
+    unless it recorded no boot and predates this one (round 28). ``reads`` is the plan's,
+    so rows on one server ask it once. Asked through :func:`~aisquare.core.tmux.asking_server`,
+    which writes nothing and waits seconds, not 30, for a server that does not answer.
     """
-    _label, socket_name, created, recorded, booted = row
-    return server_may_run(TmuxServer(socket_name), recorded, booted, this_boot, created)
+    _label, socket_name, created, recorded, booted, started = row
+    return server_may_run(
+        asking_server(socket_name), recorded, booted, created, started, reads=reads
+    )
 
 
 def _fleet_answers() -> tuple[tuple[tuple[str, SocketAnswer], ...], int, str | None]:
     """:func:`running_fleet`, with what each live row's socket said (:func:`_may_run`)."""
     rows, fleet_error = _live_fleet_agents()
-    this_boot = boot_id() if rows else None
-    live = tuple(
-        (row[0], answer) for row in rows if (answer := _may_run(row, this_boot)) is not None
-    )
+    reads = SocketReads()  # one per server, and the boot once, for every row
+    live = tuple((row[0], answer) for row in rows if (answer := _may_run(row, reads)) is not None)
     return live, len(rows) - len(live), fleet_error
 
 
@@ -2297,6 +2508,21 @@ def running_fleet() -> tuple[tuple[str, ...], int, str | None]:
     """
     live, unlistened, fleet_error = _fleet_answers()
     return tuple(label for label, _ in live), unlistened, fleet_error
+
+
+def running_remote() -> str | None:
+    """The Remote on for this home in another process, named, or ``None``: an ``aisquare
+    remote serve`` in another shell or another asq's R panel, which upgrade warns about and
+    uninstall refuses for (``services.remote_server.remote_served_by``). Asked of the lock
+    the Remote holds while it is on, so it creates nothing, as the plans promise.
+
+    Imported here, not at the top: ``aisquare``'s import must not load the server
+    (tests/test_remote_stays_off_the_hook_path.py), and the plans ask once. asq's own Remote
+    is off by the time its Update or Uninstall runs this, as it stops it before handing over.
+    """
+    from aisquare.services import remote_server
+
+    return remote_server.remote_served_by()
 
 
 def plugin_answers(cache: str | None = None) -> Path:
@@ -2416,11 +2642,13 @@ def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
         fleet_error=fleet_error,
         tmux_unusable=_tmux_unusable() if live else None,
         unreached=tuple(label for label, answer in answers if answer != "answers"),
+        taken=tuple(label for label, answer in answers if answer == "another"),
         listening=tuple(label for label, answer in answers if answer == "answers"),
         plugins=_plugins(claude_dirs),
         plugin_answers=_plugin_answers_there(),
         codex_plugins=_codex_plugins(codex_configs),
         codex_accounts=tuple(_codex_account_dirs()),
+        remote=running_remote(),
     )
 
 

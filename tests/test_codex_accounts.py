@@ -318,7 +318,7 @@ def test_a_weekly_only_plan_and_a_window_that_has_reset_since(home: Path) -> Non
     # Claude's rule skips a reading without the five-hour window; Codex's ranks what it has.
     assert service.headroom_percent(weekly) is None
     assert service.headroom_percent(weekly, agent="codex") == 30.0
-    assert service.describe_headroom(slot, weekly) == "account 2 week 30%"
+    assert service.describe_headroom(slot, weekly) == "account 2 week 30% used (70% left)"
 
     later = NOW + timedelta(days=3)  # the window reset; nobody has used this home since
     reset = service.usage(slot, now=later)
@@ -923,8 +923,9 @@ def test_launch_and_spawn_run_a_codex_role_with_codex_home_on_its_slot(
 
 
 @pytest.fixture
-def team_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The board as a fleet window has it (the environment tests/test_coding_agents.py uses)."""
+def team_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, project_capture: None) -> None:
+    """The board as a fleet window has it (the environment tests/test_coding_agents.py uses),
+    in a directory its hooks capture (``project_capture``: off is 0.8.1's default)."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AISQUARE_TEAM", "1")
     monkeypatch.setenv("AISQUARE_ROLE", "coder")
@@ -995,6 +996,7 @@ def test_a_codex_turn_that_hit_its_limit_parks_the_row_and_hands_over(
 ) -> None:
     monkeypatch.setenv("AISQUARE_FLEET_AGENT", "fleet-one")
     limited = _codex_slot("full@example.com")
+    _codex_slot("room@example.com")  # somewhere to go: one account waits (0.8.1)
     session_id, _project = _codex_fleet_row(tmp_path, limited.config_dir)
     resets = datetime.now(tz=UTC) + timedelta(hours=3)
     records: list[dict[str, Any]] = [_event("task_started")]
@@ -1042,6 +1044,23 @@ def test_a_codex_turn_that_hit_its_limit_parks_the_row_and_hands_over(
     stopped.assert_not_called()  # the limit takes the Stop's place, as StopFailure does
     [argv] = detached
     assert argv[-4:-2] == ["hand-over", session_id] and argv[-1] == "session limit"
+
+
+def test_only_the_agents_own_accounts_are_somewhere_to_hand_over(home: Path) -> None:
+    limited = _codex_slot("full@example.com")
+    claude = core.create_account()  # signed in: a Claude Code login, no Codex one
+    (claude.config_dir / ".claude.json").write_text(
+        json.dumps({"oauthAccount": {"emailAddress": "me@example.com"}}), encoding="utf-8"
+    )
+    (claude.config_dir / ".credentials.json").write_text(
+        json.dumps({"claudeAiOauth": {"accessToken": "test-token"}}), encoding="utf-8"
+    )
+    assert core.signed_in(claude)
+    # The hook asks with the row's agent: a Claude Code account is no room for Codex.
+    assert not service.somewhere_to_hand_over(limited.slot, agent=CODEX.id)
+    assert service.somewhere_to_hand_over(limited.slot)  # every agent's, as main asks
+    _codex_slot("room@example.com")
+    assert service.somewhere_to_hand_over(limited.slot, agent=CODEX.id)
 
 
 def test_a_codex_session_ending_on_its_limit_records_it_without_a_hand_over(
@@ -1125,6 +1144,7 @@ def test_a_codex_turn_that_failed_with_no_stop_reaches_the_board_on_the_fleets_r
 
     monkeypatch.setenv("AISQUARE_FLEET_AGENT", "fleet-one")
     slot = _codex_slot("full@example.com")
+    _codex_slot("room@example.com")  # somewhere to go: one account waits (0.8.1)
     resets = datetime.now(tz=UTC) + timedelta(hours=3)
     ended = datetime.now(tz=UTC) + timedelta(minutes=1)  # a minute after its prompt, below
     transcript = _rollout(
@@ -1180,7 +1200,7 @@ def _running_on_screen(monkeypatch: pytest.MonkeyPatch) -> None:
     outside any sandbox (a sandboxed one is refused tmux)."""
     from aisquare.services import fleet
 
-    def observe(placements: Any, also: Any = ()) -> dict[str, Any]:
+    def observe(placements: Any, also: Any = (), reads: Any = None) -> dict[str, Any]:
         return {
             placement.row.id: fleet._PaneView(False, None, "codex", None)
             for placement in placements
@@ -1228,6 +1248,7 @@ def _working_codex_row(
     that turn's start; ``on_limit = "switch"``, the hand-overs it detaches collected."""
     monkeypatch.setenv("AISQUARE_FLEET_AGENT", "fleet-one")
     slot = _codex_slot("full@example.com")
+    _codex_slot("room@example.com")  # somewhere to go: one account waits (0.8.1)
     transcript = _rollout(slot.config_dir, [_event("task_started", turn_id="turn-1"), *records])
     session_id, project = _codex_fleet_row(tmp_path, slot.config_dir, transcript)
     prompt = {
@@ -1417,7 +1438,7 @@ def test_a_codex_switch_goes_fresh_to_the_codex_account_with_room(
     monkeypatch.setattr(
         fleet,
         "_refuse_a_replay_that_cannot_start",
-        lambda project, record, home=None, permission_mode=None: None,
+        lambda project, record, home=None, permission_mode=None, branch=None: None,
     )
     monkeypatch.setattr(fleet, "_mark_handing_over", lambda *a, **k: None)
     monkeypatch.setattr(fleet, "_unmark_handing_over", lambda session: None)
@@ -1426,7 +1447,7 @@ def test_a_codex_switch_goes_fresh_to_the_codex_account_with_room(
 
     def respawn(project: ProjectInfo, stopped: FleetAgent, *a: Any, **k: Any) -> Any:
         respawned.update(k)
-        receipt = Mock(failures=[], prompt_typed=True, tmux_session="asq", agent=stopped)
+        receipt = Mock(failures=[], prompt_typed="yes", tmux_session="asq", agent=stopped)
         return receipt, False, []
 
     monkeypatch.setattr(fleet, "_respawn", respawn)

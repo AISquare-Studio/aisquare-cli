@@ -14,7 +14,7 @@ import os
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +41,7 @@ from aisquare.services import install_route, lifecycle
 from aisquare.services.install_route import Facts
 from tests.fsperms import can_deny_reads, can_symlink
 from tests.installer_seams import no_real_installer  # noqa: F401 — autouse, applied by import
+from tests.remote_elsewhere import remote_lock, remote_on_elsewhere
 
 _EVENTS = (
     ("SessionStart", "session-start"),
@@ -97,12 +98,17 @@ def _record(*directories: Path) -> None:
     )
 
 
-def _snapshot(root: Path) -> dict[str, bytes]:
-    """Every file, directory and link under ``root``, by path — what "unchanged" means."""
+def _snapshot(root: Path, *, held: Path | None = None) -> dict[str, bytes]:
+    """Every file, directory and link under ``root``, by path — what "unchanged" means.
+
+    ``held`` is a file another descriptor holds locked (a Remote's ``remote-serve.lock``),
+    whose bytes Windows will not read meanwhile: recorded as there, not read."""
     found: dict[str, bytes] = {}
     for path in sorted(root.rglob("*")):
         if path.is_symlink():
             found[str(path)] = b"-> " + os.readlink(path).encode()
+        elif held is not None and path.is_file() and path.resolve() == held.resolve():
+            found[str(path)] = b"<held>"
         elif path.is_file():
             found[str(path)] = path.read_bytes()
         elif path.is_dir():
@@ -642,6 +648,7 @@ def _live_agent(
     socket_path: Path | None = None,
     boot_id: str | None = None,
     agent_id: str | None = None,
+    server_started_at: datetime | None = None,
 ) -> None:
     root.mkdir(parents=True, exist_ok=True)
     project = team_project(root)
@@ -658,6 +665,7 @@ def _live_agent(
                 cwd=project.root,
                 socket_path=socket_path,
                 boot_id=boot_id,
+                server_started_at=server_started_at,
                 created_at=created_at or datetime.now(tz=UTC),
             )
         )
@@ -683,6 +691,38 @@ def test_it_refuses_while_fleet_agents_are_live_and_names_the_shutdown(
     assert "coder-1 (" in human.stderr, "the live agent is named"
     assert "aisquare fleet shutdown --all --yes" in human.stderr
     assert _snapshot(tmp_path) == before and world.events == []
+
+
+@pytest.mark.parametrize("by", ["serve", "panel"])
+def test_it_refuses_while_a_remote_is_on_in_another_process_and_names_it(
+    tool: Tool,
+    world: World,
+    runner: CliRunner,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    by: str,
+) -> None:
+    """Follow-up of #259: an `aisquare remote serve` in another terminal, or another asq's R
+    panel, outlived the uninstall. With the package gone nothing could turn it off, sign its
+    phones out or switch its writes off, and its link and passphrase kept working. Refused
+    as live fleet agents are, naming it and the way to turn it off; nothing is touched."""
+    _initialised(runner, tmp_path)
+    _hooked(isolated_agent_home / ".claude", tool.script)
+    with remote_on_elsewhere(by=by) as named:
+        before = _snapshot(tmp_path, held=remote_lock())
+        refused = runner.invoke(app, ["--json", "uninstall", "--yes"])
+        plan = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
+        human = runner.invoke(app, ["uninstall", "--yes"])
+        after = _snapshot(tmp_path, held=remote_lock())
+    off = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
+
+    said = " ".join(human.stderr.split())
+    assert refused.exit_code == 1 and _one_object(refused.stdout)["error"] == "remote_on"
+    assert plan["remote"] == named and plan["refusal"]["error"] == "remote_on", plan
+    assert f"Remote is on ({named})" in said, "the Remote that is on is named"
+    assert "press Ctrl-C where `aisquare remote serve` runs" in said
+    assert after == before and world.events == [], "nothing touched"
+    assert off["remote"] is None and off["refusal"] is None, "control: once it is off"
 
 
 @pytest.mark.parametrize(
@@ -755,7 +795,8 @@ def test_two_rows_of_one_label_are_told_apart_by_what_their_sockets_say(
     by taking the unreached rows' labels out of the live ones', and a label names only the
     project's folder. Two projects in folders of one name, `work/api` and `oss/api`, each
     with a live manager, read "manager (api)" twice: one unreached hid the other, so the
-    refusal never said a server answers for it and `--forget` leaves it live."""
+    refusal never said a server answers for it and `--forget` leaves it live. Such rows
+    are now named by their root (the follow-up), and still told apart by their sockets."""
 
     def unusable(_self: TmuxServer) -> None:
         raise TmuxUnavailable("tmux is not installed (or not on PATH) — the fleet needs it")
@@ -775,11 +816,50 @@ def test_two_rows_of_one_label_are_told_apart_by_what_their_sockets_say(
     plan = lifecycle.uninstall_plan()
     said = " ".join(runner.invoke(app, ["uninstall", "--yes"]).stderr.split())
 
-    assert "A server answers on the socket of manager (api), so it is likely running" in said
-    assert "or, if manager (api) is not running, end its row on your word" in said
-    assert plan.live_agents == ("manager (api)", "manager (api)")
-    assert plan.listening == ("manager (api)",) and plan.unreached == ("manager (api)",)
+    work, oss = f"manager ({tmp_path / 'work' / 'api'})", f"manager ({tmp_path / 'oss' / 'api'})"
+    assert f"A server answers on the socket of {work}, so it is likely running" in said
+    assert f"or, if {oss} is not running, end its row on your word" in said
+    assert sorted(plan.live_agents) == sorted((work, oss))  # in the store's order, whichever
+    assert plan.listening == (work,) and plan.unreached == (oss,)
     assert world.events == []
+
+
+def test_rows_whose_label_and_folder_collide_are_named_by_their_root(
+    tool: Tool,
+    world: World,
+    runner: CliRunner,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Follow-up of #257: the refusal showed rows as `<label> (<folder name>)`, so two
+    projects in folders of one name printed the same line, in `--json`'s `live_agents`
+    too. Where the names collide the root path is shown; every other row keeps the
+    folder, as the refusal reads at a glance."""
+    monkeypatch.setattr(TmuxServer, "listener", lambda _self, _recorded=None: "answers")
+    _initialised(runner, tmp_path)
+    _live_agent(tmp_path / "work" / "api", "manager", agent_id="agt_work")
+    _live_agent(tmp_path / "oss" / "api", "manager", agent_id="agt_oss")
+    _live_agent(tmp_path / "oss" / "api", "coder-1", agent_id="agt_oss_coder")
+    _live_agent(tmp_path / "work" / "web", "manager", agent_id="agt_web")
+    _hooked(isolated_agent_home / ".claude", tool.script)
+
+    plan = lifecycle.uninstall_plan()
+    human = runner.invoke(app, ["uninstall", "--yes"])
+    machine = runner.invoke(app, ["--json", "uninstall"])  # the plan object (dry run)
+
+    named = (
+        f"manager ({tmp_path / 'work' / 'api'})",
+        f"manager ({tmp_path / 'oss' / 'api'})",
+        "coder-1 (api)",  # one coder-1 in a folder called api: no collision to resolve
+        "manager (web)",
+    )
+    assert sorted(plan.live_agents) == sorted(named)  # in the store's order, whichever
+    assert human.exit_code == 1 and world.events == []
+    said = " ".join(human.stderr.split())
+    assert all(name in said for name in named), said
+    assert machine.exit_code == 0, machine.output
+    assert sorted(_one_object(machine.stdout)["live_agents"]) == sorted(named)
 
 
 def test_a_row_shutdown_cannot_reach_is_named_with_the_way_out(
@@ -803,8 +883,148 @@ def test_a_row_shutdown_cannot_reach_is_named_with_the_way_out(
     assert human.exit_code == 1 and world.events == []
     said = " ".join(human.stderr.split())
     assert "Stop them first: aisquare fleet shutdown --all --yes; it cannot reach coder-1 (" in said
-    assert "send that server SIGUSR1" in said
+    assert "send that server SIGUSR1, which makes tmux create its socket again" in said
     assert "end its row on your word: aisquare fleet shutdown --all --yes --forget" in said
+
+
+def test_a_row_whose_socket_another_server_took_still_counts_and_is_named_unreached(
+    tool: Tool,
+    world: World,
+    runner: CliRunner,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Follow-up of #257: a server answers on the row's socket, and it is not the one the
+    row was started on, which lost its socket file to it and may run on. The row recorded
+    when its server started, so the listener is asked the same: another time counts as
+    running still, and as a row `fleet shutdown` cannot reach, so the way out is named."""
+    then = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    monkeypatch.setattr(TmuxServer, "listener", lambda _self, _recorded=None: "answers")
+    monkeypatch.setattr(TmuxServer, "started_at", lambda _self: then + timedelta(minutes=5))
+    _initialised(runner, tmp_path)
+    _live_agent(tmp_path / "repo", socket_path=tmp_path / "asq", server_started_at=then)
+    _hooked(isolated_agent_home / ".claude", tool.script)
+
+    plan = lifecycle.uninstall_plan()
+    human = runner.invoke(app, ["uninstall", "--yes"])
+
+    assert plan.live_agents == ("coder-1 (repo)",)
+    assert plan.unreached == ("coder-1 (repo)",) and plan.listening == ()
+    assert human.exit_code == 1 and world.events == []
+    said = " ".join(human.stderr.split())
+    assert "it cannot reach coder-1 (repo), as the socket its tmux server listened on" in said
+    assert "has another server on it" in said
+    # tmux's SIGUSR1 handler takes the path from whatever listens on it: sent now, it would
+    # strand every agent of the server that answers there (review of #259, round 3).
+    assert "send that server SIGUSR1 once no server answers on that socket, which" in said
+    assert "end its row on your word: aisquare fleet shutdown --all --yes --forget" in said
+    assert plan.taken == ("coder-1 (repo)",)
+    # Beside a row whose socket file is gone, the condition is said of the taken one alone.
+    gone = tmp_path / "gone"
+    monkeypatch.setattr(
+        TmuxServer,
+        "listener",
+        lambda _self, recorded=None: "gone" if recorded == gone else "answers",
+    )
+    _live_agent(tmp_path / "web", socket_path=gone, server_started_at=then, agent_id="agt_w")
+    both = " ".join(runner.invoke(app, ["uninstall", "--yes"]).stderr.split())
+    assert "send that server SIGUSR1 (for coder-1 (repo), once no server answers on its " in both
+    # Negative control: the server that answers started when the row says: it is the
+    # row's, and the row is one `fleet shutdown` stops.
+    monkeypatch.setattr(TmuxServer, "started_at", lambda _self: then)
+    plan = lifecycle.uninstall_plan()
+    assert plan.listening == ("coder-1 (repo)",) and plan.unreached == ("coder-1 (web)",)
+    assert plan.taken == ()
+
+
+def test_the_plan_asks_each_server_once_not_once_per_row(
+    tool: Tool,
+    runner: CliRunner,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 3: whether a row's agent may run asked its socket, and the
+    server answering there when it started, a `display-message` each, row by row, though
+    both answers are the server's: three agents on one server cost three of each, for the
+    upgrade plan and the uninstall plan alike. Now one of each per server."""
+    then = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    asked = {"listener": 0, "started": 0}
+
+    def listener(_self: TmuxServer, _recorded: Path | None = None) -> str:
+        asked["listener"] += 1
+        return "answers"
+
+    def started_at(_self: TmuxServer) -> datetime:
+        asked["started"] += 1
+        return then
+
+    monkeypatch.setattr(TmuxServer, "listener", listener)
+    monkeypatch.setattr(TmuxServer, "started_at", started_at)
+    _initialised(runner, tmp_path)
+    for label in ("manager", "coder-1", "coder-2"):
+        _live_agent(
+            tmp_path / "repo",
+            label,
+            socket_path=tmp_path / "asq",
+            server_started_at=then,
+            agent_id=f"agt_{label}",
+        )
+
+    plan = lifecycle.uninstall_plan()
+
+    assert len(plan.listening) == 3 and plan.unreached == ()
+    assert asked == {"listener": 1, "started": 1}, "once for the server, not once per row"
+
+
+_START_TIME = ["display-message", "-p", "#{start_time}"]
+
+
+@pytest.mark.parametrize("plan", ["uninstall", "upgrade"])
+def test_the_plans_ask_a_server_its_start_writing_nothing_and_waiting_seconds(
+    plan: str,
+    runner: CliRunner,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 4: a plan asks the server that answers on a row's socket when it
+    started, and asked it as every tmux command is put, with the bundled conf: that made the
+    home and rewrote a conf that had drifted, in plans that promise to write nothing (#253),
+    and gave a wedged server 30 s per socket. Now ``-f /dev/null``, which a question never
+    reads, and a few seconds. The upgrade plan counts the fleet with ``running_fleet``."""
+    then = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    asked: list[tuple[list[str], float]] = []
+
+    def tmux(
+        argv: list[str], stdin: bytes | None, *, timeout: float | None = None
+    ) -> tmux_core.Completed:
+        asked.append((list(argv), tmux_core._COMMAND_TIMEOUT if timeout is None else timeout))
+        return tmux_core.Completed(0, f"{int(then.timestamp())}\n", "")
+
+    monkeypatch.setattr(TmuxServer, "listener", lambda _self, _recorded=None: "answers")
+    monkeypatch.setattr(TmuxServer, "binary", lambda _self: "tmux")
+    monkeypatch.setattr(tmux_core, "_tmux", tmux)
+    _initialised(runner, tmp_path)
+    _live_agent(tmp_path / "repo", socket_path=tmp_path / "asq", server_started_at=then)
+    conf = paths.aisquare_home() / tmux_core.CONF_NAME
+    conf.write_text("# an older aisquare's conf\n", encoding="utf-8")
+
+    if plan == "uninstall":
+        assert lifecycle.uninstall_plan().listening == ("coder-1 (repo)",)
+    else:
+        assert lifecycle.running_fleet()[0] == ("coder-1 (repo)",)
+
+    assert conf.read_text(encoding="utf-8") == "# an older aisquare's conf\n", "rewritten"
+    # `tmux -V` (whether `fleet shutdown` could run) hands tmux no conf at all.
+    assert [call for call in asked if call[0][1:] != ["-V"]] == [
+        (
+            ["tmux", "-S", str(tmp_path / "asq"), "-f", os.devnull, *_START_TIME],
+            tmux_core._ASK_TIMEOUT,
+        )
+    ]
+    assert tmux_core._ASK_TIMEOUT <= 5
 
 
 @pytest.mark.parametrize("listening", [True, False], ids=["server-listening", "no-server"])
@@ -983,12 +1203,12 @@ def test_a_row_from_another_boot_cannot_be_running(
         boot_id="boot-2",
         created_at=long_ago,
     )
-    monkeypatch.setattr(lifecycle, "boot_id", lambda: "boot-2")
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "boot-2")
 
     assert lifecycle.running_fleet() == (("coder-2 (now)",), 1, None)
     assert asked == [tmp_path / "now.sock"]
 
-    monkeypatch.setattr(lifecycle, "boot_id", lambda: None)  # where it cannot be told
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: None)  # where it cannot be told
     asked.clear()
     assert sorted(lifecycle.running_fleet()[0]) == ["coder-1 (old)", "coder-2 (now)"]
     assert sorted(asked) == [tmp_path / "now.sock", tmp_path / "old.sock"]
@@ -1006,6 +1226,9 @@ def test_a_row_that_recorded_no_boot_and_predates_it_does_not_block_once_its_soc
     _initialised(runner, tmp_path)
     _live_agent(tmp_path / "old", "coder-1", created_at=datetime(2026, 10, 11, tzinfo=UTC))
     _live_agent(tmp_path / "now", "coder-2", created_at=datetime(2026, 10, 12, 7, tzinfo=UTC))
+    # No row recorded a boot, so none is asked: it was, for every read with rows, a 5 s
+    # `sysctl` each where it fails (review of #259, round 7, 5/9).
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: pytest.fail("no row recorded a boot"))
 
     assert lifecycle.running_fleet() == (("coder-2 (now)",), 1, None)
 

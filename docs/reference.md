@@ -9,7 +9,7 @@ removes exactly them):
 | Hook | What it does |
 | --- | --- |
 | `SessionStart` | inject orientation: snapshot pointers, context, team briefing |
-| `UserPromptSubmit` | capture the prompt; deliver the teammate delta; heartbeat |
+| `UserPromptSubmit` | record the prompt in a project you added (anywhere, with `[projects] capture` on); deliver the teammate delta; heartbeat |
 | `Stop` | mark the session waiting; renew its task leases |
 | `Notification` | flag **NEEDS YOU** when a prompt needs a human (permission, elicitation); other notices are feed lines, the idle notice nothing |
 | `SessionEnd` | release claims, mark the session gone, final distill |
@@ -36,7 +36,7 @@ concurrency-tested against racing parallel sessions):
 ```
 ~/.aisquare/
 ├── context.db    # context entries, projects, prompt history, tasks, events, sessions
-├── config.toml   # typed configuration; its config_version is the file's format, not a setting
+├── config.toml   # your settings: only what differs from the built-in defaults, each fleet role whole; config_version is the format
 ├── fleet-tmux.conf  # the fleet's private tmux server config (regenerated, not yours)
 ├── state.json    # small runtime state (e.g. the pinned active project)
 ├── agents.json   # registry of connected agents
@@ -64,12 +64,14 @@ aisquare
 ├── upgrade [--check] [--version V] [--dry-run] [-y]   update this install in place
 ├── uninstall [--purge] [--dry-run] [-y]   hooks out of Claude Code and Codex, then the package
 ├── project (workspace)  info · list · switch · link · onboard [--refresh] · forget <id|path> [--purge]
+│                   rename <nickname> [--clear]   — what the sidebar and the lists call it
 │                   prune [--missing] [--worktrees] [--purge] [--yes]
 ├── agents          scan · list · status [name] · connect <name> · disconnect <name>
 │                                                  [--config-dir DIR]
 │                   use <name> [--project] · refresh-hooks <name>
 │                                                  — name: claude-code or codex
 ├── accounts        list [--usage] · add [--agent A] · run <slot> [… agent args] · usage [slot]
+│                   (--usage and usage read a five-minute cache; --refresh reads now)
 │                   remove <slot>            — Claude Code and Codex accounts the CLI owns (docs/fleet.md)
 │                   default [<slot|alias|email>] [--project P] [--role R] [--clear] [--agent A]
 │                   alias <slot> <name> [--clear] · order <slot>… · move <slot> up|down|top|bottom
@@ -83,6 +85,7 @@ aisquare
 ├── task            add · list · show · next [--role R] [--status S] [--claim]
 │                   claim · review [--note] · reopen --reason · done [--note]
 │                   block --reason · drop · release        (all with [--as SESSION])
+│                   a task is its id, or 12 / #12 — its number on the caller's board
 ├── note <text> [--task T] [--to ROLE] [--kind note|decision|question|result]
 ├── board [-w] [-i SECONDS] · recall <query>
 ├── launch <role> [--agent A] [--command CMD] [--env KEY=VALUE]… [--account SLOT] [… agent args]
@@ -91,6 +94,8 @@ aisquare
 │                   have bound; env merges over `team bind`
 ├── serve [--stdio | --port N --bind H] [--show-token]
 ├── ui              the fleet UI — what bare `asq` opens at a terminal (docs/fleet.md)
+├── remote          serve · needs · status · allow-write on|off · revoke · regenerate-password
+│                   install-page <dist>   — the fleet on your phone (docs/remote.md)
 ├── fleet           spawn <role> [--label L] [--task ID] [--worktree/--no-worktree]
 │                             [--permission-mode M] [--agent A] [--sandbox S] [--approval P]
 │                             [--bin B] [--prompt TEXT] [--account SLOT]
@@ -105,7 +110,8 @@ aisquare
 │                   take [--as SESSION])
 ├── login [--no-browser] [--with-token] [--api-url URL] · logout · whoami
 ├── auth            status [--live] · token
-├── config          list · get <key> · set <key> <value> · redaction <off|standard|strict>
+├── config          list [--overrides] · get <key> · set <key> <value> · reset [--yes]
+│                   redaction <off|standard|strict>
 └── metrics         show · list  [-n N] [--session S] [--project P | --all]   (CI test bed; hidden)
 ```
 

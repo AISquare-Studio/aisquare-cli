@@ -7,6 +7,7 @@ import importlib.metadata
 import json
 import os
 import shlex
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,7 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import agents, selfcli
+from aisquare.core import agents, paths, selfcli
 from tests.fsperms import can_deny_writes, can_symlink, unwritable
 
 
@@ -540,7 +541,7 @@ def test_a_settings_json_of_another_group_keeps_its_group(fake_home: Path) -> No
     """Round 20 of #257: replaced, the file's owner and group became this user's and its
     primary group, its mode kept but read against another group, so a file shared
     through its group stopped being writable by that group. Written in place, it keeps
-    both; so does a file another user owns, which no test can make without root."""
+    both; so does a file another user owns (the two tests below)."""
     settings_path = fake_home / ".claude" / "settings.json"
     settings_path.write_text(json.dumps(MINE), encoding="utf-8")
     group = _another_group()
@@ -555,6 +556,153 @@ def test_a_settings_json_of_another_group_keeps_its_group(fake_home: Path) -> No
     assert agents.hook_commands("claude-code", settings_path.parent)
     assert settings_path.stat().st_gid == group
     assert settings_path.stat().st_ino == inode, "in place"
+
+
+def _replaced_targets(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every path a rename lands on from here on, as ``os.replace`` was asked it."""
+    replaced: list[str] = []
+    real_replace = os.replace
+
+    def replace(source: Any, destination: Any) -> None:
+        replaced.append(str(destination))
+        real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", replace)
+    return replaced
+
+
+def _as_root() -> bool:
+    """Whether this suite runs as root, which alone may give a file to another user."""
+    if sys.platform == "win32":  # mypy narrows on this: no geteuid there
+        return False
+    return os.geteuid() == 0
+
+
+@pytest.mark.skipif(not _as_root(), reason="only root can give a file to another user")
+def test_a_settings_json_another_user_owns_keeps_its_owner(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 20 of #257: replaced, a file another user owns became the writer's, here
+    root's, and its owner lost it. Written in place, it keeps its owner. CI runs as an
+    ordinary user, so the test after this one emulates the owner, where `_as_it_was`
+    reads it; this one runs where the suite runs as root (a container, `unshare -r`)."""
+    if sys.platform == "win32":  # mypy narrows on this, not on the skipif that keeps it off
+        pytest.skip("no os.chown on Windows")
+    settings_path = fake_home / ".claude" / "settings.json"
+    settings_path.write_text(json.dumps(MINE), encoding="utf-8")
+    owner = 65534  # nobody
+    os.chown(settings_path, owner, -1)
+    inode = settings_path.stat().st_ino
+    replaced = _replaced_targets(monkeypatch)
+
+    agents.install_hooks("claude-code", settings_path.parent)
+
+    assert agents.hook_commands("claude-code", settings_path.parent)
+    assert settings_path.stat().st_uid == owner, "its owner's still"
+    assert settings_path.stat().st_ino == inode and replaced == [], "in place"
+
+
+def test_a_settings_json_another_user_owns_is_written_in_place_as_its_owner_reads(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The test above, where no root can make the file: its owner is emulated where
+    `_as_it_was` reads it, the target's stat, so every suite asks whether an owner other
+    than the temp's keeps the rename off (follow-up of #257). The temp, and every other
+    file, reads as it is."""
+    settings_path = fake_home / ".claude" / "settings.json"
+    settings_path.write_text(json.dumps(MINE), encoding="utf-8")
+    target = settings_path.resolve()
+    real_stat = Path.stat
+
+    def stat_of_anothers(self: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        found = real_stat(self, follow_symlinks=follow_symlinks)
+        if self != target:
+            return found
+        fields = list(found)
+        fields[stat.ST_UID] = found.st_uid + 1
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(Path, "stat", stat_of_anothers)
+    replaced = _replaced_targets(monkeypatch)
+
+    agents.install_hooks("claude-code", settings_path.parent)
+
+    monkeypatch.undo()
+    assert replaced == [], "in place: no rename over it"
+    assert agents.hook_commands("claude-code", settings_path.parent)
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["env"] == MINE["env"]
+    assert sorted(p.name for p in settings_path.parent.iterdir()) == [
+        "CLAUDE.md",
+        "settings.json",
+    ], "no temp"
+
+
+def _inherited_dacl(folder: Path) -> str | None:
+    """The DACL a new file in ``folder`` starts with, as a temp beside a file does."""
+    fresh = folder / "fresh.json"
+    fresh.write_text("{}", encoding="utf-8")
+    try:
+        return paths.dacl_sddl(fresh)
+    finally:
+        fresh.unlink()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="NTFS ACLs")
+def test_a_settings_json_with_a_dacl_of_its_own_is_written_in_place_and_keeps_it(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 20 of #257: on NTFS a rename keeps the temp's security descriptor, which is the
+    DACL its folder hands down, so a settings.json given a grant of its own lost it.
+    `_as_it_was` compares the two DACLs and writes in place where they differ. Real ACLs,
+    on the windows leg (follow-up of #257)."""
+    from tests import winacl
+
+    settings_path = fake_home / ".claude" / "settings.json"
+    settings_path.write_text(json.dumps(MINE), encoding="utf-8")
+    winacl.grant_other_principal(settings_path)
+    before = paths.dacl_sddl(settings_path)
+    assert before is not None and before != _inherited_dacl(settings_path.parent), (
+        "premise: a DACL its folder does not hand down"
+    )
+    replaced = _replaced_targets(monkeypatch)
+
+    agents.install_hooks("claude-code", settings_path.parent)
+
+    monkeypatch.undo()
+    assert replaced == [], "in place: no rename over it"
+    assert agents.hook_commands("claude-code", settings_path.parent)
+    assert paths.dacl_sddl(settings_path) == before, "its own DACL, kept"
+    assert winacl.OTHER_PRINCIPAL_TRUSTEE in winacl.dacl_trustees(settings_path)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="NTFS ACLs")
+def test_a_settings_json_whose_dacl_denies_this_user_writing_is_left_as_it_was(
+    fake_home: Path,
+) -> None:
+    """Round 20 of #257: `os.access` on Windows reads the read-only flag alone, so a file
+    whose DACL denies this user writing passed it, and the rename, which needs no write
+    to the file, replaced it all the same. The DACLs differ, so it is written in place,
+    which the DACL refuses: a PermissionError, and the file as it was. Real ACLs, on the
+    windows leg (follow-up of #257)."""
+    from tests import winacl
+
+    settings_path = fake_home / ".claude" / "settings.json"
+    settings_path.write_text(json.dumps(MINE), encoding="utf-8")
+    before = settings_path.read_bytes()
+    me = winacl.current_user_sid()
+    winacl.deny_writing(settings_path, me)
+    try:
+        assert os.access(settings_path, os.W_OK), "premise: os.access does not read the DACL"
+        with pytest.raises(PermissionError):
+            agents.install_hooks("claude-code", settings_path.parent)
+    finally:
+        winacl.undo_denials(settings_path, me)
+
+    assert settings_path.read_bytes() == before
+    assert sorted(p.name for p in settings_path.parent.iterdir()) == [
+        "CLAUDE.md",
+        "settings.json",
+    ], "no temp"
 
 
 def test_a_settings_json_nobody_else_shares_is_still_replaced(fake_home: Path) -> None:

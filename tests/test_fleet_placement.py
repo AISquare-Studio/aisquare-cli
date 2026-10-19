@@ -59,6 +59,10 @@ MADE: dict[str, dict[str, str]] = {
         "spawn": "today's socket, where this spawn starts its window",
         "attach_argv": "today's socket, for `require` before a record's session is asked",
         "_cannot_run": "today's socket, for a socket probe only (ACTS)",
+        "_refuse_a_replay_that_cannot_start": (
+            "today's socket, asked whether a running server lost its path before a replay "
+            "stops its agent (`_refuse_a_freed_socket`); nothing named"
+        ),
     },
     "services/diagnostics.py": {
         "_check_tmux": "the default socket: is tmux installed, which version",
@@ -101,6 +105,26 @@ ACTS: dict[str, dict[str, str]] = {
             "a socket probe at a row's own `socket_path` for a row no record places, only "
             "ever to END that row: a sandbox that wrote it could end its row itself"
         ),
+        "type_then_enter": (
+            "types into the pane its caller names: a placed pane's "
+            "(`PlacedPane.type_then_enter`), or the pane of an agent a listing placed "
+            "(Remote's paste, its row through `placed_row`)"
+        ),
+        "_live_rows_here": (
+            "a socket probe at this shell's path for the live rows recorded there, only ever "
+            "to forget an exited server's start (the row is then judged by its record's time, "
+            "never placed by it) or to refuse a spawn"
+        ),
+        "_before_a_server_starts": (
+            "today's socket, asked before a server may start there (`open_window`)"
+        ),
+        "open_window": (
+            "a window at today's socket in the session its caller names: a new one "
+            "(`_new_session_window`, `create=True`) or the Accounts view's sign-in window"
+        ),
+        "_refuse_a_replay_that_cannot_start": (
+            "today's socket, a freed path probed before a replay stops its agent"
+        ),
     },
     "services/diagnostics.py": {
         "_check_fleet": (
@@ -120,6 +144,7 @@ ACTS: dict[str, dict[str, str]] = {
         "AccountsView._settle_login_quietly": "the sign-in window this view made",
         "AccountsView._poll_login": "the sign-in window this view made",
         "AccountsView._close_login_window": "the sign-in window this view made",
+        "AccountsView._login_polled": "the sign-in window this view made",
     },
 }
 
@@ -136,12 +161,27 @@ MINTS: dict[tuple[str, str], str | None] = {
     ("_address", "_Address"): None,
     ("_session_to_join", "_Address"): "config.tmux_socket",
     ("_shutdown_sockets", "_Address"): "config.tmux_socket",
+    ("_live_rows_here", "_Address"): "config.tmux_socket",
 }
 
 #: ``callee`` → the sites that may call it in ``services/fleet.py``.
 CALLERS: dict[str, frozenset[str]] = {
     # Recorded values (a record's place, a session the index holds) to an address.
-    "_address": frozenset({"resolve_place", "_indexed_sessions", "_legacy_panes", "_running_ids"}),
+    "_address": frozenset(
+        {
+            "resolve_place",
+            "_indexed_sessions",
+            "_legacy_panes",
+            "_running_ids",
+            # Remote's handles on an agent a listing placed (`placed_row`): its fields are
+            # its record's.
+            "server_of",
+            "socket_at",
+            # The live rows at this shell's path, to forget an exited server's start or
+            # refuse a spawn (ACTS).
+            "_live_rows_here",
+        }
+    ),
     # Session names tmux itself listed, for `shutdown --all`'s sweep; or the census holds,
     # whose panes alone are matched in it (`_running_ids`).
     "_listed_session": frozenset({"_swept_sessions", "_running_ids"}),
@@ -152,7 +192,7 @@ _PROBES = frozenset({"server_may_run", "socket_answer"})
 #: A receiver that is a server, outside the fleet's service (where names are unambiguous).
 _SERVER = re.compile(r"(?:\b|_)(?:server|srv|probe|servers\[[^]]*\])\b")
 #: Calls that are no tmux server's, whatever their name (`subprocess.run`, `app.run`).
-_NOT_TMUX = frozenset({"subprocess", "os", "shutil", "app", "asyncio"})
+_NOT_TMUX = frozenset({"subprocess", "os", "shutil", "app", "asyncio", "project_service"})
 
 
 def tmux_target_methods() -> frozenset[str]:

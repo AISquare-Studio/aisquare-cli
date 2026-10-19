@@ -37,7 +37,9 @@ from aisquare.models import (
     DoctorCheck,
     FleetAgent,
     InjectionRecord,
+    ProjectInfo,
     PromptRecord,
+    PruneCandidate,
     ShippingStatus,
     StatusReport,
 )
@@ -57,6 +59,7 @@ from aisquare.services import credits as credits_service
 from aisquare.services import distill as distill_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
+from aisquare.services import project as project_service
 from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
 from aisquare.services.ci_contract import DeliveryDescriptor
@@ -163,10 +166,10 @@ def doctor(
             *_check_resumable_agents(),
             *_check_captured_projects(),
             # After the actionable machine checks on purpose. The fleet UI's sidebar
-            # shows the first three not-ok rows (`DOCTOR_LINES == 3`, a stable sort
-            # within the warn group), so a row inserted at position 12 evicted one
-            # of `brain` / `snapshot` / a logged-out `gh` — the ones an operator can
-            # act on — from the only doctor surface visible without a click. The
+            # showed the first three not-ok rows (a stable sort within the warn
+            # group), so a row inserted at position 12 evicted one of `brain` /
+            # `snapshot` / a logged-out `gh` — the ones an operator can act on — from
+            # what was seen first; the Doctor page still lists them in this order. The
             # fleet terminal row (#147) can warn too, about a running server's kept
             # prefix, so it waits here with them rather than beside tmux.
             _check_browser_tools(cwd),
@@ -1501,8 +1504,8 @@ def _planned_agent_checks() -> list[DoctorCheck]:
     Codex and Cursor today (``core.agents``; Claude Code is the row above). One
     row per registry entry, so an agent added there gets its row here, and one
     that gains hooks moves to a check of its own. Always ``ok``, detected or
-    not: there is nothing to fix, and a warning would take one of the sidebar's
-    three not-ok lines (``DOCTOR_LINES``) from a row an operator can act on. No
+    not: there is nothing to fix, and a warning would sit among the first not-ok
+    lines the Doctor page lists, above a row an operator can act on. No
     ``fix``, so no button: ``agents connect`` refuses these agents rather than
     record a connection that installs nothing. A release is named only where
     the registry plans one.
@@ -1710,7 +1713,6 @@ def _check_resumable_agents() -> list[DoctorCheck]:
         resumable: list[str] = []
         with store_session() as store:
             for project in store.list_projects(all=True):
-                name = project.codename or project.root.name or project.id
                 # The NEWEST row under each label only, the one `fleet restart
                 # <label>` acts on: a resumed restart keeps the session id, so the
                 # row it replaced still has its transcript on disk, and counting it
@@ -1725,7 +1727,10 @@ def _check_resumable_agents() -> list[DoctorCheck]:
                     if session is None or not session.transcript_path:
                         continue
                     if Path(session.transcript_path).is_file():
-                        resumable.append(f"{agent.label} ({name})")
+                        # Its own restart, naming its project: alone, `fleet restart <label>`
+                        # restarted the active project's (review of #259, round 21).
+                        restart = project_service.fleet_command("restart", project, agent.label)
+                        resumable.append(f"`{restart}`")
     except Exception:  # the database line reports a broken store
         return []
     if not resumable:
@@ -1738,8 +1743,7 @@ def _check_resumable_agents() -> list[DoctorCheck]:
         _ok(
             "fleet-resume",
             f"{len(resumable)} exited {noun} can be resumed — the transcript is on disk, so "
-            f"Restart continues the session instead of starting over: {shown} "
-            "(aisquare fleet restart <label>)",
+            f"Restart continues the session instead of starting over: {shown}",
         )
     ]
 
@@ -1748,26 +1752,196 @@ def _check_captured_projects() -> list[DoctorCheck]:
     """How many directories are registered but hidden (#139) — and how to see or drop them.
 
     Silent when there are none; gated on the store existing (doctor creates
-    nothing). ``ok``: a hidden capture is the design working, not a fault.
+    nothing). ``ok``: a hidden capture is the design working, not a fault. With
+    ``[projects] capture`` off, every one is left from before it was: nothing lists
+    them, nothing captures more, and the prune that drops them is named, with
+    ``--older-than 0`` since none of them is going to be touched again — for the rows
+    it drops (:func:`~aisquare.services.project.prune_candidates`). A captured row that
+    holds saved context, or a live agent, it keeps whatever ``--older-than`` says: counted
+    under it, they made the line say "drop them" again after every prune, of rows it
+    would never drop (review of #259, round 17). They are named apart, with ``project
+    forget``, which drops one — and the rows with a live agent apart again, since
+    ``forget`` refuses those until their agents are stopped (round 18).
+
+    What holds a row is the hold prune and forget ask (the plan's own, for its rows, and
+    :func:`~aisquare.services.project.forget_refusals` of the other captured rows, with the rows
+    that prune drops gone, as prune decides it; asked so of the plan's rows alone, a row
+    holding context was told to forget a stopped reader the prune it names drops, which then
+    matched nothing: review of #259, round 36, 3/9): the board of another project's agents,
+    live or a restart away, as a hub's, is one. Asked of the row's own live agents alone, a
+    hub prune keeps was counted under "drop them" after every prune, as the live agents' rows
+    were before round 17, and the rows apart were told to stop their own agents, which they
+    had none of; they are named apart again, with the projects that read each and the way
+    out ``forget`` names (review of #259, round 34, 3/10): every project, each with its stop
+    when its agents run, and its onboard when it is forgotten (round 35, 2/8).
     """
     if _uncreated_home("projects") is not None:
         return []
     try:
+        # One store session and one read of the setting: three sessions and two reads were
+        # opened for one line (review of #259, round 19).
+        capture = project_service.capture_on()
+        plan: list[PruneCandidate] = []
+        holds: dict[str, list[project_service.BoardReader]] = {}
         with store_session() as store:
-            captured = len(store.captured_projects())
+            captured = store.captured_projects()
+            if captured and not capture:
+                # The rows that hold a board, read once for the plan and the refusals: read
+                # by each, every project's label heads were read twice a run, and doctor
+                # runs at every `asq` start (review of #259, round 35, 6/8).
+                rows = project_service.reading_rows(store)
+                # The plan's held rows with what holds each, as prune decided it: asked again,
+                # each one's hold was worked out twice a run (review of #259, round 36, 8/9).
+                refused: dict[str, project_service.ProjectBusyError] = {}
+                plan = project_service.prune_candidates(
+                    missing=False,
+                    worktrees=False,
+                    captured_older_than=0,
+                    store=store,
+                    readers=rows,
+                    refused=refused,
+                )
+                planned = {c.project.id for c in plan}
+                dropped = {c.project.id for c in plan if not c.held}
+                refused |= project_service.forget_refusals(
+                    store,
+                    [p for p in captured if p.id not in planned],
+                    dropping=dropped,
+                    readers=rows,
+                )
+                holds = {project_id: busy.readers for project_id, busy in refused.items()}
     except Exception:  # the database line reports a broken store
         return []
     if not captured:
         return []
-    noun = "directory" if captured == 1 else "directories"
+    if not capture:
+        return [_ok("projects", _left_from_before_capture(captured, plan, holds))]
+    noun = _directories(len(captured))
     return [
         _ok(
             "projects",
-            f"{captured} captured {noun} hidden from the sidebar and `project list` (a hooked "
-            "session ran there; nothing added it on purpose) — see them: aisquare project "
-            "list --all; drop the stale ones: aisquare project prune --captured-only",
+            f"{len(captured)} captured {noun} hidden from the sidebar and `project list` (a "
+            "hooked session ran there; nothing added it on purpose) — see them: aisquare "
+            "project list --all; drop the stale ones: aisquare project prune --captured-only",
         )
     ]
+
+
+def _left_from_before_capture(
+    captured: list[ProjectInfo],
+    plan: list[PruneCandidate],
+    holds: Mapping[str, Sequence[project_service.BoardReader]],
+) -> str:
+    """The capture-off line: the rows ``prune --captured-only --older-than 0`` drops (``plan``
+    is what it would do), with that command, and apart from them the rows it keeps, by name:
+    those holding saved context with ``project forget``, and those ``forget`` refuses
+    (``holds``, by id: the projects whose fleet agents read the row's board, or none for its
+    own live ones), with what frees each first.
+
+    Each part put together once from its noun, verb and pronoun: the kept part was written
+    out twice, in near-identical branches, and a wording fix had to be made in each (review
+    of #259, round 18)."""
+    dropped = {c.project.id for c in plan if c.reason == "captured" and c.project.id not in holds}
+    held = [p for p in captured if p.id not in dropped and p.id not in holds]
+    working = [p for p in captured if p.id in holds and not holds[p.id]]
+    read = [p for p in captured if holds.get(p.id)]
+    left = "left from before project capture was turned off"
+    listed = "listed only by aisquare project list --all"
+    parts: list[str] = []
+    if dropped:
+        parts.append(
+            f"{len(dropped)} captured {_directories(len(dropped))} {left} (a hooked session "
+            f"ran there; nothing added it on purpose) — {listed}; drop them: aisquare project "
+            "prune --captured-only --older-than 0"
+        )
+    prune = "that prune" if dropped else "aisquare project prune"
+    for kept, why in ((held, "context"), (working, "agents"), (read, "hub")):
+        if not kept:
+            continue
+        one = len(kept) == 1
+        names = ", ".join(project_service.display_name(p) for p in kept[:3])
+        if len(kept) > 3:
+            names += f", +{len(kept) - 3} more"
+        # Each row's own, every row, as the stop below (review of #259, round 22): "aisquare
+        # project forget <directory>, for each" beside names shown by directory gave two rows
+        # called scratch no directory to pass, and a fourth row none at all.
+        forgets = [project_service.forget_command(p.root) for p in kept]
+        drop = f"drop it with {forgets[0]}" if one else f"drop them ({'; '.join(forgets)})"
+        which = (
+            f"{len(kept)} more"
+            if parts
+            else f"{len(kept)} captured {_directories(len(kept))} {left}"
+        )
+        then = "" if parts else f"{listed}; "
+        if why == "hub":
+            # Every project whose agents read each, and what frees it, from the steps
+            # `ProjectBusyError` words too: a restart of a stopped one starts it under the hub.
+            agents, frees = _what_frees(kept, holds)
+            what = (
+                f"{'is the board' if one else 'are the boards'} {agents}, running or stopped, "
+                f"which {prune} keeps and aisquare project forget refuses: {names} — "
+                f"{then}{frees}, then {drop}"
+            )
+        elif why == "agents":
+            # With the project named, as `ProjectBusyError` names it (review of #259, round 19):
+            # each row's own, every row. Said once "--project <name>, for each" beside names
+            # shown by directory, two rows called scratch had no name to pass, and a fourth
+            # row none at all, past "+1 more" (round 20).
+            stop = "; ".join(project_service.fleet_command("stop", p) + " <label>" for p in kept)
+            what = (
+                f"{'has a fleet agent' if one else 'have fleet agents'} still running, which "
+                f"{prune} keeps and aisquare project forget refuses: {names} — {then}stop "
+                f"{'its' if one else 'their'} agents first ({stop}), then {drop}"
+            )
+        else:
+            what = (
+                f"{'holds' if one else 'hold'} saved context, which {prune} keeps: {names} — "
+                f"{then}{drop}"
+            )
+        parts.append(f"{which} {what}")
+    return "; ".join(parts)
+
+
+def _what_frees(
+    kept: Sequence[ProjectInfo], holds: Mapping[str, Sequence[project_service.BoardReader]]
+) -> tuple[str, str]:
+    """``<whose> fleet agents read (<projects>)`` of the boards ``kept`` (``holds``), every
+    project named, and what frees them: each one's steps (:meth:`BoardReader.frees`, which
+    ``ProjectBusyError`` words too), its onboard when it is forgotten, its stop when its
+    agents run, then its forget.
+
+    The first reader of a row alone, with its forget alone, a row two projects read was
+    refused again after it, naming the other; a reader whose agents ran was refused its
+    forget, with no stop given; and a forgotten one's forget matched nothing (review of #259,
+    round 35, 2/8). The steps were written out here a second time, with rules of their own
+    (round 36, 7/9)."""
+    readers: dict[str, tuple[ProjectInfo, project_service.Frees]] = {}
+    for reader in (reader for p in kept for reader in holds[p.id]):
+        frees = reader.frees()
+        known = readers.get(reader.project.id)
+        if known is None or known[1].stop is None:  # running under any row it holds
+            readers[reader.project.id] = (reader.project, frees)
+    them = len(readers) == 1
+    steps: list[str] = []
+    adds = [frees.onboard for _, frees in readers.values() if frees.onboard is not None]
+    if adds:
+        ones = "it" if them else "the forgotten " + ("one" if len(adds) == 1 else "ones")
+        steps.append(f"add {ones} back ({'; '.join(adds)})")
+    stops = [frees.stop for _, frees in readers.values() if frees.stop is not None]
+    if stops:
+        steps.append(f"stop the running ones ({'; '.join(stops)})")
+    forgets = "; ".join(frees.forget for _, frees in readers.values())
+    steps.append(f"forget {'it' if them else 'them'} ({forgets})")
+    whose = ", ".join(project_service.display_name(project) for project, _ in readers.values())
+    agents = "another project's" if them else "other projects'"
+    return f"{agents} fleet agents read ({whose})", (
+        f"once you are done with {'its' if them else 'their'} agents, "
+        f"{', '.join(steps[:-1])}{' and ' if len(steps) > 1 else ''}{steps[-1]}"
+    )
+
+
+def _directories(count: int) -> str:
+    return "directory" if count == 1 else "directories"
 
 
 def _check_dead_managers() -> list[DoctorCheck]:
@@ -1785,6 +1959,7 @@ def _check_dead_managers() -> list[DoctorCheck]:
         with store_session() as store:
             projects = store.list_projects(all=True)
             headless = []
+            restarts = []
             for project in projects:
                 live = store.fleet_agents(project.id, live_only=True)
                 if not live or any(agent.role == "manager" for agent in live):
@@ -1795,6 +1970,7 @@ def _check_dead_managers() -> list[DoctorCheck]:
                         f"{project.codename or project.root.name or project.id} "
                         f"({len(live)} agent(s) still running)"
                     )
+                    restarts.append(project_service.fleet_command("restart", project, "manager"))
     except Exception:  # the database line reports a broken store
         return []
     if not headless:
@@ -1803,8 +1979,7 @@ def _check_dead_managers() -> list[DoctorCheck]:
         _warn(
             "fleet-manager",
             "the manager exited while agents are still running in: " + "; ".join(headless),
-            "Bring it back with its session: aisquare fleet restart manager --project <name> "
-            "(or Restart on its row in asq)",
+            f"Bring it back with its session: {'; '.join(restarts)} (or Restart on its row in asq)",
         )
     ]
 
@@ -1839,9 +2014,16 @@ def _account_limit_checks(agent: str) -> list[DoctorCheck]:
                 and (session.agent or claude_accounts_core.AGENT) == agent
             ]
             labels = {}
+            switches = []
+            by_id = {p.id: p for p in projects}
             for session, _project_name in limited:
-                row = store.fleet_agent_for_session(session.project_id, session.id)
+                row = store.fleet_agent_for_session(session.id)
                 labels[session.id] = row.label if row is not None else session.id[:8]
+                # Only a fleet agent is switched, by its row's project and label: under a hub
+                # the session's is the hub's board (review of #259, round 23).
+                project = by_id.get(row.project_id) if row is not None else None
+                if row is not None and project is not None:
+                    switches.append(project_service.fleet_command("switch", project, row.label))
     except Exception:  # the database line reports a broken store
         return []
     if not limited:
@@ -1861,16 +2043,24 @@ def _account_limit_checks(agent: str) -> list[DoctorCheck]:
             _warn(
                 f"{agent}-account-limits",
                 f"{len(limited)} agent(s) parked on a {name} usage limit: " + " · ".join(parts),
-                "Move one to an account with headroom: aisquare fleet switch <label>; or wait "
-                f"for the reset and prompt it again — AISquare does not wait for {name} to go on",
+                (
+                    f"Move one to an account with headroom: {'; '.join(switches)}; or wait "
+                    if switches
+                    else "Wait "
+                )
+                + f"for the reset and prompt it again — AISquare does not wait for {name} to go on",
             )
         ]
     return [
         _warn(
             "claude-account-limits",
             f"{len(limited)} agent(s) parked on a Claude usage limit: " + " · ".join(parts),
-            "Move one to an account with headroom: aisquare fleet switch <label>; or wait — "
-            "Claude Code continues by itself at the reset",
+            (
+                f"Move one to an account with headroom: {'; '.join(switches)}; or wait — "
+                if switches
+                else "Wait — "
+            )
+            + "Claude Code continues by itself at the reset",
         )
     ]
 
@@ -1925,7 +2115,7 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
     if measured and all(pct >= settings.switch_at for _, pct in measured):
         return _warn(
             "claude-account-headroom",
-            f"every account is at or over {settings.switch_at}% of its five-hour or weekly "
+            f"every account has used {settings.switch_at}% or more of its five-hour or weekly "
             f"window: {summary}",
             "Add or sign in another account (aisquare accounts add), or wait for a reset — "
             "a fleet spawned now has nowhere to switch to",
@@ -1938,7 +2128,8 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
         )
     return _ok(
         "claude-account-headroom",
-        f"five-hour and weekly windows ({settings.switch_at}% is the line): {summary}",
+        f"five-hour and weekly windows, percent USED ({settings.switch_at}% used is the line): "
+        f"{summary}",
     )
 
 
@@ -3464,7 +3655,7 @@ def _check_fleet(
             live = [a for p in projects for a in store.fleet_agents(p.id, live_only=True)]
         gone: list[FleetAgent] = []
         exited: list[FleetAgent] = []
-        started: dict[fleet_service._Address, datetime | None] = {}
+        started: dict[fleet_service._Address, datetime] = {}
         # Where their launch records place them, as `reap` asks (`fleet.resolve_place`): a
         # row no record places is judged by nothing, there or here.
         # Read as written, the census never taken here: the doctor writes nothing.
@@ -3485,17 +3676,17 @@ def _check_fleet(
                 facts = server.pane_facts(placement.pane.pane_id)
             except tmux_core.TmuxError:
                 facts = None
-            if facts is not None and address not in started:
-                try:
-                    started[address] = server.started_at()
-                except tmux_core.TmuxError:
-                    started[address] = None  # judges nothing, as in the fleet
+            if facts is not None and facts.server_started is not None:
+                # One server, one start, said in the answer that named the pane
+                # (`#{start_time}`), not asked in a display-message of its own (review of
+                # #259, round 5, as `_observe` reads it since round 4). None judges nothing.
+                started.setdefault(address, facts.server_started)
             # tmux 3.7c answers a vanished target with exit 0 and every field
             # empty, so "gone" is "no facts OR facts about no pane", not only None.
             if (
                 facts is None
                 or facts.pane_id != placement.pane.pane_id
-                or fleet_service._outlived(placement.pane.created_at, started[address])
+                or placement.pane.outlived(started.get(address))
             ):
                 gone.append(agent)
             elif facts.dead:
@@ -3506,11 +3697,41 @@ def _check_fleet(
         by_socket: dict[fleet_service._Address, list[FleetAgent]] = {}
         for agent in gone:
             by_socket.setdefault(addresses[agent.id], []).append(agent)
-        this_boot = tmux_core.boot_id()
+        reads = tmux_core.SocketReads()  # one per server, and the boot once, not per row
         for sock, agents in by_socket.items():
             listed = _fleet_labels(agents, names)
             if servers[sock].list_sessions():
-                problems.append(f"{len(agents)} recorded live but the tmux pane is gone: {listed}")
+                # The server that answers may be another than a row's: one that took the
+                # socket path from a server that lost its file and runs on, which the one
+                # rule says from the start the row recorded (follow-up of #257). Such a
+                # row is held, not a pane that is gone, and `reap` leaves it.
+                taken: list[FleetAgent] = []
+                vanished: list[FleetAgent] = []
+                for agent in agents:
+                    if sock in started:  # said already: the server is asked once at most
+                        reads.heard_started(servers[sock], agent.socket_path, started[sock])
+                    answer = tmux_core.server_may_run(
+                        servers[sock],
+                        agent.socket_path,
+                        agent.boot_id,
+                        agent.created_at,
+                        agent.server_started_at,
+                        reads=reads,
+                    )
+                    (taken if answer == "another" else vanished).append(agent)
+                if vanished:
+                    problems.append(
+                        f"{len(vanished)} recorded live but the tmux pane is gone: "
+                        f"{_fleet_labels(vanished, names)}"
+                    )
+                if taken:
+                    unreached.extend(taken)
+                    problems.append(
+                        f"{len(taken)} recorded live but another tmux server answers on the "
+                        f"socket of the private tmux server '{sock}', not the one "
+                        f"{'it was' if len(taken) == 1 else 'they were'} started on, which may "
+                        f"still be running: {_fleet_labels(taken, names)}"
+                    )
             elif servers[sock].server_absent():
                 # tmux itself says there is no server — the one case reap's
                 # --server-down acts on, decided by the SAME predicate reap uses.
@@ -3526,7 +3747,12 @@ def _check_fleet(
                 held: list[FleetAgent] = []
                 for agent in agents:
                     answer = tmux_core.server_may_run(
-                        servers[sock], agent.socket_path, agent.boot_id, this_boot, agent.created_at
+                        servers[sock],
+                        agent.socket_path,
+                        agent.boot_id,
+                        agent.created_at,
+                        agent.server_started_at,
+                        reads=reads,
                     )
                     (down if answer is None else held).append(agent)
                 if down:
@@ -3562,14 +3788,17 @@ def _check_fleet(
                 "aisquare fleet reap --all"
             )
             if unreached:
-                # Its server may run on, and the way back to it comes before the
-                # flag, which would end its rows as well (`reap --server-down` marks
-                # every row on a socket tmux finds no server behind).
+                # Its server may run on, and the way back to it comes first. `reap
+                # --server-down` holds such a row (the one rule, follow-up of #257);
+                # `shutdown --forget` is the word that ends it.
                 fix += (
-                    "; if a server still runs behind a socket file that is gone, send it "
-                    "SIGUSR1, which makes tmux create its socket again, before anything else"
+                    "; if a server still runs behind a socket file that is gone, or behind a "
+                    "socket another server took, send it SIGUSR1 (once the socket is free), "
+                    "which makes tmux create its socket again; reap --server-down leaves "
+                    "such rows live, and if that server is not running, end them on your "
+                    "word: aisquare fleet shutdown --all --forget"
                 )
-            if server_down or unreached:
+            if server_down:
                 # tmux says no server is there — but doctor runs in this shell and
                 # cannot see a fleet alive under another TMUX_TMPDIR, so the flag
                 # is offered with its condition, not prescribed.
@@ -3621,7 +3850,10 @@ def _trust_fix(adapter: AgentAdapter, directory: Path) -> str:
     ambient = agent_core.ambient_hook_dir(adapter.id)
     run = adapter.binary
     if ambient is None or agent_core._dir_key(ambient) != agent_core._dir_key(directory):
-        run = f"{adapter.home_env}={shlex.quote(str(directory))} {adapter.binary}"
+        if sys.platform == "win32":  # no `VAR=value cmd` in cmd.exe or PowerShell
+            run = f"{adapter.binary} with {adapter.home_env} set to {directory}"
+        else:
+            run = f"{adapter.home_env}={shlex.quote(str(directory))} {adapter.binary}"
     return (
         f"Start {run}, type /hooks, and trust aisquare's hooks there (in asq, the manager's "
         f"pane does it); {adapter.label} runs them only once trusted, and this row reads "

@@ -28,7 +28,7 @@ import sqlite3
 import sys
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from datetime import UTC, datetime, timedelta
 from functools import wraps
@@ -481,6 +481,50 @@ def _converge_v11_fork(connection: sqlite3.Connection) -> None:
     )
 
 
+def _index_board_stamps(connection: sqlite3.Connection) -> None:
+    """v25 → v26's index on when each board event was written, for the reads of the events
+    since a time that run every few seconds (``remote``'s needs scan). They started past
+    the newest event stamped before that time on the ``seq`` index, and skipped an event
+    written before a clock stepped back and stamped after the time asked (review of #259,
+    round 6, 6/10). A store at v26 without it, an earlier 0.8.1 candidate's, gets it from
+    the presence pass.
+
+    Only where ``team_event`` is: a missing table is not this step's business, as it is
+    not :func:`_add_column_if_absent`'s, and an index on it would leave the store
+    unopenable rather than one doctor names the missing table of.
+    """
+    query = "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'team_event'"
+    if connection.execute(query).fetchone() is not None:
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS team_event_project_created "
+            "ON team_event (project_id, created_at)"
+        )
+
+
+def _index_task_numbers(connection: sqlite3.Connection) -> None:
+    """v29 → v30: at most one task per number on a board (partial: NULL is no number), and
+    the tasks with no number found without reading the table.
+
+    :func:`_number_unnumbered_tasks` asks for one on every open, so on every hook, and
+    ``number IS NULL`` cannot use the first index, whose rows are the numbered ones: a store
+    with every task numbered read ``team_task`` whole to find none (review of #259, round
+    13). The second holds only the tasks without a number, which is none once they are
+    numbered. A store an earlier build of this line stamped v30 without it gets it from
+    the presence pass at its next open (:data:`_PRODUCTS`).
+    """
+    query = "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'team_task'"
+    if connection.execute(query).fetchone() is None:
+        return
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS team_task_number ON team_task (project_id, number) "
+        "WHERE number IS NOT NULL"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS team_task_unnumbered ON team_task (project_id) "
+        "WHERE number IS NULL"
+    )
+
+
 # Python that must run before a migration's statements, inside its transaction,
 # keyed by the version being upgraded FROM. Kept apart from _MIGRATIONS so the
 # scripts stay plain SQL that executescript and _statements build identically.
@@ -489,7 +533,7 @@ def _has_table(connection: sqlite3.Connection, table: str) -> bool:
     return connection.execute(query, (table,)).fetchone() is not None
 
 
-#: The two triggers v27 makes (#113), each ``IF NOT EXISTS``.
+#: The two triggers v34 makes (#113), each ``IF NOT EXISTS``.
 _TEAM_META_TRIGGERS = """
 CREATE TRIGGER IF NOT EXISTS team_meta_insert_time AFTER INSERT ON team_meta BEGIN
  UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE key = NEW.key;
@@ -501,7 +545,7 @@ END;
 
 
 def _date_team_meta_writes(connection: sqlite3.Connection) -> None:
-    """v26 → v27 (#113): the triggers that date every insert and change of a ``team_meta``
+    """v33 → v34 (#113): the triggers that date every insert and change of a ``team_meta``
     row. A trigger cannot be made on a table that is not there, and a store that lacks
     ``team_meta`` still opens, for the doctor to name what it lacks."""
     if _has_table(connection, "team_meta"):
@@ -510,7 +554,7 @@ def _date_team_meta_writes(connection: sqlite3.Connection) -> None:
 
 
 def _redate_team_meta(connection: sqlite3.Connection) -> None:
-    """v27 → v28 (#113): the rows #113's dogfooded v16 left dated 0, dated now."""
+    """v34 → v35 (#113): the rows #113's dogfooded v16 left dated 0, dated now."""
     if _has_table(connection, "team_meta"):
         connection.execute(
             "UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) "
@@ -521,8 +565,10 @@ def _redate_team_meta(connection: sqlite3.Connection) -> None:
 _PREPARE: dict[int, Callable[[sqlite3.Connection], None]] = {
     11: _retire_v1_metric_table,
     12: _converge_v11_fork,
-    26: _date_team_meta_writes,
-    27: _redate_team_meta,
+    25: _index_board_stamps,
+    29: _index_task_numbers,
+    33: _date_team_meta_writes,
+    34: _redate_team_meta,
 }
 
 
@@ -610,8 +656,93 @@ def _bind_keys_to_their_destinations(connection: sqlite3.Connection) -> None:
     )
 
 
+def _number_existing_tasks(connection: sqlite3.Connection) -> None:
+    """v28 → v29's backfill: every task already on a board gets its number, 1, 2, … per
+    project in the order the tasks were added (``created_at``, the id breaking a tie).
+
+    Runs right after ``team_task.number`` is added, in the same transaction, and only
+    then (:data:`_BACKFILLS`), so a store that has its numbers is never renumbered: a
+    number once said on a board keeps meaning that task.
+    """
+    connection.execute(
+        "UPDATE team_task SET number = ("
+        "  SELECT ranked.n FROM ("
+        "    SELECT id, ROW_NUMBER() OVER ("
+        "      PARTITION BY project_id ORDER BY created_at, id"
+        "    ) AS n FROM team_task"
+        "  ) AS ranked WHERE ranked.id = team_task.id"
+        ") WHERE number IS NULL"
+    )
+
+
+def _number_unnumbered_tasks(connection: sqlite3.Connection) -> None:
+    """Every task stored without a number gets one on open: its board's highest plus one,
+    in the order the tasks were added (``created_at``, the id breaking a tie).
+
+    v29's backfill numbers what a store holds when the column is added, and only then. A
+    build from before v29 opens a v30 store without complaint and inserts with ``number``
+    NULL, so the tasks it adds would show an id tail and an empty ``#`` for good (review
+    of #261, m6). Each one is numbered as an add here numbers it (:meth:`SqliteStore.
+    upsert_task`), under the write lock, so a racing add or opener cannot take the same
+    number. A store with every task numbered pays two reads, the second of an empty index
+    (``team_task_unnumbered``, :func:`_index_task_numbers`), and a store without
+    ``team_task`` (doctor's damaged-store case) is left to be described.
+    """
+    query = "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'team_task'"
+    if connection.execute(query).fetchone() is None:
+        return
+    query = "SELECT 1 FROM team_task WHERE number IS NULL LIMIT 1"
+    if connection.execute(query).fetchone() is None:
+        return
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        unnumbered = connection.execute(
+            "SELECT id FROM team_task WHERE number IS NULL ORDER BY created_at, id"
+        ).fetchall()
+        for row in unnumbered:
+            connection.execute(
+                "UPDATE team_task SET number = (SELECT COALESCE(MAX(number), 0) + 1 "
+                "FROM team_task AS board WHERE board.project_id = team_task.project_id) "
+                "WHERE id = ?",
+                (row[0],),
+            )
+        connection.execute("COMMIT")
+    except sqlite3.Error:
+        with contextlib.suppress(sqlite3.Error):
+            connection.execute("ROLLBACK")
+        raise
+
+
+#: The board of a ``fleet_agent`` row that recorded none: that of the session bound to it,
+#: the one its hooks registered on, else its own project's. The one answer for the v32
+#: backfill (:func:`_board_existing_agents`) and for every read of a row written with no
+#: board since (:data:`_FLEET_AGENT_READ`): a 0.8.0 build opens a v32 store as it is, and
+#: its spawn writes NULL there. Read as the row's project, such a row under a hub announced
+#: its exit, and took its pause, on a board its manager does not read, where the backfill
+#: gave a row from before v32 the hub's (review of #259, round 26, 9/11).
+_UNRECORDED_BOARD = (
+    "COALESCE((SELECT session.project_id FROM team_session AS session"
+    " WHERE session.id = fleet_agent.session_id), fleet_agent.project_id)"
+)
+
+
+def _board_existing_agents(connection: sqlite3.Connection) -> None:
+    """v31 → v32's backfill: every fleet agent already recorded reads the board of the
+    session bound to it, the one its hooks registered on, else its own project's
+    (:data:`_UNRECORDED_BOARD`).
+
+    Runs right after ``fleet_agent.board`` is added, in the same transaction, and only then
+    (:data:`_BACKFILLS`). A store without ``team_session`` (doctor's damaged-store case)
+    gives every row its project's.
+    """
+    if not _has_table(connection, "team_session"):
+        connection.execute("UPDATE fleet_agent SET board = project_id WHERE board IS NULL")
+        return
+    connection.execute(f"UPDATE fleet_agent SET board = {_UNRECORDED_BOARD} WHERE board IS NULL")
+
+
 def _adopt_claude_code_identity(connection: sqlite3.Connection) -> None:
-    """v25 → v26's backfill (#113): the sessions and fleet agents Claude Code made say so.
+    """v32 → v33's backfill (#113): the sessions and fleet agents Claude Code made say so.
 
     Runs right after ``team_session.native_session_id`` is added (``agent`` is added just
     before it), in the same transaction, and only then (:data:`_BACKFILLS`). A session
@@ -625,12 +756,12 @@ def _adopt_claude_code_identity(connection: sqlite3.Connection) -> None:
 
 
 def _adopt_claude_code_fleet_agents(connection: sqlite3.Connection) -> None:
-    """v25 → v26's backfill (#113): a fleet agent started as ``claude`` is Claude Code's."""
+    """v32 → v33's backfill (#113): a fleet agent started as ``claude`` is Claude Code's."""
     connection.execute("UPDATE fleet_agent SET agent = 'claude-code' WHERE binary = 'claude'")
 
 
 def _date_team_meta(connection: sqlite3.Connection) -> None:
-    """v26 → v27's backfill (#113): the ``team_meta`` rows from before the column are
+    """v33 → v34's backfill (#113): the ``team_meta`` rows from before the column are
     dated now, so the launch-metadata cleanup gives them a full retention period."""
     connection.execute("UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER)")
 
@@ -646,6 +777,8 @@ def _date_team_meta(connection: sqlite3.Connection) -> None:
 _BACKFILLS: dict[tuple[str, str], Callable[[sqlite3.Connection], None]] = {
     ("project", "onboarded_at"): _adopt_onboarded_projects,
     ("project_explainability", "api_url"): _bind_keys_to_their_destinations,
+    ("team_task", "number"): _number_existing_tasks,
+    ("fleet_agent", "board"): _board_existing_agents,
     ("team_session", "native_session_id"): _adopt_claude_code_identity,
     ("fleet_agent", "agent"): _adopt_claude_code_fleet_agents,
     ("team_meta", "updated_at"): _date_team_meta,
@@ -889,28 +1022,85 @@ _SCHEMA_V24 = ""
 # step, so the script is empty: they are in :data:`_PRODUCTS`; a row from before them
 # keeps NULLs, which ``services.lifecycle`` reads as nothing recorded.
 _SCHEMA_V25 = ""
-# v26-v28 (#113): the coding-agent steps that line stamped 15-17 while it was in
-# flight, appended here and renumbered (the note above _SCHEMA_V15). Idempotent like
-# every step from v15 on: the columns are in :data:`_PRODUCTS`, their backfills in
-# :data:`_BACKFILLS`, and the triggers are ``IF NOT EXISTS``.
+# v26 (follow-up of #257): when a fleet agent's server started, as it said at spawn
+# (``#{start_time}``): the identity of the server its pane id names. A server that
+# answers at the row's socket but started at another time took the path from a server
+# that lost its socket file and may run on, so stop, shutdown, reap and uninstall hold
+# the row instead of ending it under its agent. The column is in :data:`_PRODUCTS`; a row
+# from before it keeps NULL, which every reader takes as nothing recorded. And an index on
+# when each board event was written (:func:`_index_board_stamps`, in :data:`_PREPARE`), so
+# the script is empty.
+_SCHEMA_V26 = ""
+# v27: a project's nickname — free text a person gives it, as they name a browser tab,
+# beside the codename that names its tmux session and branches and so stays constrained.
+# The column is the whole step, so the script is empty: it is in :data:`_PRODUCTS`; a
+# row from before it keeps NULL, which every reader shows as the directory's name. The
+# ``name`` column is not it: written once as the basename and never read, it is not
+# repurposed.
+_SCHEMA_V27 = ""
+# v28: which token a usage reading was taken with — a fingerprint of it, never the token.
+# The five-minute cache (``services.claude_accounts.cached_usage``) serves a recorded
+# reading only to the token that took it: a slot signed into another login, or signed
+# out, is asked again rather than shown the last login's figure. The column is the whole
+# step, so the script is empty: it is in :data:`_PRODUCTS`; a row from before it keeps
+# NULL, which the cache serves to no token, and which the trends read as before.
+_SCHEMA_V28 = ""
+# v29: a task's number on its board (``#12``) — what a person reads and types instead of
+# ``tsk_01m4wd5p…``. Per project, 1, 2, … in the order tasks are added: given at insert
+# as the project's highest plus one, in the INSERT itself (one statement under the write
+# lock), and never reused, since tasks leave a board only with the whole project. The
+# column is the whole step, so the script is empty: it is in :data:`_PRODUCTS`, and its
+# backfill (:func:`_number_existing_tasks`) numbers the tasks a store already holds.
+_SCHEMA_V29 = ""
+# v30: one number per board — a unique index (:func:`_index_task_numbers`). A step of its
+# own because a step's script runs BEFORE its columns are added (:func:`_run_step`): in
+# v29 it would name a column that is not there yet. Python, not a script, because the
+# presence pass applies a step to a store whatever it lacks, and a store without
+# ``team_task`` at all (doctor's damaged-store case) must still open and be described,
+# as :func:`_add_column_if_absent` already lets it for a column.
+_SCHEMA_V30 = ""
+# v31 (review of #259, round 15): the branch a fleet agent's worktree was on, as git said
+# at spawn, at stop and at reap before the tree went: where a restart or switch makes a
+# gone tree again. It was looked for in git's worktree list, which every spawn's prune
+# empties, and in notes in the repo's git config keyed by a path labels reuse, which went
+# stale. The column is the whole step, so the script is empty: it is in :data:`_PRODUCTS`;
+# a row from before it keeps NULL, which a restart of a gone tree reads as no branch known.
+_SCHEMA_V31 = ""
+# v32 (review of #259, round 25): the board a fleet agent's sessions read, as its spawn
+# gave it: the hub's under ``AISQUARE_TEAM_HUB``, else its project's principal checkout's.
+# Worked out again from the process environment, the bound session, the cwd or Remote's
+# own environment, each reader had its own answer. The column is the whole step, so the
+# script is empty: it is in :data:`_PRODUCTS`, and its backfill
+# (:func:`_board_existing_agents`) gives a row from before it its session's board.
+_SCHEMA_V32 = ""
+# v33-v36 (#113): the coding-agent steps. That line stamped them 15-17 while it was in
+# flight (the note above _SCHEMA_V15), then 26-29 once it took main's v25; 0.8.1 took
+# 26-32 for its own steps first, so these come after them, renumbered again. Idempotent
+# like every step from v15 on: the columns are in :data:`_PRODUCTS`, their backfills in
+# :data:`_BACKFILLS`, the triggers are ``IF NOT EXISTS`` and the table and its indexes
+# too. A store #113's line stamped 26-29 ran none of 0.8.1's v26-v29 under those
+# numbers: the presence pass (:func:`_converge_by_presence`) finds their columns and
+# indexes absent and applies them, with their backfills (task numbers among them), before
+# the ladder goes on from its stamp; and these four, whose products it holds already, add
+# nothing to it but the v35 repair of rows dated 0, which converges.
 #
-# v26: native coding-agent identity, independent of runtime session IDs.
+# v33: native coding-agent identity, independent of runtime session IDs.
 # ``team_session.agent`` and ``native_session_id`` and ``fleet_agent.agent`` are the
 # whole step, so the script is empty; their backfill
 # (:func:`_adopt_claude_code_identity`) marks the rows Claude Code made.
-_SCHEMA_V26 = ""
-# v27: when each ``team_meta`` row was last written, for the launch-metadata cleanup.
+_SCHEMA_V33 = ""
+# v34: when each ``team_meta`` row was last written, for the launch-metadata cleanup.
 # The column, ``team_meta.updated_at``, is in :data:`_PRODUCTS`, and its backfill
 # (:func:`_date_team_meta`) dates the rows that predate it; the triggers, made in
 # Python where the table is (:func:`_date_team_meta_writes`, in :data:`_PREPARE`), date
 # every later insert and change of value.
-_SCHEMA_V27 = ""
-# v28: #113 stamped 17 for this repair while the native-agent branch was being
+_SCHEMA_V34 = ""
+# v35: #113 stamped 17 for this repair while the native-agent branch was being
 # dogfooded: its v16 stores made before that step's backfill was added hold rows
 # dated 0. An UPDATE of those rows only, where the table is (:func:`_redate_team_meta`):
 # a store that meets it twice converges.
-_SCHEMA_V28 = ""
-# v29: the arrangement of OTHER agents' account slots (Codex's, t3). The slots are
+_SCHEMA_V35 = ""
+# v36: the arrangement of OTHER agents' account slots (Codex's, t3). The slots are
 # directories like Claude Code's (``core.claude_accounts``: one ladder numbers every
 # agent's, so ``slot`` alone is the key), and this table is ``claude_account`` for
 # them, plus the agent: an alias, a rank among that agent's slots, a default PER
@@ -921,7 +1111,7 @@ _SCHEMA_V28 = ""
 # prune every Codex row it met, on any machine where two builds share the store.
 # Aliases are unique across the two tables by the service (``set_alias`` checks the
 # other agent's before writing); within this one, by the index.
-_SCHEMA_V29 = """
+_SCHEMA_V36 = """
 CREATE TABLE IF NOT EXISTS agent_account (
     slot        INTEGER PRIMARY KEY,
     agent       TEXT NOT NULL,
@@ -968,6 +1158,13 @@ _MIGRATIONS = (
     _SCHEMA_V27,
     _SCHEMA_V28,
     _SCHEMA_V29,
+    _SCHEMA_V30,
+    _SCHEMA_V31,
+    _SCHEMA_V32,
+    _SCHEMA_V33,
+    _SCHEMA_V34,
+    _SCHEMA_V35,
+    _SCHEMA_V36,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -1015,21 +1212,30 @@ _PRODUCTS: dict[int, _Products] = {
     24: _Products(
         columns=(("fleet_agent", "socket_path", "TEXT"), ("fleet_agent", "boot_id", "TEXT"))
     ),
-    25: _Products(
+    25: _Products(("team_event_project_created",), (("fleet_agent", "server_started_at", "TEXT"),)),
+    26: _Products(columns=(("project", "nickname", "TEXT"),)),
+    27: _Products(columns=(("claude_usage", "token_fingerprint", "TEXT"),)),
+    28: _Products(columns=(("team_task", "number", "INTEGER"),)),
+    29: _Products(("team_task_number", "team_task_unnumbered")),
+    30: _Products(columns=(("fleet_agent", "branch", "TEXT"),)),
+    31: _Products(columns=(("fleet_agent", "board", "TEXT"),)),
+    32: _Products(
         columns=(
             ("team_session", "agent", "TEXT"),
             ("team_session", "native_session_id", "TEXT"),
             ("fleet_agent", "agent", "TEXT"),
         )
     ),
-    26: _Products(
+    33: _Products(
         ("team_meta_insert_time", "team_meta_update_time"),
         (("team_meta", "updated_at", "INTEGER NOT NULL DEFAULT 0"),),
     ),
-    28: _Products(("agent_account", "agent_account_alias", "agent_account_default")),
+    35: _Products(("agent_account", "agent_account_alias", "agent_account_default")),
 }
 
-_PROJECT_COLUMNS = "id, root, linked_repos, codename, onboarded_at, group_id, position, pinned_at"
+_PROJECT_COLUMNS = (
+    "id, root, linked_repos, codename, onboarded_at, group_id, position, pinned_at, nickname"
+)
 _GROUP_COLUMNS = "id, name, position, pinned_at, collapsed, created_at"
 _DESTINATION_COLUMNS = (
     "project_id, api_url, environment, workspace_id, workspace_uid, workspace_name, "
@@ -1092,19 +1298,46 @@ _SESSION_COLUMNS = (
     "transcript_path, account, model, effort, limit_resets_at, agent, native_session_id"
 )
 _USAGE_COLUMNS = (
-    "slot, fetched_at, session_percent, session_resets_at, week_percent, week_resets_at"
+    "slot, fetched_at, session_percent, session_resets_at, week_percent, week_resets_at, "
+    "token_fingerprint"
 )
 #: How long usage readings are kept — long enough for a weekly window's history.
 _USAGE_RETENTION = timedelta(days=7)
 _TASK_COLUMNS = (
-    "id, project_id, key, title, detail, status, role, needs, "
+    "id, project_id, number, key, title, detail, status, role, needs, "
     "claimed_by, claim_expires_at, created_by, created_at, updated_at"
 )
 _EVENT_COLUMNS = "seq, id, project_id, session_id, kind, text, task_id, to_role, created_at"
-_FLEET_AGENT_COLUMNS = (
-    "id, project_id, label, role, binary, tmux_socket, pane_id, session_id, cwd, worktree, "
-    "task_id, spawned_by, created_at, ended_at, exit_status, account_slot, launch_spec, "
-    "socket_path, boot_id, agent"
+_FLEET_AGENT_FIELDS = (
+    "id", "project_id", "label", "role", "binary", "tmux_socket", "pane_id", "session_id",
+    "cwd", "worktree", "task_id", "spawned_by", "created_at", "ended_at", "exit_status",
+    "account_slot", "launch_spec", "socket_path", "boot_id", "server_started_at", "branch",
+    "board", "agent",
+)  # fmt: skip
+_FLEET_AGENT_COLUMNS = ", ".join(_FLEET_AGENT_FIELDS)
+
+
+def _read_list(fields: Sequence[str], reads: Mapping[str, str]) -> str:
+    """``fields`` as a SELECT list, in their order: each as stored, or as its expression
+    in ``reads`` under its own name.
+
+    One tuple for the columns a row is written with and read back as. Derived from the
+    written list's text, the read list depended on ``board`` being its last name, and the
+    next column appended after it would have made every fleet read invalid SQL (review of
+    #259, round 27, 7/7)."""
+    return ", ".join(f"{reads[field]} AS {field}" if field in reads else field for field in fields)
+
+
+#: A row's ``board`` as it is read: one it never recorded is its session's, as the v32
+#: backfill gives it (:data:`_UNRECORDED_BOARD`).
+_FLEET_AGENT_BOARD = f"COALESCE(board, {_UNRECORDED_BOARD})"
+#: :data:`_FLEET_AGENT_BOARD` for a store without ``team_session`` (doctor's damaged-store
+#: case): no session to ask, so the project's, as the backfill gives it there.
+_FLEET_AGENT_BOARD_SESSIONLESS = "COALESCE(board, project_id)"
+#: :data:`_FLEET_AGENT_COLUMNS` as a row is read (:data:`_FLEET_AGENT_BOARD`).
+_FLEET_AGENT_READ = _read_list(_FLEET_AGENT_FIELDS, {"board": _FLEET_AGENT_BOARD})
+_FLEET_AGENT_READ_SESSIONLESS = _read_list(
+    _FLEET_AGENT_FIELDS, {"board": _FLEET_AGENT_BOARD_SESSIONLESS}
 )
 _CLAUDE_ACCOUNT_COLUMNS = "slot, config_dir, alias, position, is_default, disabled, created_at"
 _AGENT_ACCOUNT_COLUMNS = (
@@ -1129,6 +1362,7 @@ class ContextStore(Protocol):
     def entries(
         self, pool: Pool | None = None, *, project_id: str | None = None
     ) -> list[ContextEntry]: ...
+    def has_entries(self, project_id: str) -> bool: ...
     def search(
         self, query: str, *, pool: Pool | None = None, project_id: str | None = None
     ) -> list[ContextEntry]: ...
@@ -1138,12 +1372,17 @@ class ContextStore(Protocol):
     def delete(self, entry_id: str) -> None: ...
     def promote(self, entry_id: str) -> ContextEntry: ...
     def ensure_project(self, project: ProjectInfo) -> None: ...
-    def onboard_project(self, project: ProjectInfo) -> ProjectInfo: ...
+    def onboard_project(
+        self, project: ProjectInfo, *, codename: str | None = None
+    ) -> ProjectInfo: ...
     def list_projects(
         self, *, all: bool = False, include_forgotten: bool = False
     ) -> list[ProjectInfo]: ...
     def captured_projects(self) -> list[ProjectInfo]: ...
-    def get_project(self, project_id: str) -> ProjectInfo | None: ...
+    def get_project(
+        self, project_id: str, *, include_forgotten: bool = False
+    ) -> ProjectInfo | None: ...
+    def forgotten_among(self, project_ids: Collection[str]) -> set[str]: ...
     def find_projects(self, term: str) -> list[ProjectInfo]: ...
     def add_linked_repo(self, project_id: str, repo: str) -> ProjectInfo: ...
     def forget_project(self, project_id: str) -> None: ...
@@ -1158,8 +1397,13 @@ class ContextStore(Protocol):
     def team_active(self, project_id: str) -> bool: ...
     def upsert_session(self, session: TeamSession) -> TeamSession: ...
     def adopt_session(self, provisional_id: str, native_id: str, lease_until: datetime) -> None: ...
-    def get_session(self, session_id: str) -> TeamSession | None: ...
+    def get_session(
+        self, session_id: str, *, project_ids: Collection[str] | None = None
+    ) -> TeamSession | None: ...
     def team_sessions(self, project_id: str) -> list[TeamSession]: ...
+    def team_sessions_seen_since(
+        self, project_id: str, since: datetime | None, *, ids: Sequence[str] = ()
+    ) -> list[TeamSession]: ...
     def update_session(
         self,
         session_id: str,
@@ -1179,7 +1423,11 @@ class ContextStore(Protocol):
     def end_session(self, session_id: str, *, release_claims: bool = True) -> list[TeamTask]: ...
     def release_claims(self, session_id: str) -> list[TeamTask]: ...
     def upsert_task(self, task: TeamTask) -> tuple[TeamTask, bool]: ...
-    def get_task(self, ref: str) -> TeamTask | None: ...
+    def get_task(
+        self, ref: str, *, project_ids: Collection[str] | None = None
+    ) -> TeamTask | None: ...
+    def task_by_number(self, project_id: str, number: int) -> TeamTask | None: ...
+    def task_numbers(self, project_id: str) -> dict[str, int]: ...
     def team_tasks(
         self, project_id: str, *, status: TaskStatus | None = None
     ) -> list[TeamTask]: ...
@@ -1215,9 +1463,9 @@ class ContextStore(Protocol):
     def clear_native_launch(self, launch_id: str) -> int: ...
     def expire_native_launches(self, before: float) -> int: ...
     def list_meta(self, prefix: str) -> dict[str, str]: ...
-    def add_signal_event(
-        self, event: TeamEvent, meta_key: str, meta_value: dict[str, Any]
-    ) -> TeamEvent: ...
+    def add_signal_events(
+        self, writes: Sequence[tuple[TeamEvent, str, dict[str, Any]]]
+    ) -> list[TeamEvent]: ...
     def add_team_event(self, event: TeamEvent) -> TeamEvent: ...
     def get_event(self, event_id: str) -> TeamEvent | None: ...
     def get_event_by_seq(self, seq: int) -> TeamEvent | None: ...
@@ -1238,14 +1486,34 @@ class ContextStore(Protocol):
         to_role: str | None = None,
         limit: int = 30,
     ) -> list[TeamEvent]: ...
+    def team_events_since(
+        self,
+        project_id: str,
+        since: datetime,
+        *,
+        kinds: Sequence[str],
+        human_kinds: Sequence[str] = (),
+        session_kinds: Sequence[str] = (),
+        sessions: Sequence[str] = (),
+    ) -> list[TeamEvent]: ...
+    def newest_session_event(
+        self, project_id: str, session_id: str, kind: str, *, since: datetime
+    ) -> TeamEvent | None: ...
     def latest_seq(self, project_id: str) -> int: ...
     def terminal_events(self, project_id: str) -> dict[str, TeamEvent]: ...
     def set_codename(self, project_id: str, codename: str) -> ProjectInfo: ...
+    def set_project_nickname(self, project_id: str, nickname: str | None) -> ProjectInfo: ...
     def codenames_in_use(self) -> set[str]: ...
     def upsert_fleet_agent(self, agent: FleetAgent) -> FleetAgent: ...
     def get_fleet_agent(self, ref: str) -> FleetAgent | None: ...
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
-    def fleet_agent_for_session(self, project_id: str, session_id: str) -> FleetAgent | None: ...
+    def live_fleet_agents(self) -> list[FleetAgent]: ...
+    def fleet_label_heads(self) -> list[FleetAgent]: ...
+    def fleet_agents_ended_since(self, project_id: str, since: datetime) -> list[FleetAgent]: ...
+    def fleet_agent_boards(self, project_id: str, *, live_only: bool = False) -> list[str]: ...
+    def fleet_board(self, project_id: str) -> str | None: ...
+    def fleet_manager_board(self, project_id: str) -> str | None: ...
+    def fleet_agent_for_session(self, session_id: str) -> FleetAgent | None: ...
     def ui_state(self, key: str) -> str | None: ...
     def set_ui_state(self, key: str, value: str | None) -> None: ...
     def project_groups(self) -> list[ProjectGroup]: ...
@@ -1302,6 +1570,8 @@ class ContextStore(Protocol):
     def end_fleet_agent_if_live(
         self, agent_id: str, *, exit_status: int | None = None
     ) -> FleetAgent | None: ...
+    def forget_fleet_agent_server_start(self, agent_id: str, started: datetime) -> bool: ...
+    def record_fleet_agent_branch(self, agent_id: str, branch: str | None) -> None: ...
     # The Claude account registry (v15, #145): the arrangement of the slots.
     def claude_accounts(self) -> list[ClaudeAccountRecord]: ...
     def upsert_claude_account(self, slot: int, config_dir: Path) -> ClaudeAccountRecord: ...
@@ -1311,7 +1581,7 @@ class ContextStore(Protocol):
     def set_claude_account_alias(self, slot: int, alias: str | None) -> None: ...
     def set_claude_account_disabled(self, slot: int, disabled: bool) -> None: ...
     def order_claude_accounts(self, slots: Sequence[int]) -> None: ...
-    # Other agents' account registry (v29): the same arrangement, per agent.
+    # Other agents' account registry (v36): the same arrangement, per agent.
     def agent_accounts(self, agent: str) -> list[ClaudeAccountRecord]: ...
     def upsert_agent_account(
         self, agent: str, slot: int, config_dir: Path
@@ -1332,6 +1602,7 @@ class ContextStore(Protocol):
     def project_settings(self, key: str) -> dict[str, str]: ...
     # What the open could not converge (doctor's database row).
     def missing_schema(self) -> list[str]: ...
+    def has_table(self, table: str) -> bool: ...
     def close(self) -> None: ...
 
 
@@ -1365,6 +1636,7 @@ def _row_to_project(row: sqlite3.Row) -> ProjectInfo:
         group_id=row["group_id"],
         position=row["position"],
         pinned_at=_maybe_dt(row["pinned_at"]),
+        nickname=row["nickname"],
     )
 
 
@@ -1401,6 +1673,31 @@ def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
         launch_spec=_launch_spec(row["launch_spec"]),
         socket_path=Path(row["socket_path"]) if row["socket_path"] else None,
         boot_id=row["boot_id"],
+        server_started_at=_maybe_dt(row["server_started_at"]),
+        branch=row["branch"],
+        board=row["board"],  # never NULL as read (`_FLEET_AGENT_READ`)
+    )
+
+
+#: The session a launch bound to a fleet row at its start (#113), as a column a listing
+#: reads beside the row (:func:`_row_to_bound_fleet_agent`): one query for the whole list,
+#: where :meth:`SqliteStore._bound_fleet_agent` asks ``team_meta`` once per row.
+_FLEET_AGENT_BINDING = (
+    "(SELECT value FROM team_meta WHERE key = 'fleet-session:' || fleet_agent.id) "
+    "AS bound_session_id"
+)
+
+
+def _row_to_bound_fleet_agent(row: sqlite3.Row) -> FleetAgent:
+    """A row read with :data:`_FLEET_AGENT_BINDING`, as ``_bound_fleet_agent`` reads one: the
+    row's own session first, since the launch's binding is the session it started with, and a
+    row moves off that (a ``/clear``) only in its own column (``adopt_fleet_agent_session``)."""
+    agent = _row_to_fleet_agent(row)
+    bound = row["bound_session_id"]
+    return (
+        agent.model_copy(update={"session_id": bound})
+        if bound and agent.session_id is None
+        else agent
     )
 
 
@@ -1544,6 +1841,7 @@ def _row_to_usage_sample(row: sqlite3.Row) -> UsageSample:
         session_resets_at=_maybe_dt(row["session_resets_at"]),
         week_percent=row["week_percent"],
         week_resets_at=_maybe_dt(row["week_resets_at"]),
+        token_fingerprint=row["token_fingerprint"],
     )
 
 
@@ -1551,6 +1849,7 @@ def _row_to_task(row: sqlite3.Row) -> TeamTask:
     return TeamTask(
         id=row["id"],
         project_id=row["project_id"],
+        number=row["number"],
         key=row["key"],
         title=row["title"],
         detail=row["detail"],
@@ -1657,13 +1956,37 @@ def _session_write(
     return write
 
 
+#: When each table's rows last touched a project, keyed by the table it reads
+#: (:meth:`SqliteStore.project_activity`).
+_ACTIVITY = {
+    "entry": "SELECT project_id, updated_at FROM entry WHERE project_id IS NOT NULL",
+    "prompt": "SELECT project_id, created_at FROM prompt WHERE project_id IS NOT NULL",
+    "team_session": "SELECT project_id, last_seen_at FROM team_session",
+    "team_task": "SELECT project_id, updated_at FROM team_task",
+    "team_event": "SELECT project_id, created_at FROM team_event",
+    "fleet_agent": "SELECT project_id, created_at FROM fleet_agent",
+}
+
+
 class SqliteStore:
     """The SQLite implementation of :class:`ContextStore`."""
 
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    def __init__(self, connection: sqlite3.Connection, *, names: Collection[str]) -> None:
+        """``names``: the store's tables and indexes, as :func:`_migrate` read them opening it."""
         self._conn = connection
         self._transaction_depth = 0
         self._layout_depth = 0  # open :meth:`layout_change` blocks
+        # The SELECT list of a ``fleet_agent`` read on this store. A row that recorded no board
+        # reads its session's (:data:`_FLEET_AGENT_READ`), a subquery on ``team_session``,
+        # which SQLite's COALESCE runs only for such a row. On a store without that table
+        # (doctor's damaged-store case, which the v32 backfill tolerates) it made every fleet
+        # read, the live-only ones doctor's own checks make included, fail with "no such
+        # table: team_session" (review of #259, round 27, 5/7). Told by the names the open
+        # read, not asked of ``sqlite_master`` again (round 28, 9/10).
+        self._names = frozenset(names)
+        sessions = "team_session" in names
+        self._fleet_agent_read = _FLEET_AGENT_READ if sessions else _FLEET_AGENT_READ_SESSIONLESS
+        self._fleet_agent_board = _FLEET_AGENT_BOARD if sessions else _FLEET_AGENT_BOARD_SESSIONLESS
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
@@ -1750,6 +2073,16 @@ class SqliteStore:
         ).fetchall()
         return [_row_to_entry(row) for row in rows]
 
+    def has_entries(self, project_id: str) -> bool:
+        """Whether ``entries("project", project_id=project_id)`` would list any: one row asked
+        for, none built. Doctor asks it of every captured row on each run, and loaded every
+        entry of the rows that hold context to learn that one existed (review of #259,
+        round 19)."""
+        clauses, params = _scope_filter("project", project_id)
+        where = " AND ".join(["deleted_at IS NULL", *clauses])
+        found = self._conn.execute(f"SELECT 1 FROM entry WHERE {where} LIMIT 1", params)
+        return found.fetchone() is not None
+
     def search(
         self, query: str, *, pool: Pool | None = None, project_id: str | None = None
     ) -> list[ContextEntry]:
@@ -1815,7 +2148,9 @@ class SqliteStore:
 
         This is what a hook recording a prompt and the MCP server's session
         call — automatic registration, so prompt history and injection work in
-        every directory (#139). It never sets ``onboarded_at``, so a captured
+        every directory (#139) — and only while ``[projects] capture`` is on
+        (``services.project.tracked``); off, the default since 0.8.1, nothing
+        captures. It never sets ``onboarded_at``, so a captured
         directory stays off the list until something DELIBERATE registers it
         (:meth:`onboard_project`).
 
@@ -1848,7 +2183,7 @@ class SqliteStore:
         )
         self._commit()
 
-    def onboard_project(self, project: ProjectInfo) -> ProjectInfo:
+    def onboard_project(self, project: ProjectInfo, *, codename: str | None = None) -> ProjectInfo:
         """Register the project ON PURPOSE: shown from now on, and revived if forgotten.
 
         ``init``, ``project onboard`` / ``link`` / ``switch``, the sidebar's
@@ -1859,13 +2194,20 @@ class SqliteStore:
         A revived row comes back loose and unpinned, as :meth:`ensure_project`
         says, and marked now: a tombstone holds no mark to keep (v23). A live
         one keeps its place.
+
+        ``codename`` is given to a row that has none, in the same statement: a fleet spawn's,
+        whose session and branch were named by it before anything was written. A row's own
+        codename is kept; one another project holds raises ``sqlite3.IntegrityError`` and
+        writes nothing.
         """
         now = _now_iso()
         self._conn.execute(
-            "INSERT INTO project (id, root, name, linked_repos, created_at, onboarded_at) "
-            "VALUES (?, ?, ?, ?, ?, ?) "
+            "INSERT INTO project "
+            "(id, root, name, linked_repos, created_at, onboarded_at, codename) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET forgotten_at = NULL, "
-            "onboarded_at = COALESCE(project.onboarded_at, excluded.onboarded_at)",
+            "onboarded_at = COALESCE(project.onboarded_at, excluded.onboarded_at), "
+            "codename = COALESCE(project.codename, excluded.codename)",
             (
                 project.id,
                 str(project.root),
@@ -1873,6 +2215,7 @@ class SqliteStore:
                 json.dumps(project.linked_repos),
                 now,
                 now,
+                codename,
             ),
         )
         self._commit()
@@ -1923,20 +2266,58 @@ class SqliteStore:
         ).fetchall()
         return [_row_to_project(row) for row in rows]
 
-    def get_project(self, project_id: str) -> ProjectInfo | None:
+    def get_project(
+        self, project_id: str, *, include_forgotten: bool = False
+    ) -> ProjectInfo | None:
+        """The live row for ``project_id``; with ``include_forgotten``, its tombstone too, as
+        :meth:`list_projects` reads one: a forgotten project's codename names the session its
+        agents' windows linger in."""
+        live = "" if include_forgotten else " AND forgotten_at IS NULL"
         row = self._conn.execute(
-            f"SELECT {_PROJECT_COLUMNS} FROM project WHERE id = ? AND forgotten_at IS NULL",
-            (project_id,),
+            f"SELECT {_PROJECT_COLUMNS} FROM project WHERE id = ?{live}", (project_id,)
         ).fetchone()
         return _row_to_project(row) if row is not None else None
 
+    def forgotten_among(self, project_ids: Collection[str]) -> set[str]:
+        """Which of ``project_ids`` the store holds forgotten (a tombstone, ``forgotten_at``),
+        in one query, for any ids, read or not; an id it does not hold (purged, or never
+        there) is not among them. A prune asks it of the rows it read with their tombstones
+        (``--purge``), where a ``get_project`` of each asked again what was just read (review
+        of #259, round 40, 6/6), and, without ``--purge``, of the candidates a read that
+        leaves tombstones out did not find, to tell a forgotten row from a purged one (round
+        41, 6/6; round 42, 11/11)."""
+        named = sorted(set(project_ids))
+        found: set[str] = set()
+        for start in range(0, len(named), 500):  # well under SQLite's bound on parameters
+            chunk = named[start : start + 500]
+            rows = self._conn.execute(
+                "SELECT id FROM project "
+                f"WHERE forgotten_at IS NOT NULL AND id IN ({', '.join('?' * len(chunk))})",
+                chunk,
+            ).fetchall()
+            found.update(str(row["id"]) for row in rows)
+        return found
+
     def find_projects(self, term: str) -> list[ProjectInfo]:
+        """The live projects ``term`` names: an id prefix, a directory name or a codename,
+        and only when none of those match, a nickname (exactly, case and all).
+
+        The nickname comes last so that one a person types never takes a reference
+        that already worked: a nickname spelled like another project's codename or
+        folder leaves that one found, rather than both refused as ambiguous.
+        """
         rows = self._conn.execute(
             f"SELECT {_PROJECT_COLUMNS} FROM project "
             "WHERE forgotten_at IS NULL AND (id GLOB ? OR name = ? OR codename = ?) "
             "ORDER BY name",
             (_glob_prefix(term), term, term),
         ).fetchall()
+        if not rows:
+            rows = self._conn.execute(
+                f"SELECT {_PROJECT_COLUMNS} FROM project "
+                "WHERE forgotten_at IS NULL AND nickname = ? ORDER BY name",
+                (term,),
+            ).fetchall()
         return [_row_to_project(row) for row in rows]
 
     def forget_project(self, project_id: str) -> None:
@@ -2063,7 +2444,7 @@ class SqliteStore:
             (
                 f"distill_seq:{project_id}",
                 f"coding-agent:{project_id}",
-                f"signal/{_glob_prefix(project_id)[:-1]}/*",
+                f"signal/{_glob_escape(project_id)}/*",
             ),
         ).rowcount
         for key, raw in self.list_meta("native-launch:").items():
@@ -2082,10 +2463,10 @@ class SqliteStore:
                 pattern
                 for sid in batch
                 for pattern in (
-                    f"continuations:{_glob_prefix(sid)[:-1]}:*",
-                    f"agent-event:{_glob_prefix(sid)[:-1]}:*",
-                    f"launch-seen:*:{_glob_prefix(sid)[:-1]}",
-                    f"fleet-seen:*:{_glob_prefix(sid)[:-1]}",
+                    f"continuations:{_glob_escape(sid)}:*",
+                    f"agent-event:{_glob_escape(sid)}:*",
+                    f"launch-seen:*:{_glob_escape(sid)}",
+                    f"fleet-seen:*:{_glob_escape(sid)}",
                 )
             ]
             clauses = ["key = ?"] * len(keys) + ["key GLOB ?"] * len(globs)
@@ -2122,16 +2503,17 @@ class SqliteStore:
         posted, an agent spawned. Uniform ISO strings compare lexicographically,
         which is what lets one ``MAX`` span six tables. Used to pick where the
         active pin lands when the active project is forgotten.
+
+        A table the store lacks (doctor's damaged-store case) has nothing to add: named,
+        "no such table" ended every captured-row prune, and doctor's capture-off line was
+        dropped without a word (review of #259, round 40, 1/6).
         """
+        touched = "".join(
+            f" UNION ALL {select}" for table, select in _ACTIVITY.items() if table in self._names
+        )
         rows = self._conn.execute(
             "SELECT p.id, MAX(t.at) AS at FROM project p JOIN ("
-            "  SELECT id AS project_id, created_at AS at FROM project"
-            "  UNION ALL SELECT project_id, updated_at FROM entry WHERE project_id IS NOT NULL"
-            "  UNION ALL SELECT project_id, created_at FROM prompt WHERE project_id IS NOT NULL"
-            "  UNION ALL SELECT project_id, last_seen_at FROM team_session"
-            "  UNION ALL SELECT project_id, updated_at FROM team_task"
-            "  UNION ALL SELECT project_id, created_at FROM team_event"
-            "  UNION ALL SELECT project_id, created_at FROM fleet_agent"
+            f"  SELECT id AS project_id, created_at AS at FROM project{touched}"
             ") t ON t.project_id = p.id "
             "WHERE p.forgotten_at IS NULL GROUP BY p.id"
         ).fetchall()
@@ -2321,16 +2703,23 @@ class SqliteStore:
         assert stored is not None  # just upserted
         return stored
 
-    def get_session(self, session_id: str) -> TeamSession | None:
+    def get_session(
+        self, session_id: str, *, project_ids: Collection[str] | None = None
+    ) -> TeamSession | None:
+        """The session ``session_id`` names, an id or an id prefix; with ``project_ids``, among
+        the sessions of those boards only, ambiguity included (:func:`_on_boards`). A local
+        MCP id a native session adopted reads as that session (:meth:`adopt_session`)."""
         session_id = self._canonical_session_id(session_id)
+        scope, boards = _on_boards(project_ids)
         row = self._conn.execute(
-            f"SELECT {_SESSION_COLUMNS} FROM team_session WHERE id = ?", (session_id,)
+            f"SELECT {_SESSION_COLUMNS} FROM team_session WHERE id = ?{scope}",
+            (session_id, *boards),
         ).fetchone()
         if row is not None:
             return _row_to_session(row)
         matches = self._conn.execute(
-            f"SELECT {_SESSION_COLUMNS} FROM team_session WHERE id GLOB ? LIMIT 2",
-            (_glob_prefix(session_id),),
+            f"SELECT {_SESSION_COLUMNS} FROM team_session WHERE id GLOB ?{scope} LIMIT 2",
+            (_glob_prefix(session_id), *boards),
         ).fetchall()
         if len(matches) > 1:
             raise AmbiguousIdError(session_id)
@@ -2343,6 +2732,36 @@ class SqliteStore:
             (project_id,),
         ).fetchall()
         return [_row_to_session(row) for row in rows]
+
+    def team_sessions_seen_since(
+        self, project_id: str, since: datetime | None, *, ids: Sequence[str] = ()
+    ) -> list[TeamSession]:
+        """The project's sessions seen at or after ``since``, and those named in ``ids`` however
+        long ago they were seen; newest seen first. ``None`` for ``since``: those named alone.
+
+        For a reader that runs every few seconds and needs the live few (``remote``'s needs
+        scan), or the few its events name (``remote``'s board frame): :meth:`team_sessions`
+        is every session the project ever had, and every Claude Code start adds one that is
+        never deleted. The window rides the ``(project_id, last_seen_at)`` index; ``since``
+        compares as the stored ISO-8601 UTC strings do.
+        """
+        rows: list[sqlite3.Row] = []
+        if since is not None:
+            rows = self._conn.execute(
+                f"SELECT {_SESSION_COLUMNS} FROM team_session "
+                "WHERE project_id = ? AND last_seen_at >= ?",
+                (project_id, since.astimezone(UTC).isoformat()),
+            ).fetchall()
+        named = sorted(set(ids))
+        for start in range(0, len(named), 500):  # well under SQLite's bound on parameters
+            chunk = named[start : start + 500]
+            rows += self._conn.execute(
+                f"SELECT {_SESSION_COLUMNS} FROM team_session "
+                f"WHERE project_id = ? AND id IN ({', '.join('?' * len(chunk))})",
+                (project_id, *chunk),
+            ).fetchall()
+        sessions = {row["id"]: _row_to_session(row) for row in rows}
+        return sorted(sessions.values(), key=lambda session: session.last_seen_at, reverse=True)
 
     @_session_write
     def update_session(
@@ -2597,13 +3016,20 @@ class SqliteStore:
 
         The second element reports whether a new task was created — the
         idempotency contract for ``task add``.
+
+        The task's number is the board's highest plus one, read in the INSERT itself,
+        so it is taken under the write lock with the row and two adds cannot share one.
+        A duplicate key inserts nothing and so takes no number. ``task.number`` is
+        ignored: the store gives it.
         """
         cursor = self._conn.execute(
             f"INSERT INTO team_task ({_TASK_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, (SELECT COALESCE(MAX(number), 0) + 1 FROM team_task "
+            "WHERE project_id = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (project_id, key) DO NOTHING",
             (
                 task.id,
+                task.project_id,
                 task.project_id,
                 task.key,
                 task.title,
@@ -2627,29 +3053,50 @@ class SqliteStore:
         assert row is not None  # inserted or already present
         return _row_to_task(row), created
 
-    def get_task(self, ref: str) -> TeamTask | None:
+    def get_task(self, ref: str, *, project_ids: Collection[str] | None = None) -> TeamTask | None:
+        """The task ``ref`` names, an id, an id prefix or an id tail; with ``project_ids``,
+        among the tasks of those boards only, ambiguity included (:func:`_on_boards`)."""
+        scope, boards = _on_boards(project_ids)
         row = self._conn.execute(
-            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE id = ?", (ref,)
+            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE id = ?{scope}", (ref, *boards)
         ).fetchone()
         if row is not None:
             return _row_to_task(row)
         matches = self._conn.execute(
-            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE id GLOB ? LIMIT 2",
-            (_glob_prefix(ref),),
+            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE id GLOB ?{scope} LIMIT 2",
+            (_glob_prefix(ref), *boards),
         ).fetchall()
         if len(matches) > 1:
             raise AmbiguousIdError(ref)
         if matches:
             return _row_to_task(matches[0])
+        if not _ref_stripped(ref):
+            return None  # no tail either: ``*`` alone ends every id
         # Boards display the id *tail* (the unique random part), so tails
         # must resolve too: fall back to a suffix match.
         matches = self._conn.execute(
-            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE id GLOB ? LIMIT 2",
-            (f"*{_glob_prefix(ref)[:-1]}",),
+            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE id GLOB ?{scope} LIMIT 2",
+            (f"*{_ref_stripped(ref)}", *boards),
         ).fetchall()
         if len(matches) > 1:
             raise AmbiguousIdError(ref)
         return _row_to_task(matches[0]) if matches else None
+
+    def task_by_number(self, project_id: str, number: int) -> TeamTask | None:
+        """The task numbered ``number`` on ``project_id``'s board (``#12``), if there is one."""
+        row = self._conn.execute(
+            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE project_id = ? AND number = ?",
+            (project_id, number),
+        ).fetchone()
+        return _row_to_task(row) if row is not None else None
+
+    def task_numbers(self, project_id: str) -> dict[str, int]:
+        """Every numbered task of the board, id → number: for lines that name a task by id."""
+        rows = self._conn.execute(
+            "SELECT id, number FROM team_task WHERE project_id = ? AND number IS NOT NULL",
+            (project_id,),
+        ).fetchall()
+        return {row["id"]: row["number"] for row in rows}
 
     def team_tasks(self, project_id: str, *, status: TaskStatus | None = None) -> list[TeamTask]:
         if status is None:
@@ -2950,7 +3397,7 @@ class SqliteStore:
         """Every ``team_meta`` entry under ``prefix``, key → value."""
         rows = self._conn.execute(
             "SELECT key, value FROM team_meta WHERE key GLOB ? ORDER BY key",
-            (f"{_glob_prefix(prefix)[:-1]}*",),
+            (f"{_glob_escape(prefix)}*",),
         ).fetchall()
         return {str(row["key"]): str(row["value"]) for row in rows}
 
@@ -3065,43 +3512,51 @@ class SqliteStore:
         return removed
 
     @_session_write
-    def add_signal_event(
-        self, event: TeamEvent, meta_key: str, meta_value: dict[str, Any]
-    ) -> TeamEvent:
-        """Insert a signal event AND its meta materialization in ONE transaction.
+    def add_signal_events(
+        self, writes: Sequence[tuple[TeamEvent, str, dict[str, Any]]]
+    ) -> list[TeamEvent]:
+        """Insert each signal event of ``writes`` AND its meta materialization, all in ONE
+        transaction.
 
         A signal is two writes — the pipe event (history) and the current-state
-        blob under ``meta_key`` — and a crash between separate commits would
+        blob under its meta key — and a crash between separate commits would
         leave watchers and readers disagreeing. The event's assigned ``seq``
-        is injected into ``meta_value`` before the blob is stored, so the
-        state row always names the event that produced it.
+        is injected into its meta value before the blob is stored, so the
+        state row always names the event that produced it. Every signal of
+        ``writes`` is set, or a raise rolls all of them back: a project's pause is
+        one signal on each board it lives on, and set one commit a board, a store
+        error part-way left it paused on some boards and not on others (review of
+        #259, round 34, 5/10).
         """
-        if event.session_id:
-            event = event.model_copy(
-                update={"session_id": self._canonical_session_id(event.session_id)}
+        written: list[TeamEvent] = []
+        for event, meta_key, meta_value in writes:
+            if event.session_id:
+                event = event.model_copy(
+                    update={"session_id": self._canonical_session_id(event.session_id)}
+                )
+                meta_value = {**meta_value, "session_id": event.session_id}
+            cursor = self._conn.execute(
+                "INSERT INTO team_event (id, project_id, session_id, kind, text, "
+                "task_id, to_role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    event.id,
+                    event.project_id,
+                    event.session_id,
+                    event.kind,
+                    event.text,
+                    event.task_id,
+                    event.to_role,
+                    event.created_at.isoformat(),
+                ),
             )
-            meta_value = {**meta_value, "session_id": event.session_id}
-        cursor = self._conn.execute(
-            "INSERT INTO team_event (id, project_id, session_id, kind, text, "
-            "task_id, to_role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                event.id,
-                event.project_id,
-                event.session_id,
-                event.kind,
-                event.text,
-                event.task_id,
-                event.to_role,
-                event.created_at.isoformat(),
-            ),
-        )
-        stamped = {**meta_value, "seq": cursor.lastrowid}
-        self._conn.execute(
-            "INSERT INTO team_meta (key, value) VALUES (?, ?) "
-            "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-            (meta_key, json.dumps(stamped)),
-        )
-        return event.model_copy(update={"seq": cursor.lastrowid})
+            stamped = {**meta_value, "seq": cursor.lastrowid}
+            self._conn.execute(
+                "INSERT INTO team_meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                (meta_key, json.dumps(stamped)),
+            )
+            written.append(event.model_copy(update={"seq": cursor.lastrowid}))
+        return written
 
     @_session_write
     def add_team_event(self, event: TeamEvent) -> TeamEvent:
@@ -3228,6 +3683,73 @@ class SqliteStore:
         ).fetchall()
         return [_row_to_event(row) for row in reversed(rows)]
 
+    def team_events_since(
+        self,
+        project_id: str,
+        since: datetime,
+        *,
+        kinds: Sequence[str],
+        human_kinds: Sequence[str] = (),
+        session_kinds: Sequence[str] = (),
+        sessions: Sequence[str] = (),
+    ) -> list[TeamEvent]:
+        """The project's events of ``kinds`` written at or after ``since``, those of
+        ``human_kinds`` the human wrote (no session), and those of ``session_kinds`` that one
+        of ``sessions`` wrote, oldest first.
+
+        For a reader that runs every few seconds over the last day of a board (``remote``'s
+        needs scan), however busy that day was: the ``(project_id, created_at)`` index
+        narrows it to the events since ``since``, not the project's history. Not by ``seq``:
+        the read started past the newest event stamped before ``since``, which took ``seq``
+        order for stamp order, and an event written before the clock stepped back (NTP, a
+        VM's snapshot) and stamped after ``since`` was skipped (review of #259, round 6,
+        6/10). ``since`` compares as the stored ISO-8601 UTC strings do.
+        """
+        moment = since.astimezone(UTC).isoformat()
+        wanted: list[str] = []
+        params: list[str] = [project_id, moment]
+        if kinds:
+            wanted.append(f"kind IN ({', '.join('?' * len(kinds))})")
+            params += kinds
+        if human_kinds:
+            wanted.append(f"(session_id IS NULL AND kind IN ({', '.join('?' * len(human_kinds))}))")
+            params += human_kinds
+        if session_kinds and sessions:
+            wanted.append(
+                f"(session_id IN ({', '.join('?' * len(sessions))}) "
+                f"AND kind IN ({', '.join('?' * len(session_kinds))}))"
+            )
+            params += [*sessions, *session_kinds]
+        if not wanted:
+            return []
+        rows = self._conn.execute(
+            f"SELECT {_EVENT_COLUMNS} FROM team_event WHERE project_id = ? "
+            f"AND created_at >= ? AND ({' OR '.join(wanted)}) ORDER BY seq",
+            params,
+        ).fetchall()
+        return [_row_to_event(row) for row in rows]
+
+    def newest_session_event(
+        self, project_id: str, session_id: str, kind: str, *, since: datetime
+    ) -> TeamEvent | None:
+        """The session's newest event of ``kind`` written at or after ``since``; ``None``.
+
+        For a reader that asks every few seconds (``remote``'s needs scan): the
+        ``(project_id, created_at)`` index narrows it to the events since ``since``, so a
+        session that has no such event costs those, not every event the project ever had.
+        Not a walk back on ``seq`` that stops at the first event stamped before ``since``:
+        after a clock stepped back, that one can be newer than the event asked for, which
+        then went unseen (review of #259, round 6, 6/10). ``since`` compares as the stored
+        ISO-8601 UTC strings do.
+        """
+        moment = since.astimezone(UTC).isoformat()
+        row = self._conn.execute(
+            f"SELECT {_EVENT_COLUMNS} FROM team_event WHERE project_id = ? AND session_id = ? "
+            "AND kind = ? AND created_at >= ? ORDER BY seq DESC LIMIT 1",
+            (project_id, session_id, kind, moment),
+        ).fetchone()
+        return None if row is None else _row_to_event(row)
+
     def latest_seq(self, project_id: str) -> int:
         row = self._conn.execute(
             "SELECT COALESCE(MAX(seq), 0) FROM team_event WHERE project_id = ?",
@@ -3244,6 +3766,25 @@ class SqliteStore:
         project = self.get_project(project_id)
         if project is None:
             raise KeyError(project_id)
+        return project
+
+    def set_project_nickname(self, project_id: str, nickname: str | None) -> ProjectInfo:
+        """Name a project as a person sees it, or clear that name with ``None``.
+
+        Written as given: the service (``services.project.set_nickname``) trims and
+        bounds it. A forgotten project is a ``KeyError``, as an unknown one is, and
+        as :meth:`update_project_layout` refuses one: a rename from a stale frame
+        would otherwise land on the tombstone and come back with a revival.
+        """
+        cursor = self._conn.execute(
+            "UPDATE project SET nickname = ? WHERE id = ? AND forgotten_at IS NULL",
+            (nickname, project_id),
+        )
+        self._conn.commit()
+        if cursor.rowcount != 1:
+            raise KeyError(project_id)
+        project = self.get_project(project_id)
+        assert project is not None  # just written
         return project
 
     def codenames_in_use(self) -> set[str]:
@@ -3271,13 +3812,14 @@ class SqliteStore:
         """
         self._conn.execute(
             f"INSERT INTO fleet_agent ({_FLEET_AGENT_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "pane_id = excluded.pane_id, session_id = excluded.session_id, "
             "cwd = excluded.cwd, worktree = excluded.worktree, task_id = excluded.task_id, "
             "ended_at = excluded.ended_at, exit_status = excluded.exit_status, "
             "account_slot = excluded.account_slot, launch_spec = excluded.launch_spec, "
-            "socket_path = excluded.socket_path, boot_id = excluded.boot_id",
+            "socket_path = excluded.socket_path, boot_id = excluded.boot_id, "
+            "server_started_at = excluded.server_started_at, branch = excluded.branch",
             (
                 agent.id,
                 agent.project_id,
@@ -3298,6 +3840,9 @@ class SqliteStore:
                 agent.launch_spec.model_dump_json() if agent.launch_spec is not None else None,
                 str(agent.socket_path) if agent.socket_path is not None else None,
                 agent.boot_id,
+                agent.server_started_at.isoformat() if agent.server_started_at else None,
+                agent.branch,
+                agent.board if agent.board is not None else agent.project_id,
                 agent.agent,
             ),
         )
@@ -3808,7 +4353,7 @@ class SqliteStore:
     def get_fleet_agent(self, ref: str) -> FleetAgent | None:
         """A fleet agent by id or unambiguous id prefix (git-style)."""
         rows = self._conn.execute(
-            f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent WHERE id GLOB ? LIMIT 2",
+            f"SELECT {self._fleet_agent_read} FROM fleet_agent WHERE id GLOB ? LIMIT 2",
             (_glob_prefix(ref),),
         ).fetchall()
         if len(rows) > 1:
@@ -3816,41 +4361,149 @@ class SqliteStore:
         return self._bound_fleet_agent(rows[0]) if rows else None
 
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]:
-        clause = " AND f.ended_at IS NULL" if live_only else ""
-        columns = ", ".join("f." + column for column in _FLEET_AGENT_COLUMNS.split(", "))
+        clause = " AND ended_at IS NULL" if live_only else ""
         rows = self._conn.execute(
-            f"SELECT {columns}, m.value AS bound_session_id FROM fleet_agent AS f "
-            "LEFT JOIN team_meta AS m ON m.key = 'fleet-session:' || f.id "
-            f"WHERE f.project_id = ?{clause} ORDER BY f.created_at, f.id",
+            f"SELECT {self._fleet_agent_read}, {_FLEET_AGENT_BINDING} FROM fleet_agent "
+            f"WHERE project_id = ?{clause} ORDER BY created_at, id",
             (project_id,),
         ).fetchall()
-        # The row's own id first, as ``_bound_fleet_agent`` reads it: the launch's binding
-        # is the session it started with, and a row moves off that (a ``/clear``) only
-        # in its own column (``adopt_fleet_agent_session``).
-        return [
-            _row_to_fleet_agent(row).model_copy(update={"session_id": row["bound_session_id"]})
-            if row["bound_session_id"] and row["session_id"] is None
-            else _row_to_fleet_agent(row)
-            for row in rows
-        ]
+        return [_row_to_bound_fleet_agent(row) for row in rows]
 
-    def fleet_agent_for_session(self, project_id: str, session_id: str) -> FleetAgent | None:
-        """The live fleet row recorded against ``session_id``, if there is one.
+    def live_fleet_agents(self) -> list[FleetAgent]:
+        """Every live fleet row, in every project, forgotten ones' included, oldest first.
+
+        One query, for a question about the tmux server every project shares (whose rows a
+        server started at a socket path would answer for): asked project by project, it
+        ran one query per project ever registered, captured directories included, and a
+        spawn asks it twice (review of #259, round 4)."""
+        rows = self._conn.execute(
+            f"SELECT {self._fleet_agent_read}, {_FLEET_AGENT_BINDING} FROM fleet_agent "
+            "WHERE ended_at IS NULL ORDER BY created_at, id"
+        ).fetchall()
+        return [_row_to_bound_fleet_agent(row) for row in rows]
+
+    def fleet_label_heads(self) -> list[FleetAgent]:
+        """Every live fleet row, and the newest row of each label, live or ended, in every
+        project, forgotten ones' included, oldest first: the rows a ``fleet stop`` or a
+        ``restart`` by label acts on (:meth:`fleet_agent_by_label`), ended or not.
+
+        The rows that may read a board again (``services.project.reading_rows``): a restart
+        of a stopped one starts its replacement under the hub its launch recorded. Picked in
+        SQL: every spawn, restart and switch adds a row that is never deleted.
+
+        Each label's newest by a window over the table, one pass and a sort. A correlated
+        ``NOT EXISTS`` asked for a newer row of the label per row, over an index with no
+        ``label``, and was quadratic in a project's rows: 4.6 s at 20 000, on every
+        ``project forget`` and ``prune`` and doctor's capture-off line at each ``asq`` start
+        (review of #259, round 37, 4/7). Two rows of a label stamped alike, which that
+        query gave both of, give the one of the greater id."""
+        rows = self._conn.execute(
+            f"SELECT {self._fleet_agent_read}, {_FLEET_AGENT_BINDING} FROM fleet_agent "
+            "WHERE id IN (SELECT id FROM (SELECT id, ended_at, ROW_NUMBER() OVER ("
+            "PARTITION BY project_id, label ORDER BY created_at DESC, id DESC) AS newest "
+            "FROM fleet_agent) WHERE ended_at IS NULL OR newest = 1) ORDER BY created_at, id"
+        ).fetchall()
+        return [_row_to_bound_fleet_agent(row) for row in rows]
+
+    def fleet_agents_ended_since(self, project_id: str, since: datetime) -> list[FleetAgent]:
+        """The project's rows that ended at or after ``since``, oldest first.
+
+        Filtered here, not by the caller: every spawn, restart and switch adds a row that is
+        never deleted, and a reader that runs every few seconds for the last day's endings
+        (``remote``'s needs scan) built every row the project ever had to keep a handful.
+        ``since`` compares as the stored ISO-8601 UTC strings do.
+        """
+        rows = self._conn.execute(
+            f"SELECT {self._fleet_agent_read}, {_FLEET_AGENT_BINDING} FROM fleet_agent "
+            "WHERE project_id = ? AND ended_at >= ? ORDER BY created_at, id",
+            (project_id, since.astimezone(UTC).isoformat()),
+        ).fetchall()
+        return [_row_to_bound_fleet_agent(row) for row in rows]
+
+    def fleet_agent_boards(self, project_id: str, *, live_only: bool = False) -> list[str]:
+        """Every board one of the project's rows recorded, live or ended (``live_only``: live),
+        sorted; ``[]`` before its first spawn.
+
+        The boards a phone may reach for the project (``services.remote_server``'s
+        ``_remote_boards``); the live ones, which a pause goes to besides its manager's and
+        its homes (``services.fleet._pause_boards``), whether the project ever had a manager
+        row or not. Distinct in SQL: every spawn, restart
+        and switch adds a row that is never deleted, and :meth:`fleet_agents` builds them all.
+        """
+        clause = " AND ended_at IS NULL" if live_only else ""
+        rows = self._conn.execute(
+            f"SELECT DISTINCT {self._fleet_agent_board} AS board FROM fleet_agent "
+            f"WHERE project_id = ?{clause} ORDER BY board",
+            (project_id,),
+        ).fetchall()
+        return [row["board"] for row in rows]
+
+    def fleet_board(self, project_id: str) -> str | None:
+        """The board the project's running agents read, as one live row recorded it: its live
+        manager's, else its newest live row's; ``None`` with none live.
+
+        Picked in SQL (``services.remote_server``'s ``_remote_project_board``): every spawn,
+        restart and switch adds a row that is never deleted, and :meth:`fleet_agents` builds
+        them all. Not an ended row's: a project whose agents had all stopped kept the board
+        of its last spawn, however long ago, and under a hub that spawn was given, Remote's
+        ``done #1`` closed the hub's #1, not the one ``aisquare board`` shows in the project
+        (review of #259, round 30, 1/8).
+        """
+        row = self._conn.execute(
+            f"SELECT {self._fleet_agent_board} AS board FROM fleet_agent "
+            "WHERE project_id = ? AND ended_at IS NULL "
+            "ORDER BY role = 'manager' DESC, created_at DESC, id DESC LIMIT 1",
+            (project_id,),
+        ).fetchone()
+        return None if row is None else str(row["board"])
+
+    def fleet_manager_board(self, project_id: str) -> str | None:
+        """The board the project's newest manager row recorded, a live one first: the board
+        its manager reads, or the one a ``restart`` of its last one hands the replacement
+        (``services.fleet._board_and_hub``); ``None`` before its first manager.
+
+        Where a pause is set besides its homes and the boards its live rows recorded
+        (``services.fleet._pause_boards``). Picked in SQL, as :meth:`fleet_board` is.
+        """
+        row = self._conn.execute(
+            f"SELECT {self._fleet_agent_board} AS board FROM fleet_agent "
+            "WHERE project_id = ? AND role = 'manager' "
+            "ORDER BY ended_at IS NULL DESC, created_at DESC, id DESC LIMIT 1",
+            (project_id,),
+        ).fetchone()
+        return None if row is None else str(row["board"])
+
+    def fleet_agent_for_session(self, session_id: str) -> FleetAgent | None:
+        """The live fleet row recorded against ``session_id``, if there is one, in whichever
+        project it is.
 
         One targeted lookup rather than materialising every live row and
         scanning: this runs on the session-start hook AND on every ``task next``,
         including the plain CLI ones that have no fleet row at all and paid for
-        the whole list to find that out (review of #116, round 3). A row whose own
+        the whole list to find that out (review of #116, round 3). It walks the live
+        rows alone, through the partial ``fleet_agent_live_label`` index. A row whose own
         column is empty is the session its launch bound, as :meth:`_bound_fleet_agent`
         reads it (an agent whose native id binds at its start).
+
+        Not filtered on the session's project: under ``AISQUARE_TEAM_HUB`` the session is
+        on the hub's board while its row is in the project it was spawned in, and the
+        limit hand-over, asking with the board's project, found no row and never switched
+        the agent (review of #259, round 23). A session id names one session wherever it
+        sits, so the row recorded against it is that session's.
+
+        Two live rows on one session stamped alike (a resume that keeps the session id
+        before the old row ends) give the one of the greater id, as :meth:`fleet_agent_by_label`
+        and :meth:`fleet_label_heads` pick: with no tie-break SQLite gave whichever its plan
+        reached first, and the hand-over could act on another row than a ``fleet stop`` or
+        ``restart`` by label (review of #259, round 42, 7/11).
         """
         row = self._conn.execute(
-            f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent "
-            "WHERE project_id = ? AND ended_at IS NULL AND (session_id = ? OR "
+            f"SELECT {self._fleet_agent_read} FROM fleet_agent "
+            "WHERE ended_at IS NULL AND (session_id = ? OR "
             "(session_id IS NULL AND (SELECT value FROM team_meta "
             "WHERE key = 'fleet-session:' || fleet_agent.id) = ?)) "
-            "ORDER BY created_at DESC LIMIT 1",
-            (project_id, session_id, session_id),
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (session_id, session_id),
         ).fetchone()
         return self._bound_fleet_agent(row) if row is not None else None
 
@@ -3940,10 +4593,16 @@ class SqliteStore:
     def fleet_agent_by_label(
         self, project_id: str, label: str, *, live_only: bool = True
     ) -> FleetAgent | None:
+        """The newest row of ``label`` in the project (``live_only``: its live one), two
+        stamped alike giving the one of the greater id, as :meth:`fleet_label_heads` picks
+        it. With no tie-break, SQLite gave whichever its plan reached first, and the holds
+        ``project forget`` and prune judge could read one row while a restart acted on the
+        other (review of #259, round 41, 4/6)."""
         clause = " AND ended_at IS NULL" if live_only else ""
         row = self._conn.execute(
-            f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent "
-            f"WHERE project_id = ? AND label = ?{clause} ORDER BY created_at DESC LIMIT 1",
+            f"SELECT {self._fleet_agent_read} FROM fleet_agent "
+            f"WHERE project_id = ? AND label = ?{clause} ORDER BY created_at DESC, id DESC "
+            "LIMIT 1",
             (project_id, label),
         ).fetchone()
         return self._bound_fleet_agent(row) if row is not None else None
@@ -3976,6 +4635,31 @@ class SqliteStore:
         if cursor.rowcount == 0:
             return None
         return self.get_fleet_agent(agent_id)
+
+    def forget_fleet_agent_server_start(self, agent_id: str, started: datetime) -> bool:
+        """Clear a LIVE row's recorded server start while it is still ``started``; whether it did.
+
+        For a row whose server exited (``services.fleet._forget_an_exited_server``): with no
+        start recorded, it reads lost under the next server at its socket, as a row from
+        before 0.8.1 does, rather than held as that server's for good. A compare-and-set on
+        the start the caller read and on ``ended_at IS NULL``, so a row ended or rewritten
+        since is left as it is.
+        """
+        cursor = self._conn.execute(
+            "UPDATE fleet_agent SET server_started_at = NULL "
+            "WHERE id = ? AND ended_at IS NULL AND server_started_at = ?",
+            (agent_id, started.isoformat()),
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    def record_fleet_agent_branch(self, agent_id: str, branch: str | None) -> None:
+        """Record the branch a fleet agent's worktree is on now (``None``: a detached HEAD).
+
+        Whether the row is live or ended: ``services.fleet`` records it at stop and at reap,
+        before the tree can go, and a restart makes a gone tree again on it."""
+        self._conn.execute("UPDATE fleet_agent SET branch = ? WHERE id = ?", (branch, agent_id))
+        self._conn.commit()
 
     # --- the Claude account registry (v15, #145) --------------------------------------------
     #
@@ -4097,7 +4781,7 @@ class SqliteStore:
             )
         self._commit()
 
-    # --- other agents' account registry (v29) ---------------------------------------------------
+    # --- other agents' account registry (v36) ---------------------------------------------------
     #
     # ``claude_account``'s methods above, for the rows of one other agent: the same
     # one-statement writes, the default and the alias refused by the indexes.
@@ -4194,7 +4878,7 @@ class SqliteStore:
     def add_usage_sample(self, sample: UsageSample) -> None:
         """Record one reading and drop this slot's readings older than :data:`_USAGE_RETENTION`."""
         self._conn.execute(
-            f"INSERT INTO claude_usage ({_USAGE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?)",
+            f"INSERT INTO claude_usage ({_USAGE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 sample.slot,
                 sample.fetched_at.isoformat(),
@@ -4202,6 +4886,7 @@ class SqliteStore:
                 sample.session_resets_at.isoformat() if sample.session_resets_at else None,
                 sample.week_percent,
                 sample.week_resets_at.isoformat() if sample.week_resets_at else None,
+                sample.token_fingerprint,
             ),
         )
         self._conn.execute(
@@ -4290,14 +4975,56 @@ class SqliteStore:
         """
         return _missing_from(self._conn, _ladder_schema())
 
+    def has_table(self, table: str) -> bool:
+        """Whether this store holds ``table``, as the open read its names: no query. A store
+        without ``team_session`` or ``team_task`` (doctor's damaged-store case) still opens,
+        and a read that only adds evidence asks this before it asks such a table."""
+        return table in self._names
+
     def close(self) -> None:
         self._conn.close()
 
 
+def _on_boards(project_ids: Collection[str] | None) -> tuple[str, tuple[str, ...]]:
+    """The clause that keeps a lookup to the rows of ``project_ids``, and its values; none for
+    ``None``. A lookup kept to them is ambiguous only among them: the remote's, whose phone
+    may reach only some boards, was told by an ``ambiguous_id`` which prefixes another
+    board's tasks and sessions had (review of #243, round 10, 5/7)."""
+    if project_ids is None:
+        return "", ()
+    boards = tuple(project_ids)
+    return f" AND project_id IN ({', '.join('?' * len(boards))})", boards
+
+
+_GLOB_METACHARACTERS = str.maketrans("", "", "*?[")
+
+
+def _glob_escape(text: str) -> str:
+    """``text`` as a GLOB pattern that matches ``text`` itself: each ``*``, ``?`` and ``[`` in
+    a class of its own (``[*]``), as GLOB has no escape character.
+
+    It took them out, as a ref lookup does (:func:`_ref_stripped`), and so did not stand
+    for itself: ``x[1`` was the prefix ``x1``, and a purge of the keys under an id holding
+    one would have taken another id's (review of #243, round 11, 8/9)."""
+    return re.sub(r"([*?\[])", r"[\1]", text)
+
+
+def _ref_stripped(ref: str) -> str:
+    """``ref`` with the GLOB metacharacters taken out, as an id lookup reads a ref: no id
+    holds one, and ``ses_abc*`` is the prefix ``ses_abc``."""
+    return ref.translate(_GLOB_METACHARACTERS)
+
+
 def _glob_prefix(ref: str) -> str:
-    """Escape GLOB metacharacters in ``ref`` and append a wildcard."""
-    escaped = ref.translate({ord("*"): None, ord("?"): None, ord("["): None})
-    return f"{escaped}*"
+    """The GLOB pattern of an id that starts with ``ref``, its metacharacters taken out
+    (:func:`_ref_stripped`); one that matches no id when nothing is left of it.
+
+    ``*`` was then ``*``, which matched every id: a ref of ``*``, ``?`` or ``[`` named every
+    project, task and session the store had, and a refusal of it as ambiguous listed them
+    (review of #243, round 10, 7/7). An empty pattern matches only an empty id, which none is.
+    """
+    stripped = _ref_stripped(ref)
+    return f"{stripped}*" if stripped else ""
 
 
 _DEFAULT_BUSY_MS = 5000
@@ -4505,17 +5232,26 @@ def _run_step(connection: sqlite3.Connection, version: int) -> None:
                 backfill(connection)
 
 
-def _steps_missing(connection: sqlite3.Connection, below: int) -> list[int]:
+def _schema_names(connection: sqlite3.Connection) -> frozenset[str]:
+    """Every name in ``sqlite_master``: the store's tables, indexes and triggers."""
+    return frozenset(row[0] for row in connection.execute("SELECT name FROM sqlite_master"))
+
+
+def _steps_missing(
+    connection: sqlite3.Connection, below: int, names: frozenset[str] | None = None
+) -> list[int]:
     """The steps under ``below``, from v15 on, that left something out of this store.
 
     A store stamped ``below`` claims to have run them all; one that another line
     stamped has run that line's steps under these numbers instead. Only reads:
-    one ``sqlite_master`` query and a ``table_info`` per table a column belongs to.
+    one ``sqlite_master`` query, unless the caller read ``names`` already, and a
+    ``table_info`` per table a column belongs to.
     """
     steps = sorted(step for step in _PRODUCTS if step < below)
     if not steps:
         return []
-    names = {row[0] for row in connection.execute("SELECT name FROM sqlite_master")}
+    if names is None:
+        names = _schema_names(connection)
     tables = {table for step in steps for table, _, _ in _PRODUCTS[step].columns}
     columns = {
         table: {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
@@ -4541,8 +5277,9 @@ def _converge_by_presence(connection: sqlite3.Connection, below: int) -> None:
         _run_step(connection, step)
 
 
-def _migrate(connection: sqlite3.Connection) -> None:
-    """Bring the schema to the current version, safely under concurrency.
+def _migrate(connection: sqlite3.Connection) -> frozenset[str]:
+    """Bring the schema to the current version, safely under concurrency; the names in
+    ``sqlite_master`` once it is done (:func:`_schema_names`).
 
     Hooks race: several sessions can open (and try to migrate) the store in the
     same instant. Each migration runs as ONE ``BEGIN IMMEDIATE`` transaction
@@ -4579,6 +5316,13 @@ def _migrate(connection: sqlite3.Connection) -> None:
     ``onboarded_at``, which a store stamped 17 by #113 does not have. After the
     last, because a store stamped current never enters the loop, including one
     that a build without this pass carried to current past a step it skipped.
+    Then :func:`_number_unnumbered_tasks` numbers any task an older build added.
+
+    The names the last presence pass read are what it returns, read again only when it
+    applied a step: the store asks them of nothing else (:class:`SqliteStore`). Asked again by
+    each store, at its first fleet read, whether it had ``team_session``, every
+    ``store_session()`` that read a fleet row paid a ``sqlite_master`` query of its own, and
+    hooks and Remote's 3 s needs scan open many (review of #259, round 28, 9/10).
     """
     while True:
         if int(connection.execute("PRAGMA user_version").fetchone()[0]) >= len(_MIGRATIONS):
@@ -4597,16 +5341,19 @@ def _migrate(connection: sqlite3.Connection) -> None:
             with contextlib.suppress(sqlite3.Error):
                 connection.execute("ROLLBACK")
             raise
-    if not _steps_missing(connection, len(_MIGRATIONS)):
-        return
-    try:
-        connection.execute("BEGIN IMMEDIATE")
-        _converge_by_presence(connection, len(_MIGRATIONS))
-        connection.execute("COMMIT")
-    except sqlite3.Error:
-        with contextlib.suppress(sqlite3.Error):
-            connection.execute("ROLLBACK")
-        raise
+    names = _schema_names(connection)
+    if _steps_missing(connection, len(_MIGRATIONS), names):
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            _converge_by_presence(connection, len(_MIGRATIONS))
+            connection.execute("COMMIT")
+        except sqlite3.Error:
+            with contextlib.suppress(sqlite3.Error):
+                connection.execute("ROLLBACK")
+            raise
+        names = _schema_names(connection)
+    _number_unnumbered_tasks(connection)
+    return names
 
 
 #: The suffixes of the shadow tables FTS5 keeps a table's index in, ``entry_fts_data``
@@ -4784,8 +5531,8 @@ def open_store() -> ContextStore:
         try:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA foreign_keys = ON")
-            _migrate(connection)
-            return SqliteStore(connection)
+            names = _migrate(connection)
+            return SqliteStore(connection, names=names)
         except sqlite3.OperationalError as exc:
             if is_locked_error(exc):
                 if time.monotonic() >= deadline:

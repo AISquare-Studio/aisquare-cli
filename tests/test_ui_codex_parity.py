@@ -1,6 +1,6 @@
 """Codex parity on the 0.8.0 UI beyond Welcome: Settings, the spawn dialog, Doctor, sidebar.
 
-- **Settings** offers Codex 0.162.1's approval policies (no ``untrusted``), the role's
+- **App settings** offers Codex 0.162.1's approval policies (no ``untrusted``), the role's
   ``approve_for_me``, and under each role the flags its next ``fleet spawn`` passes —
   the adapter's own ``fleet_args`` — or the refusal it would meet.
 - **The spawn dialog** offers the account and the permission in the launch agent's own
@@ -27,32 +27,28 @@ from textual.pilot import Pilot
 from textual.widgets import Button, Select, Static
 
 from aisquare.cli.ui.sidebar import AccountsSelected
-from aisquare.cli.ui.views.accounts import summarise
-from aisquare.cli.ui.views.doctor import DoctorView
-from aisquare.cli.ui.views.project import ProjectView
-from aisquare.cli.ui.views.settings import (
+from aisquare.cli.ui.views.app_settings import (
     APPROVAL_OPTIONS,
-    SettingsView,
+    AppSettingsView,
     account_options,
     launch_line,
 )
+from aisquare.cli.ui.views.doctor import DoctorView
 from aisquare.cli.ui.views.spawn import SpawnScreen
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core.config import FleetRoleSettings, load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.models import (
-    AccountsOverview,
     CheckStatus,
     ClaudeAccount,
-    ClaudeAccountStatus,
     ClaudeIdentity,
-    ClaudeInstall,
     DoctorCheck,
     FleetAgent,
 )
 from aisquare.services import agent_launch, diagnostics, fleet, onboarding
 from aisquare.services import agents as agents_service
-from tests.test_ui_project import Host, drive
+from tests.test_ui_app_settings import AppHost
+from tests.test_ui_app_settings import drive as drive_app_settings
 from tests.ui_workers import settle_page
 
 # --------------------------------------------------------------------------- Settings
@@ -66,15 +62,14 @@ def test_settings_offer_codexs_approval_policies_and_keep_an_old_untrusted_shown
     config.fleet.roles["coder"].approval_policy = "untrusted"  # saved by an older version
     save_config(config)
 
-    async def scenario(pilot: Pilot[None], host: Host) -> tuple[Any, str]:
-        host.query_one(ProjectView).active = "tab-settings"
+    async def scenario(pilot: Pilot[None], host: AppHost) -> tuple[Any, str]:
         await pilot.pause()
-        view = host.query_one(SettingsView)
-        control = view.query_one("#approval-coder", Select)
-        launch = view.query_one("#launch-coder", Static)
+        view = host.query_one(AppSettingsView)
+        control = view.query_one("#role-approval-coder", Select)
+        launch = view.query_one("#role-launch-coder", Static)
         return control.value, str(launch.render())
 
-    value, _line = drive(team_project(tmp_path), scenario)
+    value, _line = drive_app_settings(scenario)
     assert value == "untrusted"  # shown as (custom), never rewritten by opening the form
 
 
@@ -97,22 +92,21 @@ def test_launch_lines_show_each_agents_flags_and_a_refusal() -> None:
 def test_settings_save_approve_for_me_and_follow_the_roles_agent(tmp_path: Path) -> None:
     agent_launch.use("codex")
 
-    async def scenario(pilot: Pilot[None], host: Host) -> list[str]:
-        host.query_one(ProjectView).active = "tab-settings"
+    async def scenario(pilot: Pilot[None], host: AppHost) -> list[str]:
         await pilot.pause()
-        view = host.query_one(SettingsView)
-        lines = [str(view.query_one("#launch-coder", Static).render())]
-        view.query_one("#afm-coder", Select).value = "off"
+        view = host.query_one(AppSettingsView)
+        lines = [str(view.query_one("#role-launch-coder", Static).render())]
+        view.query_one("#role-afm-coder", Select).value = "off"
         await pilot.pause()
-        lines.append(str(view.query_one("#launch-coder", Static).render()))
-        view.query_one("#family-coder", Select).value = "claude-code"
+        lines.append(str(view.query_one("#role-launch-coder", Static).render()))
+        view.query_one("#role-family-coder", Select).value = "claude-code"
         await pilot.pause()
-        lines.append(str(view.query_one("#launch-coder", Static).render()))
+        lines.append(str(view.query_one("#role-launch-coder", Static).render()))
         view.query_one("#save-settings", Button).press()
         await pilot.pause()
         return lines
 
-    codex, off, claude = drive(team_project(tmp_path), scenario)
+    codex, off, claude = drive_app_settings(scenario)
     assert "--approve-for-me" in codex  # the user default is Codex
     assert "--approve-for-me" not in off and "read-only in its workspace sandbox" in off
     assert "Claude Code --permission-mode auto" in claude
@@ -348,42 +342,3 @@ def test_doctor_json_carries_the_codex_rows(
     rows = [row for row in json.loads(result.stdout) if row["name"] == "codex"]
     assert any(row["detail"].startswith("Codex: unverified in ") for row in rows), rows
     assert all("/hooks" in (row["fix"] or "") for row in rows if row["status"] == "warn"), rows
-
-
-# --------------------------------------------------------------------------- sidebar
-
-
-def _codex_status(email: str | None) -> ClaudeAccountStatus:
-    account = ClaudeAccount(slot=0, config_dir=Path("/h/.codex"), managed=False, agent="codex")
-    identity = ClaudeIdentity(email=email) if email else None
-    return ClaudeAccountStatus(
-        account=account,
-        label=accounts_core.label(account),
-        identity=identity,
-        signed_in=identity is not None,
-        token_state="ok" if identity else "missing",
-    )
-
-
-def _claude_unsigned() -> ClaudeAccountStatus:
-    account = ClaudeAccount(slot=1, config_dir=Path("/h/.claude"), managed=False)
-    return ClaudeAccountStatus(
-        account=account, label=accounts_core.label(account), signed_in=False, token_state="missing"
-    )
-
-
-def _codex_only(*statuses: ClaudeAccountStatus) -> AccountsOverview:
-    return AccountsOverview(
-        claude=ClaudeInstall(installed=False),
-        installs={"codex": ClaudeInstall(installed=True, binary="/opt/bin/codex")},
-        accounts=list(statuses),
-    )
-
-
-def test_a_codex_only_machine_is_not_told_claude_code_is_missing() -> None:
-    signed = summarise(_codex_only(_claude_unsigned(), _codex_status("dev@x.io")), None)
-    assert signed.line is not None and signed.line.plain == "1 Codex · AISquare: sign in"
-    unsigned = summarise(_codex_only(_claude_unsigned(), _codex_status(None)), None)
-    assert unsigned.line is not None and unsigned.line.plain == "0 Codex · ⚠ #0 no login"
-    # Claude Code's plain slot, with no Claude Code here, is not the thing to sign in.
-    assert "#1" not in unsigned.line.plain and "Claude" not in unsigned.line.plain

@@ -28,6 +28,7 @@ team service may one day call back into it for nudges.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import os
 import re
 import shutil
@@ -35,17 +36,17 @@ import sqlite3
 import subprocess
 import time
 import unicodedata
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, Literal
 
 from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import codenames, harness, launch_seal, orchestrator, selfcli
+from aisquare.core import claude_sharing, codenames, harness, launch_seal, orchestrator, selfcli
 from aisquare.core import tmux as tmux_core
 from aisquare.core.agent_adapters import (
     DEFAULT_AGENT,
@@ -63,20 +64,30 @@ from aisquare.core.config import (
     replacing_the_former_reviewer_default_first,
 )
 from aisquare.core.ids import new_agent_id
-from aisquare.core.spawn import untraced_env
-from aisquare.core.store import AmbiguousIdError, ContextStore, store_session
+from aisquare.core.locking import holding
+from aisquare.core.spawn import git_env, untraced_env
+from aisquare.core.store import (
+    AmbiguousIdError,
+    ContextStore,
+    StoreUnopenable,
+    is_corrupt_error,
+    is_locked_error,
+    store_session,
+)
 from aisquare.core.tmux import (
     DEFAULT_WINDOW_HEIGHT,
     DEFAULT_WINDOW_WIDTH,
     PaneFacts,
     SocketAnswer,
     TmuxError,
+    TmuxPartlyTyped,
     TmuxServer,
+    TmuxTimedOut,
     TmuxUnavailable,
     WindowInfo,
 )
 from aisquare.core.version import __version__
-from aisquare.core.workspace import active_project, git_argv
+from aisquare.core.workspace import _gone, _resolved, active_project, git_argv
 from aisquare.models import (
     CLOSED_STATUSES,
     ClaudeAccount,
@@ -98,6 +109,7 @@ from aisquare.services import (
 )
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
+from aisquare.services import project as project_service
 
 FLEET_ROLES: tuple[str, ...] = ("manager", "coder", "tester", "reviewer", "validator", "ui-tester")
 """The fleet's own roles (§3.3). Any harness or ``team bind`` role is accepted too."""
@@ -109,7 +121,7 @@ LABEL = re.compile(r"^[a-z][a-z0-9-]{1,23}$")
 """An agent label: ≤ 24 chars, no ``.``, ``:`` or spaces (tmux target separators)."""
 
 SESSION_PREFIX = "asq-"
-PAUSE_SIGNAL = "fleet-paused"
+PAUSE_SIGNAL = harness.PAUSE_SIGNAL
 TASK_SHORT = 8
 """Characters of a task id (after ``tsk_``) that name it in a branch — the same
 width ``services.team.short_id`` uses for sessions."""
@@ -228,6 +240,26 @@ class ResumeSpec:
     native_session_id: str | None = None
 
 
+Typed = Literal["yes", "no", "unsent", "maybe"]
+"""How a write into an agent's pane ended (:class:`PaneWrite`, :class:`TellResult`), and how a
+spawn's prompt or a replacement's first line reached it (:func:`_type_prompt`): the word an
+audit line says. ``yes``, all of it went through; ``no``, tmux refused it and typed
+nothing; ``unsent``, it is at the agent's prompt but its Enter did not go through, so an
+Enter sends it; ``maybe``, tmux did not answer in time, and it may still arrive. ``unsent``
+was ``no``, and a caller retrying on ``no`` pasted a second copy beside the first, both
+submitted by the next Enter (review of #259, round 12, 2/9). The receipts said it in a
+vocabulary of their own, ``True``/``False``/``unsent``/``maybe``, translated from this one
+by hand, which is how a tell had no word for ``unsent`` (9/9). Their JSON still says
+``true`` and ``false`` (:func:`prompt_typed_json`); a ``False``, "NOT typed … Tell it what
+to do", for the other two had the Tell go in beside the first copy (round 11, 2/13)."""
+
+
+def prompt_typed_json(typed: Typed | None) -> bool | str | None:
+    """A receipt's ``prompt_typed`` as the CLI's JSON and the remote's answer say it: ``true``,
+    typed and sent; ``false``, not typed; ``unsent`` and ``maybe`` as their words."""
+    return None if typed is None else {"yes": True, "no": False}.get(typed, typed)
+
+
 @dataclass(frozen=True)
 class SwitchReceipt:
     """What ``fleet switch`` did: the agent it stopped, the one it started, and how."""
@@ -247,10 +279,11 @@ class SwitchReceipt:
     not taken back. Each is in ``notes`` too, beside the ones every switch has (the
     headroom read, the launch replayed, the worktree kept). The automatic hand-over has
     no terminal to print ``notes`` to and posts these alone (``services.hooks.hand_over``)."""
-    prompt_typed: bool = True
+    prompt_typed: Typed = "yes"
     """Whether the replacement's first line reached its pane: the line telling a resumed
-    session to continue, or a fresh one's hand-off prompt. ``False`` leaves it idle at an
-    empty prompt, and ``notes`` say why."""
+    session to continue, or a fresh one's hand-off prompt. ``no`` leaves it idle at an
+    empty prompt, ``unsent`` and ``maybe`` with the line at its prompt or on its way
+    (:data:`Typed`), and ``notes`` say why."""
 
     @property
     def how(self) -> str:
@@ -270,22 +303,182 @@ class SpawnReceipt:
     branch it was put on), a prompt that could not be typed, an agent that will not
     join the board. NOT a permission-mode fallback — there is none: the mode is the
     flag, then the role's config, then ``auto``, and nothing here rewrites it."""
-    prompt_typed: bool | None = None
-    """Whether the ``prompt`` asked for reached the agent: ``None`` when none was
-    asked for, ``False`` when it was not typed — the notes say why. One an agent takes
-    as its argument (``capabilities.positional_prompt``) is on its command line: ``True``."""
+    prompt_typed: Typed | None = None
+    """Whether the ``prompt`` asked for reached the pane (:data:`Typed`): ``None`` when none
+    was asked for; otherwise the notes say why it is not ``yes``. One an agent takes as its
+    argument (``capabilities.positional_prompt``) is on its command line: ``yes``."""
     failures: list[str] = field(default_factory=list)
     """The notes about what did NOT happen once the agent was up: the prompt not typed,
     the claims of a hand-over not moved, the previous session not marked ended. Each
     is in ``notes`` too; a prompt typed past the wait is typed, and is not here."""
+    shared: list[str] = field(default_factory=list)
+    """The notes that say a share was made into the agent's account (a folder's trust
+    copied, its settings.json linked): done, not a warning. Each is in ``notes`` too."""
 
 
 @dataclass(frozen=True)
 class TellResult:
-    """How a message reached (or did not reach) an agent."""
+    """How a message reached (or did not reach) an agent: ``typed`` as :class:`PaneWrite` says
+    it, ``yes`` once its text and its Enter went through; ``unsent``, its text is at the
+    agent's prompt and its Enter was refused; ``maybe``, tmux did not answer in time with one
+    of them, which may still arrive. One field for them all, as on
+    :class:`PaneWrite`: ``delivered`` and a ``maybe`` beside it could say "delivered, maybe"
+    (review of #259, round 11, 13/13)."""
 
-    delivered: bool
+    typed: Typed
     how: str
+
+    @property
+    def delivered(self) -> bool:
+        """Whether the message went in and was sent: ``typed`` is ``yes``."""
+        return self.typed == "yes"
+
+
+@dataclass(frozen=True)
+class PaneWrite:
+    """How one write into an agent's pane ended (:func:`pane_write`): ``yes``, tmux typed it;
+    ``no``, tmux refused it and typed nothing; ``unsent``, refused past the writes of its chain
+    that went in (``went``), or past a part of it (``TmuxPartlyTyped``); ``maybe``, tmux did
+    not answer in time (``TmuxTimedOut``), and a wedged server may still type it once it
+    recovers, or the rest of a part it typed.
+
+    Every write that types into an agent on someone's word asks it here: the remote's tell
+    in each of its modes, its Escapes, ``send-keys`` and quick answers, and ``fleet tell``.
+    A ``maybe`` is said by :meth:`late` and audited ``…=maybe``. It is never "nothing was
+    typed", nor advice to type it again: a second paste is submitted beside the first, and
+    a second Enter answers whatever prompt the first one's message brought up. Rounds 7 to
+    9 of #259's review taught that to one call site at a time, each in words of its own,
+    and the sites not reached yet took a timeout for a refusal (round 10, 8/9).
+    """
+
+    typed: Typed
+    what: str
+    error: TmuxError | None = None
+    went: tuple[str, ...] = ()
+    """The writes of a chain (:func:`pane_writes`) that went through before ``what``, which are
+    in the pane whatever came of it: refused past them, it is ``unsent``."""
+
+    def said(self, label: str, *, press: str, again: str = "send it again") -> str:
+        """The sentence for an ``unsent`` or ``maybe`` write into ``label``'s pane: past a write
+        that went in (``went``), what waits at its prompt, or its Enter on its way
+        (:func:`pasted_unsent`, ``press``); otherwise what tmux may still type (:meth:`late`,
+        ``again``). A ``no`` typed nothing, and its caller words it."""
+        if self.went:
+            return f"{label}: {pasted_unsent(self, label, press=press, put='typed').how}"
+        return self.late(label, again=again)
+
+    @property
+    def audited(self) -> str:
+        """The word its audit line ends on: ``failed`` for a ``no``, else ``delivered=…``."""
+        return "failed" if self.typed == "no" else f"delivered={self.typed}"
+
+    def late(self, label: str, *, then: str = "", again: str = "send it again") -> str:
+        """``maybe``'s sentence: ``what`` may still reach ``label``'s pane (and ``then``), or a
+        part of it did, and an ``unsent`` part's, so its live screen is read before anyone does
+        ``again``."""
+        error = self.error
+        read = f"read its live screen before you {again}"
+        if isinstance(error, TmuxPartlyTyped):
+            typed = f"tmux typed {error.typed} of the {error.size} bytes of {self.what} into"
+            if isinstance(error.cause, TmuxTimedOut):
+                return (
+                    f"{typed} {label}'s pane, then did not answer in time ({error.cause}): "
+                    f"more of it may still arrive{then} — {read}"
+                )
+            return f"{typed} {label}'s pane, then refused the rest ({error.cause}){then} — {read}"
+        return (
+            f"tmux did not answer in time with {self.what} for {label}'s pane ({error}): "
+            f"it may still arrive{then} — {read}"
+        )
+
+
+def pane_write(what: str, write: Callable[[], object]) -> PaneWrite:
+    """``write()``, which types ``what`` into an agent's pane, and how it ended
+    (:class:`PaneWrite`). ``TmuxError`` is every way a tmux call fails (``core.tmux._tmux``),
+    ``TmuxTimedOut`` the one way that may still happen, and ``TmuxPartlyTyped`` a write of
+    several calls that failed past its first: ``core.tmux`` says which of its calls timed out
+    (review of #259, round 11, 7/13). Past a refusal no more of it can arrive: ``unsent``, not
+    ``maybe``, which audited it ``delivered=maybe`` (round 12, 7/9)."""
+    try:
+        write()
+    except TmuxPartlyTyped as exc:
+        return PaneWrite("maybe" if isinstance(exc.cause, TmuxTimedOut) else "unsent", what, exc)
+    except TmuxTimedOut as exc:
+        return PaneWrite("maybe", what, exc)
+    except TmuxError as exc:
+        return PaneWrite("no", what, exc)
+    return PaneWrite("yes", what)
+
+
+def pane_writes(*writes: tuple[str, Callable[[], object]] | None) -> PaneWrite:
+    """``writes`` in turn, each ``(what, write)`` as :func:`pane_write` takes it (``None``: none
+    here), up to the first that did not go through: how that one ended, its ``what`` saying
+    which it was and ``went`` the ones before it, in the pane; the last one's when all did.
+    What comes after a write tmux refused or did not answer would land beside it, or ahead of
+    what may still arrive. ``send-keys`` and a quick answer chained it by hand, the first
+    beside a stand-in "nothing" write (review of #259, round 11, 12/13). And each worked out
+    by hand what was in the pane before the write that failed, a quick answer not at all
+    (round 12, 1/9 and 8/9): :meth:`PaneWrite.said` says it, :attr:`PaneWrite.audited`
+    audits it."""
+    wrote = PaneWrite("yes", "nothing")
+    went: tuple[str, ...] = ()
+    for what, write in filter(None, writes):
+        wrote = pane_write(what, write)
+        if wrote.typed != "yes":
+            typed: Typed = "unsent" if went and wrote.typed == "no" else wrote.typed
+            return replace(wrote, typed=typed, went=went)
+        went = (*went, what)
+    return wrote
+
+
+def type_then_enter(
+    server: TmuxServer,
+    pane_id: str,
+    text: str,
+    label: str,
+    *,
+    press: str,
+    done: str = "typed into its pane at its prompt",
+    what: str = "the text",
+) -> TellResult | PaneWrite:
+    """Paste ``text`` (``what``) at the prompt in ``label``'s pane, then press Enter: how every
+    message is typed into an agent, by :func:`tell`, a spawn's prompt (:func:`_type_prompt`)
+    and the remote's paste (``remote_actions.action_paste``).
+
+    A paste that did not go through is answered as its :class:`PaneWrite`, its caller's to
+    say: a tell files the text as a note, the remote refuses with a 409, a spawn notes it.
+    Past the paste the text is at the prompt, and the answer is how the Enter ended:
+    ``done``, or :func:`pasted_unsent` (``press``). The three wrote paste, Enter and
+    :func:`pasted_unsent` out each in words of its own (review of #259, round 11, 12/13).
+    """
+
+    def enter() -> None:
+        # A key of its own, :data:`_KEY_GAP` after the paste: Codex takes keys that arrive
+        # in one burst for a paste and keeps the Enter in it as text (``PlacedPane.type_line``).
+        _sleep(_KEY_GAP)
+        server.send_keys(pane_id, "Enter")
+
+    wrote = pane_writes((what, lambda: server.paste(pane_id, text)), ("Enter", enter))
+    if wrote.typed == "yes":
+        return TellResult("yes", done)
+    return pasted_unsent(wrote, label, press=press) if wrote.went else wrote
+
+
+def pasted_unsent(entered: PaneWrite, label: str, *, press: str, put: str = "pasted") -> TellResult:
+    """A message ``put`` at ``label``'s prompt (pasted, or typed as ``send-keys`` types it)
+    whose Enter did not go through (``entered``): the text is there either way. Refused, it
+    waits there unsent, and ``press`` says where an Enter sends it. Not answered in time, the
+    Enter may still send it, so nothing invites a second one: that would answer whatever
+    prompt the message brings up, "1. Yes" to a permission nobody saw (review of #259, round
+    10, 3/9)."""
+    if entered.typed == "maybe":
+        how = entered.late(label, then=", and send it", again="press Enter")
+        return TellResult("maybe", f"{put} it at its prompt, but {how}")
+    return TellResult(
+        "unsent",
+        f"{put} it at its prompt, but tmux could not press Enter ({entered.error}) — {press} "
+        "to send it",
+    )
 
 
 @dataclass(frozen=True)
@@ -295,6 +488,19 @@ class ReapReport:
     ended: list[FleetAgent] = field(default_factory=list)
     lost: list[FleetAgent] = field(default_factory=list)
     worktrees_removed: list[Path] = field(default_factory=list)
+    worktrees_kept: list[tuple[Path, str]] = field(default_factory=list)
+    """An ended agent's worktree left in place, with why: uncommitted changes, or commits
+    found nowhere but there (:func:`_remove_finished_worktrees`)."""
+    branches_deleted: list[tuple[Path, str]] = field(default_factory=list)
+    """``(repo, branch)`` for each ``fleet/…`` branch ended agents' rows recorded and no
+    worktree had out, deleted once the default branch had its work
+    (:func:`_sweep_fleet_branches`). With its repo, as a reap of every project walks
+    several."""
+    branches_kept: list[tuple[Path, str]] = field(default_factory=list)
+    """``(repo, branch)`` for each ``fleet/…`` branch ended agents' rows recorded and no
+    worktree has out that holds commits the default branch lacks, named on every reap: kept,
+    so a spawn for its task or a restart of its agent carries on from it
+    (:func:`_remake_worktree`). With its repo, which a ``git branch -D`` needs."""
     claims_released: list[str] = field(default_factory=list)
     """Task ids the ended and lost rows' board sessions still held, returned to
     the pool — the same count ``shutdown`` reports, where ``reap`` used to
@@ -307,6 +513,14 @@ class ReapReport:
     raise here used to take the rest of the sweep down with it: the remaining
     agents, every later project, the worktree pass and the manager nudges, and
     a traceback instead of a report (round 5)."""
+    held: list[ShutdownRow] = field(default_factory=list)
+    """Rows the sweep left live whose agent may still be running where no tmux client
+    reaches it, each with why and the way out. On every ``reap``: a row whose socket another
+    tmux server answers on (:func:`_hold_on_another_server`). Under ``--server-down`` also:
+    a row on a socket tmux reports no server for, which the one rule says may still run, a
+    socket file taken from under its server or a socket that could not be asked
+    (:func:`_hold_on_absent_server`). The reason says which. Said as ``shutdown`` says a row
+    it left live (follow-up of #257; review of #259, round 5)."""
 
 
 @dataclass(frozen=True)
@@ -359,6 +573,11 @@ class ShutdownRow:
 
     agent: FleetAgent
     reason: str
+    held: bool = False
+    """Left live as one whose agent may run where no tmux client reaches it (``_held_rows``),
+    not as a pane seen alive: no server this run asks holds its pane, so it spares no session
+    there (``_spared_panes``). Never a row held as ``"answers"``: a server came up on its socket
+    after the probe, and its pane may be on it."""
 
 
 @dataclass
@@ -435,6 +654,12 @@ class ShutdownReport:
     carries the per-project failures — ``<project>: could not be read/cleared
     (…)``, joined by ``; `` — for a lookup that SUCCEEDED and left one project's
     own signal unread or unwritten (review of #121, round 9)."""
+    pause_unsettled: list[ProjectInfo] = field(default_factory=list)
+    """The projects named in ``pause_scan_failed`` as one whose signal could not be read or
+    could not be cleared: their ``fleet-paused`` may still be set, and the report gives a
+    ``fleet resume`` for each. Under ``--all`` the warning said only "re-run", with no way
+    to clear a signal and no project to clear it in (review of #259, round 22). Empty when
+    the lookup itself failed: then no project's signal was asked."""
 
 
 @dataclass(frozen=True)
@@ -453,14 +678,18 @@ class ShutdownPlan:
     """``<socket>:<session>`` for every fleet session the kill phase would target."""
     absent_sockets: list[str] = field(default_factory=list)
     held: dict[str, str] = field(default_factory=dict)
-    """Rows on an absent socket the run would LEAVE LIVE, by id, with why: their agent may
-    still run (:func:`_unreached`). Under ``forget``, only those whose socket answers, which
-    it does not end."""
+    """Rows the run would LEAVE LIVE, by id, with why: their agent may still run where no
+    tmux client reaches it (:func:`_unreached`), on a socket that did not answer or one
+    another server answers. Under ``forget``, only those whose socket answers, which it
+    does not end."""
     lost: dict[str, str] = field(default_factory=dict)
-    """Rows the run would record lost, by id, with the socket no server answered on: its
-    name, or the path its server said it listened on (:func:`_address`). Under
-    :attr:`tmux_unusable`, every row not :attr:`held`, with the socket no tmux here could
-    ask."""
+    """Rows the run would record lost, by id, with their socket: its name, or the path its
+    server said it listened on (:func:`_address`). Those no server answered on, and under
+    ``forget`` those held, whether or not their socket answers; under
+    :attr:`tmux_unusable`, every row not :attr:`held`, unchecked."""
+    lost_why: dict[str, str] = field(default_factory=dict)
+    """Why the run would record each of :attr:`lost` lost, by id: the reason its report
+    gives the row (``ShutdownReport.recorded``)."""
     tmux_unusable: str | None = None
     """Why tmux is not usable here, for a ``forget`` plan: every row is then ended
     unchecked, on the operator's word, but for those in :attr:`held`, whose socket
@@ -519,9 +748,16 @@ def server_for(socket: str, config: FleetSettings | None = None) -> TmuxServer:
     here does too. Routed through :func:`server` so a caller that fakes that
     one factory sees every socket. This asks by the name alone (``tmux -L``); a
     row's pane is asked of its :class:`PlacedPane`, at the path its launch record holds.
+
+    The socket is all :func:`server` reads of the config, so ``config.toml`` is read only
+    for a row that recorded none: every quick answer's screen check and every snapshot of
+    Remote's re-read it for a name they held (review of #259, round 9, 7/8).
     """
-    config = config or settings()
-    if socket and socket != config.tmux_socket:
+    if config is None:
+        config = (
+            FleetSettings().model_copy(update={"tmux_socket": socket}) if socket else settings()
+        )
+    elif socket and socket != config.tmux_socket:
         config = config.model_copy(update={"tmux_socket": socket})
     return server(config)
 
@@ -567,6 +803,45 @@ def _address(
     return _Address(socket)
 
 
+def server_of(agent: FleetAgent, config: FleetSettings | None = None) -> TmuxServer:
+    """The server ``agent`` is asked on, where it said it listened (:func:`_address`): for a
+    caller outside this module that holds an agent a listing placed
+    (``FleetAgentStatus.agent``, whose socket, path and pane are its launch record's,
+    :func:`resolve_place`), as Remote's actions do. Never a row read from the store: every
+    question this module puts about a row's pane is put to its :class:`PlacedPane`.
+
+    The address of each listed row is worked out once, by its placement
+    (:attr:`PlacedPane.address`); the listing asked it about five times per row before — the
+    observe, the reconcile, the lingering windows, the status and its ``socket_at`` — on asq's
+    tick every two seconds (follow-up of #257)."""
+    config = config or settings()
+    return _server_at(_address(agent.tmux_socket, agent.socket_path, config), config)
+
+
+def placed_row(row: FleetAgent) -> FleetAgent:
+    """``row`` as its launch record places it (:attr:`Placed.agent`: its socket, path, pane,
+    boot, times and agent the record's), for a caller outside this module that puts its pane
+    to tmux, as Remote's keys and screens do (:func:`server_of`). :class:`FleetError` when no
+    record places it or the row was rewritten in the store, as :func:`tell` types nothing
+    there (review r5 of #113, finding 1; r6, finding 4)."""
+    placement = resolve_place(row)
+    if isinstance(placement, Unplaced):
+        raise FleetError(f"{row.label} is not placed: {placement.why}")
+    if placement.rewritten is not None:
+        raise FleetError(f"{row.label}: {placement.rewritten}")
+    return placement.agent
+
+
+def socket_at(agent: FleetAgent) -> Path | None:
+    """The path ``agent``'s server is asked at (``tmux -S``), or ``None`` when it is asked by
+    its socket's name (:func:`_address`), for an agent a listing placed, as
+    :func:`server_of`. It reads the config, so a caller holding a listed
+    :class:`FleetAgentStatus` reads its ``socket_at``, worked out with the listing's: asked
+    on the UI thread, each frame reloaded config.toml for every open project (round 29 of
+    #257)."""
+    return _address(agent.tmux_socket, agent.socket_path).path
+
+
 def _server_at(address: _Address, config: FleetSettings | None = None) -> TmuxServer:
     """The server at ``address``, through :func:`server_for` so a faked factory sees it."""
     return server_for(address.name, config).at(address.path)
@@ -604,14 +879,17 @@ class PlacedPane:
     created_at: datetime
     """The record's: a server that started later holds none of its panes (:func:`_outlived`)."""
     config: FleetSettings = field(repr=False, compare=False)
+    server_started_at: datetime | None = None
+    """The record's start of that server (``WindowPlace.server_started_at``): a server that
+    started at any other time is another (:func:`_started_after`)."""
 
     def server(self) -> TmuxServer:
         return _server_at(self.address, self.config)
 
     def outlived(self, started: datetime | None) -> bool:
-        """Whether a server that started at ``started`` is younger than this pane's record,
-        so the id names another agent's pane there (:func:`_outlived`)."""
-        return _outlived(self.created_at, started)
+        """Whether a server that started at ``started`` is not the one this pane's record
+        was written on, so the id names another agent's pane there (:func:`_outlived`)."""
+        return _started_after(self.created_at, self.server_started_at, started)
 
     def facts(self) -> PaneFacts | None:
         return self.server().pane_facts(self.pane_id)
@@ -624,6 +902,11 @@ class PlacedPane:
 
     def screen(self) -> list[str]:
         return self.server().screen_text(self.pane_id)
+
+    def captured(self) -> list[str]:
+        """The rows on its screen with their escapes (``TmuxServer.capture``): what Claude
+        Code's folder-trust question is read off (``claude_sharing.shows_trust_prompt``)."""
+        return list(self.server().capture(self.pane_id).lines)
 
     def kill(self) -> None:
         self.server().kill_window(self.pane_id)
@@ -641,7 +924,25 @@ class PlacedPane:
         except TmuxError:
             return None
         session_id, name = held
-        return PlacedSession(self.address, session_id, name, self.created_at, self.config)
+        return PlacedSession(
+            self.address, session_id, name, self.created_at, self.config, self.server_started_at
+        )
+
+    def type_then_enter(
+        self,
+        text: str,
+        label: str,
+        *,
+        press: str,
+        done: str = "typed into its pane at its prompt",
+        what: str = "the text",
+    ) -> TellResult | PaneWrite:
+        """:func:`type_then_enter` into this pane, how every message the fleet types is typed:
+        ``text`` without its control characters (:func:`_typeable`), its Enter
+        :data:`_KEY_GAP` after the paste (:meth:`type_line`), each saying how it ended."""
+        return type_then_enter(
+            self.server(), self.pane_id, _typeable(text), label, press=press, done=done, what=what
+        )
 
     def type_line(self, text: str, *, command: bool = False) -> None:
         """Type ``text`` at the agent's prompt and submit it: how the fleet types every line.
@@ -690,13 +991,17 @@ class PlacedSession:
     created_at: datetime | None
     """The record's; ``None`` for a session tmux listed just now."""
     config: FleetSettings = field(repr=False, compare=False)
+    server_started_at: datetime | None = None
+    """The record's start of that server (:func:`_started_after`); ``None`` when it kept none."""
 
     def server(self) -> TmuxServer:
         return _server_at(self.address, self.config)
 
     def _outlived(self, srv: TmuxServer) -> bool:
         """Whether the server is younger than the record, so the id is another session's."""
-        return self.created_at is not None and _outlived(self.created_at, srv.started_at())
+        return self.created_at is not None and _started_after(
+            self.created_at, self.server_started_at, srv.started_at()
+        )
 
     def present(self) -> bool:
         """Whether it is there; ``False`` too when tmux cannot say."""
@@ -729,10 +1034,11 @@ class PlacedSession:
     def attach_command(self) -> list[str]:
         return self.server().attach_argv(self.target)
 
-    def new_window(self, **window: Any) -> WindowInfo:
+    def new_window(self, *, notes: list[str] | None = None, **window: Any) -> WindowInfo:
         """A new window in this session (``TmuxServer.spawn_window``): only by its id, so it
-        goes into this session or, should the session have gone meanwhile, nowhere."""
-        return self.server().spawn_window(self.target, **window)
+        goes into this session or, should the session have gone meanwhile, nowhere. Opened
+        through :func:`open_window`, as every window at the fleet's socket is."""
+        return open_window(self.server(), self.target, config=self.config, notes=notes, **window)
 
 
 @dataclass(frozen=True)
@@ -827,6 +1133,7 @@ def _legacy_record(row: FleetAgent, project: ProjectInfo) -> launch_seal.LaunchR
             socket_path=str(row.socket_path) if row.socket_path is not None else None,
             boot_id=row.boot_id,
             created_at=row.created_at,
+            server_started_at=row.server_started_at,
             session=session_name(project.codename) if project.codename else None,
         ),
     )
@@ -879,7 +1186,8 @@ def resolve_place(
             ("tmux socket", row.tmux_socket, place.tmux_socket),
             ("socket path", row_path, place.socket_path),
             ("pane", row.pane_id, place.pane_id),
-            ("agent", row.agent, record.agent),
+            # A row from before adapters names no agent: Claude Code's, as its record says.
+            ("agent", row.agent or DEFAULT_AGENT, record.agent),
             # Who the row is, too: two rows' labels swapped, `fleet stop coder-1` stopped
             # the manager (review r8 of #113, finding 5). A record from before it kept the
             # label has none to compare.
@@ -891,6 +1199,14 @@ def resolve_place(
     # Every field that differs, both sides: a socket name alone rewritten printed the
     # same path twice (SMOKE4).
     rewritten = f"its row was rewritten in the store: {'; '.join(differ)}" if differ else None
+    # The start of the record's server, while the row still holds it: the store may only
+    # FORGET it (`_forget_an_exited_server`, for the rows of a server that exited), after
+    # which the row is judged by its record's time, as one from before it was kept. A start
+    # the row says and its record does not is never taken: matched to a newer server's, it
+    # would make that server's `%N` read as this row's pane.
+    started_on = (
+        place.server_started_at if row.server_started_at == place.server_started_at else None
+    )
     placed = row.model_copy(
         update={
             "tmux_socket": place.tmux_socket,
@@ -898,6 +1214,7 @@ def resolve_place(
             "socket_path": Path(place.socket_path) if place.socket_path is not None else None,
             "boot_id": place.boot_id,
             "created_at": place.created_at,
+            "server_started_at": started_on,
             "agent": record.agent,
             "label": record.label if record.label is not None else row.label,
             "role": record.role,
@@ -908,10 +1225,15 @@ def resolve_place(
     )
     socket_path = Path(place.socket_path) if place.socket_path is not None else None
     address = _address(place.tmux_socket, socket_path, config)
-    pane = PlacedPane(address, place.pane_id, place.created_at, config)
+    pane = PlacedPane(address, place.pane_id, place.created_at, config, started_on)
     session = (
         PlacedSession(
-            address, place.session_id, place.session or place.session_id, place.created_at, config
+            address,
+            place.session_id,
+            place.session or place.session_id,
+            place.created_at,
+            config,
+            started_on,
         )
         if place.session_id
         else None
@@ -969,6 +1291,7 @@ def _indexed_sessions(project_id: str, config: FleetSettings) -> list[PlacedSess
             place.name,
             place.created_at,
             config,
+            place.server_started_at,
         )
         for place in launch_seal.project_sessions(project_id)
     ]
@@ -986,7 +1309,11 @@ def _legacy_panes(project_id: str, config: FleetSettings) -> list[PlacedPane]:
             continue
         path = Path(place.socket_path) if place.socket_path is not None else None
         pane = PlacedPane(
-            _address(place.tmux_socket, path, config), place.pane_id, place.created_at, config
+            _address(place.tmux_socket, path, config),
+            place.pane_id,
+            place.created_at,
+            config,
+            place.server_started_at,
         )
         if pane.address not in started:
             try:
@@ -1069,13 +1396,16 @@ def _running_ids(project_id: str, candidates: Collection[str], config: FleetSett
         for session, mine in sessions:
             # A session or window recorded before the server started is another's under
             # the same id (`_outlived`): the next server numbers them afresh.
-            if session.created_at is not None and _outlived(session.created_at, started):
+            if session.created_at is not None and _started_after(
+                session.created_at, session.server_started_at, started
+            ):
                 continue
             alive = live.get(session.target, set())
             running |= {
                 entry.row_id
                 for entry in mine
-                if entry.pane_id in alive and not _outlived(entry.created_at, started)
+                if entry.pane_id in alive
+                and not _started_after(entry.created_at, entry.server_started_at, started)
             }
     legacy = [record for record in launch_seal.legacy_records(project_id) if record.id in wanted]
     groups: dict[tuple[_Address, str], list[launch_seal.LaunchRecord]] = {}
@@ -1099,7 +1429,9 @@ def _running_ids(project_id: str, candidates: Collection[str], config: FleetSett
             for record in records
             if record.window is not None
             and record.window.pane_id in alive
-            and not _outlived(record.window.created_at, started)
+            and not _started_after(
+                record.window.created_at, record.window.server_started_at, started
+            )
         }
     return running
 
@@ -1144,7 +1476,10 @@ def _recordless_pane(
             if (session.address, window.pane_id) in claimed:
                 continue
             created = session.created_at or _now()
-            return PlacedPane(session.address, window.pane_id, created, session.config), session
+            pane = PlacedPane(
+                session.address, window.pane_id, created, session.config, session.server_started_at
+            )
+            return pane, session
     return None
 
 
@@ -1160,7 +1495,9 @@ def _now() -> datetime:
 
 
 def _name(project: ProjectInfo) -> str:
-    return project.root.name or project.id
+    """How a refusal or a note names ``project``: as every list does
+    (``project.display_name``: its nickname, else its directory, else its id)."""
+    return project_service.display_name(project)
 
 
 # --- names (§5.7) -------------------------------------------------------------------
@@ -1212,16 +1549,20 @@ def resolve_project(ref: str | None = None, *, cwd: Path | None = None) -> Proje
     with store_session() as store:
         if ref is None:
             return active_project(store, cwd)
-        matches = store.find_projects(ref)
-        if not matches:
-            raise NoSuchProject(f"no project matches {ref!r} (id prefix, name or codename)")
-        if len(matches) > 1:
-            names = ", ".join(
-                f"{p.root.name or p.id}" + (f" · {p.codename}" if p.codename else "")
-                for p in matches
-            )
-            raise NoSuchProject(f"{ref!r} matches several projects: {names} — use the codename")
-        return matches[0]
+        return only_project(ref, store.find_projects(ref))
+
+
+def only_project(ref: str, matches: list[ProjectInfo]) -> ProjectInfo:
+    """The one project of ``matches``, those ``ref`` names; :class:`NoSuchProject` for none
+    or several, the message naming them."""
+    if not matches:
+        raise NoSuchProject(f"no project matches {ref!r} (id prefix, name or codename)")
+    if len(matches) > 1:
+        names = ", ".join(
+            f"{p.root.name or p.id}" + (f" · {p.codename}" if p.codename else "") for p in matches
+        )
+        raise NoSuchProject(f"{ref!r} matches several projects: {names} — use the codename")
+    return matches[0]
 
 
 def ensure_codename(project: ProjectInfo, store: ContextStore | None = None) -> ProjectInfo:
@@ -1238,17 +1579,36 @@ def ensure_codename(project: ProjectInfo, store: ContextStore | None = None) -> 
     call this too, and neither is a deliberate add: ``fleet attach`` in a
     captured directory listed it and was then refused, since it had no session
     to attach to. A codename still needs a live row to sit on, so a directory
-    with none, never seen or forgotten, is CAPTURED here, as the next prompt
-    there would capture it. The deliberate callers onboard for themselves:
-    :func:`spawn` once its agent is recorded, :func:`rename` before it writes
-    (review of #168, round 2).
+    with none, never seen or forgotten, is CAPTURED here while ``[projects]
+    capture`` is on, as the next prompt there would capture it. The deliberate
+    callers onboard for themselves: :func:`spawn` once its agent is recorded,
+    :func:`rename` before it writes (review of #168, round 2).
+
+    With capture off, only a project added on purpose gets one here
+    (:func:`~aisquare.services.project.tracked`): a directory nobody added comes back
+    without a codename, whether it has no live row or one captured before capture
+    went off with none (:func:`attach_argv` then takes the one a forgotten row holds,
+    or refuses: no agent ran there). Written onto a captured row, it
+    reserved a codename for a directory nobody added, on every ``fleet attach`` there,
+    which then refused (review of #259, round 18). A spawn works its codename out
+    without writing it (:func:`_codename_to_add`), and adds the project with it once
+    the window exists, with the agent's row: added here, before the window, a spawn
+    refused afterwards left the directory listed with no agent, or brought a
+    forgotten one back (round 17). A codename its live row holds already comes back
+    whatever capture says: held back, a stop in a directory captured under 0.8.0
+    looked for its agents in the session ``asq-`` (review of #259, round 19).
     """
     if project.codename:
         return project
 
     def assign(store: ContextStore) -> ProjectInfo:
-        if store.get_project(project.id) is None:
-            store.ensure_project(project)
+        stored = store.get_project(project.id)
+        if stored is not None and stored.codename:
+            return stored
+        if not project_service.tracked(store, project):
+            return project
+        if stored is None:
+            store.ensure_project(project)  # capture on: captured, as its next prompt would be
         for _ in range(_CODENAME_RETRIES):
             current = store.get_project(project.id)
             if current is not None and current.codename:
@@ -1267,6 +1627,27 @@ def ensure_codename(project: ProjectInfo, store: ContextStore | None = None) -> 
         return assign(store)
     with store_session() as opened:
         return assign(opened)
+
+
+def _kept_codename(store: ContextStore, project: ProjectInfo) -> str | None:
+    """The codename ``project``'s row holds, a forgotten one's included, or ``None`` when it
+    has no row. A forget keeps the codename (its tombstone), and the windows its agents left
+    linger under it. One row read by its key: every row was read and built, tombstones
+    included, to find it (review of #259, round 18)."""
+    row = store.get_project(project.id, include_forgotten=True)
+    return row.codename if row is not None else None
+
+
+def _codename_to_add(store: ContextStore, project: ProjectInfo) -> str:
+    """The codename a spawn names its session and branch by, for a project
+    :func:`ensure_codename` gave none (``[projects] capture`` off, and nobody added it),
+    read without a write: the one its row holds, captured or forgotten, else the walk past
+    every name in use.
+    :func:`_write_row` stores it with the project's add and the agent's row."""
+    kept = _kept_codename(store, project)
+    if kept is not None:
+        return kept
+    return codenames.codename_for(project.id, taken=store.codenames_in_use())
 
 
 def next_label(
@@ -1328,10 +1709,24 @@ class _GitResult:
 def _git(cwd: Path, *args: str) -> _GitResult:
     """THE git seam: worktree add/remove/list and the branch queries behind ``reap``.
 
-    Registered in ``core.spawn.SEAMS`` as EXCLUDED and not stripped — git starts
-    no model process, exactly like the ``rev-parse`` seams in ``core``. A
-    non-zero exit is an answer (callers read ``returncode``); a missing git or
-    a hang is not, and becomes a :class:`FleetError` with the reason.
+    Registered in ``core.spawn.SEAMS`` as EXCLUDED and stripped, as every git seam is: git
+    starts no model process, exactly like the ``rev-parse`` seams in ``core``. A non-zero
+    exit is an answer (callers read ``returncode``); a missing git or a hang is not, and
+    becomes a :class:`FleetError` with the reason.
+
+    Every command runs in every git's environment (``core.spawn.git_env``), the identity
+    stripped and ``GIT_OPTIONAL_LOCKS=0``: a ``git status`` that only reads still
+    takes the tree's ``index.lock`` to write back what it refreshed, and a reap's status of
+    an ended agent's tree, asked without the branch lock, made a respawn's ``git checkout``
+    in that tree fail on the lock it held (77 of 200 overlapping checkouts, review of #259,
+    round 20). A command that must write takes its locks all the same. The environment's
+    switch, not ``--no-optional-locks``: the flag came in git 2.15, and a git from 2.5 to
+    2.14 refused it, so every fleet git command exited 129, a ``--worktree`` spawn failed
+    and a reap read each refusal as an answer; such a git ignores the variable (round 27,
+    4/7). That is all the switch buys an old git. Fleet worktrees need git 2.20, the floor
+    docs/fleet.md names; below 2.5 there is no ``git worktree`` or ``--git-common-dir``, and
+    below 1.8.5 no ``git -C``, so every command here fails whatever the switch (round 28,
+    6/10).
 
     No hook of the repository's runs: ``core.hooksPath`` is pointed at nothing for every
     call, so a ``post-checkout`` that lives in the tree (``.husky/``, ``.githooks/``), which
@@ -1347,11 +1742,13 @@ def _git(cwd: Path, *args: str) -> _GitResult:
             errors="replace",
             timeout=_GIT_TIMEOUT,
             check=False,
+            env=git_env(),
         )
     except FileNotFoundError as exc:
         raise FleetError("git is not installed (or not on PATH) — worktrees need it") from exc
     except subprocess.TimeoutExpired as exc:
         raise FleetError(f"git {args[0]} did not finish within {_GIT_TIMEOUT:.0f} s") from exc
+    _moved_on()  # under the branch lock, each git command finished is a step a waiter sees
     return _GitResult(completed.returncode, completed.stdout, completed.stderr)
 
 
@@ -1364,17 +1761,144 @@ def _git_ok(cwd: Path, *args: str) -> str:
     return result.stdout
 
 
-def _exclude_worktrees(root: Path, worktree_dir: str, notes: list[str]) -> None:
+def _git_common_dir(root: Path) -> Path:
+    """The repository's own ``.git`` directory, which every worktree of it shares: where the
+    branch lock lives (:func:`_branches_locked`). One git process, so a spawn or a reap asks
+    it once and passes it on: asked at each taking of the lock, a reap paid one for every
+    tree it removed (review of #259, round 18)."""
+    common = Path(_git_ok(root, "rev-parse", "--git-common-dir").strip())
+    return common if common.is_absolute() else root / common
+
+
+#: How long a spawn waits on a holder of the branch lock (:func:`_branches_locked`) that says
+#: nothing before it calls that holder stuck. A holder says it moved on as each git command it
+#: runs under the lock finishes (:func:`_moved_on`), and every step between two of them is
+#: bounded on its own, far inside this: a git command by :data:`_GIT_TIMEOUT`, tmux's by
+#: tmux's own timeout, the row by the store's busy timeout. So this is the patience for one
+#: step, with room to spare. It was the patience for one holder, sized for a few git
+#: commands, and a spawn holds the lock through its tree, its window and its row (review of
+#: #259, round 18): on a large repo a legitimate holder went past it, and a restart, its agent
+#: already stopped, was refused.
+_BRANCHES_LOCK_WAIT = 4 * _GIT_TIMEOUT
+
+_BRANCHES_HELD: contextvars.ContextVar[Path | None] = contextvars.ContextVar(
+    "_BRANCHES_HELD", default=None
+)
+"""The repository's own ``.git`` whose branch lock this context holds, for :func:`_moved_on`."""
+
+#: How often a waiter looks at who holds the branch lock (:func:`_lock_holder`).
+_HOLDER_LOOK = 1.0
+
+
+@contextlib.contextmanager
+def _branches_locked(common: Path, *, wait: float) -> Iterator[None]:
+    """Hold the lock a spawn and a reap share over a repository's branches, for the block:
+    the repository whose own ``.git`` is ``common`` (:func:`_git_common_dir`).
+
+    ``git worktree add -b`` makes the branch and only then registers the tree that has it
+    out, and a spawn that finds the branch there checks it out one git command after
+    asking: a reap's sweep between the two read the branch as out of every tree and
+    deleted it, and the spawn failed, or made its tree on a branch that was gone (review
+    of #259, round 16). So :func:`spawn` holds this from its first question about a branch
+    until its agent's row is written, :func:`_sweep_fleet_branches` deletes only while it
+    holds it, asking the trees again first, and :func:`_reap_tree` records a tree's branch
+    and removes the tree only while it holds it, asking the rows again first (rounds 17
+    and 18). A file in
+    ``common``, which every worktree of the repository shares.
+
+    ``wait`` is the patience for a holder that does not move, not for the lock: each holder
+    says beside the lock who it is (:func:`_announce_holder`), and again as each git command
+    it runs under it finishes (:func:`_moved_on`), and a waiter that sees another word than
+    the one it last saw starts its wait again. A queue of spawns is busy, not stuck: with one
+    120 s wait for the lock, the third of three spawns in a repo whose checkout is slow was
+    refused behind two ``git worktree add``, though nothing was stuck (review of #259, round
+    17). Nor is a spawn that holds it through a slow checkout, its window and its row (round
+    18).
+
+    The word moves with the holder's work, never on a timer: said every :data:`_HOLDER_LOOK`
+    from a thread of the hold's own (round 19), it showed the process alive, not moving, and
+    a holder blocked under the lock (a state-file ``flock`` on an NFS home whose lock manager
+    is gone, a ``git worktree add`` that will not die on Windows) made every waiter wait on it
+    with no limit (round 20). A step that is not git says nothing and needs to remember
+    nothing: each is bounded far inside ``wait``, which a step that is not, stuck, runs out.
+    Raises :class:`FleetError` when a holder says nothing for ``wait`` seconds (``0`` asks
+    once), or it cannot be taken at all.
+    """
+    path = common / "aisquare-fleet-branches.lock"
+    taken = contextlib.ExitStack()
+    seen = _lock_holder(common)
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            left = max(0.0, deadline - time.monotonic())
+            taken.enter_context(holding(path, wait_s=min(left, _HOLDER_LOOK)))
+            break
+        except TimeoutError as exc:
+            now = _lock_holder(common)
+            if wait > 0 and now != seen:
+                seen, deadline = now, time.monotonic() + wait  # another holder: still moving
+            elif time.monotonic() >= deadline:
+                raise FleetError(
+                    f"another aisquare (a spawn or a reap) holds {path}"
+                    + (
+                        f", and has held it for {wait:g} s without letting go — it may be "
+                        "stuck; try again once it ends"
+                        if wait > 0
+                        else " — try again"
+                    )
+                ) from exc
+        except OSError as exc:
+            raise FleetError(f"{path} could not be locked ({exc})") from exc
+    with taken:
+        _announce_holder(common)
+        held = _BRANCHES_HELD.set(common)
+        try:
+            yield
+        finally:
+            _BRANCHES_HELD.reset(held)
+
+
+def _holder_file(common: Path) -> Path:
+    return common / "aisquare-fleet-branches.holder"
+
+
+def _announce_holder(common: Path) -> None:
+    """Say, beside the branch lock this taking holds, that it does, as of now: a token no
+    other taking, nor any other step of this one (:func:`_moved_on`), has, which a waiter
+    compares (:func:`_branches_locked`). Not in the lock file,
+    which Windows locks byte 0 of against every other handle. Best effort: unsaid, a waiter
+    is only as patient as it was before holders said."""
+    with contextlib.suppress(OSError):
+        _holder_file(common).write_text(f"{os.getpid()} {time.time_ns()}\n", encoding="utf-8")
+
+
+def _moved_on() -> None:
+    """Say, beside the branch lock this context holds, that its holder has finished a step: a
+    new word, which a waiter reads as a holder still moving (:func:`_branches_locked`).
+    Nothing when it holds none."""
+    common = _BRANCHES_HELD.get()
+    if common is not None:
+        _announce_holder(common)
+
+
+def _lock_holder(common: Path) -> str:
+    """The token the branch lock's latest holder announced, or ``""`` when none can be read."""
+    try:
+        return _holder_file(common).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def _exclude_worktrees(common: Path, worktree_dir: str, notes: list[str]) -> None:
     """Add ``<worktree_dir>/`` to ``.git/info/exclude`` once — never to a tracked file.
+    ``common`` is the repository's own ``.git`` (:func:`_git_common_dir`).
 
     Fail-open: a read-only ``.git`` costs a note and an untracked directory in
     ``git status``, never the spawn.
     """
     line = worktree_dir.rstrip("/") + "/"
     try:
-        common = _git_ok(root, "rev-parse", "--git-common-dir").strip()
-        git_dir = Path(common) if Path(common).is_absolute() else root / common
-        exclude = git_dir / "info" / "exclude"
+        exclude = common / "info" / "exclude"
         existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
         if line in existing.splitlines():
             return
@@ -1383,7 +1907,7 @@ def _exclude_worktrees(root: Path, worktree_dir: str, notes: list[str]) -> None:
             if existing and not existing.endswith("\n"):
                 handle.write("\n")
             handle.write(f"# aisquare fleet worktrees (docs/plans/fleet-tui.md §3.5)\n{line}\n")
-    except (OSError, FleetError) as exc:
+    except OSError as exc:
         notes.append(
             f"could not add {line} to .git/info/exclude ({exc}) — "
             "git status will list the worktrees as untracked"
@@ -1429,13 +1953,11 @@ def _reuse_worktree(
     reserved in the store before anything is created, which no index here can
     express.
     """
-    head = _git(path, "rev-parse", "--abbrev-ref", "HEAD")
-    current = head.stdout.strip() if head.returncode == 0 else ""
-    # A detached HEAD is not a failure: `--abbrev-ref` exits 0 and prints the
-    # literal "HEAD" (measured with git 2.x). The empty string is the shapes
-    # that really do fail — an unborn HEAD, or no repository at all.
-    detached = current in ("", "HEAD")
-    where = "on a detached HEAD" if detached else f"on {current}"
+    try:
+        current = _tree_branch(path)  # the one reading of a tree's branch
+    except FleetError:
+        current = None  # an unborn HEAD: no branch to name, as on a detached one
+    where = f"on {current}" if current is not None else "on a detached HEAD"
     if current == branch:
         notes.append(f"reusing the existing worktree at {path} (already on {branch})")
         return
@@ -1447,21 +1969,24 @@ def _reuse_worktree(
         )
     if refuse_if_taken is not None:
         refuse_if_taken()
-    if _git(root, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0:
-        _git_ok(path, "checkout", branch)
+    if _branch_exists(root, branch):
+        _git_ok(path, "checkout", branch, "--")  # the branch, never a path of that name
     else:
         _git_ok(path, "checkout", "-b", branch)
     notes.append(f"reusing the existing worktree at {path} — it was {where}, now on {branch}")
 
 
-def _ensure_worktree(
+def _worktree_for(
     root: Path,
     worktree_dir: str,
     label: str,
     branch: str,
     notes: list[str],
     *,
-    refuse_if_taken: Callable[[], None] | None = None,
+    refuse_if_taken: Callable[[], None] | None,
+    own: Path | None,
+    own_branch: str | None,
+    common: Path,
 ) -> Path:
     """``<root>/<worktree_dir>/<label>`` on ``branch``, created or reused.
 
@@ -1479,10 +2004,21 @@ def _ensure_worktree(
     its claims released — and a clean one was moved to a branch the agent never
     worked on (review of #203, final round, FLEET-2).
 
+    A tree ``own`` names that is gone is made again on ``own_branch``, the branch its row
+    recorded it on, or refused when there is none or it is gone (:func:`_remake_worktree`):
+    never made anew from the main checkout's HEAD, without the agent's commits.
+
     ``refuse_if_taken`` reaches :func:`_reuse_worktree`, which asks it once more
     before switching branches; a tree this call CREATES cannot be another
     agent's, because ``git worktree add`` refuses an existing directory.
+
+    The caller holds the branch lock (:func:`_branches_locked`), which a reap deletes
+    branches and removes trees under: :func:`spawn` from before the first question about a
+    branch until the agent's row is written. ``common`` is the repository's own ``.git``,
+    which it was taken in.
     """
+    if own is not None and not own.exists():
+        return _remake_worktree(root, own, own_branch, notes)
     path = root / worktree_dir / label
     if path.exists():
         if (path / ".git").exists():
@@ -1496,17 +2032,33 @@ def _ensure_worktree(
             else "remove it or pick another label"
         )
         raise FleetError(f"{path} exists and is not a git worktree — {detail}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # A worktree whose directory was deleted by hand stays registered and blocks
-    # `add` at the same path; prune is idempotent and cheap.
-    _git(root, "worktree", "prune")
-    if _git(root, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0:
-        _git_ok(root, "worktree", "add", str(path), branch)
+    if _branch_exists(root, branch):
+        _add_worktree(root, path, branch)
         notes.append(f"branch {branch} already existed — checked it out")
     else:
-        _git_ok(root, "worktree", "add", str(path), "-b", branch)
-    _exclude_worktrees(root, worktree_dir, notes)
+        _add_worktree(root, path, branch, new=True)
+    _exclude_worktrees(common, worktree_dir, notes)
     return path
+
+
+def _branch_exists(root: Path, branch: str) -> bool:
+    """Whether the local branch ``branch`` is there."""
+    return _git(root, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0
+
+
+def _add_worktree(root: Path, path: Path, branch: str, *, new: bool = False) -> None:
+    """``git worktree add`` at ``path`` on ``branch`` — a new one from HEAD when ``new``.
+
+    A worktree whose directory was deleted by hand stays registered and blocks ``add`` at
+    the same path, and holds its branch from any other tree; ``git worktree prune`` is
+    idempotent and cheap. It forgets every such tree's branch, which nothing here reads:
+    an agent's branch is on its row (:attr:`FleetAgent.branch`)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _git(root, "worktree", "prune")
+    if new:
+        _git_ok(root, "worktree", "add", str(path), "-b", branch)
+    else:
+        _git_ok(root, "worktree", "add", str(path), branch)
 
 
 def _worktree_branches(root: Path) -> dict[Path, str]:
@@ -1526,6 +2078,57 @@ def _worktree_branches(root: Path) -> dict[Path, str]:
     return branches
 
 
+def _branches_in_use(root: Path, common: Path) -> set[str] | None:
+    """The branches ``git branch -D`` refuses to delete, as git's own ``branch_checked_out``
+    reads them: each one a worktree of the repository has out, is rebasing (its
+    ``rebase-merge`` or ``rebase-apply`` ``head-name``, and the refs a ``rebase
+    --update-refs`` moves when it ends) or is bisecting from (``BISECT_START``). ``None``
+    when git would not list the worktrees, or a tree's state could not be read: nothing is
+    known to be free then. ``common`` is the repository's own ``.git``
+    (:func:`_git_common_dir`), which holds the main checkout's state, and each linked tree's
+    under ``worktrees/``.
+
+    ``git worktree list`` says ``detached`` of a tree mid-rebase or mid-bisect. Asked of it
+    alone, the sweep deleted a merged ``fleet/x`` that ``../wt`` was rebasing, which ``branch
+    -D`` refuses; the ``rebase --continue`` there failed on the ref, and the rebased commits
+    were left on a detached HEAD (review of #259, round 34, 1/10). Read as no tree at all,
+    a ``worktree list`` that failed let every branch go.
+    """
+    listed = _git(root, "worktree", "list", "--porcelain")
+    if listed.returncode != 0:
+        return None
+    heads = "refs/heads/"
+    used = {
+        line.removeprefix("branch " + heads)
+        for line in listed.stdout.splitlines()
+        if line.startswith("branch " + heads)
+    }
+    trees = common / "worktrees"
+    try:
+        for state in [common, *(sorted(trees.iterdir()) if trees.is_dir() else [])]:
+            rebasing = [
+                _state_file(state / "rebase-merge" / "head-name"),
+                _state_file(state / "rebase-apply" / "head-name"),
+                # A ref, its tip before, its tip after: each third line is a ref.
+                *_state_file(state / "rebase-merge" / "update-refs").splitlines()[::3],
+            ]
+            used.update(ref.strip().removeprefix(heads) for ref in rebasing if ref.strip())
+            bisecting = _state_file(state / "BISECT_START").strip()  # a branch, or a commit
+            if bisecting:
+                used.add(bisecting)
+    except OSError:
+        return None
+    return used
+
+
+def _state_file(path: Path) -> str:
+    """What a worktree's state file at ``path`` says; ``""`` when there is none."""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except (FileNotFoundError, NotADirectoryError):
+        return ""
+
+
 def _default_branch(root: Path) -> str:
     """The branch fleet work merges into: origin's HEAD, else main/master, else HEAD."""
     head = _git(root, "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD")
@@ -1537,50 +2140,446 @@ def _default_branch(root: Path) -> str:
     return "HEAD"
 
 
-def _merged_branches(root: Path) -> set[str]:
-    """Branch names already merged into the default branch."""
-    merged = _git(root, "branch", "--merged", _default_branch(root), "--format=%(refname:short)")
-    if merged.returncode != 0:
-        return set()
-    return {line.strip() for line in merged.stdout.splitlines() if line.strip()}
+#: The prefix of every branch :func:`branch_name` makes: the only branches reap deletes.
+_FLEET_BRANCH_PREFIX = "fleet/"
 
 
-def _remove_merged_worktrees(store: ContextStore, project: ProjectInfo, report: ReapReport) -> None:
-    """Remove the worktrees of ENDED agents whose branch is merged — never unmerged work.
+def _tree_branch(tree: Path) -> str | None:
+    """The branch the worktree ``tree`` is on, as git says now; ``None`` on a detached HEAD.
 
-    A dirty worktree makes ``git worktree remove`` refuse, and that refusal is
-    honoured: uncommitted changes are unmerged work too. A tree a live agent
-    still sits in (a respawn reused it) is never touched.
+    Raises :class:`FleetError` when git cannot say: no worktree there (asked in a
+    directory without its ``.git``, git would answer for the main checkout above it), or
+    no answer — an unborn HEAD, say. A detached HEAD is not a failure: ``--abbrev-ref``
+    exits 0 and prints the literal ``HEAD`` (measured with git 2.x). Every question about
+    a tree's branch is asked here: at spawn, at reuse, at stop and at reap."""
+    if not (tree / ".git").exists():
+        raise FleetError(f"no worktree at {tree}")
+    head = _git(tree, "rev-parse", "--abbrev-ref", "HEAD")
+    if head.returncode != 0:
+        raise FleetError(f"git could not say which branch {tree} is on")
+    current = head.stdout.strip()
+    return None if current == "HEAD" else current  # --abbrev-ref says HEAD when detached
+
+
+def _spawned_on(tree: Path) -> str | None:
+    """The branch a spawn's worktree is on, for its row; ``None`` when git cannot say,
+    which costs the spawn nothing but a restart's way back to a tree that is gone."""
+    try:
+        return _tree_branch(tree)
+    except FleetError:
+        return None
+
+
+def _in_its_recorded_tree(placement: Placement) -> FleetAgent:
+    """The row with the tree its launch record names (``cwd``, ``worktree``): the one git is
+    asked about at stop and at reap (:func:`_record_the_branch`), never a path a row
+    rewritten in the store names (``core.launch_seal``). A row no record places is its own."""
+    if isinstance(placement, Placed):
+        return placement.row.model_copy(
+            update={"cwd": Path(placement.record.cwd), "worktree": placement.record.worktree}
+        )
+    return placement.row
+
+
+def _record_the_branch(store: ContextStore, agent: FleetAgent) -> None:
+    """Record on ``agent``'s row the branch its worktree is on now (:attr:`FleetAgent.branch`),
+    while the tree is there to ask: at stop, and at reap before the tree can go. An agent
+    that ran ``git checkout -b fix/auth`` is restarted there, not on the branch it was
+    spawned on. A tree that is gone, or that git cannot read, leaves what was recorded, and
+    so does a detached HEAD (mid-rebase, mid-bisect, a ``git checkout <sha>``): written over
+    with no branch, the restart of its gone tree was refused while its branch still held the
+    agent's commits (review of #259, round 16)."""
+    if not agent.worktree:
+        return
+    try:
+        branch = _tree_branch(agent.cwd)
+    except FleetError:
+        return
+    if branch is not None and branch != agent.branch:
+        store.record_fleet_agent_branch(agent.id, branch)
+
+
+def _branch_of_a_gone_tree(root: Path, own: Path, branch: str | None) -> str:
+    """``branch``, the one its row recorded ``own`` on — the worktree an agent worked in,
+    gone now — when :func:`_remake_worktree` can make the tree again there.
+
+    Asked of the row, never of git's worktree list, which every spawn's prune empties, nor
+    of anything keyed by the tree's path, which a later agent under the same label reuses
+    (review of #259, round 15). Writes nothing, so a restart refused afterwards leaves
+    nothing behind. Raises :class:`FleetError`, saying what it found, when the row recorded
+    no branch, the branch is gone, or another tree has it out: carried on in a new tree,
+    the agent would work without its commits.
+    """
+    instead = (
+        "carried on in a new tree, it would work without its commits. Spawn a new agent "
+        "for its task instead, which checks out the task's branch when there is one"
+    )
+    if branch is None:
+        raise FleetError(
+            f"its worktree {own} is gone, and its row records no branch it was on (a "
+            "detached HEAD, or an agent spawned before 0.8.1): " + instead
+        )
+    if not _branch_exists(root, branch):
+        raise FleetError(f"its worktree {own} is gone, and so is its branch {branch}: " + instead)
+    gone = own.resolve()
+    holder = next(
+        (
+            tree
+            for tree, b in _worktree_branches(root).items()
+            if b == branch and tree != gone and tree.exists()
+        ),
+        None,
+    )
+    if holder is not None:
+        # The main checkout cannot be removed — trying an ended agent's work there is common.
+        way = (
+            "switch that checkout to another branch"
+            if holder == root.resolve()
+            else "remove that tree"
+        )
+        raise FleetError(
+            f"its worktree {own} is gone, and its branch {branch} is checked out in {holder} "
+            f"now — carry on there, or {way} first"
+        )
+    return branch
+
+
+def _remake_worktree(root: Path, own: Path, branch: str | None, notes: list[str]) -> Path:
+    """Make ``own`` again — the worktree a restarted or switched agent worked in, gone
+    now — on ``branch``, the one its row recorded (:func:`_branch_of_a_gone_tree`), so the
+    replacement carries on with every commit there.
+
+    A tree deleted by hand, its branch still holding the work, was made again on it until
+    round 13 of #259 refused every tree that was gone and blamed ``fleet reap`` (round
+    14). One reap removed is made again on the branch reap kept; a branch reap deleted
+    had nothing the default branch lacks.
+    """
+    branch = _branch_of_a_gone_tree(root, own, branch)
+    _add_worktree(root, own, branch)
+    notes.append(f"its worktree {own} was gone — made it again on its branch {branch}")
+    return own
+
+
+def _pushed(root: Path, rev: str, default: str) -> bool:
+    """Whether commit ``rev`` is on the default branch or on any remote-tracking branch:
+    pushed somewhere, so the worktree is not where it lives alone."""
+    if _git(root, "merge-base", "--is-ancestor", rev, default).returncode == 0:
+        return True
+    remote = _git(root, "for-each-ref", "--contains", rev, "--format=%(refname)", "refs/remotes")
+    return remote.returncode == 0 and bool(remote.stdout.strip())
+
+
+def _why_kept(root: Path, tree: Path, default: str) -> str | None:
+    """Why ``tree`` must stay — what in it exists only there — or ``None`` when nothing does.
+
+    Untracked files are asked for by name: ``status.showUntrackedFiles=no`` hides them
+    from a plain ``status``, and ``git worktree remove`` honours it too, so the tree read
+    clean and the file went with it."""
+    status = _git(tree, "status", "--porcelain", "--untracked-files=normal")
+    if status.returncode != 0:
+        return f"git status failed there ({status.stderr.strip() or status.returncode})"
+    if status.stdout.strip():
+        return "uncommitted changes"
+    head = _git(tree, "rev-parse", "--verify", "--quiet", "HEAD")
+    if head.returncode != 0 or not head.stdout.strip():
+        return "no commit to check"
+    if not _pushed(root, head.stdout.strip(), default):
+        return "commits on no remote branch yet — push them, then reap again"
+    return None
+
+
+def _remove_finished_worktrees(
+    store: ContextStore, project: ProjectInfo, report: ReapReport
+) -> None:
+    """Remove the worktree of each ENDED agent that holds nothing found only there.
+
+    Nothing only there: the tree is clean (no uncommitted change, no untracked file that
+    is not ignored) and its HEAD is on the default branch or on ANY remote-tracking
+    branch — pushed somewhere. Merged into the default branch was the rule, and a
+    coder that pushes onto an integration branch (``push HEAD:feat/…``) never was:
+    its worktrees stayed for good, 15 of them and 1.2 GB on one night. Each tree kept
+    is on the report with why. A tree a live agent still sits in (a respawn reused it)
+    is never touched.
+
+    A tree, or a project root, that cannot be looked at (a folder above it this user may not
+    search, a mount that answered ``EIO``) is kept and said so, and the sweep goes on. Asked
+    with ``Path.exists``, which raised ``PermissionError`` for one up to 3.13, one such root
+    ended ``reap --all`` in a traceback, every later project unreaped and ``--json`` printing
+    nothing, and from 3.14 it was passed over without a word (review of #259, round 43, 1/7).
+
+    The tree goes, and its branch stays, recorded on the newest row at its path just before
+    the tree went, under the branch lock (:func:`_reap_tree`), whatever its name: a spawn for
+    the task checks it out (:func:`_worktree_for`), and a restart of the agent makes its tree
+    again there (:func:`_remake_worktree`). Deleted when pushed anywhere, as the tree is, it
+    took the task's commits with it: a coder spawned again for the task, after a reviewer
+    reopened it, asks for the same branch (:func:`branch_name`), found none, and started a
+    new one from the main checkout's HEAD, without its own pushed work, and nothing said so
+    (review of #259, round 14). Which ``fleet/…`` branches go is :func:`_sweep_fleet_branches`,
+    asked on every reap of a project an agent with a tree has ended in, whether or not a tree
+    was removed.
     """
     root = project.root
-    if not is_git_project(root):
+    read_at = _now()
+    rows = store.fleet_agents(project.id)
+    if not any(row.ended_at is not None and row.worktree for row in rows):
+        # No ended agent ever had a tree here — a project no agent ran in, the captured
+        # directories `reap()` walks included: no tree and no branch is the fleet's to take,
+        # and git is not asked (review of #259, round 16).
         return
-    candidates = [
-        agent
-        for agent in store.fleet_agents(project.id)
-        if agent.ended_at is not None and agent.worktree and agent.cwd.exists()
-    ]
-    if not candidates:
-        return
-    in_use = {agent.cwd.resolve() for agent in store.fleet_agents(project.id, live_only=True)} | {
-        root.resolve()
-    }
     try:
-        branches = _worktree_branches(root)
-        merged = _merged_branches(root)
+        if not _present(root / ".git"):  # `is_git_project`, asked alike on every Python
+            return
+    except OSError as exc:
+        report.worktrees_kept.append((root, f"not looked at, nor any tree in it: {_why(exc)}"))
+        return
+    try:
+        default = _default_branch(root)
+        common = _git_common_dir(root)  # once: the branch lock is taken for each tree
     except FleetError:
         return  # no git here: nothing can be removed safely, so nothing is
-    removed: set[Path] = set()
-    for agent in candidates:
-        path = agent.cwd.resolve()
-        if path in in_use or path in removed:
+    # The row whose tree a path is now: the NEWEST there, the one a restart of its label
+    # acts on (`fleet_agent_by_label`). A label reused — a restart, a switch, a respawn
+    # for its task — leaves older rows at the same path, each with the branch it recorded
+    # when it ended; the tree's branch written to the oldest was a restart's of the newest
+    # rebuilding on the branch before it (review of #259, round 16).
+    trees = [(_tree_at(agent.cwd), agent) for agent in rows]
+    owners = {here: agent for here, agent in trees if here is not None and agent.worktree}
+    in_use = {here for here, agent in trees if here is not None and agent.ended_at is None}
+    in_use.add(root.resolve())
+    for path, agent in owners.items():
+        if path in in_use or agent.ended_at is None:
             continue
-        branch = branches.get(path)
-        if branch is None or branch not in merged:
+        try:
+            if not _present(agent.cwd):
+                continue
+        except OSError as exc:
+            report.worktrees_kept.append((agent.cwd, f"not looked at: {_why(exc)}"))
             continue
-        if _git(root, "worktree", "remove", str(agent.cwd)).returncode == 0:
-            removed.add(path)
+        removed, kept = _reap_tree(store, project, agent, default, common, read_at)
+        if removed:
             report.worktrees_removed.append(agent.cwd)
+        elif kept is not None:
+            report.worktrees_kept.append((agent.cwd, kept))
+    # Read again: the branches recorded just now are the ones the sweep asks about.
+    _sweep_fleet_branches(root, common, default, store.fleet_agents(project.id), report)
+
+
+def _present(path: Path) -> bool:
+    """Whether ``path`` is there, as ``Path.exists`` asks, with what cannot be asked raised as
+    the ``OSError`` it is on every Python: ``Path.exists`` raised it up to 3.13 and says False
+    for it from 3.14. Gone (``workspace._gone``) is False."""
+    try:
+        os.stat(path)
+    except OSError as exc:
+        if _gone(exc):
+            return False
+        raise
+    return True
+
+
+def _tree_at(path: Path) -> Path | None:
+    """``path`` resolved, as a stored root is (``workspace._resolved``); ``None`` through a
+    symlink loop, where no tree is. Resolved raw, a loop raised ``RuntimeError`` on 3.11 and
+    3.12, out of the reap of every project (review of #259, round 43, 1/7)."""
+    try:
+        return _resolved(path)
+    except OSError:
+        return None
+
+
+def _why(exc: OSError) -> str:
+    """What the system said of a path it would not look at, in its own words."""
+    return exc.strerror or str(exc)
+
+
+def _reap_tree(
+    store: ContextStore,
+    project: ProjectInfo,
+    agent: FleetAgent,
+    default: str,
+    common: Path,
+    read_at: datetime,
+) -> tuple[bool, str | None]:
+    """Reap ``agent``'s tree: ``agent`` ended, and was the newest row at the tree's path when
+    :func:`reap` read the rows at ``read_at``. Record on its row the branch the tree is on
+    (:func:`_record_the_branch`), then ``git worktree remove`` it when it holds nothing found
+    only there (:func:`_why_kept`). Whether it went, and when it did not, why (``None`` for a
+    tree another agent took, left unsaid, as a tree in use always was).
+
+    All of it under the branch lock, which :func:`spawn` makes or reuses a tree under and
+    holds until its agent's row is written, and only while no other row has been at the
+    tree since ``read_at``: none live there, and none that ended since. Reap decided from
+    the rows it read before its loop, and each tree costs it a few git calls. A spawn or
+    restart for the label reused the tree meanwhile, and the tree, read as ended, clean and
+    pushed, was removed under the new agent (review of #259, round 17), and the branch the
+    spawn checked out there was recorded on the ended row. The branch that row had
+    recorded, then named by no row, was never swept, and a restart of a gone tree was made
+    on the spawn's (round 18). Never waited for: a spawn holds the lock through a ``git
+    worktree add`` and a window, and the next reap asks again.
+
+    What the tree holds (:func:`_why_kept`) is asked first, without the lock: it only says
+    whether to try. Asked under it, a reap held the lock through ``git status`` and the push
+    check of every tree it kept, and while a spawn held it, a tree with uncommitted work was
+    reported as "try again" rather than as what to commit (review of #259, round 19). So a
+    tree that holds something is said to, held lock or not; one that looked removable is
+    removed only once the rows say, under the lock, that no other agent took it.
+
+    With the lock busy, what the tree held is said as what it held when asked, beside "not
+    removed now", never as a settled reason to keep it: the holder may be a spawn reusing
+    this very tree, mid-checkout, which the rows read under the lock would have left unsaid
+    as another agent's. Said as the reason, a reap during a respawn reported the new agent's
+    half-checked-out tree as kept for the ended one's uncommitted changes (round 20).
+    """
+    tree = agent.cwd
+    here = tree.resolve()
+    try:
+        kept = _why_kept(project.root, tree, default)
+    except FleetError as exc:
+        kept = f"its contents could not be asked of git ({exc})"
+    try:
+        with _branches_locked(common, wait=0):
+            since = [
+                *store.fleet_agents(project.id, live_only=True),
+                *store.fleet_agents_ended_since(project.id, read_at),
+            ]
+            if any(row.id != agent.id and _tree_at(row.cwd) == here for row in since):
+                return False, None
+            _record_the_branch(store, agent)
+            if kept is not None:
+                return False, kept
+            removal = _git(project.root, "worktree", "remove", str(tree))
+    except FleetError as exc:
+        held = f"; when asked just before, it held: {kept}" if kept is not None else ""
+        return False, f"not removed now: {exc}{held}"
+    if removal.returncode != 0:
+        return False, f"git worktree remove refused: {removal.stderr.strip() or 'no reason'}"
+    return True, None
+
+
+def _fleet_branches(root: Path, *flags: str) -> dict[str, str] | None:
+    """The local ``fleet/…`` branches and their tips, as ``git for-each-ref <flags>`` lists
+    them; ``None`` when git would not."""
+    listed = _git(
+        root, "for-each-ref", "--format=%(objectname) %(refname)", *flags, "refs/heads/fleet"
+    )
+    if listed.returncode != 0:
+        return None
+    tips: dict[str, str] = {}
+    for line in listed.stdout.splitlines():
+        tip, _, ref = line.partition(" ")
+        name = ref.removeprefix("refs/heads/")
+        if name.startswith(_FLEET_BRANCH_PREFIX):
+            tips[name] = tip
+    return tips
+
+
+def _sweep_fleet_branches(
+    root: Path, common: Path, default: str, rows: Sequence[FleetAgent], report: ReapReport
+) -> None:
+    """Delete each ``fleet/…`` branch an ENDED row of ``rows`` recorded
+    (:attr:`FleetAgent.branch`) that no worktree has out, once the default branch has its
+    work; name the rest, kept, in ``branches_kept``.
+
+    Its work is there when the default branch holds its tip, or when it is pushed and
+    every change it makes is on the default branch already (:func:`_squashed`): a squash
+    or rebase merge, whose tip the default branch never holds. Asked of every such branch
+    on every reap: a branch kept when its tree went was never looked at again, so it stayed
+    for good once merged, and the repo collected one a task (review of #259, round 15).
+    A branch some worktree has out, the tree gone by hand or not, or is rebasing or
+    bisecting (:func:`_branches_in_use`, what ``branch -D`` refuses: review of #259, round
+    34, 1/10), is left alone, and so is one a LIVE row names; when the trees cannot be
+    asked, every branch is. The deletes are made under the lock a spawn makes its tree under
+    (:func:`_branches_locked`), after asking the trees again: never meanwhile, as a branch
+    a spawn has just made, or is about to check out, reads as out of every tree. Each is
+    deleted at the tip that was judged and no other (``update-ref -d <ref> <tip>``, which
+    git refuses once the ref moved), and the next reap judges it again: ``branch -D``
+    deleted whatever the ref held by then, and a tip moved after the check (a ``git fetch
+    origin fleet/x:fleet/x``, a ``branch -f``) went with commits nobody judged (review of
+    #259, round 33, 6/10). Its ``branch.<name>`` config goes too, as ``branch -D`` takes it.
+
+    Only a branch a row recorded is the fleet's. Any ``fleet/…`` branch was, and every reap
+    deleted a merged ``git branch fleet/my-own-notes`` in each project it walked, one no
+    agent ever ran in included (review of #259, round 16). A branch no row names — made by
+    hand, or one its agent left for another — is left as it is, and so is a recorded one
+    that is not ``fleet/…`` (``fix/auth``): only branches :func:`branch_name` makes go.
+    """
+    live = {row.branch for row in rows if row.ended_at is None}
+    recorded = {
+        row.branch
+        for row in rows
+        if row.ended_at is not None
+        and row.branch is not None
+        and row.branch.startswith(_FLEET_BRANCH_PREFIX)
+        and row.branch not in live
+    }
+    if not recorded:
+        return
+    # Of the recorded ones, those still there: ended rows are kept for good, so `recorded`
+    # is never empty again once a project ran a coder, and with them all swept, the trees
+    # were asked (`git worktree list` and their state files) on every reap for nothing
+    # (review of #259, round 35, 5/8).
+    every = {b: tip for b, tip in (_fleet_branches(root) or {}).items() if b in recorded}
+    if not every:
+        return
+    merged = _fleet_branches(root, f"--merged={default}")
+    out = None if merged is None else _branches_in_use(root, common)
+    if merged is None or out is None:
+        return
+    asked = {b: tip for b, tip in every.items() if b not in out}
+    squashed = _squashed(root, {b: tip for b, tip in asked.items() if b not in merged}, default)
+    done: list[str] = []
+    for branch in asked:
+        if branch in merged or branch in squashed:
+            done.append(branch)
+        else:
+            report.branches_kept.append((root, branch))
+    if not done:
+        return
+    try:
+        # Never waited for: a spawn holds it through a whole `git worktree add`, and the
+        # next reap deletes what this one could not.
+        with _branches_locked(common, wait=0):
+            out = _branches_in_use(root, common)  # asked again, under the lock
+            for branch in done:
+                if out is None or branch in out:
+                    continue
+                ref = f"refs/heads/{branch}"
+                if _git(root, "update-ref", "-d", ref, every[branch]).returncode == 0:
+                    _git(root, "config", "--remove-section", f"branch.{branch}")  # none: fine
+                    report.branches_deleted.append((root, branch))
+    except FleetError:
+        return
+
+
+def _squashed(root: Path, tips: Mapping[str, str], default: str) -> set[str]:
+    """The branches of ``tips`` (name → tip, none merged into ``default``) that are pushed
+    and that merging into ``default`` would change nothing: every change each makes is there
+    already, though ``default`` lacks its tip.
+
+    Pushed, so its commits are safe on the remote once the branch goes: asked of them all
+    in one ``rev-list``, which prints each tip neither ``default`` nor a remote-tracking
+    branch reaches (with the commits under it only it has). Then, of each pushed one, git's
+    own merge (``merge-tree --write-tree``, git 2.38): its tree is ``default``'s. An older
+    git, or a merge with conflicts, says no, and the branch is kept. One git call a pushed
+    branch and none an unpushed one, on every reap: five each were asked, the kept ones'
+    every time (review of #259, round 16)."""
+    if not tips:
+        return set()
+    # Ended by `--`: a top-level `main/` made `main` "both revision and filename", rev-list
+    # exited 128, and every squash-merged branch read as unpushed (review of #259, round 17).
+    alone = _git(root, "rev-list", *tips.values(), "--not", default, "--remotes", "--")
+    tree = _git(root, "rev-parse", "--verify", "--quiet", f"{default}^{{tree}}")
+    if alone.returncode != 0 or tree.returncode != 0:
+        return set()
+    unpushed = set(alone.stdout.split())
+    same: set[str] = set()
+    for branch, tip in tips.items():
+        if tip in unpushed:
+            continue
+        merge = _git(root, "merge-tree", "--write-tree", default, tip)
+        if merge.returncode == 0 and merge.stdout.split()[:1] == tree.stdout.split():
+            same.add(branch)
+    return same
 
 
 # --- what tmux knows about a pane -----------------------------------------------------
@@ -1596,6 +2595,30 @@ class _PaneView:
     last_output: datetime | None
     """When the window last produced output, from ``#{window_activity}``; ``None``
     when tmux did not say."""
+
+
+class _Held:
+    """What :func:`_observe` says of a live row whose server is NOT the one that answered at its
+    socket: held as unasked (:func:`_on_another_server`), its agent perhaps running where no
+    tmux client reaches it. :data:`HELD` is the one instance."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "HELD"
+
+
+HELD = _Held()
+"""Under a held row's id in :data:`_Observed`. Not ``None``, which is what a plain ``.get()``
+gives for a row whose pane is gone too: held rows were ``None`` there, so a reader that took
+the map's word without :func:`_own_view` read a held row as gone, and ended it under its
+running agent; ``reap`` was safe only because :func:`_view` screened the row first (review of
+#259, round 3). A reader that reaches a pane's facts now has to say what a held row is."""
+
+_Observed = dict[str, "_PaneView | _Held"]
+"""What one server said, by row id: the facts of the row's pane; :data:`HELD` for a row whose
+server is NOT the one that answered at its socket (:func:`_observe`); and no entry for a row
+whose pane is gone."""
 
 
 def _agent_running(current_command: str) -> bool:
@@ -1649,9 +2672,10 @@ def _server_answers(srv: TmuxServer) -> bool:
     return srv.answers()
 
 
-def _outlived(created_at: datetime, server_started: datetime | None) -> bool:
-    """Whether a row written at ``created_at`` (its launch record's time) was written before
-    its server started — so no pane there is its.
+def _outlived(agent: FleetAgent, server_started: datetime | None) -> bool:
+    """Whether ``agent``'s row was written before its server started — so no pane there is
+    its. ``agent`` is the row as its launch record places it (:attr:`Placed.agent`), its
+    times the record's (:func:`_started_after`).
 
     A pane id names a pane of one server's lifetime only: the next server on
     the socket numbers from ``%0`` again. A reboot or a hand-run ``tmux -L asq
@@ -1671,13 +2695,74 @@ def _outlived(created_at: datetime, server_started: datetime | None) -> bool:
     codename ``rename`` that tmux never heard of leaves the row's own panes
     under another session's name. ``None`` — tmux did not say when it started —
     judges nothing, and the id alone decides as it did before.
+
+    A row from 0.8.1 on records when its server started (``FleetAgent.server_started_at``),
+    and that decides exactly: a server that started at any other time is another, whatever
+    the row's ``created_at`` says of it. The next server at a socket path a running server
+    lost started AFTER the row too, but so did one that replaced a server that exited, and
+    only the recorded start tells the two apart at every later read (follow-up of #257).
     """
-    return server_started is not None and server_started > created_at
+    return _started_after(agent.created_at, agent.server_started_at, server_started)
+
+
+def _started_after(
+    created_at: datetime, recorded: datetime | None, server_started: datetime | None
+) -> bool:
+    """:func:`_outlived` of a launch record's own times: a window written at ``created_at``
+    on a server that started at ``recorded`` (``None`` in a record from before it was kept),
+    against a server that says it started at ``server_started``. What :class:`PlacedPane`,
+    :class:`PlacedSession` and the project's window index judge their ids by."""
+    if server_started is None:
+        return False
+    if recorded is not None:
+        return server_started != recorded
+    return server_started > created_at
+
+
+def _on_another_server(
+    agent: FleetAgent,
+    server_started: datetime | None,
+    reads: tmux_core.SocketReads | None = None,
+) -> bool:
+    """Whether the server that answered at ``agent``'s socket, started at ``server_started``,
+    is not the one its row was started on, and that one may still run: it recorded its
+    server's start, which is another, and it is from this boot. Such a row is held as
+    unasked, not read as lost: its server lost its socket file to this one and runs on
+    where no client reaches it, as far as anything here can tell (follow-up of #257). A
+    row from another boot cannot be running, and its pane is simply gone.
+
+    ``agent`` is the row as its launch record places it (:attr:`Placed.agent`): the start,
+    the boot and the time are the record's, never the store's word for them.
+
+    With no boot id to compare (the BSDs, a macOS whose ``sysctl`` failed), the row is
+    from another boot when it was created before this one started, as
+    :func:`~aisquare.core.tmux.server_may_run` judges it: counted from this boot instead,
+    every row was held after a reboot against the server the next spawn started, and
+    ``reap``, ``shutdown`` and ``uninstall`` could not end it (review of #259, round 1).
+
+    The boot is asked only here, once a row has passed the test that makes it matter, and
+    once per read of the fleet (``reads``, :class:`~aisquare.core.tmux.SocketReads`, which
+    :func:`~aisquare.core.tmux.server_may_run` asks it of too). :func:`_observe` asked it of
+    every read with live rows, asq's 2 s tick, needs-you's 3 s scan and every ``status_of``,
+    though only a row that may be held needs it, which is rare; and ``boot_started`` once
+    more per such row (review of #259, round 2). A cache of its own for it was a second
+    one of one machine fact (review of #259, round 6, 9/10).
+    """
+    if agent.server_started_at is None or not _outlived(agent, server_started):
+        return False
+    reads = reads or tmux_core.SocketReads()
+    this_boot = reads.boot_id()
+    if agent.boot_id is not None and this_boot is not None:
+        return agent.boot_id == this_boot
+    booted_at = reads.boot_started()
+    return booted_at is None or agent.created_at >= booted_at
 
 
 def _observe(
-    placements: Sequence[Placed], also: Collection[str] = ()
-) -> dict[str, _PaneView] | None:
+    placements: Sequence[Placed],
+    also: Collection[str] = (),
+    reads: tmux_core.SocketReads | None = None,
+) -> _Observed | None:
     """Row id → the facts of that row's pane, or ``None`` when tmux cannot be asked at all.
     ``placements`` are rows on ONE server, where their launch records place them.
 
@@ -1698,8 +2783,19 @@ def _observe(
     to another agent (:func:`_outlived`). Such a row is given no view, so it
     reads ``lost`` and not as the other agent's state, and nothing that acts on
     a view — a listing's reconcile, ``reap``, a restart — takes that agent's
-    pane for the row's. The server is asked when it started only once some pane
-    has answered: with nothing to judge, the question is not asked.
+    pane for the row's. The server is asked when it started once a pane has
+    answered, or once it has answered for live rows it holds no pane of: the
+    answer says whether the rows' server is this one (:func:`_outlived`). Read
+    where tmux already said it, in the window list or a pane's facts
+    (``#{start_time}``); asked in a ``display-message`` of its own only when no
+    answer carried it (review of #259, round 4).
+
+    A live row the answering server is NOT the server of — one that recorded its
+    server's start, and this one started at another time, in the same boot — is
+    HELD, as :data:`HELD` under its id: its server lost its socket file to this one and
+    may run on where no client reaches it, so nothing reads it as lost or ends it
+    (:func:`_on_another_server`). Readers take it through :func:`_own_view`, which
+    answers ``None`` for it, as for a server that could not be asked.
     """
     if not placements:
         return {}
@@ -1712,6 +2808,7 @@ def _observe(
         }
         live = [placement for placement in placements if placement.row.ended_at is None]
         output_at = _activity_times(srv) if live else {}
+        said = [w.server_started for w in windows.values() if w.server_started is not None]
         seen: dict[str, _PaneView] = {}
         for placement in placements:
             pane_id = placement.pane.pane_id
@@ -1738,23 +2835,33 @@ def _observe(
                     facts.current_command,
                     output_at.get(pane_id),
                 )
+                if facts.server_started is not None:
+                    said.append(facts.server_started)
         if live and not seen and not _server_answers(srv):
             return None
-        if seen:
-            started = srv.started_at()
-            seen = {
-                placement.row.id: seen[placement.row.id]
-                for placement in placements
-                if placement.row.id in seen and not placement.pane.outlived(started)
-            }
-        return seen
+        started = None
+        if seen or live:  # one server, one start: any answer that carried it says it
+            started = said[0] if said else srv.started_at()
+        reads = reads or tmux_core.SocketReads()  # the boot: only for a row that may be held
+        views: _Observed = {}
+        for placement in placements:
+            row_id = placement.row.id
+            if row_id in seen and not placement.pane.outlived(started):
+                views[row_id] = seen[row_id]
+            elif placement.row.ended_at is None and _on_another_server(
+                placement.agent, started, reads
+            ):
+                views[row_id] = HELD
+        return views
     except TmuxError:
         return None
 
 
 def _observe_sockets(
-    placements: Sequence[Placement], also: Collection[str] = ()
-) -> dict[_Address, dict[str, _PaneView] | None]:
+    placements: Sequence[Placement],
+    also: Collection[str] = (),
+    reads: tmux_core.SocketReads | None = None,
+) -> dict[_Address, _Observed | None]:
     """Server → what THAT server says about the rows its launch records place on it; a row
     no record places is asked about nowhere (:func:`resolve_place`).
 
@@ -1766,20 +2873,48 @@ def _observe_sockets(
     that could not be asked at all, which is per server and not per fleet: an
     unreachable server must not make the agents on a reachable one read as
     gone, nor the reverse. Looked up with :func:`_view`. ``also`` are ended rows whose
-    windows run (:func:`_running_ids`), asked about as a live row is.
+    windows run (:func:`_running_ids`), asked about as a live row is. ``reads`` is the
+    caller's for the whole read, so the boot is asked once for it (:func:`_on_another_server`).
     """
+    reads = reads or tmux_core.SocketReads()
     groups: dict[_Address, list[Placed]] = {}
     for placement in _placed_only(placements):
         groups.setdefault(placement.pane.address, []).append(placement)
-    return {address: _observe(group, also) for address, group in groups.items()}
+    return {address: _observe(group, also, reads) for address, group in groups.items()}
 
 
-def _view(
-    placement: Placement, views: Mapping[_Address, dict[str, _PaneView] | None]
-) -> dict[str, _PaneView] | None:
+def _view(placement: Placement, views: Mapping[_Address, _Observed | None]) -> _Observed | None:
     """What ``placement``'s own server said (:func:`_observe_sockets`); ``None`` when it
-    could not be asked, or was not, as for a row no record places."""
-    return views.get(placement.pane.address) if isinstance(placement, Placed) else None
+    could not be asked, or was not, as for a row no record places, or when the server that
+    answered is not its own (:func:`_own_view`)."""
+    if not isinstance(placement, Placed):
+        return None
+    return _own_view(placement.agent, views.get(placement.pane.address))
+
+
+def _own_view(agent: FleetAgent, observed: _Observed | None) -> _Observed | None:
+    """``observed`` as ``agent``'s own server's word, or ``None`` when it is not: the server
+    could not be asked, or it is another server than the row's, which :func:`_observe`
+    holds under the row's id as :data:`HELD`. The one way a reader takes a server's answer
+    for a row, so none of them reads a held row as a pane that is gone."""
+    if observed is None or _held_by_another(agent, observed):
+        return None
+    return observed
+
+
+def _held_by_another(agent: FleetAgent, observed: _Observed | None) -> bool:
+    """Whether ``observed`` holds ``agent`` as a row of another server's (:func:`_observe`)."""
+    return observed is not None and observed.get(agent.id) is HELD
+
+
+def _pane_in(agent: FleetAgent, observed: _Observed) -> _PaneView | None:
+    """``agent``'s pane in its own server's word (:func:`_own_view`), or ``None`` when that
+    server holds none: the pane is gone. A held row's entry is no pane, and it is not gone:
+    a caller that did not screen it out raises here, rather than end it under its agent."""
+    pane = observed.get(agent.id)
+    if isinstance(pane, _Held):
+        raise FleetError(f"{agent.label}'s row is held as another server's: not its own view")
+    return pane
 
 
 def _exit_detail(status: int | None) -> str | None:
@@ -1794,8 +2929,9 @@ def _derive(
     observed: bool,
     now: datetime,
     screen: Callable[[], Sequence[str] | None] | None = None,
+    held: bool = False,
 ) -> tuple[FleetAgentState, str | None]:
-    """State from the board first, tmux second (§5.1) — with one honest exception.
+    """State from the board first, tmux second (§5.1) — with two honest exceptions.
 
     A dead or vanished pane is a hard fact no board row can contradict: a
     process that has exited cannot be waiting, however recently its hooks
@@ -1807,6 +2943,14 @@ def _derive(
     ``screen`` (the pane's visible rows, read only then) shows it working again; then
     recent output (:data:`ACTIVITY_WINDOW`) means working; and when tmux cannot
     be asked at all the answer is ``unknown``, never a guess.
+
+    So is another server at the row's socket (``held``, :func:`_observe`): it reads
+    ``unknown`` whatever its board says, saying why (:data:`ANOTHER_SERVER`). Its agent is
+    one no tmux client reaches, if it runs at all, and its pane id there is another
+    agent's. Derived from a fresh board, it read a healthy ``waiting`` with no reason for
+    half an hour, under which ``fleet tell`` typed into that other agent, needs-you
+    pushed prompts every answer to was refused, and a held manager counted as one that
+    takes its coders' questions (review of #259, round 2).
     """
     if agent.ended_at is not None:
         return "exited", _exit_detail(agent.exit_status)
@@ -1816,6 +2960,8 @@ def _derive(
         if pane.dead:
             return "exited", _exit_detail(pane.dead_status)
     hooks = "no hooks" if agent.session_id is None else None
+    if held:
+        return "unknown", ANOTHER_SERVER if hooks is None else f"{ANOTHER_SERVER}; {hooks}"
     if session is not None and session.ended_at is None:
         fresh = now - session.last_seen_at <= _team()._STALE_AFTER
         board_state = _BOARD_STATES.get(session.state)
@@ -1873,7 +3019,8 @@ def _derive(
         # what it is" (models.py). A missing board join is a second, smaller
         # fact: reported after the reason, never instead of it — an operator
         # told only "no hooks" reads a healthy fleet with an odd binary.
-        return "unknown", "tmux unavailable" if hooks is None else f"tmux unavailable; {hooks}"
+        unasked = "tmux unavailable"
+        return "unknown", unasked if hooks is None else f"{unasked}; {hooks}"
     busy = pane.last_output is not None and now - pane.last_output <= ACTIVITY_WINDOW
     return ("working" if busy else "waiting"), hooks
 
@@ -1927,10 +3074,96 @@ def _limit_detail(until: datetime | None, now: datetime) -> str:
     return f"limit resets {claude_accounts_core.format_reset(until, now=now)}"
 
 
+ANOTHER_SERVER = "another tmux server on its socket"
+"""A held row's detail (:func:`_observe`), whose state is ``unknown`` whatever its board
+says (:func:`_derive`): a server answers at its socket, and it is not the one the row was
+started on, which may run on where no client reaches it."""
+
+TRUST_PROMPT = "waiting for folder trust"
+"""How an agent at Claude Code's folder-trust question reads (:func:`_with_trust_prompts`):
+``attention``, its detail starting with this. ``remote_needs`` keys its card on it."""
+
+
+def trust_prompt_detail(folder: Path) -> str:
+    """The detail of an agent at the folder-trust question in ``folder``: what unblocks it."""
+    return f"{TRUST_PROMPT} — approve it once, or `{claude_accounts_service.trust_command(folder)}`"
+
+
+def _with_trust_prompts(
+    statuses: list[FleetAgentStatus],
+    placements: Sequence[Placement],
+    by_id: Mapping[str, TeamSession | None],
+) -> list[FleetAgentStatus]:
+    """``statuses``, every agent at Claude Code's folder-trust question read ``attention``.
+
+    An agent there fires no hook — Claude Code runs none in a folder nobody trusted — so
+    it read a healthy ``waiting`` (or ``working``, while the dialog drew) with no reason,
+    for as long as nobody looked: the board, the sidebar and the Remote never said it
+    needed the human, and ``fleet tell`` typed into it, where Enter picks "No, exit".
+    Asked only of a live row that tmux reports and whose session has fired no hook since
+    the row began (:func:`_maybe_at_trust_prompt`): one capture each, which an agent
+    whose hooks run never costs. A screen that cannot be read is no question.
+
+    A row the listing has no session for is asked with the one ``by_id`` holds for its
+    session id, read by the caller in its own store session: :func:`list_agents` joins the
+    sessions of the project's own board, and under ``AISQUARE_TEAM_HUB`` every session is
+    the hub's. Every row there read as silent, so every listing captured every pane, and a
+    pane that merely showed the question's words (a reviewer reading ``claude_sharing``)
+    read as at it (review of #259, round 13). Looked up here, they cost a second store
+    session, with the store's migration checks, on every listing that had such a row —
+    under a hub, every sidebar tick, Remote scan and ``status_of`` (round 16).
+
+    The screen read is the pane each row's launch record places (``placements``,
+    :func:`resolve_place`); a row no record places is not asked.
+    """
+    panes = {placement.row.id: placement.pane for placement in _placed_only(placements)}
+    shown: list[FleetAgentStatus] = []
+    for status in statuses:
+        session = status.session or by_id.get(status.agent.session_id or "")
+        pane = panes.get(status.agent.id)
+        if pane is not None and _maybe_at_trust_prompt(status, session):
+            agent = status.agent
+            try:
+                lines = pane.captured()
+            except TmuxError:
+                lines = []
+            if claude_sharing.shows_trust_prompt(lines):
+                detail = trust_prompt_detail(agent.cwd)
+                status = status.model_copy(update={"state": "attention", "detail": detail})
+        shown.append(status)
+    return shown
+
+
+def _maybe_at_trust_prompt(status: FleetAgentStatus, session: TeamSession | None = None) -> bool:
+    """A live Claude Code row tmux reports, whose session has said nothing since the row
+    began: ``session``, the row's found by its id, else the listing's.
+
+    Claude Code alone asks the question, so a row is asked about only when it is Claude
+    Code: one with a session (only Claude Code's hooks write one), one started on a
+    session id (only Claude Code is: minted for it by name, or named by its caller or a
+    resume, as the ``claude2`` parallel install is — review of #259, round 15), or by its
+    binary's name (``harness.is_default_agent``, the predicate its flags and
+    ``--session-id`` go by). Another harness's agent fires no hook, ever, so its pane was
+    captured on every listing — the sidebar's tick, Remote's scan, each action's
+    ``status_of`` — and read as at the question when its screen held the words (round 14).
+    """
+    agent, session = status.agent, session or status.session
+    if agent.ended_at is not None or status.held or status.state not in ("waiting", "working"):
+        return False
+    adapter = recorded_adapter(agent.agent) if agent.agent is not None else None
+    if adapter is not None and adapter.capabilities.start_dialog_mark is None:
+        # An agent that puts up no dialog before its start (Codex) is never at it: the
+        # row its launch binding gave a session is not captured on every listing for it.
+        return False
+    if session is None:
+        return agent.session_id is not None or harness.is_default_agent(agent.binary)
+    return session.last_seen_at < agent.created_at
+
+
 def _status(
     placement: Placement,
     session: TeamSession | None,
-    views: Mapping[_Address, dict[str, _PaneView] | None],
+    views: Mapping[_Address, _Observed | None],
     now: datetime,
     running: Collection[str] = (),
 ) -> FleetAgentStatus:
@@ -1954,8 +3187,13 @@ def _status(
         )
     if _ended_but_running(placement, views, running):
         placement = _as_running(placement)
-    observed = _view(placement, views)
-    pane = observed.get(placement.row.id) if observed is not None else None
+    # The server's word AS GIVEN (`_observe_sockets`' view for the row's address), never
+    # through `_view`: a row the answering server is not the server of is held there under
+    # its id, which is the one fact that decides its state and detail below.
+    given = views.get(placement.pane.address)
+    held = _held_by_another(placement.agent, given)
+    observed = _own_view(placement.agent, given)
+    pane = _pane_in(placement.agent, observed) if observed is not None else None
     state, detail = _derive(
         placement.agent,
         session,
@@ -1963,6 +3201,7 @@ def _status(
         observed=observed is not None,
         now=now,
         screen=(lambda: _screen_of(placement.pane)) if pane is not None else None,
+        held=held,
     )
     return FleetAgentStatus(
         agent=placement.agent,
@@ -1977,6 +3216,7 @@ def _status(
             else None
         ),
         socket_at=placement.pane.address.path,
+        held=held,
     )
 
 
@@ -2006,17 +3246,220 @@ def _require_role(role: str) -> None:
         )
 
 
-def _task_for(store: ContextStore, project: ProjectInfo, task_id: str | None) -> TeamTask | None:
-    """The board task an agent is spawned for — on THIS project's board, or refused."""
+def _board_for(project: ProjectInfo) -> str:
+    """The board an agent this process spawns into ``project`` reads: the one its window's
+    ``launch`` and hooks resolve in the project's root (:func:`orchestrator.team_project`),
+    under the hub the window is given (:func:`orchestrator.window_team_hub`). That is the
+    hub's when this process honours one, else that of the checkout the root belongs to, so
+    a project rooted in a sub-folder of its repository, or at a linked worktree, reads its
+    principal checkout's board (review of #259, round 25, 3/10).
+
+    Asked once, at spawn, and recorded on the row (``FleetAgent.board``); every later
+    question of the row's board asks the row (:func:`_board_of_row`). A root whose checkout
+    cannot be worked out is a ``FleetError`` (:func:`_unaskable_root`).
+    """
+    try:
+        return orchestrator.team_project(project.root).id
+    except OSError as exc:
+        raise _unaskable_root(project, exc) from exc
+
+
+def _checkout_board(project: ProjectInfo) -> str:
+    """The board of the checkout ``project``'s root belongs to
+    (:func:`orchestrator.directory_project`), where a window with no hub reads; a root whose
+    checkout cannot be worked out is a ``FleetError`` (:func:`_unaskable_root`)."""
+    try:
+        return orchestrator.directory_project(project.root).id
+    except OSError as exc:
+        raise _unaskable_root(project, exc) from exc
+
+
+def _unaskable_root(project: ProjectInfo, exc: OSError) -> FleetError:
+    """The refusal of a command that has to work out ``project``'s board from its root and
+    cannot: a root that became a symlink loop raises ``OSError`` on every Python (round 40,
+    3/6), and so does one under a folder this user may not search (round 42, 5/11). The
+    ``fleet`` commands catch ``FleetError`` alone, and ``fleet pause``, ``restart`` and
+    ``switch`` ended in a traceback, ``--json`` printing nothing (review of #259, round 43,
+    4/7)."""
+    return FleetError(
+        f"the board of {_name(project)} cannot be worked out: its root {project.root} cannot "
+        f"be looked at ({exc.strerror or exc})"
+    )
+
+
+def _board_of_row(agent: FleetAgent) -> str:
+    """The board ``agent``'s sessions read, as its spawn recorded it (``FleetAgent.board``).
+
+    docs/fleet.md, "Under a hub: one board, many fleet projects": a task, the fleet's own
+    feed lines (``agent_exited``, ``switched``, ``restarted``), the entries a hand-off prompt
+    quotes, the ``fleet-paused`` signal and the exits Remote reads are the board's. Rounds 21
+    to 24 of the review of #259 worked that board out again at each call site, from the
+    process's ``AISQUARE_TEAM_HUB``, the bound session, the cwd or Remote's own
+    environment, and where two disagreed, a switch was refused its own task, an exit went to
+    a board its manager does not read, and a pause to one it does not ask (round 25, 10/10).
+    The row says, whoever asks and from wherever.
+    """
+    return agent.board or agent.project_id
+
+
+def _board_and_hub(
+    store: ContextStore, project: ProjectInfo, agent: FleetAgent, session: TeamSession | None
+) -> tuple[str, str]:
+    """The board a replacement of ``agent`` in ``project`` reads, and the
+    ``AISQUARE_TEAM_HUB`` its window is given so that its ``launch`` and hooks resolve that
+    board. ``session`` is the agent's, as its row binds it.
+
+    The board the row recorded (:func:`_board_of_row`), and the hub its window was given,
+    kept in the launch it replays (``LaunchSpec.hub``). A ``restart`` or ``switch`` from
+    ``asq``, the phone or a shell that does not export the hub the agent was spawned under
+    asked for the task on the caller's board and refused it, and the replacement's window
+    took the caller's hub, moving the agent off the board its manager reads (review of #259,
+    round 25, 1/10). The hub is read, never inferred: worked out from the board, as "a board
+    that is not the checkout's is a hub", a row that read its own project's board took that
+    project's root for a hub, and the replacement, and every one after it, read a private
+    board its manager does not (round 26, 8/11).
+
+    A spec recorded before it kept the hub (every row 0.8.0 spawned) says nothing, and the
+    board is read with the hub that gives it: none for the checkout's, a known project's
+    root for any other. The project's own board, where the checkout is another's, is the
+    one case the row's board may not be evidence: 0.8.0 recorded no board, and a row whose
+    session never registered reads as its project's (``store._UNRECORDED_BOARD``). It is
+    kept when the row's session registered on it, or the task the row names is on it: 0.8.0
+    gave a project rooted at ``repo/api`` a board of its own only under the hub
+    ``repo/api``, and spawned for a task only on the board it gave. Read from the checkout
+    there, a restart of such an agent with a task stopped it and then refused its
+    replacement the task, and without one moved it off its manager's board (round 27, 2/7).
+    Else it is read as a window with no hub reads it, from the checkout. A board whose root
+    the store no longer has reads the board this process gives (:func:`_board_for`). One
+    forgotten since is still held, its tasks and events kept, and still read by the agents
+    whose rows recorded it, as Remote reads it (``remote_server._remote_recorded_board``):
+    taken for one the store does not hold, a hub forgotten to tidy the project list was
+    replaced by the caller's board and hub, a restart with a task on the hub refused it, and
+    one without moved the agent off its manager's board (review of #259, round 31, 3/7).
+
+    Asked before the agent is stopped, and the task checked against it then
+    (:func:`restart`, :func:`switch`): the replacement's spawn reads the same answer.
+    """
+    spec = agent.launch_spec
+    if spec is not None and spec.hub is not None:
+        return _board_of_row(agent), spec.hub
+    checkout = _checkout_board(project)
+    board = _replacement_board(store, agent, lambda: session, lambda: checkout)
+    if board == checkout:
+        return checkout, ""
+    known = store.get_project(board, include_forgotten=True)
+    if known is not None:
+        return board, str(known.root)
+    return _board_for(project), orchestrator.window_team_hub()
+
+
+def _replacement_board(
+    store: ContextStore,
+    agent: FleetAgent,
+    session: Callable[[], TeamSession | None],
+    checkout: Callable[[], str],
+) -> str:
+    """The board a replacement of ``agent`` reads, as the store says it: the one its row
+    recorded (:func:`_board_of_row`), but for a row whose launch kept no hub, whose board is
+    its own project's and that does not show it read it (:func:`_read_its_own_board`), whose
+    replacement reads its project's ``checkout``'s. ``session`` (the row's) and ``checkout``
+    are asked for such a row alone, the store first: the checkout is a ``git`` call, and a
+    row that read its own board keeps it whatever the checkout is. Asked after it, every
+    0.8.0 row, whose session registered on its own project's board, cost a ``git`` call a
+    project on each ``project forget``, prune and ``asq`` start (round 39, 1/9).
+
+    The one place the rule is written: :func:`_board_and_hub` reads it for a restart, and
+    adds the hub, and :func:`restart_board` for the holds ``project forget`` and prune judge.
+    Written out in each, the next change to one copy would leave the other judging holds by
+    the old rule, and forget a hub a restart adds back (review of #259, round 39, 3/9)."""
+    board = _board_of_row(agent)
+    spec = agent.launch_spec
+    if board != agent.project_id or (spec is not None and spec.hub is not None):
+        return board
+    if _read_its_own_board(store, agent, session()):
+        return board
+    return checkout()
+
+
+def _read_its_own_board(
+    store: ContextStore, agent: FleetAgent, session: TeamSession | None
+) -> bool:
+    """Whether ``agent``, a row whose board is its own project's and whose launch kept no hub,
+    is shown to have read that board: its session registered on it, or the task it names is
+    on it (:func:`_replacement_board`). A store without ``team_task`` shows no task."""
+    board = agent.project_id
+    if session is not None and session.project_id == board:
+        return True
+    return (
+        agent.task_id is not None
+        and store.has_table("team_task")
+        and store.get_task(agent.task_id, project_ids=[board]) is not None
+    )
+
+
+def restart_board(store: ContextStore, agent: FleetAgent, checkouts: dict[str, str]) -> str:
+    """The board a ``restart`` of ``agent`` starts its replacement on, as the store says it
+    (:func:`_replacement_board`, the rule :func:`_board_and_hub` reads too). A board the
+    store does not hold stays the row's: a restart reads the one its caller's process gives
+    then (:func:`_board_for`), which is not the store's to say.
+
+    ``checkouts`` keeps each project's checkout (a ``git`` call) as it is worked out, for a
+    caller asking of every row (``project.reading_rows``). Filed under the row's own board, a
+    row that read ``repo``'s held ``repo/api``'s instead, and ``project forget repo`` was not
+    refused, though a restart of it brought ``repo`` back (review of #259, round 38, 3/4).
+    Asked first once it is known: the rule's answer is the row's board or the checkout, so
+    where the two are one, the row is filed with no lookup. Asked of the store first, every
+    0.8.0 row ran a session read, and a task read, the checkout already settled, though
+    before round 39 a project's rows after its first ran none (round 40, 4/6).
+
+    A root whose checkout cannot be worked out, a symlink loop (an ``OSError`` on every
+    Python, as ``find_project_root`` resolves it: round 40, 3/6) or a mount that answers
+    ``EIO``, is no evidence either, and the row's board stands. Uncaught, one such project's
+    root ended every other's ``project forget`` in a traceback, and doctor's capture-off line
+    went without a word (round 39, 2/9). A root that is gone is its own checkout
+    (``find_project_root``, review of #259, round 42, 3/11).
+
+    Nor is a table the store lacks (doctor's damaged-store case, which every fleet read
+    tolerates): without ``team_session`` the row shows no session, without ``team_task`` no
+    task, and its board is read from the checkout. Asked anyway, a 0.8.0 row with a session
+    raised "no such table" there, and the forget, the prune and doctor's line with it
+    (round 40, 1/6)."""
+
+    def checkout() -> str:
+        board = agent.project_id
+        if board not in checkouts:
+            checkouts[board] = board
+            project = store.get_project(board, include_forgotten=True)
+            if project is not None:
+                with suppress(OSError):
+                    checkouts[board] = orchestrator.directory_project(project.root).id
+        return checkouts[board]
+
+    def session() -> TeamSession | None:
+        if not agent.session_id or not store.has_table("team_session"):
+            return None
+        return store.get_session(agent.session_id)
+
+    known = checkouts.get(agent.project_id)
+    if known is not None and known == _board_of_row(agent):
+        return known
+    return _replacement_board(store, agent, session, checkout)
+
+
+def _task_for(store: ContextStore, board_id: str, task_id: str | None) -> TeamTask | None:
+    """The board task an agent is spawned for — on the board it will read
+    (:func:`_board_and_hub`, :func:`_board_of_row`), or refused."""
     if task_id is None:
         return None
     try:
-        task = store.get_task(task_id)
+        task: TeamTask | None = _team().find_task(store, task_id, board_id)  # `12`, `#12`
     except AmbiguousIdError as exc:
         raise FleetError(f"task {task_id!r} is ambiguous — use more of the id") from exc
+    except _team().NoSuchTaskNumber as exc:
+        raise FleetError(str(exc)) from exc
     if task is None:
         raise FleetError(f"no task matches {task_id!r}")
-    if task.project_id != project.id:
+    if task.project_id != board_id:
         raise FleetError(f"task {task_id!r} belongs to another project's board")
     if task.status in CLOSED_STATUSES:
         # Harmless when the id only named a label; now it reaches the agent as
@@ -2084,11 +3527,11 @@ def _live_row(
     if found is None:
         raise NoSuchAgent(
             f"no live agent {label!r} in {_name(project)} — "
-            "`aisquare fleet ls` shows who is running"
+            f"`{project_service.fleet_command('ls', project)}` shows who is running"
         )
     agent, record = found
     if agent_id is not None and agent.id != agent_id:
-        raise _replaced(label, agent, agent_id)
+        raise _replaced(project, label, agent, agent_id)
     return agent, record
 
 
@@ -2099,22 +3542,24 @@ def _live_agent(
     return _live_row(store, project, label, agent_id=agent_id)[0]
 
 
-def _replaced(label: str, current: FleetAgent, agent_id: str) -> NoSuchAgent:
+def _replaced(project: ProjectInfo, label: str, current: FleetAgent, agent_id: str) -> NoSuchAgent:
     """The refusal for a caller pinned to a row whose label has since passed to another."""
     return NoSuchAgent(
         f"{label!r} is another agent now ({current.id}) — {agent_id} ended and was "
-        "replaced since; nothing was done to either (`aisquare fleet ls` shows who is running)"
+        "replaced since; nothing was done to either "
+        f"(`{project_service.fleet_command('ls', project)}` shows who is running)"
     )
 
 
-def _in_hand_over(verb: str, label: str) -> FleetError:
+def _in_hand_over(project: ProjectInfo, verb: str, label: str) -> FleetError:
     """The refusal of a ``restart`` or a ``switch`` of a row a hand-over is already moving
     (:func:`_handed_over`) — the automatic path's own brake, for the commands. It names
     the grace, since a hand-over interrupted on its way holds the row until that lapses."""
     minutes = int(HANDOVER_GRACE.total_seconds() // 60)
     return FleetError(
         f"cannot {verb} {label!r}: a hand-over is already moving it and starts the "
-        f"replacement itself — nothing was done (`aisquare fleet ls` shows it come back; "
+        "replacement itself — nothing was done "
+        f"(`{project_service.fleet_command('ls', project)}` shows it come back; "
         f"one that was interrupted lets go of it within {minutes} min)"
     )
 
@@ -2146,6 +3591,8 @@ def spawn(
     onboard: bool = True,
     bin_flag: bool = True,
     own_worktree: Path | None = None,
+    own_branch: str | None = None,
+    board_and_hub: tuple[str, str] | None = None,
     session: launch_seal.SessionFacts | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
@@ -2167,9 +3614,15 @@ def spawn(
     ways out those commands have (:func:`_launch_binary`). ``own_worktree`` is
     such a replacement's too: the tree its launch record names, which it works in
     as it stands — branch, uncommitted work and all — never one the row's label
-    names, never put on the branch today's task and codename would name.
-    ``session`` is what the replaced agent's record holds of the session a
-    replacement resumes, carried into the replacement's own record.
+    names, never put on the branch today's task and codename would name; gone, it is
+    made again on ``own_branch``, the branch the replaced row recorded it on
+    (:func:`_worktree_for`). ``board_and_hub`` is such a replacement's too: the board it
+    reads and records in turn, and the hub its window is given to resolve it, as
+    :func:`_board_and_hub` answered before the replaced agent was stopped; the task is
+    looked up there. A new agent reads the board this process gives it
+    (:func:`_board_for`), under the hub this process honours. ``session`` is what the
+    replaced agent's record holds of the session a replacement resumes, carried into the
+    replacement's own record.
 
     Every spawn writes its launch record (``core.launch_seal``) before the window
     starts, from what it resolved itself: what a restart, a switch and the hand-over
@@ -2191,8 +3644,8 @@ def spawn(
     carries the row id into the window; ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0``
     keeps Claude's native teams out of the fleet unless configured otherwise (§7.6);
     ``AISQUARE_TEAM_HUB`` is set to this process's hub, or blank
-    (:func:`orchestrator.window_team_hub`), and ``AISQUARE_EXPLAINABILITY_TARGET``
-    to this process's value, or blank.
+    (:func:`orchestrator.window_team_hub`), a replacement's to the hub of the board it
+    keeps, and ``AISQUARE_EXPLAINABILITY_TARGET`` to this process's value, or blank.
     Every variable set here is THIS window's: none reaches the tmux session's
     environment, so a later spawn sets its own account and opt-out rather than
     inheriting the first spawn's, and a window the operator opens by hand keeps
@@ -2264,7 +3717,7 @@ def spawn(
     chosen = binary
     if spec is not None and binary is None:
         replayed = _launch_binary(
-            role, binary=None, spec=spec, family=family, notes=notes, bin_flag=bin_flag
+            project, role, binary=None, spec=spec, family=family, notes=notes, bin_flag=bin_flag
         )
         # Today's default stays the default: carried as `--command` only when chosen.
         chosen = replayed.binary if replayed.source != "default" else None
@@ -2283,7 +3736,18 @@ def spawn(
             f"{resolution.binary!r} is not on your PATH (chosen by: {resolution.source}) — "
             + way_out
         )
+    _refuse_an_env_file_it_cannot_read(role)
     role_config = role_settings(role, config)
+    # A server that exited at the socket path left its rows live, and the server this spawn
+    # starts there would hold them for good: they read lost from now on, in every project,
+    # decided while the stale file still says so. And a socket path a running server lost
+    # is not one to start a server at: the agents on it would be stranded for good, and the
+    # new server would answer for their rows. Asked here so the refusal comes before the
+    # project is captured or a worktree made (#139), and again as the window opens
+    # (`open_window`), as a server can exit while the worktree is checked out.
+    exited = _before_a_server_starts(srv, config)
+    if exited:
+        notes.append(_exited_note(srv, exited))
     from aisquare.core.agent_adapters.types import fleet_extra_args
 
     # A replayed spec already holds the role's arguments as they were at spawn;
@@ -2392,26 +3856,34 @@ def spawn(
         for placement in _placed_only(running)
         if placement.record.worktree
     ]
-    with store_session() as store:
-        if role == "manager":
-            # The record's role, not the row's: a manager row set to `coder` was no manager
-            # to this guard, and a second started beside it (review r9 of #113, finding 9).
-            existing = next(
-                (placement.row for placement in running if placement.agent.role == "manager"),
-                None,
-            )
-            if existing is not None:
-                raise FleetError(
-                    f"{_name(project)} already has a manager ({existing.id}) — one per "
-                    "project; `aisquare fleet stop manager` first"
-                )
-        if len(running) >= config.max_agents_per_project:
+    if role == "manager":
+        # The record's role, not the row's: a manager row set to `coder` was no manager
+        # to this guard, and a second started beside it (review r9 of #113, finding 9).
+        existing = next(
+            (placement.row for placement in running if placement.agent.role == "manager"),
+            None,
+        )
+        if existing is not None:
             raise FleetError(
-                f"{_name(project)} already runs {len(running)} agents "
-                f"(max_agents_per_project = {config.max_agents_per_project}) — stop one, "
-                "or raise the limit in [fleet]"
+                f"{_name(project)} already has a manager ({existing.id}) — one per "
+                f"project; `{project_service.fleet_command('stop', project, 'manager')}` "
+                "first"
             )
-        task = _task_for(store, project, task_id)
+    if len(running) >= config.max_agents_per_project:
+        raise FleetError(
+            f"{_name(project)} already runs {len(running)} agents "
+            f"(max_agents_per_project = {config.max_agents_per_project}) — stop one, "
+            "or raise the limit in [fleet]"
+        )
+    # Before the store opens: with no hub, `_board_for` runs git (review of #259, round 29,
+    # 5/8), and the refusals above need neither.
+    board, hub = (
+        board_and_hub
+        if board_and_hub is not None
+        else (_board_for(project), orchestrator.window_team_hub())
+    )
+    with store_session() as store:
+        task = _task_for(store, board, task_id)
         resolved_task_id = task.id if task is not None else None
         picked = next_label(
             project, role, wanted=label, task_id=resolved_task_id, store=store, held=held
@@ -2501,35 +3973,13 @@ def spawn(
     # The spawn goes ahead: the codename names its tmux session and its branch. A
     # directory with no live row, never seen or forgotten, is captured for it
     # (`ensure_codename`), not listed, and a worktree or a window that then cannot
-    # be made leaves it captured.
+    # be made leaves it captured. With `[projects] capture` off nothing is written
+    # here: the codename is worked out, and stored with the add and the agent's row
+    # (`_write_row`), so a refusal from here on leaves no row behind (review of #259,
+    # round 17).
     with store_session() as store:
         project = ensure_codename(project, store)
-    codename = project.codename or codenames.codename_for(project.id)
-    cwd = project.root
-    if use_worktree and own_worktree is not None:
-        # A replay works in the tree its launch record names: one the row's label
-        # named was the store's to choose, and `_ensure_worktree` made a new one there.
-        if not (own_worktree / ".git").exists():
-            raise FleetError(
-                f"{own_worktree}, the worktree it was spawned in, is no longer a git "
-                "worktree — spawn a new agent"
-            )
-        cwd = own_worktree
-        notes.append(f"kept the agent's worktree at {cwd} as it stands")
-    elif use_worktree:
-        branch = branch_name(
-            codename,
-            task_id=resolved_task_id,
-            title=task.title if task is not None else picked,
-        )
-        cwd = _ensure_worktree(
-            project.root,
-            config.worktree_dir,
-            picked,
-            branch,
-            notes,
-            refuse_if_taken=refuse_if_taken,
-        )
+        codename = project.codename or _codename_to_add(store, project)
     notes.extend(f"accounts: {note}" for note in choice.notes)
     if resume is not None:
         identity = explainability_service.SessionIdentity(resume.session_id)
@@ -2598,7 +4048,8 @@ def spawn(
     # `launch` joins the project the spawner — and the UI's Explainability tab
     # beside it — resolves, and takes that project's key, not the one the tmux
     # server's frozen environment would name (review of #170, D1b round 2, B1).
-    env[orchestrator.TEAM_HUB_ENV_VAR] = orchestrator.window_team_hub()
+    # A replacement's is the hub of the board its row recorded (`_board_and_hub`).
+    env[orchestrator.TEAM_HUB_ENV_VAR] = hub
     # The deployment override too, for the same reason: the tab resolves the
     # key's deployment, and shows the target, with THIS process's variable,
     # and the window's `launch` has to trace where the tab says. Blank for
@@ -2642,163 +4093,263 @@ def spawn(
     width, height = size if size is not None else (DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
     # Before the window: a session start since this moment is this launch's (`_type_prompt`).
     launched = _now()
-    launch_spec = LaunchSpec(
-        binary=resolution.binary,
-        permission_mode=native_mode,
-        extra_args=recorded_args,
-        account_slot=choice.account.slot if choice.account is not None else None,
-        worktree=use_worktree,
-        command=list(command),
-        recorded_by=__version__,
+    # The tree, made or reused, and the row that says an agent works in it, under one hold
+    # of the branch lock a reap removes trees under (`_reap_tree`): a reap that
+    # landed between a reuse and the row read the tree as an ended agent's, clean and
+    # pushed, and removed it from under the agent starting in it (review of #259, round 17).
+    made: list[str] = []
+    common = _git_common_dir(project.root) if use_worktree else None
+    # Where the agent will start: the tree its launch record names for a replay, else the
+    # worktree `_worktree_for` makes or reuses, else the root.
+    start = (
+        project.root
+        if common is None
+        else own_worktree
+        if own_worktree is not None
+        else project.root / config.worktree_dir / picked
     )
-    if session is not None:
-        # The predecessor's start is not this launch's: its own hook says when it started.
-        session = session.model_copy(update={"started_at": None})
-    elif identity.session_id is not None:
-        session = launch_seal.SessionFacts(id=identity.session_id, agent=selected.adapter.id)
-    # Everything a replay starts this agent with, written before it runs, by this
-    # process alone (`core.launch_seal`): the records, as the whole store now, are
-    # read-only to an agent's sandbox, and nothing reads the store to write one.
-    launch_record = launch_seal.LaunchRecord(
-        id=agent_id,
-        project_id=project.id,
-        project_root=str(project.root),
-        role=role,
-        agent=selected.adapter.id,
-        binary=resolution.binary,
-        cwd=str(cwd),
-        worktree=use_worktree,
-        account_slot=choice.account.slot if choice.account is not None else None,
-        account_home=str(choice.account.config_dir) if choice.account is not None else None,
-        spec=launch_spec,
-        session=session,
-        label=picked,
+    settled: str | None = None
+    if choice.account is not None:
+        # Here as well as in the window's `aisquare launch`, so the receipt — the manager's
+        # one view of the spawn — says when the folder's trust could not be shared and the
+        # agent will stop at Claude Code's question. Before the branch lock, which a reap
+        # and every other spawn in the repository queue on (review of #259, round 21): for
+        # the folder the agent starts in, with the entries that will cover it once made.
+        # Asked of the project's root instead, it copied an entry on a root that is a
+        # sub-folder of its repository, which does not cover the tree, and missed one on the
+        # tree itself (round 22). And the window is told, so its launch does not read the
+        # same files again; with no account chosen, only the window knows its environment.
+        # An account of another agent's is shared nothing (`share_for_launch`).
+        scope = claude_sharing.worktree_scope(project.root, start) if common is not None else start
+        shared = claude_accounts_service.share_for_launch(scope, account=choice.account)
+        notes.extend(f"accounts: {note}" for note in shared)
+        made = [
+            f"accounts: {note}"
+            for note in shared
+            if isinstance(note, claude_accounts_service.SharedNote)
+        ]
+        if len(made) == len(shared):  # nothing it could not share, which the launch tries again
+            settled = str(choice.account.slot)
+    tree_lock = (
+        _branches_locked(common, wait=_BRANCHES_LOCK_WAIT)
+        if common is not None
+        else contextlib.nullcontext()
     )
-    unrecorded = launch_seal.write(launch_record)
-    if unrecorded is not None:
-        raise FleetError(_unrecorded_refusal(unrecorded))
-    try:
-        # Every pair is this window's alone: `spawn_window` keeps them out of
-        # the session environment, so a later spawn — or a window opened by hand
-        # — starts from the server's environment and sets its own (review of
-        # #203, rounds 3 and 4; §7.6 for the opt-out).
-        window = (
-            joined.new_window(
-                name=picked, cwd=cwd, command=command, env=env, width=width, height=height
+    with tree_lock:
+        cwd = project.root
+        if common is not None and own_worktree is not None and own_worktree.exists():
+            # A replay works in the tree its launch record names: one the row's label
+            # named was the store's to choose, and `_worktree_for` made a new one there.
+            if not (own_worktree / ".git").exists():
+                raise FleetError(
+                    f"{own_worktree}, the worktree it was spawned in, is no longer a git "
+                    "worktree — spawn a new agent"
+                )
+            cwd = own_worktree
+            notes.append(f"kept the agent's worktree at {cwd} as it stands")
+        elif common is not None:
+            branch = branch_name(
+                codename,
+                task_id=resolved_task_id,
+                title=task.title if task is not None else picked,
             )
-            if joined is not None
-            else _new_session_window(
-                srv,
-                session_name(codename),
-                name=picked,
-                cwd=cwd,
-                command=command,
-                env=env,
-                width=width,
-                height=height,
+            # A replay's tree that is gone is made again where its record names it, on the
+            # branch its row recorded (`_remake_worktree`).
+            cwd = _worktree_for(
+                project.root,
+                config.worktree_dir,
+                picked,
+                branch,
+                notes,
+                refuse_if_taken=refuse_if_taken,
+                own=own_worktree,
+                own_branch=own_branch,
+                common=common,
             )
+        if settled is not None and os.path.realpath(cwd) == os.path.realpath(start):
+            # Only for the folder it shared for: a restart's own tree can be elsewhere.
+            env[claude_accounts_service.SHARED_ENV] = settled
+        launch_spec = LaunchSpec(
+            binary=resolution.binary,
+            permission_mode=native_mode,
+            extra_args=recorded_args,
+            account_slot=choice.account.slot if choice.account is not None else None,
+            worktree=use_worktree,
+            command=list(command),
+            recorded_by=__version__,
+            hub=hub,
         )
-    except TmuxError as exc:
-        raise FleetError(f"tmux could not start the window: {exc}") from exc
-    tmux_session = window.session
-    if window.resize_refused is not None:
-        # The agent runs either way; what it costs is #149 itself, so it is said
-        # rather than left for the diff panel to explain (review of #162, round 1).
-        notes.append(
-            f"tmux would not size the window {width}x{height} ({window.resize_refused}) — "
-            "it runs at its session's size until a pane shows it, and at 144 columns or "
-            "wider Claude Code opens its diff panel on its own"
+        if session is not None:
+            # The predecessor's start is not this launch's: its own hook says when it started.
+            session = session.model_copy(update={"started_at": None})
+        elif identity.session_id is not None:
+            session = launch_seal.SessionFacts(id=identity.session_id, agent=selected.adapter.id)
+        # Everything a replay starts this agent with, written before it runs, by this
+        # process alone (`core.launch_seal`): the records, as the whole store now, are
+        # read-only to an agent's sandbox, and nothing reads the store to write one.
+        launch_record = launch_seal.LaunchRecord(
+            id=agent_id,
+            project_id=project.id,
+            project_root=str(project.root),
+            role=role,
+            agent=selected.adapter.id,
+            binary=resolution.binary,
+            cwd=str(cwd),
+            worktree=use_worktree,
+            account_slot=choice.account.slot if choice.account is not None else None,
+            account_home=str(choice.account.config_dir) if choice.account is not None else None,
+            spec=launch_spec,
+            session=session,
+            label=picked,
         )
-    # Where this server listens and in which boot, as the window exists: what uninstall
-    # and upgrade ask whether the row may still run, rather than inferring it from the
-    # shell they run in (round 25 of #257). Not saying is not failing the spawn.
-    try:
-        socket_path = srv.server_socket_path()
-    except TmuxError:
-        socket_path = None
-    created_at, boot = _now(), tmux_core.boot_id()
-    # Where the window is, beside its record, before the row names it: every line the
-    # fleet types into the agent, and every kill of its window, is aimed there, never at
-    # the row's pane and socket, which a sandbox could write before its broker (review
-    # r5 of #113, finding 1). A window whose place cannot be recorded is one no `tell`
-    # or `stop` could reach, so it is not left running.
-    unplaced = launch_seal.placed(
-        agent_id,
-        launch_seal.WindowPlace(
+        unrecorded = launch_seal.write(launch_record)
+        if unrecorded is not None:
+            raise FleetError(_unrecorded_refusal(unrecorded))
+        try:
+            # Every pair is this window's alone: `spawn_window` keeps them out of
+            # the session environment, so a later spawn — or a window opened by hand
+            # — starts from the server's environment and sets its own (review of
+            # #203, rounds 3 and 4; §7.6 for the opt-out).
+            window = (
+                joined.new_window(
+                    name=picked,
+                    cwd=cwd,
+                    command=command,
+                    env=env,
+                    width=width,
+                    height=height,
+                    notes=notes,
+                )
+                if joined is not None
+                else _new_session_window(
+                    srv,
+                    session_name(codename),
+                    name=picked,
+                    cwd=cwd,
+                    command=command,
+                    env=env,
+                    width=width,
+                    height=height,
+                    config=config,
+                    notes=notes,
+                )
+            )
+        except TmuxError as exc:
+            raise FleetError(f"tmux could not start the window: {exc}") from exc
+        tmux_session = window.session
+        if window.resize_refused is not None:
+            # The agent runs either way; what it costs is #149 itself, so it is said
+            # rather than left for the diff panel to explain (review of #162, round 1).
+            notes.append(
+                f"tmux would not size the window {width}x{height} ({window.resize_refused}) — "
+                "it runs at its session's size until a pane shows it, and at 144 columns or "
+                "wider Claude Code opens its diff panel on its own"
+            )
+        # Where this server listens and in which boot, as the window exists: what uninstall
+        # and upgrade ask whether the row may still run, rather than inferring it from the
+        # shell they run in (round 25 of #257). Not saying is not failing the spawn.
+        try:
+            socket_path = srv.server_socket_path()
+        except TmuxError:
+            socket_path = None
+        # And when it started: the identity of the server the pane id names, since every server
+        # numbers from %0. A server at that socket started at another time is not this one
+        # (`_outlived`, `server_may_run`): it took the path from this one, which lost its socket
+        # file and runs on (follow-up of #257). Not saying is not failing the spawn either.
+        try:
+            server_started = srv.started_at()
+        except TmuxError:
+            server_started = None
+        created_at, boot = _now(), tmux_core.boot_id()
+        # Where the window is, beside its record, before the row names it: every line the
+        # fleet types into the agent, and every kill of its window, is aimed there, never at
+        # the row's pane and socket, which a sandbox could write before its broker (review
+        # r5 of #113, finding 1). A window whose place cannot be recorded is one no `tell`
+        # or `stop` could reach, so it is not left running.
+        unplaced = launch_seal.placed(
+            agent_id,
+            launch_seal.WindowPlace(
+                tmux_socket=config.tmux_socket,
+                pane_id=window.pane_id,
+                socket_path=str(socket_path) if socket_path is not None else None,
+                boot_id=boot,
+                created_at=created_at,
+                server_started_at=server_started,
+                session=tmux_session,
+                session_id=window.session_id,
+            ),
+        )
+        if unplaced is not None:
+            _kill_unrecorded(srv, window.pane_id)
+            raise FleetError(
+                f"its launch record could not say where its window is ({unplaced}) — its tmux "
+                "window was killed rather than left where no `fleet tell` or `fleet stop` "
+                "could reach it"
+            )
+        if window.session_id is not None:
+            # The project's sessions, beside its records: what its later spawns join and
+            # `shutdown` takes down, however long its last agent has been gone (review r8 of
+            # #113, findings 2 and 4). One that cannot be written is still named by this
+            # agent's record.
+            launch_seal.add_project_session(
+                project.id,
+                launch_seal.SessionPlace(
+                    tmux_socket=config.tmux_socket,
+                    socket_path=str(socket_path) if socket_path is not None else None,
+                    session_id=window.session_id,
+                    name=tmux_session,
+                    created_at=created_at,
+                    server_started_at=server_started,
+                ),
+                # Its window too: which of the project's rows run is read from the panes,
+                # never from their `ended_at` (review r9 of #113, findings 5 and 6).
+                launch_seal.WindowEntry(
+                    row_id=agent_id,
+                    tmux_socket=config.tmux_socket,
+                    socket_path=str(socket_path) if socket_path is not None else None,
+                    session_id=window.session_id,
+                    pane_id=window.pane_id,
+                    created_at=created_at,
+                    server_started_at=server_started,
+                ),
+            )
+
+        fleet_agent = FleetAgent(
+            id=agent_id,
+            project_id=project.id,
+            label=picked,
+            role=role,
+            binary=resolution.binary,
+            agent=selected.adapter.id,
             tmux_socket=config.tmux_socket,
             pane_id=window.pane_id,
-            socket_path=str(socket_path) if socket_path is not None else None,
+            # A fresh hand-over's row starts on the session whose claims it inherits,
+            # the state `_take_over` moves it out of (and the agent's own start hook
+            # would, should that move not happen).
+            session_id=takes_over if takes_over is not None else identity.session_id,
+            cwd=cwd,
+            worktree=use_worktree,
+            task_id=resolved_task_id,
+            spawned_by=spawned_by,
+            account_slot=choice.account.slot if choice.account is not None else None,
+            launch_spec=launch_spec,
+            socket_path=socket_path,
             boot_id=boot,
+            server_started_at=server_started,
+            branch=_spawned_on(cwd) if use_worktree else None,
+            board=board,
             created_at=created_at,
-            session=tmux_session,
-            session_id=window.session_id,
-        ),
-    )
-    if unplaced is not None:
-        _kill_unrecorded(srv, window.pane_id)
-        raise FleetError(
-            f"its launch record could not say where its window is ({unplaced}) — its tmux "
-            "window was killed rather than left where no `fleet tell` or `fleet stop` "
-            "could reach it"
         )
-    if window.session_id is not None:
-        # The project's sessions, beside its records: what its later spawns join and
-        # `shutdown` takes down, however long its last agent has been gone (review r8 of
-        # #113, findings 2 and 4). One that cannot be written is still named by this
-        # agent's record.
-        launch_seal.add_project_session(
-            project.id,
-            launch_seal.SessionPlace(
-                tmux_socket=config.tmux_socket,
-                socket_path=str(socket_path) if socket_path is not None else None,
-                session_id=window.session_id,
-                name=tmux_session,
-                created_at=created_at,
-            ),
-            # Its window too: which of the project's rows run is read from the panes, never
-            # from their `ended_at` (review r9 of #113, findings 5 and 6).
-            launch_seal.WindowEntry(
-                row_id=agent_id,
-                tmux_socket=config.tmux_socket,
-                socket_path=str(socket_path) if socket_path is not None else None,
-                session_id=window.session_id,
-                pane_id=window.pane_id,
-                created_at=created_at,
-            ),
+        stored = _record(
+            fleet_agent,
+            project,
+            srv,
+            wanted=label,
+            notes=notes,
+            cap=config.max_agents_per_project,
+            onboard=onboard,
+            codename=codename,
         )
-
-    fleet_agent = FleetAgent(
-        id=agent_id,
-        project_id=project.id,
-        label=picked,
-        role=role,
-        binary=resolution.binary,
-        agent=selected.adapter.id,
-        tmux_socket=config.tmux_socket,
-        pane_id=window.pane_id,
-        # A fresh hand-over's row starts on the session whose claims it inherits,
-        # the state `_take_over` moves it out of (and the agent's own start hook
-        # would, should that move not happen).
-        session_id=takes_over if takes_over is not None else identity.session_id,
-        cwd=cwd,
-        worktree=use_worktree,
-        task_id=resolved_task_id,
-        spawned_by=spawned_by,
-        account_slot=choice.account.slot if choice.account is not None else None,
-        launch_spec=launch_spec,
-        socket_path=socket_path,
-        boot_id=boot,
-        created_at=created_at,
-    )
-    stored = _record(
-        fleet_agent,
-        project,
-        srv,
-        wanted=label,
-        notes=notes,
-        cap=config.max_agents_per_project,
-        onboard=onboard,
-    )
     if stored.label != picked:
         # Re-picked on a collision: the record names the label the row was stored under,
         # which `fleet stop <label>` and `tell` resolve by (review r8 of #113, finding 5).
@@ -2810,7 +4361,9 @@ def spawn(
     # under the label the agent was recorded with (`_record` re-picks one taken
     # meanwhile); a sentence, no store or file read.
     with contextlib.suppress(Exception):
-        warning = auto_mode.spawn_note(evidence, role=role, label=stored.label, config=config)
+        warning = auto_mode.spawn_note(
+            evidence, role=role, label=stored.label, config=config, project=project
+        )
         if warning is not None:
             notes.append(warning)
     # Every note `_take_over` writes is a move that did not happen; `_type_prompt`'s are
@@ -2826,10 +4379,10 @@ def spawn(
     # A prompt an agent takes on its command line went into the window's command: it
     # reaches the agent as its argument, and the restart or switch that passed it reads
     # that as delivered.
-    typed = (
+    typed: Typed | None = (
         None
         if not prompt
-        else True
+        else "yes"
         if selected.adapter.capabilities.positional_prompt
         else _type_prompt(
             started,
@@ -2838,6 +4391,7 @@ def spawn(
             project=project,
             session_id=identity.session_id or stored.session_id,
             launched=launched,
+            folder=cwd,
         )
     )
     return SpawnReceipt(
@@ -2846,7 +4400,8 @@ def spawn(
         tmux_session=tmux_session,
         notes=[*notes, *moved, *typing],
         prompt_typed=typed,
-        failures=[*moved, *(typing if typed is False else [])],
+        failures=[*moved, *(typing if typed not in (None, "yes") else [])],
+        shared=made,
     )
 
 
@@ -2953,6 +4508,7 @@ def _permission_intent(
 
 
 def _launch_binary(
+    project: ProjectInfo,
     role: str,
     *,
     binary: str | None,
@@ -2979,7 +4535,9 @@ def _launch_binary(
     resolution = harness.resolve_binary(role, override=spec.binary)
     if shutil.which(resolution.binary) is None:
         # Replayed, and gone since: today's resolution, when it is the same kind of program.
-        resolution = _in_place_of_recorded(role, resolution.binary, family=family, notes=notes)
+        resolution = _in_place_of_recorded(
+            project, role, resolution.binary, family=family, notes=notes
+        )
     return resolution
 
 
@@ -3005,7 +4563,7 @@ def _binary_for(
 
 
 def _in_place_of_recorded(
-    role: str, recorded: str, *, family: str | None, notes: list[str]
+    project: ProjectInfo, role: str, recorded: str, *, family: str | None, notes: list[str]
 ) -> harness.BinaryResolution:
     """What a replay starts when ``recorded``, the binary its spec holds, has left the PATH.
 
@@ -3044,7 +4602,8 @@ def _in_place_of_recorded(
             f"{gone}, and the role resolves to {today.binary!r} today (chosen by: "
             f"{today.source}), not known to be the same kind of program: the recorded "
             f"arguments are {recorded!r}'s — put {recorded!r} back on your PATH, or start "
-            f"a new agent under today's config with `aisquare fleet spawn {role}`"
+            "a new agent under today's config with "
+            f"`{project_service.fleet_command('spawn', project, role)}`"
         )
     if shutil.which(today.binary) is None:
         raise FleetError(
@@ -3114,7 +4673,7 @@ def _without_session_choice(
 
 def _supersede(
     placements: Sequence[Placement],
-    views: Mapping[_Address, dict[str, _PaneView] | None],
+    views: Mapping[_Address, _Observed | None],
     started: Placement,
 ) -> None:
     """Remove the dead windows of the ended rows ``started`` replaces — those under its label.
@@ -3172,16 +4731,24 @@ def _session_to_join(
     return None
 
 
-def _new_session_window(srv: TmuxServer, session: str, **window: Any) -> WindowInfo:
+def _new_session_window(
+    srv: TmuxServer,
+    session: str,
+    *,
+    config: FleetSettings | None = None,
+    notes: list[str] | None = None,
+    **window: Any,
+) -> WindowInfo:
     """A window in a NEW session named ``session`` — or, when tmux holds a session by that
     name already, ``session-2``, ``session-3``…: a session found under a name is joined by
     nothing, since the name is read from the store (:func:`_session_to_join`). One that a
-    spawn of this project made is joined by its id, which its record holds."""
+    spawn of this project made is joined by its id, which its record holds. Opened through
+    :func:`open_window`, as every window at the fleet's socket is (``config``, ``notes``)."""
     for attempt in range(1, _CODENAME_RETRIES + 1):
         candidate = session if attempt == 1 else f"{session}-{attempt}"
         if srv.has_session(candidate):
             continue
-        return srv.spawn_window(candidate, create=True, **window)
+        return open_window(srv, candidate, config=config, notes=notes, create=True, **window)
     raise TmuxError(
         f"tmux already holds sessions named {session} to {session}-{_CODENAME_RETRIES}, none "
         "of them one a launch record of this project names — end them, or rename this project"
@@ -3247,6 +4814,309 @@ def _take_over(agent: FleetAgent, previous: str, session_id: str, notes: list[st
     return current if current is not None else agent
 
 
+def _live_rows_here(
+    store: ContextStore,
+    srv: TmuxServer,
+    config: FleetSettings,
+    reads: tmux_core.SocketReads | None = None,
+) -> Iterator[tuple[FleetAgent, SocketAnswer | None]]:
+    """Every live row recorded at this shell's socket path, in every project, with what the
+    one rule says of its agent (:func:`~aisquare.core.tmux.server_may_run`): the rows a
+    server started at that path would answer for.
+
+    The server is shared by every project, so every project's rows are asked, forgotten
+    ones' included, in one query (``live_fleet_agents``; a query per project before round 4
+    of #259); a row asked at another path (:func:`_address`) is another server's. The one
+    walk :func:`_refuse_a_freed_socket` and :func:`_forget_an_exited_server` take, so the
+    two cannot come to count different rows (review of #259, round 3).
+
+    Every such row is asked at this shell's path, where :func:`_address` found the one it
+    recorded, so ``reads``, the caller's, which read that path already
+    (:meth:`~aisquare.core.tmux.SocketReads.heard_listener`), answers for all of them. A
+    ``SocketReads`` of its own here, keyed by each row's spelling of the path, connected to
+    the socket the caller had just read (review of #259, round 7, 6/9).
+    """
+    here = _Address(config.tmux_socket)
+    reads = reads or tmux_core.SocketReads()  # one socket: asked once, not per row
+    for agent in store.live_fleet_agents():
+        if _address(agent.tmux_socket, agent.socket_path, config) != here:
+            continue
+        answer = tmux_core.server_may_run(
+            srv,
+            None,  # this shell's path: the row's, as `_address` says
+            agent.boot_id,
+            agent.created_at,
+            agent.server_started_at,
+            reads=reads,
+        )
+        yield agent, answer
+
+
+@dataclass(frozen=True)
+class _RowProjects:
+    """The projects of live rows from any project, as a message about those rows names them
+    (:func:`_row_projects`)."""
+
+    named: str
+    """Each row as ``<label> (<its project's name>)``, in row order, comma-separated."""
+    reached: dict[str, ProjectInfo]
+    """The rows' projects a fleet command reaches (a registration, captured or not), by id."""
+    forgotten: list[str]
+    """For each forgotten project of the rows, in row order: ``<name> is forgotten: <onboard>
+    adds it back first``, which the commands for its rows wait on."""
+    unreached: str | None
+    """For those rows, that no fleet command reaches them; ``None`` when there are none."""
+
+
+def _row_projects(store: ContextStore, rows: Sequence[FleetAgent]) -> _RowProjects:
+    """What a message about ``rows``, live rows from any project, says of their projects.
+
+    :func:`_refuse_a_freed_socket` and :func:`_exited_note` each read the projects and wrote
+    the forgotten sentence, and the copies had drifted: "adds it back first" against "for
+    both", one sorted by id, the other in row order (review of #259, round 22). One reading
+    keeps the two messages in step.
+
+    A live row can be in a project with no record at all (``live_fleet_agents`` reads every
+    row), and every fleet command finds its rows through a project, so none reaches it.
+    Such rows are said to be out of reach: with no other way to give, the refusal ended
+    mid-sentence, "if it is not, " (round 22)."""
+    known = {each.id: each for each in store.list_projects(include_forgotten=True)}
+    live = {each.id for each in store.list_projects(all=True)}
+    names = {each.id: _name(each) for each in known.values()}
+    theirs = list(dict.fromkeys(row.project_id for row in rows))
+    orphans = [row for row in rows if row.project_id not in known]
+    unreached = None
+    if orphans:
+        one = len(orphans) == 1
+        out_of_reach = ", ".join(f"{row.label} ({row.project_id})" for row in orphans)
+        unreached = (
+            f"no fleet command reaches {out_of_reach}: "
+            f"{'its project is' if one else 'their projects are'} not one this machine has a "
+            "record of"
+        )
+    return _RowProjects(
+        named=", ".join(
+            f"{row.label} ({names.get(row.project_id, row.project_id)})" for row in rows
+        ),
+        reached={each: known[each] for each in theirs if each in live},
+        forgotten=[
+            f"{names[each]} is forgotten: {project_service.onboard_command(known[each].root)} "
+            "adds it back first"
+            for each in theirs
+            if each in known and each not in live
+        ],
+        unreached=unreached,
+    )
+
+
+def _refuse_a_freed_socket(
+    srv: TmuxServer,
+    config: FleetSettings,
+    answer: SocketAnswer | None,
+    reads: tmux_core.SocketReads | None = None,
+) -> None:
+    """Refuse to start a server at a socket path a running server lost (follow-up of #257).
+
+    ``tmux -L`` finds no file at the path and starts a server there. A live row whose
+    server said at spawn that it listened at that path, in this boot, and whose socket
+    file is gone (:func:`~aisquare.core.tmux.server_may_run`: ``"gone"``) is an agent that
+    may run on a server no tmux client reaches: systemd-tmpfiles or logind took the file
+    from under it, which the server outlives. A spawn then started a second server at the
+    freed path, which answered for the row from then on, and the agent kept running
+    where nothing could reach it again. The server is shared by every project, so every
+    project's live rows are asked, not only this one's (:func:`_live_rows_here`).
+
+    Asked only when this shell's path holds no file: a server listening there is the one
+    the spawn joins, and a stale file is a server that exited, which tmux replaces. That is
+    ``answer``, what the path said (:meth:`~aisquare.core.tmux.TmuxServer.listener`), read
+    by the caller: read here again, a path with no file cost two reads a check (review of
+    #259, round 6, 7/10). It answers for the rows recorded there too (``reads``).
+    """
+    if answer != "gone":
+        return
+    try:
+        here = srv.socket_path()
+    except TmuxUnavailable:
+        return  # no POSIX uid: no tmux server can exist here
+    reads = reads or tmux_core.SocketReads()
+    reads.heard_listener(srv, None, answer)
+    with store_session() as store:
+        rows = _live_rows_here(store, srv, config, reads)
+        gone = [agent for agent, answer in rows if answer == "gone"]
+        if not gone:
+            return
+        projects = _row_projects(store, gone)
+    one = len(gone) == 1
+    # Each project's own shutdown: the rows are any project's, and a bare one is the active
+    # project's (review of #259, round 21). A forgotten project's is reached once it is back.
+    forgets = [_forget(each) for each in projects.reached.values()]
+    ways = [f"{' and '.join(forgets)} {'ends its row' if one else 'end their rows'} on your word"]
+    ways = ways if forgets else []
+    ways += projects.forgotten
+    if projects.unreached is not None:
+        # The rule that holds a spawn here reads a row from another boot as not running.
+        ways.append(f"{projects.unreached}, so a spawn here is refused until the machine restarts")
+    raise FleetError(
+        f"not started: the tmux server that {projects.named} {'runs' if one else 'run'} "
+        f"on lost its socket file {here}, so no tmux client reaches it, and it may still be "
+        f"running; a spawn now would start a second server at that path and leave "
+        f"{'that agent' if one else 'those agents'} where nothing can reach "
+        f"{'it' if one else 'them'} again. If it is running, send that server SIGUSR1, which "
+        f"makes tmux create its socket again, and spawn again; if it is not, {'; '.join(ways)}"
+    )
+
+
+def _forget_an_exited_server(
+    srv: TmuxServer, config: FleetSettings, reads: tmux_core.SocketReads | None = None
+) -> list[FleetAgent]:
+    """Forget the recorded start of a server that exited at this shell's socket path, before a
+    spawn starts the next server there, so that its rows read lost under the new one rather
+    than held as its; the rows it changed.
+
+    A socket file with nothing listening is a server that exited (tmux leaves the file:
+    :func:`~aisquare.core.tmux.socket_answer`), and the spawn's ``new-session`` starts the
+    next server at that path. The agents went with the old one (a hand-run ``kill-server``,
+    a crash). Once the next server is up, each of their rows, having recorded its server's
+    start, was held as another server's (:func:`_on_another_server`), since from outside a
+    killed server looks like one that lost its socket file and runs on. Every such row, in
+    every project, was held for good: ``reap`` left it, ``stop`` refused it, and it still
+    counted toward ``max_agents_per_project`` and the one-manager rule until ``shutdown
+    --forget`` (review of #259, round 2). 0.8.0 read them lost.
+
+    The evidence is there only until the new server takes the path, so it is acted on here:
+    each live row recorded at this path (:func:`_live_rows_here`) that the one rule says
+    cannot be running (:func:`~aisquare.core.tmux.server_may_run` is ``None``: the stale
+    file, or another boot) forgets its server's start, as a row from before 0.8.1 has none.
+    It then reads ``lost`` under the next server, as in 0.8.0: ``reap`` records it, ``stop``
+    ends it, and Welcome's top-up restarts a coder under its own label, its session resumed.
+    Ending it here instead would cost that. Asked per row, and written as a compare-and-set
+    (``forget_fleet_agent_server_start``), so a server another process brought up meanwhile
+    leaves its rows and any held one alone.
+
+    Asked by :func:`_before_a_server_starts` once it read a stale file at the path, with
+    ``reads`` holding that answer.
+    """
+    forgotten: list[FleetAgent] = []
+    with store_session() as store:
+        for agent, answer in _live_rows_here(store, srv, config, reads):
+            started = agent.server_started_at
+            if (
+                answer is None
+                and started is not None
+                and store.forget_fleet_agent_server_start(agent.id, started)
+            ):
+                forgotten.append(agent)
+    return forgotten
+
+
+def _before_a_server_starts(srv: TmuxServer, config: FleetSettings) -> list[FleetAgent]:
+    """What must hold before anything starts a tmux server at the fleet's socket path, asked in
+    this one place; the rows whose exited server's start it forgot. ``srv`` is the fleet's
+    server for ``config`` (:func:`server`).
+
+    ``new-session`` starts a server where none listens. Over a stale file, a server that
+    exited, that is the next server, and the rows of the one that exited forget its start
+    first, or the new one holds them for good (:func:`_forget_an_exited_server`). At a path
+    with no file, a running server may have lost it, and a server started there strands its
+    agents (:func:`_refuse_a_freed_socket`, which raises). Only ``spawn`` asked, and the
+    Accounts sign-in window, on the same server, started one past both (review of #259,
+    round 3): so every window opened there goes through :func:`open_window`, which asks.
+
+    One read of the socket says which, if either, applies. Each asked it, so a check cost
+    two connects, and a spawn checks twice (review of #259, round 5). A server listening
+    there, the usual case, is one connect and nothing else.
+    """
+    try:
+        answer = srv.listener(srv.socket_path())
+    except TmuxUnavailable:
+        return []  # no POSIX uid: no tmux server can exist here
+    reads = tmux_core.SocketReads()  # that answer, for every row recorded at the path
+    reads.heard_listener(srv, None, answer)
+    if answer is None:
+        return _forget_an_exited_server(srv, config, reads)
+    _refuse_a_freed_socket(srv, config, answer, reads)
+    return []
+
+
+def _exited_note(srv: TmuxServer, exited: Sequence[FleetAgent]) -> str:
+    """What a spawn says of the rows :func:`_before_a_server_starts` forgot the start of: they
+    read lost from now on, named with their projects, forgotten ones' included.
+
+    The rows are any project's, so the commands it names reach every project: ``reap --all``,
+    and a ``restart`` naming each row's project (:func:`project_service.fleet_command`).
+    ``aisquare fleet reap`` alone walked the active project's rows, and a ``restart`` with
+    no label is a usage error (review of #259, round 21). A forgotten project is reached by
+    neither until it is added back, so its rows are told that instead. ``reap --all`` is
+    offered for the rows it walks, those in a project it reaches (``projects.reached``): it
+    was offered for every row with any record, and said to record a forgotten project's
+    rows (round 23)."""
+    one = len(exited) == 1
+    with store_session() as store:
+        projects = _row_projects(store, exited)
+    reached = [row for row in exited if row.project_id in projects.reached]
+    restarts = [
+        f"`{project_service.fleet_command('restart', projects.reached[row.project_id], row.label)}`"
+        for row in reached
+    ]
+    ways = (
+        [f"`aisquare fleet reap --all` records {'it' if len(reached) == 1 else 'them'}"]
+        if reached
+        else []
+    )
+    if restarts:
+        again = "starts it again" if len(restarts) == 1 else "start them again"
+        ways.append(f"{' and '.join(restarts)} {again}")
+    ways += projects.forgotten
+    if projects.unreached is not None:
+        ways.append(projects.unreached)
+    return (
+        f"the tmux server at {srv.socket_path()} had exited, leaving its socket file: "
+        f"{projects.named} {'reads' if one else 'read'} lost from now on, as "
+        f"{'its' if one else 'their'}"
+        f" {'pane' if one else 'panes'} went with it ({'; '.join(ways)})"
+    )
+
+
+def open_window(
+    srv: TmuxServer,
+    session: str,
+    *,
+    name: str,
+    cwd: Path,
+    command: Sequence[str],
+    env: Mapping[str, str] | None = None,
+    width: int = DEFAULT_WINDOW_WIDTH,
+    height: int = DEFAULT_WINDOW_HEIGHT,
+    config: FleetSettings | None = None,
+    notes: list[str] | None = None,
+    create: bool = False,
+) -> WindowInfo:
+    """A window on the fleet's tmux server ``srv`` (:func:`server`), opened once what must hold
+    before a server starts there does (:func:`_before_a_server_starts`): the one way anything
+    opens a window at the fleet's socket, a spawn's agent and the Accounts sign-in window
+    alike (tests/test_fleet_service.py names every caller). :class:`FleetError` when it may
+    not; :class:`~aisquare.core.tmux.TmuxError` when tmux would not
+    (:meth:`~aisquare.core.tmux.TmuxServer.spawn_window`). ``config`` is the one ``srv`` was
+    made for, the caller's, so the check asks the rows of the socket it probes. ``notes``,
+    when given, gets the rows whose exited server's start the check forgot, for the caller
+    to say (:func:`_exited_note`). ``create`` opens it only in a session it creates
+    (``TmuxServer.spawn_window``), as a spawn that joins no recorded session does
+    (:func:`_new_session_window`)."""
+    exited = _before_a_server_starts(srv, config or settings())
+    if exited and notes is not None:
+        notes.append(_exited_note(srv, exited))
+    return srv.spawn_window(
+        session,
+        name=name,
+        cwd=cwd,
+        command=command,
+        env=env,
+        width=width,
+        height=height,
+        create=create,
+    )
+
+
 def _refuse_occupied_worktree(
     project: ProjectInfo, worktree_dir: str, label: str, occupied: Sequence[Path] = ()
 ) -> None:
@@ -3292,6 +5162,7 @@ def _record(
     notes: list[str],
     cap: int,
     onboard: bool,
+    codename: str,
 ) -> FleetAgent:
     """Write the row; on a live-label collision re-pick the label and retry.
 
@@ -3311,10 +5182,14 @@ def _record(
     The spawn's deliberate add (#139) is made in the same store session, before
     the insert, so a store that refuses it refuses the row too and the window
     goes with it: onboarded after the insert, the refusal would leave a live
-    row on a killed window. ``onboard`` is :func:`spawn`'s.
+    row on a killed window. ``onboard`` is :func:`spawn`'s, and so is ``codename``, the
+    one its session and branch were named by, which the add stores on a row that has
+    none (``[projects] capture`` off: nothing was written before the window).
     """
     try:
-        return _write_row(agent, project, wanted=wanted, notes=notes, cap=cap, onboard=onboard)
+        return _write_row(
+            agent, project, wanted=wanted, notes=notes, cap=cap, onboard=onboard, codename=codename
+        )
     except FleetError:
         _kill_unrecorded(srv, agent.pane_id)
         raise
@@ -3340,11 +5215,12 @@ def _write_row(
     notes: list[str],
     cap: int,
     onboard: bool,
+    codename: str,
 ) -> FleetAgent:
     """The store half of :func:`_record`: onboard, insert, relabelling past a live collision."""
     with store_session() as store:
         if onboard:
-            store.onboard_project(project)
+            _add_named(store, project, codename)
         for _ in range(_LABEL_RETRIES):
             try:
                 stored = store.upsert_fleet_agent(agent)
@@ -3354,6 +5230,28 @@ def _write_row(
             _verify_cap(store, stored, cap)
             return stored
     raise FleetError(f"could not record {agent.label!r}: every label tried was taken")
+
+
+def _add_named(store: ContextStore, project: ProjectInfo, codename: str) -> None:
+    """A spawn's deliberate add, with ``codename`` — the one its window's session and its
+    branch were named by — stored on a row that has none, in the same statement.
+
+    Refused (:class:`FleetError`, and :func:`_record` kills the window) when another
+    project took that codename while the agent was starting, or another aisquare gave this
+    project another one meanwhile: either way the window sits in a session that is not this
+    project's, where ``fleet attach`` would never find it."""
+    try:
+        added = store.onboard_project(project, codename=codename)
+    except sqlite3.IntegrityError as exc:
+        raise FleetError(
+            f"another project took the codename {codename} while this agent was starting — "
+            "spawn again"
+        ) from exc
+    if added.codename != codename:
+        raise FleetError(
+            f"{_name(project)} was named {added.codename} by another aisquare while this agent "
+            f"was starting in session {session_name(codename)} — spawn again"
+        )
 
 
 def _relabel(
@@ -3420,10 +5318,11 @@ def _type_prompt(
     project: ProjectInfo,
     session_id: str | None,
     launched: datetime,
-) -> bool:
+    folder: Path | None = None,
+) -> Typed:
     """Wait (bounded) for the agent to come up, then paste the prompt and press Enter.
 
-    Returns whether it was typed; when it was not, a note says why.
+    Returns whether it was typed (:data:`Typed`); when it was not, a note says why.
 
     An agent whose ``SessionStart`` fires at rest at its prompt
     (``capabilities.starts_at_its_prompt``: Claude Code) is up when that start has
@@ -3447,12 +5346,28 @@ def _type_prompt(
     reads N submitted messages instead of one. That is not a slow start's cost
     to pay silently, so it is not typed; the note says what to do instead.
 
+    Nor into Claude Code's folder-trust question (:func:`_past_trust_prompt`), whose
+    highlighted answer is "No, exit": the prompt's Enter ended the agent there. Asked on
+    the timeout's path too, with one look: an agent that came up at the question just past
+    :data:`PROMPT_TIMEOUT` was typed into, and the receipt said ``yes`` for an agent the
+    Enter had ended (review of #259, round 13). A question drawn after that look still
+    reads what was typed; no look can close that.
+
     Never raises: it runs after the row is recorded, and ``restart`` and
     ``switch`` read a raise out of ``spawn`` as "no replacement started" — they
     gave the claims parked for a replacement that was up back to the pool,
     announced its exit and woke the manager for a second worker (review of
     #203, final round, FLEET-4). So a poll tmux will not answer (a wedged
     server's timeout, an OS refusal) is a note, as a refused paste already was.
+
+    The paste and its Enter say how they ended as a tell's do (:class:`PaneWrite`): one
+    tmux did not answer in time may still arrive, and an Enter that did not go through
+    leaves the prompt at the agent's, unsent (:func:`pasted_unsent`). Both were "could not
+    type the prompt", and the prompt sent again with ``fleet tell`` went in beside the first
+    (review of #259, round 10, 8/9). And the receipt says so too, ``unsent`` or ``maybe``: it
+    said ``False``, "NOT typed", and the board's line and the page told the human to send
+    it (round 11, 2/13). The commands a note gives name the agent's project and label
+    (:func:`_send_it_later`); ``folder`` is the one it starts in, which a trust note names.
 
     Typed into the pane its launch record places (:func:`resolve_place`), by its agent's
     rules; a window whose record cannot be read back is typed nothing, as every row no
@@ -3461,10 +5376,11 @@ def _type_prompt(
     if not isinstance(placement, Placed):
         notes.append(
             f"the prompt was NOT typed: {placement.why}. Send it once the agent is up: "
-            f"`aisquare fleet tell {placement.row.label} …`, or `aisquare fleet attach`"
+            f"{_send_it_later(project, placement.row.label)}"
         )
-        return False
+        return "no"
     agent, pane = placement.agent, placement.pane
+    to = (project, agent.label)
     adapter = recorded_adapter(agent.agent)
     if (
         adapter is not None
@@ -3473,7 +5389,7 @@ def _type_prompt(
         and session_id is not None
     ):
         return _type_at_its_start(
-            pane, agent, adapter, prompt, notes, project, session_id, launched
+            pane, agent, adapter, prompt, notes, project, session_id, launched, folder
         )
     deadline = _monotonic() + PROMPT_TIMEOUT
     ready = False
@@ -3483,13 +5399,12 @@ def _type_prompt(
         except TmuxError as exc:
             notes.append(
                 f"tmux could not be asked whether the agent is up ({exc}) — the prompt was "
-                "NOT typed. Send it once the agent is up: `aisquare fleet tell <label> …`, "
-                "or `aisquare fleet attach`"
+                f"NOT typed. Send it once the agent is up: {_send_it_later(*to)}"
             )
-            return False
+            return "no"
         if facts is None or facts.dead:
             notes.append("the agent exited before the prompt could be typed")
-            return False
+            return "no"
         if _agent_running(facts.current_command) or facts.history_size > 0:
             ready = True
             break
@@ -3502,34 +5417,118 @@ def _type_prompt(
             # Up, and as quiet as at its prompt: the dialog's answer is the human's.
             while _at_a_start_dialog(pane, adapter):
                 if _monotonic() >= deadline:
-                    notes.append(
-                        f"the agent was still at a dialog of its own after {PROMPT_TIMEOUT:.0f} "
-                        "s, where an Enter would answer it for you — the prompt was NOT "
-                        "typed. Answer it in its pane (`aisquare fleet attach`), then send "
-                        f"the prompt: `aisquare fleet tell {agent.label} …`"
-                    )
-                    return False
+                    if _past_trust_prompt(pane, notes, folder=folder, to=to, wait=False):
+                        notes.append(
+                            f"the agent was still at a dialog of its own after "
+                            f"{PROMPT_TIMEOUT:.0f} s, where an Enter would answer it for you "
+                            "— the prompt was NOT typed. Answer it in its pane "
+                            f"(`{project_service.fleet_command('attach', project)}`), then "
+                            f"send the prompt: `{_tell(*to)} …`"
+                        )
+                    return "no"
                 _sleep(_POLL_INTERVAL)
             _sleep(_PROMPT_SETTLE)
+        if not _past_trust_prompt(pane, notes, folder=folder, to=to):
+            return "no"
     elif "\n" in prompt:
         notes.append(
             f"the agent did not come up within {PROMPT_TIMEOUT:.0f} s and the prompt has "
             "several lines — NOT typed: tmux brackets a paste only for an application that "
             "asked for bracketed paste, and the launcher has not, so each line would arrive "
-            "as its own message. Send it once the agent is up: `aisquare fleet tell "
-            "<label> …`, or `aisquare fleet attach`"
+            f"as its own message. Send it once the agent is up: {_send_it_later(*to)}"
         )
-        return False
+        return "no"
     else:
+        if not _past_trust_prompt(pane, notes, folder=folder, to=to, wait=False):
+            return "no"
         notes.append(
             f"the agent did not come up within {PROMPT_TIMEOUT:.0f} s — prompt typed anyway"
         )
+    return _typed_prompt(pane, prompt, notes)
+
+
+def _typed_prompt(pane: PlacedPane, prompt: str, notes: list[str]) -> Typed:
+    """Type ``prompt`` into ``pane`` (:meth:`PlacedPane.type_then_enter`), and how it ended,
+    a note saying so when it is not ``yes``: the last step of :func:`_type_prompt` and
+    :func:`_type_at_its_start`."""
+    told = pane.type_then_enter(
+        prompt, "the agent", press="press Enter in its pane", what="the prompt"
+    )
+    if isinstance(told, PaneWrite):
+        if told.typed == "maybe":
+            notes.append(told.late("the agent", then=" at its prompt, unsent"))
+            return "maybe"
+        notes.append(f"could not type the prompt: {told.error}")
+        return "no"
+    if told.typed != "yes":
+        notes.append(f"the prompt: {told.how}")
+    return told.typed
+
+
+def _tell(project: ProjectInfo, label: str) -> str:
+    """``fleet tell`` to the agent ``label`` of ``project``, its text left for the reader."""
+    return project_service.fleet_command("tell", project, label)
+
+
+def _send_it_later(project: ProjectInfo, label: str) -> str:
+    """How a prompt left untyped is sent once the agent is up: told, or typed in its window."""
+    return f"`{_tell(project, label)} …`, or `{project_service.fleet_command('attach', project)}`"
+
+
+def _past_trust_prompt(
+    pane: PlacedPane,
+    notes: list[str],
+    *,
+    folder: Path | None = None,
+    to: tuple[ProjectInfo, str],
+    wait: bool = True,
+) -> bool:
+    """Whether the agent is past Claude Code's folder-trust question, waited for (bounded).
+
+    The question shows when no account trusts the folder (``share_for_launch`` copied
+    nothing). A human at the window may answer it within :data:`PROMPT_TIMEOUT`; after
+    that the prompt is left untyped, with a note — typed, its Enter picks the highlighted
+    "No, exit". A screen tmux will not show is no question: typed as before. Without
+    ``wait``, one look: for the prompt typed once that timeout has passed already. Asked
+    of the pane its launch record places; another agent's screen never shows the question.
+    """
+    deadline = _monotonic() + (PROMPT_TIMEOUT if wait else 0.0)
+    asked = False
+    while True:
+        try:
+            lines = pane.captured()
+        except TmuxError:
+            return True
+        if not claude_sharing.shows_trust_prompt(lines):
+            if asked:
+                _sleep(_PROMPT_SETTLE)  # answered: the session draws itself first
+            return True
+        asked = True
+        if _monotonic() >= deadline:
+            notes.append(_trust_note(folder, to))
+            return False
+        _sleep(_POLL_INTERVAL)
+
+
+def _at_trust_question(pane: PlacedPane) -> bool:
+    """Whether ``pane``'s screen shows Claude Code's folder-trust question; ``False`` when
+    tmux will not show it."""
     try:
-        pane.type_line(prompt)
-    except TmuxError as exc:
-        notes.append(f"could not type the prompt: {exc}")
+        return claude_sharing.shows_trust_prompt(pane.captured())
+    except TmuxError:
         return False
-    return True
+
+
+def _trust_note(folder: Path | None, to: tuple[ProjectInfo, str]) -> str:
+    """Why a prompt was left untyped at Claude Code's folder-trust question, and the way on."""
+    trust = claude_accounts_service.trust_command(folder)
+    return (
+        "the agent is waiting at Claude Code's folder-trust question, which no "
+        "account has said yes to for this folder — the prompt was NOT typed (Enter "
+        'there picks "No, exit"). Approve it once in the agent\'s window '
+        f"(`{project_service.fleet_command('attach', to[0])}`), or run `{trust}` and "
+        f"restart it; then send the prompt: `{_tell(*to)} …`"
+    )
 
 
 def _type_at_its_start(
@@ -3541,7 +5540,8 @@ def _type_at_its_start(
     project: ProjectInfo,
     session_id: str | None,
     launched: datetime,
-) -> bool:
+    folder: Path | None = None,
+) -> Typed:
     """:func:`_type_prompt` for an agent whose ``SessionStart`` fires at rest at its prompt.
 
     Typed once that start has come (:func:`_started_since`), at once: Claude Code took a
@@ -3558,9 +5558,11 @@ def _type_at_its_start(
     prompt (review r4 of #113, finding 8). A dialog is the human's to answer. With no
     start the prompt is never typed: it is filed as the board note to the agent's label,
     which its first prompt's delta carries (``services.team`` keeps a new session's
-    cursor before the notes to its row), and the receipt says how to go on. Never raises,
+    cursor before the notes to its row), and the receipt says how to go on: at Claude Code's
+    folder-trust question, which account to trust it on (:func:`_trust_note`). Never raises,
     as :func:`_type_prompt`.
     """
+    to = (project, agent.label)
     start = _monotonic()
     deadline, ceiling = start + PROMPT_TIMEOUT, start + START_TIMEOUT
     while True:
@@ -3569,13 +5571,12 @@ def _type_at_its_start(
         except TmuxError as exc:
             notes.append(
                 f"tmux could not be asked whether the agent is up ({exc}) — the prompt was "
-                "NOT typed. Send it once the agent is up: `aisquare fleet tell <label> …`, "
-                "or `aisquare fleet attach`"
+                f"NOT typed. Send it once the agent is up: {_send_it_later(*to)}"
             )
-            return False
+            return "no"
         if facts is None or facts.dead:
             notes.append("the agent exited before the prompt could be typed")
-            return False
+            return "no"
         if _started_since(session_id, launched):
             break
         now = _monotonic()
@@ -3586,26 +5587,38 @@ def _type_at_its_start(
             except Exception as exc:  # never raises: the receipt says it
                 how = f"not filed as a board note either ({exc})"
             waited = PROMPT_TIMEOUT if at_a_dialog else START_TIMEOUT
-            then = (
-                "It is at a dialog of its own, which fires no hook and where an Enter "
-                "would answer it for you (`No, exit` at its folder-trust one): answer the "
-                "dialog in its pane (`aisquare fleet attach`), then"
-                if at_a_dialog
-                else "Once it is at its prompt,"
-            )
+            attach = project_service.fleet_command("attach", project)
+            if at_a_dialog and _at_trust_question(pane):
+                # Claude Code's folder-trust question, which no account has said yes to for
+                # this folder (`share_for_launch` copied nothing): the way past it named.
+                trust = claude_accounts_service.trust_command(folder)
+                then = (
+                    "It is at Claude Code's folder-trust question, where an Enter picks "
+                    f'"No, exit": approve it once in its window (`{attach}`), or run '
+                    f"`{trust}` and restart it; then"
+                )
+            elif at_a_dialog:
+                then = (
+                    "It is at a dialog of its own, which fires no hook and where an Enter "
+                    "would answer it for you (`No, exit` at its folder-trust one): answer the "
+                    f"dialog in its pane (`{attach}`), then"
+                )
+            else:
+                then = "Once it is at its prompt,"
             notes.append(
                 f"its {adapter.label} session did not start within {waited:.0f} s, so the "
-                f"prompt was NOT typed — {how}. {then} `aisquare fleet tell {agent.label} "
-                "…` types its first prompt, which brings the note"
+                f"prompt was NOT typed — {how}. {then} `{_tell(*to)} …` types its first "
+                "prompt, which brings the note"
             )
-            return False
+            return "no"
         _sleep(_POLL_INTERVAL)
-    try:
-        pane.type_line(prompt)
-    except TmuxError as exc:
-        notes.append(f"could not type the prompt: {exc}")
-        return False
-    return True
+    # Claude Code starts once its folder-trust question is answered (measured on 2.1.300),
+    # so the question is not on its screen now; one look all the same, as every prompt a
+    # spawn types takes one (`_past_trust_prompt`): a start the board took for this launch's
+    # cannot type an Enter into "No, exit".
+    if not _past_trust_prompt(pane, notes, folder=folder, to=to):
+        return "no"
+    return _typed_prompt(pane, prompt, notes)
 
 
 def _started_since(session_id: str | None, launched: datetime) -> bool:
@@ -3706,8 +5719,18 @@ def _handed_over(agent: FleetAgent, session: TeamSession | None, now: datetime) 
     )
 
 
-def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+def list_agents(
+    project: ProjectInfo,
+    *,
+    live_only: bool = True,
+    looked_up: dict[str, TeamSession | None] | None = None,
+) -> list[FleetAgentStatus]:
     """The project's agents with their DERIVED state (§5.1).
+
+    ``looked_up``, when given, is filled with the sessions read by their ids for the live
+    rows the project's own board holds none for (:func:`_with_trust_prompts`), ``None`` for
+    an id with no session, for a caller that reads them too: Remote's scan derives those
+    rows again with their sessions, and read them a second time (review of #259, round 14).
 
     Two things changed with #138, both so the store stops lagging the screen:
 
@@ -3729,6 +5752,16 @@ def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAg
     with store_session() as store:
         agents = store.fleet_agents(project.id, live_only=False)
         sessions = {session.id: session for session in store.team_sessions(project.id)}
+        # A live row's session another board keeps (under AISQUARE_TEAM_HUB, every one):
+        # read by its id here, in this one store session, for the folder-trust question
+        # (`_with_trust_prompts`), and for a caller that derives those rows again with it.
+        by_id = {
+            agent.session_id: store.get_session(agent.session_id)
+            for agent in agents
+            if agent.ended_at is None and agent.session_id and agent.session_id not in sessions
+        }
+    if looked_up is not None:
+        looked_up.update(by_id)
     now = _now()
     config = settings()
     # Running is what the panes say, whatever a row's `ended_at` (review r9 of #113, 6).
@@ -3761,7 +5794,7 @@ def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAg
     sessions = _record_failed_turns(
         [placement.agent for placement in placements], sessions, reached, records
     )
-    return [
+    statuses = [
         _status(
             placement,
             sessions.get(placement.row.session_id) if placement.row.session_id else None,
@@ -3771,6 +5804,7 @@ def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAg
         )
         for placement in placements
     ]
+    return _with_trust_prompts(statuses, placements, by_id)
 
 
 def _record_failed_turns(
@@ -3819,7 +5853,7 @@ def _record_failed_turns(
 
 def _end_dead_rows(
     placements: Sequence[Placement],
-    views: Mapping[_Address, dict[str, _PaneView] | None],
+    views: Mapping[_Address, _Observed | None],
     *,
     best_effort: bool = False,
     nudge: bool = True,
@@ -3872,7 +5906,7 @@ def _end_dead_rows(
         for placement in placements
         if placement.row.ended_at is None
         and (observed := _view(placement, views)) is not None
-        and (pane := observed.get(placement.row.id)) is not None
+        and (pane := _pane_in(placement.agent, observed)) is not None
         and pane.dead
     ]
     if not dead:
@@ -3902,13 +5936,13 @@ def _end_dead_rows(
                 ended.append(row)
     if nudge:
         for row in mine:
-            nudge_manager(row.project_id, reason=f"{row.label} exited")
+            nudge_manager(row.project_id, reason=f"{row.label} exited", board=_board_of_row(row))
     return ended
 
 
 def _lingering_windows(
     placements: Sequence[Placement],
-    views: Mapping[_Address, dict[str, _PaneView] | None],
+    views: Mapping[_Address, _Observed | None],
 ) -> dict[tuple[_Address, str], Placed]:
     """``(server, pane id)`` → the ENDED row whose window each dead pane still is, as their
     launch records place them.
@@ -3927,12 +5961,13 @@ def _lingering_windows(
     that shows the 💤 row, ``stop`` that removes the window, ``spawn`` that
     supersedes it — so none of them takes another agent's last screen for a
     row's (review of #138: a reused id let ``stop`` kill another agent's
-    window and report success).
+    window and report success). ``addresses`` as for :func:`_where`.
     """
     owners: dict[tuple[_Address, str], Placed] = {}
     for placement in _placed_only(placements):
         observed = _view(placement, views)
-        pane = observed.get(placement.row.id) if observed else None
+        # No pane, or a held row's (HELD), whose id is another agent's there.
+        pane = _pane_in(placement.agent, observed) if observed else None
         if pane is None or not pane.dead:
             continue
         key = (placement.pane.address, placement.pane.pane_id)
@@ -3947,7 +5982,7 @@ def _lingering_windows(
 
 def _with_lingering_windows(
     placements: Sequence[Placement],
-    views: Mapping[_Address, dict[str, _PaneView] | None],
+    views: Mapping[_Address, _Observed | None],
     running: Collection[str] = (),
 ) -> list[Placement]:
     """Every live row, plus each ended row whose window still stands (see
@@ -3964,7 +5999,7 @@ def _with_lingering_windows(
 
 def _ended_but_running(
     placement: Placement,
-    views: Mapping[_Address, dict[str, _PaneView] | None],
+    views: Mapping[_Address, _Observed | None],
     running: Collection[str] = (),
 ) -> bool:
     """Whether ``placement``'s row is ended in the store while the pane its launch record
@@ -3976,7 +6011,7 @@ def _ended_but_running(
     if placement.row.id in running:  # its window runs, as the panes say (`_running_ids`)
         return True
     observed = _view(placement, views)
-    pane = observed.get(placement.row.id) if observed else None
+    pane = _pane_in(placement.agent, observed) if observed else None
     return pane is not None and not pane.dead
 
 
@@ -4071,7 +6106,9 @@ def status_of(
         session = _record_failed_turns(
             [placement.agent], {session.id: session}, reached, {agent.id: placement.record}
         )[session.id]
-    return _status(placement, session, views, _now())
+    status = _status(placement, session, views, _now())
+    by_id = {agent.session_id: session} if agent.session_id else {}
+    return _with_trust_prompts([status], [placement], by_id)[0]
 
 
 def manager_of(project: ProjectInfo) -> FleetAgent | None:
@@ -4087,7 +6124,14 @@ def manager_of(project: ProjectInfo) -> FleetAgent | None:
     return agent if role == "manager" else None
 
 
-def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = None) -> TellResult:
+def tell(
+    project: ProjectInfo,
+    label: str,
+    text: str,
+    *,
+    sender: str | None = None,
+    agent_id: str | None = None,
+) -> TellResult:
     """Type ``text`` into a WAITING agent; otherwise file it as a board note to it.
 
     Typing into a working agent would interleave with its turn; into one that
@@ -4135,16 +6179,32 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
     agent without one, leaves the board note. The queue is no way in before the first
     prompt: Codex writes the thread's rollout with it, and ``codex queue`` refused the
     thread a fresh TUI had open with "no rollout found for thread id".
+
+    ``agent_id`` pins the row, as for :func:`stop`: the phone's tell means the
+    agent it showed, and a replacement that took the label since (a manager's
+    restart or switch, in another process) is refused, not typed into.
+
+    And the pane must be the row's own (:func:`_its_agent`): on the server that took a row's
+    socket, its pane id is another agent's. A held row read its board's ``waiting`` while
+    that was fresh, and pasted into, that agent got the text and an Enter (review of #259,
+    round 2).
+
+    A paste tmux refused typed nothing, and the text goes to the board instead. Once the
+    paste went through, the text sits at the agent's prompt, and an Enter that did not
+    (:func:`pasted_unsent`) leaves it there, said so, and files no copy: the agent read the
+    note at its next prompt, and the text left in its input box went out with whatever was
+    typed there next (review of #259, round 10, 4/9).
     """
     with store_session() as store:
-        row, record = _live_row(store, project, label)  # its record read once (r6, 11)
+        # Its record read once (r6, 11).
+        row, record = _live_row(store, project, label, agent_id=agent_id)
     placement = resolve_place(row, record)
     why = placement.why if isinstance(placement, Unplaced) else placement.rewritten
     if not isinstance(placement, Placed) or why is not None:
         waits = "it waits on the board for the agent's next prompt"
         _say_refused(project.id, row, "a message told to it is not typed", why or "", waits)
-        how = _file_note(project, label, text, sender)
-        return TellResult(False, f"not typed: {why} — {how}")
+        how = _file_note(project, label, text, sender, agent=row)
+        return TellResult("no", f"not typed: {why} — {how}")
     agent, pane = placement.agent, placement.pane  # its place and its agent: the record's
     status = status_of(agent, record=placement.record)
     adapter = recorded_adapter(agent.agent)
@@ -4159,9 +6219,9 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
         # Quiet, and not at its prompt: Claude Code fires no hook at its folder-trust
         # dialog, whose default an Enter picks — `No, exit` (2.1.300). Only where the
         # board sees its start: the board on, the row naming its session.
-        how = _file_note(project, label, text, sender)
+        how = _file_note(project, label, text, sender, agent=agent)
         return TellResult(
-            False,
+            "no",
             f"its {adapter.label} session has not started (it fires no hook at its "
             f"folder-trust dialog, where an Enter would exit it) — {how}",
         )
@@ -4177,58 +6237,85 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
         ):
             queued = _queue_message(adapter, agent, session, text, placement.record)
             if queued is True:
-                return TellResult(True, "queued for its next turn (it was working)")
+                return TellResult("yes", "queued for its next turn (it was working)")
             if queued is not None:
-                how = _file_note(project, label, text, sender)
-                return TellResult(False, f"{queued} — {how}")
+                how = _file_note(project, label, text, sender, agent=agent)
+                return TellResult("no", f"{queued} — {how}")
         if not _at_its_prompt(pane, agent, session, status.state, _now()):
-            how = _file_note(project, label, text, sender)
+            how = _file_note(project, label, text, sender, agent=agent)
             gone = _socket_gone(pane)
             if gone is not None:
-                return TellResult(False, f"{gone} — {how}")
+                return TellResult("no", f"{gone} — {how}")
             if adapter is None or not adapter.capabilities.idle_prompt_mark:
-                return TellResult(False, f"no confirmed waiting native session — {how}")
+                return TellResult("no", f"no confirmed waiting native session — {how}")
             if status.state == "waiting" and _hooks_fresh(session, _now()):
                 # Its hooks say waiting, its screen does not: a dialog of the agent's
                 # own, opened after its turn ended (Codex's `Switch to gpt-6-luna?`).
                 return TellResult(
-                    False,
+                    "no",
                     f"its hooks say waiting, but its pane is not at {adapter.label}'s empty "
                     "prompt (a dialog of its own is open, where an Enter would answer for "
-                    f"you: `aisquare fleet attach`) — {how}",
+                    f"you: `{project_service.fleet_command('attach', project)}`) — {how}",
                 )
             return TellResult(
-                False,
+                "no",
                 "no confirmed waiting native session and its pane is not at "
                 f"{adapter.label}'s empty prompt — {how}",
             )
     if status.state == "waiting":
-        if not _pane_is_the_agent(pane):
-            how = _file_note(project, label, text, sender)
-            return TellResult(
-                False,
-                "it reads as waiting, but its pane is not running the agent yet (the "
-                f"launcher or a shell is in the foreground) — {how}",
-            )
+        try:
+            facts = pane.facts()
+        except TmuxError:
+            facts = None  # tmux that cannot answer is not a pane to type into either
+        if not _its_agent(agent, facts):
+            how = _file_note(project, label, text, sender, agent=agent)
+            if facts is not None and _outlived(agent, facts.server_started):
+                why = (
+                    "it reads as waiting, but the tmux server at its socket is not the one it "
+                    "was started on, and its pane id there is another agent's"
+                )
+            else:
+                why = (
+                    "it reads as waiting, but its pane is not running the agent yet (the "
+                    "launcher or a shell is in the foreground)"
+                )
+            return TellResult("no", f"{why} — {how}")
         if not started and _at_a_start_dialog(pane, adapter):
             # A start the board cannot see: as quiet at a dialog as at its prompt.
             why = (
                 "its pane shows a dialog of the agent's, where an Enter would answer it "
-                "for you (answer it there: `aisquare fleet attach`)"
+                f"for you (answer it there: `{project_service.fleet_command('attach', project)}`)"
             )
             try:
-                how = _file_note(project, label, text, sender)
+                how = _file_note(project, label, text, sender, agent=agent)
             except FleetError as exc:
                 raise FleetError(f"not typed: {why}; {exc}") from exc
-            return TellResult(False, f"{why} — {how}")
-        try:
-            pane.type_line(text)
-        except TmuxError as exc:
-            how = _file_note(project, label, text, sender)
-            return TellResult(False, f"tmux could not type it ({exc}) — {how}")
-        return TellResult(True, "typed into its pane (it was waiting)")
-    how = _file_note(project, label, text, sender)
-    return TellResult(False, f"it is {status.state} — {how}")
+            return TellResult("no", f"{why} — {how}")
+        told = pane.type_then_enter(
+            text,
+            label,
+            press="press Enter in its pane",
+            done="typed into its pane (it was waiting)",
+        )
+        if not isinstance(told, PaneWrite):
+            return told
+        if told.typed == "maybe":
+            # A wedged server may still run what it was asked (review of #259, round 9, 1/8),
+            # which the remote's trail says as `delivered=maybe` (round 10, 6/9), a note that
+            # could not be filed too: it was the note's error, `delivered=no` (round 11, 6/13).
+            # Whatever the note raised: a store locked past its busy timeout is no `FleetError`
+            # (round 12, 3/9), and the note is a courtesy once the paste may be on its way.
+            try:
+                how = _file_note(project, label, text, sender, agent=agent)
+            except Exception as exc:
+                late = told.late(label, then=" at its prompt, unsent", again="type into it")
+                return TellResult("maybe", f"{late}. It was not filed as a board note: {exc}")
+            late = told.late(label, then=" at its prompt as well, unsent", again="type into it")
+            return TellResult("maybe", f"{how}, and {late}")
+        how = _file_note(project, label, text, sender, agent=agent)
+        return TellResult("no", f"tmux could not type it ({told.error}) — {how}")
+    how = _file_note(project, label, text, sender, agent=agent)
+    return TellResult("no", f"it is {status.state} — {how}")
 
 
 _QUEUE_TIMEOUT = 30.0
@@ -4306,16 +6393,26 @@ def _run_native(argv: list[str], *, env: dict[str, str]) -> subprocess.Completed
     )
 
 
-def _pane_is_the_agent(pane: PlacedPane) -> bool:
-    """Whether the pane's foreground process is the agent right now.
+def _its_agent(agent: FleetAgent, facts: PaneFacts | None) -> bool:
+    """Whether the pane these facts are of runs ``agent``'s own agent now: the agent is in its
+    foreground (:func:`_runs_the_agent`), on the server the row was started on
+    (:func:`_outlived`), from one ``display-message`` (``PaneFacts.server_started``).
+    ``agent`` is the row as its launch record places it (:attr:`Placed.agent`), the
+    facts its placed pane's (:meth:`PlacedPane.facts`).
 
-    Never raises: tmux that cannot answer is not a pane to type into either
-    (and :func:`_derive` has already called such an agent ``unknown``).
+    The one test every path that types into a row's pane puts: :func:`tell`, the manager's
+    nudge (:func:`nudge_manager`), and the remote's keys, quick answers and agent actions
+    (``remote_server._remote_facts_refusal``). ``tell`` asked only the first, and pasted
+    into the pane another server gave a held row's id (review of #259, round 2).
     """
-    try:
-        facts = pane.facts()
-    except TmuxError:
-        return False
+    return (
+        facts is not None and _runs_the_agent(facts) and not _outlived(agent, facts.server_started)
+    )
+
+
+def _runs_the_agent(facts: PaneFacts | None) -> bool:
+    """Whether the pane's foreground process is the agent right now: not dead, and not a
+    shell or the launcher (:func:`_agent_running`). Half of :func:`_its_agent`."""
     return facts is not None and not facts.dead and _agent_running(facts.current_command)
 
 
@@ -4379,15 +6476,52 @@ def _idle_screen(adapter: AgentAdapter, screen: Sequence[str]) -> bool:
     return bool(mark) and last.startswith(mark or "")
 
 
-def _file_note(project: ProjectInfo, label: str, text: str, sender: str | None) -> str:
+def _file_note(
+    project: ProjectInfo,
+    label: str,
+    text: str,
+    sender: str | None,
+    *,
+    agent: FleetAgent | None = None,
+) -> str:
+    """File ``text`` as a board note to ``label`` on the board its agent reads, as its spawn
+    recorded (:func:`_board_of_row`), whoever tells it and from wherever. ``agent`` is the
+    live row ``label`` names, when the caller has it. Resolved from the caller (the phone's
+    tell, ``asq``, a shell without the hub the agent was spawned under), the note went to the
+    project's own board while the agent read the hub's, and was reported filed; with
+    ``[projects] capture`` off, a project board never added refused it though the hub's was
+    added (review of #259, round 26, 2/11). With no live row, it goes where the caller
+    resolves, as before (:func:`_note_board`)."""
     team = _team()
+    board: str | None
+    if agent is not None:
+        board = _board_of_row(agent)
+    else:
+        with store_session() as store:
+            board = _note_board(store, project, label)
     try:
-        event = team.add_note(text, session_ref=sender, to_role=label, cwd=project.root)
-    except team.TeamDisabledError as exc:
+        event = team.add_note(
+            text, session_ref=sender, to_role=label, cwd=project.root, board_id=board
+        )
+    except (team.TeamDisabledError, project_service.NotAdded) as exc:
+        # NotAdded: with no row to name it, the board the note resolves to
+        # (`AISQUARE_TEAM_HUB`'s, or the project's) is one nobody added, with
+        # `[projects] capture` off (review of #259, round 17).
         raise FleetError(f"cannot file the message as a board note: {exc}") from exc
     except KeyError as exc:
         raise FleetError(f"unknown sender session {sender!r}") from exc
     return f"filed as board note #{event.seq} to {label}"
+
+
+def _note_board(store: ContextStore, project: ProjectInfo, label: str) -> str | None:
+    """The board a note to ``label`` in ``project`` goes to, through ``store``: the one the
+    live row ``label`` names recorded (:func:`_board_of_row`); ``None`` with no live row of
+    that label, where the caller's own rule decides. ``fleet tell``'s note
+    (:func:`_file_note`) and the phone's (``remote_server._remote_note_board``) both ask it:
+    each wrote this routing out, and the phone's opened a store for the label and another
+    for its fallback (review of #259, round 31, 6/7)."""
+    agent = store.fleet_agent_by_label(project.id, label, live_only=True)
+    return None if agent is None else _board_of_row(agent)
 
 
 def stop(
@@ -4576,7 +6710,7 @@ def _stop_row(
                 "is listed in a session of its project's — nothing was typed into or killed "
                 "where its row points, and a live window is never killed on a row's word. "
                 "End it in its own window; once it has exited, "
-                f"`aisquare fleet shutdown --forget` ends its row on your word"
+                f"{_forget(project)} ends its row on your word"
             )
         pane, held = found
         session, place = held, None
@@ -4616,22 +6750,33 @@ def _stop_row(
         Either read finds a pane by its id, and on a server that started after
         the row was written that pane is another agent's (:func:`_outlived`):
         the row's own is gone with the server it ran on, which is what ``None``
-        says. Asked of tmux only once a pane has answered, and strictly, as the
-        reads before it.
+        says. When the server started comes in the same answer as the pane
+        (``WindowInfo.server_started``, ``PaneFacts.server_started``): asked in a
+        second ``display-message`` of its own, every look of a stop's grace period
+        cost one more process (review of #259, round 3).
 
         Neither read names the pane when tmux found no server at the socket, and
         a socket file taken from under its server is one of those: that is not a
-        pane that is gone (:func:`_refuse_unless_gone`).
+        pane that is gone (:func:`_refuse_unless_gone`). Nor is a pane on a server
+        younger than the row when the row recorded its server's start: that server
+        took the socket from the row's, which may run on (follow-up of #257), and
+        the same rule refuses it.
         """
         for window in session.panes_or_raise() if session is not None else ():
             if window.pane_id == pane.pane_id:
-                return None if pane.outlived(srv.started_at()) else window
+                if pane.outlived(window.server_started):
+                    if place is not None:
+                        _refuse_unless_gone(project, place, srv)
+                    return None
+                return window
         facts = pane.facts_or_raise()
         if facts is None:
             if place is not None:  # a dead window a row's word found is gone, whatever
-                _refuse_unless_gone(agent.label, place, srv)
+                _refuse_unless_gone(project, place, srv)
             return None
-        if pane.outlived(srv.started_at()):
+        if pane.outlived(facts.server_started):
+            if place is not None:
+                _refuse_unless_gone(project, place, srv)
             return None
         return WindowInfo(
             session=session.name if session is not None else "",
@@ -4717,6 +6862,7 @@ def _stop_row(
         # both then announced the one death (review of #163, round 1). Re-reading a
         # window earlier, in a connection of its own, neither closed the gap nor
         # paid for itself (round 5).
+        _record_the_branch(store, _in_its_recorded_tree(placement))
         ended: FleetAgent | None
         if agent.ended_at is not None:
             # A row ended in the store while its window ran (review r8 of #113, rule B):
@@ -4772,7 +6918,7 @@ def _stop_row(
     # Outside the store session, as ``reap`` does: the nudge types into a pane
     # and must not hold the write lock the woken manager's own hooks will want.
     if not handover and nudge:
-        nudge_manager(ended.project_id, reason=f"{ended.label} exited")
+        nudge_manager(ended.project_id, reason=f"{ended.label} exited", board=_board_of_row(ended))
     return StopReceipt(ended, released, release_failed, killed=killed, withheld=handover)
 
 
@@ -4787,7 +6933,7 @@ def _end_unreachable(project: ProjectInfo, agent: FleetAgent, why: str, nudge: b
         released, release_failed = _release_or_say(store, ended, why="agent stopped")
         _emit_exit(store, ended)
     if nudge:
-        nudge_manager(ended.project_id, reason=f"{ended.label} exited")
+        nudge_manager(ended.project_id, reason=f"{ended.label} exited", board=_board_of_row(ended))
     killed = f"{why}: its row was ended, nothing typed or killed"
     return StopReceipt(ended, released, release_failed, killed=killed)
 
@@ -4823,10 +6969,10 @@ def _exit_withheld(pane: PlacedPane, agent: FleetAgent) -> str | None:
     )
 
 
-def _refuse_unless_gone(label: str, agent: FleetAgent, srv: TmuxServer) -> None:
-    """Raise unless the pane of ``label``, which tmux did not find on ``srv``, is really
-    gone. ``agent`` is the placed row whose launch record holds the server's socket path,
-    boot and time (:attr:`Placed.agent`).
+def _refuse_unless_gone(project: ProjectInfo, agent: FleetAgent, srv: TmuxServer) -> None:
+    """Raise unless ``agent``'s pane, which tmux did not find on ``srv``, is really gone.
+    ``agent`` is the placed row whose launch record holds the server's socket path, boot,
+    time and start (:attr:`Placed.agent`).
 
     tmux's strict reads answer "no such pane" for a live server that does not hold it, and
     the same for no server at the socket, ``error connecting to <path> (No such file or
@@ -4840,7 +6986,7 @@ def _refuse_unless_gone(label: str, agent: FleetAgent, srv: TmuxServer) -> None:
     Anything else is refused, as :func:`_verify_gone` refuses a question it could not put.
     """
     answer = tmux_core.server_may_run(
-        srv, agent.socket_path, agent.boot_id, tmux_core.boot_id(), agent.created_at
+        srv, agent.socket_path, agent.boot_id, agent.created_at, agent.server_started_at
     )
     if answer is None or answer == "answers":
         return
@@ -4848,18 +6994,50 @@ def _refuse_unless_gone(label: str, agent: FleetAgent, srv: TmuxServer) -> None:
         path = agent.socket_path or srv.socket_path()
     except TmuxUnavailable:
         return  # no POSIX uid: no tmux server can exist here
-    if answer == "gone":
+    if answer == "unasked":
         raise FleetError(
-            f"{label!r} was not stopped: its server's socket {path} is gone, so no tmux "
-            "client can reach the server, which may still be running, and its row is left "
-            "live. If it is, send that server SIGUSR1, which makes tmux create its socket "
-            "again, and run this again; if it is not, `aisquare fleet reap --server-down` "
-            "ends its row on your word"
+            f"{agent.label!r} was not stopped: its server's socket {path} could not be asked, "
+            "so it may still be running, and its row is left live; run this again where it "
+            "can be asked"
         )
-    raise FleetError(
-        f"{label!r} was not stopped: its server's socket {path} could not be asked, so "
-        "it may still be running, and its row is left live; run this again where it can be "
-        "asked"
+    why, way = _unreachable_why(answer, path, forget=_forget(project))
+    raise FleetError(f"{agent.label!r} was not stopped: {why}, and its row is left live. {way}")
+
+
+def _forget(project: ProjectInfo) -> str:
+    """``fleet shutdown --forget`` for ``project``, as a way out names it: the operator's word
+    that ends a row whose agent no tmux client reaches."""
+    return f"`{project_service.fleet_command('shutdown', project, '--forget')}`"
+
+
+def _unreachable_why(answer: SocketAnswer, path: Path, *, forget: str) -> tuple[str, str]:
+    """``(why, what to do)`` for a row whose agent may still run though no tmux client
+    reaches its server, as :func:`~aisquare.core.tmux.server_may_run` said (``answer``):
+    its socket file is gone, or another server took its socket. ``forget`` names the
+    operator's word that ends the row, as the command saying this spells it. The one
+    wording ``stop``, ``shutdown`` and ``reap`` give, so an operator reads the same
+    way out from each.
+    """
+    if answer == "another":
+        return (
+            f"another tmux server answers on its socket {path}, started at another time than "
+            "the one it was started on, which lost its socket file and may still be running "
+            "where no tmux client reaches it",
+            "If it is, send that server SIGUSR1 once that socket is free, which makes tmux "
+            f"create its socket again, and run this again; if it is not, {forget} ends its "
+            "row on your word",
+        )
+    if answer == "gone":
+        return (
+            f"its server's socket {path} is gone, so no tmux client can reach the server, "
+            "which may still be running",
+            "If it is, send that server SIGUSR1, which makes tmux create its socket again, "
+            f"and run this again; if it is not, {forget} ends its row on your word",
+        )
+    return (
+        f"its server's socket {path} could not be asked, so its agent may still be running",
+        f"Run this again where it can be asked, or, if it is not running, {forget} ends its "
+        "row on your word",
     )
 
 
@@ -5103,7 +7281,12 @@ def _shutdown_probe(sockets: Sequence[_Address], config: FleetSettings) -> dict[
 
 
 def _unreached(
-    placed: Placed, this_boot: str | None, *, unusable: bool = False
+    placed: Placed,
+    *,
+    unusable: bool = False,
+    answering: bool = False,
+    forget: str = "--forget",
+    reads: tmux_core.SocketReads | None = None,
 ) -> tuple[SocketAnswer, str, str] | None:
     """``(what its socket said, why, what to do)`` for a row whose server did not answer
     through tmux, or could not be asked as tmux is ``unusable`` here, but whose agent may
@@ -5115,13 +7298,31 @@ def _unreached(
     file taken from under its server (round 27 of #257). The socket asked is the one the
     row recorded, where tmux was asked too (:func:`_address`), else where this shell's tmux
     looks; one that answers now came up after tmux was asked. The socket, its path, the
-    boot and the time are the row's launch record's (:func:`resolve_place`).
+    boot, the time and the server's start are the row's launch record's
+    (:func:`resolve_place`).
+
+    ``answering`` is a row on a socket the probe found a server on: asked whether that
+    server is the row's (``"another"``: it started at another time than the one the row
+    recorded, which lost its socket file to it and may run on, follow-up of #257). Any other
+    answer is then ``None`` here and the row is stopped as any other: tmux reached that
+    server, so a socket that read ``"unasked"`` (a connect that timed out on a busy server)
+    or ``"gone"`` (its file removed since) holds no agent out of reach (review of #259,
+    round 5): held, the row spared no session, so the kill phase ended its agent while the
+    report said it was left live. ``forget``
+    is how the way out spells the operator's word: ``shutdown``'s own flag, or the command
+    for ``reap``. ``reads`` is the caller's for every row it asks, so rows on one server ask
+    it once (:class:`~aisquare.core.tmux.SocketReads`).
     """
     agent, srv = placed.agent, placed.pane.server()
     answer = tmux_core.server_may_run(
-        srv, agent.socket_path, agent.boot_id, this_boot, agent.created_at
+        srv,
+        agent.socket_path,
+        agent.boot_id,
+        agent.created_at,
+        agent.server_started_at,
+        reads=reads,
     )
-    if answer is None:
+    if answer is None or (answering and answer != "another"):
         return None
     try:
         path = agent.socket_path or srv.socket_path()
@@ -5135,20 +7336,8 @@ def _unreached(
         )
     if answer == "answers":
         return answer, f"a server came up on its socket {path} after it was asked", "run this again"
-    if answer == "gone":
-        return (
-            answer,
-            f"its server's socket {path} is gone, so no tmux client can reach the server, "
-            "which may still be running",
-            "if it is, send that server SIGUSR1, which makes tmux create its socket again, and "
-            "run this again; if it is not, --forget ends its row on your word",
-        )
-    return (
-        answer,
-        f"its server's socket {path} could not be asked, so its agent may still be running",
-        "run this again where it can be asked, or, if it is not running, --forget ends its row "
-        "on your word",
-    )
+    why, way = _unreachable_why(answer, path, forget=forget)
+    return answer, why, way[0].lower() + way[1:]
 
 
 def _held_rows(
@@ -5159,15 +7348,25 @@ def _held_rows(
 ) -> dict[str, tuple[SocketAnswer, str, str]]:
     """:func:`_unreached` for each placed row on a socket that did not answer, or for every
     placed row where tmux is ``unusable``, by id, where its agent may still run. A row no
-    record places has no socket to ask: :func:`_stop_row` decides it."""
-    this_boot = tmux_core.boot_id()
+    record places has no socket to ask: :func:`_stop_row` decides it.
+
+    And for each placed row on a socket that DID answer, when its record holds its server's
+    start: the server that answers may be another than the row's, which lost its socket
+    file to it and runs on (follow-up of #257). Stopped as any other, the row ended under
+    its agent: its pane read as gone, and the socket answered.
+    """
+    reads = tmux_core.SocketReads()  # one per server, and the boot once, not per row
     held: dict[str, tuple[SocketAnswer, str, str]] = {}
     for _, placements in targets:
         for placed in _placed_only(placements):
             if unusable or not answering.get(placed.pane.address):
-                unreached = _unreached(placed, this_boot, unusable=unusable)
-                if unreached is not None:
-                    held[placed.row.id] = unreached
+                unreached = _unreached(placed, unusable=unusable, reads=reads)
+            elif placed.agent.server_started_at is not None:
+                unreached = _unreached(placed, answering=True, reads=reads)
+            else:
+                continue
+            if unreached is not None:
+                held[placed.row.id] = unreached
     return held
 
 
@@ -5192,9 +7391,19 @@ def _spared_panes(report: ShutdownReport, placements: Mapping[str, Placement]) -
     (``placements``, by row id): a session holding one is not taken down. A row no record
     places is spared by the pane id its row names, on any server: that word only ever
     keeps a session up. Unspared, ``--all``'s sweep killed the window of an agent the same
-    report told the operator to end in its own window (review r8 of #113, finding 10)."""
+    report told the operator to end in its own window (review r8 of #113, finding 10).
+
+    Not a row left live as held (:attr:`ShutdownRow.held`): its agent may run where no
+    client reaches it, and its pane is on no server this run asks. A row another server
+    answers for spared its project's session on that server, which the held agent does
+    not run on, with every window there and the server itself (review of #259, round 3).
+    A row whose silent socket answers now (``"answers"``) is not held so, and is spared: its
+    pane may be on that server, and a late row's take-down there killed the session of an
+    agent the report said it left live (review of #259, round 6, 3/10)."""
     spared: Spared = set()
     for row in report.failed:
+        if row.held:
+            continue
         placement = placements.get(row.agent.id)
         if isinstance(placement, Placed):
             spared.add((placement.pane.address, placement.pane.pane_id))
@@ -5237,8 +7446,8 @@ def _kill_fleet_sessions(
     them. ``--all`` also sweeps every other ``asq-`` session tmux lists on a server in scope
     (:func:`_swept_sessions`).
 
-    A session holding a row this LEFT LIVE is spared. Killing it would end an
-    agent whose pane ``_verify_gone`` had just confirmed alive, and leave its
+    A session holding a row this LEFT LIVE is spared (:func:`_spared_panes`). Killing it
+    would end an agent whose pane ``_verify_gone`` had just confirmed alive, and leave its
     live row on a dead pane — the state this whole command exists to end.
     """
     placements = {
@@ -5248,7 +7457,7 @@ def _kill_fleet_sessions(
     spared = {
         (placement.pane.address, placement.row.project_id)
         for row in report.failed
-        if isinstance(placement := placements.get(row.agent.id), Placed)
+        if not row.held and isinstance(placement := placements.get(row.agent.id), Placed)
     }
     taken: dict[_Address, set[str]] = {}
     ended = {project.id: rows for project, rows in lingering}
@@ -5633,6 +7842,66 @@ def _row_that_went_away(agent: FleetAgent, reason: str, report: ShutdownReport) 
     _not_down(report, agent.project_id)
 
 
+@dataclass(frozen=True)
+class _Verdict:
+    """What ``shutdown`` does with one row (:func:`_shutdown_verdict`)."""
+
+    end: Literal["stop", "live", "lost"]
+    """``stop`` it through its server; leave it ``live``; or record it ``lost`` unstopped."""
+    reason: str = ""
+    """Why, as the run reports it: a row left live's reason (``ShutdownReport.failed``), or
+    the one a row recorded lost is ended with (``ShutdownReport.recorded``)."""
+    plan: str = ""
+    """Why, as the plan shows it (``ShutdownPlan.held``, ``ShutdownPlan.lost_why``)."""
+    held: bool = False
+    """A row left ``live`` as one whose agent may run where no tmux client reaches it
+    (:attr:`ShutdownRow.held`): never one held as ``"answers"``, a server that came up on
+    its socket since the probe, where its pane may be."""
+
+
+def _shutdown_verdict(
+    agent: FleetAgent,
+    address: _Address,
+    answering: Mapping[_Address, bool],
+    held: Mapping[str, tuple[SocketAnswer, str, str]],
+    *,
+    forget: bool,
+    unusable: str | None,
+) -> _Verdict:
+    """What ``shutdown`` does with ``agent``'s row, the one verdict its plan shows and its run
+    carries out (:func:`shutdown_plan`, :func:`_shutdown_row`), so the two cannot disagree.
+
+    Stopped where its server answers. Recorded lost where none answers, unless its agent may
+    still run (``held``, :func:`_held_rows`): left live then, saying why and what to do, or
+    under ``forget`` ended on the operator's word, but never one whose socket answers (round
+    28 of #257). A row held on an answering socket is one whose server is another than the
+    one that answers there: left live, or ended on the word, as a row on a silent socket
+    is, and never stopped through the other server. The plan decided that last case apart:
+    under ``--forget`` it listed such a row neither as held nor as lost, so it said
+    ``stopped (%3)``, the other server's pane id, while the run recorded it lost (review of
+    #259, round 3; round 29 of #257 was the same mismatch for silent sockets).
+
+    ``address`` is where the row's launch record places its server (:attr:`PlacedPane.address`);
+    a row no record places has no verdict here (:func:`_shutdown_row`).
+    """
+    unreached = held.get(agent.id)
+    if unusable is None and answering.get(address) and unreached is None:
+        return _Verdict("stop")
+    if unreached is not None and (unreached[0] == "answers" or not forget):
+        said, why, way = unreached
+        kept = ", which --forget does not end as a server answers there" if forget else ""
+        return _Verdict(
+            "live", f"{why} — left live{kept}: {way}", f"{why} — {way}", said != "answers"
+        )
+    if unusable is not None:
+        reason = f"ended on your word (--forget), unchecked: {unusable}"
+    elif unreached is None:
+        reason = f"no server answered on socket '{address}'"
+    else:
+        reason = f"ended on your word (--forget): {unreached[1]}"
+    return _Verdict("lost", reason, reason)
+
+
 def _shutdown_row(
     project: ProjectInfo,
     placement: Placement,
@@ -5646,11 +7915,10 @@ def _shutdown_row(
     forget: bool = False,
     beside: Sequence[Placement] = (),
 ) -> None:
-    """Stop one row where its server answers; record it lost where it does not, unless its
-    agent may still run (``held``, :func:`_unreached`): left live then, saying why and what
-    to do, or under ``forget`` ended on the operator's word. Never one whose socket answers:
-    a server listens there, which is no word's to deny, and ``uninstall`` counts it, so
-    ending it let the next ``uninstall`` go on under it (round 28 of #257).
+    """Stop one row, leave it live or record it lost, as :func:`_shutdown_verdict` says, the
+    verdict the plan showed: never ending one whose socket answers, as a server listens
+    there, which is no word's to deny, and ``uninstall`` counts it, so ending it let the
+    next ``uninstall`` go on under it (round 28 of #257).
 
     ``stop``'s refusal is not swallowed. It refuses on exactly one verdict —
     ``_verify_gone`` looked again and the pane is VERIFIABLY still alive — which
@@ -5680,20 +7948,24 @@ def _shutdown_row(
         if _cannot_run(agent):
             _record_lost(agent, _from_before_this_boot(placement), report)
             return
-    address = placement.pane.address if isinstance(placement, Placed) else None
-    if address is not None and (unusable is not None or not answering.get(address)):
-        unreached = (held or {}).get(agent.id)
-        if unreached is not None and (unreached[0] == "answers" or not forget):
-            _, why, way = unreached
-            kept = ", which --forget does not end as a server answers there" if forget else ""
-            report.failed.append(ShutdownRow(agent, f"{why} — left live{kept}: {way}"))
-            _not_down(report, agent.project_id)
-        elif unusable is not None:
-            _record_lost(agent, f"ended on your word (--forget), unchecked: {unusable}", report)
-        elif unreached is None:
-            _record_lost(agent, f"no server answered on socket '{address}'", report)
-        else:
-            _record_lost(agent, f"ended on your word (--forget): {unreached[1]}", report)
+    verdict = (
+        _shutdown_verdict(
+            agent,
+            placement.pane.address,
+            answering,
+            held or {},
+            forget=forget,
+            unusable=unusable,
+        )
+        if isinstance(placement, Placed)
+        else _Verdict("stop")  # stopped only where `_stop_row` finds its dead window
+    )
+    if verdict.end == "live":
+        report.failed.append(ShutdownRow(agent, verdict.reason, held=verdict.held))
+        _not_down(report, agent.project_id)
+        return
+    if verdict.end == "lost":
+        _record_lost(agent, verdict.reason, report)
         return
     try:
         # The snapshot's row is the row stopped — THAT pane, whatever label a
@@ -5730,7 +8002,7 @@ def _cannot_run(row: FleetAgent) -> bool:
     with suppress(TmuxError):
         return (
             tmux_core.server_may_run(
-                server(), row.socket_path, row.boot_id, tmux_core.boot_id(), row.created_at
+                server(), row.socket_path, row.boot_id, row.created_at, row.server_started_at
             )
             is None
         )
@@ -5870,7 +8142,7 @@ def _record_late_rows(
                         agent,
                         f"it was spawned during the shutdown and {placement.why}, so no pane "
                         "of its may be asked about or killed — its row is left live; end it "
-                        "in its own window, then `aisquare fleet shutdown --forget` ends it",
+                        f"in its own window, then {_forget(current)} ends it",
                     )
                 )
                 _not_down(report, agent.project_id)
@@ -5889,15 +8161,24 @@ def _record_late_rows(
                 _not_down(report, agent.project_id)
                 continue
             if reachable is False:
-                # The rule every other row is held to (`_unreached`); never forgotten, as no
-                # plan the operator saw named it.
-                unreached = _unreached(placement, tmux_core.boot_id())
-                if unreached is not None:
+                # The rule every other row is held to (`_unreached`), and the one verdict on
+                # it (`_shutdown_verdict`), held included; never forgotten, as no plan the
+                # operator saw named it (review of #259, round 7, 7/9).
+                unreached = _unreached(placement)
+                verdict = _shutdown_verdict(
+                    agent,
+                    address,
+                    {address: False},
+                    {} if unreached is None else {agent.id: unreached},
+                    forget=False,
+                    unusable=None,
+                )
+                if verdict.end == "live":
                     report.failed.append(
                         ShutdownRow(
                             agent,
-                            f"it was spawned during the shutdown; {unreached[1]} — left live: "
-                            f"{unreached[2]}",
+                            f"it was spawned during the shutdown; {verdict.reason}",
+                            held=verdict.held,
                         )
                     )
                     _not_down(report, agent.project_id)
@@ -5961,9 +8242,7 @@ def _record_late_rows(
     _retire_late_panes(late_dead, report, _spared_panes(report, placed_by_id))
 
 
-def _clear_pause(
-    targets: Sequence[tuple[ProjectInfo, list[Placement]]], report: ShutdownReport
-) -> None:
+def _clear_pause(projects: Sequence[ProjectInfo], report: ShutdownReport) -> None:
     """Clear each project's ``fleet-paused`` signal: the fleet it paused is gone.
 
     Board state survives shutdown by design, which is what makes this signal a
@@ -5978,28 +8257,36 @@ def _clear_pause(
     A signal this could not READ or WRITE is reported rather than passed over —
     the pause outlives the shutdown either way, and the operator has to know.
 
-    ONE store connection for the whole pass. ``is_paused`` and ``resume`` each
-    open their own — connect, WAL switch, migrations — so an ``--all`` shutdown
+    ONE store connection for the whole pass. A read of the pause and ``resume`` each
+    opened their own — connect, WAL switch, migrations — so an ``--all`` shutdown
     paid two opens per project here on top of the rows'; the signals are read
     and cleared through the store this holds, by project id
-    (:func:`services.team.read_signal_in`, :func:`services.team.set_signal_in`),
+    (:func:`services.team.board_signals_in`, :func:`services.team.set_signals_in`),
     which also keeps the shutdown from contending with the hooks of the agents
     it is still stopping (review of #203, round 4).
+
+    The signals are read once for the pass, and each project's pause is found among them by
+    its name (:func:`_pause_where_on`), so no ``git`` runs. Its boards were worked out per
+    project from its checkout's (:func:`_pause_homes`, a ``git rev-parse`` with a 5 s
+    timeout), serially, for every visible project, every directory 0.8.0 captured included,
+    each for a pause it almost never has (review of #259, round 30, 7/8, and round 31, 5/7).
     """
+    if not orchestrator.team_enabled():
+        return  # no board, no signals: nothing is paused anywhere
     team = _team()
     try:
         with store_session() as store:
-            # `is_paused`/`resume` resolve the board through `ensure_project`,
-            # which CLEARS a registration's tombstone. `shutdown --all` reads
+            # A pause resolved through `ensure_project` CLEARED a registration's
+            # tombstone (review of #121, round 7). `shutdown --all` reads
             # past tombstones on purpose (a forgotten project can hold live
             # rows), so touching the pause of one would silently undo `project
-            # forget` (review of #121, round 7). A forgotten project's pause is
+            # forget`. A forgotten project's pause is
             # nobody's standing order: skipped, not read. A CAPTURED project's
             # pause is one like any other (#139), hence `all=True`: the default
             # list would skip every pause set where nothing was ever onboarded,
             # and the shutdown would leave it on with nothing saying so.
             visible = {p.id for p in store.list_projects(all=True)}
-            failures = _reconcile_pauses(store, team, targets, visible, report)
+            failures = _reconcile_pauses(store, team, projects, visible, report)
     except Exception as exc:
         # The store `_record_late_rows` already found locked is still locked (or
         # a fresh failure). The report is owed to the caller regardless, and this
@@ -6017,13 +8304,15 @@ def _clear_pause(
 def _reconcile_pauses(
     store: ContextStore,
     team: Any,
-    targets: Sequence[tuple[ProjectInfo, list[Placement]]],
+    projects: Sequence[ProjectInfo],
     visible: Collection[str],
     report: ShutdownReport,
 ) -> list[str]:
-    """The per-project half of :func:`_clear_pause`; returns what could not be done.
+    """The per-project half of :func:`_clear_pause`, of each visible project, its pause found
+    by name among the signals read once for the pass (:func:`_pause_where_on`); returns what
+    could not be done.
 
-    Per-project read/write failures are surfaced the way the lookup's is. A
+    Read/write failures are surfaced the way the lookup's is. A
     blanket ``suppress(Exception)`` here left the signal ON with
     ``paused_kept=[]``, ``pause_scan_failed=null`` and exit 0 — the next manager
     still under orders to spawn nothing, and nothing in the report saying so
@@ -6032,20 +8321,37 @@ def _reconcile_pauses(
     run on a project with no board still reports clean.
     """
     failures: list[str] = []
-    for project, _ in targets:
+    unread: Exception | None = None
+    unreadable: list[tuple[str, str]] = []
+    try:
+        signals = team.board_signals_in(store, unreadable=unreadable)
+    except team.TeamDisabledError:
+        return failures  # no board, no signals: nothing is paused anywhere
+    except Exception as exc:
+        signals, unread = {}, exc
+    for project in projects:
         if project.id not in visible:
             continue
-        try:
-            paused = _pause_is_on(store, project)
-        except team.TeamDisabledError:
-            return failures  # no board, no signals: nothing is paused anywhere
-        except Exception as exc:
-            # The signal could not even be READ, so nothing is known about it:
-            # the failure is named and the project is not confirmed down, and
-            # neither `paused_kept` nor `paused_cleared` claims anything.
-            failures.append(f"{_name(project)}: could not be read ({type(exc).__name__}: {exc})")
+        if unread is not None:
+            # The signals could not even be READ, so nothing is known about this
+            # project's: the failure is named and the project is not confirmed down,
+            # and neither `paused_kept` nor `paused_cleared` claims anything.
+            why = f"{type(unread).__name__}: {unread}"
+            failures.append(f"{_name(project)}: could not be read ({why})")
+            report.pause_unsettled.append(project)
             _not_down(report, project.id)
             continue
+        # A blob of its own pause that does not parse: whether it is on is not known. Another
+        # project's is no concern of this one's (review of #259, round 32, 6/9).
+        broken = _pause_where_on(project, unreadable)
+        if broken:
+            named = ", ".join(f"{name} on {board}" for board, name in broken)
+            failures.append(f"{_name(project)}: could not be read ({named})")
+            report.pause_unsettled.append(project)
+            _not_down(report, project.id)
+            continue
+        # Its own pause wherever it is on: under a hub, never another project's on the board.
+        paused = _pause_where_on(project, signals)
         if not paused:
             continue
         if project.id in report.incomplete_projects:
@@ -6056,11 +8362,12 @@ def _reconcile_pauses(
             report.paused_kept.append(_name(project))
             continue
         try:
-            _clear_pause_signal(store, project)
+            _clear_pause_signal(store, paused)
         except Exception as exc:
             # The signal was just read ON and the clear did not happen: it IS
             # kept, so it is named as kept as well as reported failed.
             failures.append(f"{_name(project)}: could not be cleared ({type(exc).__name__}: {exc})")
+            report.pause_unsettled.append(project)
             report.paused_kept.append(_name(project))
             _not_down(report, project.id)
             continue
@@ -6077,6 +8384,9 @@ def shutdown_plan(project: ProjectInfo | None = None, *, forget: bool = False) -
     before anything is printed. A session query that fails AFTER a good probe refuses
     the same way: the operator confirms this list, so a list missing a session
     the run would still kill is worse than no list at all.
+
+    Each row's disposition is the run's own verdict (:func:`_shutdown_verdict`), so what
+    the plan says it stops, leaves live or records lost is what the run does with it.
     """
     config = settings()
     unusable = _shutdown_tmux(config, forget=forget)
@@ -6085,24 +8395,20 @@ def shutdown_plan(project: ProjectInfo | None = None, *, forget: bool = False) -
         targets, _ = _still_running(targets, _lately_ended(targets), say=False)
     rows = [placement.agent for _, placements in targets for placement in placements]
     if unusable is not None:
-        held_live = {
-            agent_id: f"{why} — {way}"
-            for agent_id, (answer, why, way) in _held_rows(targets, {}, unusable=True).items()
-            if answer == "answers"  # what --forget may not end (_shutdown_row)
-        }
-        return ShutdownPlan(
-            projects=[current for current, placements in targets if placements],
-            agents=rows,
-            tmux_unusable=unusable,
-            held=held_live,
-            # Every other row is ended unchecked (`_record_lost`), so the plan says so: a
-            # script reading `--json`'s `lost` saw nothing being ended (round 29 of #257).
-            lost={
-                placement.row.id: _where(placement)
-                for _, placements in targets
-                for placement in placements
-                if placement.row.id not in held_live
-            },
+        # Every row but those whose socket answers is ended unchecked (`_record_lost`), so
+        # the plan says so: a script reading `--json`'s `lost` saw nothing being ended
+        # (round 29 of #257). Nothing is asked of tmux, and no session is killed.
+        return _planned(
+            ShutdownPlan(
+                projects=[current for current, placements in targets if placements],
+                agents=rows,
+                tmux_unusable=unusable,
+            ),
+            targets,
+            {},
+            _held_rows(targets, {}, unusable=True),
+            forget=forget,
+            unusable=unusable,
         )
     sockets = _shutdown_sockets(targets, config)
     _refuse_from_inside(sockets, config)
@@ -6138,33 +8444,18 @@ def shutdown_plan(project: ProjectInfo | None = None, *, forget: bool = False) -
             f"could not list the fleet's sessions ({exc}) — refusing to show a plan that may "
             "be short of what a shutdown would kill; try again once tmux answers"
         ) from exc
-    held = {
-        agent_id: (why, way)
-        for agent_id, (answer, why, way) in _held_rows(targets, answering).items()
-        if not forget or answer == "answers"  # what --forget may not end (_shutdown_row)
-    }
-    # A row no record places whose agent cannot be running is recorded lost (`_shutdown_row`).
-    lost = {
-        placement.row.id: _where(placement)
-        for _, placements in targets
-        for placement in placements
-        if isinstance(placement, Unplaced) and _cannot_run(placement.row)
-    }
-    return ShutdownPlan(
-        projects=[current for current, placements in targets if placements],
-        agents=rows,
-        sessions=sessions,
-        absent_sockets=[str(socket) for socket in sockets if not answering[socket]],
-        held={agent_id: f"{why} — {way}" for agent_id, (why, way) in held.items()},
-        lost={
-            **lost,
-            **{
-                placement.row.id: str(placement.pane.address)
-                for _, placements in targets
-                for placement in _placed_only(placements)
-                if not answering[placement.pane.address] and placement.row.id not in held
-            },
-        },
+    return _planned(
+        ShutdownPlan(
+            projects=[current for current, placements in targets if placements],
+            agents=rows,
+            sessions=sessions,
+            absent_sockets=[str(socket) for socket in sockets if not answering[socket]],
+        ),
+        targets,
+        answering,
+        _held_rows(targets, answering),
+        forget=forget,
+        unusable=None,
     )
 
 
@@ -6174,6 +8465,50 @@ def _where(placement: Placement) -> str:
     if isinstance(placement, Placed):
         return str(placement.pane.address)
     return f"nowhere: {placement.why}"
+
+
+def _planned(
+    plan: ShutdownPlan,
+    targets: Sequence[tuple[ProjectInfo, list[Placement]]],
+    answering: Mapping[_Address, bool],
+    held: Mapping[str, tuple[SocketAnswer, str, str]],
+    *,
+    forget: bool,
+    unusable: str | None,
+) -> ShutdownPlan:
+    """``plan`` with each of its rows' verdict (:func:`_shutdown_verdict`): those the run
+    leaves live in :attr:`ShutdownPlan.held`, those it records lost in
+    :attr:`ShutdownPlan.lost`, each with why; every other row is stopped. A row no launch
+    record places is recorded lost unchecked where tmux cannot be used, or when its agent
+    cannot be running; otherwise it is stopped where :func:`_stop_row` finds its window,
+    as :func:`_shutdown_row` does."""
+    for _, placements in targets:
+        for placement in placements:
+            agent = placement.row
+            if isinstance(placement, Unplaced):
+                if unusable is not None:
+                    why = f"ended on your word (--forget), unchecked: {unusable}"
+                elif _cannot_run(agent):
+                    why = _from_before_this_boot(placement)
+                else:
+                    continue
+                plan.lost[agent.id] = _where(placement)
+                plan.lost_why[agent.id] = why
+                continue
+            verdict = _shutdown_verdict(
+                agent,
+                placement.pane.address,
+                answering,
+                held,
+                forget=forget,
+                unusable=unusable,
+            )
+            if verdict.end == "live":
+                plan.held[agent.id] = verdict.plan
+            elif verdict.end == "lost":
+                plan.lost[agent.id] = _where(placement)
+                plan.lost_why[agent.id] = verdict.plan
+    return plan
 
 
 def shutdown(
@@ -6188,7 +8523,7 @@ def shutdown(
     The one place a row may be ended without tmux confirming its pane died. Every
     other path — ``stop``, ``reap`` — refuses that: a server that cannot be reached
     is not evidence of a dead pane, and ending a live agent's row hides it from
-    every listing and hands its worktree to ``_remove_merged_worktrees``. Here the
+    every listing and hands its worktree to ``_remove_finished_worktrees``. Here the
     ambiguity is resolved by the operator, not by inference: they have ordered the
     fleet DOWN. Measured 2026-09-10 without this command — the operator ran ``tmux
     -L asq kill-server`` by hand (the only off switch they had), every manager
@@ -6278,7 +8613,7 @@ def shutdown(
             phase = "during the final scan for rows spawned during the shutdown"
             _record_late_rows(project, handled, report, config, snapshot=targets)
             phase = "while reconciling the fleet-paused signals"
-            _clear_pause(targets, report)
+            _clear_pause([current for current, _ in targets], report)
 
         try:
             for current, placements in targets:
@@ -6353,6 +8688,8 @@ def switch(
     reason: str | None = None,
     spawned_by: str = "user",
     automatic: bool = False,
+    agent_id: str | None = None,
+    before_stop: Callable[[], None] | None = None,
 ) -> SwitchReceipt:
     """Move a running agent to another Claude account — the hand-over of #146.
 
@@ -6405,9 +8742,20 @@ def switch(
     (:func:`_refuse_a_replay_that_cannot_start`), the role, a task that is
     closed — is refused before the agent is stopped, as :func:`restart`
     refuses it.
+
+    ``agent_id`` pins the row, as for :func:`stop` and :func:`restart`: the
+    phone's Switch means the agent it showed, and a manager's switch or the
+    automatic hand-over runs in another process, which can hand the label to
+    a replacement between the phone's check and this read. By label, that
+    replacement was stopped and moved again (sweep of #243). ``before_stop``
+    is the caller's last check, asked once every refusal above has passed and
+    before anything is marked or stopped. It raises to refuse, and nothing has
+    been done then. The phone's dialog guard is one: the Escape it may send
+    must not come before a refusal this function makes up front, such as a
+    ``to`` that names no account.
     """
     with store_session() as store:
-        agent = _live_agent(store, project, label)
+        agent = _live_agent(store, project, label, agent_id=agent_id)
         # First: every refusal after this one reads the role, the agent and the account,
         # and they are the launch record's (`core.launch_seal`), never the row's.
         record = _launch_record(project, agent, "switch")
@@ -6419,14 +8767,18 @@ def switch(
             # `/exit` — and started a replacement of its own, the first failed on its
             # own row, and its take-back wrote a stale state over the second's mark
             # (review of #163, round 2).
-            raise _in_hand_over("switch", label)
+            raise _in_hand_over(project, "switch", label)
         # `spawn`'s refusal for the task (done, dropped, gone from the board), asked
         # before anything is stopped, as `restart` asks it. After the stop it left the
         # agent stopped and nothing started: a row spawned before rule 3 still names
         # its closed task until its next briefing, and switching one always lost it
         # (review of #203, final round, FLEET-3).
-        task = _task_for(store, project, agent.task_id)
-        recent = _handoff_events(store, project, agent)
+        # On the board the replacement will read (`_board_and_hub`), which a row 0.8.0
+        # spawned may not have read: asked after the stop, the task was refused with the
+        # agent already down (review of #259, round 27, 2/7).
+        board_and_hub = _board_and_hub(store, project, agent, session)
+        task = _task_for(store, board_and_hub[0], agent.task_id)
+        recent = _handoff_events(store, agent)
     _require_role(record.role)  # `spawn`'s first refusal, before the stop as the task's
     current = record.account_slot
     notes: list[str] = []
@@ -6459,7 +8811,8 @@ def switch(
             raise FleetError(
                 f"no account under the line for {label!r}{where} — every other account is "
                 "over switch_at or unreadable; it stays parked until a reset, or "
-                f"`aisquare fleet switch` moves it by hand{said}"
+                f"`{project_service.fleet_command('switch', project, label)}` moves it by "
+                f"hand{said}"
             )
         raise FleetError(
             f"no other account with headroom for {label!r}{where}"
@@ -6484,7 +8837,9 @@ def switch(
             f"{claude_accounts_core.agent_label(kind)} cannot resume a thread under another "
             "account's home — the replacement starts fresh with a hand-off prompt"
         )
-    _refuse_a_replay_that_cannot_start(project, record, target.config_dir)
+    _refuse_a_replay_that_cannot_start(project, record, target.config_dir, branch=agent.branch)
+    if before_stop is not None:
+        before_stop()
     # A hand-over whether it resumes or not: the agent is coming back, so its
     # claims wait for the replacement and no exit is announced. A fresh start
     # used to stop the agent as `fleet stop` does — the task went back to the
@@ -6502,7 +8857,7 @@ def switch(
     with store_session() as store:
         _live_agent(store, project, label, agent_id=agent.id)
     if session is not None:
-        _mark_handing_over(agent, session, "switch", label)
+        _mark_handing_over(project, agent, session, "switch", label)
     try:
         handed_over = stop(project, label, handover=True, agent_id=agent.id)
     finally:
@@ -6550,6 +8905,7 @@ def switch(
             spawned_by=spawned_by,
             # The hook's hand-over is nobody's add (#139): `spawn`'s `onboard`.
             onboard=not automatic,
+            board_and_hub=board_and_hub,
         )
     except Exception:
         if handed_over.withheld:
@@ -6557,21 +8913,26 @@ def switch(
         raise
     notes.extend(more)
     failures.extend(receipt.failures)
-    from_name = (
-        f"slot {current}"
-        if current is not None
-        else "its shell's claude"
-        if kind == claude_accounts_core.AGENT
-        else f"its shell's {claude_accounts_core.agent_label(kind).lower()}"
-    )
-    how = _how_started(resumed, typed=bool(receipt.prompt_typed))
+    labels = claude_accounts_service.slot_labels() if current is not None else {}
+    if current is None:
+        from_name = (
+            "its shell's claude"
+            if kind == claude_accounts_core.AGENT
+            else f"its shell's {claude_accounts_core.agent_label(kind).lower()}"
+        )
+    else:  # by name, as the target is: an account renamed is that name here too
+        from_name = (
+            f"{labels[current]} (slot {current})" if current in labels else f"slot {current}"
+        )
+    typed = receipt.prompt_typed or "no"
+    how = _how_started(resumed, typed=typed)
     why = f" ({reason})" if reason else ""
     # The suppression is entered FIRST: a store that cannot be opened is the courtesy
     # lost too, never a moved agent reported as not moved (review of #205, fourth round).
     with contextlib.suppress(Exception), store_session() as store:  # the courtesy, not the record
         _team()._emit(
             store,
-            project.id,
+            _board_of_row(receipt.agent),
             "switched",
             f"{label} moved from {from_name} to {claude_accounts_core.label(target)} "
             f"(slot {target.slot}){why} — {how}",
@@ -6586,7 +8947,7 @@ def switch(
         tmux_session=receipt.tmux_session,
         notes=notes,
         failures=failures,
-        prompt_typed=bool(receipt.prompt_typed),
+        prompt_typed=typed,
     )
 
 
@@ -6606,6 +8967,7 @@ def _respawn(
     takes_over: bool = False,
     permission_mode: str | None = None,
     onboard: bool = True,
+    board_and_hub: tuple[str, str],
 ) -> tuple[SpawnReceipt, bool, list[str]]:
     """Start ``agent`` again — same label, role, task and worktree — resuming when it can.
 
@@ -6629,7 +8991,8 @@ def _respawn(
     replacement's spec records. ``onboard`` is :func:`spawn`'s. A worktree
     agent's replacement works in the same tree, as it stands: its branch is
     the one the agent was on, whatever its task or the codename says now
-    (``spawn(own_worktree=…)``).
+    (``spawn(own_worktree=…)``). ``board_and_hub`` is the board it reads and its window's
+    hub, asked before the stop (:func:`_board_and_hub`).
     """
     notes: list[str] = []
     # Read again after the stop, which can outlast its agent's last hook: the replay
@@ -6675,6 +9038,8 @@ def _respawn(
         # grace): the refusal names no `--bin`, which no command that gets here takes.
         bin_flag=False,
         own_worktree=Path(record.cwd) if record.worktree else None,
+        own_branch=agent.branch,
+        board_and_hub=board_and_hub,
         session=record.session if resume is not None else None,
     )
     # Said once the replacement is up, for what it really took from the record: a
@@ -6804,6 +9169,7 @@ def _refuse_a_replay_that_cannot_start(
     record: launch_seal.LaunchRecord,
     home: Path | None = None,
     permission_mode: str | None = None,
+    branch: str | None = None,
 ) -> None:
     """Raise now what replaying ``record`` would refuse — BEFORE its agent is stopped.
 
@@ -6830,8 +9196,18 @@ def _refuse_a_replay_that_cannot_start(
     --permission-mode``), the replacement's sandbox is that mode's, not the recorded one:
     a read-only seat restarted as a workspace one was let through, then refused after the
     stop, and ``full``, which no launch refuses, was refused (r14, finding 5).
+
+    And every other refusal :func:`spawn` gives before a window opens: a bound file it
+    cannot read, and a socket path a running server lost (:func:`_refuse_a_freed_socket`).
+    That one was asked only inside the spawn, after the stop had typed ``/exit``: an agent
+    whose own server listens at another path was stopped, and its replacement refused,
+    which left it down (review of #259, round 2). And a worktree that is gone with no
+    branch to make it again on (:func:`_branch_of_a_gone_tree`, which writes nothing), in
+    ``project``'s root; ``branch`` is the one its row recorded the tree on. A refusal names
+    ``project`` in the commands it gives.
     """
     replayed = _launch_binary(
+        project,
         record.role,
         binary=None,
         spec=record.spec,
@@ -6867,6 +9243,13 @@ def _refuse_a_replay_that_cannot_start(
             account or selected.config_dir,
             _window_path(None, selected.profile.env),
         )
+    _refuse_an_env_file_it_cannot_read(record.role)
+    tree = Path(record.cwd)
+    if record.worktree and not tree.exists():
+        _branch_of_a_gone_tree(project.root, tree, branch)
+    config = settings()
+    srv = server(config)
+    _refuse_a_freed_socket(srv, config, srv.listener())
 
 
 def _launch_record(project: ProjectInfo, agent: FleetAgent, verb: str) -> launch_seal.LaunchRecord:
@@ -6906,11 +9289,13 @@ def _launch_record(project: ProjectInfo, agent: FleetAgent, verb: str) -> launch
         way_out = "spawn a new agent"
     elif isinstance(record, str):
         way_out = (
-            f"end its agent in its own window, then `aisquare fleet stop {agent.label}` "
+            "end its agent in its own window, then "
+            f"`{project_service.fleet_command('stop', project, agent.label)}` "
             "removes the window and ends its row, and spawn a new agent"
         )
     else:
-        way_out = f"`aisquare fleet stop {agent.label}`, then spawn a new agent"
+        stop_it = project_service.fleet_command("stop", project, agent.label)
+        way_out = f"`{stop_it}`, then spawn a new agent"
     _say_refused(project.id, agent, f"cannot {verb} it", why, way_out)
     raise LaunchRefused(
         f"cannot {verb} {agent.label!r}: {why} — a replacement takes nothing from the store "
@@ -6969,6 +9354,17 @@ def _exit_command(agent: FleetAgent) -> str:
     return adapter.exit_command
 
 
+def _refuse_an_env_file_it_cannot_read(role: str) -> None:
+    """Raise now what the window's ``aisquare launch`` would refuse: a variable ``role``'s
+    binding reads from a file that cannot be read or holds nothing
+    (``harness.resolve_profile``), such as a reviewer's ``GH_TOKEN``. Said by the spawn,
+    restart or switch, before a window opens or a running agent is stopped, rather than by
+    a window that ends as it starts."""
+    refusal = harness.resolve_profile(role).refusal
+    if refusal is not None:
+        raise FleetError(refusal)
+
+
 @dataclass
 class RestartReceipt:
     """What ``fleet restart`` did: the row it replaced, the one it started, and how."""
@@ -6980,8 +9376,13 @@ class RestartReceipt:
     """True when the agent was still alive and had to be stopped first."""
     tmux_session: str
     notes: list[str] = field(default_factory=list)
-    prompt_typed: bool = True
+    prompt_typed: Typed = "yes"
     """Whether the replacement's first line reached its pane, as on :class:`SwitchReceipt`."""
+    failures: list[str] = field(default_factory=list)
+    """The notes that say what did NOT happen, as on :class:`SwitchReceipt`: the stop's
+    claims not released, the hand-over mark not taken back, the replacement's first line
+    not typed (and why), its claims not moved. Each is in ``notes`` too, among the ones
+    every restart has (the account ladder's, the launch replayed)."""
 
     @property
     def how(self) -> str:
@@ -6998,6 +9399,7 @@ def restart(
     spawned_by: str = "user",
     agent_id: str | None = None,
     permission_mode: str | None = None,
+    before_stop: Callable[[], None] | None = None,
 ) -> RestartReceipt:
     """Start an agent again under its own label — the **Restart** of #138.
 
@@ -7044,17 +9446,22 @@ def restart(
     The replacement records it, so a typo was replayed by every later restart, switch
     and hand-over, and it stopped a running agent for a replacement that could not
     start (review of #169, round 1).
+
+    ``before_stop`` is the caller's last check, as for :func:`switch`: asked
+    once every refusal above has passed, before anything is stopped or
+    recorded, and it raises to refuse.
     """
     with store_session() as store:
+        current = store.get_project(project.id) or project
         found = _by_label(store, project.id, label, live_only=False)
         if found is None:
             raise NoSuchAgent(
-                f"no agent {label!r} in {_name(project)} — `aisquare fleet ls --all` shows "
-                "every row"
+                f"no agent {label!r} in {_name(project)} — "
+                f"`{project_service.fleet_command('ls', project, '--all')}` shows every row"
             )
         agent = found[0]
         if agent_id is not None and agent.id != agent_id:
-            raise _replaced(label, agent, agent_id)
+            raise _replaced(project, label, agent, agent_id)
         # First: every refusal after this one reads the role, the agent and the account,
         # and they are the launch record's (`core.launch_seal`), never the row's.
         record = _launch_record(project, agent, "restart")
@@ -7066,13 +9473,15 @@ def restart(
             # fell through to a plain `stop` here released the parked claims,
             # announced the exit and failed the switch on its own row — with the
             # restart's replacement not holding the task (review of #163, round 2).
-            raise _in_hand_over("restart", label)
+            raise _in_hand_over(project, "restart", label)
         try:
-            # `spawn`'s refusal for the task (done, dropped, gone from the board).
-            task = _task_for(store, project, agent.task_id)
+            # `spawn`'s refusal for the task (done, dropped, gone from the board), on the
+            # board the replacement will read, as `switch` asks it.
+            board_and_hub = _board_and_hub(store, current, agent, session)
+            task = _task_for(store, board_and_hub[0], agent.task_id)
         except FleetError as exc:
             raise FleetError(f"cannot restart {label!r}: {exc}") from exc
-        recent = _handoff_events(store, project, agent)
+        recent = _handoff_events(store, agent)
     # `spawn`'s refusals for the binary and the account, asked here for the same
     # reason. The account is the record's slot, whose number outlives a removed slot,
     # and none when its spawn chose none: never the one the session's row says it ran
@@ -7084,7 +9493,9 @@ def restart(
     replays = recorded_adapter(record.agent)
     try:
         _require_role(record.role)
-        _refuse_a_replay_that_cannot_start(project, record, permission_mode=permission_mode)
+        _refuse_a_replay_that_cannot_start(
+            current, record, permission_mode=permission_mode, branch=agent.branch
+        )
         choice = (
             claude_accounts_service.choose(
                 str(slot) if slot is not None else None,
@@ -7107,6 +9518,9 @@ def restart(
     # wake-up held back for the replacement (below): a replacement that then never
     # starts owes the manager that wake-up.
     held_back = False
+    failures: list[str] = []  # the notes that say what did not happen (`RestartReceipt`)
+    if before_stop is not None:
+        before_stop()
     # Where its launch record places it: whether it runs is asked there, and a dead pane is
     # ended there. Asked of the row, a row rewritten to name a dead window read "not
     # running", was ended unstopped, and its replacement resumed the session the agent
@@ -7135,7 +9549,7 @@ def restart(
             # no claims to park and nothing to mark; a listing that records the death
             # meanwhile leaves the stop one that worked (`_stop_row`), not a failure.
             if session is not None:
-                _mark_handing_over(agent, session, "restart", label)
+                _mark_handing_over(project, agent, session, "restart", label)
             try:
                 handed_over = stop(project, label, handover=True, agent_id=agent.id)
             finally:
@@ -7148,6 +9562,7 @@ def restart(
                 # the mark (the #205 fold's rule, met by #163 at the stack's fold).
                 if session is not None and (left := _unmark_handing_over(session)) is not None:
                     notes.append(left)
+                    failures.append(left)
             agent = handed_over.agent
         else:
             # A dead pane no listing has recorded yet is recorded as a listing
@@ -7167,6 +9582,7 @@ def restart(
                     # session is one a fresh replacement cannot take back until its
                     # lease lapses.
                     notes.append(f"claims: {stopped.release_failed}")
+                    failures.append(notes[-1])
             held_back = True
     # An exited agent's dead window is NOT removed here: `spawn` supersedes it
     # once the replacement is up and recorded, so a restart that is refused on
@@ -7187,6 +9603,7 @@ def restart(
             resume_prompt=_restart_prompt(agent),
             takes_over=handed_over is not None,
             permission_mode=permission_mode,
+            board_and_hub=board_and_hub,
         )
     except Exception:
         if handed_over is not None and handed_over.withheld:
@@ -7195,16 +9612,17 @@ def restart(
             # The exit went out with its wake-up held back for a replacement that has
             # now failed to start: left unwoken, a waiting manager never hears of the
             # agent it lost, as the hand-over's `_abandon_handover` wakes it for its own.
-            nudge_manager(project.id, reason=f"{label} exited")
+            nudge_manager(project.id, reason=f"{label} exited", board=_board_of_row(agent))
         raise
     notes.extend(more)
-    how = _how_started(resumed, typed=bool(receipt.prompt_typed))
+    typed = receipt.prompt_typed or "no"
+    how = _how_started(resumed, typed=typed)
     # The suppression is entered FIRST, as in `switch`: a store that cannot be opened
     # costs the courtesy, never a restarted agent reported as not restarted.
     with contextlib.suppress(Exception), store_session() as store:  # the courtesy, not the record
         _team()._emit(
             store,
-            project.id,
+            _board_of_row(receipt.agent),
             "restarted",
             f"{label} restarted — {how}",
             session_id=receipt.agent.session_id,
@@ -7216,7 +9634,8 @@ def restart(
         was_running=was_running,
         tmux_session=receipt.tmux_session,
         notes=notes,
-        prompt_typed=bool(receipt.prompt_typed),
+        prompt_typed=typed,
+        failures=[*failures, *receipt.failures],
     )
 
 
@@ -7261,12 +9680,13 @@ def _pane_alive(pane: PlacedPane) -> bool:
 
     A pane under the record's id on a server younger than the record is another
     agent's (:func:`_outlived`), so it is not the row's pane alive. When the
-    server started is a second question, put once the pane has answered alive,
-    and a refusal of that one judges nothing, as a start tmux does not report
-    does. Read as "cannot say", it sent the restart of a RUNNING agent down
-    the other branch: stopped as ``fleet stop`` stops it, its claims released
-    and its exit announced, then replaced with no hand-over (review of the
-    #203 final-round fixes, F5).
+    server started comes in the same answer (``PaneFacts.server_started``; a
+    second ``display-message`` before, review of #259, round 3), and a start tmux
+    does not report judges nothing. A refusal of that second question was read
+    as "cannot say" once, and sent the restart of a RUNNING agent down the other
+    branch: stopped as ``fleet stop`` stops it, its claims released and its exit
+    announced, then replaced with no hand-over (review of the #203 final-round
+    fixes, F5).
     """
     try:
         facts = pane.facts()
@@ -7274,11 +9694,7 @@ def _pane_alive(pane: PlacedPane) -> bool:
         return False
     if facts is None or facts.dead:
         return False
-    try:
-        started = pane.server().started_at()
-    except TmuxError:
-        started = None
-    return not pane.outlived(started)
+    return not pane.outlived(facts.server_started)
 
 
 def project_of(agent: FleetAgent) -> ProjectInfo:
@@ -7290,7 +9706,9 @@ def project_of(agent: FleetAgent) -> ProjectInfo:
     return project
 
 
-def _mark_handing_over(agent: FleetAgent, session: TeamSession, verb: str, label: str) -> None:
+def _mark_handing_over(
+    project: ProjectInfo, agent: FleetAgent, session: TeamSession, verb: str, label: str
+) -> None:
     """The session's own ``SessionEnd`` parks its claims for the replacement (rule 2).
 
     Marked for ONE hand-over. ``switch`` and ``restart`` refuse a session a
@@ -7308,7 +9726,7 @@ def _mark_handing_over(agent: FleetAgent, session: TeamSession, verb: str, label
     with store_session() as store:
         marked = store.mark_handover(session.id, held_after=held_after)
     if not marked:
-        raise _in_hand_over(verb, label)
+        raise _in_hand_over(project, verb, label)
 
 
 def _unmark_handing_over(session: TeamSession) -> str | None:
@@ -7332,15 +9750,25 @@ def _unmark_handing_over(session: TeamSession) -> str | None:
     return None
 
 
+#: What the exit :func:`_abandon_handover` announces says after its status. The hand-over's own
+#: ``/exit`` ended the row with status 0, so the board read "exited (0)" as a ``fleet stop``
+#: does, and whoever reads it (the manager, ``remote``'s needs-you for the manager itself) took
+#: an agent nothing replaced for one whose work was done.
+HANDOVER_FAILED = "its replacement did not start"
+
+
 def _abandon_handover(stopped: FleetAgent) -> None:
-    """The replacement never started: release what was parked and record the exit withheld."""
+    """The replacement never started: release what was parked and record the exit withheld,
+    saying so (:data:`HANDOVER_FAILED`)."""
     with contextlib.suppress(Exception), store_session() as store:
         _team().release_agent_claims(store, stopped, why="hand-over failed")
-        _emit_exit(store, stopped)
-    nudge_manager(stopped.project_id, reason=f"{stopped.label} exited")
+        _emit_exit(store, stopped, why=HANDOVER_FAILED)
+    nudge_manager(
+        stopped.project_id, reason=f"{stopped.label} exited", board=_board_of_row(stopped)
+    )
 
 
-def _how_started(resumed: bool, *, typed: bool) -> str:
+def _how_started(resumed: bool, *, typed: Typed) -> str:
     """How a replacement began, for the board's ``switched`` and ``restarted`` lines.
 
     And for every surface that reports the receipt (``RestartReceipt.how``,
@@ -7355,14 +9783,23 @@ def _how_started(resumed: bool, *, typed: bool) -> str:
     the line said "started fresh with a hand-off prompt" over it. On the
     automatic hand-over that line was the only account anyone got (review of
     #203, final round, FLEET-5); the receipt's notes say why it was not typed.
+
+    A line pasted at its prompt whose Enter was refused, or one tmux did not answer in time
+    with, is not "NOT typed": the human, or the manager reading the board, sent it again,
+    beside the first copy (review of #259, round 11, 2/13).
     """
-    if resumed:
-        if typed:
-            return "resumed its session"
-        return "resumed its session, but the line telling it to continue was NOT typed"
-    if typed:
-        return "started fresh with a hand-off prompt"
-    return "started fresh, but its hand-off prompt was NOT typed"
+    line = "the line telling it to continue" if resumed else "its hand-off prompt"
+    began = "resumed its session" if resumed else "started fresh"
+    if typed == "yes":
+        return began if resumed else "started fresh with a hand-off prompt"
+    if typed == "unsent":
+        return f"{began}, but {line} waits unsent at its prompt: press Enter in its pane"
+    if typed == "maybe":
+        return (
+            f"{began}, but tmux did not answer in time with {line}: it may still arrive — "
+            "read its screen before you send it again"
+        )
+    return f"{began}, but {line} was NOT typed"
 
 
 def _restart_prompt(agent: FleetAgent) -> str:
@@ -7404,17 +9841,17 @@ _HANDOFF_SCAN = 60
 :data:`_HANDOFF_NOTES`, the human board's among them."""
 
 
-def _handoff_events(
-    store: ContextStore, project: ProjectInfo, agent: FleetAgent
-) -> list[TeamEvent]:
+def _handoff_events(store: ContextStore, agent: FleetAgent) -> list[TeamEvent]:
     """The board entries a hand-off prompt quotes: the session's own newest (oldest first),
     not the project's last 60 filtered down, which on a busy board all belonged to other
     agents (review of #205, third round); and less its bells and notices, which are the
     human's and never an agent's (``team.HUMAN_BOARD_KINDS``): three "attention" lines
-    of Codex's took the whole tail."""
+    of Codex's took the whole tail. Read on the board the agent read (:func:`_board_of_row`)."""
     if agent.session_id is None:
         return []
-    events = store.filtered_events(project.id, session_id=agent.session_id, limit=_HANDOFF_SCAN)
+    events = store.filtered_events(
+        _board_of_row(agent), session_id=agent.session_id, limit=_HANDOFF_SCAN
+    )
     human = _team().HUMAN_BOARD_KINDS
     return [event for event in events if event.kind not in human][-_HANDOFF_NOTES:]
 
@@ -7454,7 +9891,7 @@ def _handoff_prompt(
 
 
 def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> ReapReport:
-    """Record dead panes as ended, mark vanished panes lost, remove merged worktrees.
+    """Record dead panes as ended, mark vanished panes lost, remove finished worktrees.
 
     When tmux cannot be asked nothing is marked: absence of evidence is not a
     dead pane, and an unreachable tmux must not end rows whose processes may
@@ -7471,9 +9908,18 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
     non-zero for a protocol mismatch, a wedged server or, for a row from before
     v25 that recorded no socket, a socket under another ``TMUX_TMPDIR`` is not a
     dead server, and the agents behind it are alive.
-    Such a socket is then a server with no panes — the view is empty and the
-    ordinary "pane is gone → lost" branch does the rest. A missing tmux binary
-    marks nothing: that is a question that could not be put.
+    And of the rows on such a socket, only those whose agent cannot be running
+    by the one rule ``stop``, ``shutdown`` and ``uninstall`` ask
+    (:func:`~aisquare.core.tmux.server_may_run`): tmux reports no server for a
+    socket file taken from under a running one too, and the word marked those
+    rows lost under their agents, on another server under another
+    ``TMUX_TMPDIR`` as well (round 29 of #257 had only the doctor warn). The
+    rest are HELD and named on the report (:func:`_hold_on_absent_server`), and
+    ``shutdown --forget`` is the word that ends them. So is a row the listing holds as
+    another server's, with the word or without it (:func:`_hold_on_another_server`).
+    For the rows the word may act on the socket is then a server with no panes —
+    no view for them, and the ordinary "pane is gone → lost" branch does the rest.
+    A missing tmux binary marks nothing: that is a question that could not be put.
 
     A row a hand-over is stopping (:func:`_handed_over`) is left to it, dead or
     gone, as every listing leaves it.
@@ -7481,6 +9927,7 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
     config = settings()
     report = ReapReport()
     absent: dict[_Address, bool] = {}
+    reads = tmux_core.SocketReads()  # one per server for the sweep, not per row
     now = _now()
     with store_session() as store:
         if project is not None:
@@ -7494,7 +9941,8 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
                 _resolve_all(store.fleet_agents(current.id, live_only=True), config)
             )
             if live:
-                views = _observe_sockets(live)
+                views = _observe_sockets(live, reads=reads)
+                _hold_on_another_server(current, live, views, report)
                 if server_down:
                     for address, view in views.items():
                         if view is None:
@@ -7514,13 +9962,20 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
                                     # to a call site that has the promise.
                                     absent[address] = False
                             if absent[address]:
-                                views[address] = {}  # no server: no panes
+                                # No server, tmux says: no panes for the rows whose agent
+                                # cannot be running; the rest held, as `shutdown` holds them.
+                                views[address] = _hold_on_absent_server(
+                                    current,
+                                    [placed for placed in live if placed.pane.address == address],
+                                    report,
+                                    reads,
+                                )
                 for placed in live:
                     agent = placed.row
                     observed = _view(placed, views)
                     if observed is None:
                         continue  # that server could not be asked: nothing is marked
-                    pane = observed.get(agent.id)
+                    pane = _pane_in(agent, observed)
                     if (pane is None or pane.dead) and _handed_over(
                         agent,
                         store.get_session(agent.session_id) if agent.session_id else None,
@@ -7555,27 +10010,89 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
                             _count_release(report, ended, released, failed)
                             report.ended.append(ended)
                             _emit_exit(store, ended)
-            _remove_merged_worktrees(store, current, report)
+            _remove_finished_worktrees(store, current, report)
     gone: dict[str, list[str]] = {}
     for row in (*report.ended, *report.lost):
         gone.setdefault(row.project_id, []).append(row.id)
     for project_id, rows in gone.items():
         launch_seal.forget_row_windows(project_id, rows)
     for ended in report.ended:
-        nudge_manager(ended.project_id, reason=f"{ended.label} exited")
+        nudge_manager(ended.project_id, reason=f"{ended.label} exited", board=_board_of_row(ended))
     return report
 
 
-def _emit_exit(store: ContextStore, agent: FleetAgent) -> None:
-    """The ``agent_exited`` board event the manager's Stop hook wakes on (§7.3)."""
+def _hold_on_absent_server(
+    project: ProjectInfo,
+    placements: Sequence[Placed],
+    report: ReapReport,
+    reads: tmux_core.SocketReads | None = None,
+) -> _Observed:
+    """The view ``reap --server-down`` takes of a server tmux reports absent: no pane for a
+    row whose agent cannot be running, which reads lost; every other row held, as a row of
+    a server that may run (:func:`_unreached`), with why on the report.
+
+    tmux reports no server for a socket file taken from under a running server too
+    (``error connecting to … (No such file or directory)``), and ``server_absent`` alone
+    marked such rows lost under their agents, on another server under another
+    ``TMUX_TMPDIR`` as well (round 29 of #257 had only the doctor warn). The word may end
+    only what the one rule says cannot be running
+    (:func:`~aisquare.core.tmux.server_may_run`): a row from another boot, or one whose
+    socket file is there with nothing listening. The way out names ``fleet shutdown
+    --forget``, the operator's word that ends a held row. ``reads`` is the sweep's. The rows
+    are placed where their launch records put them (:func:`resolve_place`).
+    """
+    view: _Observed = {}
+    for placed in placements:
+        unreached = _unreached(placed, forget=_forget(project), reads=reads)
+        if unreached is not None:
+            view[placed.row.id] = HELD
+            report.held.append(
+                ShutdownRow(placed.row, f"{unreached[1]} — left live: {unreached[2]}")
+            )
+    return view
+
+
+def _hold_on_another_server(
+    project: ProjectInfo,
+    placements: Sequence[Placed],
+    views: Mapping[_Address, _Observed | None],
+    report: ReapReport,
+) -> None:
+    """Name on ``report`` each row ``views`` holds as another server's (:func:`_observe`),
+    with why and the way out, as :func:`_hold_on_absent_server` names the rows it holds.
+
+    ``reap`` leaves such a row live, as it leaves a row whose server could not be asked,
+    and said nothing of it: ``0 ended, 0 lost``, while the row still counted toward
+    ``max_agents_per_project`` and the one-manager rule, and ``stop`` refused it (review
+    of #259, round 1). The way out names ``fleet shutdown --forget``.
+    """
+    for placed in placements:
+        if not _held_by_another(placed.agent, views.get(placed.pane.address)):
+            continue
+        try:
+            path = placed.agent.socket_path or placed.pane.server().socket_path()
+        except TmuxUnavailable:
+            continue  # no POSIX uid: no tmux server can exist here
+        why, way = _unreachable_why("another", path, forget=_forget(project))
+        report.held.append(
+            ShutdownRow(placed.row, f"{why} — left live: {way[0].lower() + way[1:]}")
+        )
+
+
+def _emit_exit(store: ContextStore, agent: FleetAgent, *, why: str | None = None) -> None:
+    """The ``agent_exited`` board event the manager's Stop hook wakes on (§7.3), with
+    ``why`` after the status when the status does not say it all."""
     status = "?" if agent.exit_status is None else str(agent.exit_status)
-    # The row is already ended; the event is the courtesy, not the record.
+    # The row is already ended; the event is the courtesy, not the record. On the board the
+    # row recorded (`_board_of_row`), which its manager reads: under a hub not the row's
+    # project's, and never the board of whichever process ends the row, a session or none
+    # (review of #259, round 25, 4/10).
     with contextlib.suppress(Exception):
         _team()._emit(
             store,
-            agent.project_id,
+            _board_of_row(agent),
             "agent_exited",
-            f"{agent.label} exited ({status})",
+            f"{agent.label} exited ({status})" + (f": {why}" if why else ""),
             session_id=agent.session_id,
         )
 
@@ -7655,7 +10172,7 @@ def rename(project: ProjectInfo, codename: str, *, notes: list[str] | None = Non
                         f"the codename is {codename}, but tmux could not be told ({exc}) — its "
                         f"session {session.name} on {session.address} keeps that name until it "
                         f"is renamed: `{remedy}` does that, on the fleet's server (review r8 of "
-                        "#113, finding 7), and a second `aisquare fleet rename` will not (it "
+                        "#113, finding 7), and renaming again will not (it "
                         "renames from the stored codename, which is already the new one). "
                         "`fleet ls`, `tell`, `stop`, `shutdown` and `attach` are unaffected — "
                         "they find panes and sessions by tmux's ids"
@@ -7686,50 +10203,206 @@ def _rename_recorded_sessions(
 
 
 def pause(project: ProjectInfo, *, session_ref: str | None = None) -> None:
-    """Set the ``fleet-paused`` board signal — the manager spawns nothing while it is on."""
+    """Set the project's ``fleet-paused`` board signal — its manager spawns nothing while it
+    is on.
+
+    On the board its newest manager row recorded, the boards its live rows recorded, its
+    checkout's and the one a spawn from here gives (:func:`_pause_boards`), by the project's
+    own name there
+    (:func:`_pause_signals`): under a hub the hub's board, where every other fleet project's
+    manager reads its own project's pause, not this one."""
     _set_pause(project, "on", session_ref)
 
 
 def resume(project: ProjectInfo, *, session_ref: str | None = None) -> None:
+    """Set the project's ``fleet-paused`` signal off where it reads on (:func:`_set_pause`)."""
     _set_pause(project, "off", session_ref)
 
 
 def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> None:
+    """Set ``project``'s pause to ``value``: ``on`` on every board it lives on
+    (:func:`_pause_signals`), ``off`` wherever it reads on (:func:`_pause_where_on`).
+
+    A resume whose own pause does not parse on some board is refused, naming it, and nothing
+    is written: the write reads the value it replaces. So is a pause whose own does not parse
+    on a board it is set on, every board worked out before any is written: set on the boards
+    sorted before it, ``fleet pause`` then ended in a traceback, ``--json`` printed nothing,
+    and the project was paused on some boards and not on others (review of #259, round 33,
+    1/10). Another project's that does not parse is no concern of this one's
+    (:func:`team.board_signals_in`). Every board's is written in one transaction through the
+    store the boards were worked out in (:func:`team.set_signals_in`): one ``set_signal`` a
+    board, each in a store of its own, a store error on a later board (``database is
+    locked``) left the earlier ones set and ended in a traceback all the same (round 34,
+    5/10); it rolls every one back now. A lock is said as a ``FleetError`` that says to try
+    again (:func:`is_locked_error`), and nothing else is: a store found damaged
+    (``database disk image is malformed``, a ``StoreUnopenable``) reaches the CLI's root
+    group, which says to move it aside. Said as "try again" too, it was told to retry what
+    never works, and never how to recover (round 35, 1/8). Any other store error (``database
+    or disk is full``, a readonly store, ``disk I/O error``) is a ``FleetError`` that names
+    it: the root group maps damage alone, and re-raised, it ended in a traceback, ``--json``
+    printing nothing (round 36, 2/9).
+
+    Each write is a ``signal`` event in the delta of every session on that board. Off on
+    every board one of the project's rows ever recorded, ``fleet resume -P a`` put
+    ``fleet-paused.a: off`` in the next prompt of every agent on every hub ``a`` ever ran
+    under, where it had never been paused (review of #259, round 30, 5/8). With nothing on,
+    ``--as`` is still checked (:func:`team.set_signals_in` resolves it with no signal to
+    write): an unknown session is refused, as a write refuses it, and so is a prefix of
+    several, as :func:`_task_for` refuses one of a task. Left to the CLI, which catches only
+    ``FleetError``, ``fleet resume --as ses_a`` ended in a traceback, and ``--json`` printed
+    nothing (round 31, 2/7). Checked here too, it was looked up twice on every resume (round
+    35, 7/8).
+    """
     team = _team()
+    doing = "set" if value == "on" else "clear"
     try:
-        team.set_signal(PAUSE_SIGNAL, value, session_ref=session_ref, project_id=project.id)
+        if not orchestrator.team_enabled():
+            raise team.TeamDisabledError  # refused before any store opens
+        homes = _pause_homes(project) if value == "on" else set()
+        unreadable: list[tuple[str, str]] = []
+        with store_session() as store:
+            states = team.board_signals_in(store, unreadable=unreadable)
+            if value == "on":
+                signals = _pause_signals(store, project, homes)
+            else:
+                signals = _pause_where_on(project, states)
+            broken = [
+                where
+                for where in _pause_where_on(project, unreadable)
+                if value == "off" or where in signals
+            ]
+            if broken:
+                named = ", ".join(f"{name} on {board}" for board, name in broken)
+                raise FleetError(f"cannot {doing} the pause: {named} could not be read")
+            team.set_signals_in(store, signals, value, session_ref=session_ref)
+    except sqlite3.Error as exc:
+        if isinstance(exc, StoreUnopenable) or is_corrupt_error(exc):
+            raise  # damage, which the CLI's root group says how to recover from
+        again = "; try again" if is_locked_error(exc) else ""
+        raise FleetError(  # every write rolled back
+            f"cannot {doing} the pause: the store refused it ({type(exc).__name__}: {exc}) — "
+            f"nothing was written{again}"
+        ) from exc
     except team.TeamDisabledError as exc:
         raise FleetError(f"cannot set the pause signal: {exc}") from exc
+    except AmbiguousIdError as exc:
+        raise FleetError(f"session {session_ref!r} is ambiguous — use more of the id") from exc
     except KeyError as exc:
         raise FleetError(f"unknown session {session_ref!r}") from exc
 
 
-def is_paused(project: ProjectInfo) -> bool:
-    if not orchestrator.team_enabled():
-        return False  # a disabled board holds no signals: nothing can be paused — and no store
-    with store_session() as store:
-        return _pause_is_on(store, project)
+def _pause_homes(project: ProjectInfo) -> set[str]:
+    """The boards ``project``'s pause lives on whatever its rows recorded
+    (:func:`_pause_boards`): its checkout's, where a spawn from a caller without a hub reads,
+    and the one a spawn from here gives (:func:`_board_for`), the hub's under one.
 
-
-def _pause_is_on(store: ContextStore, project: ProjectInfo) -> bool:
-    """Whether ``project``'s ``fleet-paused`` signal reads ON, through ``store``.
-
-    The read half of the pause, id-addressed and on a caller's connection, so
-    ``shutdown``'s pass over every project pays one open (review of #203,
-    round 4). Raises ``TeamDisabledError`` when there is no board to ask.
+    Asks git, before the store opens, and only to set the pause: reading or clearing it
+    finds it by name (:func:`_pause_where_on`).
     """
-    state = _team().read_signal_in(store, project.id, PAUSE_SIGNAL)
-    return state is not None and state.value == "on"
+    checkout = _checkout_board(project)
+    return {checkout, _board_for(project)} if orchestrator.team_hub() is not None else {checkout}
 
 
-def _clear_pause_signal(store: ContextStore, project: ProjectInfo) -> None:
-    """Set ``project``'s ``fleet-paused`` signal OFF through ``store`` — the write
+def _pause_boards(store: ContextStore, project: ProjectInfo, homes: Collection[str]) -> list[str]:
+    """The boards ``project``'s ``fleet-paused`` signal is set on: the ones a manager of it
+    reads now or would read next. The board its newest manager row recorded, live or ended
+    (:meth:`ContextStore.fleet_manager_board`, :func:`_board_of_row`), where it reads, or
+    where a ``restart`` of it puts its replacement; the boards its live rows recorded, where
+    the manager spawned next beside them reads; and ``homes`` (:func:`_pause_homes`), where
+    the next manager a spawn from here gives reads.
+
+    The live rows' boards whether or not it ever had a manager: its coders were spawned where
+    its next manager will be, a hub this process may not export. Its homes alone, a pause
+    from a plain shell went on the checkout's board, and the manager spawned next from
+    ``asq`` under the coders' hub read none there and staffed (review of #259, round 33,
+    4/10). Asked only before its first manager, any manager row, one stopped last week on
+    the checkout's board included, left the coders' hub unpaused, as before (round 34,
+    2/10).
+
+    Whether that manager is live and whether the caller exports the hub or not. Taken from
+    the rows live at the moment, a pause set on a hub where the manager read was left on
+    there once that manager stopped, and the next manager spawned under the hub came up
+    staffing nothing (review of #259, round 29, 1/8). ``fleet resume`` and ``fleet
+    shutdown`` now find the pause wherever it is on, by its name
+    (:func:`_pause_where_on`), so a board no manager of the project reads any more needs
+    none: set on every board any row ever recorded, ``fleet pause -P a`` put ``a``'s pause,
+    and its resume the ``off``, in the next prompt of every agent on every hub ``a`` ever
+    ran under (round 32, 2/9). Only a manager reads the pause, so a board only a stopped
+    coder, or a manager long since replaced, recorded is not one; a live coder's is, where
+    the manager spawned next beside it reads (round 35, 8/8). A ``SELECT`` each, so no row
+    is built: every spawn, restart and switch adds a row that is never deleted (round 26,
+    10/11).
+
+    A signal is the board's (docs/fleet.md, "Under a hub: one board, many fleet projects"),
+    and the manager asks its own session's board, as its cycle line tells it to. Set, read
+    and cleared on the project's own board, under a hub a paused fleet's manager kept
+    spawning, and a pause set where it does read was never cleared by ``fleet shutdown``
+    (review of #259, round 25, 2/10). By what name: :func:`_pause_signals`.
+    """
+    manager = store.fleet_manager_board(project.id)
+    live = store.fleet_agent_boards(project.id, live_only=True)
+    return sorted({*([manager] if manager is not None else []), *live, *homes})
+
+
+def _pause_signals(
+    store: ContextStore, project: ProjectInfo, homes: Collection[str]
+) -> list[tuple[str, str]]:
+    """``project``'s pause: each board it lives on (:func:`_pause_boards`), with the name
+    of the project's ``fleet-paused`` signal there (:func:`harness.pause_signal`).
+
+    The project's own, on a board other projects read too: under a hub, ``fleet pause -P a``
+    paused every manager on the hub, and ``fleet shutdown -P a`` cleared the pause ``b``'s
+    manager still obeyed (review of #259, round 26, 1/11).
+    """
+    return [
+        (board, harness.pause_signal(project.id, board))
+        for board in _pause_boards(store, project, homes)
+    ]
+
+
+def _pause_where_on(
+    project: ProjectInfo, signals: Mapping[tuple[str, str], Any] | Sequence[tuple[str, str]]
+) -> list[tuple[str, str]]:
+    """``project``'s pause where it reads ON: each (board, name) of ``signals``, every board's
+    named states (``team.board_signals_in``, read once on a caller's connection), that is the
+    project's ``fleet-paused`` there (:func:`harness.pause_signal`). Of a sequence of (board,
+    name), as ``board_signals_in`` lists those it could not read, each that is the project's.
+
+    The read half of the pause. A signal's name says whose pause it is, on whichever board:
+    ``fleet-paused`` on the project's own, ``fleet-paused.<id>`` on any other. Found from the
+    boards its rows recorded and its homes (:func:`_pause_boards`, :func:`_pause_homes`),
+    ``fleet resume`` and each visible project of ``fleet shutdown --all`` ran ``git`` for a
+    pause they almost never found (review of #259, round 31, 5/7); now they
+    run none, and a pause on a board no row of the project names any more is found too.
+    """
+    if not isinstance(signals, Mapping):
+        return [(board, name) for board, name in signals if _is_pause_of(project, board, name)]
+    return [
+        (board, name)
+        for (board, name), state in sorted(signals.items())
+        if state.value == "on" and _is_pause_of(project, board, name)
+    ]
+
+
+def _is_pause_of(project: ProjectInfo, board: str, name: str) -> bool:
+    """Whether ``name`` on ``board`` is ``project``'s pause (:func:`harness.pause_signal`)."""
+    return name == harness.pause_signal(project.id, board)
+
+
+def _clear_pause_signal(store: ContextStore, signals: Sequence[tuple[str, str]]) -> None:
+    """Set each of ``signals`` (board, name) OFF through ``store``, all or none — the write
     half of the pause for the same pass; ``resume`` is the command's own door."""
-    _team().set_signal_in(store, project.id, PAUSE_SIGNAL, "off")
+    _team().set_signals_in(store, signals, "off")
 
 
-def nudge_manager(project_id: str, *, reason: str) -> bool:
+def nudge_manager(project_id: str, *, reason: str, board: str | None = None) -> bool:
     """Wake a WAITING manager with one fixed line + Enter (§7.3); ``False`` if not sent.
+
+    ``board`` is the board the news is on, an agent's exit on the one its row recorded: a
+    manager that reads another is not woken. The line wakes it to its own board's delta,
+    which does not hold the news, and Remote took the crash for handled (review of #259,
+    round 26, 4/11). A board write's nudge is asked the same before it is sent
+    (``team._nudge_manager``, which passes ``board``).
 
     Never raises and never touches a manager that is working or needs the
     human: this runs inside sub-agents' CLI processes, where a failure must
@@ -7742,9 +10415,10 @@ def nudge_manager(project_id: str, *, reason: str) -> bool:
     (``_STALE_AFTER``). A row frozen at ``waiting`` while the pane keeps
     printing (hooks that stopped firing: a Stop that never ran, a session id
     that no longer matches) is ``working`` everywhere else, and typing into it
-    is the interleaving ``tell`` refuses to cause. Agreeing costs one extra
-    ``list-panes`` for the pane's last-output time, on a path the debounce
-    already bounds to one pass per :data:`NUDGE_DEBOUNCE`. And ``waiting`` must be
+    is the interleaving ``tell`` refuses to cause. The pane's last-output time it needs for
+    that comes with the pane's facts (``PaneFacts.last_output``, ``#{window_activity}``),
+    in the one ``display-message``. A ``list-panes -a`` over every pane on the server for it
+    was one more tmux process per nudge (review of #259, round 5). And ``waiting`` must be
     at its prompt as ``tell`` decides it (:func:`_at_its_prompt`), the line typed as
     ``tell`` types one (:meth:`PlacedPane.type_line`): a Codex manager kept every nudge sent with
     its Enter in one burst unsent in its composer, and woke for none of them.
@@ -7759,7 +10433,7 @@ def nudge_manager(project_id: str, *, reason: str) -> bool:
     (:data:`NUDGE_OWED`) for a process outside it to send: :func:`deliver_owed_nudge`,
     from the writer's own hooks, which Codex runs outside.
     """
-    return _nudge(project_id, owe=True)
+    return _nudge(project_id, owe=True, board=board)
 
 
 def deliver_owed_nudge(project_id: str) -> bool:
@@ -7784,13 +10458,13 @@ def deliver_owed_nudge(project_id: str) -> bool:
     return _nudge(project_id, owe=False)
 
 
-def _nudge(project_id: str, *, owe: bool) -> bool:
+def _nudge(project_id: str, *, owe: bool, board: str | None = None) -> bool:
     """:func:`nudge_manager`, leaving the nudge owed where tmux refused it when ``owe``;
     otherwise :func:`deliver_owed_nudge`'s, due only for unread news. Typed into the pane
     the manager's launch record places, by its record's agent's rules (:func:`resolve_place`),
     never its row's: a delivery runs from a sandboxed agent's own hooks, outside its
     sandbox, and the row was the sandbox's to write before its broker (review r5 of
-    #113, finding 1; r6, finding 1)."""
+    #113, finding 1; r6, finding 1). ``board`` as for :func:`nudge_manager`."""
     try:
         with store_session() as store:
             found = _by_label(store, project_id, MANAGER_LABEL, live_only=True)
@@ -7811,6 +10485,8 @@ def _nudge(project_id: str, *, owe: bool) -> bool:
                 )
                 return False
             manager, pane = placement.agent, placement.pane  # its place and agent: the record's
+            if board is not None and _board_of_row(manager) != board:
+                return False
             session = store.get_session(row.session_id)
             if session is None or session.ended_at is not None:
                 return False
@@ -7821,22 +10497,16 @@ def _nudge(project_id: str, *, owe: bool) -> bool:
             last = store.get_meta(key)
             if last is not None and now - datetime.fromisoformat(last) < NUDGE_DEBOUNCE:
                 return False
-            srv = pane.server()
             try:
                 facts = pane.facts_or_raise()
             except TmuxError:
                 if owe:
                     store.set_meta(NUDGE_OWED + project_id, now.isoformat())
                 return False
-            if facts is None or facts.dead or not _agent_running(facts.current_command):
-                return False
-            if pane.outlived(srv.started_at()):
-                return False  # the id is another agent's on a newer server
+            if facts is None or not _its_agent(manager, facts):
+                return False  # not the agent, or the id is another agent's on another server
             view = _PaneView(
-                facts.dead,
-                facts.dead_status,
-                facts.current_command,
-                _activity_times(srv).get(pane.pane_id),
+                facts.dead, facts.dead_status, facts.current_command, facts.last_output
             )
             state, _ = _derive(manager, session, view, observed=True, now=now)
             if not _at_its_prompt(pane, manager, session, state, now):
@@ -7860,24 +10530,33 @@ def attach_argv(project: ProjectInfo) -> list[str]:
     ``asq-<codename>``, a name read from the store, a swap of two projects' codenames
     attached the human to the other project's agents, and typed their keys there (review
     r7 of #113). By the socket's name alone (``tmux -L``), a shell under another
-    ``TMUX_TMPDIR`` asks another server (round 29 of #257). A project whose agents were
+    ``TMUX_TMPDIR`` asks another server (round 29 of #257). One the project's spawns made
+    is asked however long ago its last agent ended (``launch_seal.project_sessions``): an
+    ended manager's window lingers (``remain-on-exit``) and holds the session, which is
+    what the 💤 row's attach stands for (follow-up of #257). A project whose agents were
     spawned before this version has no record to name its session: the refusal names the
-    tmux command that attaches to it by hand.
+    tmux command that attaches to it by hand; one no agent ever ran in (``[projects]
+    capture`` off, no row) has no session to name (review of #259, round 17).
     """
     config = settings()
     srv = server(config)
     _require_tmux(srv)
     project = ensure_codename(project)
     with store_session() as store:
+        codename = project.codename or _kept_codename(store, project)
         live = store.fleet_agents(project.id, live_only=True)
     placements = _resolve_all(_manager_first(live), config)
     for session in _project_sessions(project.id, placements, config):
         if session.present():
             return session.attach_command()
-    name = session_name(project.codename or codenames.codename_for(project.id))
+    spawn = project_service.fleet_command("spawn", project, "manager")
+    if codename is None:
+        raise FleetError(
+            f"no fleet session for {_name(project)} — nothing to attach to; `{spawn}` starts one"
+        )
     raise FleetError(
         f"no fleet session a launch record of {_name(project)} names is running — nothing to "
-        "attach to; `aisquare fleet spawn manager` starts one. Agents spawned before this "
-        f"version run in a session no record names: `tmux -L {config.tmux_socket} attach -t "
-        f"={name}` attaches to it by hand"
+        f"attach to; `{spawn}` starts one. Agents spawned before this version run in a "
+        f"session no record names: `tmux -L {config.tmux_socket} attach -t "
+        f"={session_name(codename)}` attaches to it by hand"
     )

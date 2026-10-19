@@ -29,6 +29,7 @@ from aisquare.core.spawn import (
     SEAMS,
     TRACED,
     TRACING_ENV_VARS,
+    git_env,
     untraced_env,
 )
 from aisquare.services import distill as _distill
@@ -218,6 +219,26 @@ def test_every_ruling_is_one_of_the_two() -> None:
         assert seam.decision in (TRACED, spawn.EXCLUDED), key
         assert seam.reason, f"{key} has a decision but no reason"
         assert not (seam.decision == TRACED and seam.strips_identity), key
+
+
+def test_every_seam_that_runs_in_the_git_environment_is_ruled_stripped() -> None:
+    """Review of #259, round 29, 6/8: b92c0380 moved ``fleet._git`` onto :func:`git_env`,
+    which strips the tracing identity, and its ruling still said otherwise: no
+    ``strips_identity``, and its docstring said "not stripped". Every seam that runs git in
+    that environment is ruled as stripping it."""
+    import importlib
+    import inspect
+
+    in_git_env = []
+    for key in SEAMS:
+        path, name = key.split("::")
+        module = importlib.import_module(path.removesuffix(".py").replace("/", "."))
+        function = getattr(module, name, None)
+        if function is not None and "env=git_env()" in inspect.getsource(function):
+            in_git_env.append(key)
+
+    assert len(in_git_env) == 4, in_git_env
+    assert [key for key in in_git_env if not SEAMS[key].strips_identity] == []
 
 
 def test_tracing_vars_agree_with_the_wiring_that_sets_them() -> None:
@@ -455,6 +476,39 @@ def test_the_detached_distiller_never_inherits_a_role_identity(
     for name in IDENTITY_ENV_VARS:
         assert name not in env, f"{name} reaches the detached distiller"
     assert env.get("PATH") == os.environ.get("PATH")
+
+
+def test_every_git_seam_runs_in_the_one_git_environment(
+    traced_parent: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 28, 10/10: the fleet's git seam and the CI snapshot's each built
+    git's environment by hand, and they had drifted apart: the snapshot's stripped the
+    identity and set ``GIT_TERMINAL_PROMPT=0``, the fleet's copied the environment as it was.
+    Every git seam takes :func:`git_env`, so a fix to one is a fix to all."""
+    from aisquare.core import snapshot, workspace
+    from aisquare.services import ci_snapshot, fleet
+
+    seen: dict[str, dict[str, str] | None] = {}
+
+    def fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        seen[" ".join(argv[argv.index("git") + 1 :][-2:])] = kwargs.get("env")
+        return subprocess.CompletedProcess(argv, 0, "sha\n", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    fleet._git(tmp_path, "status", "--porcelain")
+    ci_snapshot._git(tmp_path, "stash", "create", timeout=5)
+    workspace.git_common_root(tmp_path)
+    snapshot.head_sha(tmp_path)
+
+    asked = [
+        "--git-common-dir --show-cdup", "rev-parse HEAD", "stash create", "status --porcelain"
+    ]  # fmt: skip
+    assert sorted(seen) == asked, seen
+    for argv, env in seen.items():
+        assert env == git_env(), argv
+        assert env["GIT_OPTIONAL_LOCKS"] == env["GIT_TERMINAL_PROMPT"] == "0", argv
+        for name in IDENTITY_ENV_VARS:
+            assert name not in env, f"{name} reaches git {argv}"
 
 
 def _traced_seams() -> Iterator[str]:

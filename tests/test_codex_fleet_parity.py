@@ -34,7 +34,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.cli.ui.views.agent import key_spellings
-from aisquare.cli.ui.views.settings import launch_line
+from aisquare.cli.ui.views.app_settings import launch_line
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import harness, launch_seal
 from aisquare.core.agent_adapters import get_adapter
@@ -62,6 +62,7 @@ from aisquare.models import (
 )
 from aisquare.services import agent_events, agent_launch, auto_mode, diagnostics
 from aisquare.services import fleet as fleet_service
+from aisquare.services import project as project_service
 from aisquare.services import team as team_service
 from tests import fakebin
 from tests.test_codex_account_switch import codex_on_path  # noqa: F401 - fixture, by name
@@ -239,10 +240,8 @@ def test_a_nested_codex_under_the_window_takes_neither_the_row_nor_the_task(
     assert _claimed_by(task.id) == first
     with store_session() as store:
         listed = store.fleet_agents(codex.project.id, live_only=True)
-        assert store.fleet_agent_for_session(codex.project.id, first) is not None
-        assert (
-            store.fleet_agent_for_session(codex.project.id, codex.board_id("child-resume")) is None
-        )
+        assert store.fleet_agent_for_session(first) is not None
+        assert store.fleet_agent_for_session(codex.board_id("child-resume")) is None
         assert store.get_meta(f"launch-session:{codex.launch}") == first, "MCP stays the agent's"
     assert [row.session_id for row in listed if row.id == codex.agent.id] == [first]
 
@@ -1097,7 +1096,7 @@ def test_a_codex_spawn_prompt_is_its_argument_and_nothing_is_typed_into_its_dial
     receipt = fleet_service.spawn(
         project, "coder", agent="codex", worktree=False, prompt="start on tsk_1"
     )
-    assert receipt.prompt_typed is True and tmux.typed == []
+    assert receipt.prompt_typed == "yes" and tmux.typed == []
     assert _command(tmux)[-2:] == ["--", "start on tsk_1"]
 
 
@@ -1821,12 +1820,12 @@ def test_a_refusal_is_said_on_the_board_once_per_row_and_reason(
     told = fleet_service.tell(codex.project, codex.agent.label, "rebase on main first")
 
     said = [text for text in _events(codex.project, "note") if UNRECORDED in text]
+    stop = project_service.fleet_command("stop", codex.project, codex.agent.label)
     assert said == [
         f"{codex.agent.label}: cannot restart it — no launch record was written for it (it was "
         "spawned by an aisquare that keeps none, or its record could not be written), and it "
         "was not in the fleet when this aisquare first read it; end its agent in its own "
-        f"window, then `aisquare fleet stop {codex.agent.label}` removes the window and ends "
-        "its row, and spawn a new agent"
+        f"window, then `{stop}` removes the window and ends its row, and spawn a new agent"
     ]
     assert told.delivered is False and UNRECORDED in told.how
     # Another reason for the same row is said again.
@@ -2419,8 +2418,8 @@ def test_every_read_of_a_row_names_its_own_session_over_its_launch_binding(
             if agent.id == codex.agent.id
         ]
         got = store.get_fleet_agent(codex.agent.id)
-        by_session = store.fleet_agent_for_session(codex.project.id, "its-own-id")
-        stale = store.fleet_agent_for_session(codex.project.id, "a-stale-binding")
+        by_session = store.fleet_agent_for_session("its-own-id")
+        stale = store.fleet_agent_for_session("a-stale-binding")
     assert listed == ["its-own-id"] and got is not None and got.session_id == "its-own-id"
     assert by_session is not None and by_session.id == codex.agent.id and stale is None
 

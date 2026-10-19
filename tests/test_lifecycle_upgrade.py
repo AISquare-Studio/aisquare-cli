@@ -35,8 +35,9 @@ from typer.testing import CliRunner
 from aisquare.cli import install as install_cli
 from aisquare.cli.app import app
 from aisquare.core import agents as agent_core
-from aisquare.core import paths, spawn
+from aisquare.core import paths, selfcli, spawn
 from aisquare.core.agent_adapters import get_adapter
+from aisquare.core.config import RoleLaunchProfile, load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxServer
@@ -44,10 +45,12 @@ from aisquare.core.version import DISTRIBUTION
 from aisquare.models import FleetAgent
 from aisquare.services import agents as agents_service
 from aisquare.services import install_route, lifecycle
+from aisquare.services import settings as settings_service
 from aisquare.services.install_route import Captured, Facts, LatestRelease
 from tests import installer_seams
 from tests.fsperms import can_deny_reads
 from tests.installer_seams import no_real_installer  # noqa: F401 — autouse, applied by import
+from tests.remote_elsewhere import remote_on_elsewhere
 
 #: The real lookup, captured before the autouse fixture closes it (its own tests
 #: drive it with a stand-in ``open_url``, which the fixture also closes).
@@ -1977,6 +1980,69 @@ def test_a_move_back_plans_no_reconnect_and_asks_to_move_back(
     assert asked == ["Move aisquare 0.9.0 back to 0.7.0?", "Upgrade aisquare 0.9.0 → 0.9.1?"]
 
 
+def test_a_move_back_to_a_release_that_reads_config_whole_names_what_it_reads_otherwise(
+    runner: CliRunner, tool: Tool, machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #261, M2: 0.8.0 and earlier read config.toml as it stands, without this
+    release's defaults under it, so what the file leaves to them takes that release's
+    defaults there. Named in the plan, as the live fleet is, and not refused; a setting
+    the user set is in the file and reads the same in both. #261 ships in 0.8.1, the first
+    release that lays the file over the defaults: a move back to it names nothing."""
+    monkeypatch.setattr(install_cli, "_stdin_is_a_terminal", lambda: True)
+    monkeypatch.setattr("aisquare.cli.install.typer.confirm", lambda text, **_: False)
+    back = _one_object(runner.invoke(app, ["--json", "upgrade", "--version", "0.8.0"]).stdout)
+    layered = _one_object(runner.invoke(app, ["--json", "upgrade", "--version", "0.8.1"]).stdout)
+    forward = _one_object(runner.invoke(app, ["--json", "upgrade", "--version", "0.9.1"]).stdout)
+    said = runner.invoke(app, ["upgrade", "--version", "0.8.0"]).stdout
+    settings_service.set_value("accounts.pick", "default")
+    chosen = _one_object(runner.invoke(app, ["--json", "upgrade", "--version", "0.8.0"]).stdout)
+
+    assert back["config_defaults_lost"] == [
+        "accounts.pick default (here headroom)",
+        "accounts.on_limit wait (here switch)",
+    ], back
+    assert layered["config_defaults_lost"] == [], "0.8.1 lays the file over its defaults too"
+    assert forward["config_defaults_lost"] == [], "control: a move forward reads it the same"
+    assert "⚠ 0.8.0 reads config.toml without this release's defaults under it" in said, said
+    assert "`aisquare config set accounts.pick …`" in said.replace("\n", " "), said
+    assert chosen["config_defaults_lost"] == ["accounts.on_limit wait (here switch)"], chosen
+
+
+def test_a_move_back_before_env_files_names_the_roles_whose_file_bindings_it_ignores(
+    runner: CliRunner, tool: Tool, machine: Machine, tmp_path: Path
+) -> None:
+    """Review of #259, round 2: 0.8.0's role profile ignores keys it does not know, so after
+    `upgrade --version 0.8.0` a reviewer bound with `team bind reviewer --env-file
+    GH_TOKEN=…` launched with the shell's own GH_TOKEN, often the owner's token that can
+    push, and the plan said nothing. It names each role and its variables, in the plan,
+    under --yes and in --json; a move to a release that reads env_files says nothing."""
+    token = tmp_path / "reviewer-gh-token"
+    token.write_text("github_pat_cannot_push\n", encoding="utf-8")
+    config = load_config()
+    config.team.profiles["reviewer"] = RoleLaunchProfile(env_files={"GH_TOKEN": str(token)})
+    config.team.profiles["coder"] = RoleLaunchProfile(env={"CLAUDE_CONFIG_DIR": "/c2"})
+    save_config(config)
+    warning = (
+        "⚠ 0.8.0 predates `team bind --env-file` (new in 0.8.1) and ignores that binding: "
+        "reviewer (GH_TOKEN) would launch there with whatever value the launching shell has, "
+        "such as a GH_TOKEN that can push. The binding stays in config.toml, read again from "
+        "0.8.1 on"
+    )
+
+    planned = runner.invoke(app, ["upgrade", "--version", "0.8.0"])
+    back = _one_object(runner.invoke(app, ["--json", "upgrade", "--version", "0.8.0"]).stdout)
+    machine.new_version = "0.8.0"
+    ran = runner.invoke(app, ["upgrade", "--version", "0.8.0", "--yes"])
+    machine.new_version = "0.9.0"
+    across = _one_object(runner.invoke(app, ["--json", "upgrade", "--version", "0.8.1"]).stdout)
+    forward = _one_object(runner.invoke(app, ["--json", "upgrade", "--version", "0.9.1"]).stdout)
+
+    assert warning in planned.stdout, planned.stdout
+    assert warning in ran.stdout, "--yes skips the plan, not what it costs"
+    assert back["env_files_dropped"] == ["reviewer (GH_TOKEN)"], back
+    assert across["env_files_dropped"] == forward["env_files_dropped"] == [], "they read it"
+
+
 def _live_fleet_agent(root: Path, label: str = "coder-1") -> None:
     """A fleet row the board lists as live, as `fleet spawn` records one."""
     root.mkdir(parents=True, exist_ok=True)
@@ -2026,6 +2092,49 @@ def test_live_fleet_agents_are_named_before_the_install_is_replaced_under_them(
     assert warning in declined.stdout and "aisquare fleet shutdown --all --yes" in declined.stdout
     assert warning in agreed.stdout and len(machine.installs) == 1, "--yes upgrades, having said it"
     assert "fleet agent" not in quiet.stdout, "control: no fleet, no warning"
+
+
+@pytest.mark.parametrize("by", ["serve", "panel"])
+def test_a_remote_on_in_another_process_is_named_before_the_install_is_replaced_under_it(
+    runner: CliRunner, tool: Tool, machine: Machine, monkeypatch: pytest.MonkeyPatch, by: str
+) -> None:
+    """Follow-up of #259: upgrade said nothing of an `aisquare remote serve` in another
+    terminal, or another asq's R panel. While uv recreates the environment, its page and what
+    phones ask of it fail, and afterwards it runs the old release over the new files. Named
+    in the plan, the question and under --yes, as live fleet agents are, and like them a
+    warning, not a refusal. asq's Update (`--reopen`) says it and comes back on a "no"."""
+    monkeypatch.setattr(install_cli, "_stdin_is_a_terminal", lambda: True)
+    asked: list[str] = []
+    reopened: list[list[str]] = []
+
+    def confirm(text: str, **_: object) -> bool:
+        asked.append(text)
+        return False
+
+    monkeypatch.setattr("aisquare.cli.install.typer.confirm", confirm)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "")
+    monkeypatch.setattr(selfcli, "exec_self", lambda args: reopened.append(list(args)))
+    quiet = runner.invoke(app, ["upgrade"])
+    with remote_on_elsewhere(by=by) as named:
+        plan = _one_object(runner.invoke(app, ["--json", "upgrade"]).stdout)
+        declined = runner.invoke(app, ["upgrade", "--reopen"])
+        agreed = runner.invoke(app, ["upgrade", "--yes"])
+
+    warning = f"⚠ Remote is on ({named}): while the install is being replaced, its page"
+    assert plan["remote"] == named, plan
+    assert asked == [
+        "Upgrade aisquare 0.9.0 → 0.9.1?",
+        "Upgrade aisquare 0.9.0 → 0.9.1 while Remote is on?",
+    ]
+    assert warning in declined.stdout and "Ctrl-C where `aisquare remote serve` runs" in (
+        declined.stdout
+    )
+    assert reopened == [["ui"]], "asq's Update comes back after a no"
+    assert warning in agreed.stdout and len(machine.installs) == 1, "--yes upgrades, having said it"
+    assert "`aisquare remote serve` processes that were already running keep 0.9.0" in (
+        agreed.stdout
+    )
+    assert "Remote is on" not in quiet.stdout, "control: no Remote, no warning"
 
 
 def test_yes_runs_the_restated_command_checks_the_version_and_refreshes_the_hooks(
@@ -3859,6 +3968,9 @@ def test_a_move_back_to_a_release_without_codex_hooks_leaves_them_and_names_the_
 
 def test_a_release_after_the_last_without_codex_hooks_has_them() -> None:
     assert lifecycle.lacks_agent_hooks("codex", lifecycle.LAST_WITHOUT_CODEX_HOOKS)
+    # 0.8.1, the release this branch merged, ships no Codex adapter either.
+    assert lifecycle.lacks_agent_hooks("codex", "0.8.1")
+    assert lifecycle.lacks_agent_hooks("codex", "0.8.0")
     assert lifecycle.lacks_agent_hooks("codex", "0.7.0")
     assert not lifecycle.lacks_agent_hooks("codex", "0.9.0")
     assert not lifecycle.lacks_agent_hooks("claude-code", "0.7.0"), "refresh-hooks' question"

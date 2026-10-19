@@ -8,11 +8,12 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
 
 import tomli_w
 import typer
 from rich.table import Table
+from rich.text import Text
 
 from aisquare.core import paths
 from aisquare.core import snapshot as snapshot_core
@@ -225,7 +226,7 @@ def emit_project_detail(project: ProjectInfo) -> None:
     grid = Table.grid(padding=(0, 2))
     grid.add_column(style="bold")
     grid.add_column()
-    grid.add_row("name", project.root.name or project.id)
+    grid.add_row("name", Text(_project_name(project)))
     grid.add_row("id", project.id)
     grid.add_row("root", str(project.root))
     if project.linked_repos:
@@ -234,7 +235,31 @@ def emit_project_detail(project: ProjectInfo) -> None:
 
 
 def _project_name(project: ProjectInfo) -> str:
-    return project.root.name or project.id
+    """``services.project.display_name``: the nickname, else the directory, else the id.
+
+    Imported here, not at module scope, for :func:`project_for_ref`'s reason. A
+    nickname is free text, so a line that prints it prints it as data
+    (``markup=False``, a :class:`~rich.text.Text` cell): ``[wip]`` is not a style.
+    """
+    from aisquare.services.project import display_name  # lazy: see project_for_ref
+
+    return display_name(project)
+
+
+def projects_json(
+    projects: list[ProjectInfo], *, group_names: Mapping[str, str] | None = None
+) -> list[dict[str, object]]:
+    """The ``project list --json`` payload — shared with the Remote Control server verbatim."""
+    names = group_names or {}
+    return [
+        {
+            **project.model_dump(mode="json"),
+            "name": _project_name(project),
+            "group": names.get(project.group_id or "", project.group_id),
+            "pinned": project.pinned_at is not None,
+        }
+        for project in projects
+    ]
 
 
 def emit_projects(
@@ -259,19 +284,7 @@ def emit_projects(
     """
     names = group_names or {}
     if get_state().json_output:
-        typer.echo(
-            json.dumps(
-                [
-                    {
-                        **project.model_dump(mode="json"),
-                        "name": _project_name(project),
-                        "group": names.get(project.group_id or "", project.group_id),
-                        "pinned": project.pinned_at is not None,
-                    }
-                    for project in projects
-                ]
-            )
-        )
+        typer.echo(json.dumps(projects_json(projects, group_names=names)))
         return
     if not projects and filtered:
         stdout_console().print(filtered)
@@ -305,7 +318,9 @@ def emit_projects(
         marker = "*" if project.id == active_id else ""
         if project.pinned_at is not None:
             marker = (marker + "📌").strip()
-        cells = [marker, project.root.name or "—", project.id, str(project.root)]
+        # display_name's order, with a dash for the id the next column shows anyway.
+        name = Text(project.nickname or project.root.name or "—")
+        cells: list[str | Text] = [marker, name, project.id, str(project.root)]
         if captured:
             cells.append("captured" if project.onboarded_at is None else "yes")
         if arranged:
@@ -325,7 +340,7 @@ def emit_project_action(message: str, project: ProjectInfo) -> None:
     if get_state().json_output:
         typer.echo(project.model_dump_json())
     else:
-        stdout_console().print(message)
+        stdout_console().print(message, markup=False)  # a nickname is text, not markup
 
 
 def _active_note(
@@ -358,7 +373,9 @@ def emit_project_forget(report: ProjectForgetReport) -> None:
         return
     console = stdout_console()
     project = report.project
-    console.print(f"✓ forgot {_project_name(project)} ({project.id}) at {project.root}")
+    console.print(
+        f"✓ forgot {_project_name(project)} ({project.id}) at {project.root}", markup=False
+    )
     if report.purged:
         counts = ", ".join(f"{count} {table}" for table, count in report.removed.items() if count)
         console.print(f"  deleted: {counts or 'no rows'}")
@@ -372,7 +389,7 @@ def emit_project_forget(report: ProjectForgetReport) -> None:
     _say_keys_still_live(report.keys_still_live)
     note = _active_note(report.active, changed=report.active_changed, pin_error=report.pin_error)
     if note is not None:
-        console.print(f"  {note}")
+        console.print(f"  {note}", markup=False)
 
 
 def _say_keys_still_live(owed: list[PendingRevocation]) -> None:
@@ -401,7 +418,18 @@ def emit_prune(report: ProjectPruneReport) -> None:
     if not report.candidates:
         console.print("nothing to prune")
         return
-    kept = {candidate.project.id for candidate in report.kept}
+    # Each kept row's reason as the run re-read it (``prune``'s ``kept``), not the plan's copy
+    # in ``candidates``: a hold that changed while the prompt sat open read "kept: 0 live
+    # agent(s)" beside a summary that named a hub (review of #259, round 34, 6/10). A dry
+    # run's ``kept`` is the plan's own.
+    kept = {candidate.project.id: candidate for candidate in report.kept}
+    # A run marks what it dropped, not what it did not keep: a candidate forgotten elsewhere
+    # while the prompt sat open is in neither list, and was marked ✓ beside a count that left
+    # it out (review of #259, round 35, 4/8).
+    dropped = set(report.dropped)
+    changed = set(report.changed)
+    forgotten = set(report.forgotten)
+    root_gone = set(report.root_gone)
     table = Table(show_header=True, header_style="bold")
     table.add_column("", no_wrap=True)
     table.add_column("WHY", no_wrap=True)
@@ -413,10 +441,36 @@ def emit_prune(report: ProjectPruneReport) -> None:
         why: str = candidate.reason
         if candidate.principal is not None:
             why = f"worktree of {_project_name(candidate.principal)}"
-        if project.id in kept:
-            why += f" (kept: {candidate.live_agents} live agent(s))"
-        marker = "" if report.dry_run else ("·" if project.id in kept else "✓")
-        table.add_row(marker, why, _project_name(project), project.id, str(project.root))
+        held = kept.get(project.id)
+        if held is not None and held.read_by:
+            # Not "the board api, web's fleet agents read", as if the last one's alone (review
+            # of #259, round 36, 6/9); the names early, before a narrow terminal cuts the cell.
+            whose = ", ".join(_project_name(reader) for reader in held.read_by)
+            why += f" (kept: the fleet agents of {whose} read its board)"
+        elif held is not None:
+            why += f" (kept: {held.live_agents} live agent(s))"
+        elif project.id in root_gone:
+            # Not "changed since the plan" alone: its root went, and --missing drops it (round
+            # 39, 5/9).
+            why += " (kept: its root went since the plan)"
+        elif project.id in changed:
+            # Added, given an entry or back on disk while the prompt sat open (round 37, 2/7).
+            why += " (kept: changed since the plan)"
+        elif not report.dry_run and project.id not in dropped:
+            # By its fate, not this run's --purge (round 41, 6/6): one the run found forgotten
+            # (a purge purges one still stale, round 36, 5/9, and leaves the others, round 39,
+            # 4/9; a plain run passes over each), else one purged since the plan. Said
+            # forgotten whenever the run was plain, a purged row read as one an onboard
+            # brings back.
+            fate = "forgotten" if project.id in forgotten else "purged"
+            why += f" (gone already: {fate} since the plan)"
+        marker = ""
+        if not report.dry_run:
+            kept_here = held is not None or project.id in changed
+            marker = "✓" if project.id in dropped else "·" if kept_here else "-"
+        table.add_row(
+            marker, Text(why), Text(_project_name(project)), project.id, str(project.root)
+        )
     console.print(table)
     if report.dry_run:
         return
@@ -424,8 +478,35 @@ def emit_prune(report: ProjectPruneReport) -> None:
     noun = "registration" if count == 1 else "registrations"
     what = "purged" if report.purged else "forgot"
     console.print(f"✓ {what} {count} {noun}")
-    if report.kept:
-        console.print(f"  kept {len(report.kept)} with live fleet agents — stop or reap them first")
+    hubs = sum(bool(candidate.read_by) for candidate in report.kept)
+    if len(report.kept) > hubs:
+        console.print(
+            f"  kept {len(report.kept) - hubs} with live fleet agents — stop or reap them first"
+        )
+    if hubs:
+        console.print(
+            f"  kept {hubs} whose board another project's fleet agents read, as a hub's — "
+            "its row names each project"
+        )
+    if len(report.changed) > len(report.root_gone):
+        stale_no_more = len(report.changed) - len(report.root_gone)
+        console.print(f"  kept {stale_no_more} that changed since the plan: no longer stale")
+    if report.root_gone:
+        # Each row's own forget, as doctor's capture-off line names them: `prune --missing`
+        # drops every registration whose root is missing, not only these, and under --purge
+        # deletes each one's entries, prompts and data directory (round 41, 5/6). With this
+        # run's --purge: a plain forget only forgets them, and nothing lists a forgotten row
+        # to purge it after (round 40, 2/6).
+        from aisquare.services.project import forget_command  # lazy: see project_for_ref
+
+        roots = {candidate.project.id: candidate.project.root for candidate in report.candidates}
+        forgets = [forget_command(roots[gone], purge=report.purged) for gone in report.root_gone]
+        drop = f"drop it: {forgets[0]}" if len(forgets) == 1 else f"drop them: {'; '.join(forgets)}"
+        console.print(
+            f"  kept {len(report.root_gone)} whose root went since the plan, which this prune "
+            f"did not ask for — {drop}",
+            markup=False,
+        )
     if not report.purged and count:
         console.print(
             "  their context entries, prompt history and board rows stay in the store, hidden "
@@ -434,7 +515,7 @@ def emit_prune(report: ProjectPruneReport) -> None:
     _say_keys_still_live(report.keys_still_live)
     note = _active_note(report.active, changed=report.active_changed, pin_error=report.pin_error)
     if note is not None:
-        console.print(f"  {note}")
+        console.print(f"  {note}", markup=False)
 
 
 def emit_setup(report: SetupReport) -> None:
@@ -472,6 +553,39 @@ def emit_config(config: AppConfig) -> None:
         typer.echo(config.model_dump_json())
     else:
         typer.echo(tomli_w.dumps(config.model_dump(mode="json", exclude_none=True)), nl=False)
+
+
+def emit_config_overrides(overrides: Mapping[str, Any]) -> None:
+    """Render the settings the user changed — a JSON object under ``--json``, TOML otherwise.
+
+    The TOML goes through ``typer.echo`` as :func:`emit_config`'s does, never the Rich
+    console, which would take ``[fleet.roles.coder]`` for markup and print nothing of
+    it. Nothing changed prints one TOML comment, so the output still parses.
+    """
+    if get_state().json_output:
+        typer.echo(json.dumps(overrides))
+    elif overrides:
+        typer.echo(tomli_w.dumps(dict(overrides)), nl=False)
+    else:
+        typer.echo("# no overrides: every setting is at its system default")
+
+
+def emit_config_reset(config: Path, backup: Path | None) -> None:
+    """Report ``config reset``: where the user's file went, or that there was nothing to reset."""
+    if get_state().json_output:
+        payload = {"config": str(config), "reset": backup is not None, "backup": None}
+        if backup is not None:
+            payload["backup"] = str(backup)
+        typer.echo(json.dumps(payload))
+    elif backup is None:
+        stdout_console().print(
+            f"nothing to reset: {config} holds no setting, so every setting is at its "
+            "system default"
+        )
+    else:
+        stdout_console().print(
+            f"✓ every setting is back at its system default; your file is kept as {backup}"
+        )
 
 
 def emit_config_value(key: str, value: str) -> None:

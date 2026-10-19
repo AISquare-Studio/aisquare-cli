@@ -1,4 +1,4 @@
-"""The Accounts page with Codex slots: their own section, offline usage bars, ``codex login``.
+"""The Accounts page with Codex slots: their own table, offline usage bars, ``codex login``.
 
 The shell and the tmux recorder are ``test_ui_accounts.py``'s (its ``no_real_tmux``
 fixture is imported, so no window here reaches a real fleet). The Codex slots are
@@ -23,10 +23,9 @@ from textual.pilot import Pilot
 from textual.widgets import Button, Static
 
 from aisquare.cli.ui.views.accounts import (
-    account_line_text,
+    account_cells,
     agent_section_shown,
     reading_age,
-    summarise,
 )
 from aisquare.core import claude_accounts as core
 from aisquare.core.tmux import TmuxServer, WindowInfo
@@ -42,12 +41,15 @@ from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import iam
 from tests.test_ui_accounts import (  # noqa: F401 — `no_real_tmux` is an autouse fixture
     PRIVATE_SOCKET,
+    cells,
     drive,
     fleet_app,
     line,
     no_real_tmux,
     notice,
     open_accounts,
+    painted,
+    press,
     row,
     settle,
     shown,
@@ -244,15 +246,17 @@ def test_a_codex_row_says_how_old_its_reading_is_and_never_asks_to_open_a_sessio
         week_percent=7,
         fetched_at=NOW - timedelta(hours=3),
     )
-    shown_row = account_line_text(_codex_status(4, "me@example.com"), reading, now=NOW).plain
-    assert "4  account 4" in shown_row and "me@example.com  plus" in shown_row
-    assert "session ▮▮▯▯▯ 42%" in shown_row and "week ▯▯▯▯▯ 7%" in shown_row
-    assert shown_row.endswith("as of 3h ago")
-    unfinished = account_line_text(
-        _codex_status(0, "me@example.com", signed_in=False), None, now=NOW
-    ).plain
-    assert "plain codex" in unfinished and "login incomplete" in unfinished
-    assert "open a session" not in unfinished  # Claude Code's wording, not Codex's
+    shown_row = {
+        key: text.plain
+        for key, text in account_cells(_codex_status(4, "me@example.com"), reading, now=NOW).items()
+    }
+    assert (shown_row["slot"], shown_row["name"]) == ("4", "account 4")
+    assert (shown_row["email"], shown_row["plan"]) == ("me@example.com", "plus")
+    assert (shown_row["session"], shown_row["week"]) == ("▮▮▯▯▯ 42%", "▯▯▯▯▯ 7%")
+    assert shown_row["status"] == "as of 3h ago"
+    unfinished = account_cells(_codex_status(0, "me@example.com", signed_in=False), None, now=NOW)
+    assert unfinished["name"].plain == "plain codex"
+    assert unfinished["status"].plain == "⚠ login incomplete"  # never "token missing": Claude's
     # A Claude row never carries an age: its reading is taken now, over the network.
     claude = ClaudeAccountStatus(
         account=ClaudeAccount(slot=1, config_dir=Path("/h/.claude")),
@@ -260,7 +264,7 @@ def test_a_codex_row_says_how_old_its_reading_is_and_never_asks_to_open_a_sessio
         identity=ClaudeIdentity(email="me@example.com"),
         signed_in=True,
     )
-    assert "as of" not in account_line_text(claude, reading, now=NOW).plain
+    assert "as of" not in account_cells(claude, reading, now=NOW)["status"].plain
     assert reading_age(reading.model_copy(update={"fetched_at": NOW}), now=NOW) == ""
     assert reading_age(reading.model_copy(update={"fetched_at": None}), now=NOW) == ""
     old = reading.model_copy(update={"fetched_at": NOW - timedelta(days=3)})
@@ -277,22 +281,6 @@ def test_the_codex_section_shows_once_codex_is_installed_or_has_a_slot() -> None
     assert agent_section_shown(CODEX, missing.model_copy(update={"installs": INSTALLED}))
     with_slot = missing.model_copy(update={"accounts": [_codex_status(3, None)]})
     assert agent_section_shown(CODEX, with_slot)
-
-
-def test_the_sidebar_counts_codex_beside_claude_only_when_there_is_one() -> None:
-    claude = ClaudeAccountStatus(
-        account=ClaudeAccount(slot=1, config_dir=Path("/h/.claude")),
-        label="plain claude",
-        identity=ClaudeIdentity(email="me@example.com"),
-        signed_in=True,
-    )
-    alone = AccountsOverview(claude=INSTALLED[core.AGENT], accounts=[claude])
-    both = alone.model_copy(update={"accounts": [claude, _codex_status(2, "me@example.com")]})
-    line_alone = summarise(alone, None).line
-    line_both = summarise(both, None).line
-    assert line_alone is not None and line_alone.plain.startswith("1 Claude ·")
-    assert "Codex" not in line_alone.plain
-    assert line_both is not None and line_both.plain.startswith("1 Claude · 1 Codex")
 
 
 # --- the page ----------------------------------------------------------------------------------
@@ -313,29 +301,34 @@ def test_a_codex_slot_renders_in_its_own_section_with_offline_usage_bars(
     async def go(pilot: Pilot[None]) -> dict[str, Any]:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
-        await settle_until(app, lambda: "usage: …" not in line(view, slot))
+        await settle_until(app, lambda: painted(view, slot))
         codex_rows = view.query_one("#codex-rows", Vertical)
         return {
             "section": view.query_one("#codex-section", Vertical).display,
             "title": shown(view.query_one("#codex-title", Static)),
+            "header": bool(view.query("#codex-header")),
             "in_codex": bool(codex_rows.query(f"#account-row-{slot}")),
             "in_claude": bool(
                 view.query_one("#claude-rows", Vertical).query(f"#account-row-{slot}")
             ),
             "line": line(view, slot),
+            "cells": cells(view, slot),
             "add": view.query_one("#codex-add", Button).disabled,
-            "remove": row(view, slot).query_one(f"#account-remove-{slot}", Button).display,
-            "sign_in": row(view, slot).query_one(f"#account-sign-in-{slot}", Button).display,
+            "remove": row(view, slot).query_one(f"#account-remove-{slot}", Button).visible,
+            "login": row(view, slot).query_one(f"#account-login-{slot}", Button).visible,
         }
 
     seen = drive(go, overview=overview)
-    assert seen["section"] and seen["title"].startswith("Codex 0.162.1")
+    assert seen["section"] and seen["title"].startswith("Codex 0.162.1") and seen["header"]
     assert seen["in_codex"] and not seen["in_claude"]
     assert f"{slot}  account {slot}" in seen["line"]
     assert "codex@example.com  plus" in seen["line"]
-    assert "session ▮▮▯▯▯ 42%" in seen["line"] and "week ▯▯▯▯▯ 7%" in seen["line"]
-    assert "resets in" in seen["line"] and "as of 3h ago" in seen["line"]
-    assert not seen["add"] and seen["remove"] and not seen["sign_in"]
+    shown_cells = seen["cells"]
+    assert (shown_cells["session"], shown_cells["week"]) == ("▮▮▯▯▯ 42%", "▯▯▯▯▯ 7%")
+    assert shown_cells["session-resets"].startswith("in ") and shown_cells["status"] == (
+        "as of 3h ago"
+    )
+    assert not seen["add"] and seen["remove"] and not seen["login"]
     assert offline == []  # read from the rollout: no request was made for it
 
 
@@ -430,8 +423,8 @@ def test_sign_in_on_an_existing_codex_slot_runs_codex_login_there_and_keeps_the_
     async def go(pilot: Pilot[None]) -> tuple[bool, str]:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
-        shown_button = row(view, slot).query_one(f"#account-sign-in-{slot}", Button).display
-        await pilot.click(f"#account-sign-in-{slot}")
+        shown_button = row(view, slot).query_one(f"#account-login-{slot}", Button).visible
+        await press(pilot, f"#account-login-{slot}")
         await settle(app)
         assert view.login is not None and not view.login.fresh
         # The recorder answers "no server" for the pane: the window closed with no login.
@@ -457,7 +450,7 @@ def test_default_on_a_codex_row_sets_the_codex_default_and_leaves_claudes_alone(
     async def go(pilot: Pilot[None]) -> str:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
-        await pilot.click(f"#account-default-{slot}")
+        await press(pilot, f"#account-default-{slot}")
         await settle_until(app, lambda: "default" in notice(view))
         return notice(view)
 

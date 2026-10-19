@@ -41,18 +41,21 @@ from aisquare.core import paths, selfcli
 from aisquare.core.config import AccountsSettings, AppConfig, load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
-from aisquare.models import ClaudeAccount, FleetAgent, ProjectInfo, TeamSession, TurnMetric
+from aisquare.models import (
+    ClaudeAccount,
+    FleetAgent,
+    FleetAgentStatus,
+    ProjectInfo,
+    TeamSession,
+    TurnMetric,
+)
 from aisquare.services import claude_accounts as service
-from aisquare.services import diagnostics
+from aisquare.services import diagnostics, remote_needs
 from aisquare.services import fleet as fleet_service
 from aisquare.services import hooks as hooks_service
 from aisquare.services import metrics as metrics_service
 from aisquare.services import team as team_service
 from tests.test_claude_accounts import LIVE_USAGE, NOW, _sign_in
-from tests.test_claude_accounts import fake_home as _redirected_home
-
-#: Re-exported so pytest collects it here (see tests/test_account_defaults.py).
-fake_home = _redirected_home
 
 #: ``NOW`` is the sibling file's clock (the credentials its ``_sign_in`` writes expire
 #: relative to it); the parser tests use a SUNDAY so the weekday arithmetic is visible.
@@ -122,7 +125,7 @@ def work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ProjectInfo:
     monkeypatch.chdir(root)
     project = team_project(root)
     with store_session() as store:
-        store.ensure_project(project)
+        store.onboard_project(project)  # added: the hooks record nowhere else (#139)
     return project
 
 
@@ -251,7 +254,7 @@ def test_a_rate_limit_stop_failure_parks_the_session_limited_once_and_wakes_the_
 ) -> None:
     nudges: list[str] = []
     monkeypatch.setattr(
-        team_service, "_nudge_manager", lambda project_id, *, reason: nudges.append(reason)
+        team_service, "_nudge_manager", lambda project_id, *, reason, board: nudges.append(reason)
     )
     _session(work, "sess-coder")
     payload = json.dumps(
@@ -291,7 +294,7 @@ def test_a_rate_limit_stop_failure_parks_the_session_limited_once_and_wakes_the_
 def test_a_limited_fleet_agent_is_named_by_its_label_with_the_switch_command(
     fake_home: Path, work: ProjectInfo, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
     _session(work, "sess-fleet")
     with store_session() as store:
         store.upsert_fleet_agent(
@@ -319,7 +322,11 @@ def test_a_limited_fleet_agent_is_named_by_its_label_with_the_switch_command(
 
     [text] = [text for kind, text in _events(work) if kind == "limited"]
     assert text.startswith("coder-auth hit its session limit")
-    assert "aisquare fleet switch coder-auth" in text
+    # Naming the agent's project: alone, it switched the active project's (#259, round 21).
+    with store_session() as store:
+        stored = store.get_project(work.id)
+    assert stored is not None
+    assert f"aisquare fleet switch --project {stored.codename or work.id} coder-auth" in text
 
 
 def test_other_api_errors_end_the_turn_as_waiting_with_a_feed_line(
@@ -421,7 +428,7 @@ def test_claude_codes_routine_notices_leave_a_parked_or_handed_over_row_as_it_is
     whose ``SessionEnd`` then released the claims the replacement was to
     inherit. Only a prompt that needs a human rings now.
     """
-    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
     _session(work, "sess-coder")
     team_service.hook_stop_failure(
         "sess-coder", error="rate_limit", message=SESSION_LIMIT, details=None
@@ -518,7 +525,7 @@ def test_the_hook_starts_a_detached_hand_over_only_when_configured_and_the_reset
     output is one detached ``aisquare hook hand-over``; nothing is switched in
     this process, and ``fleet.switch`` must not be reached from here at all.
     """
-    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
     started: list[list[str]] = []
     monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
 
@@ -526,6 +533,8 @@ def test_the_hook_starts_a_detached_hand_over_only_when_configured_and_the_reset
         raise AssertionError("the hook must not switch inline")
 
     monkeypatch.setattr(fleet_service, "switch", never)
+    _slot("work@example.com", "tok-work")
+    _slot("home@example.com", "tok-home")  # somewhere to hand it over to
     _session(work, "sess-fleet")
     _fleet_row(work, "agt_limited2", "coder-db", "sess-fleet")
 
@@ -533,12 +542,13 @@ def test_the_hook_starts_a_detached_hand_over_only_when_configured_and_the_reset
         with store_session() as store:
             store.touch_session("sess-fleet", state="working")
 
-    # The default: wait. Nothing is started however far the reset is.
+    # Set to wait: nothing is started however far the reset is.
+    _settings(on_limit="wait")
     _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
     assert started == []
 
-    # Configured to switch: a limit whose reset is far away starts the worker…
-    _settings(on_limit="switch", wait_if_reset_within_minutes=15)
+    # Switch, the default since 0.8.1: a limit whose reset is far away starts the worker…
+    _settings(wait_if_reset_within_minutes=15)
     unpark()
     _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
     assert len(started) == 1
@@ -575,16 +585,225 @@ def test_the_hook_starts_a_detached_hand_over_only_when_configured_and_the_reset
     )
 
 
+@pytest.mark.parametrize("accounts", ["one", "two"])
+def test_a_limit_that_lifts_soon_waits_without_asking_any_account_whether_it_is_signed_in(
+    fake_home: Path,
+    work: ProjectInfo,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    accounts: str,
+) -> None:
+    """Review of #259, round 16: the StopFailure hook asked ``somewhere_to_hand_over`` —
+    every account's ``.claude.json`` parsed, and on macOS its Keychain item read, perhaps
+    with an unlock dialog from a background hook — before the cheap check that the limit
+    lifts within ``wait_if_reset_within_minutes``, which waits whatever the answer. The
+    reset is asked first, and the wait's note is posted on any machine."""
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
+    started: list[list[str]] = []
+    monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
+
+    def never(leaving: int | None = None) -> bool:
+        raise AssertionError("every account asked about, for a limit that lifts soon")
+
+    monkeypatch.setattr(service, "somewhere_to_hand_over", never)
+    _slot("work@example.com", "tok-work")
+    if accounts == "two":
+        _slot("home@example.com", "tok-home")
+    _session(work, "sess-fleet")
+    _fleet_row(work, "agt_limited2", "coder-db", "sess-fleet")
+    _settings(wait_if_reset_within_minutes=15)
+    soon = (datetime.now().astimezone() + timedelta(minutes=5)).strftime("%I:%M%p").lstrip("0")
+
+    _fire_limit(
+        runner, work, f"You've hit your session limit · resets {soon.lower()}", "sess-fleet"
+    )
+
+    assert started == []
+    assert any("waiting for the reset instead of switching" in text for _, text in _events(work))
+
+
+@pytest.mark.parametrize("accounts", ["one", "one enabled of two"])
+def test_with_no_other_account_a_limit_starts_no_hand_over_and_posts_nothing_of_it(
+    fake_home: Path,
+    work: ProjectInfo,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    accounts: str,
+) -> None:
+    """``on_limit = "switch"`` is the default since 0.8.1, on a machine with one account too:
+    every limit there started a hand-over that could only refuse and said "not switched" on
+    the board, and Remote held the limit's push 90 s for it (review of #259, round 13). With
+    no other enabled, signed-in account it is ``wait``; a second one makes it ``switch``."""
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
+    started: list[list[str]] = []
+    monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
+    mine = _slot("work@example.com", "tok-work")
+    if accounts == "one enabled of two":
+        other = _slot("home@example.com", "tok-home")
+        service.set_disabled(str(other.slot), True)
+    _session(work, "sess-fleet")
+    _fleet_row(work, "agt_limited2", "coder-db", "sess-fleet")
+    with store_session() as store:
+        row = store.fleet_agent_for_session("sess-fleet")
+        assert row is not None
+        store.upsert_fleet_agent(row.model_copy(update={"account_slot": mine.slot}))
+
+    _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
+
+    assert started == []
+    assert not any("switch" in text for kind, text in _events(work) if kind != "limited")
+    assert not service.somewhere_to_hand_over(mine.slot)
+    assert service.accounts_settings().on_limit == "switch"  # as configured
+
+    _slot("spare@example.com", "tok-spare")  # an account to go to: switch it is
+    assert service.somewhere_to_hand_over(mine.slot)
+    with store_session() as store:
+        store.touch_session("sess-fleet", state="working")
+    _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
+    assert len(started) == 1
+
+
+def test_with_the_registry_unreadable_a_limit_still_reaches_the_worker_that_says_why(
+    fake_home: Path, work: ProjectInfo, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 14: ``somewhere_to_hand_over`` said no where the registry could
+    not be read, and the hook returned without a word, where the worker used to post "not
+    switched — accounts registry unreadable …". Which accounts are enabled is not known, so
+    with another slot among the directories the worker is started, and its pick, which
+    takes nothing from that registry, says why."""
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
+    started: list[list[str]] = []
+    monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
+    mine = _slot("work@example.com", "tok-work")
+    _slot("home@example.com", "tok-home")
+    _session(work, "sess-fleet")
+    _fleet_row(work, "agt_limited4", "coder-db", "sess-fleet")
+    with store_session() as store:
+        row = store.fleet_agent_for_session("sess-fleet")
+        assert row is not None
+        store.upsert_fleet_agent(row.model_copy(update={"account_slot": mine.slot}))
+    unreadable = "accounts registry unreadable (database is locked)"
+    monkeypatch.setattr(service, "_read_arranged", lambda: (core.list_accounts(), unreadable))
+
+    assert service.somewhere_to_hand_over(mine.slot)
+    _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
+
+    assert len(started) == 1, "the worker is started, to say why it switched nothing"
+    hooks_service.hand_over("sess-fleet", reason="weekly limit")
+    said = [text for kind, text in _events(work) if "not switched" in text]
+    assert said and unreadable in said[0], _events(work)
+
+
+def test_with_the_registry_unreadable_and_no_other_slot_a_limit_starts_no_hand_over(
+    fake_home: Path, work: ProjectInfo, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 15: with a registry note the answer was always yes, though the
+    slot directories it falls back to showed nowhere to go: a disabled flag only takes an
+    account away. On a one-account machine whose store was locked, every limit started a
+    worker that posted "not switched — accounts registry unreadable", and Remote held the
+    push 90 s: round 13's noise again. The fallback list answers."""
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
+    started: list[list[str]] = []
+    monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
+    mine = _slot("work@example.com", "tok-work")
+    _session(work, "sess-fleet")
+    _fleet_row(work, "agt_limited6", "coder-db", "sess-fleet")
+    with store_session() as store:
+        row = store.fleet_agent_for_session("sess-fleet")
+        assert row is not None
+        store.upsert_fleet_agent(row.model_copy(update={"account_slot": mine.slot}))
+    unreadable = "accounts registry unreadable (database is locked)"
+    monkeypatch.setattr(service, "_read_arranged", lambda: (core.list_accounts(), unreadable))
+
+    assert not service.somewhere_to_hand_over(mine.slot)
+    assert not service.somewhere_to_hand_over(None), "one slot is not two"
+    _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
+
+    assert started == []
+    assert not any("switch" in text for kind, text in _events(work) if kind != "limited")
+
+
+def test_with_the_slot_directories_unlistable_the_worker_says_why_rather_than_dying(
+    fake_home: Path, work: ProjectInfo, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 15: an ``OSError`` listing the slot directories read as yes,
+    and the worker then raised the same ``OSError`` out of its pick, which caught only a
+    store error: it exited into ``DEVNULL`` with nothing on the board, the agent stayed
+    parked, and Remote held the limit's push for a hand-over already dead. The pick returns
+    it as its note, and the worker posts it."""
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
+    started: list[list[str]] = []
+    monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
+    _slot("work@example.com", "tok-work")
+    _session(work, "sess-fleet")
+    _fleet_row(work, "agt_limited5", "coder-db", "sess-fleet")
+
+    def unlistable() -> tuple[list[Any], str | None]:
+        raise PermissionError(13, "Permission denied", "claude-accounts")
+
+    monkeypatch.setattr(service, "_read_arranged", unlistable)
+
+    _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
+    assert len(started) == 1, "the worker is started, to say why it switched nothing"
+    hooks_service.hand_over("sess-fleet", reason="weekly limit")
+
+    said = [text for kind, text in _events(work) if "not switched" in text]
+    assert said and "accounts unreadable" in said[0] and "Permission denied" in said[0], said
+
+
+def test_remote_holds_the_limit_of_an_agent_the_hook_hands_over_from_an_account_disabled_since(
+    fake_home: Path, work: ProjectInfo, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 14: coder-1 was spawned on slot 2, which was then disabled, and
+    slot 3 is enabled and signed in. The hook hands it over to slot 3; Remote's scan asked
+    with no slot ("two usable accounts": one) and pushed the limit at once, for a limit
+    being handled. Remote asks the hook's question now, with the row's slot."""
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
+    started: list[list[str]] = []
+    monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
+    mine = _slot("work@example.com", "tok-work")
+    _slot("home@example.com", "tok-home")
+    service.set_disabled(str(mine.slot), True)
+    _session(work, "sess-fleet")
+    _fleet_row(work, "agt_limited3", "coder-1", "sess-fleet")
+    with store_session() as store:
+        row = store.fleet_agent_for_session("sess-fleet")
+        assert row is not None
+        row = row.model_copy(update={"account_slot": mine.slot})
+        store.upsert_fleet_agent(row)
+
+    _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
+    assert len(started) == 1, "the hook hands it over"
+
+    with store_session() as store:
+        session = store.get_session("sess-fleet")
+    status = FleetAgentStatus(agent=row, state="limited", session=session)
+    sources = remote_needs.live_needs_sources()
+    now = datetime.now(tz=UTC)
+    [item] = remote_needs.needs_from_agent(
+        status,
+        None,
+        project=work,
+        events=[],
+        now=now,
+        accounts=sources.accounts(),
+        hands_over=sources.hands_over,
+    )
+    assert item.push_after == item.since + remote_needs._LIMITED_PUSH_DELAY, "held for it"
+
+
 def test_a_re_fire_for_the_same_window_starts_no_second_worker(
     fake_home: Path, work: ProjectInfo, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Claude Code re-fires ``StopFailure`` for one window; the second firing found the row
     already ``limited`` and still started a second worker — two switches of one agent at
     once (review of #205, second round). ``TurnFailure.already_limited`` now says so."""
-    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
     started: list[list[str]] = []
     monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
     _settings(on_limit="switch", wait_if_reset_within_minutes=15)
+    _slot("work@example.com", "tok-work")
+    _slot("home@example.com", "tok-home")  # somewhere to hand it over to
     _session(work, "sess-fleet")
     _fleet_row(work, "agt_refire", "coder-db", "sess-fleet")
 
@@ -619,7 +838,7 @@ def test_another_api_error_mid_hand_over_keeps_the_mark_and_the_claims(
     (third round), the other one wrote ``waiting`` over it — an ``overloaded`` landing
     while the switch waits for the ``/exit``, and the SessionEnd that followed released
     the claims the replacement was to inherit."""
-    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
     monkeypatch.setenv("AISQUARE_ROLE", "coder")
     _session(work, "sess-fleet")
     _fleet_row(work, "agt_overload", "coder-db", "sess-fleet")
@@ -739,7 +958,7 @@ def test_the_worker_refuses_a_hand_over_in_flight_or_one_that_just_happened(
     """Two brakes in ``hand_over`` (review of #205, second round): a session already marked
     ``switching``, and a replacement row younger than ``HANDOVER_COOLDOWN`` that the last
     hand-over spawned. Each is a board line; ``fleet.switch`` is never reached."""
-    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
 
     def never(*args: Any, **kwargs: Any) -> None:
         raise AssertionError("a braked hand-over must not switch")
@@ -830,7 +1049,7 @@ def test_the_detach_puts_the_worker_in_its_own_session_without_this_agents_ident
 def test_the_detached_half_moves_the_agent_and_puts_a_refusal_on_the_board(
     fake_home: Path, work: ProjectInfo, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
     switches: list[tuple[str, str | None, str | None, bool | None]] = []
 
     def fake_switch(project: ProjectInfo, label: str, **kwargs: Any) -> None:
@@ -867,6 +1086,64 @@ def test_the_detached_half_moves_the_agent_and_puts_a_refusal_on_the_board(
     assert len(switches) == 1
 
 
+def test_under_a_hub_the_limit_is_handed_over_from_the_agents_own_row(
+    fake_home: Path,
+    work: ProjectInfo,
+    tmp_path: Path,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 23, 1/10: under ``AISQUARE_TEAM_HUB`` the session is on the
+    hub's board and its fleet row in the project it was spawned in. The stop-failure hook,
+    the hand-over decision and its worker all asked the store for the row by the board's
+    project and found none: the feed line named the agent by its short id with no command,
+    ``on_limit = "switch"`` never started the worker, and the hub's manager was the one
+    nudged. Each now reads the row recorded against the session, in its own project, as the
+    board's chip and doctor's line do."""
+    hub_root = tmp_path / "hub"
+    hub_root.mkdir()
+    hub = team_project(hub_root)
+    with store_session() as store:
+        store.onboard_project(hub)
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub_root))
+    nudged: list[str] = []
+    monkeypatch.setattr(
+        team_service,
+        "_nudge_manager",
+        lambda project_id, *, reason, board: nudged.append(project_id),
+    )
+    started: list[list[str]] = []
+    monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
+    moved: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        fleet_service, "switch", lambda project, label, **kwargs: moved.append((project.id, label))
+    )
+    _slot("work@example.com", "tok-work")
+    _slot("home@example.com", "tok-home")
+    _settings(wait_if_reset_within_minutes=15)
+    session = _session(hub, "sess-fleet")
+    _fleet_row(work, "agt_hub1", "coder-db", "sess-fleet")
+    switch = f"aisquare fleet switch --project {work.id} coder-db"
+
+    _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
+
+    limited = [text for kind, text in _events(hub) if kind == "limited"]
+    assert len(limited) == 1 and limited[0].startswith("coder-db hit its weekly limit"), limited
+    assert f"`{switch}`" in limited[0]
+    assert nudged == [work.id], "the agent's own project's manager"
+    assert len(started) == 1 and started[0][-4:-2] == ["hand-over", "sess-fleet"]
+    assert runner.invoke(app, ["hook", "hand-over", "sess-fleet"]).exit_code == 0
+    assert moved == [(work.id, "coder-db")]
+
+    with store_session() as store:
+        parked = store.get_session("sess-fleet")
+        assert parked is not None and parked.state == "limited"
+        assert team_service.fleet_switches(store, [parked]) == {"sess-fleet": switch}
+    [doctor] = diagnostics._claude_account_limit_checks()
+    assert switch in (doctor.fix or ""), doctor
+    assert session.project_id == hub.id  # the premise: the board is the hub's
+
+
 # --------------------------------------------------------------------------- the pick
 
 
@@ -886,7 +1163,13 @@ def test_headroom_picks_the_first_account_under_the_line_in_priority_order(
     assert (
         picked is not None and picked.slot == work_slot.slot
     )  # first UNDER 85 in order, not lowest
-    assert any("first under 85%" in note for note in notes)
+    # Every figure says USED, with what is left beside it (an agent read a bare 40% as left).
+    assert any(
+        "account 2 20% used (80% left)" in note
+        and "account 3 90% used (10% left)" in note
+        and "account 2 is first under the 85%-used line" in note
+        for note in notes
+    ), notes
     assert sorted(fetch.calls) == ["tok-personal", "tok-spare", "tok-work"]  # one read each
     # The control: slot 1 (no credentials in this home) was never a candidate.
     assert "tok" not in "".join(n for n in notes if "plain claude" in n)
@@ -903,7 +1186,11 @@ def test_headroom_takes_the_most_room_when_every_account_is_over_the_line(
     picked, notes = service.headroom_choice(service.list_accounts(), switch_at=85, fetch=fetch)
 
     assert picked is not None and picked.slot == 3  # 12 % left beats 4 % left
-    assert any("every account is over 85%" in note and "12% left" in note for note in notes)
+    assert any(
+        "every account is over the 85%-used line" in note
+        and "account 3 has the most room (12% left)" in note
+        for note in notes
+    ), notes
 
 
 def test_an_account_that_has_spent_its_week_has_no_headroom_however_empty_its_five_hours(
@@ -934,7 +1221,8 @@ def test_an_account_that_has_spent_its_week_has_no_headroom_however_empty_its_fi
     )
     assert picked is not None and picked.slot == 4
     assert any(
-        "account 3 0% (week 100%)" in note and "account 4 is first under 85%" in note
+        "account 3 0% used (week 100% used, 0% left)" in note
+        and "account 4 is first under the 85%-used line" in note
         for note in notes
     ), notes
 
@@ -988,18 +1276,19 @@ def test_headroom_skips_what_it_cannot_read_and_honours_disabled_and_exclude(
 
 
 def test_choose_uses_headroom_only_when_configured_and_falls_back_to_the_default(
-    fake_home: Path, work: ProjectInfo
+    fake_home: Path, work: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _slot("work@example.com", "tok-work")
     _slot("personal@example.com", "tok-personal")
     service.set_default("2")
     fetch = _Usage({"tok-work": _payload(95), "tok-personal": _payload(10)})
 
+    _settings(pick="default")
     plain = service.choose(role="coder", project=work, fetch=fetch)
     assert plain.source == "machine default" and plain.account is not None
     assert plain.account.slot == 2 and fetch.calls == []  # pick=default: no request at all
 
-    _settings(pick="headroom", switch_at=85)
+    _settings(switch_at=85)  # pick=headroom, the default since 0.8.1
     spread = service.choose(role="coder", project=work, fetch=fetch)
     assert spread.source == "headroom" and spread.account is not None
     assert spread.account.slot == 3
@@ -1011,11 +1300,47 @@ def test_choose_uses_headroom_only_when_configured_and_falls_back_to_the_default
     settings_service.bind_role("coder", account="2")
     assert service.choose(role="coder", project=work, fetch=fetch).source == "role binding"
 
-    # Nothing readable: the default decides, with the notes saying why.
+    # Nothing readable (a minute on, past what a launch serves): the default decides, with
+    # the notes saying why.
+    later = NOW + timedelta(seconds=service.PICK_MAX_AGE_SECONDS + 1)
+    monkeypatch.setattr(service, "_now", lambda: later)
     offline = service.choose(role="tester", project=work, fetch=_Usage({}))
     assert offline.source == "machine default" and offline.account is not None
     assert offline.account.slot == 2
     assert any("no account's usage could be read" in note for note in offline.notes)
+
+
+def test_a_launch_on_one_account_says_it_is_over_the_line_from_the_cache_and_asks_nothing(
+    fake_home: Path, work: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One candidate is the answer whatever it reads, so its pick asks nothing (m1) — and so
+    lost the only word at launch that the one account is nearly full (review of #261, N4).
+    The cache still says it: a reading recorded in the last five minutes, no request."""
+    only = _slot("work@example.com", "tok-work")
+    _settings(switch_at=85)  # pick=headroom
+    service.cached_usage([only], fetch=_Usage({"tok-work": _payload(97)}))  # recorded at NOW
+
+    def never(url: str, headers: Mapping[str, str], timeout: float) -> tuple[int, bytes]:
+        raise AssertionError("a one-account launch must not ask the endpoint")
+
+    later = NOW + timedelta(minutes=2)  # past a launch's minute, inside the five
+    monkeypatch.setattr(service, "_now", lambda: later)
+    full = service.choose(role="coder", project=work, fetch=never)
+    assert full.account is not None and full.account.slot == only.slot
+    assert any(
+        "every account is over the 85%-used line" in note and "3% left" in note
+        for note in full.notes
+    ), full.notes
+
+    _settings(switch_at=99)  # the same reading, under the line now: nothing to say
+    assert not any(
+        "over the" in note for note in service.choose(role="coder", project=work, fetch=never).notes
+    )
+
+    monkeypatch.setattr(service, "_now", lambda: NOW + timedelta(minutes=6))  # nothing cached
+    quiet = service.choose(role="coder", project=work, fetch=never)
+    assert quiet.account is not None and quiet.account.slot == only.slot
+    assert not any("over the" in note for note in quiet.notes)
 
 
 def test_a_hand_over_never_re_picks_the_account_it_is_leaving_on_an_arranged_machine(
@@ -1065,7 +1390,10 @@ def test_choose_for_handover_asks_headroom_before_the_binding_and_refuses_when_a
         role="coder", project=work, exclude=(2,), automatic=True, fetch=full
     )
     assert automatic.account is None
-    assert any("every account is over 85%; nothing to switch to" in n for n in automatic.notes)
+    assert any(
+        "every account is over the 85%-used line; nothing to switch to" in n
+        for n in automatic.notes
+    )
 
     # An iterator as `exclude` is spent by its first reader: normalised once (third round).
     lazy = service.choose_for_handover(
@@ -1091,6 +1419,46 @@ def test_choose_for_handover_asks_headroom_before_the_binding_and_refuses_when_a
         ).account
         is None
     )
+
+
+def test_a_launch_picks_from_a_reading_a_minute_old_and_a_hand_over_reads_live(
+    fake_home: Path, work: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #261, m1: ``pick = "headroom"`` is the default, and its pick read live, so
+    the sidebar's read then three launches sent four rounds. A launch now picks from the
+    cache, a minute deep; a hand-over still reads every candidate now."""
+    work_slot = _slot("work@example.com", "tok-work")
+    personal = _slot("personal@example.com", "tok-personal")
+    fetch = _Usage({"tok-work": _payload(95), "tok-personal": _payload(10)})
+    _settings(switch_at=85)
+
+    service.cached_usage([work_slot, personal], fetch=fetch)  # the sidebar's read
+    assert len(fetch.calls) == 2
+    for _ in range(3):
+        launched = service.choose(role="tester", project=work, fetch=fetch)
+        assert launched.source == "headroom" and launched.account is not None
+        assert launched.account.slot == personal.slot
+    assert len(fetch.calls) == 2  # three launches, no request
+
+    later = NOW + timedelta(seconds=service.PICK_MAX_AGE_SECONDS + 1)
+    monkeypatch.setattr(service, "_now", lambda: later)
+    service.choose(role="tester", project=work, fetch=fetch)
+    assert len(fetch.calls) == 4  # a minute on: one round, every candidate
+    handed = service.choose_for_handover(role="coder", project=work, exclude=(2,), fetch=fetch)
+    assert handed.account is not None and handed.account.slot == personal.slot
+    assert len(fetch.calls) == 5  # live, though the launch just read it
+
+    # One candidate is the answer whatever it reads: no request at all. The cache's
+    # reading of it, 95% used, still says it is over the line (N4).
+    service.set_disabled(str(personal.slot), True)
+    lone_fetch = _Usage({})
+    alone = service.choose(role="tester", project=work, fetch=lone_fetch)
+    assert alone.account is not None and alone.account.slot == work_slot.slot
+    assert alone.source == "headroom"
+    assert [note.split(" — ")[1] for note in alone.notes] == [
+        "every account is over the 85%-used line; account 2 has the most room (5% left)"
+    ]
+    assert len(fetch.calls) == 5 and lone_fetch.calls == []
 
 
 def test_a_hand_over_picks_nothing_from_a_registry_it_cannot_read(
@@ -1278,7 +1646,8 @@ def test_accounts_usage_and_list_usage_read_every_account_in_one_round_with_labe
     fake_home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The two CLI usage surfaces go through ``read_usage`` (one round trip) and the arranged
-    list — priority order, the alias, ``(disabled)`` — like every other surface (third round)."""
+    list — priority order, the alias, ``(disabled)`` — like every other surface (third round).
+    Both read through the shared five-minute cache, so the second is served without a round."""
     _slot("work@example.com", "tok-work")
     _slot("personal@example.com", "tok-personal")
     service.set_alias("2", "work")
@@ -1303,9 +1672,17 @@ def test_accounts_usage_and_list_usage_read_every_account_in_one_round_with_labe
     assert lines[1].startswith("3") and "(disabled)" in lines[1] and "60%" in lines[1]
     assert lines[2].startswith("2") and "work" in lines[2] and "40%" in lines[2]
 
+    assert "session used" in lines[0] and "week used" in lines[0]
+
+    # The readings `usage` just recorded serve `list --usage`: no request within five minutes…
     rounds.clear()
     listing = runner.invoke(app, ["accounts", "list", "--usage"])
     assert listing.exit_code == 0, listing.output
+    assert rounds == []
+    assert "usage as of just now" in listing.stdout
+    # …unless asked to fetch now, which is one round again.
+    refreshed = runner.invoke(app, ["accounts", "list", "--usage", "--refresh"])
+    assert refreshed.exit_code == 0, refreshed.output
     assert rounds == [[3, 2]]
 
 
@@ -1330,10 +1707,12 @@ def test_reorder_and_move_read_the_registry_once(
     assert len(reads) == 1
 
 
-def test_the_pages_tick_opens_the_store_once_for_every_sample_and_trend(
+def test_the_pages_read_opens_the_store_three_times_however_many_accounts(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Eight opens a minute for four accounts before: one now (third round)."""
+    """Eight opens a minute for four accounts before (third round). The page's read
+    (``cached_usage_with_trends``) opens it once to look in the cache, once to record what
+    it fetched and once for every trend, whatever the number of accounts."""
     import contextlib
 
     a = _slot("work@example.com", "tok-work")
@@ -1352,9 +1731,9 @@ def test_the_pages_tick_opens_the_store_once_for_every_sample_and_trend(
             yield store
 
     monkeypatch.setattr("aisquare.services.claude_accounts.store_session", counted_session)
-    fetched = service.read_usage_with_trends([a, b], now=NOW, fetch=fetch)
+    fetched = service.cached_usage_with_trends([a, b], now=NOW, fetch=fetch)
 
-    assert opens == [1]
+    assert opens == [1, 1, 1]
     assert fetched[a.slot][0].session_percent == 40 and fetched[b.slot][0].session_percent == 60
     trend = fetched[a.slot][1]
     assert trend is not None and trend.per_hour == pytest.approx(40.0)  # 20 → 40 in 30 min
@@ -1397,9 +1776,6 @@ def test_a_recording_usage_round_opens_the_store_once_on_the_callers_thread(
         assert len(store.usage_samples(a.slot, since=since)) == 1
         assert len(store.usage_samples(b.slot, since=since)) == 1
         assert store.usage_samples(c.slot, since=since) == []
-    opens.clear()
-    service.read_usage([a], now=NOW, fetch=fetch, record=False)
-    assert opens == []  # the page's path records in a session of its own
 
 
 def test_the_board_and_watch_name_an_aliased_slot_1_as_the_rest_does(
@@ -1412,7 +1788,7 @@ def test_the_board_and_watch_name_an_aliased_slot_1_as_the_rest_does(
     from aisquare.cli.watch import _session_lines
 
     two = _slot("work@example.com", "tok-work")
-    service.set_alias("1", "personal")
+    service.set_alias("1", "Personal laptop")  # a free-text name, as the Accounts page sets it
     plain_dir = str(core.default_config_dir())
     now = datetime.now(tz=UTC)
     sessions = [
@@ -1428,12 +1804,12 @@ def test_the_board_and_watch_name_an_aliased_slot_1_as_the_rest_does(
     ]
     labels = service.slot_labels()
 
-    assert team_service.account_label(plain_dir, labels) == "personal"
+    assert team_service.account_label(plain_dir, labels) == "Personal laptop"
     assert team_service.account_label(plain_dir) == "plain claude"  # the built-in name, unlabelled
     rendered = _session_lines(sessions, labels).plain
-    assert "personal" in rendered and ".claude" not in rendered
+    assert "Personal laptop" in rendered and ".claude" not in rendered
     block = team_service._render_board(work, sessions, [], [], me=None, labels=labels)
-    assert "[personal]" in block and "[.claude]" not in block
+    assert "[Personal laptop]" in block and "[.claude]" not in block
 
 
 def test_the_board_a_hook_renders_under_a_managed_slot_names_the_aliased_slot_1_too(
@@ -1586,7 +1962,9 @@ def test_doctor_names_limited_agents_and_is_silent_without_any(
     limits = checks["claude-account-limits"]
     assert limits.status.value == "warn"
     assert "coder-auth" in limits.detail and "resets" in limits.detail
-    assert limits.fix is not None and "aisquare fleet switch <label>" in limits.fix
+    # The agent's own switch, naming its project (review of #259, round 21).
+    switch = f"aisquare fleet switch --project {work.codename or work.id} coder-auth"
+    assert limits.fix is not None and switch in limits.fix, limits.fix
 
 
 def test_doctor_live_headroom_warns_only_when_every_account_is_over_the_line(
@@ -1601,14 +1979,15 @@ def test_doctor_live_headroom_warns_only_when_every_account_is_over_the_line(
     service.list_accounts()  # the registry exists from here on
     check = diagnostics._claude_account_headroom_check()
     assert check is not None and check.status.value == "ok"
-    assert "work@" not in check.detail and "account 2 90%" in check.detail
+    assert "work@" not in check.detail and "account 2 90% used (10% left)" in check.detail
+    assert "percent USED (85% used is the line)" in check.detail
 
     monkeypatch.setattr(
         service, "_http_get", _Usage({"tok-work": _payload(90), "tok-personal": _payload(86)})
     )
     check = diagnostics._claude_account_headroom_check()
     assert check is not None and check.status.value == "warn"
-    assert "every account is at or over 85%" in check.detail
+    assert "every account has used 85% or more" in check.detail
 
     monkeypatch.setattr(service, "_http_get", _Usage({}))
     check = diagnostics._claude_account_headroom_check()
@@ -1637,14 +2016,15 @@ def test_doctor_live_headroom_counts_a_spent_week_as_over_the_line(
     check = diagnostics._claude_account_headroom_check()
 
     assert check is not None and check.status.value == "warn", check
-    assert "every account is at or over 85%" in check.detail
-    assert "account 3 0% (week 100%)" in check.detail
+    assert "every account has used 85% or more" in check.detail
+    assert "account 3 0% used (week 100% used, 0% left)" in check.detail
 
 
 def test_doctor_live_and_the_page_read_every_account_in_one_round(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Both go through ``read_usage``, once, with every account (review of #205, finding 11)."""
+    """Both go through ``read_usage``, once, with every account (review of #205, finding 11);
+    the page through the shared cache, which doctor's live round has just filled."""
     _slot("work@example.com", "tok-work")
     _slot("personal@example.com", "tok-personal")
     monkeypatch.setattr(
@@ -1665,27 +2045,29 @@ def test_doctor_live_and_the_page_read_every_account_in_one_round(
 
     rounds.clear()
     accounts = [a for a in service.list_accounts() if a.slot != 1]
-    fetched = service.read_usage_with_trends(accounts)  # what the page's usage worker runs
-    assert rounds == [[2, 3]]
+    fetched = service.cached_usage_with_trends(accounts)  # what the page's usage worker runs
+    assert rounds == []  # doctor's round was recorded: the page is served it
     assert fetched[2][0].session_percent == 10 and fetched[3][0].session_percent == 20
     assert fetched[2][1] is not None  # the reading was recorded, so a trend object exists
+    service.cached_usage_with_trends(accounts, force=True)  # ↻ Refresh usage
+    assert rounds == [[2, 3]]
 
 
 def test_the_accounts_section_defaults_and_round_trips_through_config_set(
     runner: CliRunner,
 ) -> None:
     assert AppConfig().accounts == AccountsSettings(
-        pick="default", switch_at=85, on_limit="wait", wait_if_reset_within_minutes=15
+        pick="headroom", switch_at=85, on_limit="switch", wait_if_reset_within_minutes=15
     )
-    assert service.accounts_settings().pick == "default"  # no file: the defaults
+    assert service.accounts_settings().pick == "headroom"  # no file: the defaults
 
-    result = runner.invoke(app, ["config", "set", "accounts.pick", "headroom"])
+    result = runner.invoke(app, ["config", "set", "accounts.pick", "default"])
     assert result.exit_code == 0, result.output
-    assert load_config().accounts.pick == "headroom"
-    assert service.accounts_settings().pick == "headroom"
+    assert load_config().accounts.pick == "default"
+    assert service.accounts_settings().pick == "default"
     bad = runner.invoke(app, ["config", "set", "accounts.pick", "sometimes"])
-    assert bad.exit_code != 0 and load_config().accounts.pick == "headroom"
-    limit = runner.invoke(app, ["config", "set", "accounts.on_limit", "switch"])
-    assert limit.exit_code == 0 and load_config().accounts.on_limit == "switch"
+    assert bad.exit_code != 0 and load_config().accounts.pick == "default"
+    limit = runner.invoke(app, ["config", "set", "accounts.on_limit", "wait"])
+    assert limit.exit_code == 0 and load_config().accounts.on_limit == "wait"
     shown = runner.invoke(app, ["config", "get", "accounts.switch_at"])
     assert shown.stdout.strip() == "accounts.switch_at = 85"

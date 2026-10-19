@@ -178,9 +178,16 @@ def test_the_hooks_are_read_in_the_home_of_the_account_the_manager_runs_on(
     hooked = first_run.probe_fleet(which=on_path("codex"), sign_in=False)
     assert hooked.home == slot.config_dir and hooked.connected and hooked.trust_pending
     assert f"aisquare's hooks in {slot.config_dir}" in claude_text(hooked, platform="linux").plain
-    # Control: with no Codex default, the manager runs on the plain home, read as before.
+    # Control: with no Codex default, the manager runs on the plain home, read as before,
+    # where a launch with nothing named takes the default (`pick = "default"`). 0.8.1's own
+    # default, `headroom`, sends it to the signed-in slot that has room, slot 2 here.
     agents_service.disconnect("codex", slot.config_dir)
     accounts_service.set_default(None, agent="codex")
+    room = first_run.probe_fleet(which=on_path("codex"))
+    assert room.home == slot.config_dir and room.account_slot == slot.slot
+    config = load_config()
+    config.accounts.pick = "default"
+    save_config(config)
     plain = first_run.probe_fleet(which=on_path("codex"))
     assert plain.home == codex_home and plain.connected and plain.account_slot == 0
 

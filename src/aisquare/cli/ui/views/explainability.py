@@ -1,4 +1,4 @@
-"""The Explainability tab: both tracing lanes at a glance, and the switches as buttons.
+"""The Explainability section of a project's AISquare tab: both tracing lanes, and the switches.
 
 Everything here goes through the services behind ``cli/explainability.py`` —
 what ``status``, ``enable``, ``disable``, ``register`` and ``ship`` call — and
@@ -669,6 +669,7 @@ class ExplainabilityView(VerticalScroll):
 
     DEFAULT_CSS = """
     ExplainabilityView { padding: 1 2; }
+    ExplainabilityView #explainability-heading { height: auto; margin-bottom: 1; }
     ExplainabilityView #explainability-status { height: auto; margin-bottom: 1; }
     ExplainabilityView #explainability-actions { height: auto; }
     ExplainabilityView #explainability-actions Button { margin-right: 1; }
@@ -688,6 +689,8 @@ class ExplainabilityView(VerticalScroll):
         """The plain text of the status block (what a test reads)."""
 
     def compose(self) -> ComposeResult:
+        # The first section of the project's AISquare tab; more may follow it there.
+        yield Static(Text("Explainability", style="bold"), id="explainability-heading")
         yield Static(Text("reading the tracing state…", style="dim"), id="explainability-status")
         with Horizontal(id="explainability-actions"):
             yield Button("Enable tracing", id="explainability-enable", variant="primary")

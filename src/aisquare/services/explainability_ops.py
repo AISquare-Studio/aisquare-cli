@@ -35,7 +35,6 @@ import importlib.util
 import json
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -66,6 +65,7 @@ from aisquare.models import (
     RedactionLevel,
     TraceDestination,
 )
+from aisquare.services import install_route
 from aisquare.services.explainability import (
     EDITABLE_INSTALL_HINT,
     FALLBACK_ROLE,
@@ -319,11 +319,11 @@ def unregistered_roles_note(roles: Sequence[str], target: ResolvedTarget) -> str
     gap exists at all.
     """
     listed = ", ".join(roles)
-    flags = " ".join(f"--role {role}" for role in roles)
+    register = ["aisquare", "explainability", "register", "--target", target.name]
+    register += [word for role in roles for word in ("--role", role)]
     return (
         f"launchable but not in explainability.roles: {listed} — add them to "
-        "config.toml or run: aisquare explainability register "
-        f"--target {shlex.quote(target.name)} {flags}"
+        f"config.toml or run: {install_route.command_line(register)}"
     )
 
 
@@ -1642,13 +1642,17 @@ def _check_config(target: ResolvedTarget, *, on: bool) -> DoctorCheck:
         # machine's target, re-pointing every project without a destination (review of #203):
         # the project's own key is the way in, as `use` says. With `--from-env`: from a
         # terminal, `key set` with nothing on stdin refuses (review of #203, round 2).
-        other = (
-            "attach it to the project: aisquare explainability key set --project "
-            f"{shlex.quote(target.project_id or '<project>')} --from-env <VAR>"
-            if target.project_deployment
-            else "point the target at another variable: aisquare explainability enable "
-            f"--target {target.name} --key-env <VAR>"
-        )
+        if target.project_deployment:
+            ref = install_route.command_line([target.project_id or "<project>"])
+            other = (
+                "attach it to the project: aisquare explainability key set --project "
+                f"{ref} --from-env <VAR>"
+            )
+        else:
+            other = (
+                "point the target at another variable: aisquare explainability enable "
+                f"--target {target.name} --key-env <VAR>"
+            )
         if target.api_key_env == KEY_ENV_VAR and key_path().is_file():
             # The key file is there and reads as no key. Its writer was told to export
             # the variable "the CLI never stores" (review of the #203 final-review
@@ -2272,7 +2276,7 @@ def _rerun_live(target: ResolvedTarget) -> str:
         argv += ["--target", target.name]
     if target.project_id is not None:
         argv += ["--project", target.project_id]
-    return shlex.join(argv)
+    return install_route.command_line(argv)
 
 
 #: ``_fail`` when the operator has switched tracing on (broken now means

@@ -258,6 +258,31 @@ def test_remote_calls_never_activate_an_unopted_project(work_dir: Path) -> None:
         assert not store.team_active(team_project(work_dir).id)
 
 
+def test_with_capture_off_a_board_on_a_captured_row_is_refused_not_written(
+    work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A board 0.8.0 left on a captured row is active, and the project was never added:
+    with ``[projects] capture`` off the remote is told to add it, and no session row is
+    written there. ``serve`` adds its own at start (``team on``)."""
+    from aisquare.core.orchestrator import team_project
+    from aisquare.core.store import store_session
+    from aisquare.services import project as project_service
+
+    monkeypatch.setattr(project_service, "capture_on", lambda: True)
+    team_service.add_note("left by 0.8.0")  # captures the row and activates its board
+    monkeypatch.setattr(project_service, "capture_on", lambda: False)
+
+    text = error_text(call_remote("team_board"))
+
+    assert text.startswith("error:") and "add it first: aisquare project onboard" in text
+    project = team_project(work_dir)
+    with store_session() as store:
+        assert store.list_projects() == [], "the refusal adds nothing"
+        assert store.get_session(mcp_server.client_session_id(project.id)) is None
+    team_service.activate()  # what `serve` does at start
+    assert "left by 0.8.0" in mcp_server.team_board()
+
+
 def test_remote_calls_respect_master_switch(
     work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -288,7 +313,7 @@ def test_remote_success_results_stay_plain_tool_results(work_dir: Path) -> None:
     assert not result.is_error
     block = result.content[0]
     assert isinstance(block, TextContent)
-    assert block.text.startswith("created: tsk_")
+    assert block.text.startswith("created: #1 tsk_")  # the board number, then the id
 
 
 def test_virtual_session_is_scoped_per_project(

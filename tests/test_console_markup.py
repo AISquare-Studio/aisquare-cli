@@ -141,6 +141,36 @@ def test_a_stub_message_keeps_its_brackets(runner: CliRunner) -> None:
     assert "not implemented" in result.output
 
 
+def test_a_help_text_keeps_the_config_section_it_names(runner: CliRunner) -> None:
+    """Final gate NIT 1: ``accounts trust --help`` printed ``(` share_trust`)``. Typer renders
+    a docstring through Rich markup, which took ``[accounts]`` for a style."""
+    result = runner.invoke(app, ["accounts", "trust", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "(`[accounts] share_trust`)" in " ".join(_ANSI.sub("", result.output).split())
+
+
+def test_no_help_text_holds_a_bracket_rich_would_take_for_markup() -> None:
+    """Every command's help, and every option's, as Rich reads it: a ``[section]`` that is
+    not escaped (``\\\\[section]`` in the source) is gone from the screen."""
+    from rich.errors import MarkupError
+    from rich.text import Text
+
+    from tests.cli_tree import all_nodes
+
+    eaten: list[str] = []
+    for path, command in all_nodes():
+        texts = [command.help, command.epilog, *(getattr(p, "help", None) for p in command.params)]
+        for text in filter(None, texts):
+            try:
+                kept = Text.from_markup(text).plain == text.replace("\\[", "[")
+            except MarkupError:
+                kept = False
+            if not kept:
+                eaten.append(f"aisquare {' '.join(path)}: {text[:70]!r}")
+    assert eaten == []
+
+
 # --- styling is not collateral damage ---
 
 

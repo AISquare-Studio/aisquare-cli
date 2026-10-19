@@ -40,6 +40,7 @@ from typing import TypedDict
 
 from aisquare.core import paths
 from aisquare.core.config import SnapshotSettings
+from aisquare.core.spawn import git_env
 from aisquare.core.workspace import git_argv
 from aisquare.models import Snapshot
 
@@ -266,6 +267,7 @@ def head_sha(root: Path) -> str | None:
             errors="replace",
             timeout=10,
             check=True,
+            env=git_env(),
         )
     except (subprocess.SubprocessError, OSError):
         return None

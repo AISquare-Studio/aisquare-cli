@@ -19,6 +19,10 @@ from tests.stub_ci_server import StubCI, error_v1, live_descriptor, serve
 
 from .test_shipping_redaction import SECRETS
 
+#: Each recall row is tied to the project it ran in, which with ``[projects] capture`` off
+#: must be one someone added: these run where nothing was, as a captured directory.
+pytestmark = pytest.mark.usefixtures("project_capture")
+
 
 @pytest.fixture
 def stub() -> Iterator[StubCI]:
@@ -384,6 +388,26 @@ def test_a_recall_while_off_is_unavailable_and_recorded(isolated_home: Path) -> 
     assert result["client_reason"] == "disabled"
     (turn,) = metrics_service.recent()
     assert turn.trigger == "agent_request" and turn.client_reason is ClientReason.disabled
+
+
+@pytest.mark.parametrize("refused", [False, True], ids=["carried", "refused at the boundary"])
+def test_with_capture_off_a_recall_where_nothing_was_added_writes_no_row(
+    wired: StubCI, isolated_home: Path, monkeypatch: pytest.MonkeyPatch, refused: bool
+) -> None:
+    """Review of #259, round 17: with ``[projects] capture`` off, a directory nobody added
+    records nothing — the hooks skip their CI rows there, since each would be a turn tied to
+    a project that does not exist. The recall tool resolves the same project and still
+    wrote its metric row and join record. It is carried as ever, and writes no row."""
+    from aisquare.services import project as project_service
+
+    monkeypatch.setattr(project_service, "capture_on", lambda: False)
+    if refused:
+        result = ci_recall.collective_intelligence_recall("q", WIRE, token_budget=-5)
+        assert result["client_reason"] == "schema_mismatch"
+    else:
+        result = ci_recall.collective_intelligence_recall("Why did the pool guard leak?", WIRE)
+        assert result == fixture("mcp-tool-output.v1.valid"), "carried, and answered"
+    assert metrics_service.recent() == []
 
 
 def test_a_recall_against_a_push_only_descriptor_is_recorded_not_sent(

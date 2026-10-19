@@ -38,25 +38,19 @@ import contextlib
 import errno
 import json
 import os
-import time
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
 from aisquare.core import paths
 from aisquare.core.atomic import Replacement, replacement
-from aisquare.core.locking import lock_exclusive, unlock
+from aisquare.core.locking import holding
 
 #: Where a legacy bare-string file is migrated to.
 API_KEY = "api_key"
 
 LOCK_WAIT_S = 2.0
 """How long a writer waits for another's turn before giving up: a few writes' worth, not a hang."""
-
-_LOCK_POLL_S = 0.01
-_HELD = frozenset({errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES})
-"""The errnos that mean "another holder", POSIX ``flock``'s and Windows ``locking``'s, as in
-``core.state_file``. Any other error from the primitive is raised at once."""
 
 
 def load_all(*, strict: bool = False) -> dict[str, str]:
@@ -239,31 +233,18 @@ def _locked(path: Path) -> Iterator[None]:
     """Hold ``<path>.lock`` exclusively for the block, waiting at most :data:`LOCK_WAIT_S`.
 
     Beside the path every process opens, not beside a symlink's target, like
-    ``core.state_file``'s lock. Taken without blocking and polled, so a writer
-    stalled inside its critical section costs a bounded wait, not a hang; only
-    "held" is retried. The OS drops the lock if the process dies.
+    ``core.state_file``'s lock, and created ``0o600``. Opened and polled by
+    :func:`~aisquare.core.locking.holding`, the one copy of the loop, so a writer stalled
+    inside its critical section costs a bounded wait, not a hang; only "held" is retried.
+    The OS drops the lock if the process dies.
     """
     lock_path = path.with_name(f"{path.name}.lock")
-    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        deadline = time.monotonic() + LOCK_WAIT_S
-        while True:
-            try:
-                lock_exclusive(fd)
-                break
-            except OSError as exc:
-                if exc.errno not in _HELD:
-                    raise
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(
-                        errno.ETIMEDOUT,
-                        f"{lock_path} is held by another process (waited {LOCK_WAIT_S:g}s)",
-                    ) from exc
-                time.sleep(_LOCK_POLL_S)
+    with contextlib.ExitStack() as stack:
         try:
-            yield
-        finally:
-            with contextlib.suppress(OSError):
-                unlock(fd)
-    finally:
-        os.close(fd)
+            stack.enter_context(holding(lock_path, wait_s=LOCK_WAIT_S, mode=0o600))
+        except TimeoutError as exc:
+            raise TimeoutError(
+                errno.ETIMEDOUT,
+                f"{lock_path} is held by another process (waited {LOCK_WAIT_S:g}s)",
+            ) from exc
+        yield

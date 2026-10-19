@@ -37,7 +37,7 @@
 # pyproject.toml and both plugins' plugin.json; tests/test_claude_plugin.py and
 # tests/test_codex_plugin.py fail when they disagree. AISQUARE_PLUGIN_FROM replaces
 # the whole requirement (a wheel, a path) for testing a build that is not on PyPI yet.
-AISQUARE_PLUGIN_VERSION=0.8.0
+AISQUARE_PLUGIN_VERSION=0.8.1
 
 # The event, and the one a session starts with: Claude Code's are the `aisquare hook`
 # subcommands, Codex's the names its payload carries (core.agent_adapters.codex).
@@ -367,6 +367,12 @@ _keep() {
 # same download, or offline the same timeout, which keeping the answer exists to
 # spare a prompt (round 19); read as `ranged`, each waits for a download of its
 # own, and offline fails. So they run as where uv may fetch none (round 21).
+# Revisited for 0.8.1, and kept: the window opens only where `uv python find` found no
+# tested Python for the key, and a Python any session's probe found or fetched before
+# would be found by it. So no event in the window could run on a tested Python without
+# waiting for this download itself, or failing offline. Waiting a moment for the probe
+# helps only a download done within that moment, adds the moment to each of those
+# prompts, and `sleep` here counts whole seconds.
 _has_tested_python() {
     _uv=${_runner%/*}/uv
     _starts "$_uv" || _uv=$(_find uv) || return 0

@@ -34,7 +34,6 @@ long as the session lives.
 from __future__ import annotations
 
 import contextlib
-import sys
 import time
 from collections.abc import Mapping
 from datetime import datetime
@@ -60,6 +59,7 @@ from aisquare.cli.ui.clipboard import copy_and_tell
 from aisquare.cli.ui.divider import Divider, floor_of
 from aisquare.cli.ui.ticks import while_running
 from aisquare.core.store import unmet_needs
+from aisquare.core.terminal import mac_keyboard
 from aisquare.models import CLOSED_STATUSES, ProjectInfo, TeamEvent, TeamSession, TeamTask
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import team as team_service
@@ -110,13 +110,14 @@ BOARD_KEYS: tuple[tuple[str, str], ...] = (
 )
 """The board's own keys, as the help screens list them."""
 MAC_COPY_KEY = ("v  c", "freeze the feed to select text · c copies (not ⌘C)")
-"""The copy row on macOS, where a copy key left unnamed reads as ⌘C: Terminal.app and
+"""The copy row for a Mac's keyboard, where a copy key left unnamed reads as ⌘C: Terminal.app and
 iTerm2 keep ⌘C as their own Copy, so it never reaches the board."""
 
 
 def board_keys() -> tuple[tuple[str, str], ...]:
-    """:data:`BOARD_KEYS` as this machine's help reads them: on macOS with :data:`MAC_COPY_KEY`."""
-    if sys.platform != "darwin":
+    """:data:`BOARD_KEYS` as the user's help reads them: with :data:`MAC_COPY_KEY` when they
+    type on a Mac (``core.terminal.mac_keyboard``), whatever the host runs."""
+    if not mac_keyboard():
         return BOARD_KEYS
     return tuple(
         MAC_COPY_KEY if key == MAC_COPY_KEY[0] else (key, what) for key, what in BOARD_KEYS

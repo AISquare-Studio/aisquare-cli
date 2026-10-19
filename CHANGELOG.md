@@ -62,7 +62,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a key is never ignored.
 
 ### Changed
-- On macOS the help screens name the copy and paste keys a Mac has. The board's
+- When you type on a Mac (`asq` on your Mac, or reached from Terminal.app or
+  iTerm2, iTerm2 over SSH included) the help screens name the copy and paste
+  keys a Mac has, whatever machine `asq` runs on. The board's
   copy row names `c`, not ⌘C, which Terminal.app and iTerm2 keep as their own
   Copy, and the fleet's `?` lists ctrl+c, ⌘V and the terminal's own selection
   (Option-drag in iTerm2, Fn-drag in Terminal.app on most Macs). docs/fleet.md

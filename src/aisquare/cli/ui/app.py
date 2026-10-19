@@ -108,6 +108,7 @@ from aisquare.cli.ui.views.settings_hub import SettingsHubView
 from aisquare.cli.ui.views.welcome import WelcomeView
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, store_session
+from aisquare.core.terminal import mac_keyboard
 from aisquare.models import (
     AccountsOverview,
     CheckStatus,
@@ -286,7 +287,7 @@ class HelpScreen(ModalScreen[None]):
             (self.escape_key.upper(), "hand focus from an agent's pane back to the sidebar"),
             ("wheel", "scroll an agent pane; shift/alt+PgUp/PgDn too, shift+Home/End"),
             ("drag", "select text in a pane (double-click: a word) — copied on release"),
-            *(self.MAC_COPY_KEYS if sys.platform == "darwin" else ()),
+            *(self.MAC_COPY_KEYS if mac_keyboard() else ()),
             ("divider", "drag the line beside the sidebar to resize it; double-click puts it back"),
             ("> < =", "from the sidebar: widen, narrow, reset the divider"),
             ("t", "themes (applied live, autosaved)"),

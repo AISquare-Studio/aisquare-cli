@@ -1681,7 +1681,10 @@ hand-over is already moving (a `fleet switch`, by hand or on a usage limit, or
 another restart) is not restarted or switched again: that hand-over starts the
 replacement itself. The agent view's **Stop** and **Restart** act on the row it
 shows: once its label has passed to a replacement (the manager restarted that
-coder), they say so and leave the replacement alone.
+coder), they say so and leave the replacement alone. A restart from the view
+moves you to the new row only if that view is still on screen when the restart
+ends. If you have opened another agent meanwhile, you stay there, and a toast
+names the restart and its project.
 
 **A panel reading "No changes this session" sits beside an agent's conversation
 and will not go away.** That is Claude Code's own diff panel (fullscreen

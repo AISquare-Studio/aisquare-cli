@@ -22,6 +22,7 @@ import logging
 import os
 import shutil
 import sqlite3
+import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
@@ -3865,8 +3866,156 @@ def test_restart_from_the_agent_view_selects_the_new_row_in_the_shell(
     assert calls and calls[0][:2] == ("prj_a", "manager")
     assert current == "agent-agt_a_new" and selected == "agent:agt_a_new"
     assert typing_reaches, "the new pane has the keyboard, not nobody (where q quits the UI)"
-    assert any("✓ restarted manager — resumed its session" in toast for toast in toasts), toasts
+    assert any("✓ restarted manager (alpha) — resumed its session" in toast for toast in toasts), (
+        toasts
+    )
     assert len(rows) == 1 and rows[0].rstrip().endswith("⏸")  # the old 💤 exited row is gone
+
+
+def _replacement(old: FleetAgentStatus, agent_id: str) -> FleetAgentStatus:
+    """The row a restart or a switch starts for ``old``: its label, a new id and pane."""
+    agent = old.agent.model_copy(
+        update={
+            "id": agent_id,
+            "pane_id": "%2",
+            "created_at": old.agent.created_at + timedelta(minutes=5),
+        }
+    )
+    return FleetAgentStatus(agent=agent, state="waiting")
+
+
+_MESSAGES_ONLY = "no-worker-has-this-group"
+"""``settle_page``'s ``group`` for a test that holds a worker on purpose: the messages
+settle, and the held worker is not waited for."""
+
+
+def test_a_restart_that_ends_after_the_user_moved_on_leaves_them_where_they_are(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """User feedback (2026-10-19): "when I am in the pane of manager 1 and manager 0
+    restarts, it takes me back to manager 0's pane, and my mouse is either on stop or
+    restart". A restart started from manager 0's view ends after the user opened manager
+    1's, and the shell showed, highlighted, remembered and focused the new manager 0 all
+    the same. Now nothing of the user's moves: the restart is a toast naming its project,
+    and the sidebar lists the new row."""
+    seed(tmp_path, ("prj_a", "alpha", "amber-otter"), ("prj_b", "beta", "brave-lynx"))
+    zero = status("prj_a", "manager", "manager", "working")
+    one = status("prj_b", "manager", "manager", "working")
+    script["prj_a"], script["prj_b"] = [zero], [one]
+    started = _replacement(zero, "agt_a_new")
+    release = threading.Event()
+
+    def slow_restart(
+        project: ProjectInfo, label: str, **kw: object
+    ) -> fleet_service.RestartReceipt:
+        release.wait(10)  # the user moves on while it runs
+        script["prj_a"] = [started]
+        return fleet_service.RestartReceipt(
+            replaced=zero.agent, started=started.agent, resumed=True, was_running=True,
+            tmux_session="asq-amber-otter",
+        )  # fmt: skip
+
+    monkeypatch.setattr(fleet_service, "restart", slow_restart)
+
+    async def go(
+        pilot: Pilot[None],
+    ) -> tuple[str | None, str | None, str | None, bool, list[str], list[str]]:
+        app = fleet_app(pilot)
+        await pilot.click(row_for(app, "agt_a_manager"))
+        await settle(app)
+        view = app.current_view()
+        assert isinstance(view, AgentView)
+        view.query_one("#agent-restart", Button).press()
+        await settle_page(app, group=_MESSAGES_ONLY)
+        await pilot.click(row_for(app, "agt_b_manager"))
+        await settle_page(app, group=_MESSAGES_ONLY)
+        mine = app.current_view()
+        assert isinstance(mine, AgentView) and app.focused is mine.pane
+        release.set()
+        toasts = await _toast_list(app)
+        await pilot.pause()
+        current = app.current_view()
+        rows = [row.status.agent.id for row in card_for(app, "prj_a").query(AgentRow)]
+        return (
+            (current.id if current else None),
+            app.sidebar.selected_key,
+            ui_app._ui_state(ui_app.SELECTED_KEY),
+            app.focused is mine.pane,
+            toasts,
+            rows,
+        )
+
+    current, selected, remembered, typing_reaches, toasts, rows = drive(go, notifications=True)
+    assert current == "agent-agt_b_manager", "the restart took the screen back to its row"
+    assert selected == "agent:agt_b_manager"
+    assert remembered == "agent:prj_b/agt_b_manager"
+    assert typing_reaches, "the keyboard stays with the pane the user is typing into"
+    assert any("✓ restarted manager (alpha) — resumed its session" in t for t in toasts), toasts
+    assert rows == ["agt_a_new"]  # the replaced row is updated, quietly
+
+
+def _replaced_out_of_the_ui(script: Script, old: FleetAgentStatus) -> None:
+    script[old.agent.project_id] = [_replacement(old, "agt_a_new")]
+
+
+def _vanished(script: Script, old: FleetAgentStatus) -> None:
+    script[old.agent.project_id] = []
+
+
+@pytest.mark.parametrize(
+    ("shown_row", "change"),
+    [
+        pytest.param("agent:agt_b_manager", _replaced_out_of_the_ui, id="another-agent-replaced"),
+        pytest.param("agent:agt_a_manager", _replaced_out_of_the_ui, id="the-shown-agent-replaced"),
+        pytest.param("agent:agt_a_manager", _vanished, id="the-shown-row-vanishes"),
+        pytest.param("project:prj_a", _replaced_out_of_the_ui, id="its-manager-tab-replaced"),
+    ],
+)
+def test_a_row_replaced_outside_the_ui_moves_nothing_of_the_users(
+    tmp_path: Path,
+    script: Script,
+    shown_row: str,
+    change: Callable[[Script, FleetAgentStatus], None],
+) -> None:
+    """The other ways a row is replaced reach asq only as its next frame: ``fleet restart``
+    and ``fleet switch`` from a shell, the hand-over that ``[accounts] on_limit =
+    "switch"`` starts from a hook (its own process), and the phone's Restart and Switch
+    (Remote's thread). A frame repaints the sidebar and feeds the open views, and never
+    shows, highlights, remembers or focuses anything: the user stays on the view they
+    had, a dead one included, which keeps its last screen until they pick the new row.
+    The Manager tab follows its project's new manager in place, as it always did."""
+    seed(tmp_path, ("prj_a", "alpha", "amber-otter"), ("prj_b", "beta", "brave-lynx"))
+    zero = status("prj_a", "manager", "manager", "working")
+    script["prj_a"] = [zero]
+    script["prj_b"] = [status("prj_b", "manager", "manager", "working")]
+    kind, ident = shown_row.split(":", 1)
+
+    async def go(pilot: Pilot[None]) -> tuple[object, object]:
+        app = fleet_app(pilot)
+        target = (
+            row_for(app, ident) if kind == "agent" else card_for(app, ident).query_one(ProjectTitle)
+        )
+        await pilot.click(target)
+        await settle(app)
+
+        def where() -> tuple[str | None, str | None, str | None, Widget | None]:
+            current = app.current_view()
+            return (
+                (current.id if current else None),
+                app.sidebar.selected_key,
+                ui_app._ui_state(ui_app.SELECTED_KEY),
+                app.focused,
+            )
+
+        before = where()
+        change(script, zero)
+        app.refresh_data()
+        await settle(app)
+        await pilot.pause()
+        return before, where()
+
+    before, after = drive(go)
+    assert after == before
 
 
 def test_the_sidebar_hides_captured_directories_until_a_shows_them(

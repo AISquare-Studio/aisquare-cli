@@ -92,6 +92,7 @@ from aisquare.cli.ui.sidebar import (
     SettingsSelected,
     Sidebar,
     SpawnAgent,
+    project_name,
 )
 from aisquare.cli.ui.terminal import EscapeToSidebar, SelectionHost, TerminalPane
 from aisquare.cli.ui.theme import ThemePicker, restore_theme, theme_autosave
@@ -1408,7 +1409,17 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.call_after_refresh(pane.focus)
 
     async def on_agent_restarted(self, event: AgentRestarted) -> None:
-        """A restart minted a new row (#138): show it where the old one was.
+        """A restart minted a new row (#138): say so, and show it where the old one was — but
+        only from the old row's own view, still on screen.
+
+        A restart takes seconds, and by its end the user may be on another agent: the new
+        row was shown, selected and focused all the same, which took the screen back to
+        it, with its Stop and Restart under a pointer aimed at the other pane (user
+        feedback, 2026-10-19: "it takes me back to manager 0's pane … that had destroyed
+        my manager session on more than one occasion"). Anywhere else, the view, the
+        sidebar's highlight, the remembered selection and the focus stay where the user
+        put them; the sidebar's next frame lists the new row, and the toast names the
+        project, as one ``manager`` reads like another's.
 
         The view that posted this refreshed the frame first, so the row is
         normally in the snapshot already; one more read covers a store that
@@ -1418,7 +1429,15 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         it was on, and focus was left with nobody — where the app's keys are
         live, so a ``q`` typed at the restarted agent quit the UI.
         """
+        receipt = event.receipt
         started = event.agent
+        project = self.snapshot.project(started.project_id) if self.snapshot else None
+        named = f"{started.label} ({project_name(project)})" if project else started.label
+        self.notify(f"✓ restarted {named} — {receipt.how}", timeout=6, markup=False)
+        for note in receipt.notes:
+            self.notify(note, severity="warning", timeout=8, markup=False)
+        if self.content.current != f"agent-{event.replaced.id}":
+            return  # the user is elsewhere: nothing of theirs moves
         status = self.snapshot.agent(started.project_id, started.id) if self.snapshot else None
         if status is None:
             self.refresh_data()

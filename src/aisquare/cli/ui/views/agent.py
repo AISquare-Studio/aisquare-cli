@@ -131,7 +131,8 @@ class AgentView(Vertical):
     ``reap``. Both run the service off the UI thread; the shell's next frame is
     what repaints, never an optimistic guess. A restart resumes the agent's own
     session when its transcript is on disk, so the manager comes back knowing
-    its intake and its coders; the view then selects the new row.
+    its intake and its coders; the shell then shows the new row if this view is
+    still the one on screen (:class:`AgentRestarted`).
     """
 
     DEFAULT_CSS = """
@@ -327,10 +328,9 @@ class AgentView(Vertical):
         else:
             receipt = event.worker.result
             if isinstance(receipt, fleet_service.RestartReceipt):
-                self.notify(f"✓ restarted {label} — {receipt.how}", timeout=6, markup=False)
-                for note in receipt.notes:
-                    self.notify(note, severity="warning", timeout=8, markup=False)
-                self.post_message(AgentRestarted(receipt.started))
+                # The shell says it: it knows the project to name, and whether this view
+                # is still the one on screen by now (:class:`AgentRestarted`).
+                self.post_message(AgentRestarted(receipt))
         self._paint_actions()
         refresh = getattr(self.app, "refresh_data", None)
         if callable(refresh):
@@ -338,8 +338,25 @@ class AgentView(Vertical):
 
 
 class AgentRestarted(Message):
-    """A restart produced a new row; the shell selects it once its frame lists it."""
+    """A restart replaced a row with a new one; the shell says so, and shows the new row
+    only when the replaced row's view is the one on screen.
 
-    def __init__(self, agent: FleetAgent) -> None:
+    A restart runs for seconds, and the user may have moved on before it ends: shown
+    unconditionally, the new row took the screen back from whatever the user had opened
+    since, its Stop and Restart under the pointer that was aimed at the other view's
+    pane (user feedback, 2026-10-19: a manager destroyed that way more than once).
+    """
+
+    def __init__(self, receipt: fleet_service.RestartReceipt) -> None:
         super().__init__()
-        self.agent = agent
+        self.receipt = receipt
+
+    @property
+    def agent(self) -> FleetAgent:
+        """The row the restart started."""
+        return self.receipt.started
+
+    @property
+    def replaced(self) -> FleetAgent:
+        """The row it replaced: the one whose view, if shown, follows to the new row."""
+        return self.receipt.replaced

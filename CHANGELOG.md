@@ -24,6 +24,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   select with the terminal itself. On a terminal nothing names (over SSH from
   Terminal.app, or behind tmux or screen) it says the text was sent through OSC
   52, and that an empty paste means the terminal ignored it.
+- A restart no longer takes you off the pane you are on. A restart started
+  from an agent's view showed the new row when it finished, wherever you had
+  gone meanwhile: on manager 1's pane, manager 0's restart took the screen back
+  to manager 0, with its Stop and Restart under the pointer aimed at manager 1.
+  The view now follows the new row only while the restarted agent's view is
+  still the one on screen. Anywhere else your view, the sidebar's highlight,
+  the selection asq reopens at and the keyboard stay where they were. The
+  sidebar lists the new row, and a toast names the restart and its project
+  (`✓ restarted manager (alpha) — resumed its session`). A row replaced from
+  outside the view (`fleet restart` or `fleet switch` in a shell, the hand-over
+  on a usage limit, the phone) never moved the view, and still doesn't.
 
 ### Changed
 - On macOS the help screens name the copy and paste keys a Mac has. The board's

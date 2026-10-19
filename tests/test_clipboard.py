@@ -490,13 +490,15 @@ def test_a_write_that_raises_anything_is_false_and_logged(
 def test_the_clipboard_thread_outlives_a_write_that_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A copy whose write blew up is still told, and the next copy still runs on the same
-    thread: dead, the thread took that copy's toast with it."""
+    """A copy whose write blew up is still told, and the copy queued behind it still runs
+    on the same thread: dead, the thread took that copy's toast with it."""
     calls: list[str] = []
+    queued = threading.Event()
 
     def write(writer: Writer, text: str, **kwargs: object) -> bool:
         calls.append(text)
         if text == "boom":
+            queued.wait(5)
             raise RuntimeError("not caught by write itself")
         return True
 
@@ -514,14 +516,36 @@ def test_the_clipboard_thread_outlives_a_write_that_raises(
 
     clipboard.submit("boom", done("boom"))
     deadline = time.monotonic() + 5
-    while not told and time.monotonic() < deadline:
+    while not calls and time.monotonic() < deadline:
         time.sleep(0.01)
     clipboard.submit("after", done("after"))
+    queued.set()
     deadline = time.monotonic() + 5
     while len(told) < 2 and time.monotonic() < deadline:
         time.sleep(0.01)
     assert told == [("boom", False), ("after", True)]
     assert calls == ["boom", "after"] and len(set(threads)) == 1
+
+
+def test_the_clipboard_thread_ends_when_nothing_is_left_to_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kept for good, an idle thread outlived every test that copied, and each ``forkpty``
+    later in the run warned of forking a threaded process. The next copy starts another."""
+    monkeypatch.setattr(clipboard, "write", lambda writer, text, **kwargs: True)
+    monkeypatch.setattr(clipboard, "local_writer", lambda: Writer(("/fake/bin/pbcopy",)))
+
+    def running() -> list[threading.Thread]:
+        return [thread for thread in threading.enumerate() if thread.name == "clipboard"]
+
+    for text in ("first", "second"):
+        told: list[bool] = []
+        clipboard.submit(text, told.append)
+        assert clipboard.flush(5) and told == [True]
+        deadline = time.monotonic() + 5
+        while running() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not running(), f"the thread is still there after {text!r}"
 
 
 @NEEDS_POSIX

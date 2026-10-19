@@ -469,12 +469,23 @@ def _drain() -> None:
     trickling in long after the gestures, for a clipboard that holds the last one only
     (review of #266, round 1). The overtaken copies are told in order, with the newest
     write's outcome: their text was meant for the clipboard the newest one now fills.
+
+    The thread ends when none is waiting, and the next :func:`submit` starts another:
+    kept for good, it outlived every test that copied, and each ``forkpty`` later in the
+    run warned of forking a threaded process. It takes the jobs and gives up its place
+    under ``_worker_lock``, which :func:`submit` checks after queueing, so a copy is
+    either taken here or finds no thread and starts one.
     """
+    global _worker
     while True:
-        batch = [_jobs.get()]
-        with contextlib.suppress(queue.Empty):
-            while True:
-                batch.append(_jobs.get_nowait())
+        batch: list[tuple[str, Done]] = []
+        with _worker_lock:
+            with contextlib.suppress(queue.Empty):
+                while True:
+                    batch.append(_jobs.get_nowait())
+            if not batch:
+                _worker = None
+                return
         text, _ = batch[-1]
         try:
             writer = _resolve()

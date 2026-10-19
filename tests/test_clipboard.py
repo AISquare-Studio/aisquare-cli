@@ -124,6 +124,15 @@ def test_wsl_writes_with_clip_exe_in_utf16_after_a_bom(
     assert mounted is not None and mounted.argv == (str(tmp_path / "clip.exe"),)
 
 
+def test_the_bom_is_an_escape_in_the_source_not_an_invisible_character() -> None:
+    """A literal U+FEFF shows as nothing: an editor or formatter that strips it leaves ""
+    with no visible diff, and clip.exe then reads the console's codepage and mangles
+    every character outside it (review of #266, round 1)."""
+    source = Path(clipboard.__file__).read_text(encoding="utf-8")
+    assert "\ufeff" not in source
+    assert '"\\ufeff"' in source
+
+
 def test_wsl_is_known_by_its_variables_or_by_the_kernel(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

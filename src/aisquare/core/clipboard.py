@@ -68,7 +68,7 @@ class Writer:
 
     def payload(self, text: str) -> bytes:
         """``text`` as this tool reads it from stdin."""
-        return (("﻿" if self.bom else "") + text).encode(self.encoding)
+        return (("\ufeff" if self.bom else "") + text).encode(self.encoding)
 
 
 def is_remote(env: Mapping[str, str]) -> bool:

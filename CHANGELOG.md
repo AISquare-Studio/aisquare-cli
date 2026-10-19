@@ -6,7 +6,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.8.1] - 2026-10-13
+## [0.8.2] - 2026-10-19
+
+**A hotfix: a copy in `asq` reaches the clipboard on macOS.**
+
+### Fixed
+- A copy in `asq` reaches your clipboard in Terminal.app and in iTerm2 as it
+  comes. 0.8.1 sent every copy as OSC 52 alone, and said "copied" either way:
+  Terminal.app never implemented OSC 52 and iTerm2 drops it unless its clipboard
+  setting is on, so ⌘V pasted what the clipboard held before. On a local session
+  a copy now also goes through the platform's own tool (`pbcopy` on macOS,
+  `clip.exe` on WSL, and on Linux `wl-copy`, else `xclip`, else `xsel`), and
+  still as OSC 52. Over SSH OSC 52 is the only route. The toast says "copied"
+  only when the copy can have landed, and otherwise how to copy with the
+  terminal itself.
+
+### Changed
+- On macOS the help screens name the copy and paste keys a Mac has. The board's
+  copy row names `c`, not ⌘C, which Terminal.app and iTerm2 keep as their own
+  Copy, and the fleet's `?` lists ctrl+c, ⌘V and the terminal's own selection
+  (Option-drag in iTerm2, Fn-drag in Terminal.app on most Macs). docs/fleet.md
+  has "Copy and paste on macOS", and its mouse section no longer lists iTerm2
+  among the terminals that accept OSC 52 as they come.
+
+## [0.8.1] - 2026-10-19
 
 **The fleet on your phone: `aisquare remote`, through your own ngrok tunnel.**
 - One server on `127.0.0.1:8750` serves a page that ships with aisquare-cli,
@@ -3836,7 +3859,8 @@ First release — a portable memory layer for coding agents.
 - **Diagnostics & config** — `status`, `doctor` (dependency + setup health with
   fixes), the `config` group, and `log` (captured prompt history).
 
-[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.6.0...v0.7.0

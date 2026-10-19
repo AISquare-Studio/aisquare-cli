@@ -114,8 +114,9 @@ def shown_pane(status: FleetAgentStatus) -> str | None:
 
 STOP_WORKER = "agent-stop"
 RESTART_WORKER = "agent-restart"
-#: States in which there is a process to stop; anything else is a row to restart.
-_STOPPABLE: frozenset[str] = frozenset({"working", "waiting", "attention", "limited", "unknown"})
+#: States in which there is a process to stop; anything else is a row to restart. The
+#: service's own set, which `fleet restart|stop --all` acts on.
+_STOPPABLE: frozenset[str] = fleet_service.PROCESS_STATES
 #: Where **Stop** is offered: a process to stop, or an exited agent's dead window —
 #: `remain-on-exit` keeps it for the last screen, and Stop on the 💤 row removes it,
 #: which takes the row off the listing (``fleet stop`` on an ended row). Without it a

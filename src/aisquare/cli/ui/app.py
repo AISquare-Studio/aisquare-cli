@@ -76,9 +76,11 @@ from aisquare.cli.ui.sidebar import (
     HEADROOM_DOT,
     RED,
     SETTINGS_KEY,
+    STATUS_INDENT,
     TIMES,
     AccountsSelected,
     AddProject,
+    AgentHeadroom,
     AgentSelected,
     AppSettingsSelected,
     DoctorSelected,
@@ -105,12 +107,14 @@ from aisquare.cli.ui.views.project import ProjectView
 from aisquare.cli.ui.views.remote import RemotePanel
 from aisquare.cli.ui.views.settings_hub import SettingsHubView
 from aisquare.cli.ui.views.welcome import WelcomeView
+from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, store_session
 from aisquare.models import (
     AccountsOverview,
     CheckStatus,
     ClaudeAccount,
+    ClaudeAccountStatus,
     DoctorCheck,
     FleetAgentStatus,
     HeadroomSummary,
@@ -129,8 +133,14 @@ AccountsReader = Callable[[], AccountsOverview]
 """What the Accounts page reads: ``claude_accounts.overview`` in production, a stub in tests."""
 
 HeadroomReader = Callable[[Sequence[ClaudeAccount] | None], HeadroomSummary]
-"""What the status line's Claude dot reads: ``claude_accounts.read_fleet_headroom`` (through
-the five-minute usage cache) in production, a stub in tests."""
+"""What each of the status line's account dots reads, one agent's accounts at a time:
+``claude_accounts.read_fleet_headroom`` (through the five-minute usage cache) in
+production, a stub in tests."""
+
+_AgentHeadroomRead = tuple[str | None, HeadroomSummary, bool]
+"""One agent's accounts as the status line read them: the agent (``None`` before the first
+accounts frame, the reader's own default, Claude Code's), the room left across them, and
+whether every enabled one needs a login."""
 
 _DoctorReport = tuple[Path | None, list[DoctorCheck]]
 """What the doctor worker hands back: the scope it ran for, and its checks."""
@@ -180,6 +190,12 @@ SELECTED_KEY = "fleet.selected"
 """``ui_state`` key for what is open: ``project:<id>``, ``agent:<project>/<id>``, ``settings``
 (the hub), ``app-settings``, ``accounts`` or ``doctor:<project or ''>`` (#144)."""
 SHOW_CAPTURED_KEY = "fleet.show_captured"
+
+
+def _binary_of(agent: str | None) -> str:
+    """The word the status line names an agent's accounts by: its binary (``claude``,
+    ``codex``); ``None`` is the headroom reader's default agent, Claude Code."""
+    return get_adapter(agent or accounts_service.AGENT).binary
 
 
 def _ui_state(key: str) -> str | None:
@@ -325,6 +341,10 @@ class HelpScreen(ModalScreen[None]):
         text.append("●", style=RED)
         text.append(" and ⚠ — accounts that need a login (signed out, token expired or refused);\n")
         text.append("     the dot is red when every enabled account needs one\n")
+        text.append(f"  {STATUS_INDENT}● 1", style="bold cyan")
+        text.append(f"{TIMES} codex", style="bold cyan")
+        text.append("  another agent's accounts (Codex's), read the same way, on a line\n")
+        text.append(f"  {STATUS_INDENT}       of their own under the first\n")
         text.append("\nEsc closes this", style="dim")
         with VerticalScroll(id="helpbox"):
             yield Static(text)
@@ -670,7 +690,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """A frame was asked for while a read was in flight: read once more after it."""
         self._headroom = headroom
         self.headroom_seconds = headroom_seconds
-        self._headroom_worker: Worker[tuple[HeadroomSummary, bool]] | None = None
+        self._headroom_worker: Worker[list[_AgentHeadroomRead]] | None = None
         """The headroom read in flight, or the last one; only one runs at a time."""
         self._headroom_owed = False
         """A headroom read was asked for while one ran: read once more after it."""
@@ -1107,21 +1127,30 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return
         self._headroom_owed = False
         overview = self.accounts_overview
-        accounts = None if overview is None else [status.account for status in overview.accounts]
-        enabled = (
-            [] if overview is None else [s for s in overview.accounts if not s.account.disabled]
-        )
-        signed_out = sum(1 for s in enabled if not s.signed_in)
+        by_agent: dict[str, list[ClaudeAccountStatus]] = {}
+        for status in overview.accounts if overview is not None else []:
+            by_agent.setdefault(status.account.agent, []).append(status)
         read_headroom = self._headroom
 
-        def read() -> tuple[HeadroomSummary, bool]:
-            summary = read_headroom(accounts)
+        def tally(statuses: list[ClaudeAccountStatus] | None) -> tuple[HeadroomSummary, bool]:
+            if statuses is None:
+                return read_headroom(None), False
+            summary = read_headroom([status.account for status in statuses])
+            enabled = [s for s in statuses if not s.account.disabled]
+            signed_out = sum(1 for s in enabled if not s.signed_in)
             if signed_out:
                 needs = summary.needs_login + signed_out
                 summary = summary.model_copy(update={"needs_login": needs})
             # Every enabled slot needs a login — the one case the dot is red for want of
             # one; an unreadable slot beside a signed-out one is grey with the ⚠ (N2).
             return summary, bool(enabled) and summary.needs_login >= len(enabled)
+
+        def read() -> list[_AgentHeadroomRead]:
+            # One dot per agent, each over its own accounts: a Codex account's room is
+            # nothing to a Claude Code agent, and the frame lists Claude Code's first.
+            if not by_agent:
+                return [(None, *tally(None))]
+            return [(agent, *tally(statuses)) for agent, statuses in by_agent.items()]
 
         self._headroom_worker = self.run_worker(
             read,
@@ -1135,9 +1164,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """Paint the headroom a read answered (a read that failed leaves the dot as it was),
         then make the read that was owed while it ran, if one was."""
         result = event.worker.result
-        if event.state is WorkerState.SUCCESS and isinstance(result, tuple):
-            summary, every_needs_login = result
-            self.sidebar.show_headroom(summary, every_needs_login=every_needs_login)
+        if event.state is WorkerState.SUCCESS and isinstance(result, list) and result:
+            (agent, summary, every_needs_login), *others = result
+            self.sidebar.show_headroom(
+                summary,
+                every_needs_login=every_needs_login,
+                name=_binary_of(agent),
+                more=[AgentHeadroom(_binary_of(a), s, every) for a, s, every in others],
+            )
         if event.state in (WorkerState.SUCCESS, WorkerState.ERROR) and self._headroom_owed:
             self.refresh_headroom()
 

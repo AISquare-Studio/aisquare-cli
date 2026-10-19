@@ -7,7 +7,8 @@ the path as a dim subtitle; under it one ``AgentRow`` per fleet agent (role icon
 label, state chip, exit status) and a spawn-agent row. Below the separator, one
 row, *⚙ Settings* (the Settings hub: App settings, Accounts, Doctor), and under it
 one dim status line (:func:`status_line_text`): the AISquare sign-in and the
-Claude accounts' headroom as two dots. A click on that line opens Accounts.
+Claude accounts' headroom as two dots, and under them a dot for each other agent's
+accounts (Codex's). A click on that line opens Accounts.
 
 Two rules shape the code more than the layout does:
 
@@ -32,9 +33,9 @@ markup in data).
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, NamedTuple
 
 from rich.text import Text
 from textual import events, on
@@ -296,29 +297,58 @@ def headroom_dot(
     return HEADROOM_DOT[headroom.level]
 
 
+class AgentHeadroom(NamedTuple):
+    """Another agent's accounts on the status line, on a line of their own: the word its
+    binary goes by (``codex``), the room left across them, and whether every enabled one
+    needs a login (:func:`headroom_dot`)."""
+
+    name: str
+    headroom: HeadroomSummary
+    every_needs_login: bool = False
+
+
+STATUS_INDENT = " " * len("● aisquare  ")
+"""What puts another agent's dot under the first one's."""
+
+
 def status_line_text(
-    aisquare: bool | None, headroom: HeadroomSummary | None, *, every_needs_login: bool = False
+    aisquare: bool | None,
+    headroom: HeadroomSummary | None,
+    *,
+    every_needs_login: bool = False,
+    name: str = "claude",
+    more: Sequence[AgentHeadroom] = (),
 ) -> Text:
     """``● aisquare  ● 3x claude`` (the x a multiplication sign) — the line under *⚙ Settings*.
 
     The AISquare dot is green signed in, red signed out, grey while unknown. The
     Claude dot is :func:`headroom_dot`; the count is how many accounts are usable,
     and a ``⚠`` follows when an account needs a login. ``headroom`` is ``None`` until
-    the first summary lands.
+    the first summary lands. Each agent in ``more`` (Codex's accounts) has a line of its
+    own under it, read the same way: ``● 1x codex``.
     """
     text = Text(no_wrap=True, overflow="ellipsis")
     colour = "grey50" if aisquare is None else GREEN if aisquare else RED
     text.append("● ", style=colour)
     text.append("aisquare", style="dim")
     text.append("  ")
+    _append_agent(text, name, headroom, every_needs_login)
+    for other in more:
+        text.append("\n" + STATUS_INDENT)
+        _append_agent(text, other.name, other.headroom, other.every_needs_login)
+    return text
+
+
+def _append_agent(
+    text: Text, name: str, headroom: HeadroomSummary | None, every_needs_login: bool
+) -> None:
     dot, colour = headroom_dot(headroom, every_needs_login=every_needs_login)
     text.append(f"{dot} ", style=colour)
     if headroom is not None:
         text.append(f"{headroom.usable}{TIMES} ", style="dim")
-    text.append("claude", style="dim")
+    text.append(name, style="dim")
     if headroom is not None and headroom.needs_login:
         text.append(" ⚠", style="yellow")
-    return text
 
 
 # --- rows -------------------------------------------------------------------------
@@ -1024,7 +1054,7 @@ class StatusLine(Static):
     """
 
     DEFAULT_CSS = """
-    StatusLine { height: 1; color: $text-muted; text-wrap: nowrap; text-overflow: ellipsis; }
+    StatusLine { height: auto; color: $text-muted; text-wrap: nowrap; text-overflow: ellipsis; }
     """
 
     ALLOW_SELECT = False
@@ -1113,6 +1143,10 @@ class Sidebar(Vertical):
         """The Claude accounts' headroom the status line shows; ``None`` until the first."""
         self.every_needs_login = False
         """Whether every enabled account needs a login: the one case the dot is red for it."""
+        self.headroom_name = "claude"
+        """The word the first dot names its accounts by (``status_line_text``'s ``name``)."""
+        self.more_headroom: tuple[AgentHeadroom, ...] = ()
+        """Every other agent's accounts the status line shows, each on its own line."""
         self._prev_states: dict[str, str] = {}
         self._cursor_key: str | None = None
         self.last_frame: tuple[list[ProjectInfo], dict[str, list[FleetAgentStatus]]] | None = None
@@ -1522,15 +1556,29 @@ class Sidebar(Vertical):
         self.aisquare = signed_in
         self._paint_status()
 
-    def show_headroom(self, headroom: HeadroomSummary, *, every_needs_login: bool = False) -> None:
-        """The status line's Claude dot, from the usage cache (``FleetApp.refresh_headroom``)."""
+    def show_headroom(
+        self,
+        headroom: HeadroomSummary,
+        *,
+        every_needs_login: bool = False,
+        name: str = "claude",
+        more: Sequence[AgentHeadroom] = (),
+    ) -> None:
+        """The status line's Claude dot, and one for each other agent's accounts (``more``),
+        from the usage cache (``FleetApp.refresh_headroom``)."""
         self.headroom = headroom
         self.every_needs_login = every_needs_login
+        self.headroom_name = name
+        self.more_headroom = tuple(more)
         self._paint_status()
 
     def _paint_status(self) -> None:
         line = status_line_text(
-            self.aisquare, self.headroom, every_needs_login=self.every_needs_login
+            self.aisquare,
+            self.headroom,
+            every_needs_login=self.every_needs_login,
+            name=self.headroom_name,
+            more=self.more_headroom,
         )
         self.query_one(StatusLine).update(line)
 

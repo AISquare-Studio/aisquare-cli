@@ -185,11 +185,12 @@ The screens, along the bottom bar:
 - **An agent** — **Live** (its pane, colours included, the cursor where the
   program shows one, with Fit width), **Transcript** (the conversation, wrapped
   to the phone, each turn's time in the phone's own time zone, older pages on
-  demand) and **Card** (model, tokens and the explainability verdict). Under Live
-  and Transcript sit the input bar and the key pad. Live, Transcript and a Needs
-  card's pane strip stay dark with the phone in light mode too: an agent's colours
-  are picked for its own theme, dark in Claude Code by default, so an agent on a
-  light theme draws its dark text on that ground as well.
+  demand) and **Card** (model, tokens and the explainability verdict, for a Codex
+  agent its own telemetry's). Under Live and Transcript sit the input bar and the
+  key pad. Live, Transcript and a Needs card's pane strip stay dark with the phone
+  in light mode too: an agent's colours are picked for its own theme, dark in
+  Claude Code by default, so an agent on a light theme draws its dark text on that
+  ground as well.
 - **Devices** — every device that unlocked, which one is this one, last seen, when
   its sign-in ends. Sign out of this one, or revoke another (a write, so only
   while writes are on).
@@ -472,12 +473,16 @@ that one.
 On a phone wide enough for eight keys (412 px is, 390 px is not) the key pad is
 one row, `Esc 1 2 3 ⏎ ↑ ↓ More` (⏎ being Enter), with the rest under More. On
 a narrower phone More takes the line under the seven, and below 360 px the
-eight are two rows of four, More last.
+eight are two rows of four, More last. More's ⇧⏎ is a newline in the prompt,
+sent as the agent reads one (Codex takes Ctrl-J, and submits on Shift-Enter).
 Ctrl-C and Ctrl-D ask first, and a second one within 3 seconds asks again,
-because Claude Code exits on it. A second Esc within a second and a half of the
-last one sent asks too, again after its sheet was closed unanswered, and from
-the Transcript tab is not sent, nor is any Esc there until a second and a half
-passes with none tapped: two in a row open Claude Code's Rewind selector. The
+because the coding agent exits on it (Claude Code on a second Ctrl-C, Codex on
+the first at an empty prompt, both on Ctrl-D there). A second Esc within a
+second and a half of the last one sent asks too, again after its sheet was
+closed unanswered, and from the Transcript tab is not sent, nor is any Esc there
+until a second and a half passes with none tapped: two in a row open the agent's
+rewind (Claude Code's Rewind selector, Codex's transcript), where Enter goes
+back to an earlier message. The
 pad and the phone's keyboard never share the screen. Keys reach an agent one at
 a time, in the order they were tapped, and a key shows in the accent colour
 until the machine has answered it; one that waits behind a key that did not get

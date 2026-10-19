@@ -315,6 +315,9 @@ adapter.**
   tells, restarts and switches. The Transcript tab shows the conversation under
   `* codex`. A plan Codex proposes in Plan mode is no card yet: its *Implement
   this plan?* dialog leaves no record.
+- Remote's key pad has ⇧⏎ (under More), a newline in the agent's prompt. It
+  reaches a Codex agent as Ctrl-J, since Codex submits on Shift-Enter, and a
+  Claude Code agent as Shift-Enter, or as Ctrl-J on a tmux older than 3.5.
 
 ### Changed
 
@@ -364,6 +367,28 @@ adapter.**
 
 ### Fixed
 
+- Remote's Tell (Prompt, Interrupt & tell), Stop, Restart, Switch account and the
+  Transcript tab's keys go by a Codex agent's own screen. A quiet pane at its
+  empty prompt is at rest, and anything drawn over that prompt is a dialog they
+  refuse: the *Switch to gpt-6-luna for lower credit usage?* dialog Codex opens
+  after a turn's `Stop`, which no hook reports, its folder-trust, hook-review and
+  approval views, its transcript after a second Esc, and a draft. A Prompt tell
+  used to paste into that dialog, and its Enter picked an option for you.
+  Interrupt & tell did the same after its Esc. A fresh Codex, which fires no hook
+  before its first prompt, was refused as an agent nothing reads; it now takes a
+  Prompt tell at its empty prompt. A Codex whose screen tmux cannot show is
+  typed into only after an Esc, like any agent nothing here reads. `fleet tell`
+  and `fleet stop` also read Codex's `esc again to edit previous message` footer,
+  left by one Esc, as its empty prompt.
+- Remote's Card tab judges a Codex agent by its own telemetry, from the receiver
+  each launch starts, and names that source (`policy.source`). It used to judge
+  every agent by the explainability proxy, which never carries Codex's traffic,
+  so a Codex card read off whenever the proxy was down. A Codex card is off while
+  insight shipping is off, since the receiver runs only with shipping on, and off
+  POSIX.
+- Remote's sheets and refusals for Ctrl-C, Ctrl-D and a second Esc speak of the
+  coding agent, not Claude Code. One Ctrl-C at Codex's empty prompt exits it, and
+  two Esc open its transcript, where Enter rewinds.
 - A store this process may not write (a sandbox, or a directory without write
   permission) is no longer called damaged. 0.8.0 answered with "Move it aside
   and re-create: mv context.db context.db.broken", which loses the board's

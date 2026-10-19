@@ -21,6 +21,7 @@ Nothing here knows Textual: the app half, OSC 52 and the toast, is
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import logging
 import os
@@ -441,6 +442,12 @@ Done = Callable[[bool], None]
 _jobs: queue.SimpleQueue[tuple[str, Done]] = queue.SimpleQueue()
 _worker: threading.Thread | None = None
 _worker_lock = threading.Lock()
+_pending = 0
+"""Copies submitted and not yet told: what :func:`flush` waits for."""
+_idle = threading.Condition()
+
+FLUSH_TIMEOUT = WRITE_TIMEOUT + KILL_WAIT
+"""Seconds :func:`flush` waits at exit: the longest one write can take."""
 
 
 def submit(text: str, done: Done) -> None:
@@ -455,7 +462,9 @@ def submit(text: str, done: Done) -> None:
     is, since it is what the clipboard ends with, and the ones it overtook are told
     its outcome (:func:`_drain`). ``done`` is called on that thread once it is known.
     """
-    global _worker
+    global _worker, _pending
+    with _idle:
+        _pending += 1
     _jobs.put((text, done))
     with _worker_lock:
         if _worker is None or not _worker.is_alive():
@@ -492,3 +501,31 @@ def _drain() -> None:
                 done(landed)
             except Exception:
                 log.warning("clipboard: the copy's outcome could not be told", exc_info=True)
+        _settled(len(batch))
+
+
+def _settled(count: int) -> None:
+    global _pending
+    with _idle:
+        _pending -= count
+        if _pending <= 0:
+            _idle.notify_all()
+
+
+def flush(timeout: float | None = None) -> bool:
+    """Wait for every copy submitted so far to be written; whether they all were in time.
+
+    The clipboard thread is a daemon, killed where the interpreter stopped: a copy made
+    the moment before quitting never reached the tool, or reached it cut short — a
+    payload larger than the pipe's buffer, half written when the process died, which
+    ``pbcopy`` stores as it got it (review of #266, round 1). So it runs at exit
+    (``atexit``, which comes before daemon threads die), for :data:`FLUSH_TIMEOUT`
+    unless ``timeout`` says otherwise.
+    """
+    with _idle:
+        return _idle.wait_for(
+            lambda: _pending <= 0, timeout=FLUSH_TIMEOUT if timeout is None else timeout
+        )
+
+
+atexit.register(flush)

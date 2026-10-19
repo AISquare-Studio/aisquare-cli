@@ -46,8 +46,10 @@ import json, os, sys, time
 root = sys.argv[1]
 with open(os.path.join(root, "started.log"), "a", encoding="utf-8") as started:
     started.write("started\n")
-data = sys.stdin.buffer.read()
 behaviour = open(os.path.join(root, "behaviour"), encoding="utf-8").read().split()
+if "slow-read" in behaviour:
+    time.sleep(0.6)
+data = sys.stdin.buffer.read()
 if "hang" in behaviour:
     time.sleep(30)
 if "fail" in behaviour:

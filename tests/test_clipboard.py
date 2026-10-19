@@ -587,6 +587,52 @@ def test_no_tool_found_is_looked_for_again_after_a_while(
     assert clipboard.cached_writer() is clipboard.Ask.WORKER
 
 
+@NEEDS_POSIX
+def test_a_copy_made_at_quit_reaches_the_tool_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The clipboard thread is a daemon. A process that copies and exits at once (drag,
+    then q) killed it mid-write: a payload over the pipe's buffer reached the tool cut
+    short, or not at all (review of #266, round 1). ``flush`` runs at exit."""
+    fake = install(tmp_path, monkeypatch, behaviour="slow-read")
+    big = (TEXT + "\n") * 12_000  # ~200 KB: more than any pipe buffer
+    (tmp_path / "big.txt").write_text(big, encoding="utf-8")
+    script = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from aisquare.core import clipboard\n"
+        "clipboard.local_writer = lambda: clipboard.Writer((sys.argv[1],))\n"
+        "clipboard.submit(Path(sys.argv[2]).read_text(encoding='utf-8'), lambda landed: None)\n"
+    )
+    tool = str(fake.root / "bin" / "pbcopy")
+    done = subprocess.run(
+        [sys.executable, "-c", script, tool, str(tmp_path / "big.txt")],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    assert fake.texts() == [big]
+
+
+@NEEDS_POSIX
+def test_flush_waits_for_the_queued_copies_and_no_longer_than_it_is_told(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = install(tmp_path, monkeypatch, behaviour="slow-read")
+    assert clipboard.flush(0.1), "nothing queued: done at once"
+    clipboard.submit(TEXT, lambda landed: None)
+    assert clipboard.flush(10) and fake.texts() == [TEXT]
+    fake.behaviour = "hang"
+    monkeypatch.setattr(clipboard, "WRITE_TIMEOUT", 0.5)
+    clipboard.submit("stuck", lambda landed: None)
+    started = time.monotonic()
+    assert clipboard.flush(0.1) is False
+    assert time.monotonic() - started < 1
+    assert clipboard.flush(10), "and it ends once the stuck tool is killed"
+
+
 # --- what becomes of an OSC 52 ---------------------------------------------------------
 
 

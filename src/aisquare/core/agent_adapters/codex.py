@@ -16,6 +16,7 @@ from aisquare.core import harness
 from aisquare.core.agent_adapters.types import (
     AgentCapabilities,
     AgentEvent,
+    AgentTranscript,
     BadEffortError,
     EventKind,
     HookSpec,
@@ -413,6 +414,13 @@ class CodexAdapter:
             }
         ),
     )
+
+    @property
+    def transcript_reader(self) -> AgentTranscript:
+        # Read when Remote asks, never on a hook: the reader and rich's cell widths load then.
+        from aisquare.core.agent_adapters.codex_transcript import CodexTranscript
+
+        return CodexTranscript()
 
     def config_dir(self, home: Path, env: Mapping[str, str], explicit: Path | None = None) -> Path:
         return config_home(self, home, env, explicit)

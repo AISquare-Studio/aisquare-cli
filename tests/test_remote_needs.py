@@ -1565,7 +1565,7 @@ def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> Needs
             session for session in fleet.sessions if session.id in ids
         ],
         task_status=lambda ref: fleet.tasks.get(ref),
-        transcript_tail=lambda path: fleet.tails.get(path),
+        transcript_tail=lambda path, agent: fleet.tails.get(path),
         accounts=lambda: accounts or AccountsSettings(),
         has_live_agents=lambda pid: any(status.agent.ended_at is None for status in fleet.agents),
         tmux_answers=tmux_answers,
@@ -2680,7 +2680,7 @@ def test_a_limit_is_held_by_the_hand_over_question_asked_with_the_agents_own_slo
     a row no reset or manager settles first."""
     asked: list[int | None] = []
 
-    def hands_over(leaving: int | None) -> bool:
+    def hands_over(leaving: int | None, agent: str | None) -> bool:
         asked.append(leaving)
         return somewhere
 
@@ -2704,7 +2704,7 @@ def test_the_hand_over_question_is_asked_once_a_scan_and_only_of_a_limited_row()
     its slot, however many rows are on it."""
     asked: list[int | None] = []
 
-    def hands_over(leaving: int | None) -> bool:
+    def hands_over(leaving: int | None, agent: str | None) -> bool:
         asked.append(leaving)
         return True
 
@@ -2736,7 +2736,7 @@ def test_the_live_hand_over_question_is_kept_a_minute_and_a_raise_is_a_yes(
 
     calls: list[int | None] = []
 
-    def unreadable(leaving: int | None) -> bool:
+    def unreadable(leaving: int | None, *, agent: str | None = None) -> bool:
         calls.append(leaving)
         raise OSError("[Errno 13] Permission denied: 'claude-accounts'")
 
@@ -2746,10 +2746,10 @@ def test_the_live_hand_over_question_is_kept_a_minute_and_a_raise_is_a_yes(
     monkeypatch.setattr(claude_accounts_service, "somewhere_to_hand_over", unreadable)
     hands_over = remote_needs.live_needs_sources().hands_over
 
-    assert hands_over(2) is True and hands_over(2) is True
+    assert hands_over(2, None) is True and hands_over(2, None) is True
     assert calls == [2], "kept"
     clock[0] += remote_needs._NEEDS_HANDS_OVER_KEPT
-    assert hands_over(2) is True and calls == [2, 2], "asked again a minute on"
+    assert hands_over(2, None) is True and calls == [2, 2], "asked again a minute on"
 
     monkeypatch.undo()
     monkeypatch.setattr(
@@ -3819,7 +3819,7 @@ class _TailOnly:
     nothing of its project. Asking for any other source fails the test."""
 
     def __init__(self, read: Callable[[str], TranscriptTail | None]) -> None:
-        self.transcript_tail = read
+        self.transcript_tail = lambda path, agent: read(path)
 
     def __getattr__(self, name: str) -> Any:
         raise AssertionError(f"a read of one agent asked its project's sources for {name}")
@@ -4024,7 +4024,9 @@ def test_the_agent_alone_never_asks_about_the_pane_of_a_row_that_ended(
     tmux = FakeTmux(reference=NOW)
     monkeypatch.setattr(fleet_service, "_now", lambda: NOW)
     monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
-    monkeypatch.setattr(remote_needs, "_needs_cached_tail", lambda path: _tail(_tool("toolu_a")))
+    monkeypatch.setattr(
+        remote_needs, "_needs_cached_tail", lambda path, agent=None: _tail(_tool("toolu_a"))
+    )
     snap = needs_single_agent_now(PROJECT, "coder-1", now=NOW)
     assert snap.status is not None and snap.status.state == "exited"
     assert tmux.asked == [] and not snap.pane_is_agent and snap.pane_quiet is None
@@ -4167,18 +4169,20 @@ def test_the_live_sources_read_an_unchanged_transcript_once(
     reads: list[str] = []
     real = read_transcript_tail
 
-    def counted(path: Path | str | None, *, budget: int = TAIL_BUDGET) -> TranscriptTail | None:
+    def counted(
+        path: Path | str | None, *, budget: int = TAIL_BUDGET, agent: str | None = None
+    ) -> TranscriptTail | None:
         reads.append(str(path))
-        return real(path, budget=budget)
+        return real(path, budget=budget, agent=agent)
 
     monkeypatch.setattr(remote_needs, "read_transcript_tail", counted)
     monkeypatch.setattr(remote_needs, "_tails", {})
     transcript = tmp_path / "coder-1.jsonl"
     transcript.write_text(json.dumps(_asking_record(NOW)) + "\n", encoding="utf-8")
     tail_of = remote_needs.live_needs_sources().transcript_tail
-    first = tail_of(str(transcript))
+    first = tail_of(str(transcript), None)
     assert first is not None and [tool.tool_use_id for tool in first.pending] == ["toolu_q"]
-    assert tail_of(str(transcript)) is first
+    assert tail_of(str(transcript), None) is first
     assert reads == [str(transcript)], "unchanged: read once"
     answer = {
         "type": "user",
@@ -4188,7 +4192,7 @@ def test_the_live_sources_read_an_unchanged_transcript_once(
     }
     with transcript.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(answer) + "\n")
-    again = tail_of(str(transcript))
+    again = tail_of(str(transcript), None)
     assert len(reads) == 2 and again is not None and again.pending == (), "it grew: read again"
 
 
@@ -4204,7 +4208,7 @@ def test_the_cache_of_tails_keeps_the_newest_it_read(
         path.write_text(json.dumps(_asking_record(NOW)) + "\n", encoding="utf-8")
     tail_of = remote_needs.live_needs_sources().transcript_tail
     for path in paths:
-        assert tail_of(str(path)) is not None
+        assert tail_of(str(path), None) is not None
     assert list(remote_needs._tails) == [str(path) for path in paths[2:]]
 
 

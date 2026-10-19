@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, get_args
 from aisquare.core import harness, paths
 
 if TYPE_CHECKING:
+    from aisquare.core.agent_adapters.transcripts import PendingTool, TranscriptTail
     from aisquare.core.claude_accounts import FailedTurn, LimitNotice
     from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage
 
@@ -468,6 +469,76 @@ class AgentPlugin(Protocol):
         ...
 
 
+CallAsk = Literal["tool", "question", "plan", "subagent"]
+"""What a pending call waits on the human for (:meth:`AgentTranscript.call_asks`)."""
+
+AnswerKind = Literal["permission", "question", "plan"]
+"""The cards a phone answers with keys (:meth:`AgentTranscript.answer_keys`)."""
+
+
+@dataclass(frozen=True)
+class AnswerKey:
+    """One quick answer a card offers: its label, and the tmux key names it sends."""
+
+    label: str
+    keys: tuple[str, ...]
+
+
+class AgentTranscript(Protocol):
+    """One agent's session transcript (the path its hooks report, ``TeamSession.
+    transcript_path``), read for Remote: the needs-you scan's facts
+    (``services.remote_needs``) and the Transcript tab's pages (``services.transcript``).
+
+    ``services.transcript`` opens the file (a regular one only, never a pipe), bounds what
+    is read of it and pages it; the reader decodes the agent's own records. A record is one
+    JSON object a line, its ``timestamp`` ISO 8601 (:func:`~aisquare.core.agent_adapters.
+    transcripts.record_time`). The shared shapes are in ``core.agent_adapters.transcripts``.
+    """
+
+    speaker: str
+    """How a page names the agent's own turns: ``* <speaker>`` (``claude``, ``codex``)."""
+
+    def tail_facts(self, file: Path, size: int, budget: int, written: datetime) -> TranscriptTail:
+        """What the end of the transcript says (SPEC §4.3): the calls still waiting for their
+        result, the newest record's kind (``TranscriptTail.newest``), the agent's newest
+        words, and ``cut_at`` = ``written`` (the file's mtime) for a walk that ran out of
+        ``budget`` bytes back from ``size``, or of ``transcripts.TAIL_RECORDS``, before it saw
+        the newest model response whole, while that response calls tools and the turn has
+        not ended (a call of it may still wait unseen). A turn seen to end (its last
+        words, an interruption) waits on nothing however much is unread. Reads only the
+        tail (``transcripts.lines_backwards``), a line past ``transcripts.MAX_LINE`` off its
+        bytes alone; may raise ``OSError``."""
+        ...
+
+    def page_lines(self, record: dict[str, Any], width: int) -> list[str]:
+        """One record as the page's terminal lines, wrapped to ``width`` columns: the human's
+        words under ``transcripts.YOU``, the agent's under ``transcripts.speaker_line``, a
+        call as one dim line (a question or a plan in full); ``[]`` for a record that is
+        not conversation (results, thinking, the agent's own injected context)."""
+        ...
+
+    def call_asks(self, tool: PendingTool) -> CallAsk:
+        """What a pending call waits on the human for: ``question`` (its dialog is the call
+        itself; ``input["questions"]`` holds them as ``AskUserQuestion`` does: ``header``,
+        ``question``, ``multiSelect``, ``options`` of ``label`` and ``description``),
+        ``plan`` (``input["plan"]``, a plan to approve), ``subagent`` (a sub-agent runs
+        inside it, and a prompt while it is pending is the sub-agent's) or ``tool`` (a
+        permission prompt, when the board's attention says one is up)."""
+        ...
+
+    def call_mark(self, tool: PendingTool) -> str | None:
+        """What the agent's prompt for the call shows of it (a command, a file's base name, a
+        question's words), by which the needs scan tells which of several pending calls
+        a dialog on screen is for; ``None`` for a call whose prompt is not known to."""
+        ...
+
+    def answer_keys(self, kind: AnswerKind, options: int = 0) -> tuple[AnswerKey, ...]:
+        """The quick answers of a card of ``kind`` on this agent's dialog: for ``question``,
+        first the key that picks each of its ``options`` (in their order; the card labels
+        them), then the rest. ``()`` where the agent has no such dialog."""
+        ...
+
+
 class AgentAdapter(Protocol):
     """One terminal agent, in the terms the shared services ask in.
 
@@ -481,7 +552,8 @@ class AgentAdapter(Protocol):
     :meth:`label_args`, :meth:`resume_args`,
     ``exit_command``, :meth:`queue_args`,
     :meth:`mcp_args`, :meth:`context_files`, :meth:`disable_native_teams`,
-    :meth:`telemetry_args`. Accounts: ``accounts``. ``capabilities`` says the rest.
+    :meth:`telemetry_args`. Accounts: ``accounts``. Remote: ``transcript_reader``.
+    ``capabilities`` says the rest.
     """
 
     id: str
@@ -512,6 +584,13 @@ class AgentAdapter(Protocol):
     @property
     def plugin(self) -> AgentPlugin | None:
         """The aisquare plugin route for this agent; ``None`` when there is none."""
+        ...
+
+    @property
+    def transcript_reader(self) -> AgentTranscript | None:
+        """The reader of the agent's session transcript, for Remote's needs-you cards and
+        Transcript tab; ``None`` for an agent whose transcript AISquare cannot read (its
+        rows then have no card a transcript decides, and an empty page)."""
         ...
 
     def config_dir(self, home: Path, env: Mapping[str, str], explicit: Path | None = None) -> Path:

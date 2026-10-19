@@ -2980,7 +2980,10 @@ def _live_transcript(
     """One page of the agent's own conversation, from the board's transcript (§4-M).
 
     The pane cannot answer this: agent panes are alternate-screen and tmux keeps
-    no scrollback for them. The board already records where the transcript is.
+    no scrollback for them. The board already records where the transcript is, and the
+    row which agent wrote it: its adapter reads the format (``transcript.reader_of``), so a
+    Codex rollout is a page of its turns under ``* codex``, where read as Claude Code's
+    JSONL it was empty, each Load older a further 2 MB read for nothing.
     ``width`` is the phone's own column count; without it the lines wrap at the
     agent's pane width, which a phone narrower than the pane re-wraps into a mess.
 
@@ -3017,6 +3020,7 @@ def _live_transcript(
         limit=limit or transcript_service.DEFAULT_LIMIT,
         before=offset,
         width=width or _pane_width(agent),
+        agent=agent.agent,
     )
     payload = page.page_json()
     if page.cursor is not None and session is not None:

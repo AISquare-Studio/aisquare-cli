@@ -8,7 +8,9 @@ or writes a flag itself instead of asking the adapter, fails here for the fake.
 What a new adapter must bring for this suite to pass (docs/coding-agents.md, "Adding a
 terminal agent"): a recorded-payload fixture for every hook event it installs
 (``tests/fixtures/agent_events/<id>.json``, with its ``--version`` line and what switches
-its hooks off) and a row in :data:`EXPECTED_PERMISSIONS`.
+its hooks off), a row in :data:`EXPECTED_PERMISSIONS`, and its transcript at four moments
+(``tests/fixtures/agent_transcripts/<id>.json``: a permission prompt up, a question, an
+interruption, a turn ended on a question) for its ``transcript_reader``.
 """
 
 from __future__ import annotations
@@ -59,6 +61,7 @@ from tests.fake_agent import FakeAgentAdapter
 from tests.test_fleet_service import FakeTmux
 
 FIXTURES = Path(__file__).parent / "fixtures" / "agent_events"
+TRANSCRIPTS = Path(__file__).parent / "fixtures" / "agent_transcripts"
 REGISTERED = tuple(adapter.id for adapter in adapters())
 ALL = (*REGISTERED, FakeAgentAdapter.id)
 
@@ -598,3 +601,122 @@ def test_the_fake_agent_runs_through_the_fleet_like_any_other(
     tmux.honours_exit = False
     fleet_service.stop(project, label, grace=0)
     assert (receipt.agent.pane_id, "literal", "/quit") in tmux.typed
+
+
+# --- the transcript, for Remote's needs-you cards and Transcript tab --------------------
+
+
+def _moments(adapter: AgentAdapter) -> dict[str, Any]:
+    path = TRANSCRIPTS / f"{adapter.id}.json"
+    assert path.is_file(), f"add {path.relative_to(TRANSCRIPTS.parents[1])} for {adapter.id}"
+    moments: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))["moments"]
+    assert set(moments) == {"permission", "question", "interrupted", "asked"}
+    return moments
+
+
+def _written(moment: dict[str, Any], path: Path) -> Path:
+    """The transcript as it stood at ``moment``: its records, or the recorded session's first
+    lines."""
+    if "rollout" in moment:
+        lines = (TRANSCRIPTS / moment["rollout"]).read_text(encoding="utf-8").splitlines()
+        text = "".join(line + "\n" for line in lines[: moment["lines"]])
+    else:
+        text = "".join(json.dumps(record) + "\n" for record in moment["records"])
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _reader(adapter: AgentAdapter) -> Any:
+    reader = adapter.transcript_reader
+    assert reader is not None, f"{adapter.id} has no transcript_reader: Remote reads nothing of it"
+    return reader
+
+
+@pytest.mark.parametrize("moment", ["permission", "question", "interrupted", "asked"])
+def test_the_transcript_reader_reads_each_recorded_moment(
+    adapter: AgentAdapter, moment: str, tmp_path: Path
+) -> None:
+    """What the needs-you scan classifies on, from the agent's own transcript: the calls
+    still waiting and what each waits for, the newest record, the agent's last words, and no
+    walk cut short on a file this small."""
+    from aisquare.services import transcript
+
+    reader = _reader(adapter)
+    recorded = _moments(adapter)[moment]
+    expect = recorded["expect"]
+    tail = transcript.read_transcript_tail(
+        _written(recorded, tmp_path / "session.jsonl"), agent=adapter.id
+    )
+    assert tail is not None and tail.cut_at is None
+    assert tail.newest == expect["newest"]
+    pending = [[tool.tool_use_id, tool.name, reader.call_asks(tool)] for tool in tail.pending]
+    assert pending == expect["pending"]
+    if "mark" in expect:
+        assert reader.call_mark(tail.pending[0]) == expect["mark"]
+    if "last_text_end" in expect:
+        assert tail.last_text is not None and tail.last_text.endswith(expect["last_text_end"])
+
+
+def test_a_card_is_made_from_the_readers_facts_and_answered_with_its_keys(
+    adapter: AgentAdapter, tmp_path: Path
+) -> None:
+    """The shared needs scan asks the reader, not the agent's name: a pending call with the
+    board's attention is a permission card on the adapter's own keys, a question call is a
+    question card whose options are the adapter's keys for them, and each key is one a
+    phone may send (``remote_needs.NEEDS_ANSWER_KEYS``). The fake answers with ``y``/``n``
+    and arrows, so digits written into a service fail here."""
+    from datetime import UTC, timedelta
+
+    from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamEvent, TeamSession
+    from aisquare.services import remote_needs, transcript
+
+    reader = _reader(adapter)
+    project = ProjectInfo(id="prj_contract", root=tmp_path)
+    moments = _moments(adapter)
+    for moment, kind in (("permission", "permission"), ("question", "question")):
+        path = _written(moments[moment], tmp_path / f"{moment}.jsonl")
+        tail = transcript.read_transcript_tail(path, agent=adapter.id)
+        assert tail is not None and tail.newest_at is not None
+        now = tail.newest_at + timedelta(minutes=1)
+        row = FleetAgent(
+            id="agt_1", project_id=project.id, label="coder-1", role="coder", agent=adapter.id,
+            binary=adapter.binary, pane_id="%1", session_id="ses_1", cwd=tmp_path,
+            created_at=tail.newest_at - timedelta(hours=1),
+        )  # fmt: skip
+        seen = tail.newest_at + timedelta(seconds=1)
+        session = TeamSession(
+            id="ses_1", project_id=project.id, role="coder", started_at=row.created_at,
+            last_seen_at=seen, state="attention", transcript_path=str(path),
+        )  # fmt: skip
+        notice = TeamEvent(
+            seq=1, id="evt_1", project_id=project.id, session_id="ses_1", kind="attention",
+            text=f"{adapter.label} needs you", created_at=seen,
+        )  # fmt: skip
+        status = FleetAgentStatus(agent=row, state="attention", session=session)
+        (card,) = remote_needs.needs_from_agent(
+            status, tail, project=project, events=[notice], now=now.astimezone(UTC)
+        )
+        assert card.kind == kind, (moment, card.reason)
+        options = moments[moment]["expect"].get("options", 0)
+        keys = reader.answer_keys(kind, options)
+        assert keys, f"{adapter.id} offers no quick answer for a {kind}"
+        assert [answer.keys for answer in card.answers] == [key.keys for key in keys]
+        assert all(set(key.keys) <= remote_needs.NEEDS_ANSWER_KEYS for key in keys)
+
+
+def test_the_transcript_page_names_the_human_and_the_agent(
+    adapter: AgentAdapter, tmp_path: Path
+) -> None:
+    """A page of the Transcript tab, from the agent's own records: the human's words under
+    ``> you``, the agent's under its own speaker (``* claude`` named every agent's)."""
+    import re
+
+    from aisquare.core.agent_adapters.transcripts import YOU, speaker_line
+    from aisquare.services import transcript
+
+    reader = _reader(adapter)
+    assert reader.speaker and re.fullmatch(r"[a-z][a-z0-9-]*", reader.speaker)
+    path = _written(_moments(adapter)["asked"], tmp_path / "session.jsonl")
+    page = transcript.read_page(path, agent=adapter.id, width=60)
+    assert YOU in page.lines and speaker_line(reader.speaker) in page.lines
+    assert page.more is False and page.lines[-1] == ""

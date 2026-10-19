@@ -76,6 +76,7 @@ if TYPE_CHECKING:
     from starlette.responses import Response
     from starlette.routing import BaseRoute
 
+    from aisquare.core.agent_adapters.types import AgentTranscript, AnswerKind
     from aisquare.core.config import AccountsSettings
     from aisquare.core.tmux import TmuxServer
     from aisquare.services.fleet import PaneWrite
@@ -211,9 +212,6 @@ _FAILURE_KIND = re.compile(r"[A-Za-z0-9_.-]{1,40}")
 """The error a failed turn's reason may name (``authentication_failed``, ``billing_error``,
 ``server_error``): Claude Code's word for it, or nothing."""
 
-_SUBAGENT_TOOLS = frozenset({"Task", "Agent"})
-"""The tools a sub-agent runs inside: a prompt pending under one is the sub-agent's."""
-
 _NOTICE_WAIT = timedelta(seconds=20)
 """How long after its pane printed a sub-agent's prompt may still be waiting for the
 notification that names it (:func:`_needs_drawn_since_notice`). Claude Code sends it 6 s
@@ -238,13 +236,6 @@ _PROMPT_RULE = re.compile(r"\s*[╭╰┌└├]?[─━═]{8,}")
 _PROMPT_UNSPACED = re.compile(r"[\s─-╿…`*]+")
 """What :func:`_needs_squashed` drops: blanks, wraps, box edges, an ellipsis and the marks a
 terminal draws as style."""
-
-_NEEDS_ASKING_TOOLS = frozenset({"AskUserQuestion", "ExitPlanMode"})
-"""The tools whose card needs no notice: their dialog is the call itself."""
-
-_PROMPT_FILE_TOOLS = frozenset({"Edit", "MultiEdit", "Write", "NotebookEdit"})
-"""The tools whose prompt names the file by its base name, in the line above its options
-("Do you want to make this edit to cache.py?"), however tall its diff."""
 
 _DETAIL_INPUT_KEYS = (
     "command",
@@ -392,7 +383,7 @@ def _needs_answers_every(socket: str, path: Path | None) -> bool:
     return True
 
 
-def _needs_hands_over_anywhere(leaving: int | None) -> bool:
+def _needs_hands_over_anywhere(leaving: int | None, agent: str | None) -> bool:
     """A source's ``hands_over`` when it says nothing: every agent has somewhere to go."""
     return True
 
@@ -454,7 +445,10 @@ class NeedsSources:
     """The project's sessions with the given ids: the authors of the board's open questions."""
     task_status: Callable[[str], str | None]
     """A task's status; ``None`` when it is gone."""
-    transcript_tail: Callable[[str], TranscriptTail | None]
+    transcript_tail: Callable[[str, str | None], TranscriptTail | None]
+    """The tail of the transcript at the path, as the agent a row recorded writes it
+    (``FleetAgent.agent``; ``transcript.read_transcript_tail``): a Codex rollout read as
+    Claude Code's JSONL said nothing, and a long one read as a walk cut short."""
     accounts: Callable[[], AccountsSettings]
     """``[accounts]`` as configured: ``on_limit`` and ``wait_if_reset_within_minutes``."""
     has_live_agents: Callable[[str], bool] = _needs_lists_every
@@ -481,11 +475,14 @@ class NeedsSources:
     (:func:`_needs_screen_read`).
     Asked only of an agent with more than one call pending, whose prompt on screen may be
     any of them (:func:`_needs_on_screen`)."""
-    hands_over: Callable[[int | None], bool] = _needs_hands_over_anywhere
+    hands_over: Callable[[int | None, str | None], bool] = _needs_hands_over_anywhere
     """Whether ``on_limit = "switch"`` hands an agent leaving the given slot over: an
-    account to go to (``claude_accounts.somewhere_to_hand_over``), asked with the slot the
-    StopFailure hook asks with (``claude_accounts.leaving_slot``). Asked only of a limited
-    row that no reset or live manager settles first (:func:`_needs_limited_push`)."""
+    account of the given agent's to go to (``claude_accounts.somewhere_to_hand_over``),
+    asked with the slot and the agent the limit's hook asks with
+    (``claude_accounts.leaving_slot``, the row's ``agent``). Asked with the slot alone, a
+    limited Codex agent counted Claude Code accounts it can never go to, and its push
+    waited 90 s for a hand-over that never came. Asked only of a limited row that no reset
+    or live manager settles first (:func:`_needs_limited_push`)."""
     board_project: Callable[[ProjectInfo], str] = _needs_own_board
     """The id of the project whose board a project's agents write: the project's own, a
     worktree's principal checkout's, or under ``AISQUARE_TEAM_HUB`` the hub's, as ``asq board``
@@ -908,6 +905,30 @@ def _needs_is_manager(role: str | None) -> bool:
     return role is not None and harness.base_role(role) == "manager"
 
 
+def _needs_reader(agent: FleetAgent) -> AgentTranscript | None:
+    """The transcript reader of the agent the row recorded (``transcript.reader_of``): what
+    its calls wait for, what its prompts show of them, and the keys its dialogs take."""
+    from aisquare.services.transcript import reader_of
+
+    return reader_of(agent.agent)
+
+
+def _needs_asks(reader: AgentTranscript | None, tool: PendingTool) -> str:
+    """What a pending call waits on the human for (``AgentTranscript.call_asks``); a call of
+    an agent with no reader is a tool's."""
+    return "tool" if reader is None else reader.call_asks(tool)
+
+
+def _needs_answers(
+    reader: AgentTranscript | None, kind: AnswerKind, options: int = 0
+) -> tuple[QuickAnswer, ...]:
+    """The quick answers of a card of ``kind`` on the agent's dialog
+    (``AgentTranscript.answer_keys``); none for an agent with no reader, whose card the key
+    pad answers."""
+    keys = () if reader is None else reader.answer_keys(kind, options)
+    return tuple(QuickAnswer(key.label, key.keys) for key in keys)
+
+
 # --- one agent ----------------------------------------------------------------------------
 
 
@@ -920,7 +941,7 @@ def needs_from_agent(
     now: datetime,
     manager_live: bool = False,
     accounts: AccountsSettings | None = None,
-    hands_over: Callable[[int | None], bool] = _needs_hands_over_anywhere,
+    hands_over: Callable[[int | None, str | None], bool] = _needs_hands_over_anywhere,
     pane_output: Callable[[], datetime | None] | None = None,
     pane_screen: Callable[[], Sequence[str] | None] | None = None,
 ) -> list[NeedsItem]:
@@ -1061,14 +1082,24 @@ def needs_from_agent(
         return [trust]
     pending = _needs_pending(tail, agent)
     attention = _needs_attention(status)
-    asking = next((tool for tool in pending if tool.name in _NEEDS_ASKING_TOOLS), None)
+    reader = _needs_reader(agent)
+    asking = next(
+        (tool for tool in pending if _needs_asks(reader, tool) in ("question", "plan")), None
+    )
     screen = _needs_screen_once(pane_screen)
     # The screen is read only where a card could come of it: not for calls at work, unasked.
-    call = _needs_prompt_call(pending, screen) if attention or asking is not None else None
-    if call is not None and call.name == "AskUserQuestion":
-        return [_needs_question_item(call, project=project, agent=agent, name=name, now=now)]
-    if call is not None and call.name == "ExitPlanMode":
-        return [_needs_plan_item(call, project=project, agent=agent, name=name, now=now)]
+    call = _needs_prompt_call(pending, screen, reader) if attention or asking is not None else None
+    asks = None if call is None else _needs_asks(reader, call)
+    if call is not None and asks == "question":
+        return [
+            _needs_question_item(
+                call, project=project, agent=agent, name=name, now=now, reader=reader
+            )
+        ]
+    if call is not None and asks == "plan":
+        return [
+            _needs_plan_item(call, project=project, agent=agent, name=name, now=now, reader=reader)
+        ]
     # Rule 8's card beside a question or a plan no screen names is named after it, not after
     # the notices around it: one card before its notice and after (round 10, 2/9).
     asked = asking if call is None else None
@@ -1097,15 +1128,19 @@ def needs_from_agent(
             form = (
                 len(pending) == 1
                 and call is not None
-                and call.name not in _SUBAGENT_TOOLS
+                and asks != "subagent"
                 and _needs_later_notice(attention_event, tail, session)
             )
         if not form and call is not None:
-            if call.name in _SUBAGENT_TOOLS and session is not None:
+            if asks == "subagent" and session is not None:
                 return _needs_subagent_prompt(
-                    call, session, pane_output, project=project, agent=agent, now=now
+                    call, session, pane_output, project=project, agent=agent, now=now, reader=reader
                 )
-            return [_needs_permission_item(call, project=project, agent=agent, name=name, now=now)]
+            return [
+                _needs_permission_item(
+                    call, project=project, agent=agent, name=name, now=now, reader=reader
+                )
+            ]
     elif tail is not None and _needs_marker_later(status, tail):
         return [_needs_interrupted_item(tail, project=project, agent=agent, name=name, now=now)]
     if attention or _needs_unanswered(status, tail, unread=False):
@@ -1371,7 +1406,7 @@ def _needs_limited_item(
     now: datetime,
     manager_live: bool,
     accounts: AccountsSettings | None,
-    hands_over: Callable[[int | None], bool],
+    hands_over: Callable[[int | None, str | None], bool],
 ) -> NeedsItem:
     """A row parked on a usage limit: the subject is its newest ``limited`` event.
 
@@ -1404,7 +1439,7 @@ def _needs_limited_item(
     def handed_over() -> bool:
         account = session.account if session is not None else None
         leaving = claude_accounts_service.leaving_slot(agent.account_slot, account)
-        return hands_over(leaving)
+        return hands_over(leaving, agent.agent)
 
     return _needs_item(
         "limited",
@@ -1502,13 +1537,21 @@ def _needs_str(value: object) -> str:
 
 
 def _needs_question_item(
-    tool: PendingTool, *, project: ProjectInfo, agent: FleetAgent, name: str, now: datetime
+    tool: PendingTool,
+    *,
+    project: ProjectInfo,
+    agent: FleetAgent,
+    name: str,
+    now: datetime,
+    reader: AgentTranscript | None,
 ) -> NeedsItem:
-    """A pending ``AskUserQuestion``: every question in ``detail``, digits for a simple one.
+    """A pending question (Claude Code's ``AskUserQuestion``, Codex's ``request_user_input``):
+    every question in ``detail``, the agent's keys for a simple one.
 
     Quick answers only for one single-select question of at most nine options,
-    which its digits pick; anything else is answered from the key pad, with the
-    live pane beside it.
+    which the agent's keys pick (``AgentTranscript.answer_keys``, its digits on both
+    agents), each labelled with its option; anything else is answered from the key pad,
+    with the live pane beside it.
     """
     questions = _needs_questions(tool.input.get("questions"))
     excerpt = ""
@@ -1520,13 +1563,16 @@ def _needs_question_item(
         if len(questions) > 1:
             excerpt += f" (+{len(questions) - 1} more)"
         if len(questions) == 1 and not first["multiSelect"] and 1 <= len(first["options"]) <= 9:
-            answers = (
-                *(
-                    QuickAnswer(needs_push_safe(option["label"], 80) or str(n), (str(n),))
-                    for n, option in enumerate(first["options"], start=1)
-                ),
-                QuickAnswer("Cancel", ("Escape",)),
-            )
+            options = first["options"]
+            keys = _needs_answers(reader, "question", len(options))
+            if len(keys) >= len(options):
+                answers = (
+                    *(
+                        replace(answer, label=needs_push_safe(option["label"], 80) or answer.label)
+                        for option, answer in zip(options, keys, strict=False)
+                    ),
+                    *keys[len(options) :],
+                )
     since = tool.at or now
     detail: dict[str, Any] = {"questions": questions}
     said = _needs_said(detail)
@@ -1551,7 +1597,13 @@ def _needs_question_item(
 
 
 def _needs_plan_item(
-    tool: PendingTool, *, project: ProjectInfo, agent: FleetAgent, name: str, now: datetime
+    tool: PendingTool,
+    *,
+    project: ProjectInfo,
+    agent: FleetAgent,
+    name: str,
+    now: datetime,
+    reader: AgentTranscript | None,
 ) -> NeedsItem:
     """A plan waiting for approval: the plan itself in ``detail``, its first line as excerpt."""
     raw = tool.input.get("plan")
@@ -1571,12 +1623,7 @@ def _needs_plan_item(
         detail=_needs_tool_detail(tool, detail, _DETAIL_PLAN_MAX, shown=detail),
         since=since,
         push_after=since,
-        answers=(
-            QuickAnswer("1", ("1",)),
-            QuickAnswer("2", ("2",)),
-            QuickAnswer("3", ("3",)),
-            QuickAnswer("Keep planning", ("Escape",)),
-        ),
+        answers=_needs_answers(reader, "plan"),
     )
 
 
@@ -1588,6 +1635,7 @@ def _needs_subagent_prompt(
     project: ProjectInfo,
     agent: FleetAgent,
     now: datetime,
+    reader: AgentTranscript | None,
 ) -> list[NeedsItem]:
     """A prompt of a sub-agent's: one item per notification, never the one before's.
 
@@ -1613,6 +1661,7 @@ def _needs_subagent_prompt(
             now=now,
             subject=f"{tool.tool_use_id}:{seen.isoformat()}",
             since=seen,
+            reader=reader,
         )
     ]
 
@@ -1689,17 +1738,19 @@ def _needs_drawn_dialog(screen: Callable[[], Sequence[str] | None] | None) -> st
 
 
 def _needs_prompt_call(
-    pending: Sequence[PendingTool], pane_screen: Callable[[], Sequence[str] | None] | None
+    pending: Sequence[PendingTool],
+    pane_screen: Callable[[], Sequence[str] | None] | None,
+    reader: AgentTranscript | None,
 ) -> PendingTool | None:
     """The pending call whose prompt is up: the one call, or of more than one, the call the
     pane's screen names (:func:`_needs_on_screen`); ``None`` when nothing says which."""
     if len(pending) <= 1:
         return pending[0] if pending else None
-    return _needs_on_screen(pending, None if pane_screen is None else pane_screen())
+    return _needs_on_screen(pending, None if pane_screen is None else pane_screen(), reader)
 
 
 def _needs_on_screen(
-    pending: Sequence[PendingTool], rows: Sequence[str] | None
+    pending: Sequence[PendingTool], rows: Sequence[str] | None, reader: AgentTranscript | None
 ) -> PendingTool | None:
     """Of more than one pending call, the one whose prompt the screen ``rows`` show: the only
     one whose mark (:func:`_needs_prompt_mark`) is in the prompt's text above its options
@@ -1717,7 +1768,7 @@ def _needs_on_screen(
         return None
     shown: list[tuple[PendingTool, str]] = []
     for tool in pending:
-        mark = _needs_prompt_mark(tool)
+        mark = _needs_prompt_mark(tool, reader)
         if mark is None:
             return None
         if mark in region:
@@ -1727,25 +1778,13 @@ def _needs_on_screen(
     return shown[0][0]
 
 
-def _needs_prompt_mark(tool: PendingTool) -> str | None:
-    """The text a call's prompt shows of it, squashed and cut to :data:`_PROMPT_MARK_MAX`:
-    a question's words, a command, a file's base name, a URL; ``None`` for a call whose
-    prompt is not known to show one, or that shows nothing of it."""
-    if tool.name == "AskUserQuestion":
-        questions = _needs_questions(tool.input.get("questions"))
-        text = questions[0]["question"] if questions else ""
-    elif tool.name == "Bash":
-        text = _needs_str(tool.input.get("command"))
-    elif tool.name in _PROMPT_FILE_TOOLS:
-        path = _needs_str(tool.input.get("file_path")) or _needs_str(
-            tool.input.get("notebook_path")
-        )
-        text = path.replace("\\", "/").rsplit("/", 1)[-1]
-    elif tool.name == "WebFetch":
-        text = _needs_str(tool.input.get("url"))
-    else:
-        return None
-    return _needs_squashed(text)[:_PROMPT_MARK_MAX] or None
+def _needs_prompt_mark(tool: PendingTool, reader: AgentTranscript | None) -> str | None:
+    """The text a call's prompt shows of it (``AgentTranscript.call_mark``: a question's
+    words, a command, a file's base name, a URL), squashed and cut to
+    :data:`_PROMPT_MARK_MAX`; ``None`` for a call whose prompt is not known to show one, or
+    that shows nothing of it."""
+    text = None if reader is None else reader.call_mark(tool)
+    return None if text is None else _needs_squashed(text)[:_PROMPT_MARK_MAX] or None
 
 
 def _needs_prompt_region(rows: Sequence[str], *, ruled: bool = False) -> str | None:
@@ -1844,18 +1883,21 @@ def _needs_permission_item(
     now: datetime,
     subject: str | None = None,
     since: datetime | None = None,
+    reader: AgentTranscript | None,
 ) -> NeedsItem:
     """A permission prompt: the call in ``detail``, and what of it the card cannot hold
     (:func:`_needs_tool_fields`, :func:`_needs_tool_detail`), so nobody approves blind.
 
-    The buttons are the dialog's own digits and Esc; the card shows the live
-    pane beside them, so the options' real text is on screen. A prompt under a
-    ``Task``/``Agent`` tool is a sub-agent's, whose own tool use is in its own
-    records, not this transcript: its detail is the task the sub-agent was given,
-    marked ``subagent``, since the call its "1" approves is not in it.
-    ``subject`` and ``since`` default to the tool use's.
+    The buttons are the dialog's own keys (``AgentTranscript.answer_keys``: its digits and
+    Esc on both agents); the card shows the live pane beside them, so the options' real
+    text is on screen. A prompt under a call a sub-agent runs in (Claude Code's
+    ``Task``/``Agent``) is the sub-agent's, whose own tool use is in its own records, not
+    this transcript: its detail is the task the sub-agent was given, marked ``subagent``,
+    since the call its "1" approves is not in it. ``subject`` and ``since`` default to the
+    tool use's.
     """
-    if tool.name in _SUBAGENT_TOOLS:
+    subagent = _needs_asks(reader, tool) == "subagent"
+    if subagent:
         reason = f"{name} waits for a permission answer (in a sub-agent)"
     elif _TOOL_NAME.fullmatch(tool.name):
         reason = f"{name} waits for a permission answer to use {tool.name}"
@@ -1870,7 +1912,7 @@ def _needs_permission_item(
     detail: dict[str, Any] = {"tool": _needs_cut(tool.name, 200), "input": shown}
     if omitted:
         detail["omitted"] = omitted
-    if tool.name in _SUBAGENT_TOOLS:
+    if subagent:
         detail["subagent"] = True
     return _needs_item(
         "permission",
@@ -1882,11 +1924,7 @@ def _needs_permission_item(
         detail=_needs_tool_detail(tool, detail, _DETAIL_TOOL_MAX, shown=shown, whole=whole),
         since=since,
         push_after=since,
-        answers=(
-            QuickAnswer("1", ("1",)),
-            QuickAnswer("2", ("2",)),
-            QuickAnswer("No", ("Escape",)),
-        ),
+        answers=_needs_answers(reader, "permission"),
     )
 
 
@@ -2349,7 +2387,9 @@ def _needs_tail_of(
     path = None if session is None else session.transcript_path
     if not path or status.state in ("exited", "unknown", "lost"):
         return None
-    return reads.needs_read(partial(sources.transcript_tail, path), "a transcript")
+    return reads.needs_read(
+        partial(sources.transcript_tail, path, status.agent.agent), "a transcript"
+    )
 
 
 def _needs_own_events(
@@ -3369,18 +3409,33 @@ def needs_prompt_now(
     is none: rule 8's card there was a dialog that was not drawn, the tap told "shows
     another prompt" and the page "No longer needs you: coder-1 shows a dialog that needs
     you" while nothing waited (round 10, 1/9).
+
+    For an agent whose screen says when it is at work or at its empty prompt
+    (``AgentCapabilities.working_on_screen``, ``idle_on_screen``: Codex's), the screen is
+    read for one call too, and a dialog's keys go in only while a dialog is drawn
+    (:func:`_needs_undrawn`). Codex records a call as it streams, and draws its approval or
+    its question view only once the call's hooks have run (PermissionRequest, PreToolUse):
+    its question card came that early, and a ``2`` tapped at once went into the composer
+    under the view, which then waited unanswered (measured on 0.162.1). An answer in words
+    (``asked``, ``interrupted``) is typed at the prompt, and is not held to it.
     """
     status = snap.status
     pending = () if status is None else _needs_pending(snap.tail, status.agent)
     named = {needs_item_id(snap.project.id, item.kind, tool.tool_use_id): tool for tool in pending}
-    if len(pending) <= 1 or item.id not in named or status is None:
+    several = status is not None and len(pending) > 1 and item.id in named
+    drawn_only = (
+        status is not None and item.kind in _NEEDS_DIALOG_KEYS and _needs_screen_says(status)
+    )
+    if status is None or not (several or drawn_only):
         return (item,)
     rows = _needs_screen_now(status)
     if rows is None:
         return None
-    if _needs_prompt_region(rows) is None:
+    if _needs_prompt_region(rows) is None or (drawn_only and _needs_undrawn(status, rows)):
         return ()
-    if _needs_on_screen(pending, rows) is named[item.id]:
+    if not several:
+        return (item,)
+    if _needs_on_screen(pending, rows, _needs_reader(status.agent)) is named[item.id]:
         return (item,)
     instead = needs_from_agent(
         status, snap.tail, project=snap.project, events=(), now=now, pane_screen=lambda: rows
@@ -3389,6 +3444,35 @@ def needs_prompt_now(
     return tuple(instead) or (
         _needs_dialog_item(status, None, None, project=snap.project, now=now),
     )
+
+
+_NEEDS_DIALOG_KEYS = frozenset({"permission", "question", "plan"})
+"""The cards whose quick answers are a dialog's keys, not words typed at the prompt."""
+
+
+def _needs_screen_says(status: FleetAgentStatus) -> bool:
+    """Whether the row's agent reads from its screen when it is at work or at its empty prompt
+    (``AgentCapabilities.working_on_screen``, ``idle_on_screen``)."""
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    adapter = recorded_adapter(status.agent.agent)
+    return adapter is not None and (
+        adapter.capabilities.working_on_screen is not None
+        or adapter.capabilities.idle_on_screen is not None
+    )
+
+
+def _needs_undrawn(status: FleetAgentStatus, rows: Sequence[str]) -> bool:
+    """Whether ``rows`` show the row's agent at work or at its empty prompt, by its own reading
+    of its screen: no dialog drawn for a card's keys to answer, whatever option row the
+    conversation above may hold."""
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    adapter = recorded_adapter(status.agent.agent)
+    if adapter is None:
+        return False
+    working, idle = adapter.capabilities.working_on_screen, adapter.capabilities.idle_on_screen
+    return (working is not None and working(rows)) or (idle is not None and idle(rows))
 
 
 def _needs_screen_now(status: FleetAgentStatus) -> list[str] | None:
@@ -3607,14 +3691,15 @@ _NEEDS_HANDS_OVER_KEPT = 60.0
 """Seconds an answer of :func:`_needs_hands_over_kept` is kept: the question opens the store
 and parses every account's ``.claude.json`` (tens of MB) and ``.credentials.json``, and an
 agent that no hand-over can move stays limited for hours, every 3 s scan of them."""
-_hands_over: dict[tuple[str, int | None], tuple[float, bool]] = {}
+_hands_over: dict[tuple[str, int | None, str | None], tuple[float, bool]] = {}
 _hands_over_lock = threading.Lock()
 
 
-def _needs_hands_over_kept(leaving: int | None) -> bool:
-    """``claude_accounts.somewhere_to_hand_over(leaving)`` for the scan: kept a minute
-    (:data:`_NEEDS_HANDS_OVER_KEPT`), by the machine's accounts directory and the slot,
-    and fail-open.
+def _needs_hands_over_kept(leaving: int | None, agent: str | None) -> bool:
+    """``claude_accounts.somewhere_to_hand_over(leaving, agent=agent)`` for the scan, asked
+    as the limit's hook asks it (``hooks.py``, with the row's agent): kept a minute
+    (:data:`_NEEDS_HANDS_OVER_KEPT`), by the machine's accounts directory, the slot and the
+    agent, and fail-open.
 
     It is asked only of a limited row that no reset, live manager or ``wait`` settles
     first (:func:`_needs_limited_push`). Read as ``[accounts]`` itself was, every scan
@@ -3628,14 +3713,14 @@ def _needs_hands_over_kept(leaving: int | None) -> bool:
     from aisquare.core import claude_accounts as claude_accounts_core
     from aisquare.services import claude_accounts as claude_accounts_service
 
-    key = (str(claude_accounts_core.accounts_root()), leaving)
+    key = (str(claude_accounts_core.accounts_root()), leaving, agent)
     now = time.monotonic()
     with _hands_over_lock:
         kept = _hands_over.get(key)
     if kept is not None and now - kept[0] < _NEEDS_HANDS_OVER_KEPT:
         return kept[1]
     try:
-        answer = claude_accounts_service.somewhere_to_hand_over(leaving)
+        answer = claude_accounts_service.somewhere_to_hand_over(leaving, agent=agent)
     except Exception as exc:
         log.debug("remote: whether slot %s can be handed over is not known: %s", leaving, exc)
         answer = True
@@ -3646,13 +3731,14 @@ def _needs_hands_over_kept(leaving: int | None) -> bool:
     return answer
 
 
-_tails: dict[str, tuple[tuple[int, int], TranscriptTail | None]] = {}
+_tails: dict[str, tuple[tuple[int, int, str | None], TranscriptTail | None]] = {}
 _tails_lock = threading.Lock()
 _TAILS_KEPT = 512
 
 
-def _needs_cached_tail(path: str) -> TranscriptTail | None:
-    """:func:`read_transcript_tail`, read again only when the file's size or mtime moved.
+def _needs_cached_tail(path: str, agent: str | None = None) -> TranscriptTail | None:
+    """:func:`read_transcript_tail` as the row's ``agent`` writes it, read again only when the
+    file's size or mtime moved (or another agent's row names it).
 
     An unchanged transcript costs one ``stat()``. Shared by the watcher and
     :func:`needs_agent_now`, and bounded: the oldest entries go first. A path the
@@ -3667,12 +3753,12 @@ def _needs_cached_tail(path: str) -> TranscriptTail | None:
         return _TAIL_NOTHING
     except OSError:
         return None
-    key = (stat.st_size, stat.st_mtime_ns)
+    key = (stat.st_size, stat.st_mtime_ns, agent)
     with _tails_lock:
         cached = _tails.get(path)
     if cached is not None and cached[0] == key:
         return cached[1]
-    tail = read_transcript_tail(path)
+    tail = read_transcript_tail(path, agent=agent)
     with _tails_lock:
         _tails.pop(path, None)
         _tails[path] = (key, tail)

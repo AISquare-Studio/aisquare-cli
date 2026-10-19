@@ -1,0 +1,52 @@
+{
+  "about": "Codex 0.162.1's rollout, measured (codex-0.162.1.jsonl): each moment is its first lines.",
+  "moments": {
+    "permission": {
+      "rollout": "codex-0.162.1.jsonl",
+      "lines": 10,
+      "expect": {
+        "newest": "assistant_tool",
+        "pending": [
+          [
+            "call_1",
+            "exec_command",
+            "tool"
+          ]
+        ],
+        "mark": "touch /work/outside-probe"
+      }
+    },
+    "question": {
+      "rollout": "codex-0.162.1.jsonl",
+      "lines": 53,
+      "expect": {
+        "newest": "assistant_tool",
+        "pending": [
+          [
+            "call_9",
+            "request_user_input",
+            "question"
+          ]
+        ],
+        "options": 2
+      }
+    },
+    "interrupted": {
+      "rollout": "codex-0.162.1.jsonl",
+      "lines": 14,
+      "expect": {
+        "newest": "interrupted",
+        "pending": []
+      }
+    },
+    "asked": {
+      "rollout": "codex-0.162.1.jsonl",
+      "lines": 29,
+      "expect": {
+        "newest": "assistant_text",
+        "pending": [],
+        "last_text_end": "Shall I go on?"
+      }
+    }
+  }
+}

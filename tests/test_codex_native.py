@@ -30,6 +30,8 @@ from aisquare.core.config import load_config, save_config
 from aisquare.core.entries import new_entry
 from aisquare.core.store import SqliteStore, store_session
 from aisquare.services import agent_launch, fleet, native_telemetry, store_broker, team
+from aisquare.services.remote_server import build_app
+from tests.remote_kit_helpers import base, make_client, make_runtime, unlock
 
 #: The real install check, before the suite's stand-in (``tests/conftest.py``).
 REAL_INSTALL_PATHS = store_broker.install_paths
@@ -2084,3 +2086,251 @@ def test_real_fleet_refuses_a_codex_agent_given_a_directory_inside_the_aisquare_
     finally:
         subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True, check=False)
         shutil.rmtree(outside, ignore_errors=True)
+
+
+class _Asking(BaseHTTPRequestHandler):
+    """A loopback Responses provider for Remote's Codex cards, driven by the last user line:
+    ``ESC <cmd>`` asks to run ``cmd`` outside the sandbox (Codex's approval view), ``ASK``
+    asks one question with ``request_user_input`` (Plan mode only), and a call's result is
+    answered with words that end on a question. Each request lands in ``server.requests``."""
+
+    def do_POST(self) -> None:
+        raw = self.rfile.read(int(self.headers["Content-Length"]))
+        if not self.path.endswith("/responses"):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"{}")
+            return
+        request = json.loads(raw)
+        requests: list[dict[str, Any]] = self.server.requests  # type: ignore[attr-defined]
+        requests.append(request)
+        items, said = request.get("input", []), _user_texts(request)
+        verb, _, command = (said[-1] if said else "").partition(" ")
+        if items and items[-1].get("type") == "function_call_output":
+            _answer(self, _message(f"done: {str(items[-1].get('output'))[:40]}. Shall I go on?"))
+            return
+        call = f"call_{len(requests)}"
+        arguments: dict[str, Any]
+        if verb == "ESC":
+            arguments = {
+                "cmd": command,
+                "sandbox_permissions": "require_escalated",
+                "justification": "Remote answers it",
+            }
+            name = "exec_command"
+        elif verb == "ASK":
+            arguments = {
+                "questions": [
+                    {
+                        "id": "colour",
+                        "header": "Colour",
+                        "question": "Which colour should the button be?",
+                        "options": [
+                            {"label": "Red (Recommended)", "description": "Warm and loud"},
+                            {"label": "Blue", "description": "Calm"},
+                        ],
+                    }
+                ]
+            }
+            name = "request_user_input"
+        else:
+            _answer(self, _message("local fixture complete"))
+            return
+        _answer(
+            self,
+            {
+                "id": call,
+                "type": "function_call",
+                "call_id": call,
+                "name": name,
+                "arguments": json.dumps(arguments),
+            },
+        )
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+
+@pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
+def test_real_codex_approval_and_question_are_answered_from_the_remote_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SCOPE #113 0.8.1, items 1 to 3, live: a Codex coder on ``workspace:ask`` in the fleet,
+    read by Remote's own app (its live sources, the store, the fleet's tmux), with no fake
+    between. Its approval view is a permission card naming the call, with Codex's keys, and
+    the card's ``1`` approves it; the turn that ends on a question is an ``asked`` card; an
+    approval answered "No" from the phone (Esc) stops the turn, an ``interrupted`` card; in
+    Plan mode a ``request_user_input`` is a question card whose ``2`` picks Blue; and the
+    Transcript tab is the conversation under ``* codex``. Before the transcript slot every
+    one of these read the rollout as Claude Code's JSONL: no card but "shows a dialog that
+    needs you", no answers, an empty page."""
+    binary = shutil.which("codex")
+    assert binary, "AISQUARE_TEST_CODEX requires an installed Codex"
+    refused = _sandbox_refused(binary, tmp_path)
+    if refused is not None:
+        pytest.skip(f"Codex's sandbox cannot start a command on this host: {refused}")
+    outside = Path(tempfile.mkdtemp(prefix="asq-", dir="/var/tmp"))
+    store, native_home, workspace = outside / "h", outside / "c", outside / "w"
+    native_home.mkdir()
+    workspace.mkdir()
+    socket = f"asq-codex-remote-{os.getpid()}"
+    with ThreadingHTTPServer(("127.0.0.1", 0), _Asking) as server:
+        server.requests = []  # type: ignore[attr-defined]
+        requests: list[dict[str, Any]] = server.requests  # type: ignore[attr-defined]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        (native_home / "config.toml").write_text(
+            'model = "local-fixture"\nmodel_provider = "local"\n'
+            '[model_providers.local]\nname = "Local fixture"\nwire_api = "responses"\n'
+            f'base_url = "http://127.0.0.1:{server.server_port}/v1"\n'
+            "requires_openai_auth = false\n"
+            f'[projects.{json.dumps(str(workspace))}]\ntrust_level = "trusted"\n',
+            encoding="utf-8",
+        )
+        for key in tuple(os.environ):
+            if key.startswith(("OPENAI_", "ANTHROPIC_", "CODEX_")):
+                monkeypatch.delenv(key)
+        monkeypatch.delenv("TMPDIR", raising=False)
+        monkeypatch.setenv("AISQUARE_HOME", str(store))
+        monkeypatch.setenv("CODEX_HOME", str(native_home))
+        monkeypatch.setattr(
+            agents, "_aisquare_command", lambda *args, **kwargs: shlex.join(selfcli.argv_for([]))
+        )
+        agents.install_hooks("codex", native_home)
+        config = load_config()
+        config.fleet.tmux_socket = socket
+        save_config(config)
+        project = team.activate(workspace)
+        for kept in store_read_only(store_dir()):
+            kept.parent.mkdir(parents=True, exist_ok=True)
+        (store / "codex-accounts").mkdir(exist_ok=True)
+        srv = fleet.server(config.fleet)
+        runtime = make_runtime()
+        runtime.set_allow_write(True)
+        client = make_client(build_app(runtime, dist_dir=tmp_path))
+        assert unlock(client, runtime).status_code == 200
+        api = f"{base(runtime)}/api"
+        try:
+
+            def until(check: Any, seconds: float, what: str, pane: str) -> Any:
+                deadline = time.monotonic() + seconds
+                while not (found := check()):
+                    if time.monotonic() >= deadline:
+                        screen = srv.run("capture-pane", "-p", "-t", pane)
+                        raise AssertionError(f"{what}:\n{screen}\n{feed()}")
+                    time.sleep(0.3)
+                return found
+
+            def feed() -> list[dict[str, Any]]:
+                response = client.get(f"{api}/needs")
+                assert response.status_code == 200, response.text
+                return [item for item in response.json()["items"] if item["agent"] == label]
+
+            def card(kind: str, *, besides: str = "") -> dict[str, Any] | None:
+                found = (item for item in feed() if item["kind"] == kind and item["id"] != besides)
+                return next(found, None)
+
+            held: list[str] = []
+
+            def answer(item: dict[str, Any], key: str) -> None:
+                """Tap ``key`` on the card the moment it shows, as again and again as it is
+                refused for a view not drawn yet (Codex records the call before its hooks
+                run and its view is drawn), until it goes in."""
+                deadline, kind = time.monotonic() + 20, item["kind"]
+                while True:
+                    body = {"id": item["id"], "keys": [key]}
+                    said = client.post(f"{api}/needs/answer", json=body)
+                    if said.status_code == 200:
+                        assert said.json()["sent"] is True, said.text
+                        return
+                    assert said.status_code == 409, said.text
+                    assert "shows no prompt now" in said.json()["message"], said.text
+                    held.append(kind)
+                    assert time.monotonic() < deadline, "the view was never drawn"
+                    time.sleep(0.3)
+                    item = until(lambda: card(kind), 10, "the card back", pane)
+
+            def state() -> str:
+                return fleet.status_of(coder).state
+
+            def results() -> list[str]:
+                return [
+                    str(item.get("output"))
+                    for request in list(requests)
+                    for item in request.get("input", [])
+                    if item.get("type") == "function_call_output"
+                ]
+
+            first = outside / "approved-from-the-phone"
+            coder = fleet.spawn(
+                project,
+                "coder",
+                agent="codex",
+                worktree=False,
+                permission_mode="workspace:ask",
+                prompt=f"ESC touch {first}",
+                agent_args=["--dangerously-bypass-hook-trust", "--no-alt-screen"],
+            ).agent
+            pane, label = coder.pane_id, coder.label
+
+            # The approval view: a permission card naming the call, on Codex's own keys.
+            asked = until(lambda: card("permission"), 60, "the approval's card", pane)
+            assert asked["reason"] == f"{label} waits for a permission answer to use exec_command"
+            assert asked["detail"]["tool"] == "exec_command"
+            assert asked["detail"]["input"]["cmd"] == f"touch {first}"
+            assert asked["answers"] == [
+                {"label": "1", "keys": ["1"]},
+                {"label": "2", "keys": ["2"]},
+                {"label": "No", "keys": ["Escape"]},
+            ]
+            assert "Would you like to run" in srv.run("capture-pane", "-p", "-t", pane)
+            answer(asked, "1")
+            until(first.exists, 30, "the command the phone approved ran", pane)
+            # Its turn ends on a question: an `asked` card once its Stop says waiting.
+            ended = until(lambda: card("asked"), 40, "the turn's question card", pane)
+            assert ended["excerpt"].endswith("Shall I go on?")
+
+            # An approval answered "No" from the phone is Codex's Esc: the turn stops.
+            second = outside / "refused-from-the-phone"
+            assert fleet.tell(project, label, f"ESC touch {second}").delivered
+            refusing = until(
+                lambda: card("permission", besides=asked["id"]), 40, "the next card", pane
+            )
+            answer(refusing, "Escape")
+            stopped = until(lambda: card("interrupted"), 40, "the interrupted card", pane)
+            assert stopped["reason"] == f"{label} was interrupted and waits for you"
+            assert not second.exists()
+
+            # Plan mode's question: a question card, its options on their digits.
+            until(lambda: state() == "waiting", 20, "waiting", pane)
+            srv.run("send-keys", "-t", pane, "BTab")
+            until(
+                lambda: "Plan mode" in srv.run("capture-pane", "-p", "-t", pane), 10, "Plan", pane
+            )
+            assert fleet.tell(project, label, "ASK").delivered
+            question = until(lambda: card("question"), 40, "the question's card", pane)
+            assert question["excerpt"].startswith("Which colour should the button be?")
+            assert question["answers"] == [
+                {"label": "Red (Recommended)", "keys": ["1"]},
+                {"label": "Blue", "keys": ["2"]},
+                {"label": "Cancel", "keys": ["Escape"]},
+            ]
+            answer(question, "2")
+            until(lambda: any('"Blue"' in said for said in results()), 30, "Blue answered", pane)
+            print(f"taps held for a view not drawn yet: {held}")
+
+            # The Transcript tab: the conversation, under the agent's own speaker.
+            response = client.get(
+                f"{api}/transcript/{label}", params={"project": project.id, "width": 80}
+            )
+            assert response.status_code == 200, response.text
+            lines = [re.sub(r"\x1b\[[0-9;]*m", "", line) for line in response.json()["lines"]]
+            assert "* codex" in lines and "* claude" not in lines
+            assert "> you" in lines and f"  ESC touch {first}" in lines
+            assert "  ? Colour: Which colour should the button be?" in lines
+            assert "  ⎿ interrupted" in lines
+        finally:
+            subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True, check=False)
+            server.shutdown()
+            thread.join(timeout=2)
+            shutil.rmtree(outside, ignore_errors=True)

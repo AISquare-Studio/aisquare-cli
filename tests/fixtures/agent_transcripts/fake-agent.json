@@ -1,0 +1,118 @@
+{
+  "about": "The fake agent's own log (tests/fake_agent.py FakeTranscript).",
+  "moments": {
+    "permission": {
+      "records": [
+        {
+          "timestamp": "2026-10-19T18:40:00.000Z",
+          "kind": "heard",
+          "text": "deploy it"
+        },
+        {
+          "timestamp": "2026-10-19T18:40:05.000Z",
+          "kind": "said",
+          "text": "running it"
+        },
+        {
+          "timestamp": "2026-10-19T18:40:06.000Z",
+          "kind": "run",
+          "id": "r1",
+          "tool": "shell",
+          "args": {
+            "line": "make deploy"
+          }
+        }
+      ],
+      "expect": {
+        "newest": "assistant_tool",
+        "pending": [
+          [
+            "r1",
+            "shell",
+            "tool"
+          ]
+        ],
+        "mark": "make deploy"
+      }
+    },
+    "question": {
+      "records": [
+        {
+          "timestamp": "2026-10-19T18:40:00.000Z",
+          "kind": "heard",
+          "text": "paint it"
+        },
+        {
+          "timestamp": "2026-10-19T18:40:05.000Z",
+          "kind": "pick",
+          "id": "q1",
+          "title": "Which colour?",
+          "choices": [
+            "Red",
+            "Blue"
+          ]
+        }
+      ],
+      "expect": {
+        "newest": "assistant_tool",
+        "pending": [
+          [
+            "q1",
+            "pick",
+            "question"
+          ]
+        ],
+        "options": 2
+      }
+    },
+    "interrupted": {
+      "records": [
+        {
+          "timestamp": "2026-10-19T18:40:00.000Z",
+          "kind": "heard",
+          "text": "deploy it"
+        },
+        {
+          "timestamp": "2026-10-19T18:40:05.000Z",
+          "kind": "run",
+          "id": "r1",
+          "tool": "shell",
+          "args": {
+            "line": "make deploy"
+          }
+        },
+        {
+          "timestamp": "2026-10-19T18:40:09.000Z",
+          "kind": "halt"
+        }
+      ],
+      "expect": {
+        "newest": "interrupted",
+        "pending": []
+      }
+    },
+    "asked": {
+      "records": [
+        {
+          "timestamp": "2026-10-19T18:40:00.000Z",
+          "kind": "heard",
+          "text": "tidy it"
+        },
+        {
+          "timestamp": "2026-10-19T18:40:30.000Z",
+          "kind": "said",
+          "text": "Done. Ship it?"
+        },
+        {
+          "timestamp": "2026-10-19T18:40:31.000Z",
+          "kind": "over"
+        }
+      ],
+      "expect": {
+        "newest": "assistant_text",
+        "pending": [],
+        "last_text_end": "Ship it?"
+      }
+    }
+  }
+}

@@ -11,15 +11,33 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from aisquare.core import harness
+from aisquare.core.agent_adapters.transcripts import (
+    YOU,
+    PendingTool,
+    TranscriptTail,
+    dim_note,
+    kept_input,
+    lines_backwards,
+    parse_line,
+    question_lines,
+    record_time,
+    speaker_line,
+    wrap,
+)
 from aisquare.core.agent_adapters.types import (
     GENERIC_HOOK,
     AgentCapabilities,
     AgentEvent,
+    AgentTranscript,
+    AnswerKey,
+    AnswerKind,
     BadEffortError,
+    CallAsk,
     EventKind,
     HookSpec,
     HooksSwitch,
@@ -49,6 +67,114 @@ EVENTS: dict[str, EventKind] = {
 }
 
 
+class FakeTranscript:
+    """Its log: one record a line, ``{"timestamp", "kind", …}`` — ``heard`` (the human's
+    ``text``), ``said`` (its ``text``), ``run`` (a ``tool`` with ``args`` under an ``id``),
+    ``pick`` (a question: ``title`` and ``choices``, under an ``id``), ``ran`` (the result of
+    ``id``), ``halt`` (stopped by the human) and ``over`` (the turn's end). Its dialogs take
+    ``y``/``n``, and a choice is picked by moving down to it and confirming."""
+
+    speaker = "fake"
+
+    def tail_facts(self, file: Path, size: int, budget: int, written: datetime) -> TranscriptTail:
+        answered: set[str] = set()
+        pending: list[PendingTool] = []
+        newest, newest_at, key = "none", None, None
+        text: str | None = None
+        over = False
+        for offset, raw in lines_backwards(file, size, budget=budget):
+            record = parse_line(raw)
+            if record is None:
+                continue
+            kind, at = record.get("kind"), record_time(record)
+            said = {
+                "heard": "user_prompt",
+                "said": "assistant_text",
+                "run": "assistant_tool",
+                "pick": "assistant_tool",
+                "ran": "tool_result",
+                "halt": "interrupted",
+            }.get(str(kind))
+            if kind == "over" and newest == "none":
+                over = True
+                continue
+            if said is None:
+                continue
+            if newest == "none":
+                newest, newest_at, key = said, at, str(offset)
+            if kind == "said" and text is None:
+                text = str(record.get("text", ""))
+            if kind == "halt":
+                over = True
+            if kind == "ran":
+                answered.add(str(record.get("id")))
+            if kind in ("run", "pick") and str(record.get("id")) not in answered and not over:
+                pending.append(_fake_call(record, at))
+            if kind == "heard":
+                break
+        return TranscriptTail(
+            pending=tuple(reversed(pending)),
+            newest=newest,
+            newest_at=newest_at,
+            last_text=text,
+            last_text_at=newest_at if text is not None else None,
+            marker_key=key,
+        )
+
+    def page_lines(self, record: dict[str, Any], width: int) -> list[str]:
+        kind = record.get("kind")
+        if kind == "heard":
+            return [YOU, *wrap(str(record.get("text", "")), width), ""]
+        if kind == "said":
+            return [speaker_line(self.speaker), *wrap(str(record.get("text", "")), width), ""]
+        if kind == "pick":
+            asked = question_lines(_fake_call(record, None).input.get("questions"), width)
+            return [speaker_line(self.speaker), *asked, ""]
+        if kind == "run":
+            return [speaker_line(self.speaker), dim_note(str(record.get("tool")), width), ""]
+        return []
+
+    def call_asks(self, tool: PendingTool) -> CallAsk:
+        return "question" if tool.name == "pick" else "tool"
+
+    def call_mark(self, tool: PendingTool) -> str | None:
+        line = tool.input.get("line")
+        return line if isinstance(line, str) else None
+
+    def answer_keys(self, kind: AnswerKind, options: int = 0) -> tuple[AnswerKey, ...]:
+        if kind == "permission":
+            return (AnswerKey("allow", ("y",)), AnswerKey("deny", ("n",)))
+        if kind == "question":
+            picks = tuple(
+                AnswerKey(str(n), (*("Down",) * (n - 1), "Enter")) for n in range(1, options + 1)
+            )
+            return (*picks, AnswerKey("Back", ("Escape",)))
+        return ()
+
+
+def _fake_call(record: Mapping[str, Any], at: datetime | None) -> PendingTool:
+    """A ``run`` or a ``pick`` as a pending call; a pick's choices as the questions the
+    transcript slot hands a card (``AgentTranscript.call_asks``)."""
+    if record.get("kind") == "pick":
+        choices = record.get("choices")
+        options = [
+            {"label": str(choice), "description": ""}
+            for choice in (choices if isinstance(choices, list) else [])
+        ]
+        title = str(record.get("title", ""))
+        arguments: object = {
+            "questions": [
+                {"header": "", "question": title, "multiSelect": False, "options": options}
+            ]
+        }
+        name = "pick"
+    else:
+        arguments = record.get("args")
+        name = str(record.get("tool", "tool"))
+    kept, dropped = kept_input(arguments)
+    return PendingTool(str(record.get("id")), name, name, kept, at, input_dropped=dropped)
+
+
 class FakeAgentAdapter:
     id = "fake-agent"
     label = "Fake Agent"
@@ -63,6 +189,7 @@ class FakeAgentAdapter:
     key_spellings: Mapping[str, str] = {"M-Enter": "C-o"}
     accounts = None
     plugin = None
+    transcript_reader: AgentTranscript | None = FakeTranscript()
     capabilities = AgentCapabilities(
         launch_inputs=(".fakeagent",),
         hooks=tuple(

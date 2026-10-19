@@ -273,6 +273,20 @@ adapter.**
 - `install.sh --agent codex` installs a missing Codex with its own installer and
   connects it alone; `--agent both` (or `--agent` twice) installs both agents.
   `install.ps1` takes the agent from `AISQUARE_INSTALL_AGENT`.
+- **Remote on Codex.** The phone's needs-you scan, quick answers and Transcript
+  tab read a Codex agent's own rollout, through its adapter's transcript reader
+  (`AgentAdapter.transcript_reader`; Claude Code's reads its JSONL as before).
+  An approval Codex asks the human is a permission card naming the call
+  (`exec_command` and its command), answered with Codex's `1`, `2` or *No* (Esc,
+  which stops the turn); a `request_user_input` is a question card, each option
+  on its digit; an Esc is an *interrupted* card, and a turn that ends on a
+  question an *asked* card. A dialog's key is typed only once Codex has drawn
+  its view, which comes after the call's hooks run. A limited Codex agent's push
+  waits for a hand-over only when another Codex account can take it, and a long
+  rollout no longer reads as a tool still pending, which refused the phone's
+  tells, restarts and switches. The Transcript tab shows the conversation under
+  `* codex`. A plan Codex proposes in Plan mode is no card yet: its *Implement
+  this plan?* dialog leaves no record.
 
 ### Changed
 

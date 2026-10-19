@@ -11,6 +11,8 @@ fake forgot to override fails loudly instead of quietly reaching a real tmux.
 
 from __future__ import annotations
 
+import ast
+import errno
 import json
 import logging
 import os
@@ -22,9 +24,9 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Collection, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -33,7 +35,8 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import codenames, paths, selfcli
+from aisquare.core import claude_accounts as accounts_core
+from aisquare.core import claude_sharing, codenames, harness, locking, paths, selfcli
 from aisquare.core import store as core_store
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import (
@@ -48,36 +51,63 @@ from aisquare.core.orchestrator import team_project
 from aisquare.core.store import ContextStore, SqliteStore, store_session
 from aisquare.core.tmux import (
     _FACTS_FIELDS,
+    Capture,
     Completed,
     PaneFacts,
     Runner,
     SocketAnswer,
     TmuxError,
+    TmuxPartlyTyped,
     TmuxServer,
+    TmuxTimedOut,
     TmuxUnavailable,
     WindowInfo,
 )
 from aisquare.core.version import __version__
-from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession, TeamTask
-from aisquare.services import auto_mode, lifecycle
+from aisquare.core.workspace import project_id_for
+from aisquare.models import (
+    CheckStatus,
+    FleetAgent,
+    FleetAgentStatus,
+    ProjectInfo,
+    TeamEvent,
+    TeamSession,
+    TeamTask,
+)
+from aisquare.services import auto_mode, install_route, lifecycle
+from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
+from aisquare.services import project as project_service
 from aisquare.services import team as team_service
 from aisquare.services.explainability import PIPELINE_ID_ENV_VAR
 from aisquare.services.fleet import (
     ACTIVITY_WINDOW,
     NUDGE_TEXT,
     PROMPT_TIMEOUT,
+    TRUST_PROMPT,
     FleetError,
     FleetUnavailable,
     NoSuchAgent,
 )
 from tests import fakebin
+from tests.cycles import unscoped
+from tests.fsperms import can_deny_reads, can_symlink, remove_tree
+from tests.projects import add_project
 
 PYTHON_LAUNCHER = "python3"
 """What ``pane_current_command`` reads while ``python -m aisquare launch`` is resolving."""
 
 
 # --- the fake tmux ---------------------------------------------------------------------
+
+
+def _is_paused(project: ProjectInfo) -> bool:
+    """Whether ``project``'s pause reads on, on any board, found by its name as ``fleet
+    resume`` and ``fleet shutdown`` find it (``fleet._pause_where_on``); a blob that does not
+    parse reads as none (``team.board_signals_in``). The tests' own: nothing else asks it
+    (review of #259, round 37, 7/7)."""
+    with store_session() as store:
+        return bool(fleet_service._pause_where_on(project, team_service.board_signals_in(store)))
 
 
 def _facts(pane_id: str, **overrides: object) -> PaneFacts:
@@ -178,6 +208,10 @@ class FakeTmux(TmuxServer):
         words in ``WindowInfo.resize_refused`` (#149; review of #162, round 1)."""
         self.typed: list[tuple[str, str, str]] = []
         """``(pane_id, kind, text)`` with kind ``literal`` / ``paste`` / ``key``."""
+        self.screens: dict[str, list[str]] = {}
+        """What each pane shows — what ``capture`` answers; blank until a test draws one."""
+        self.captured: list[str] = []
+        """Every pane whose screen was asked for, in order."""
         self.killed: list[str] = []
         self.renamed: list[tuple[str, str]] = []
         self._counter = 0
@@ -362,10 +396,35 @@ class FakeTmux(TmuxServer):
             # Faithful to tmux 3.7c: the flag is set from creation and never clears
             # on a detached session, so it must not be what the service reads.
             activity=True,
+            server_started=self.started,  # asked in the same `list-panes`, as the real one
         )
 
     def pane_facts(self, pane_id: str) -> PaneFacts | None:
-        return self.facts.get(pane_id) if self._read() else None
+        """As the real one, which asks ``#{start_time}`` and ``#{window_activity}`` (to the
+        second, rounded down) in the same ``display-message``."""
+        facts = self.facts.get(pane_id) if self._read() else None
+        if facts is None:
+            return None
+        printed = self.output_at.get(pane_id)
+        last = None if printed is None else datetime.fromtimestamp(int(printed.timestamp()), UTC)
+        return replace(facts, server_started=self.started, last_output=last)
+
+    def capture(
+        self,
+        pane_id: str,
+        *,
+        scrollback: int = 0,
+        height: int | None = None,
+        flags: bool = False,
+    ) -> Capture:
+        """The pane's screen as a test drew it (:attr:`screens`); a gone pane is an error."""
+        self.binary()
+        self._require_server()
+        facts = self.facts.get(pane_id)
+        if facts is None:
+            raise TmuxError(f"can't find pane: {pane_id}")
+        self.captured.append(pane_id)
+        return Capture(list(self.screens.get(pane_id, [])), facts, 0)
 
     # The strict twins the shutdown paths use: each is the lenient answer UNLESS
     # the server could not be asked, and that single distinction is `reachable()`
@@ -606,9 +665,11 @@ def repo(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def project(repo: Path) -> ProjectInfo:
+    """Added on purpose, as a fleet's project is: with ``[projects] capture`` off, the
+    default, a hook or a board write in a directory nobody added records nothing."""
     info = team_project(repo)
     with store_session() as store:
-        store.ensure_project(info)
+        store.onboard_project(info)
     return info
 
 
@@ -619,7 +680,7 @@ def plain_project(tmp_path: Path) -> ProjectInfo:
     path.mkdir()
     info = team_project(path)
     with store_session() as store:
-        store.ensure_project(info)
+        store.onboard_project(info)
     return info
 
 
@@ -716,6 +777,14 @@ def _events(project: ProjectInfo, kind: str) -> list[str]:
         return [e.text for e in store.recent_events(project.id, limit=50) if e.kind == kind]
 
 
+def _fleet(verb: str, project: ProjectInfo, *words: str) -> str:
+    """``project_service.fleet_command`` for ``project`` as the store holds it now: a spawn
+    gives it its codename, which the commands a refusal or a note gives then name."""
+    with store_session() as store:
+        stored = store.get_project(project.id)
+    return project_service.fleet_command(verb, stored or project, *words)
+
+
 def _coder(project: ProjectInfo, **kwargs: object) -> FleetAgent:
     kwargs.setdefault("worktree", False)
     return fleet_service.spawn(project, "coder", **kwargs).agent  # type: ignore[arg-type]
@@ -773,6 +842,35 @@ def test_spawn_records_where_its_server_listens_and_in_which_boot(
 
     monkeypatch.setattr(tmux, "server_socket_path", refused)  # the spawn goes on without it
     assert fleet_service.spawn(project, "coder", worktree=False).agent.socket_path is None
+
+
+def test_spawn_records_when_its_server_started(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Follow-up of #257: the identity of the server the pane id names, as the server says
+    it (``#{start_time}``), kept by the store as written. A server at the row's socket that
+    started at another time is not the one the row runs on. Not saying costs the spawn
+    nothing, and a row that recorded no start is judged by its own time, as before."""
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+
+    agent = fleet_service.spawn(project, "manager").agent
+
+    assert agent.server_started_at == tmux.started
+    with store_session() as store:
+        assert store.fleet_agent_by_label(project.id, "manager") == agent
+    assert not fleet_service._outlived(agent, tmux.started)
+    assert fleet_service._outlived(agent, tmux.started + timedelta(seconds=1))
+    assert fleet_service._outlived(agent, tmux.started - timedelta(days=1)), "any other time"
+    assert not fleet_service._outlived(agent, None), "a start tmux does not report judges nothing"
+
+    def refused() -> datetime | None:
+        raise TmuxError("tmux did not answer within 30s")
+
+    monkeypatch.setattr(tmux, "started_at", refused)  # the spawn goes on without it
+    coder = fleet_service.spawn(project, "coder", worktree=False).agent
+    assert coder.server_started_at is None
+    assert fleet_service._outlived(coder, coder.created_at + timedelta(seconds=1))
+    assert not fleet_service._outlived(coder, coder.created_at - timedelta(seconds=1))
 
 
 def test_spawn_with_an_account_carries_the_callers_environment_into_the_window(
@@ -1456,6 +1554,31 @@ def test_spawn_prompt_stops_waiting_at_the_timeout_and_types_anyway(
     assert (receipt.agent.pane_id, "paste", "hello") in tmux.typed
 
 
+def test_a_prompt_typed_past_the_timeout_is_not_typed_into_the_trust_question(
+    tmux: FakeTmux,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow first start draws the trust question just past the timeout: the prompt and its
+    Enter went in, Enter picked "No, exit", and the receipt said ``yes`` (review of #259,
+    round 13). One look first, on that path too."""
+    original = tmux.capture
+
+    def drawn_once_the_timeout_passed(pane_id: str, **kwargs: Any) -> Capture:
+        if clock.now >= PROMPT_TIMEOUT:
+            tmux.screens[pane_id] = TRUST_SCREEN
+        return original(pane_id, **kwargs)
+
+    monkeypatch.setattr(tmux, "capture", drawn_once_the_timeout_passed)
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="hello")
+
+    assert tmux.typed == [] and receipt.prompt_typed == "no"
+    assert any("folder-trust question" in note for note in receipt.notes)
+    assert PROMPT_TIMEOUT <= clock.now < PROMPT_TIMEOUT + 5, "one look, not a second wait"
+
+
 def test_a_multi_line_prompt_is_not_typed_before_the_agent_is_up(
     tmux: FakeTmux,
     clock: FakeClock,
@@ -1485,6 +1608,114 @@ def test_a_multi_line_prompt_is_not_typed_before_the_agent_is_up(
     pane = second.agent.pane_id
     assert tmux.typed == [(pane, "paste", prompt), (pane, "key", "Enter")]
     assert second.notes == []
+
+
+@pytest.mark.parametrize(
+    ("late", "says"),
+    [
+        ("paste", "tmux did not answer in time with the prompt for the agent's pane"),
+        ("Enter", "the prompt: pasted it at its prompt, but tmux did not answer in time"),
+        ("refused Enter", "the prompt: pasted it at its prompt, but tmux could not press Enter"),
+    ],
+)
+def test_spawn_prompt_that_tmux_did_not_take_says_how_far_it_got(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    late: str,
+    says: str,
+) -> None:
+    """Review of #259, round 10, 8/9: a paste or an Enter that timed out, or an Enter refused
+    after the paste went in, was "could not type the prompt", and the prompt sent again with
+    ``fleet tell`` went in beside the first. One that timed out may still arrive; one whose
+    Enter was refused waits at the agent's prompt, unsent."""
+    original = tmux.pane_facts
+
+    def up(pane_id: str) -> PaneFacts | None:
+        tmux.set_command(pane_id, "claude")
+        return original(pane_id)
+
+    def wedged(*args: object) -> None:
+        if late == "refused Enter":
+            raise TmuxError("send-keys failed (fake)")
+        raise TmuxTimedOut("tmux did not answer within 30s: send-keys")
+
+    monkeypatch.setattr(tmux, "pane_facts", up)
+    monkeypatch.setattr(tmux, "paste" if late == "paste" else "send_keys", wedged)
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="start on tsk_1")
+    # Round 11, 2/13: and the receipt does not say "not typed" of it either.
+    assert receipt.prompt_typed == ("unsent" if late == "refused Enter" else "maybe")
+    (note,) = [note for note in receipt.notes if "prompt" in note]
+    assert note.startswith(says), note
+    assert ("it may still arrive" in note) is (late != "refused Enter"), note
+    assert "could not type the prompt" not in note
+    assert receipt.failures == [note]
+
+
+@pytest.mark.parametrize(
+    ("late", "typed", "how"),
+    [
+        (
+            "refused Enter",
+            "unsent",
+            "started fresh, but its hand-off prompt waits unsent at its prompt: press Enter in "
+            "its pane",
+        ),
+        (
+            "paste",
+            "maybe",
+            "started fresh, but tmux did not answer in time with its hand-off prompt: it may "
+            "still arrive — read its screen before you send it again",
+        ),
+    ],
+)
+def test_a_replacement_whose_first_line_is_at_its_prompt_is_not_said_to_be_untyped(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    late: str,
+    typed: str,
+    how: str,
+) -> None:
+    """Review of #259, round 11, 2/13: a hand-off prompt pasted with its Enter refused, or
+    one tmux did not answer in time with, was ``prompt_typed`` false: "started fresh, but
+    its hand-off prompt was NOT typed" on the receipt and the board's ``restarted`` line,
+    and the page added "Tell it what to do". The Tell went in beside the first copy, both
+    submitted as one message."""
+    agent = _coder(project)
+    _with_transcript(agent, tmp_path / "missing.jsonl")  # named, not on disk: a fresh start
+    original_spawn, original_paste, original_keys = tmux.spawn_window, tmux.paste, tmux.send_keys
+    pasted: list[str] = []
+
+    def ready_spawn(*args: Any, **kwargs: Any) -> WindowInfo:
+        window = original_spawn(*args, **kwargs)
+        tmux.set_command(window.pane_id, "claude")
+        return window
+
+    def paste(pane_id: str, text: str) -> None:
+        if late == "paste":
+            raise TmuxTimedOut("tmux did not answer within 30s: paste-buffer")
+        original_paste(pane_id, text)
+        pasted.append(pane_id)
+
+    def send_keys(pane_id: str, *keys: str) -> None:
+        if pasted and keys == ("Enter",):
+            raise TmuxError("send-keys failed (fake)")
+        original_keys(pane_id, *keys)
+
+    monkeypatch.setattr(tmux, "spawn_window", ready_spawn)
+    monkeypatch.setattr(tmux, "paste", paste)
+    monkeypatch.setattr(tmux, "send_keys", send_keys)
+    receipt = fleet_service.restart(project, agent.label)
+
+    assert receipt.resumed is False and receipt.prompt_typed == typed
+    assert receipt.how == how and "NOT typed" not in receipt.how
+    assert _events(project, "restarted") == [f"{agent.label} restarted — {how}"]
+    (note,) = [note for note in receipt.failures if "prompt" in note]
+    assert ("press Enter in its pane" in note) is (typed == "unsent"), note
 
 
 def test_spawn_prompt_is_not_typed_into_a_dead_pane(
@@ -1641,11 +1872,15 @@ def test_a_refused_spawn_leaves_the_registration_as_it_found_it(
 
 
 def test_a_codename_is_not_an_onboarding(
-    tmux: FakeTmux, project: ProjectInfo, tmp_path: Path
+    tmux: FakeTmux, repo: Path, tmp_path: Path, project_capture: None
 ) -> None:
     """Review of #168, round 2: ``ensure_codename`` onboarded, so ``fleet attach`` in a
     captured directory listed it and was then refused — it had no session to attach
-    to. A codename needs a live row, so a directory never seen is captured for it."""
+    to. A codename needs a live row, so a directory never seen is captured for it,
+    while ``[projects] capture`` is on."""
+    project = team_project(repo)
+    with store_session() as store:
+        store.ensure_project(project)  # a prompt there: captured
     with pytest.raises(FleetError, match="nothing to attach to"):
         fleet_service.attach_argv(project)
     unseen = team_project(tmp_path / "unseen")
@@ -1661,6 +1896,246 @@ def test_a_codename_is_not_an_onboarding(
     fleet_service.rename(named, "quiet-lynx")
     with store_session() as store:
         assert [p.id for p in store.list_projects()] == [unseen.id]
+
+
+def test_with_capture_off_a_codename_or_an_attach_writes_no_row(
+    tmux: FakeTmux, tmp_path: Path
+) -> None:
+    """``[projects] capture`` off: ``fleet attach`` and a stop ask for the codename, and
+    neither is an add, so a directory nobody added gets no row — its session is named
+    by the walk with nothing taken, as the callers fall back to."""
+    unseen = team_project(tmp_path / "unseen")
+    assert fleet_service.ensure_codename(unseen).codename is None
+    with pytest.raises(FleetError, match="nothing to attach to"):
+        fleet_service.attach_argv(unseen)
+    with store_session() as store:
+        assert store.list_projects(all=True) == []
+
+
+def test_with_capture_off_a_row_captured_before_gets_no_codename_but_from_a_spawn(
+    tmux: FakeTmux, claude_on_path: Path, tmp_path: Path
+) -> None:
+    """Review of #259, round 18: ``ensure_codename`` held back only for a directory with no
+    live row, so with capture off a row captured before it went off — hundreds of scratch
+    directories on a 0.8.0 machine — was given a codename by ``fleet attach`` there, which
+    then refused. Nobody added it: it gets none until a spawn adds it, with one."""
+    where = tmp_path / "scratch"
+    where.mkdir()
+    scratch = team_project(where)
+    with store_session() as store:
+        store.ensure_project(scratch)  # what 0.8.0's capture wrote
+
+    assert fleet_service.ensure_codename(scratch).codename is None
+    with pytest.raises(FleetError, match="nothing to attach to"):
+        fleet_service.attach_argv(scratch)
+    with store_session() as store:
+        [row] = store.list_projects(all=True)
+    assert row.codename is None and row.onboarded_at is None, "nothing written"
+
+    started = fleet_service.spawn(scratch, "coder", worktree=False)
+    with store_session() as store:
+        [listed] = store.list_projects()
+    assert listed.id == scratch.id and listed.codename
+    assert started.tmux_session == f"asq-{listed.codename}"
+
+
+def test_with_capture_off_a_row_captured_with_a_codename_keeps_it(tmp_path: Path) -> None:
+    """Review of #259, round 19: the guard that gives a directory nobody added no codename
+    came before the stored row was read, so with capture off a row captured under 0.8.0,
+    codename and agents and all, came back without its codename to a caller that passed a
+    project with none: a stop then looked for its agents in the session ``asq-``. A codename
+    the row holds comes back, and nothing is written."""
+    where = tmp_path / "old"
+    where.mkdir()
+    old = team_project(where)
+    with store_session() as store:
+        store.ensure_project(old)  # what 0.8.0's capture wrote
+        store.set_codename(old.id, "quiet-lynx")  # and its first spawn
+
+    assert fleet_service.ensure_codename(old).codename == "quiet-lynx"
+    with store_session() as store:
+        [row] = store.list_projects(all=True)
+    assert row.onboarded_at is None, "nothing written"
+
+
+def test_the_codename_a_row_kept_is_read_by_its_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 18: ``_kept_codename`` read and built every project row,
+    tombstones included, to find one by its key, on each ``fleet attach`` and first spawn in
+    a directory nobody added. It reads the one row, live, captured or forgotten."""
+    from aisquare.core.store import SqliteStore
+
+    live, gone, unseen = (team_project(tmp_path / name) for name in ("live", "gone", "unseen"))
+    with store_session() as store:
+        store.ensure_project(live)
+        store.set_codename(live.id, "quiet-lynx")
+        store.onboard_project(gone)
+        store.set_codename(gone.id, "brave-otter")
+        store.forget_project(gone.id)
+
+    def every_row(self: SqliteStore, **_kwargs: object) -> list[ProjectInfo]:
+        raise AssertionError("read every project row for one")
+
+    monkeypatch.setattr(SqliteStore, "list_projects", every_row)
+    with store_session() as store:
+        assert fleet_service._kept_codename(store, live) == "quiet-lynx"
+        assert fleet_service._kept_codename(store, gone) == "brave-otter"
+        assert fleet_service._kept_codename(store, unseen) is None
+        assert store.get_project(gone.id) is None, "a tombstone is still hidden by default"
+
+
+def test_with_capture_off_an_attach_where_nothing_was_added_never_finds_anothers_session(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Review of #259, round 17: with no row, ``attach_argv`` named the session by the walk
+    with nothing taken, ``asq-<its first candidate>``, past no name in use. Another project
+    that holds that codename has a session of that name on the default socket, and ``fleet
+    attach`` in the directory nobody added attached to that project's manager. With no
+    row, live or forgotten, no session is the directory's: it is refused."""
+    unseen = team_project(tmp_path / "unseen")
+    taken = codenames.codename_for(unseen.id)
+    with store_session() as store:
+        store.set_codename(project.id, taken)
+    fleet_service.spawn(project, "manager")
+    assert tmux.has_session(f"asq-{taken}"), "the premise: another project's session"
+
+    with pytest.raises(FleetError, match="nothing to attach to"):
+        fleet_service.attach_argv(unseen)
+
+    with store_session() as store:
+        assert unseen.id not in {p.id for p in store.list_projects(all=True)}
+
+
+def test_an_attach_in_a_forgotten_directory_finds_the_session_its_codename_kept(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """A forget keeps the codename (its tombstone), and the agents' session stays under it:
+    a forget that raced a spawn, or the window an ended manager left (``remain-on-exit``).
+    With capture off, ``attach_argv`` takes the codename from the tombstone, which nothing
+    revives, rather than the walk's first name, which is not this project's."""
+    with store_session() as store:
+        store.set_codename(project.id, "quiet-lynx")
+    fleet_service.spawn(project, "manager")
+    with store_session() as store:
+        store.forget_project(project.id)
+
+    argv = fleet_service.attach_argv(team_project(project.root))
+
+    assert argv[-1] == "=asq-quiet-lynx"
+    with store_session() as store:
+        assert store.get_project(project.id) is None, "still forgotten"
+
+
+def test_with_capture_off_a_spawn_where_nothing_was_added_adds_it(
+    tmux: FakeTmux, claude_on_path: Path, repo: Path
+) -> None:
+    """The deliberate path still adds: a spawn someone asked for in a directory nobody
+    added onboards it at the codename, which names the window's session, and leaves
+    nothing captured."""
+    asked = team_project(repo)
+    receipt = fleet_service.spawn(asked, "coder", worktree=False)
+    with store_session() as store:
+        [listed] = store.list_projects()
+        assert store.captured_projects() == []
+    assert listed.id == asked.id and listed.codename
+    assert receipt.tmux_session == f"asq-{listed.codename}"
+
+
+@pytest.mark.parametrize("refusal", ["worktree", "window"])
+@pytest.mark.parametrize("state", ["unseen", "forgotten"])
+def test_with_capture_off_a_spawn_refused_after_its_codename_adds_nothing(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    refusal: str,
+    state: str,
+) -> None:
+    """Review of #259, round 17: with ``[projects] capture`` off, ``ensure_codename`` added
+    the project for a spawn before its worktree and window existed, and a spawn refused
+    after that — a directory at the tree's path that is no worktree, a window tmux would
+    not start — left a directory nobody added listed with no agent, or brought a forgotten
+    one back, as review of #168, round 2 had stopped. The codename is worked out without a
+    write and stored with the add, once the agent's row is written; a spawn that starts
+    names its session by it, and a forgotten project comes back under the one it kept."""
+    asked = team_project(repo)
+    kept: str | None = None
+    if state == "forgotten":
+        with store_session() as store:
+            store.onboard_project(asked)
+        first = fleet_service.spawn(asked, "coder", worktree=False).agent
+        fleet_service.stop(asked, first.label, force=True)
+        kept = _codename(asked)
+        with store_session() as store:
+            store.forget_project(asked.id)
+    blocked = repo / fleet_service.settings().worktree_dir / "coder-1"
+    real_spawn_window = tmux.spawn_window
+    if refusal == "worktree":
+        blocked.mkdir(parents=True)
+        (blocked / "notes.txt").write_text("somebody's\n", encoding="utf-8")
+    else:
+
+        def refused(*args: Any, **kwargs: Any) -> WindowInfo:
+            raise TmuxError("no server running")
+
+        monkeypatch.setattr(tmux, "spawn_window", refused)
+    spawned_before = len(tmux.spawned)
+
+    with pytest.raises(FleetError):
+        fleet_service.spawn(asked, "coder", worktree=refusal == "worktree")
+
+    assert len(tmux.spawned) == spawned_before, "nothing was started"
+    with store_session() as store:
+        rows = {p.id: p for p in store.list_projects(all=True, include_forgotten=True)}
+        assert store.list_projects(all=True) == [], "nothing listed, nothing captured"
+    if state == "unseen":
+        assert asked.id not in rows, "no row at all"
+    else:
+        assert rows[asked.id].codename == kept, "still forgotten, the codename kept"
+    if refusal == "worktree":
+        shutil.rmtree(blocked)
+    else:
+        monkeypatch.setattr(tmux, "spawn_window", real_spawn_window)
+    started = fleet_service.spawn(asked, "coder", worktree=refusal == "worktree")
+    with store_session() as store:
+        [listed] = store.list_projects()
+    assert listed.id == asked.id and listed.codename
+    assert started.tmux_session == f"asq-{listed.codename}"
+    if kept is not None:
+        assert listed.codename == kept
+
+
+def test_a_spawn_whose_codename_another_project_took_meanwhile_is_refused_and_adds_nothing(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The codename is stored with the add, after the window: another project that took it
+    in between makes the add fail, and the spawn is refused, its window killed, rather than
+    left in a session that is another project's."""
+    asked = team_project(repo)
+    other = team_project(tmp_path / "other")
+    real = fleet_service.open_window
+
+    def another_takes_it(*args: Any, **kwargs: Any) -> WindowInfo:
+        window = real(*args, **kwargs)
+        with store_session() as store:
+            store.onboard_project(other)
+            store.set_codename(other.id, codenames.codename_for(asked.id))
+        return window
+
+    monkeypatch.setattr(fleet_service, "open_window", another_takes_it)
+
+    with pytest.raises(FleetError, match="another project took the codename"):
+        fleet_service.spawn(asked, "coder", worktree=False)
+
+    assert tmux.sessions.get(f"asq-{codenames.codename_for(asked.id)}", []) == []
+    with store_session() as store:
+        assert [p.id for p in store.list_projects(all=True)] == [other.id]
+        assert store.fleet_agents(asked.id) == []
 
 
 def test_the_automatic_hand_over_lists_nothing_a_forget_left_captured(
@@ -1749,7 +2224,7 @@ def test_an_unreachable_tmux_server_is_not_read_as_every_pane_gone(
     unreachable server is exactly that — though nothing raises: its non-zero exit
     reaches ``_observe`` as an empty answer, which used to read as "every pane is
     gone". ``reap`` then ended every live row as ``lost`` for processes that are
-    still running, and ``_remove_merged_worktrees`` — the same pass, now seeing
+    still running, and ``_remove_finished_worktrees`` — the same pass, now seeing
     ``ended_at`` set — removed their clean worktrees out from under them. A stale
     socket path is all it takes (a /tmp sweep, or a ``TMUX_TMPDIR`` that differs
     between the spawning shell and the reaping one).
@@ -1791,10 +2266,13 @@ def test_reap_server_down_marks_rows_on_a_silent_server_lost(
     reconciled 0 — the refusal above is correct by default and left the
     operator with no command that acted. ``--server-down`` is their word that
     the server is gone; the rows on it are then lost, and nothing else changes.
+    A reboot, here: the row is from another boot, so its agent cannot be running.
     """
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
     agent = fleet_service.spawn(project, "coder").agent
     dead = _unreachable_server()
     monkeypatch.setattr(fleet_service, "server", lambda config=None: dead)
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-2")
 
     assert fleet_service.reap(project).lost == [], "the default still refuses"
     report = fleet_service.reap(project, server_down=True)
@@ -1808,10 +2286,12 @@ def test_reap_server_down_only_touches_the_socket_that_is_silent(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Rows span sockets; the flag vouches for the silent one, not for all of them."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
     _settings(monkeypatch, tmux_socket="asq-old")
     on_old = _coder(project)
     _settings(monkeypatch, tmux_socket="asq-new")
     on_new = _coder(project)
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-2")  # a reboot since
     dead = _unreachable_server()
 
     def per_socket(config: FleetSettings | None = None) -> TmuxServer:
@@ -1822,6 +2302,64 @@ def test_reap_server_down_only_touches_the_socket_that_is_silent(
     assert [a.id for a in report.lost] == [on_old.id]
     with store_session() as store:
         assert [a.id for a in store.fleet_agents(project.id, live_only=True)] == [on_new.id]
+
+
+def test_reap_server_down_holds_a_row_whose_server_may_still_run(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Follow-up of #257: tmux reports no server for a socket file taken from under a
+    running server too (`error connecting to … (No such file or directory)`), and
+    `reap --server-down` marked such rows lost under their agents, on another server under
+    another `TMUX_TMPDIR` as well; only the doctor warned. The word now ends only what the
+    one rule `stop`, `shutdown` and `uninstall` ask says cannot be running: a row whose
+    socket file is gone in this boot is left live and named, with the way back to its
+    server and `fleet shutdown --forget`; a reboot, or a stale file with nothing behind
+    it, ends it as before."""
+    if not hasattr(socket, "AF_UNIX") or not hasattr(os, "getuid"):
+        pytest.skip("AF_UNIX sockets and a POSIX uid are what tmux needs: the rule asks one")
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    coder = _coder(project)
+    dead = _unreachable_server()  # tmux: `No such file or directory`, as for a taken file
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: dead)
+    assert dead.listener(coder.socket_path) == "gone", "no file at the path it recorded"
+
+    report = fleet_service.reap(project, server_down=True)
+
+    assert report.lost == [] and report.ended == []
+    assert [row.agent.id for row in report.held] == [coder.id]
+    reason = report.held[0].reason
+    assert "is gone, so no tmux client can reach the server" in reason, reason
+    assert "left live: if it is, send that server SIGUSR1" in reason
+    assert f"`{_fleet('shutdown', project, '--forget')}` ends its row on your word" in reason
+    with store_session() as store:
+        assert [a.id for a in store.fleet_agents(project.id, live_only=True)] == [coder.id]
+    assert _events(project, "agent_exited") == []
+    # The CLI says so, in both shapes.
+    human = runner.invoke(app, ["fleet", "reap", "--server-down", "-P", project.id])
+    assert human.exit_code == 0, human.output
+    assert "0 lost, 0 worktrees removed, 1 left live" in human.stdout
+    assert "⚠ coder-1  LEFT LIVE — its server's socket" in human.stdout
+    machine = runner.invoke(app, ["--json", "fleet", "reap", "--server-down", "-P", project.id])
+    assert machine.exit_code == 0, machine.output
+    payload = json.loads(machine.stdout)
+    assert [row["agent"]["id"] for row in payload["held"]] == [coder.id]
+    assert payload["held"][0]["reason"] == reason and payload["lost"] == []
+    # Negative controls: a stale socket file, nothing behind it, is a server that exited
+    # (`kill-server`), and a row from another boot cannot be running: both are lost.
+    with _socket_file(coder.tmux_socket, listening=False) as stale:
+        coder = _recorded_at(coder, stale)
+        swept = fleet_service.reap(project, server_down=True)
+    assert [a.id for a in swept.lost] == [coder.id] and swept.held == []
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: tmux)
+    rebooted = _coder(project)
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: dead)
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-2")
+    swept = fleet_service.reap(project, server_down=True)
+    assert [a.id for a in swept.lost] == [rebooted.id] and swept.held == []
 
 
 def test_server_absent_needs_tmux_to_say_so() -> None:
@@ -1866,8 +2404,10 @@ def test_reap_server_down_asks_each_socket_once_across_every_project(
     """One probe per socket per sweep — not one per project — so a server coming
     up mid-``reap --all`` cannot mark the first projects' rows lost and keep the
     rest: one command, one answer. (Review of the first version.)"""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
     here = _coder(project)
     there = fleet_service.spawn(plain_project, "coder", worktree=False).agent
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-2")  # a reboot since
     probes: list[Sequence[str]] = []
 
     def refusing(argv: Sequence[str], stdin: bytes | None) -> Completed:
@@ -2056,6 +2596,37 @@ def test_list_agents_orders_by_creation_and_knows_the_session(
 # --- manager_of / resolve_project ------------------------------------------------------
 
 
+def test_list_agents_works_out_each_rows_address_once(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Follow-up of #257: a listing asked `_address` about five times per row — the
+    observe, the reconcile, the lingering windows, the status and its `socket_at` — each
+    resolving two paths, on asq's tick every two seconds. Once per row per listing now;
+    `_address` itself stays uncached, as a stale "same socket" would send `-L` to another
+    server. Live rows, one recorded elsewhere, and an ended row whose window lingers."""
+    manager = fleet_service.spawn(project, "manager").agent
+    elsewhere = _recorded_at(_coder(project), Path("/run/user/1000/tmux-1000/asq-test"))
+    tmux.per_path[Path("/run/user/1000/tmux-1000/asq-test")] = tmux
+    exited = _coder(project)
+    tmux.die(exited.pane_id, 0)  # ended by this listing, its window kept (💤)
+    asked: list[str] = []
+    real = fleet_service._address
+
+    def counted(agent: FleetAgent, config: FleetSettings | None = None) -> fleet_service._Address:
+        asked.append(agent.id)
+        return real(agent, config)
+
+    monkeypatch.setattr(fleet_service, "_address", counted)
+
+    listed = {status.agent.id: status for status in fleet_service.list_agents(project)}
+
+    assert {listed[manager.id].state, listed[elsewhere.id].state} == {"waiting"}
+    assert listed[exited.id].state == "exited" and listed[exited.id].agent.ended_at is not None
+    assert listed[elsewhere.id].socket_at == elsewhere.socket_path
+    assert listed[manager.id].socket_at is None
+    assert sorted(asked) == sorted([manager.id, elsewhere.id, exited.id]), "once per row"
+
+
 def test_manager_of_is_the_live_manager_or_none(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:
@@ -2103,7 +2674,7 @@ def test_ensure_codename_walks_on_when_another_process_took_the_name(
     assert fleet_service.resolve_project(named.codename).id == project.id
     # Negative control: with nothing in the way the walk runs once.
     calls.clear()
-    third = fleet_service.ensure_codename(team_project(tmp_path / "third"))
+    third = fleet_service.ensure_codename(add_project(tmp_path / "third"))
     assert third.codename and len(calls) == 1
 
 
@@ -2126,7 +2697,7 @@ def test_resolve_project_names_the_codenames_when_basenames_collide(tmp_path: Pa
     for parent in ("work", "oss"):
         root = tmp_path / parent / "api"
         root.mkdir(parents=True)
-        info = fleet_service.ensure_codename(team_project(root))
+        info = fleet_service.ensure_codename(add_project(root))
         infos.append(info)
     with pytest.raises(fleet_service.NoSuchProject, match="matches several projects") as caught:
         fleet_service.resolve_project("api")
@@ -2198,6 +2769,31 @@ def test_tell_files_a_board_note_when_the_agent_is_not_waiting(
     assert len(notes) == 1 and notes[0].text == "please rebase" and notes[0].to_role == "coder-1"
 
 
+def test_tell_from_under_a_hub_nobody_added_files_the_note_where_the_agent_reads(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 17: an agent not at its prompt is told through a board note,
+    which was filed on the board the CALLER resolved, ``AISQUARE_TEAM_HUB``'s when it set
+    one, and with ``[projects] capture`` off a hub nobody added ended ``fleet tell`` in a
+    traceback, then a ``FleetError``. Round 26, 2/11: the note goes to the board the agent
+    reads, as its spawn recorded, so the caller's hub is never asked: filed, not refused."""
+    agent = _coder(project)
+    _board_session(agent, "working")
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))
+
+    result = fleet_service.tell(project, "coder-1", "please rebase")
+
+    assert not result.delivered and "filed as board note" in result.how, result
+    assert agent.board == project.id and _events(project, "note") == ["please rebase"]
+    assert tmux.typed == []
+
+
 def test_tell_falls_back_to_a_note_when_tmux_cannot_type(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:
@@ -2208,6 +2804,183 @@ def test_tell_falls_back_to_a_note_when_tmux_cannot_type(
     result = fleet_service.tell(project, "coder-1", "please rebase")
     assert not result.delivered and "tmux could not type" in result.how
     assert _events(project, "note") == ["please rebase"]
+
+
+@pytest.mark.parametrize("timed_out", [False, True], ids=["refused", "timed out"])
+def test_tell_whose_enter_did_not_go_through_leaves_the_text_at_its_prompt_and_files_no_note(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    timed_out: bool,
+) -> None:
+    """Review of #259, round 10, 4/9: the paste landed and only its Enter failed, but the tell
+    said "tmux could not type it" and filed the text as a note too. The agent read the note
+    at its next prompt, and the text left unsent in its input box went out with whatever was
+    typed there next. It says the text is at its prompt, and files nothing. One whose Enter
+    timed out may still send it, and is ``maybe``. Round 12, 2/9: one whose Enter was refused
+    is ``unsent``, not ``no``, the word a caller that retries on "not typed" retries on."""
+    agent = _coder(project)
+    _board_session(agent, "waiting")
+    tmux.set_command(agent.pane_id, "claude")
+
+    def enter_fails(pane_id: str, *keys: str) -> None:
+        if timed_out:
+            raise TmuxTimedOut("tmux did not answer within 30s: send-keys")
+        raise TmuxError("send-keys failed (fake)")
+
+    monkeypatch.setattr(tmux, "send_keys", enter_fails)
+    result = fleet_service.tell(project, "coder-1", "please rebase")
+    assert result.typed == ("maybe" if timed_out else "unsent")
+    assert result.how.startswith("pasted it at its prompt, but "), result.how
+    assert "tmux could not type it" not in result.how and "board note" not in result.how
+    if timed_out:
+        assert "it may still arrive, and send it" in result.how
+    else:
+        assert result.how.endswith("— press Enter in its pane to send it")
+    assert (agent.pane_id, "paste", "please rebase") in tmux.typed
+    assert _events(project, "note") == []
+
+
+@pytest.mark.parametrize(
+    "cause",
+    [TmuxError("server exited unexpectedly"), TmuxTimedOut("tmux did not answer within 30s")],
+    ids=["refused", "timed out"],
+)
+def test_a_write_tmux_typed_a_part_of_says_how_much_and_is_maybe_only_while_more_may_come(
+    cause: TmuxError,
+) -> None:
+    """Review of #259, round 11, 7/13: a ``send_literal`` chunk after the first that failed
+    left a prefix in the pane. Refused, it was "no" (nothing typed); timed out, "it may still
+    arrive", true of that prefix only, and of the one chunk the timeout asked for. Round 12,
+    7/9: refused, it was ``maybe`` all the same, audited ``delivered=maybe``, where nothing
+    more can arrive: it is ``unsent``, a part at its prompt."""
+
+    def write() -> None:
+        raise TmuxPartlyTyped(cause, 512, 2048)
+
+    wrote = fleet_service.pane_write("the text", write)
+    assert wrote.typed == ("maybe" if isinstance(cause, TmuxTimedOut) else "unsent")
+    said = wrote.late("coder-1")
+    assert said.startswith(
+        "tmux typed 512 of the 2048 bytes of the text into coder-1's pane, then "
+    )
+    assert ("more of it may still arrive" in said) is isinstance(cause, TmuxTimedOut), said
+    assert said.endswith("— read its live screen before you send it again"), said
+
+
+def test_a_chain_of_writes_says_what_went_in_before_the_one_that_did_not() -> None:
+    """Review of #259, round 12, 8/9: ``pane_writes`` answered only the write that failed, and
+    each caller worked out by hand what was already in the pane, a quick answer not at all
+    (1/9). It says what went in (``went``); refused past it, the chain is ``unsent``, and
+    one sentence and one audit word say it for every caller."""
+    typed: list[str] = []
+
+    def refused() -> None:
+        raise TmuxError("send-keys failed (fake)")
+
+    def late() -> None:
+        raise TmuxTimedOut("tmux did not answer within 30s: send-keys")
+
+    wrote = fleet_service.pane_writes(
+        ("the text", lambda: typed.append("text")),
+        None,
+        ("Enter", refused),
+        ("more", lambda: typed.append("more")),
+    )
+    assert (wrote.typed, wrote.what, wrote.went, wrote.audited) == (
+        "unsent",
+        "Enter",
+        ("the text",),
+        "delivered=unsent",
+    )
+    assert typed == ["text"], "nothing after the write that did not go"
+    assert wrote.said("coder-1", press="press Enter on the pad") == (
+        "coder-1: typed it at its prompt, but tmux could not press Enter (send-keys failed "
+        "(fake)) — press Enter on the pad to send it"
+    )
+    first = fleet_service.pane_writes(("the text", refused), ("Enter", lambda: None))
+    assert (first.typed, first.went, first.audited) == ("no", (), "failed")
+    waits = fleet_service.pane_writes(("the keys", lambda: None), ("Enter", late))
+    assert (waits.typed, waits.went, waits.audited) == ("maybe", ("the keys",), "delivered=maybe")
+    assert "it may still arrive, and send it" in waits.said("coder-1", press="press Enter")
+
+
+def test_tell_says_a_paste_that_timed_out_may_be_typed_as_well_as_noted(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 9, 1/8: a wedged server may still run the queued paste once it
+    recovers, so the note it falls back to may reach the agent beside the typed text. Round
+    10, 6/9: and it is ``maybe``, which the remote's trail says (``delivered=maybe``)."""
+    agent = _coder(project)
+    _board_session(agent, "waiting")
+    tmux.set_command(agent.pane_id, "claude")
+
+    def wedged(pane_id: str, text: str) -> None:
+        raise TmuxTimedOut("tmux did not answer within 30s: paste-buffer")
+
+    monkeypatch.setattr(tmux, "paste", wedged)
+    result = fleet_service.tell(project, "coder-1", "please rebase")
+    assert not result.delivered and result.typed == "maybe"
+    assert result.how.startswith("filed as board note #1 to coder-1, and tmux did not answer")
+    assert "it may still arrive at its prompt as well, unsent" in result.how
+    assert _events(project, "note") == ["please rebase"]
+
+
+def test_a_tell_whose_paste_timed_out_is_maybe_when_its_store_is_locked(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 12, 3/9: only a ``FleetError`` from the note was caught, and a
+    store locked past its busy timeout raises ``sqlite3.OperationalError``: it went out of
+    ``tell``, the CLI failed and the remote answered 400 ``write_failed`` (``delivered=no``),
+    while the paste may still land and a Send again would type it a second time."""
+    from aisquare.services import team
+
+    agent = _coder(project)
+    _board_session(agent, "waiting")
+    tmux.set_command(agent.pane_id, "claude")
+
+    def wedged(pane_id: str, text: str) -> None:
+        raise TmuxTimedOut("tmux did not answer within 30s: paste-buffer")
+
+    def locked(*args: object, **kwargs: object) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(tmux, "paste", wedged)
+    monkeypatch.setattr(team, "add_note", locked)
+    result = fleet_service.tell(project, "coder-1", "please rebase")
+    assert result.typed == "maybe", result
+    assert "it may still arrive at its prompt, unsent" in result.how
+    assert result.how.endswith("It was not filed as a board note: database is locked"), result.how
+
+
+def test_a_tell_whose_paste_timed_out_is_maybe_when_its_note_cannot_be_filed(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 11, 6/13: the note a timed-out paste falls back to is filed after
+    a paste that may still land, and an unknown sender (or a Team switched off) raised from
+    it: the tell answered only the note's error, and the remote's trail `delivered=no`."""
+    agent = _coder(project)
+    _board_session(agent, "waiting")
+    tmux.set_command(agent.pane_id, "claude")
+
+    def wedged(pane_id: str, text: str) -> None:
+        raise TmuxTimedOut("tmux did not answer within 30s: paste-buffer")
+
+    monkeypatch.setattr(tmux, "paste", wedged)
+    result = fleet_service.tell(project, "coder-1", "please rebase", sender="nope")
+    assert result.typed == "maybe", result
+    assert result.how.startswith("tmux did not answer in time with the text"), result.how
+    assert "it may still arrive at its prompt, unsent" in result.how
+    assert result.how.endswith("It was not filed as a board note: unknown sender session 'nope'"), (
+        result.how
+    )
+    assert _events(project, "note") == []
+
+    # Control: a paste tmux refused typed nothing, and the note's error is the tell's.
+    monkeypatch.setattr(tmux, "paste", lambda pane_id, text: (_ for _ in ()).throw(TmuxError("x")))
+    with pytest.raises(FleetError, match="unknown sender session 'nope'"):
+        fleet_service.tell(project, "coder-1", "please rebase", sender="nope")
 
 
 def test_tell_does_not_type_into_a_pane_that_is_not_the_agent_yet(
@@ -2240,6 +3013,39 @@ def test_tell_does_not_type_into_a_pane_that_is_not_the_agent_yet(
         (agent.pane_id, "key", "Enter"),
     ]
     assert _events(project, "note") == [message], "no second note was filed"
+
+
+def test_tell_files_a_note_for_a_held_row_rather_than_type_into_the_pane_under_its_id(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 2: after a `kill-server` and any respawn, a row whose board still
+    reads `waiting` (a killed agent fires no SessionEnd) is held as another server's, and
+    `tell` asked only whether the pane under its id ran an agent. On the server that took
+    its socket that id is another agent's, here another project's manager at its prompt,
+    which got the text and an Enter. The pane must be the row's own, on its own server."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    coder = _coder(project)
+    _board_session(coder, "waiting")
+    newcomer = FakeTmux()  # at the same path, so `-L` reaches it
+    newcomer.started = tmux.started + timedelta(minutes=5)
+    newcomer.spawn_window("asq-elsewhere", name="manager", cwd=project.root, command=["claude"])
+    newcomer.set_command(coder.pane_id, "claude")  # its %1 runs an agent: someone else's
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: newcomer)
+
+    result = fleet_service.tell(project, "coder-1", "please rebase")
+
+    assert not result.delivered and "board note" in result.how, result.how
+    assert newcomer.typed == [], "nothing pasted into the pane that took its id"
+    assert _events(project, "note") == ["please rebase"]
+    # Negative control: on its own server, the same waiting row is typed into.
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: tmux)
+    tmux.set_command(coder.pane_id, "claude")
+    assert fleet_service.tell(project, "coder-1", "please rebase").delivered
+    assert tmux.typed == [
+        (coder.pane_id, "paste", "please rebase"),
+        (coder.pane_id, "key", "Enter"),
+    ]
 
 
 def test_tell_an_unknown_label_is_no_such_agent(tmux: FakeTmux, project: ProjectInfo) -> None:
@@ -2433,9 +3239,14 @@ def test_stop_and_restart_leave_live_a_row_whose_socket_was_taken_from_under_its
 
     with pytest.raises(FleetError, match=r"'coder-1' was not stopped: .* is gone") as stopped:
         fleet_service.stop(project, "coder-1")
-    assert "SIGUSR1" in str(stopped.value) and "reap --server-down" in str(stopped.value)
-    with pytest.raises(FleetError, match="is gone"):
+    assert "SIGUSR1" in str(stopped.value)
+    assert f"shutdown --project {project.id} --forget`" in str(stopped.value)
+    # Refused before its stop is asked: its replacement could not start at that path either
+    # (`_refuse_a_freed_socket`, asked with the replay's refusals: review of #259, round 2).
+    with pytest.raises(FleetError, match=r"coder-1 .* runs on lost its socket file") as again:
         fleet_service.restart(project, "coder-1")
+    assert "SIGUSR1" in str(again.value)
+    assert f"`{_fleet('shutdown', project, '--forget')}`" in str(again.value)
 
     assert len(tmux.spawned) == spawned, "no second agent in its worktree"
     with store_session() as store:
@@ -2446,6 +3257,1114 @@ def test_stop_and_restart_leave_live_a_row_whose_socket_was_taken_from_under_its
     tmux.socket_file = True
     ended = fleet_service.stop(project, "coder-1").agent
     assert ended.ended_at is not None and tmux.killed == []
+
+
+def test_spawn_refuses_to_start_a_server_at_a_socket_a_running_server_lost(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    plain_project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Follow-up of #257: `tmux -L` finds no file at the socket path and starts a server
+    there. A live row's server whose socket file was taken from under it (systemd-tmpfiles,
+    logind) may still run, which `stop`, `shutdown` and `uninstall` all count; a spawn
+    started a second server at the freed path, which answered for the row from then on,
+    and the agent kept running where nothing could reach it. The server is shared, so
+    another project's spawn is refused the same way. A stale file (the server exited) and
+    a row from another boot are no reason: tmux replaces the one, and nothing outlives
+    the other."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    coder = _coder(project)
+    spawned = len(tmux.spawned)
+    tmux.running = False  # no tmux client reaches the server…
+    tmux.socket_file = False  # …because its socket file is gone, not because it exited
+
+    with pytest.raises(FleetError, match=r"not started: .* lost its socket file") as refused:
+        fleet_service.spawn(project, "coder")
+    said = str(refused.value)
+    assert f"the tmux server that coder-1 ({project.root.name}) runs on lost its" in said
+    assert "may still be running" in said
+    assert "SIGUSR1" in said and f"`{_fleet('shutdown', project, '--forget')}`" in said
+    with pytest.raises(FleetError, match="lost its socket file"):
+        fleet_service.spawn(plain_project, "manager")  # the server is every project's
+
+    assert len(tmux.spawned) == spawned and tmux.running is False, "no second server"
+    with store_session() as store:
+        assert [a.id for a in store.fleet_agents(project.id, live_only=True)] == [coder.id]
+        assert store.fleet_agents(plain_project.id, live_only=False) == []
+    # Negative control: a server that exited leaves its socket file, where nothing listens,
+    # and a spawn starts a fresh server at the path, as it always did.
+    tmux.socket_file = True
+    manager = fleet_service.spawn(plain_project, "manager").agent
+    assert tmux.running and manager.pane_id in tmux.facts
+    # And a row from another boot cannot be running on any server, socket file or not.
+    tmux.socket_file = False
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-2")
+    assert fleet_service.spawn(project, "coder").agent.label == "coder-2"
+
+
+def test_the_rows_a_new_server_would_answer_for_are_read_in_one_query(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    plain_project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 4: before a server starts at the fleet's socket, every live row
+    recorded there is asked about, in every project, forgotten ones' included. That walked
+    `list_projects` and ran one `fleet_agents` query per project ever registered, captured
+    directories included, twice per spawn. One query now, and the refusal still names a
+    forgotten project's row by its project. Whether the store has ``team_session`` to read a
+    row's unrecorded board from (round 27, 5/7) is told by the names its open read, not by a
+    ``sqlite_master`` query of each store's first fleet read (round 28, 9/10)."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    coder = _coder(project)
+    other = fleet_service.spawn(plain_project, "manager").agent
+    with store_session() as store:
+        store.forget_project(plain_project.id)
+    tmux.running = False  # no tmux client reaches the server…
+    tmux.socket_file = False  # …because its socket file is gone, not because it exited
+
+    with store_session() as store:
+        asked: list[str] = []
+        store._conn.set_trace_callback(asked.append)  # type: ignore[attr-defined]
+        try:
+            rows = list(fleet_service._live_rows_here(store, tmux, fleet_service.settings()))
+        finally:
+            store._conn.set_trace_callback(None)  # type: ignore[attr-defined]
+
+    assert {agent.id: answer for agent, answer in rows} == {coder.id: "gone", other.id: "gone"}
+    reads = [sql for sql in asked if sql.lstrip().upper().startswith("SELECT")]
+    assert len(reads) == 1 and "FROM fleet_agent WHERE ended_at IS NULL" in reads[0], reads
+    with pytest.raises(FleetError, match="lost its socket file") as refused:
+        fleet_service.spawn(project, "coder")
+    assert f"manager ({plain_project.root.name})" in str(refused.value), "forgotten, named"
+
+
+def test_a_spawn_over_a_server_that_exited_leaves_its_rows_lost_not_held(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    plain_project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 2: a `kill-server` (or a tmux crash) leaves the socket file with
+    nothing listening, and the first spawn in any project starts the next server there.
+    Every row of the old server had recorded its start, and under the new one each was
+    held as another server's for good: `reap` left it, `stop` refused it, and it still
+    counted toward the cap and the one-manager rule, until `shutdown --forget`. 0.8.0 read
+    them lost. The spawn forgets the start of the server that exited while the stale file
+    still says so, in every project, and the rows read lost as before: `reap` records
+    them, `stop` ends them, `restart` brings a coder back. A row whose server listens at
+    another path is not that server's."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    manager = fleet_service.spawn(project, "manager").agent
+    coder = _coder(project)
+    other = fleet_service.spawn(plain_project, "manager").agent
+    apart = Path("/elsewhere/tmux-1000/asq-test")  # another TMUX_TMPDIR's server, still up
+    elsewhere = tmux.per_path[apart] = FakeTmux()
+    elsewhere.started = tmux.started
+    window = elsewhere.spawn_window("asq-x", name="coder-2", cwd=project.root, command=["c"])
+    moved = {"socket_path": apart, "pane_id": window.pane_id}
+    with store_session() as store:
+        kept = store.upsert_fleet_agent(_coder(project).model_copy(update=moved))
+    tmux.kill_server()  # `tmux -L asq kill-server`: the file stays, nothing listens
+    assert tmux.listener() is None
+
+    receipt = fleet_service.spawn(project, "coder")  # any spawn, in any project
+
+    assert receipt.agent.label == "coder-3" and tmux.running
+    states = {s.agent.label: (s.state, s.held) for s in fleet_service.list_agents(project)}
+    assert states == {
+        "manager": ("lost", False),
+        "coder-1": ("lost", False),
+        "coder-2": ("waiting", False),  # its server is not the one that exited
+        "coder-3": ("waiting", False),
+    }, states
+    [theirs] = fleet_service.list_agents(plain_project)
+    assert (theirs.agent.id, theirs.state, theirs.held) == (other.id, "lost", False)
+    [said] = [note for note in receipt.notes if "had exited" in note]
+    assert said.startswith(f"the tmux server at {tmux.socket_path()} had exited, leaving its")
+    for name in ("manager", "coder-1"):
+        assert f"{name} ({project.root.name})" in said, said
+    assert f"manager ({plain_project.root.name})" in said, "every project's, on a shared server"
+    assert " read lost from now on, as their panes went with it " in said, said
+    # Rows of every project: `reap --all`, and a restart naming each row's project and label
+    # (review of #259, round 21) — bare, each acted on the active project, or was refused.
+    assert "(`aisquare fleet reap --all` records them; " in said, said
+    with store_session() as store:
+        ours, theirs_project = store.get_project(project.id), store.get_project(plain_project.id)
+    assert ours is not None and theirs_project is not None
+    for where, label in ((ours, "manager"), (ours, "coder-1"), (theirs_project, "manager")):
+        restart = project_service.fleet_command("restart", where, label)
+        assert f"`{restart}`" in said, said
+    assert "`aisquare fleet reap`" not in said and "`aisquare fleet restart`" not in said
+    # Lost, as in 0.8.0: a coder comes back under its own label, the manager's row ends at
+    # a stop, and `reap` records the rest; nothing is held, and nothing of coder-3's touched.
+    assert fleet_service.restart(project, "coder-1").replaced.id == coder.id
+    assert fleet_service.stop(project, "manager").agent.id == manager.id
+    report = fleet_service.reap()
+    assert [row.id for row in report.lost] == [other.id] and report.held == []
+    with store_session() as store:
+        still = store.get_fleet_agent(kept.id)
+    assert still is not None and still.ended_at is None and still.server_started_at is not None
+    assert [typed for typed in tmux.typed if typed[0] == receipt.agent.pane_id] == []
+
+
+def test_the_exited_note_tells_a_forgotten_projects_rows_to_add_it_back_first(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, plain_project: ProjectInfo
+) -> None:
+    """Review of #259, round 21: the note names rows of forgotten projects too, which neither
+    ``reap --all`` nor ``restart --project`` reaches: a restart for one was refused as no
+    such project. Such a row gets no restart, and its project is said to need adding back.
+    Round 23, 5/10: nor is ``reap --all`` said to record it, which it never walks."""
+    ours = fleet_service.spawn(project, "manager").agent
+    theirs = fleet_service.spawn(plain_project, "manager").agent
+    with store_session() as store:
+        store.forget_project(plain_project.id)
+        named = store.get_project(project.id)
+    assert named is not None
+
+    said = fleet_service._exited_note(tmux, [ours, theirs])
+
+    restart = project_service.fleet_command("restart", named, "manager")
+    assert f"`{restart}` starts it again" in said, said
+    assert said.count("aisquare fleet restart") == 1, said
+    onboard = project_service.onboard_command(plain_project.root)
+    assert f"{plain_project.root.name} is forgotten: {onboard} adds it back first" in said
+    # Round 23, 5/10: `reap --all` walks the projects it reaches, so it records the one row
+    # of a live project, "it", and never the forgotten project's alone.
+    assert "(`aisquare fleet reap --all` records it; " in said, said
+    alone = fleet_service._exited_note(tmux, [theirs])
+    assert "reap --all" not in alone and "aisquare fleet restart" not in alone, alone
+    assert f"({plain_project.root.name} is forgotten: {onboard} adds it back first)" in alone
+
+
+def test_rows_in_no_recorded_project_are_said_to_be_out_of_reach_not_left_mid_sentence(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 22, 5/9: a live row can be in a project with no record at all,
+    and the rows a spawn asks about are read whatever their project. When every stranded row
+    was such a row, the refusal over a freed socket gave no way out and ended mid-sentence,
+    "if it is not, ", and the exited note said ``reap --all`` records rows it never walks.
+    Both now say no fleet command reaches them, and the refusal how long it holds."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    coder = _coder(project)
+    with store_session() as store:  # ended in its own project, and live in none
+        store.end_fleet_agent(coder.id)
+        orphan = store.upsert_fleet_agent(
+            coder.model_copy(update={"id": new_agent_id(), "project_id": "prj_nowhere"})
+        )
+    tmux.running, tmux.socket_file = False, False  # a server that lost its socket file
+
+    with pytest.raises(FleetError, match="lost its socket file") as refused:
+        fleet_service.spawn(project, "coder")
+    said = str(refused.value)
+    note = fleet_service._exited_note(tmux, [orphan])
+
+    unreached = "no fleet command reaches coder-1 (prj_nowhere): its project is not one this"
+    assert said.endswith(
+        f"if it is not, {unreached} machine has a record of, so a spawn here is refused until "
+        "the machine restarts"
+    ), said
+    assert f"({unreached} machine has a record of)" in note, note
+    assert "reap --all" not in note, note
+
+
+def test_the_freed_socket_refusal_and_the_exited_note_name_rows_projects_alike(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    plain_project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 22, 9/9: the spawn's refusal over a freed socket and its note on
+    an exited server each read the rows' projects and wrote what a forgotten one needs, and
+    the copies had drifted ("adds it back first" against "for both", sorted against row
+    order). One reading names them in both, in row order, with one sentence."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    theirs = fleet_service.spawn(plain_project, "manager").agent
+    ours = _coder(project)
+    with store_session() as store:
+        store.forget_project(plain_project.id)
+    rows = [theirs, ours]
+    onboard = project_service.onboard_command(plain_project.root)
+    forgotten = f"{plain_project.root.name} is forgotten: {onboard} adds it back first"
+    named = f"manager ({plain_project.root.name}), coder-1 ({project.root.name})"
+
+    note = fleet_service._exited_note(tmux, rows)
+    tmux.running, tmux.socket_file = False, False  # a server that lost its socket file
+    with pytest.raises(FleetError, match="lost its socket file") as refused:
+        fleet_service.spawn(project, "coder")
+    said = str(refused.value)
+
+    for message in (note, said):
+        assert named in message and forgotten in message, message
+        assert message.count("is forgotten") == 1, message
+
+
+def test_a_check_at_a_path_with_no_file_reads_the_fleets_socket_once(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 6, 7/10: `_refuse_a_freed_socket` read the fleet's socket again
+    right after `_before_a_server_starts` had read "gone" there, two reads a check where a
+    listening server costs one. The refusal stands on the one read. Round 7, 6/9: so do the
+    rows recorded at that path, which `_live_rows_here` asked again, in a `SocketReads` of
+    its own, exactly where it matters: a path with no file, and rows recorded there."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    coder = _coder(project)
+    tmux.running, tmux.socket_file = False, False  # a server that lost its socket file
+    asked: list[Path | None] = []
+    listener = tmux.listener
+
+    def counted(recorded: Path | None = None) -> SocketAnswer | None:
+        asked.append(recorded)
+        return listener(recorded)
+
+    monkeypatch.setattr(tmux, "listener", counted)
+    with pytest.raises(FleetError, match="lost its socket file"):
+        fleet_service._before_a_server_starts(tmux, fleet_service.settings())
+
+    assert coder.socket_path is not None, "the row recorded where its server listened"
+    assert asked == [tmux.socket_path()], asked
+
+
+def test_a_check_before_a_server_starts_reads_the_socket_once_and_a_spawn_says_both_checks(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 5: `_forget_an_exited_server` and `_refuse_a_freed_socket` each
+    read the fleet's socket, so a check made two connects, and a spawn, which checks before
+    it captures the project or makes a worktree and again as its window opens, made four.
+    One read says which of the two applies. And the rows the window's check forgot, a
+    server having exited while the spawn checked its worktree out, went unsaid: the spawn
+    threw that check's answer away."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    asked: list[Path | None] = []
+    listener = tmux.listener
+
+    def counted(recorded: Path | None = None) -> SocketAnswer | None:
+        asked.append(recorded)
+        return listener(recorded)
+
+    monkeypatch.setattr(tmux, "listener", counted)
+    manager = fleet_service.spawn(project, "manager").agent
+
+    assert len(asked) == 2, asked  # a server listens: one read per check
+    checks = fleet_service._before_a_server_starts
+    early = [True]
+
+    def then_the_server_exits(srv: TmuxServer, config: FleetSettings) -> list[FleetAgent]:
+        exited = checks(srv, config)
+        if early:  # the spawn's own check, before its worktree
+            early.clear()
+            tmux.kill_server()  # the file stays, nothing listens
+        return exited
+
+    monkeypatch.setattr(fleet_service, "_before_a_server_starts", then_the_server_exits)
+    receipt = fleet_service.spawn(project, "coder", worktree=False)
+
+    [said] = [note for note in receipt.notes if "had exited" in note]
+    assert f"manager ({project.root.name}) reads lost from now on" in said, said
+    with store_session() as store:
+        forgotten = store.get_fleet_agent(manager.id)
+    assert forgotten is not None and forgotten.server_started_at is None
+
+
+def test_the_sign_in_window_asks_its_check_with_the_config_its_server_was_made_for(
+    tmux: FakeTmux, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 5: the Accounts sign-in window passed no `config`, so the check
+    before a server starts read `config.toml` again on Textual's thread, and asked the rows
+    of today's `[fleet] tmux_socket` while the page probed the server it had kept from its
+    first sign-in. The page reads `[fleet]` once and passes it with the server it made."""
+    from aisquare.core import claude_accounts as claude_accounts_core
+    from aisquare.services import claude_accounts as claude_accounts_service
+
+    config = fleet_service.settings()
+    monkeypatch.setattr(fleet_service, "settings", lambda: pytest.fail("[fleet] read again"))
+    account = claude_accounts_core.default_account()
+
+    window = claude_accounts_service.open_sign_in_window(account, tmux, config=config)
+
+    assert window.pane_id in tmux.facts
+
+
+def test_a_server_named_by_its_socket_is_had_without_reading_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 9, 7/8: ``server_for`` read ``config.toml`` for a name it was
+    given, the socket being all ``server`` reads of it. A row with none still takes today's."""
+    sockets: list[str] = []
+
+    def server(config: FleetSettings | None = None) -> TmuxServer:
+        assert config is not None
+        sockets.append(config.tmux_socket)
+        return TmuxServer(config.tmux_socket)
+
+    monkeypatch.setattr(fleet_service, "server", server)
+    monkeypatch.setattr(fleet_service, "settings", lambda: pytest.fail("config.toml read"))
+    assert fleet_service.server_for("asq-old").socket == "asq-old"
+    monkeypatch.setattr(fleet_service, "settings", lambda: FleetSettings(tmux_socket="asq-new"))
+    assert fleet_service.server_for("").socket == "asq-new"
+    assert sockets == ["asq-old", "asq-new"]
+
+
+def _callers_of(name: str) -> set[tuple[str, str]]:
+    """``(module under src/aisquare, function)`` for each function whose body calls ``.name(…)``
+    or holds the string ``name`` as a whole constant (a tmux command word)."""
+    root = Path(fleet_service.__file__).resolve().parents[1]
+    found: set[tuple[str, str]] = set()
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for function in ast.walk(tree):
+            if not isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            for node in ast.walk(function):
+                called = (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == name
+                )
+                if called or (isinstance(node, ast.Constant) and node.value == name):
+                    found.add((path.relative_to(root).as_posix(), function.name))
+    return found
+
+
+@pytest.mark.parametrize("way_in", ["spawn", "restart", "switch", "sign-in"])
+def test_every_window_at_the_fleet_socket_asks_what_must_hold_before_a_server_starts(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    plain_project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    way_in: str,
+) -> None:
+    """Review of #259, round 3: rounds 1 to 3 each found another path that starts the fleet's
+    tmux server past the rules for doing so. Only `spawn` forgot the start of a server that
+    exited (a stale socket file, after which the next server holds its rows for good) and
+    refused a socket path a running server lost (no file, where a second server strands
+    its agents). The Accounts sign-in window, on the same server, started one past both.
+    Every window there now opens through `fleet.open_window`, which asks both: the source
+    has no other caller of `spawn_window`, and each way in is asked here."""
+    from aisquare.core import claude_accounts as claude_accounts_core
+    from aisquare.services import claude_accounts as claude_accounts_service
+
+    assert _callers_of("spawn_window") == {("services/fleet.py", "open_window")}
+    assert _callers_of("new-session") == {("core/tmux.py", "spawn_window")}, "no other start"
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    manager = fleet_service.spawn(project, "manager").agent  # on this shell's socket path
+    # The agent a restart or a switch replaces runs on a server at another path (another
+    # `TMUX_TMPDIR`), so its own stop goes through whatever this socket's state.
+    apart = Path("/elsewhere/tmux-1000/asq-test")
+    elsewhere = tmux.per_path[apart] = FakeTmux()
+    elsewhere.started = tmux.started
+    window = elsewhere.spawn_window("asq-x", name="coder-1", cwd=project.root, command=["c"])
+    elsewhere.set_command(window.pane_id, "claude")
+    moved = {"socket_path": apart, "pane_id": window.pane_id, "server_started_at": None}
+    spawned = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    with store_session() as store:
+        agent = store.upsert_fleet_agent(spawned.model_copy(update=moved))
+    _with_transcript(agent, None)
+
+    def enter() -> None:
+        if way_in == "spawn":
+            fleet_service.spawn(plain_project, "manager")  # any project: the server is shared
+        elif way_in == "sign-in":
+            account = claude_accounts_core.default_account()
+            claude_accounts_service.open_sign_in_window(account, fleet_service.server())
+        else:
+            getattr(fleet_service, way_in)(project, agent.label)
+
+    tmux.running = False  # no tmux client reaches the manager's server…
+    tmux.socket_file = False  # …because its socket file is gone: it may run on
+    started = len(tmux.spawned)
+
+    with pytest.raises(FleetError, match=r"not started: the tmux server that manager .* lost"):
+        enter()
+
+    assert len(tmux.spawned) == started and not tmux.running, "no second server at the path"
+    # A server that exited leaves its socket file, where nothing listens: the next server
+    # starts there, and the manager's row reads lost under it, as in 0.8.0, not held.
+    tmux.socket_file = True
+    enter()
+
+    assert tmux.running and len(tmux.spawned) == started + 1
+    [status] = [s for s in fleet_service.list_agents(project) if s.agent.id == manager.id]
+    assert (status.state, status.held) == ("lost", False), status
+    with store_session() as store:
+        forgotten = store.get_fleet_agent(manager.id)
+    assert forgotten is not None and forgotten.server_started_at is None
+
+
+def test_a_row_whose_socket_another_server_took_is_held_not_ended(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Follow-up of #257: a server that lost its socket file runs on, and the next `tmux -L`
+    there (a 0.8.0 client, a spawn into a project with no rows, a hand-run tmux) starts a
+    second server at the freed path. That server answered for the old rows from then on:
+    their panes read as gone, their socket answered, and `stop`, `shutdown` and `restart`
+    ended them under their running agents, and `reap` marked them lost. Every row records
+    when its server started, and a server at its socket that started at another time is
+    not its own: the listing holds the row as unknown, saying why; `reap` leaves it, with
+    `--server-down` too; `stop` refuses with the way out; `shutdown` leaves it live until
+    `--forget`; and nothing of the newcomer's is typed into or killed."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    coder = _coder(project)
+    newcomer = FakeTmux()  # at the same path, so `-L` reaches it: the row's server is lost
+    newcomer.started = tmux.started + timedelta(minutes=5)
+    # Another project's agent there took its id. (This project's own session there would
+    # be the shutdown's to take down: the held row spares none on the newcomer.)
+    newcomer.spawn_window("asq-elsewhere", name="coder-1", cwd=project.root, command=["claude"])
+    assert newcomer.facts.keys() == {coder.pane_id}, "its %1 is another agent's"
+    newcomer.set_command(coder.pane_id, "claude")
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: newcomer)
+
+    [listed] = fleet_service.list_agents(project)
+    assert (listed.state, listed.detail) == ("unknown", "another tmux server on its socket")
+    status = fleet_service.status_of(coder)
+    assert (status.state, status.detail) == ("unknown", "another tmux server on its socket")
+    assert listed.held and status.held, "said, so no view shows the newcomer's %1 under it"
+    _board_session(coder, "waiting")  # its hooks may still fire: the board does not decide
+    [fresh] = fleet_service.list_agents(project)
+    assert (fresh.state, fresh.detail) == ("unknown", "another tmux server on its socket")
+    assert fresh.held, "held whatever the board says"
+    reaped = fleet_service.reap(project)
+    swept = fleet_service.reap(project, server_down=True)
+    assert reaped.lost == reaped.ended == swept.lost == swept.ended == []
+    # Left live, and said so, with the way out (review of #259, round 1): unnamed, `reap`
+    # printed `0 ended, 0 lost` while the row still counted toward the cap and stop refused.
+    for said in (reaped, swept):
+        [named] = said.held
+        assert named.agent.id == coder.id, said
+        assert named.reason.startswith("another tmux server answers on its socket "), named
+        assert "— left live: if it is, send that server SIGUSR1" in named.reason
+        forget = _fleet("shutdown", project, "--forget")
+        assert f"`{forget}` ends its row on your word" in named.reason
+    with pytest.raises(FleetError, match="another tmux server answers on its socket") as stop:
+        fleet_service.stop(project, "coder-1")
+    assert "SIGUSR1" in str(stop.value)
+    assert f"shutdown --project {project.id} --forget`" in str(stop.value)
+    with pytest.raises(FleetError, match="another tmux server"):
+        fleet_service.restart(project, "coder-1")
+    plan = fleet_service.shutdown_plan(project)
+    report = fleet_service.shutdown(project)
+
+    assert "another tmux server answers on its socket" in plan.held[coder.id]
+    assert report.stopped == [] and report.recorded == []
+    assert [row.agent.id for row in report.failed] == [coder.id]
+    assert "another tmux server" in report.failed[0].reason
+    assert "--forget ends its row on your word" in report.failed[0].reason
+    assert report.incomplete_projects == [project.id]
+    assert newcomer.typed == [] and newcomer.killed == [] and newcomer.killed_sessions == []
+    with store_session() as store:
+        assert [a.id for a in store.fleet_agents(project.id, live_only=True)] == [coder.id]
+    assert _events(project, "agent_exited") == []
+
+    forgotten = fleet_service.shutdown(project, forget=True)
+
+    assert [row.agent.id for row in forgotten.recorded] == [coder.id]
+    assert forgotten.recorded[0].reason.startswith(
+        "ended on your word (--forget): another tmux server answers on its socket"
+    )
+    assert newcomer.typed == [] and newcomer.killed == [], "still nothing of the newcomer's"
+    # Negative control: a row from another boot cannot be running on any server, so under
+    # the newcomer it is lost, and a stop ends it, touching nothing of the newcomer's.
+    stale = _coder(project)  # spawned on the newcomer, as the config now reaches it
+    with store_session() as store:
+        stale = store.upsert_fleet_agent(stale.model_copy(update={"boot_id": "b00t-0"}))
+    newcomer.started = newcomer.started + timedelta(minutes=1)  # the newcomer restarted
+    [listed] = fleet_service.list_agents(project)
+    assert (listed.agent.id, listed.state, listed.detail) == (stale.id, "lost", "pane gone")
+    assert not listed.held
+    assert fleet_service.stop(project, stale.label).agent.ended_at is not None
+    assert newcomer.killed == [] and newcomer.typed == []
+
+
+def test_a_held_row_is_held_in_its_servers_view_not_absent_from_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 3: in what `_observe` returns, `None` under a row's id meant
+    held, and a missing id meant its pane is gone, so a reader that did `.get(agent.id)`
+    without `_own_view` took a held row for a gone one; `reap` was safe only because
+    `_view` screened the row first. A held row is `HELD`, which no `.get()` gives for a
+    gone pane, and the one accessor that reads a pane refuses it."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    coder = _coder(project)
+    session = f"asq-{_codename(project)}"
+    newcomer = FakeTmux()  # took the socket, and gave %1 to another agent
+    newcomer.started = tmux.started + timedelta(minutes=5)
+    newcomer.spawn_window(session, name="other", cwd=project.root, command=["claude"])
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: newcomer)
+
+    views = fleet_service._observe_sockets([coder], session)
+
+    [observed] = views.values()
+    assert observed is not None and observed.get(coder.id) is fleet_service.HELD
+    assert fleet_service._own_view(coder, observed) is None
+    assert fleet_service._held_by_another(coder, observed)
+    with pytest.raises(FleetError, match="held as another server's"):
+        fleet_service._pane_in(coder, observed)
+    # The readers of the raw map claim nothing for it, though its id is a pane that died.
+    newcomer.die(coder.pane_id, 0)
+    dead = fleet_service._observe_sockets([coder], session)
+    assert fleet_service._lingering_windows([coder], dead) == {}
+    assert fleet_service._end_dead_rows([coder], dead) == []
+    with store_session() as store:
+        assert [a.id for a in store.fleet_agents(project.id, live_only=True)] == [coder.id]
+
+
+def test_a_stop_and_a_restart_read_the_servers_start_in_the_answer_that_names_the_pane(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 3: `_stop_row`'s look at the window asked `srv.started_at()` in
+    a `display-message` of its own each time the pane answered, on every poll of a stop's
+    grace period, and `_pane_alive` (whether a restart hands over) did the same after
+    `pane_facts`, though tmux says when its server started in the answer that names the
+    pane (`#{start_time}`: `PaneFacts.server_started`, and now `WindowInfo.server_started`).
+    Both read it there, and still judge a pane on another server the same way."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    coder = _coder(project)
+    tmux.set_command(coder.pane_id, "claude")
+    asked: list[datetime | None] = []
+    started_at = tmux.started_at
+
+    def counted() -> datetime | None:
+        asked.append(started_at())
+        return asked[-1]
+
+    monkeypatch.setattr(tmux, "started_at", counted)
+
+    assert fleet_service._pane_alive(coder) is True
+    tmux.honours_exit = False  # it lets its grace run out: every poll looks at the window
+    receipt = fleet_service._stop_row(project, coder, grace=2.0)
+
+    assert receipt.agent.ended_at is not None and tmux.killed == [coder.pane_id]
+    assert asked == [], "not one display-message for the start"
+    # The start read there still decides: on a server that took the socket, a pane under
+    # the row's id is another agent's, not the row's alive.
+    other = _coder(project)
+    newcomer = FakeTmux()
+    newcomer.started = tmux.started + timedelta(minutes=5)
+    newcomer.spawn_window("asq-elsewhere", name="x", cwd=project.root, command=["claude"])
+    newcomer.spawn_window("asq-elsewhere", name="y", cwd=project.root, command=["claude"])
+    assert other.pane_id in newcomer.facts
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: newcomer)
+    assert fleet_service._pane_alive(other) is False
+
+
+def test_a_look_at_the_fleet_reads_the_servers_start_in_the_answers_that_named_its_panes(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 4: `_observe` asked `srv.started_at()` in a `display-message` of
+    its own though the window list and a pane's facts it had just read carry the start
+    (`#{start_time}`): one more tmux process per server on asq's 2 s tick, every needs-you
+    scan, every `status_of` and `tell`. It reads the start there, and asks only when no
+    answer carried it (live rows, no pane seen), as it must to tell a lost row from a held
+    one."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    coder = _coder(project)
+    tmux.set_command(coder.pane_id, "claude")
+    session = f"asq-{_codename(project)}"
+    asked: list[datetime | None] = []
+    started_at = tmux.started_at
+
+    def counted() -> datetime | None:
+        asked.append(started_at())
+        return asked[-1]
+
+    monkeypatch.setattr(tmux, "started_at", counted)
+
+    assert coder.id in (fleet_service._observe(tmux, session, [coder]) or {}), "the window list"
+    # A session renamed under it: the pane answers to `pane_facts` alone.
+    assert coder.id in (fleet_service._observe(tmux, "asq-renamed", [coder]) or {}), "facts"
+    assert fleet_service.status_of(coder).state != "lost"
+    assert asked == [], "not one display-message for the start"
+    # On a server that took the socket, a start read there still holds the row's pane.
+    tmux.started += timedelta(minutes=5)
+    assert fleet_service._observe(tmux, session, [coder]) == {coder.id: fleet_service.HELD}
+    assert asked == []
+    # Control: a live row and no pane seen, so no answer carried the start: asked, once.
+    tmux.facts.pop(coder.pane_id)
+    tmux.sessions[session] = []
+    tmux.started -= timedelta(minutes=5)
+    assert fleet_service._observe(tmux, session, [coder]) == {}
+    assert asked == [tmux.started]
+
+
+def _planned_ends(plan: fleet_service.ShutdownPlan) -> dict[str, str]:
+    """What a shutdown plan says it does with each row."""
+    return {
+        agent.id: "live" if agent.id in plan.held else "lost" if agent.id in plan.lost else "stop"
+        for agent in plan.agents
+    }
+
+
+def _ends(report: fleet_service.ShutdownReport) -> dict[str, str]:
+    """What a shutdown did with each row."""
+    return {
+        **{agent.id: "stop" for agent in report.stopped},
+        **{row.agent.id: "lost" for row in report.recorded},
+        **{row.agent.id: "live" for row in report.failed},
+    }
+
+
+def test_a_forget_plan_says_a_row_another_server_answers_for_is_recorded_lost_as_its_run_does(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    """Review of #259, round 3: under `--forget` the plan's filter dropped a row held as
+    another server's from `held`, and its `lost` covered only sockets that did not answer,
+    so `fleet shutdown --forget` printed `💤 coder-1 · … — stopped (%1)`, the other
+    server's pane id, and `--json`'s `lost` left it out, while the run recorded it lost
+    without stopping anything. Round 29 of #257 fixed the same mismatch for silent
+    sockets. The plan and the run now read one verdict per row, with or without the word."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    held = _coder(project)
+    newcomer = FakeTmux()  # took the socket: its %1 is another agent's
+    newcomer.started = tmux.started + timedelta(minutes=5)
+    newcomer.spawn_window("asq-elsewhere", name="coder-9", cwd=project.root, command=["c"])
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: newcomer)
+
+    for forget in (False, True):
+        own = _coder(project)  # on the newcomer, its own server: stopped either way
+        plan = fleet_service.shutdown_plan(project, forget=forget)
+        report = fleet_service.shutdown(project, forget=forget)
+        assert _planned_ends(plan) == _ends(report), (forget, plan, report)
+        assert _ends(report) == {held.id: "lost" if forget else "live", own.id: "stop"}
+
+    assert plan.lost == {held.id: str(fleet_service._address(held))}
+    [recorded] = report.recorded
+    assert plan.lost_why[held.id] == recorded.reason
+    assert recorded.reason.startswith("ended on your word (--forget): another tmux server")
+    # And the operator reads it so before confirming, in both shapes.
+    again = _coder(project, label="coder-1")  # a row held as before, once more
+    with store_session() as store:
+        store.upsert_fleet_agent(again.model_copy(update={"server_started_at": tmux.started}))
+    human = runner.invoke(app, ["fleet", "shutdown", "--forget", "-P", project.id])
+    machine = runner.invoke(app, ["--json", "fleet", "shutdown", "--forget", "-P", project.id])
+    assert human.exit_code == 0, human.output
+    said = " ".join(human.stdout.split())
+    assert "coder-1 · " in said and " — recorded lost: ended on your word (--forget): " in said
+    assert "stopped (" not in said, said
+    payload = json.loads(machine.stdout)
+    assert payload["lost"] == {again.id: str(fleet_service._address(again))}
+    assert payload["lost_why"][again.id].startswith("ended on your word (--forget): another")
+
+
+def test_a_row_left_live_as_held_spares_no_session_on_the_server_that_took_its_socket(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 3: a row held as another server's lands in the report's
+    `failed`, and the kill phase spared every session of a `failed` row's project at its
+    address: the socket where the newer server answers. So `fleet shutdown` left the
+    project's `asq-<codename>` session on that server up, listed in `sessions_left_up`,
+    with every window in it and the server itself, though the held agent does not run
+    there: the spare is for a pane `_verify_gone` saw alive. A held row spares nothing."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    held = _coder(project)
+    session = f"asq-{_codename(project)}"
+    newcomer = FakeTmux()  # took the socket
+    newcomer.started = tmux.started + timedelta(minutes=5)
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: newcomer)
+    own = _coder(project)  # this project's, on the newcomer: in its session there
+    left = newcomer.spawn_window(session, name="scratch", cwd=project.root, command=["sh"])
+
+    report = fleet_service.shutdown(project)
+
+    assert [row.agent.id for row in report.failed] == [held.id] and report.failed[0].held
+    assert [agent.id for agent in report.stopped] == [own.id]
+    assert report.sessions_killed == [f"asq:{session}"] and report.sessions_left_up == []
+    assert left.pane_id not in newcomer.facts and session not in newcomer.sessions
+    assert report.incomplete_projects == [project.id], "the held row is still live"
+    # Negative control: a row whose pane its own server shows alive spares its session.
+    kept = _coder(project)
+    newcomer.honours_exit, newcomer.refuse_kills = False, True  # alive, and stays so
+    again = fleet_service.shutdown(project)
+    assert [row.agent.id for row in again.failed if not row.held] == [kept.id]
+    assert again.sessions_left_up == [f"asq:{session}"]
+
+
+@pytest.mark.parametrize(("answer", "spared"), [("answers", True), ("another", False)])
+def test_a_row_held_as_its_socket_answering_now_spares_its_session_from_a_late_take_down(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, answer: SocketAnswer, spared: bool
+) -> None:
+    """Review of #259, round 6, 3/10: a row whose socket was silent at the probe and answers
+    now (``"answers"``) is left live, held, and `_spared` dropped every held row. Its pane
+    may be on the server that came up, so a late row's take-down on that socket killed the
+    session of an agent the report said it left live. Only a row out of every client's
+    reach (``"another"``, a silent socket) spares nothing."""
+    config = fleet_service.settings()
+    held = _coder(project)
+    late = _coder(project)  # spawned during the run, exited on its own since
+    tmux.die(late.pane_id, 0)
+    unreached: dict[str, tuple[SocketAnswer, str, str]] = {held.id: (answer, "why", "do")}
+    report = fleet_service.ShutdownReport()
+    with store_session() as store:
+        named = store.get_project(project.id)  # with the codename its spawn gave it
+    assert named is not None
+
+    fleet_service._shutdown_row(
+        named, held, {}, report, force=False, grace=0, held=unreached, config=config
+    )
+    fleet_service._retire_late_panes([(named, late)], report, config)
+
+    assert [row.agent.id for row in report.failed] == [held.id]
+    session = f"asq-{_codename(project)}"
+    assert (session in tmux.sessions) is spared
+    assert (report.sessions_left_up == [_session_of(project)]) is spared
+
+
+@pytest.mark.parametrize("board", ["waiting", "working", "attention"])
+def test_a_held_row_reads_unknown_saying_why_whatever_its_fresh_board_says(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    board: str,
+) -> None:
+    """Review of #259, round 2: the held reason reached a row only once its board went stale.
+    While the board was fresh (30 minutes: a killed agent fires no SessionEnd) the row read
+    its board's state with no detail, so `fleet ls`, asq's header and the phone showed a
+    healthy `waiting` that no tab gave a pane and every action refused, `tell` typed into
+    the agent that got its id, and a held manager counted as one taking its coders'
+    questions. Held, it reads `unknown`, saying why, whatever its board says."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    coder = _coder(project)
+    _board_session(coder, board)
+    newcomer = FakeTmux()
+    newcomer.started = tmux.started + timedelta(minutes=5)
+    newcomer.spawn_window("asq-elsewhere", name="manager", cwd=project.root, command=["claude"])
+    newcomer.set_command(coder.pane_id, "claude")
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: newcomer)
+
+    [listed] = fleet_service.list_agents(project)
+    status = fleet_service.status_of(coder)
+
+    for said in (listed, status):
+        assert (said.state, said.detail, said.held) == (
+            "unknown",
+            "another tmux server on its socket",
+            True,
+        ), said
+    told = fleet_service.tell(project, "coder-1", "please rebase")
+    assert not told.delivered and told.how.startswith("it is unknown — filed as board note")
+    assert newcomer.typed == []
+    # Negative control: on its own server the same fresh board decides, as for any row.
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: tmux)
+    [own] = fleet_service.list_agents(project)
+    assert (own.state, own.held) == (board, False)
+
+
+@pytest.mark.parametrize("shape", ["another", "gone"])
+def test_every_path_that_decides_a_held_rows_fate_gives_the_one_verdict(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    shape: str,
+) -> None:
+    """Reviews of #259, rounds 1 to 3: each found another path that decided a held row's
+    fate its own way: a shutdown plan that said `stopped` where its run recorded the row
+    lost, a kill phase that spared a session for it on another server, an uninstall that
+    advised `SIGUSR1` while another server listened at its socket. Every path that ends a
+    row, keeps it, or says what to do with it asks the one rule (`server_may_run`) and says
+    the one way back (`_unreachable_why`): for a row another server answers for (`another`)
+    and for one whose server lost its socket file (`gone`), this asks each in turn, so the
+    next path is one more line. Only `--forget` ends it, plan and run alike, and every
+    `SIGUSR1` said for a socket another server answers on waits for it to be free."""
+    from aisquare.services import diagnostics
+
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    # Uninstall asks whether `fleet shutdown` could reach the fleet: here it can, as it
+    # does through the fake, whether or not this machine has a usable tmux (Windows: none).
+    monkeypatch.setattr(TmuxServer, "require", lambda _self: None)
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    coder = _coder(project)
+    if shape == "another":
+        answering = FakeTmux()  # took the socket; its %1 is another agent's
+        answering.started = tmux.started + timedelta(minutes=5)
+        answering.spawn_window("asq-elsewhere", name="x", cwd=project.root, command=["c"])
+        monkeypatch.setattr(fleet_service, "server", lambda config=None: answering)
+        monkeypatch.setattr(TmuxServer, "listener", lambda _self, _recorded=None: "answers")
+        monkeypatch.setattr(TmuxServer, "started_at", lambda _self: answering.started)
+        doctor_sees: TmuxServer = answering
+    else:
+        tmux.running = False  # no tmux client reaches its server…
+        tmux.socket_file = False  # …as its socket file is gone: it may run on
+        monkeypatch.setattr(tmux, "server_absent", lambda: True)  # as tmux says for that
+        monkeypatch.setattr(TmuxServer, "listener", lambda _self, _recorded=None: "gone")
+        doctor_sees = tmux
+    said: list[str] = []
+
+    swept = fleet_service.reap(project, server_down=True)
+    plain = fleet_service.reap(project)  # a server that does not answer is not asked to say
+    for reaped in (swept, plain) if shape == "another" else (swept,):
+        [held] = reaped.held
+        assert held.agent.id == coder.id
+        said.append(held.reason)
+    assert swept.lost == swept.ended == plain.lost == plain.ended == []
+    for verb in (fleet_service.stop, fleet_service.restart):
+        with pytest.raises(FleetError) as refused:
+            verb(project, "coder-1")
+        said.append(str(refused.value))
+    plan = fleet_service.shutdown_plan(project)
+    report = fleet_service.shutdown(project)
+    assert _planned_ends(plan) == _ends(report) == {coder.id: "live"}, (plan, report)
+    said += [plan.held[coder.id], report.failed[0].reason]
+    assert lifecycle.running_fleet()[0] != (), "uninstall counts it as running"
+    refusal = lifecycle.uninstall_plan().refusal
+    assert refusal is not None and refusal.error == "fleet_running"
+    said.append(str(refusal))
+    check = diagnostics._check_fleet(lambda socket: doctor_sees)
+    assert check.status is CheckStatus.warn and "may still be running" in check.detail
+    said.append(check.fix or "")
+    with store_session() as store:
+        assert [a.id for a in store.fleet_agents(project.id, live_only=True)] == [coder.id]
+    assert all("SIGUSR1" in words for words in said), said
+    if shape == "another":
+        # tmux's handler takes the path from whatever listens on it: only once it is free.
+        for words in said:
+            assert re.search(r"SIGUSR1 (\(once|once)", words), words
+
+    forget = fleet_service.shutdown_plan(project, forget=True)
+    forgotten = fleet_service.shutdown(project, forget=True)
+
+    assert _planned_ends(forget) == _ends(forgotten) == {coder.id: "lost"}
+    assert forget.lost_why[coder.id] == forgotten.recorded[0].reason
+    assert lifecycle.running_fleet()[0] == ()
+
+
+@pytest.mark.parametrize("said", ["unasked", "gone"])
+def test_a_row_on_a_socket_tmux_reached_is_held_only_as_another_servers(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    said: str,
+) -> None:
+    """Review of #259, round 5: on a socket tmux had just reached, a row that recorded its
+    server's start was held for any answer of its socket but `answers`: a connect that timed
+    out on a busy server (`unasked`), or a file removed since (`gone`). Held, it spared no
+    session, so the kill phase killed its agent with the session while the report said
+    `left live`, and `--forget` recorded lost a row whose socket tmux answered on. Only
+    `another` holds it there; any other answer stops it as any row, plan and run alike."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    monkeypatch.setattr(tmux, "listener", lambda recorded=None: said)
+
+    for forget in (False, True):
+        coder = _coder(project)
+        assert coder.server_started_at == tmux.started, "asked whether it is another's"
+        plan = fleet_service.shutdown_plan(project, forget=forget)
+        report = fleet_service.shutdown(project, forget=forget)
+
+        assert _planned_ends(plan) == _ends(report) == {coder.id: "stop"}, (forget, plan, report)
+        assert [agent.exit_status for agent in report.stopped] == [0], "its own /exit"
+
+
+def test_every_path_that_types_into_or_shows_a_pane_refuses_a_held_rows_id(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reviews of #259, rounds 1 and 2: each found another path that acted on a row held as
+    another tmux server's as if its pane id were its own: asq's tabs, needs-you's server,
+    `tell`, needs-you's cards, the status detail. On the server that took the socket those
+    ids are other agents', here each at its prompt. Every path that types into a pane or
+    shows one goes through the one derivation (`_derive`, held: `unknown`) or the one pane
+    predicate (`_its_agent`); this asks each of them, so the next path is one more line."""
+    from aisquare.cli.ui.views.agent import shown_pane
+    from aisquare.services import remote_needs, remote_server
+
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    manager = fleet_service.spawn(project, "manager").agent
+    coder = _coder(project)
+    for row in (manager, coder):
+        _board_session(row, "waiting")  # fresh: a killed agent fires no SessionEnd
+    newcomer = FakeTmux()  # at the same path, so `-L` reaches it
+    newcomer.started = tmux.started + timedelta(minutes=5)
+    for name in ("manager", "coder-1"):
+        newcomer.spawn_window("asq-elsewhere", name=name, cwd=project.root, command=["claude"])
+    assert newcomer.facts.keys() == {manager.pane_id, coder.pane_id}, "their ids, others' panes"
+    for row in (manager, coder):
+        newcomer.set_command(row.pane_id, "claude")  # agents at their prompts: not theirs
+
+    def capture(pane_id: str, **_: object) -> Capture:
+        facts = newcomer.pane_facts(pane_id)
+        assert facts is not None
+        return Capture(["another agent's screen"], facts, 0)
+
+    monkeypatch.setattr(newcomer, "capture", capture)
+    monkeypatch.setattr(remote_server, "_resolve_project", lambda ref=None: project)
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: newcomer)
+    now = datetime.now(tz=UTC)
+
+    # The listing, status_of and so `fleet ls`, asq and the phone's api/fleet.
+    statuses = {status.agent.id: status for status in fleet_service.list_agents(project)}
+    statuses[coder.id] = fleet_service.status_of(coder)
+    for status in statuses.values():
+        assert (status.state, status.detail, status.held) == (
+            "unknown",
+            fleet_service.ANOTHER_SERVER,
+            True,
+        ), status
+        assert shown_pane(status) is None, "asq's Agent and Manager tabs"
+    status = statuses[coder.id]
+    assert not fleet_service.tell(project, "coder-1", "please rebase").delivered
+    assert fleet_service.nudge_manager(project.id, reason="coder-1 exited") is False
+    assert remote_server._remote_pane_refusal(newcomer, coder) == remote_server.PANE_OUTLIVED
+    snap = remote_needs._needs_snapshot(project, status, None, (), now)
+    assert snap.pane_is_agent is False, "what quick answers and agent actions type on"
+    [card] = remote_needs.needs_from_agent(status, None, project=project, events=(), now=now)
+    assert (card.kind, card.reason) == (
+        "lost",
+        "coder-1 is out of reach: another tmux server answers on its socket",
+    )
+    with pytest.raises(remote_server.RequestError) as shown:
+        remote_server._live_panes("coder-1")
+    assert (shown.value.status, shown.value.error) == (409, "not_agent"), "the phone's pane"
+    assert remote_server._pane_width(coder) == 80, "not the other agent's width"
+    with pytest.raises(FleetError, match="another tmux server answers on its socket"):
+        fleet_service.stop(project, "coder-1")
+
+    assert newcomer.typed == [] and newcomer.killed == []
+    # Negative control: on their own server every path takes the same panes as theirs.
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: tmux)
+    for row in (manager, coder):
+        tmux.set_command(row.pane_id, "claude")
+    own = fleet_service.status_of(coder)
+    assert (own.state, own.held, shown_pane(own)) == ("waiting", False, coder.pane_id)
+    assert remote_server._remote_pane_refusal(tmux, coder) is None
+    assert remote_needs._needs_snapshot(project, own, None, (), now).pane_is_agent is True
+    assert fleet_service.nudge_manager(project.id, reason="coder-1 exited") is True
+    assert fleet_service.tell(project, "coder-1", "please rebase").delivered
+    assert newcomer.typed == [], "and still nothing of the newcomer's"
+
+
+def test_a_listing_asks_for_the_boot_only_for_rows_that_may_be_held_and_once_per_read(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 2: `boot_id()` keeps only an id it found (round 28 of #257), so
+    where `sysctl` fails each question is another `sysctl`, with a 5 s timeout. `_observe`
+    asked it of every read with live rows (asq's 2 s tick, needs-you's 3 s scan, every
+    `status_of`), though only a row another server may hold needs it, and asked
+    `boot_started()` once more per such row. Now neither for rows on their own server, and
+    each once per read however many rows need it."""
+    asked = {"id": 0, "started": 0}
+
+    def boot_id() -> str | None:
+        asked["id"] += 1
+        return None  # a macOS whose `sysctl` fails: kept by nothing, asked again each time
+
+    def boot_started() -> datetime | None:
+        asked["started"] += 1
+        return None
+
+    monkeypatch.setattr(tmux_core, "boot_id", boot_id)
+    monkeypatch.setattr(tmux_core, "boot_started", boot_started)
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    coders = [_coder(project) for _ in range(3)]
+    asked.update(id=0, started=0)  # what the spawns recorded
+
+    assert {status.state for status in fleet_service.list_agents(project)} == {"waiting"}
+    fleet_service.status_of(coders[0])
+    assert asked == {"id": 0, "started": 0}, "no row on its own server needs the boot"
+
+    newcomer = FakeTmux()  # three rows another server at their socket may hold
+    newcomer.started = tmux.started + timedelta(minutes=5)
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: newcomer)
+    assert all(status.held for status in fleet_service.list_agents(project))
+    assert asked == {"id": 1, "started": 1}, "once each for the read, not once per row"
+    # Review of #259, round 6, 9/10: one cache of the boot per read, the one the rule asks
+    # (`SocketReads`), so a sweep's listing and its rule share the answer.
+    asked.update(id=0, started=0)
+    fleet_service.reap(project, server_down=True)
+    assert asked["id"] == 1, asked
+
+
+def test_the_one_rule_asks_each_server_once_per_read_not_once_per_row(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 3: `server_may_run` asked the server answering at a row's socket
+    when it started, a `display-message` each time, and connected to the socket, for every
+    row, though both answers are the server's. A shutdown plan over ten agents on one server
+    ran ten of each, its run as many again, and so did `reap --server-down`. Now once per
+    server for one read, however many rows it holds."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    coders = [_coder(project) for _ in range(3)]
+    newcomer = FakeTmux()  # took the socket: every row asks it whether it is theirs
+    newcomer.started = tmux.started + timedelta(minutes=5)
+    asked = {"started": 0, "listener": 0}
+    started_at, listener = newcomer.started_at, newcomer.listener
+
+    def counted_start() -> datetime | None:
+        asked["started"] += 1
+        return started_at()
+
+    def counted_listener(recorded: Path | None = None) -> SocketAnswer | None:
+        asked["listener"] += 1
+        return listener(recorded)
+
+    monkeypatch.setattr(newcomer, "started_at", counted_start)
+    monkeypatch.setattr(newcomer, "listener", counted_listener)
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: newcomer)
+
+    plan = fleet_service.shutdown_plan(project)
+
+    assert set(plan.held) == {coder.id for coder in coders}
+    assert asked == {"started": 1, "listener": 1}, "once for the server, not once per row"
+    # And a sweep that holds every row of a server tmux reports absent.
+    newcomer.running, newcomer.socket_file = False, False  # its socket file taken too
+    monkeypatch.setattr(newcomer, "server_absent", lambda: True)  # as tmux says for that
+    asked.update(started=0, listener=0)
+    swept = fleet_service.reap(project, server_down=True)
+    assert {row.agent.id for row in swept.held} == {coder.id for coder in coders}
+    assert asked["listener"] == 1, asked
+
+
+def test_with_no_boot_id_a_row_from_before_the_boot_is_lost_not_held_by_the_next_server(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 1: on a host with no boot id (the BSDs, a macOS whose `sysctl`
+    failed) every row counted as from this boot, so after a reboot a row that recorded its
+    server's start was held against the server the next spawn started: `unknown (another
+    tmux server on its socket)` for good, which `reap` could not end, `stop` refused and
+    `shutdown` held until `--forget`. Created before this boot started, it is lost and
+    ended as before; one created since is still held, as its server may run."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: None)
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    coder = _coder(project)
+    assert coder.boot_id is None and coder.server_started_at == tmux.started
+    newcomer = FakeTmux()  # the server the first spawn after the reboot started
+    newcomer.started = tmux.started + timedelta(hours=2)
+    newcomer.spawn_window(f"asq-{_codename(project)}", name="m", cwd=project.root, command=["c"])
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: newcomer)
+
+    monkeypatch.setattr(tmux_core, "boot_started", lambda: coder.created_at - timedelta(hours=1))
+    [since] = fleet_service.list_agents(project)
+    assert (since.state, since.held) == ("unknown", True), "since the boot: its server may run"
+
+    booted = coder.created_at + timedelta(hours=1)  # the reboot came after the row
+    monkeypatch.setattr(tmux_core, "boot_started", lambda: booted)
+    [before] = fleet_service.list_agents(project)
+    assert (before.state, before.detail, before.held) == ("lost", "pane gone", False)
+    assert [row.id for row in fleet_service.reap(project).lost] == [coder.id]
+    assert newcomer.typed == [] and newcomer.killed == []
 
 
 def test_stop_leaves_the_row_live_when_a_denied_socket_cannot_confirm_the_pane_died(
@@ -2489,8 +4408,8 @@ def test_stop_leaves_the_row_live_when_a_denied_socket_cannot_confirm_the_pane_d
 
 # --- a spawned agent learns the task it was spawned for --------------------------------
 #
-# The row belongs to the PROCESS in its pane (the three rules above
-# ``team._fleet_row_named``). These tests act as that process the way Claude Code
+# The row belongs to the PROCESS in its pane (the rules above
+# ``team._named_fleet_row``). These tests act as that process the way Claude Code
 # would: the fake pane reports a pid, and ``CLAUDE_PID`` — what Claude Code hands
 # every hook, measured on 2.1.272 — carries the same number. A nested child is a
 # different number under the same window variables. A ``/clear`` is fired in the
@@ -2594,6 +4513,2144 @@ def test_a_spawned_agent_is_told_its_task_on_its_first_start(
     assert f"aisquare task claim {mine.id} --as {first[:8]}" in board, "claim it FIRST, by id"
     assert older.id not in _assignment_block(board)
     assert _row(agent.id).session_id == first, "the minted id is the row's from the spawn"
+
+
+def test_a_fleet_agents_cycle_names_its_own_project_under_a_hub(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 22, 1/9: under ``AISQUARE_TEAM_HUB`` every session is on the
+    hub's board, and the cycle named the board's project in every fleet command. So the
+    manager was told to spawn its coders in the hub's directory, and its ``stop``,
+    ``tell`` and ``switch`` found no live agent there. They name the agent's own row's
+    project, by its codename. A session with no row names its own directory's project, the
+    hub aside (round 23, 3/10, below)."""
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    with store_session() as store:
+        store.onboard_project(team_project(hub))
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))
+    _agent, session_id = _spawned(project, "manager", None, tmux, monkeypatch)
+    with store_session() as store:
+        stored = store.get_project(project.id)
+    assert stored is not None and stored.codename, "a spawn gives its project a codename"
+
+    board = team_service.hook_session_start(session_id, project.root, "startup")
+
+    assert "Your standing cycle (manager)" in board
+    commands = re.findall(r"aisquare fleet [a-z]+(?: --project [\w.-]+)?", board)
+    assert {command.split()[2] for command in commands} == {
+        "spawn",
+        "tell",
+        "switch",
+        "stop",
+        "reap",
+    }
+    assert all(command.endswith(f"--project {stored.codename}") for command in commands), commands
+    assert team_project(hub).id not in board
+
+
+def test_under_a_hub_a_session_with_no_fleet_row_names_its_own_directorys_project(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 23, 3/10: under ``AISQUARE_TEAM_HUB`` a session with no fleet
+    row, one the human launched, got every fleet command of its cycle without
+    ``--project``. Alone, a fleet command acts on the active project, the machine-wide pin
+    before the working directory: the manager launched in ``/work/app`` while another shell
+    had pinned ``site`` spawned its coders in ``site``, and stopped and reaped there, the
+    bug round 21 fixed. Its commands name its directory's project, the hub aside. A
+    directory nobody registered names a ``<project>`` to fill in, and says so: never a bare
+    command."""
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    with store_session() as store:
+        store.onboard_project(team_project(hub))
+        named = store.onboard_project(project, codename="calm-otter")
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))
+    _stranger(monkeypatch, "manager")
+
+    started = team_service.hook_session_start("sess-no-row", project.root, "startup")
+    joined = team_service.hook_prompt_heartbeat("sess-late-no-row", project.root)
+
+    for board in (started, joined):
+        assert "`aisquare fleet reap --project calm-otter` again, then" in board
+        commands = re.findall(r"aisquare fleet [a-z]+(?: --project [\w.-]+)?", board)
+        assert commands and all(c.endswith(f"--project {named.codename}") for c in commands)
+        assert team_project(hub).id not in board
+
+    elsewhere = tmp_path / "unregistered"
+    elsewhere.mkdir()
+    loose = team_service.hook_session_start("sess-loose", elsewhere, "startup")
+
+    assert "Your standing cycle (manager)" in loose
+    assert "`aisquare fleet reap --project <project>` again, then" in loose
+    assert "The fleet commands below name <project>:" in loose
+    assert not re.search(r"aisquare fleet [a-z]+(?! --project)\b", loose), loose
+
+
+def test_under_a_hub_a_session_with_no_project_is_told_a_pause_to_fill_in_not_the_hubs(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 27, 6/7: a session whose project could not be told names a
+    ``<project>`` in its fleet commands, but was told the bare ``fleet-paused``: under a hub,
+    the hub project's own pause. Filled in with ``app``, the manager spawned there and kept
+    spawning while ``fleet pause -P app`` set ``app``'s on the hub's board. It is told a
+    ``fleet-paused.<project id>`` to fill in, and how: the ID, not the codename."""
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    with store_session() as store:
+        board = store.onboard_project(team_project(hub))
+        app = store.onboard_project(project, codename="calm-otter")
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))
+    _stranger(monkeypatch, "manager")
+    elsewhere = tmp_path / "unregistered"
+    elsewhere.mkdir()
+
+    loose = team_service.hook_session_start("sess-loose", elsewhere, "startup")
+
+    assert "Spawn\nnothing while the `fleet-paused.<project id>` signal is set." in loose, loose
+    assert "`fleet-paused` signal" not in loose, "the hub project's own pause"
+    told = next(line for line in loose.splitlines() if line.startswith("Its pause is "))
+    assert "that project's ID, not its codename," in told, told
+    assert "(`prj_ab12` → `fleet-paused.prj-ab12`)" in told, told
+    assert f"`fleet-paused` alone when it is this board's own project ({board.id})" in told
+
+    fleet_service.pause(app)  # what the human runs once the manager is spawning in `app`
+    filled = "fleet-paused." + app.id.lower().replace("_", "-")
+    with store_session() as store:
+        state = team_service._read_signal(store, board.id, filled)
+    assert state is not None and state.value == "on", "the name filled in is the one set"
+
+
+def test_a_cycle_with_no_fleet_row_names_its_project_by_its_codename(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 22, 6/9: the session-start hook and the prompt heartbeat build
+    the board from ``orchestrator.team_project``, which carries no codename, and the cycle
+    named its fleet commands by it: ``--project prj_<24 hex>`` in every manager's and
+    coder's briefing, for a project ``fleet ls``, the sidebar and every receipt call by its
+    codename. The stored project is named, as ``fleet_command`` says."""
+    with store_session() as store:
+        named = store.onboard_project(project, codename="calm-otter")
+    assert named.codename == "calm-otter"
+    _stranger(monkeypatch, "manager")
+
+    started = team_service.hook_session_start("sess-plain-6", project.root, "startup")
+    _stranger(monkeypatch, "coder")
+    joined = team_service.hook_prompt_heartbeat("sess-late-6", project.root)
+
+    for board in (started, joined):
+        commands = re.findall(r"aisquare fleet [a-z]+(?: --project [\w.-]+)?", board)
+        assert commands and all(c.endswith("--project calm-otter") for c in commands), board
+        assert project.id not in board
+
+
+def test_a_hook_reads_the_row_its_window_names_once_for_the_assignment_and_the_cycle(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 23, 10/10: at every session start of a fleet agent, and at
+    every late join through the heartbeat, the row ``AISQUARE_FLEET_AGENT`` names was read
+    twice in the same store session, a GLOB on its id each time: once for the assignment
+    (``_named_fleet_row``) and again for the cycle's project (``_cycle_project``). It is
+    read once and handed to both, and each still gets what it got."""
+    mine = _task(project, "the task this manager is for")
+    agent, session_id = _spawned(project, "manager", mine.id, tmux, monkeypatch)
+    with store_session() as store:
+        stored = store.get_project(project.id)
+    assert stored is not None and stored.codename
+    reads: list[str] = []
+    real = SqliteStore.get_fleet_agent
+
+    def counted(self: SqliteStore, agent_id: str) -> FleetAgent | None:
+        reads.append(agent_id)
+        return real(self, agent_id)
+
+    monkeypatch.setattr(SqliteStore, "get_fleet_agent", counted)
+
+    started = team_service.hook_session_start(session_id, project.root, "startup")
+
+    assert reads == [agent.id]
+    assert f"ASSIGNED TO YOU: {mine.id} [todo]" in started
+    assert f"aisquare fleet reap --project {stored.codename}" in started
+    with store_session() as store:  # a session the hook has not seen joins at a prompt
+        store.end_session(session_id, release_claims=False)
+    reads.clear()
+    joined = team_service.hook_prompt_heartbeat("sess-late-10", project.root)
+
+    assert reads == [agent.id]
+    assert f"aisquare fleet reap --project {stored.codename}" in joined
+
+
+def test_a_cycle_whose_project_cannot_be_read_still_gets_its_board(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review of #259, round 23, 6/10: ``_cycle_project`` guarded the fleet row's read and
+    not the stored board's, so a ``get_project`` that raised there (a locked database, a
+    schema regression) went out of ``hook_session_start`` and the heartbeat, and the session
+    lost its whole ``<aisquare-team>`` injection. The read is guarded and logged, and the
+    cycle names the board it already holds."""
+    real = SqliteStore.get_project
+
+    def flaky(self: SqliteStore, project_id: str) -> ProjectInfo | None:
+        if sys._getframe(1).f_code.co_name == "_cycle_project":
+            raise sqlite3.OperationalError("database is locked")
+        return real(self, project_id)
+
+    monkeypatch.setattr(SqliteStore, "get_project", flaky)
+    _stranger(monkeypatch, "manager")
+
+    with caplog.at_level(logging.WARNING, logger="aisquare.services.team"):
+        started = team_service.hook_session_start("sess-plain-r23", project.root, "startup")
+        joined = team_service.hook_prompt_heartbeat("sess-late-r23", project.root)
+
+    for board in (started, joined):
+        assert "Your standing cycle (manager)" in board
+        commands = re.findall(r"aisquare fleet [a-z]+(?: --project [\w.-]+)?", board)
+        assert commands and all(c.endswith(f"--project {project.id}") for c in commands), board
+    warned = [r.getMessage() for r in caplog.records if r.name == "aisquare.services.team"]
+    assert len(warned) == 2 and all("OperationalError: database is locked" in w for w in warned)
+
+
+def test_the_boards_limited_chip_names_the_agents_own_project_under_a_hub(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 22, 2/9: ``aisquare board`` and the board panel read the hub's
+    board under ``AISQUARE_TEAM_HUB``, and the ``limited`` chip's ``fleet switch`` named
+    that board's project, where the agent's row is not: it refused with "no live agent".
+    It names the agent's own row's project and label. A session with no row has none."""
+    from aisquare.cli.watch import board_frame
+
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    with store_session() as store:
+        store.onboard_project(team_project(hub))
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))
+    agent, session_id = _spawned(project, "coder", None, tmux, monkeypatch)
+    team_service.hook_session_start(session_id, project.root, "startup")
+    _stranger(monkeypatch, "coder")
+    team_service.hook_session_start("sess-no-row", project.root, "startup")
+    with store_session() as store:
+        store.mark_limited(session_id, None)
+        store.mark_limited("sess-no-row", None)
+        stored = store.get_project(project.id)
+    assert stored is not None and stored.codename
+
+    frame = board_frame(height=40, width=200).plain
+
+    switch = f"aisquare fleet switch --project {stored.codename} {agent.label}"
+    assert f"⏳ limited — `{switch}`" in frame
+    assert frame.count("aisquare fleet switch") == 1, "the session with no row: the chip alone"
+    assert team_project(hub).id not in frame
+
+
+def test_the_limited_chips_switch_is_read_in_the_boards_own_store_session(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 23, 9/10: the board panel and ``aisquare board``'s frame asked
+    ``fleet_switches`` for the limited chips after ``board_data`` had closed its store
+    session, and it opened a second one: a connection, the migration check and the presence
+    pass, at every 2 s tick of every visible board for as long as a session stayed limited.
+    The frame is read in one, the chip's switch included."""
+    from aisquare.cli.watch import board_frame
+
+    monkeypatch.chdir(project.root)  # the frame reads the board of where it runs
+    agent, session_id = _spawned(project, "coder", None, tmux, monkeypatch)
+    team_service.hook_session_start(session_id, project.root, "startup")
+    with store_session() as store:
+        store.mark_limited(session_id, None)
+        stored = store.get_project(project.id)
+    assert stored is not None and stored.codename
+    opened: list[str] = []
+
+    @contextmanager
+    def counted(*args: Any, **kwargs: Any) -> Iterator[ContextStore]:
+        opened.append("store")
+        with store_session(*args, **kwargs) as store:
+            yield store
+
+    monkeypatch.setattr(team_service, "store_session", counted)
+
+    frame = board_frame(height=40, width=200).plain
+
+    assert f"`aisquare fleet switch --project {stored.codename} {agent.label}`" in frame
+    assert opened == ["store"]
+
+
+def test_a_limited_chips_switch_that_cannot_be_read_is_logged_not_swallowed(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review of #259, round 23, 8/10: ``fleet_switches`` fails open, and it did so silently.
+    A store or schema regression took the ``fleet switch`` off every limited chip, on the
+    board panel and in ``aisquare board``, with nothing anywhere saying so. It logs what it
+    swallowed, as ``_cycle_project`` does, and the board still gets no command."""
+    now = datetime.now(tz=UTC)
+    limited = TeamSession(
+        id="sess-limited-8",
+        project_id=project.id,
+        role="coder",
+        started_at=now,
+        last_seen_at=now,
+        state="limited",
+    )
+
+    def changed(self: SqliteStore, *args: object) -> FleetAgent | None:
+        raise sqlite3.OperationalError("no such column: session_id")
+
+    monkeypatch.setattr(SqliteStore, "fleet_agent_for_session", changed)
+
+    with (
+        caplog.at_level(logging.WARNING, logger="aisquare.services.team"),
+        store_session() as store,
+    ):
+        assert team_service.fleet_switches(store, [limited]) == {}
+
+    [record] = [r for r in caplog.records if r.name == "aisquare.services.team"]
+    assert "could not be read" in record.getMessage()
+    assert "OperationalError: no such column: session_id" in record.getMessage()
+
+
+# --- under a hub: one board, many fleet projects ------------------------------------------
+#
+# docs/fleet.md's rule ("Under a hub: one board, many fleet projects"): what the team reads
+# and writes goes to the session's board, the hub's under one; what finds an agent goes to
+# its row's own project and never asks the board. Without a hub the two are one project, so
+# every call site that asked the wrong one passed every other test (review of #259, rounds
+# 21 to 24). Each case below runs under a hub whose fleet project is another, and names the
+# project where it landed.
+
+
+@dataclass(frozen=True)
+class _Hubbed:
+    """A hub's board and a fleet project that is another: a manager and a coder spawned
+    into ``fleet``, both started on ``hub``'s board, the coder holding ``task``, its process
+    the one this test runs as. ``woken`` is the project of each manager a nudge went to."""
+
+    hub: ProjectInfo
+    fleet: ProjectInfo
+    manager: FleetAgent
+    coder: FleetAgent
+    task: TeamTask
+    tmux: FakeTmux
+    monkeypatch: pytest.MonkeyPatch
+    woken: list[str]
+    nudge: Any
+    """``fleet.nudge_manager`` itself, which the fixture replaces with a recorder."""
+
+    @property
+    def manager_sid(self) -> str:
+        assert self.manager.session_id is not None
+        return self.manager.session_id
+
+    @property
+    def coder_sid(self) -> str:
+        assert self.coder.session_id is not None
+        return self.coder.session_id
+
+
+@pytest.fixture
+def hubbed(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> _Hubbed:
+    hub_root = tmp_path / "hub"
+    hub_root.mkdir()
+    with store_session() as store:
+        hub = store.onboard_project(team_project(hub_root))
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub_root))
+    manager, manager_sid = _spawned(project, "manager", None, tmux, monkeypatch)
+    team_service.hook_session_start(manager_sid, project.root, "startup")
+    task = _task(project, "the coder's task, on the hub's board")
+    coder, coder_sid = _spawned(project, "coder", None, tmux, monkeypatch)
+    team_service.hook_session_start(coder_sid, project.root, "startup")
+    team_service.claim_task(task.id, session_ref=coder_sid)
+    woken: list[str] = []
+    real = fleet_service.nudge_manager
+
+    def nudge(project_id: str, *, reason: str, board: str | None = None) -> bool:
+        woken.append(project_id)
+        return True
+
+    monkeypatch.setattr(fleet_service, "nudge_manager", nudge)
+    assert task.project_id == hub.id != project.id
+    return _Hubbed(hub, project, manager, coder, task, tmux, monkeypatch, woken, real)
+
+
+def _delivered() -> str | None:
+    """The board the last attributed write was delivered to."""
+    delivery = team_service.last_delivery()
+    return delivery.board_id if delivery is not None else None
+
+
+def _named_by(command: str, w: _Hubbed) -> str | None:
+    """The id of the project ``command``'s ``--project`` names, of the hub and the fleet's."""
+    named = re.search(r"--project (\S+)", command)
+    with store_session() as store:
+        for project in (w.hub, w.fleet):
+            stored = store.get_project(project.id) or project
+            if named is not None and named.group(1) in (stored.codename, stored.id):
+                return project.id
+    return None
+
+
+def _case_task_add(w: _Hubbed) -> str | None:
+    task, _ = team_service.add_task("another task", session_ref=w.manager_sid)
+    return task.project_id
+
+
+def _case_note(w: _Hubbed) -> str | None:
+    team_service.add_note("which branch?", kind="question", session_ref=w.coder_sid)
+    return _delivered()
+
+
+def _case_task_next(w: _Hubbed) -> str | None:
+    team_service.add_task("a task for the pool", role="coder", session_ref=w.manager_sid)
+    picked = team_service.next_task(role="coder", claim=True, session_ref=w.coder_sid)
+    assert picked is not None
+    return picked.project_id
+
+
+def _case_task_review(w: _Hubbed) -> str | None:
+    team_service.review_task(w.task.id, note="green", session_ref=w.coder_sid)
+    return _delivered()
+
+
+def _case_task_done(w: _Hubbed) -> str | None:
+    team_service.finish_task(w.task.id, session_ref=w.coder_sid)
+    return _delivered()
+
+
+def _case_spawn_task(w: _Hubbed) -> str | None:
+    task, _ = team_service.add_task("a task to spawn for", role="coder", session_ref=w.manager_sid)
+    row = fleet_service.spawn(w.fleet, "coder", task_id=f"#{task.number}", worktree=False).agent
+    assert row.task_id is not None
+    return _task_now(row.task_id).project_id
+
+
+def _kept_by(w: _Hubbed, session_id: str) -> str | None:
+    """The board of the coder's task while ``session_id`` still holds it, else ``None``."""
+    task = _task_now(w.task.id)
+    return task.project_id if task.status == "doing" and task.claimed_by == session_id else None
+
+
+def _case_hand_over_keeps(w: _Hubbed) -> str | None:
+    with store_session() as store:
+        store.touch_session(w.coder_sid, state=team_service.HANDOVER_STATE)
+    team_service.hook_session_end(w.coder_sid, w.fleet.root, reason="prompt_input_exit")
+    return _kept_by(w, w.coder_sid)
+
+
+def _case_clear_keeps(w: _Hubbed) -> str | None:
+    team_service.hook_session_end(w.coder_sid, w.fleet.root, reason="clear")
+    return _kept_by(w, w.coder_sid)
+
+
+def _case_clear_adopts(w: _Hubbed) -> str | None:
+    _clear(w.coder_sid, "sess-after-clear", w.fleet)
+    with store_session() as store:
+        row = store.fleet_agent_for_session("sess-after-clear")
+    return row.project_id if row is not None else None
+
+
+def _fed_to(w: _Hubbed, kind: str) -> str | None:
+    """The one board, of the hub's and the fleet's, whose feed has a ``kind`` line."""
+    with store_session() as store:
+        boards = [
+            project.id
+            for project in (w.hub, w.fleet)
+            if any(event.kind == kind for event in store.recent_events(project.id, limit=100))
+        ]
+    return boards[0] if len(boards) == 1 else None
+
+
+def _ready_windows(w: _Hubbed) -> None:
+    """Every window the fleet opens from here runs ``claude`` at once, so a hand-off prompt
+    is pasted into it."""
+    original = w.tmux.spawn_window
+
+    def ready(*args: Any, **kwargs: Any) -> WindowInfo:
+        window = original(*args, **kwargs)
+        w.tmux.set_command(window.pane_id, "claude")
+        return window
+
+    w.monkeypatch.setattr(w.tmux, "spawn_window", ready)
+
+
+def _case_exited(w: _Hubbed) -> str | None:
+    w.tmux.die(w.coder.pane_id, 1)
+    fleet_service.reap()
+    return _fed_to(w, "agent_exited")
+
+
+def _case_restarted(w: _Hubbed) -> str | None:
+    w.tmux.die(w.coder.pane_id, 0)
+    fleet_service.restart(w.fleet, w.coder.label)
+    return _fed_to(w, "restarted")
+
+
+def _case_switched(w: _Hubbed) -> str | None:
+    _two_slots_with_usage(w.monkeypatch, work=95, personal=10)
+    fleet_service.switch(w.fleet, w.coder.label, to="2")
+    return _fed_to(w, "switched")
+
+
+def _case_hand_off_entries(w: _Hubbed) -> str | None:
+    team_service.add_note("halfway through the router", session_ref=w.coder_sid)
+    _ready_windows(w)
+    w.tmux.die(w.coder.pane_id, 0)
+    fleet_service.restart(w.fleet, w.coder.label)
+    [prompt] = [text for _pane, kind, text in w.tmux.typed if kind == "paste"]
+    return _delivered() if "- note: halfway through the router" in prompt else None
+
+
+def _woke(w: _Hubbed, write: Callable[[], object]) -> str | None:
+    """The project of the one manager ``write`` nudged."""
+    w.woken.clear()
+    write()
+    return w.woken[0] if len(w.woken) == 1 else repr(w.woken)
+
+
+def _case_question_wakes(w: _Hubbed) -> str | None:
+    return _woke(
+        w, lambda: team_service.add_note("which branch?", kind="question", session_ref=w.coder_sid)
+    )
+
+
+def _case_result_wakes(w: _Hubbed) -> str | None:
+    return _woke(w, lambda: team_service.add_note("green", kind="result", session_ref=w.coder_sid))
+
+
+def _case_note_to_manager_wakes(w: _Hubbed) -> str | None:
+    return _woke(
+        w, lambda: team_service.add_note("fyi", to_role="manager", session_ref=w.coder_sid)
+    )
+
+
+def _case_done_wakes(w: _Hubbed) -> str | None:
+    return _woke(w, lambda: team_service.finish_task(w.task.id, session_ref=w.coder_sid))
+
+
+def _case_review_wakes(w: _Hubbed) -> str | None:
+    return _woke(w, lambda: team_service.review_task(w.task.id, session_ref=w.coder_sid))
+
+
+def _case_block_wakes(w: _Hubbed) -> str | None:
+    return _woke(
+        w, lambda: team_service.block_task(w.task.id, reason="no spec", session_ref=w.coder_sid)
+    )
+
+
+def _case_reopen_wakes(w: _Hubbed) -> str | None:
+    team_service.review_task(w.task.id, session_ref=w.coder_sid)
+    return _woke(
+        w, lambda: team_service.reopen_task(w.task.id, reason="red", session_ref=w.coder_sid)
+    )
+
+
+def _case_deferred_wake(w: _Hubbed) -> str | None:
+    team_service.add_note(
+        "which branch?", kind="question", to_role="manager", session_ref=w.coder_sid
+    )
+    _become(w.manager, w.tmux, w.monkeypatch, pid=PANE_PID, role="manager")
+    return _woke(
+        w,
+        lambda: team_service.hook_stop(w.manager_sid, w.fleet.root, stop_hook_active=True),
+    )
+
+
+def _case_cycle_project(w: _Hubbed) -> str | None:
+    with store_session() as store:
+        named = team_service._cycle_project(store, w.hub, w.fleet.root, w.manager_sid, named=None)
+    return named.id if named is not None else None
+
+
+def _case_limited_chip(w: _Hubbed) -> str | None:
+    with store_session() as store:
+        store.mark_limited(w.coder_sid, None)
+        session = store.get_session(w.coder_sid)
+        assert session is not None
+        switches = team_service.fleet_switches(store, [session])
+    return _named_by(switches[w.coder_sid], w)
+
+
+def _case_phone_note_wakes(w: _Hubbed) -> str | None:
+    # The phone's Board note to the manager: no session, the project's root (`write_note`).
+    return _woke(w, lambda: team_service.add_note("fyi", to_role="manager", cwd=w.fleet.root))
+
+
+def _case_phone_done_wakes(w: _Hubbed) -> str | None:
+    from aisquare.services.remote_server import live_writes
+
+    other, _ = _another_fleet_on_the_hub(w)
+    w.monkeypatch.chdir(other.root)  # Remote runs in the other project's folder
+    done = live_writes().handlers["task/done"]
+    return _woke(w, lambda: done({"ref": w.task.id, "project": w.fleet.id}))
+
+
+def _case_rowless_session_wakes(w: _Hubbed) -> str | None:
+    # A session no row holds: the human's own claude, an MCP client, a manager by hand.
+    _stranger(w.monkeypatch, "human")
+    team_service.hook_session_start("sess-by-hand", w.hub.root, "startup")
+    return _woke(w, lambda: team_service.finish_task(w.task.id, session_ref="sess-by-hand"))
+
+
+def _case_limit_nudge(w: _Hubbed) -> str | None:
+    team_service.hook_stop_failure(
+        w.coder_sid, error="rate_limit", message="You've hit your session limit", details=None
+    )
+    (woken,) = w.woken
+    return woken
+
+
+def _without_the_hub(w: _Hubbed) -> None:
+    """Run on as a caller that does not export the hub: ``asq``, the phone's Remote or a
+    plain shell (review of #259, round 25)."""
+    w.monkeypatch.delenv("AISQUARE_TEAM_HUB")
+
+
+def _for_its_task(w: _Hubbed) -> FleetAgent:
+    """The coder's row, now naming the task it holds, as a ``spawn --task`` row does."""
+    with store_session() as store:
+        return store.upsert_fleet_agent(w.coder.model_copy(update={"task_id": w.task.id}))
+
+
+def _window_board(w: _Hubbed, row: FleetAgent) -> str | None:
+    """The board the last window's ``launch`` and hooks resolve, under the hub it was given,
+    when that is the board ``row`` recorded; else ``None``."""
+    env, cwd = w.tmux.spawned[-1]["env"], w.tmux.spawned[-1]["cwd"]
+    assert isinstance(env, dict) and isinstance(cwd, (str, Path))
+    with pytest.MonkeyPatch.context() as window:
+        window.setenv("AISQUARE_TEAM_HUB", env["AISQUARE_TEAM_HUB"])
+        resolved = team_project(Path(cwd)).id
+    return resolved if resolved == row.board else None
+
+
+def _case_spawn_records(w: _Hubbed) -> str | None:
+    return _row(w.coder.id).board
+
+
+def _case_spawn_records_the_hub(w: _Hubbed) -> str | None:
+    spec = _row(w.coder.id).launch_spec
+    assert spec is not None and spec.hub is not None
+    with pytest.MonkeyPatch.context() as window:
+        window.setenv("AISQUARE_TEAM_HUB", spec.hub)
+        return team_project(w.fleet.root).id
+
+
+def _case_restart_without_the_hub(w: _Hubbed) -> str | None:
+    row = _for_its_task(w)
+    w.tmux.die(row.pane_id, 0)
+    _without_the_hub(w)
+    started = fleet_service.restart(w.fleet, row.label).started
+    assert started.task_id == w.task.id
+    return _window_board(w, started)
+
+
+def _case_switch_without_the_hub(w: _Hubbed) -> str | None:
+    row = _for_its_task(w)
+    _two_slots_with_usage(w.monkeypatch, work=95, personal=10)
+    _without_the_hub(w)
+    started = fleet_service.switch(w.fleet, row.label, to="2").started
+    assert started.task_id == w.task.id
+    return _window_board(w, started)
+
+
+def _case_exited_without_a_session_or_the_hub(w: _Hubbed) -> str | None:
+    row = fleet_service.spawn(w.fleet, "coder", worktree=False).agent  # its hook never ran
+    _without_the_hub(w)
+    w.tmux.die(row.pane_id, 1)
+    fleet_service.reap()
+    return _fed_to(w, "agent_exited")
+
+
+def _spawned_without_the_hub(w: _Hubbed) -> FleetAgent:
+    """A coder spawned by a caller that exported no hub, the hub set again after."""
+    _without_the_hub(w)
+    row = fleet_service.spawn(w.fleet, "coder", worktree=False).agent
+    w.monkeypatch.setenv("AISQUARE_TEAM_HUB", str(w.hub.root))
+    return row
+
+
+def _case_restart_under_the_hub_of_a_row_without(w: _Hubbed) -> str | None:
+    row = _spawned_without_the_hub(w)
+    w.tmux.die(row.pane_id, 0)
+    return _window_board(w, fleet_service.restart(w.fleet, row.label).started)
+
+
+def _case_exited_under_the_hub_of_a_row_without(w: _Hubbed) -> str | None:
+    row = _spawned_without_the_hub(w)
+    w.tmux.die(row.pane_id, 1)
+    fleet_service.reap()
+    return _fed_to(w, "agent_exited")
+
+
+def _paused_on(w: _Hubbed, project: ProjectInfo | None = None) -> list[str]:
+    """The boards, of the hub's and the fleet's, where the ``fleet-paused`` signal of
+    ``project`` (the fleet's by default) reads ON, by its name there
+    (``harness.pause_signal``)."""
+    paused = project or w.fleet
+    with store_session() as store:
+        return [
+            board.id
+            for board in (w.hub, w.fleet)
+            for name in [harness.pause_signal(paused.id, board.id)]
+            for state in [team_service._read_signal(store, board.id, name)]
+            if state is not None and state.value == "on"
+        ]
+
+
+def _case_pause(w: _Hubbed) -> str | None:
+    """The board the manager reads, if the pause is on it. It is also on the fleet's own
+    board, its checkout's, where a manager spawned without the hub reads
+    (``fleet._pause_homes``), and nowhere else."""
+    fleet_service.pause(w.fleet)
+    paused = _paused_on(w)
+    assert _is_paused(w.fleet)
+    fleet_service.resume(w.fleet)
+    assert _paused_on(w) == [] and not _is_paused(w.fleet)
+    assert sorted(paused) == sorted([w.hub.id, w.fleet.id]), paused
+    return _row(w.manager.id).board if _row(w.manager.id).board in paused else None
+
+
+def _case_pause_without_the_hub(w: _Hubbed) -> str | None:
+    _without_the_hub(w)
+    return _case_pause(w)
+
+
+def _case_tell_unhubbed(w: _Hubbed) -> str | None:
+    _without_the_hub(w)  # `asq`, the phone's tell or a plain shell
+    told = fleet_service.tell(w.fleet, w.coder.label, "please rebase")
+    assert not told.delivered and "filed as board note" in told.how, told
+    return _delivered()
+
+
+def _case_pause_is_its_projects(w: _Hubbed) -> str | None:
+    fleet_service.pause(w.fleet)
+    paused = [project.id for project in (w.hub, w.fleet) if _is_paused(project)]
+    return paused[0] if len(paused) == 1 else repr(paused)
+
+
+def _case_shutdown_clears_the_pause(w: _Hubbed) -> str | None:
+    # Set by the manager itself, `team signal <its pause> on`, where its cycle reads it.
+    team_service.set_signal(
+        harness.pause_signal(w.fleet.id, w.hub.id), "on", session_ref=w.manager_sid
+    )
+    (paused,) = _paused_on(w)
+    report = fleet_service.shutdown(w.fleet)
+    assert _paused_on(w) == [] and report.paused_cleared, report
+    return paused
+
+
+#: Each case: which of the rule's two places it goes to, what it is, and how to run it.
+#: A board case is about an agent spawned under the hub; the board is the one its spawn
+#: recorded, whoever asks, with the hub or without it.
+_HUB_RULE_CASES: list[tuple[str, str, Any]] = [
+    ("board", "task add", _case_task_add),
+    ("board", "a question on the feed", _case_note),
+    ("board", "task next --claim", _case_task_next),
+    ("board", "task review", _case_task_review),
+    ("board", "task done", _case_task_done),
+    ("board", "the task fleet spawn --task gives", _case_spawn_task),
+    ("board", "the claim a hand-over's SessionEnd keeps", _case_hand_over_keeps),
+    ("board", "the claim a /clear's SessionEnd keeps", _case_clear_keeps),
+    ("board", "agent_exited", _case_exited),
+    ("board", "restarted", _case_restarted),
+    ("board", "switched", _case_switched),
+    ("board", "the entries a hand-off prompt quotes", _case_hand_off_entries),
+    ("board", "the board a spawn records", _case_spawn_records),
+    ("board", "the board under the hub a spawn records", _case_spawn_records_the_hub),
+    ("board", "a restart from a caller without the hub", _case_restart_without_the_hub),
+    ("board", "a switch from a caller without the hub", _case_switch_without_the_hub),
+    ("board", "agent_exited, no session, the hub unset", _case_exited_without_a_session_or_the_hub),
+    ("board", "fleet pause and resume", _case_pause),
+    ("board", "fleet pause from a caller without the hub", _case_pause_without_the_hub),
+    ("board", "the pause fleet shutdown clears", _case_shutdown_clears_the_pause),
+    ("fleet", "the project a pause on the hub's board pauses", _case_pause_is_its_projects),
+    ("board", "the note fleet tell files from a caller without the hub", _case_tell_unhubbed),
+    (
+        "fleet",
+        "a restart under the hub of a row without",
+        _case_restart_under_the_hub_of_a_row_without,
+    ),
+    (
+        "fleet",
+        "agent_exited under the hub of a row without",
+        _case_exited_under_the_hub_of_a_row_without,
+    ),
+    ("fleet", "the row a /clear's next id is adopted onto", _case_clear_adopts),
+    ("fleet", "the cycle's --project", _case_cycle_project),
+    ("fleet", "a limited chip's fleet switch", _case_limited_chip),
+    ("fleet", "the manager a usage limit wakes", _case_limit_nudge),
+    ("fleet", "the manager a question wakes", _case_question_wakes),
+    ("fleet", "the manager a result wakes", _case_result_wakes),
+    ("fleet", "the manager a note --to manager wakes", _case_note_to_manager_wakes),
+    ("fleet", "the manager task done wakes", _case_done_wakes),
+    ("fleet", "the manager task review wakes", _case_review_wakes),
+    ("fleet", "the manager task block wakes", _case_block_wakes),
+    ("fleet", "the manager task reopen wakes", _case_reopen_wakes),
+    ("fleet", "the manager a deferred Stop wakes", _case_deferred_wake),
+    ("fleet", "the manager the phone's note wakes", _case_phone_note_wakes),
+    ("fleet", "the manager the phone's task done wakes", _case_phone_done_wakes),
+    ("fleet", "the manager a session with no row wakes", _case_rowless_session_wakes),
+]
+
+
+def test_under_a_hub_a_manager_spawns_its_coder_for_a_task_it_added(hubbed: _Hubbed) -> None:
+    """Review of #259, round 24, 2/6: since round 22 a hub manager's cycle spawns its coders
+    in its own row's project, while ``task add`` puts every task on the hub's board, and
+    ``fleet spawn --task`` looked the task up on the project it spawns into: "task … belongs
+    to another project's board" for every task the manager had added, and ``--task 12`` read
+    that project's #12. The task is looked up on the board the agent will read, the hub's;
+    ``restart`` checks the task there too. A task of the fleet project's own board is the
+    one now refused: the agent would never see it."""
+    task, _ = team_service.add_task("the hub's task", role="coder", session_ref=hubbed.manager_sid)
+
+    row = fleet_service.spawn(hubbed.fleet, "coder", task_id=f"#{task.number}", worktree=False)
+
+    assert row.agent.project_id == hubbed.fleet.id and row.agent.task_id == task.id
+    hubbed.tmux.die(row.agent.pane_id, 0)
+    assert fleet_service.restart(hubbed.fleet, row.agent.label).started.task_id == task.id
+    hubbed.monkeypatch.delenv("AISQUARE_TEAM_HUB")
+    stray, _ = team_service.add_task("the fleet project's own task", cwd=hubbed.fleet.root)
+    hubbed.monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hubbed.hub.root))
+    assert stray.project_id == hubbed.fleet.id
+    with pytest.raises(FleetError, match="belongs to another project's board"):
+        fleet_service.spawn(hubbed.fleet, "coder", task_id=stray.id, worktree=False)
+
+
+@pytest.mark.parametrize("reason", ["switch", "clear"])
+def test_under_a_hub_a_hand_over_or_a_clear_keeps_the_agents_claims(
+    hubbed: _Hubbed, reason: str
+) -> None:
+    """Review of #259, round 24, 1/6: the SessionEnd of a hand-over or a ``/clear`` keeps the
+    agent's claims when the session is a live fleet row's, and it asked for the row with the
+    session's board. Under a hub that is the hub's, where the row is not: a coder's
+    usage-limit switch released its task back to the pool, with ``task_released`` on the
+    feed, and its replacement inherited nothing; its ``/clear`` released it the same way.
+    The row is found in any project, and the claims wait for the id that follows."""
+    with store_session() as store:
+        if reason == "switch":
+            store.touch_session(hubbed.coder_sid, state=team_service.HANDOVER_STATE)
+
+    team_service.hook_session_end(
+        hubbed.coder_sid, hubbed.fleet.root, reason="clear" if reason == "clear" else "other"
+    )
+
+    task = _task_now(hubbed.task.id)
+    assert (task.status, task.claimed_by) == ("doing", hubbed.coder_sid)
+    with store_session() as store:
+        assert not [e for e in store.recent_events(hubbed.hub.id) if e.kind == "task_released"]
+        ended = store.get_session(hubbed.coder_sid)
+    assert ended is not None and ended.ended_at is not None, "the presence is retired"
+
+
+@pytest.mark.parametrize("bound_at", ["the start hook", "the next prompt"])
+def test_under_a_hub_a_clears_next_id_is_bound_to_the_row_and_told_its_task(
+    hubbed: _Hubbed, bound_at: str
+) -> None:
+    """Review of #259, round 24, 5/6: the start hook after a ``/clear``, and the prompt that
+    tries again when tmux did not answer it, bind the new id to the row through the
+    assignment, which asked for the row with the session's board and dropped a row of
+    another project. Under a hub that is every row: the row stayed bound to the ended id,
+    the claims parked on it, and every lookup by the new id missed, the usage-limit
+    hand-over's and the board chip's included. The row is adopted in any project, and the
+    ASSIGNED TO YOU block still names only a task of the session's board."""
+    task, _ = team_service.add_task("the hub's task", role="coder", session_ref=hubbed.manager_sid)
+    row = fleet_service.spawn(hubbed.fleet, "coder", task_id=task.id, worktree=False).agent
+    assert row.session_id is not None
+    _become(row, hubbed.tmux, hubbed.monkeypatch, pid=PANE_PID, role="coder")
+    team_service.hook_session_start(row.session_id, hubbed.fleet.root, "startup")
+    team_service.claim_task(task.id, session_ref=row.session_id)
+
+    team_service.hook_session_end(row.session_id, hubbed.fleet.root, reason="clear")
+    if bound_at == "the next prompt":
+        pid = hubbed.tmux.pids.pop(row.pane_id)  # tmux does not answer the start hook
+        started = team_service.hook_session_start("sess-next", hubbed.fleet.root, "clear")
+        assert "ASSIGNED TO YOU" not in started and _row(row.id).session_id == row.session_id
+        hubbed.tmux.pids[row.pane_id] = pid
+        briefed = team_service.hook_prompt_heartbeat("sess-next", hubbed.fleet.root)
+    else:
+        briefed = team_service.hook_session_start("sess-next", hubbed.fleet.root, "clear")
+
+    assert _row(row.id).session_id == "sess-next"
+    assert (_task_now(task.id).status, _task_now(task.id).claimed_by) == ("doing", "sess-next")
+    assert f"ASSIGNED TO YOU: {task.id} [doing]" in briefed
+    assert "You are the one working it" in briefed
+
+
+def test_under_a_hub_the_briefing_names_no_task_of_another_board(hubbed: _Hubbed) -> None:
+    """The other half of 5/6: the row is found in any project, its task only on the
+    session's board. A row spawned for a task of its own project's board, before the hub
+    was set, is still this session's row, and the briefing tells it of no task it cannot
+    see on its board."""
+    hubbed.monkeypatch.delenv("AISQUARE_TEAM_HUB")
+    stray, _ = team_service.add_task("the fleet project's own task", cwd=hubbed.fleet.root)
+    row = fleet_service.spawn(hubbed.fleet, "coder", task_id=stray.id, worktree=False).agent
+    hubbed.monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hubbed.hub.root))
+    assert row.session_id is not None and stray.project_id == hubbed.fleet.id
+    _become(row, hubbed.tmux, hubbed.monkeypatch, pid=PANE_PID, role="coder")
+
+    started = team_service.hook_session_start(row.session_id, hubbed.fleet.root, "startup")
+
+    assert "ASSIGNED TO YOU" not in started and stray.id not in started
+    with store_session() as store:
+        found = store.fleet_agent_for_session(row.session_id)
+    assert found is not None and found.id == row.id
+
+
+def test_a_prompt_under_a_fleet_window_reads_the_row_it_names_once(hubbed: _Hubbed) -> None:
+    """Review of #259, round 24, 6/6: ``_late_assignment``, on every prompt of a session
+    under a fleet window that no row is bound to, read the row ``AISQUARE_FLEET_AGENT``
+    names twice, a GLOB on its id each time: once to ask whether the session is bound,
+    and again for the assignment. Read once, it is handed to both. A child of the agent,
+    which inherits the variable and is refused the row, is that session at every prompt."""
+    _become(hubbed.coder, hubbed.tmux, hubbed.monkeypatch, pid=CHILD_PID, role="coder")
+    team_service.hook_session_start("sess-child", hubbed.fleet.root, "startup")
+    reads: list[str] = []
+    real = SqliteStore.get_fleet_agent
+
+    def counted(self: SqliteStore, agent_id: str) -> FleetAgent | None:
+        reads.append(agent_id)
+        return real(self, agent_id)
+
+    hubbed.monkeypatch.setattr(SqliteStore, "get_fleet_agent", counted)
+
+    team_service.hook_prompt_heartbeat("sess-child", hubbed.fleet.root)
+
+    assert reads == [hubbed.coder.id]
+    assert _row(hubbed.coder.id).session_id == hubbed.coder_sid, "the child is refused it"
+
+
+def test_under_a_hub_a_manager_is_told_its_coder_exited_and_was_restarted(
+    hubbed: _Hubbed,
+) -> None:
+    """Review of #259, round 24, 3/6: since round 22 a hub manager's coders are spawned
+    into its row's project, and the fleet wrote ``agent_exited``, ``switched`` and
+    ``restarted`` to the row's project's board. The manager reads its session's, the hub's,
+    at its Stop and in its prompt deltas, so it never heard that a coder had died, and a
+    nudge woke it to an empty delta. They go to the board the row's session reads."""
+    _become(hubbed.manager, hubbed.tmux, hubbed.monkeypatch, pid=PANE_PID, role="manager")
+    team_service.hook_prompt_heartbeat(hubbed.manager_sid, hubbed.fleet.root)  # caught up
+    hubbed.tmux.die(hubbed.coder.pane_id, 1)
+
+    fleet_service.reap()
+    fleet_service.restart(hubbed.fleet, hubbed.coder.label)
+
+    delta = team_service.hook_prompt_heartbeat(hubbed.manager_sid, hubbed.fleet.root)
+    assert f"{hubbed.coder.label} exited (1)" in delta
+    assert f"{hubbed.coder.label} restarted" in delta
+    assert hubbed.woken and set(hubbed.woken) == {hubbed.fleet.id}, "its own manager"
+    with store_session() as store:
+        assert not store.recent_events(hubbed.fleet.id), "nothing on a board nobody reads"
+
+
+def test_under_a_hub_a_write_with_no_row_wakes_the_manager_of_the_writers_project(
+    hubbed: _Hubbed, plain_project: ProjectInfo
+) -> None:
+    """Review of #259, round 25, 5/10: a writer with no fleet row (the phone, a shell, an
+    MCP client) nudged the board's project's manager, under a hub the hub's, where none has
+    a row. It wakes the manager that reads the board, and with two on one hub, the one
+    whose project holds the writer's directory; in neither, none."""
+    other, _ = _spawned(plain_project, "manager", None, hubbed.tmux, hubbed.monkeypatch)
+    assert other.board == hubbed.manager.board == hubbed.hub.id
+
+    for where, woken in (
+        (plain_project.root, [plain_project.id]),
+        (hubbed.fleet.root, [hubbed.fleet.id]),
+        (hubbed.hub.root, [hubbed.hub.id]),  # neither project's: the board's, as before
+    ):
+        hubbed.woken.clear()
+        team_service.add_note("which branch?", kind="question", cwd=where)
+        assert hubbed.woken == woken, where
+
+
+def test_a_usage_limit_reads_the_agents_row_once(hubbed: _Hubbed) -> None:
+    """Review of #259, round 25, 8/10: ``hook_stop_failure`` read the session's row for the
+    limit line's label and command, then ``_nudge_target`` read the same row again for the
+    manager to wake. The row read once names both; a re-fire of the limit nudges nobody."""
+    reads: list[str] = []
+    real = SqliteStore.fleet_agent_for_session
+
+    def counted(self: SqliteStore, session_id: str) -> FleetAgent | None:
+        reads.append(session_id)
+        return real(self, session_id)
+
+    hubbed.monkeypatch.setattr(SqliteStore, "fleet_agent_for_session", counted)
+    limit = "You've hit your session limit · resets 12:30am"
+
+    team_service.hook_stop_failure(
+        hubbed.coder_sid, error="rate_limit", message=limit, details=None
+    )
+    team_service.hook_stop_failure(
+        hubbed.coder_sid, error="rate_limit", message=limit, details=None
+    )
+
+    assert reads == [hubbed.coder_sid, hubbed.coder_sid], "once a call"
+    assert hubbed.woken == [hubbed.fleet.id], "its own manager, once"
+
+
+@pytest.mark.parametrize(("verb", "looked_up"), [("drop", 0), ("done", 1)])
+def test_a_task_dropped_looks_up_no_manager_to_wake(
+    hubbed: _Hubbed, verb: str, looked_up: int
+) -> None:
+    """Review of #259, round 25, 9/10: ``_finish_task`` worked out the manager a write wakes,
+    a lookup of the writer's live row, for every status, ``drop`` too, whose caller threw
+    it away. Only a status that wakes looks."""
+    reads: list[str] = []
+    real = SqliteStore.fleet_agent_for_session
+
+    def counted(self: SqliteStore, session_id: str) -> FleetAgent | None:
+        reads.append(session_id)
+        return real(self, session_id)
+
+    hubbed.monkeypatch.setattr(SqliteStore, "fleet_agent_for_session", counted)
+    finish = team_service.drop_task if verb == "drop" else team_service.finish_task
+
+    finish(hubbed.task.id, session_ref=hubbed.coder_sid)
+
+    assert len(reads) == looked_up
+    assert hubbed.woken == ([hubbed.fleet.id] if looked_up else [])
+
+
+@pytest.mark.parametrize("nested", ["a sub-folder", "a linked worktree"])
+def test_a_project_rooted_below_its_checkout_spawns_for_a_task_on_the_checkouts_board(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    nested: str,
+) -> None:
+    """Review of #259, round 25, 3/10: a project rooted in a sub-folder of its repository,
+    or at a linked worktree, has its manager, its sessions and every ``task add`` on its
+    principal checkout's board, as ``team_project`` maps it. ``fleet spawn --task`` looked
+    the task up on the project's own id ("no task #1 on this board"; "belongs to another
+    project's board" by id). The board is the one the agent's window resolves, recorded."""
+    if nested == "a sub-folder":
+        root = project.root / "api"
+        root.mkdir()
+    else:
+        root = tmp_path / "wt"
+        _git("worktree", "add", "-q", "-b", "wt", str(root), cwd=project.root)
+    below = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
+    with store_session() as store:
+        store.onboard_project(below)
+    task, _ = team_service.add_task("the checkout's task", role="coder", cwd=root)
+    assert task.project_id == project.id != below.id, "the checkout's board, added"
+
+    row = fleet_service.spawn(below, "coder", task_id=f"#{task.number}", worktree=False).agent
+
+    assert (row.project_id, row.task_id, row.board) == (below.id, task.id, task.project_id)
+    tmux.die(row.pane_id, 0)
+    assert fleet_service.restart(below, row.label).started.task_id == task.id
+
+
+def _last_window_hub(tmux: FakeTmux) -> object:
+    """The ``AISQUARE_TEAM_HUB`` the last window the fleet opened was given."""
+    env = tmux.spawned[-1]["env"]
+    assert isinstance(env, dict)
+    return env["AISQUARE_TEAM_HUB"]
+
+
+def test_a_replacement_gets_the_hub_its_agents_window_was_given_never_one_worked_out(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 26, 8/11: a restart's window was given a hub worked out from the
+    board the row recorded, "a board that is not the checkout's is a hub, at its root". For a
+    project rooted at ``repo/api``, whose window reads ``repo``'s board, a row that read as its
+    own project's (0.8.0 writes no board, and a session that never registered gives the
+    project's) got ``AISQUARE_TEAM_HUB=repo/api``: a private board its manager never reads,
+    recorded again by every restart after. And a window spawned under the hub ``repo``, whose
+    board is the checkout's too, came back with none. The spawn records the hub its window
+    was given (``LaunchSpec.hub``), and a replacement is given it again."""
+    root = project.root / "api"
+    root.mkdir()
+    with store_session() as store:
+        below = store.onboard_project(ProjectInfo(id=project_id_for(root), root=root))
+    plain = _coder(below, label="coder-plain")
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(project.root))  # the checkout, as a hub
+    under = _coder(below, label="coder-under")
+    monkeypatch.delenv("AISQUARE_TEAM_HUB")
+    assert plain.launch_spec is not None and plain.launch_spec.hub == ""
+    assert under.launch_spec is not None and under.launch_spec.hub == str(project.root)
+    assert plain.board == under.board == project.id, "the checkout's board, both"
+    raw = sqlite3.connect(str(paths.db_path()))
+    try:
+        legacy = json.loads(plain.launch_spec.model_dump_json())
+        del legacy["hub"]  # as a build from before the field wrote it
+        raw.execute(
+            "UPDATE fleet_agent SET board = NULL, launch_spec = ? WHERE id = ?",
+            (json.dumps(legacy), plain.id),
+        )
+        raw.commit()
+    finally:
+        raw.close()
+    assert _row(plain.id).board == below.id, "no session registered: its project's"
+
+    tmux.die(plain.pane_id, 0)
+    again = fleet_service.restart(below, plain.label).started
+
+    assert _last_window_hub(tmux) == "", "no hub: the window reads the checkout's board"
+    assert again.board == project.id and again.launch_spec is not None
+    assert again.launch_spec.hub == ""
+    tmux.die(under.pane_id, 0)
+    kept = fleet_service.restart(below, under.label).started
+    assert _last_window_hub(tmux) == str(project.root), "the hub it was spawned under"
+    assert kept.board == project.id
+
+
+def _as_080_left_it(agent: FleetAgent) -> None:
+    """The row as 0.8.0 wrote it: no board recorded, and a launch spec without the hub."""
+    assert agent.launch_spec is not None
+    legacy = json.loads(agent.launch_spec.model_dump_json())
+    del legacy["hub"]
+    raw = sqlite3.connect(str(paths.db_path()))
+    try:
+        raw.execute(
+            "UPDATE fleet_agent SET board = NULL, launch_spec = ? WHERE id = ?",
+            (json.dumps(legacy), agent.id),
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+
+def _project_below(project: ProjectInfo) -> ProjectInfo:
+    """A project rooted at ``<checkout>/api``, a sub-folder of ``project``'s repository."""
+    root = project.root / "api"
+    root.mkdir()
+    with store_session() as store:
+        return store.onboard_project(ProjectInfo(id=project_id_for(root), root=root))
+
+
+@pytest.mark.parametrize("verb", ["restart", "switch"])
+def test_a_080_agent_of_a_sub_folder_project_with_its_own_board_is_replaced_on_it(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    verb: str,
+) -> None:
+    """Review of #259, round 27, 2/7: in 0.8.0 a project rooted at ``repo/api`` had a board
+    of its own only under ``AISQUARE_TEAM_HUB=repo/api``, its sessions and its ``--task``
+    tasks on it, and the backfill gives its rows that board, their session's. A spec from
+    before the hub field mapped the project's own board to the checkout's: a restart or a
+    switch checked the task on the row's board, stopped the agent, and its replacement was
+    refused the task ("belongs to another project's board"), the agent left down. The
+    session registered on it says the board was read: the replacement reads it, under the
+    hub that gives it, and takes the task."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    below = _project_below(project)
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(below.root))
+    task = _add_task(below, "api's own task")
+    agent = _coder(below, task_id=task.id, account="2")
+    monkeypatch.delenv("AISQUARE_TEAM_HUB")
+    _with_transcript(agent, None)  # its session, registered on the board it read
+    _as_080_left_it(agent)
+    assert _row(agent.id).board == below.id != project.id
+
+    if verb == "restart":
+        again = fleet_service.restart(below, agent.label).started
+    else:
+        again = fleet_service.switch(below, agent.label).started
+
+    assert (again.board, again.task_id) == (below.id, task.id)
+    assert _last_window_hub(tmux) == str(below.root), "the hub that gives that board"
+    assert again.launch_spec is not None and again.launch_spec.hub == str(below.root)
+
+
+def test_a_080_agent_whose_session_never_registered_keeps_the_board_of_its_task(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 27, 2/7: a 0.8.0 row whose session never registered reads as its
+    project's board, and round 26 read such a board as a default, from the checkout. But
+    0.8.0 spawned for a task only on the board it gave the agent: a task on the project's own
+    board says that board was read, and the replacement keeps it, and the task."""
+    below = _project_below(project)
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(below.root))
+    task = _add_task(below, "api's own task")
+    agent = _coder(below, task_id=task.id)
+    monkeypatch.delenv("AISQUARE_TEAM_HUB")
+    _as_080_left_it(agent)
+    with store_session() as store:
+        assert agent.session_id is not None and store.get_session(agent.session_id) is None
+
+    again = fleet_service.restart(below, agent.label).started
+
+    assert (again.board, again.task_id) == (below.id, task.id)
+    assert _last_window_hub(tmux) == str(below.root)
+
+
+@pytest.mark.parametrize("ended", [False, True], ids=["live", "stopped"])
+def test_a_080_row_a_restart_moves_to_the_checkouts_board_holds_the_checkout_against_forget(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    ended: bool,
+) -> None:
+    """Review of #259, round 38, 3/4: the rows that hold a board were filed by the board each
+    recorded, and a 0.8.0 row of ``repo/api`` whose session never registered reads as its own
+    project's. A restart does not take that board at its word (round 27, 2/7): with no task
+    on it, the replacement reads the checkout's, ``repo``'s, and its ``launch`` adds ``repo``
+    back. So ``project forget repo`` went through, and the next restart undid it. The row is
+    filed under the board a restart starts it on, and the checkout's forget is refused. The
+    checkout is worked out once a project (a ``git`` call), not once a row."""
+    from aisquare.core import orchestrator
+
+    below = _project_below(project)
+    agent, other = _coder(below), _coder(below)
+    for each in (agent, other):
+        _as_080_left_it(each)
+    asked: list[Path | None] = []
+    real = orchestrator.directory_project
+
+    def counted(cwd: Path | None = None) -> ProjectInfo:
+        asked.append(cwd)
+        return real(cwd)
+
+    with store_session() as store:
+        assert agent.session_id is not None and store.get_session(agent.session_id) is None
+        if ended:
+            store.end_fleet_agent(agent.id, exit_status=0)
+        row = _row(agent.id)
+        assert row.board == below.id, "the premise: read as its project's"
+        assert fleet_service._board_and_hub(store, below, row, None) == (project.id, "")
+        monkeypatch.setattr(orchestrator, "directory_project", counted)
+        rows = project_service.reading_rows(store)
+    assert [each.id for each in rows.get(project.id, [])] == [agent.id, other.id], rows
+    assert below.id not in rows
+    assert asked == [below.root], "once for the project"
+
+    with pytest.raises(project_service.ProjectBusyError) as refused:
+        project_service.forget_project(project)
+
+    assert [reader.project.id for reader in refused.value.readers] == [below.id]
+    with store_session() as store:
+        assert store.get_project(project.id) is not None, "not forgotten"
+
+
+def test_a_080_row_that_shows_it_read_its_own_board_is_filed_without_a_git_call(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 39, 1/9: the rows that hold a board worked out each 0.8.0 row's
+    checkout (a ``git`` call) before asking the store whether the row read its own board,
+    and a row that did keeps it whatever the checkout is. Every 0.8.0 row's session
+    registered on its project's board, so each ``project forget``, prune and ``asq`` start
+    ran ``git`` once a project. A session registered on the board, or a task on it, says
+    so: no ``git``."""
+    from aisquare.core import orchestrator
+
+    below = _project_below(project)
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(below.root))
+    task = _add_task(below, "api's own task")
+    tasked = _coder(below, task_id=task.id)
+    monkeypatch.delenv("AISQUARE_TEAM_HUB")
+    registered = _coder(project)
+    _with_transcript(registered, None)  # its session, registered on its project's board
+    for each in (registered, tasked):
+        _as_080_left_it(each)
+    asked: list[Path | None] = []
+    real = orchestrator.directory_project
+
+    def counted(cwd: Path | None = None) -> ProjectInfo:
+        asked.append(cwd)
+        return real(cwd)
+
+    monkeypatch.setattr(orchestrator, "directory_project", counted)
+    with store_session() as store:
+        rows = project_service.reading_rows(store)
+
+    assert {board: [row.id for row in theirs] for board, theirs in rows.items()} == {
+        project.id: [registered.id],
+        below.id: [tasked.id],
+    }
+    assert asked == [], "the store said: no git"
+
+
+def test_a_projects_rows_after_its_checkout_is_known_are_filed_with_no_lookup(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 40, 4/6: since round 39 the rows that hold a board asked the
+    store of every 0.8.0 row (its session, then its task) before the checkout, and asked it
+    again for each row the checkout had already settled: a project rooted at its own
+    checkout, whose rows after its first ran no query before. Once a project's checkout is
+    known, a row whose board it is is filed with no lookup."""
+    from aisquare.core import orchestrator
+
+    rows = [_coder(project) for _ in range(3)]
+    for each in rows:
+        _as_080_left_it(each)  # no session registered, no task: the checkout settles it
+    asked: list[str] = []
+    real = orchestrator.directory_project
+
+    def counted(cwd: Path | None = None) -> ProjectInfo:
+        asked.append("git")
+        return real(cwd)
+
+    def counting(name: str) -> Callable[..., Any]:
+        read = getattr(SqliteStore, name)
+
+        def lookup(self: SqliteStore, *args: Any, **kwargs: Any) -> Any:
+            asked.append(name)
+            return read(self, *args, **kwargs)
+
+        return lookup
+
+    for name in ("get_session", "get_task"):
+        monkeypatch.setattr(SqliteStore, name, counting(name))
+    monkeypatch.setattr(orchestrator, "directory_project", counted)
+    with store_session() as store:
+        filed = project_service.reading_rows(store)
+
+    assert {board: [row.id for row in theirs] for board, theirs in filed.items()} == {
+        project.id: [row.id for row in rows]
+    }
+    assert asked == ["get_session", "git"], "the first row alone asks"
+
+
+@pytest.mark.parametrize("shape", ["shows nothing", "session", "task", "hub kept"])
+def test_the_holds_and_a_restart_read_a_rows_board_by_one_rule(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    shape: str,
+) -> None:
+    """Review of #259, round 39, 3/9: the board a restart starts a replacement on
+    (``_board_and_hub``) and the one the holds file its row under (``restart_board``) were
+    each worked out by a copy of the rule, and the next change to one would leave ``project
+    forget`` and prune judging holds by the old one. Both read one rule, and agree on every
+    shape a row of a sub-folder project comes in."""
+    below = _project_below(project)
+    if shape == "task":
+        monkeypatch.setenv("AISQUARE_TEAM_HUB", str(below.root))
+        agent = _coder(below, task_id=_add_task(below, "api's own task").id)
+        monkeypatch.delenv("AISQUARE_TEAM_HUB")
+    else:
+        agent = _coder(below)
+    if shape == "session":
+        _with_transcript(agent, None)
+    if shape != "hub kept":
+        _as_080_left_it(agent)
+
+    with store_session() as store:
+        row = _row(agent.id)
+        session = store.get_session(agent.session_id) if agent.session_id else None
+        board, _ = fleet_service._board_and_hub(store, below, row, session)
+        filed = fleet_service.restart_board(store, row, {})
+
+    assert filed == board == (below.id if shape in ("session", "task") else project.id)
+
+
+@pytest.mark.parametrize("root", ["a symlink loop", "a mount that answers EIO"])
+def test_a_080_row_whose_root_cannot_be_asked_keeps_its_board_and_fails_no_forget(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    root: str,
+) -> None:
+    """Review of #259, round 39, 2/9: the rows that hold a board work out the checkout of a
+    0.8.0 row's project, and nothing caught what that raised. A root that became a symlink
+    loop (``Path.resolve`` raises ``RuntimeError`` on 3.11 and 3.12), or a mount answering
+    ``EIO``, ended ``project forget`` of any other project in a traceback. Such a root is no
+    evidence: the row keeps its board, and the forget goes through."""
+    from aisquare.core import orchestrator
+
+    below = _project_below(project)
+    agent = _coder(below)
+    _as_080_left_it(agent)
+    if root == "a symlink loop":
+        shutil.rmtree(below.root)
+        below.root.symlink_to(below.root)
+    else:
+        real = orchestrator.directory_project
+
+        def unanswered(cwd: Path | None = None) -> ProjectInfo:
+            if cwd == below.root:
+                raise OSError(errno.EIO, os.strerror(errno.EIO), str(cwd))
+            return real(cwd)
+
+        monkeypatch.setattr(orchestrator, "directory_project", unanswered)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    with store_session() as store:
+        unrelated = store.onboard_project(ProjectInfo(id=project_id_for(elsewhere), root=elsewhere))
+        rows = project_service.reading_rows(store)
+
+    project_service.forget_project(unrelated)
+
+    filed = {board: [row.id for row in theirs] for board, theirs in rows.items()}
+    assert filed == {below.id: [agent.id]}, "on every Python (round 41, 1/6)"
+    with store_session() as store:
+        assert store.get_project(unrelated.id) is None, "forgotten"
+
+
+def test_a_080_row_whose_root_is_gone_keeps_its_board_and_holds_no_ancestor(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Review of #259, round 41, 3/6: a root that is simply gone raises nothing, and its
+    checkout was asked of it: ``git`` failed there, and ``find_project_root`` walked from the
+    missing path to the nearest ancestor with a marker. For a project that was its own
+    repository that ancestor is unrelated, as a dotfiles ``~/.git`` is to ``~/code/app``:
+    the stopped row was filed under the ancestor's board, and its ``project forget`` was
+    refused, naming ``app``. A gone root is no evidence of a checkout: the row keeps its
+    board, and the ancestor's forget goes through."""
+    app = project.root / "app"  # its own repository, below one that holds it (``~``)
+    app.mkdir()
+    _git("init", "-q", "-b", "main", cwd=app)
+    _git("commit", "-q", "--allow-empty", "-m", "init", cwd=app)
+    own = team_project(app)
+    with store_session() as store:
+        store.onboard_project(own)
+    agent = _coder(own)
+    _as_080_left_it(agent)
+    with store_session() as store:
+        store.end_fleet_agent(agent.id, exit_status=0)
+    remove_tree(app)  # a checkout with a commit: its objects are read-only
+
+    with store_session() as store:
+        rows = project_service.reading_rows(store)
+    project_service.forget_project(project)
+
+    assert {board: [row.id for row in theirs] for board, theirs in rows.items()} == {
+        own.id: [agent.id]
+    }
+    with store_session() as store:
+        assert store.get_project(project.id) is None, "forgotten"
+
+
+@pytest.mark.skipif(not can_deny_reads(), reason="mode 000 does not stop this user from reading")
+def test_a_080_row_whose_root_may_not_be_searched_keeps_its_board_on_every_python(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Review of #259, round 42, 5/11: a root that cannot be asked keeps its row's board only
+    while ``find_project_root`` raises for it, and from 3.14 ``Path.exists`` said False for
+    a marker under ``chmod 000``: the walk went on to the repository above, the stopped row
+    was filed under its board, and its ``project forget`` was refused. The markers are
+    stat-ed, so it raises on every Python: the row keeps its board, the forget goes through."""
+    below = _project_below(project)
+    agent = _coder(below)
+    _as_080_left_it(agent)
+    with store_session() as store:
+        store.end_fleet_agent(agent.id, exit_status=0)
+    below.root.chmod(0)
+    try:
+        with store_session() as store:
+            rows = project_service.reading_rows(store)
+        project_service.forget_project(project)
+    finally:
+        below.root.chmod(0o700)
+
+    assert {board: [row.id for row in theirs] for board, theirs in rows.items()} == {
+        below.id: [agent.id]
+    }
+    with store_session() as store:
+        assert store.get_project(project.id) is None, "forgotten"
+
+
+def test_a_restart_the_holds_and_a_pause_read_a_gone_roots_own_board_not_its_ancestors(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 42, 3/11: round 41 kept a gone root's row on its board in
+    ``restart_board`` alone. A restart (``_board_and_hub``) and a pause (``_pause_homes``)
+    still asked ``directory_project`` of the deleted ``~/code/app``, which walked to the
+    dotfiles ``~/.git``: the holds filed the row under ``app`` while its restart moved it onto
+    ``~``'s board, and the pause went on ``~``'s. ``find_project_root`` walks from no start
+    that is not a directory, and each reads ``app``'s own board."""
+    monkeypatch.delenv("AISQUARE_TEAM_HUB", raising=False)
+    app = project.root / "app"  # its own repository, below one that holds it (``~``)
+    app.mkdir()
+    _git("init", "-q", "-b", "main", cwd=app)
+    _git("commit", "-q", "--allow-empty", "-m", "init", cwd=app)
+    own = team_project(app)
+    with store_session() as store:
+        store.onboard_project(own)
+    agent = _coder(own)
+    _as_080_left_it(agent)  # no session on its own board, no task: read from the checkout
+    remove_tree(app)  # a checkout with a commit: its objects are read-only
+
+    with store_session() as store:
+        row = _row(agent.id)
+        board_and_hub = fleet_service._board_and_hub(store, own, row, None)
+        filed = fleet_service.restart_board(store, row, {})
+
+    assert board_and_hub == (own.id, ""), "not the ancestor's board"
+    assert filed == own.id
+    assert fleet_service._pause_homes(own) == {own.id}
+
+
+@pytest.mark.parametrize("root", ["a symlink loop", "under a folder it may not search"])
+def test_a_pause_restart_or_switch_whose_board_its_root_cannot_give_is_a_fleet_error(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    root: str,
+) -> None:
+    """Review of #259, round 43, 4/7: a pause (``_pause_homes``), and a restart or switch of a
+    row whose launch kept no hub (``_board_and_hub``), ask ``directory_project`` of the
+    project's root, which raises ``OSError`` for a root that became a symlink loop, or one
+    under a folder this user may not search. The ``fleet`` commands catch ``FleetError``
+    alone: ``fleet pause`` ended in a traceback, ``--json`` printing nothing. Each is a
+    ``FleetError`` that names the root."""
+    if root == "under a folder it may not search" and not can_deny_reads():
+        pytest.skip("mode 000 does not stop this user from reading")
+    monkeypatch.delenv("AISQUARE_TEAM_HUB", raising=False)
+    where = tmp_path / "locked" / "app"
+    where.mkdir(parents=True)
+    own = team_project(where)
+    with store_session() as store:
+        store.onboard_project(own)
+    agent = _coder(own)
+    _as_080_left_it(agent)  # no hub kept: its board is read from the checkout
+    codename = _codename(own)
+    if root == "a symlink loop":
+        where.rmdir()
+        where.symlink_to(where)
+    else:
+        where.parent.chmod(0)
+    try:
+        paused = runner.invoke(app, ["--json", "fleet", "pause", "--project", codename])
+        with pytest.raises(FleetError, match="cannot be worked out") as restarted:
+            fleet_service.restart(own, agent.label)
+        with store_session() as store, pytest.raises(FleetError) as switched:
+            fleet_service._board_and_hub(store, own, _row(agent.id), None)  # switch's
+    finally:
+        where.parent.chmod(0o700)
+
+    assert paused.exit_code == 1, paused.output
+    refused = json.loads(paused.stdout)
+    assert refused["error"] == "fleet_error"
+    assert f"its root {where} cannot be looked at" in refused["detail"]
+    assert str(where) in str(restarted.value) and str(where) in str(switched.value)
+    assert _row(agent.id).ended_at is None, "the restart stopped nothing"
+
+
+@pytest.mark.parametrize("table", ["team_session", "team_task"])
+def test_a_080_row_on_a_store_without_its_session_or_task_table_fails_no_forget_or_prune(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    table: str,
+) -> None:
+    """Review of #259, round 40, 1/6: the rows that hold a board asked the store whether a
+    0.8.0 row read its own board before the checkout (round 39, 1/9), and a store without
+    ``team_session`` or ``team_task`` (doctor's damaged-store case, which every fleet read
+    tolerates) raised "no such table" for a row with a session, or a task. ``project
+    forget`` of any other project and ``prune`` ended in a traceback, and doctor's
+    capture-off line was dropped without a word. That line was lost on such a store before
+    too: a captured row's last activity (``project_activity``) named both tables. A table
+    the store lacks shows nothing, and the row is read from the checkout."""
+    from aisquare.services import diagnostics
+
+    agent = _coder(project, task_id=_add_task(project, "Ship auth").id)
+    if table == "team_session":
+        _with_transcript(agent, None)  # its session, registered on its project's board
+    _as_080_left_it(agent)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    with store_session() as store:
+        unrelated = store.onboard_project(ProjectInfo(id=project_id_for(elsewhere), root=elsewhere))
+        store.ensure_project(ProjectInfo(id="prj_gone", root=tmp_path / "gone"))  # captured
+    raw = sqlite3.connect(str(paths.db_path()))
+    try:
+        raw.execute(f"DROP TABLE {table}")
+        raw.commit()
+    finally:
+        raw.close()
+
+    with store_session() as store:
+        assert not store.has_table(table) and store.has_table("fleet_agent")
+        rows = project_service.reading_rows(store)
+    [check] = diagnostics._check_captured_projects()
+    plan = project_service.prune_candidates(missing=True, worktrees=True)
+    report = project_service.prune(plan, purge=False, missing=True, worktrees=True)
+    project_service.forget_project(unrelated)
+
+    assert {board: [row.id for row in theirs] for board, theirs in rows.items()} == {
+        project.id: [agent.id]
+    }
+    assert check.detail.startswith("1 captured directory left from before project capture")
+    assert report.dropped == ["prj_gone"]
+    with store_session() as store:
+        assert store.get_project(unrelated.id) is None, "forgotten"
+
+
+@pytest.mark.parametrize("verb", ["restart", "switch"])
+def test_a_replacement_that_could_not_take_the_task_is_refused_before_the_stop(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    verb: str,
+) -> None:
+    """Review of #259, round 27, 2/7: the task was checked on the board the row recorded,
+    and the replacement looked it up on the board it would read, after the stop. Where the
+    two differ (here a board whose project the store no longer has, so the replacement
+    reads the board this process gives), the agent was stopped and then refused its
+    replacement. The task is checked on the replacement's board, before anything is
+    stopped."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    task = _add_task(project, "Ship auth")
+    agent = _coder(project, task_id=task.id, account="2")
+    _with_transcript(agent, None)
+    _as_080_left_it(agent)
+    raw = sqlite3.connect(str(paths.db_path()))
+    try:
+        for table, column, key in (
+            ("fleet_agent", "board", agent.id),
+            ("team_task", "project_id", task.id),
+        ):
+            raw.execute(f"UPDATE {table} SET {column} = 'prj_gone' WHERE id = ?", (key,))
+        raw.commit()
+    finally:
+        raw.close()
+    assert _row(agent.id).board == "prj_gone"
+
+    with pytest.raises(FleetError, match="belongs to another project's board"):
+        if verb == "restart":
+            fleet_service.restart(project, agent.label)
+        else:
+            fleet_service.switch(project, agent.label)
+
+    assert tmux.typed == [] and tmux.killed == [], "no /exit typed, no window killed"
+    assert len(tmux.spawned) == 1
+    with store_session() as store:
+        live = store.fleet_agent_by_label(project.id, agent.label, live_only=True)
+    assert live is not None and live.id == agent.id
+    assert _session_state(agent.session_id or "") == "working", "the session is not marked"
+
+
+@pytest.mark.parametrize("with_task", [True, False], ids=["with a task", "without one"])
+@pytest.mark.parametrize("verb", ["restart", "switch"])
+def test_a_080_agent_spawned_under_a_hub_forgotten_since_is_replaced_on_that_hub(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    verb: str,
+    with_task: bool,
+) -> None:
+    """Review of #259, round 31, 3/7: a row 0.8.0 spawned under hub H keeps no hub in its
+    launch, and the v32 backfill recorded H, its session's board. With H forgotten since
+    (``project forget``, to tidy the list), H counted as a board the store does not hold, so a
+    restart or a switch from a shell without the hub took the caller's board and hub: with a
+    task on H it was refused ("belongs to another project's board"), and without one the
+    replacement read P's checkout board, off the board its manager reads. H's tasks and
+    events are kept and the agent reads it, as Remote reads it since round 30, 2/8."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    (tmp_path / "hub").mkdir()
+    with store_session() as store:
+        hub = store.onboard_project(team_project(tmp_path / "hub"))
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub.root))
+    task = _add_task(hub, "the hub's task") if with_task else None
+    agent = _coder(project, task_id=None if task is None else task.id, account="2")
+    monkeypatch.delenv("AISQUARE_TEAM_HUB")
+    assert agent.launch_spec is not None and agent.board == hub.id
+    legacy = json.loads(agent.launch_spec.model_dump_json())
+    del legacy["hub"]  # as 0.8.0 wrote it; the backfill recorded the board
+    raw = sqlite3.connect(str(paths.db_path()))
+    try:
+        raw.execute(
+            "UPDATE fleet_agent SET launch_spec = ? WHERE id = ?", (json.dumps(legacy), agent.id)
+        )
+        raw.commit()
+    finally:
+        raw.close()
+    with store_session() as store:
+        store.forget_project(hub.id)
+        assert store.get_project(hub.id) is None, "forgotten"
+
+    if verb == "restart":
+        again = fleet_service.restart(project, agent.label).started
+    else:
+        again = fleet_service.switch(project, agent.label).started
+
+    assert (again.board, again.task_id) == (hub.id, None if task is None else task.id)
+    assert _last_window_hub(tmux) == str(hub.root), "the hub that gives that board"
+
+
+def test_a_fleet_row_from_before_v32_reads_its_sessions_board(hubbed: _Hubbed) -> None:
+    """v32's backfill: a row recorded before the board was reads the board of the session
+    bound to it, where its hooks registered, else its own project's."""
+    hubbed.monkeypatch.delenv("AISQUARE_TEAM_HUB")
+    unbound = fleet_service.spawn(hubbed.fleet, "coder", worktree=False).agent
+    raw = sqlite3.connect(str(paths.db_path()))
+    try:
+        raw.executescript(
+            "UPDATE fleet_agent SET board = NULL; "  # what a v31 store's rows hold
+            "ALTER TABLE fleet_agent DROP COLUMN board; PRAGMA user_version = 31;"
+        )
+    finally:
+        raw.close()
+
+    core_store.open_store().close()
+
+    assert _row(hubbed.coder.id).board == hubbed.hub.id, "its session's"
+    assert _row(unbound.id).board == hubbed.fleet.id, "no session registered: its project's"
+
+
+def test_a_fleet_row_an_older_build_writes_into_a_v32_store_reads_its_sessions_board(
+    hubbed: _Hubbed,
+) -> None:
+    """Review of #259, round 26, 9/11: 0.8.0 opens a v32 store as it is and writes no board,
+    and a row with none was read as its own project's, where the backfill gives a row from
+    before v32 its session's. Under a hub its exit went to the fleet project's board and its
+    pause was set there, neither where its manager reads. Read, it is the backfill's answer:
+    its session's board, else its project's."""
+    hubbed.monkeypatch.delenv("AISQUARE_TEAM_HUB")
+    unbound = fleet_service.spawn(hubbed.fleet, "coder", worktree=False).agent
+    raw = sqlite3.connect(str(paths.db_path()))
+    try:
+        raw.execute("UPDATE fleet_agent SET board = NULL")  # what a 0.8.0 spawn writes
+        raw.commit()
+    finally:
+        raw.close()
+
+    assert _row(hubbed.coder.id).board == hubbed.hub.id, "its session's"
+    assert _row(unbound.id).board == hubbed.fleet.id, "no session registered: its project's"
+    with store_session() as store:
+        listed = {row.id: row.board for row in store.fleet_agents(hubbed.fleet.id)}
+        assert listed[hubbed.manager.id] == hubbed.hub.id, "every read, not one of them"
+        by_session = store.fleet_agent_for_session(hubbed.coder_sid)
+        assert by_session is not None and by_session.board == hubbed.hub.id
+
+
+def test_of_two_managers_on_one_board_a_note_wakes_the_one_whose_root_holds_it_deepest(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 26, 5/11: with no hub, a project rooted at ``repo/api`` reads
+    ``repo``'s board, as ``repo``'s own project does. A writer with no row wakes the manager
+    that reads the board, and of several, the one whose root holds its directory: the oldest
+    of those, so the phone's note to ``api``'s manager, written in ``repo/api``, inside both
+    roots, woke ``repo``'s. The deepest root is the writer's project."""
+    sub = project.root / "api"
+    sub.mkdir()
+    with store_session() as store:
+        below = store.onboard_project(ProjectInfo(id=project_id_for(sub), root=sub))
+    for each in (project, below):  # the outer one first: the older manager
+        manager, sid = _spawned(each, "manager", None, tmux, monkeypatch)
+        team_service.hook_session_start(sid, each.root, "startup")
+        assert _row(manager.id).board == project.id, "the checkout's board, both"
+    woken: list[str] = []
+
+    def nudge(project_id: str, *, reason: str, board: str | None = None) -> bool:
+        woken.append(project_id)
+        return True
+
+    monkeypatch.setattr(fleet_service, "nudge_manager", nudge)
+
+    team_service.add_note("fyi", to_role="manager", cwd=sub)  # the phone's, in api's root
+    team_service.add_note("fyi", to_role="manager", cwd=project.root)
+
+    assert woken == [below.id, project.id]
+
+
+def test_under_a_hub_a_manager_launched_by_hand_defers_its_wake_to_nobody_else(
+    hubbed: _Hubbed,
+) -> None:
+    """Review of #259, round 26, 7/11: a manager's Stop that defers its wake-up
+    (``stop_hook_active``) nudges its own row. A manager the human launched by hand in
+    another project's folder has none, and was asked as a writer with no row: the one
+    manager that reads the hub's board, the fleet project's, got the nudge for the other's
+    turn typed into its pane. It wakes nobody; its news waits for its next prompt."""
+    other = hubbed.fleet.root.parent / "by-hand"
+    other.mkdir()
+    _stranger(hubbed.monkeypatch, "manager")
+    team_service.hook_session_start("sess-manager-by-hand", other, "startup")
+    team_service.add_note(
+        "which branch?", kind="question", to_role="manager", session_ref=hubbed.coder_sid
+    )
+    hubbed.woken.clear()
+
+    team_service.hook_stop("sess-manager-by-hand", other, stop_hook_active=True)
+
+    assert hubbed.woken == [], "no row of its own: nobody's pane"
+    _become(hubbed.manager, hubbed.tmux, hubbed.monkeypatch, pid=PANE_PID, role="manager")
+    team_service.hook_stop(hubbed.manager_sid, hubbed.fleet.root, stop_hook_active=True)
+    assert hubbed.woken == [hubbed.fleet.id], "a manager with a row still wakes its own"
+
+
+def test_a_nudge_wakes_a_manager_only_for_a_write_on_the_board_it_reads(hubbed: _Hubbed) -> None:
+    """Review of #259, round 26, 4/11: a write woke the manager of the writer's row's project
+    whatever board that manager reads. Spawned from ``asq`` under the hub, the manager reads
+    the hub's; a coder the human spawned from a shell without it reads its project's, where
+    its question lands. The nudge woke the manager to the hub's delta, which does not hold
+    the question, and it waited again. A manager is woken only for a write on its board,
+    and so for an exit on the board the row recorded."""
+    hubbed.monkeypatch.setattr(fleet_service, "nudge_manager", hubbed.nudge)
+    stray = _spawned_without_the_hub(hubbed)
+    assert stray.session_id is not None
+    hubbed.monkeypatch.delenv("AISQUARE_TEAM_HUB")
+    _become(stray, hubbed.tmux, hubbed.monkeypatch, pid=PANE_PID, role="coder")
+    team_service.hook_session_start(stray.session_id, hubbed.fleet.root, "startup")
+    hubbed.monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hubbed.hub.root))
+    assert stray.board == hubbed.fleet.id != hubbed.manager.board == hubbed.hub.id
+    hubbed.tmux.set_command(hubbed.manager.pane_id, "claude")
+    with store_session() as store:
+        store.touch_session(hubbed.manager_sid, state="waiting")
+    hubbed.tmux.typed.clear()
+
+    team_service.add_note("which branch?", kind="question", session_ref=stray.session_id)
+    hubbed.tmux.die(stray.pane_id, 1)
+    fleet_service.reap()
+
+    assert hubbed.tmux.typed == [], "its manager reads the hub's board, where neither is"
+    team_service.add_note("which branch?", kind="question", session_ref=hubbed.coder_sid)
+    assert hubbed.tmux.typed == [
+        (hubbed.manager.pane_id, "literal", NUDGE_TEXT),
+        (hubbed.manager.pane_id, "key", "Enter"),
+    ], "a write on the board it reads does wake it"
+
+
+@pytest.mark.parametrize("writer", ["the coder's task done", "the manager's deferred Stop"])
+def test_under_a_hub_a_waiting_manager_is_woken_by_its_coders_writes_and_its_own_stop(
+    hubbed: _Hubbed, writer: str
+) -> None:
+    """Review of #259, round 24, 4/6: round 23 moved the usage-limit nudge to the row's
+    project, and every other nudge still named the session's board, under a hub the hub's,
+    where no manager has a row: a coder's ``task done``, ``task review`` or question never
+    woke the manager waiting on it, and a Stop that deferred its wake (``stop_hook_active``)
+    lost it, the stall the deferral exists to prevent. Each nudges the manager of the
+    writer's own row's project, and the manager wakes to the hub board's delta."""
+    hubbed.monkeypatch.setattr(fleet_service, "nudge_manager", hubbed.nudge)
+    if writer == "the manager's deferred Stop":
+        team_service.add_note(
+            "which branch?", kind="question", to_role="manager", session_ref=hubbed.coder_sid
+        )
+    hubbed.tmux.set_command(hubbed.manager.pane_id, "claude")
+    with store_session() as store:
+        store.touch_session(hubbed.manager_sid, state="waiting")
+    hubbed.tmux.typed.clear()
+
+    if writer == "the manager's deferred Stop":
+        _become(hubbed.manager, hubbed.tmux, hubbed.monkeypatch, pid=PANE_PID, role="manager")
+        team_service.hook_stop(hubbed.manager_sid, hubbed.fleet.root, stop_hook_active=True)
+    else:
+        team_service.finish_task(hubbed.task.id, session_ref=hubbed.coder_sid)
+
+    assert hubbed.tmux.typed == [
+        (hubbed.manager.pane_id, "literal", NUDGE_TEXT),
+        (hubbed.manager.pane_id, "key", "Enter"),
+    ]
+    delta = team_service.hook_prompt_heartbeat(hubbed.manager_sid, hubbed.fleet.root)
+    assert "which branch?" in delta or hubbed.task.title in delta, delta
+
+
+@pytest.mark.parametrize(
+    ("where", "case"),
+    [pytest.param(where, run, id=f"{where}: {name}") for where, name, run in _HUB_RULE_CASES],
+)
+def test_under_a_hub_each_read_and_write_goes_where_the_rule_says(
+    hubbed: _Hubbed, where: str, case: Any
+) -> None:
+    """docs/fleet.md, "Under a hub: one board, many fleet projects": a board write lands on
+    the hub's board, a fleet lookup on the row's own project, and neither on the other."""
+    expected = hubbed.hub.id if where == "board" else hubbed.fleet.id
+
+    assert case(hubbed) == expected
+
+
+def test_a_note_on_a_forgotten_hub_is_drained_there_and_named_by_it(hubbed: _Hubbed) -> None:
+    """Review of #259, round 32, 7/9: ``add_note(board_id=...)`` named its board through a
+    lookup that read a forgotten project as none. A note ``fleet tell`` filed on a hub
+    forgotten since, where its agents still read, went there, but its receipt named the hub
+    by its id, and its drain ran in the caller's directory (``spawn_drain(root=None)``),
+    distilling the caller's board, not the hub's. Both are the hub's own."""
+    from aisquare.services import distill as distill_service
+
+    w = hubbed
+    drained: list[tuple[Path | None, str | None]] = []
+    w.monkeypatch.setattr(
+        distill_service,
+        "spawn_drain",
+        lambda cwd=None, *, root=None, board=None: drained.append((root, board)),
+    )
+    with store_session() as store:
+        store.forget_project(w.hub.id)  # as 0.8.1 before round 32 allowed, to tidy the list
+        assert store.get_project(w.hub.id) is None
+
+    team_service.add_note("ship it", to_role="coder-1", board_id=w.hub.id)
+
+    assert drained == [(w.hub.root, w.hub.id)]
+    receipt = team_service.last_delivery()
+    assert receipt is not None and (receipt.board_id, receipt.board_name) == (w.hub.id, "hub")
+    with store_session() as store:
+        assert store.get_project(w.hub.id) is None, "still forgotten"
+
+
+def _another_fleet_on_the_hub(w: _Hubbed, name: str = "other") -> tuple[ProjectInfo, str]:
+    """A second fleet project whose manager, spawned under the hub, reads the hub's board as
+    ``w.fleet``'s does; returns it and its manager's session."""
+    root = w.fleet.root.parent / name
+    root.mkdir()
+    with store_session() as store:
+        other = store.onboard_project(ProjectInfo(id=project_id_for(root), root=root))
+    _, sid = _spawned(other, "manager", None, w.tmux, w.monkeypatch)
+    team_service.hook_session_start(sid, root, "startup")
+    return other, sid
+
+
+def _manager_cycle(session_id: str, project: ProjectInfo) -> str:
+    """The standing cycle a manager session is briefed with, as one text."""
+    with store_session() as store:
+        me = store.get_session(session_id)
+    assert me is not None
+    return "\n".join(team_service._role_cycle(me, project))
+
+
+def test_under_a_hub_each_fleet_project_pauses_and_resumes_alone(hubbed: _Hubbed) -> None:
+    """Review of #259, round 26, 1/11: since round 25 a hub project's ``fleet-paused`` signal
+    is on the hub's board, which every fleet project under the hub reads, by one name. So
+    ``fleet pause -P a`` paused ``b``'s manager too, and ``fleet shutdown -P a`` cleared the
+    pause ``b``'s manager was still obeying, with ``--all`` saying ``b`` kept it. Each project's
+    pause is its own signal on the shared board, and each manager is told its own's name."""
+    other, other_sid = _another_fleet_on_the_hub(hubbed)
+    mine = harness.pause_signal(hubbed.fleet.id, hubbed.hub.id)
+    theirs = harness.pause_signal(other.id, hubbed.hub.id)
+    assert mine != theirs and fleet_service.PAUSE_SIGNAL not in (mine, theirs)
+    assert f"`{mine}`" in _manager_cycle(hubbed.manager_sid, hubbed.fleet)
+    assert f"`{theirs}`" in _manager_cycle(other_sid, other)
+
+    fleet_service.pause(other)
+
+    assert _is_paused(other) and not _is_paused(hubbed.fleet)
+    assert _paused_on(hubbed, other) == [hubbed.hub.id] and _paused_on(hubbed) == []
+    fleet_service.pause(hubbed.fleet)
+    fleet_service.resume(hubbed.fleet)
+    assert _is_paused(other), "a resume of one is not the other's"
+    fleet_service.pause(hubbed.fleet)
+
+    report = fleet_service.shutdown(hubbed.fleet)
+
+    assert report.paused_cleared == [fleet_service._name(hubbed.fleet)], report
+    assert not _is_paused(hubbed.fleet)
+    assert _is_paused(other), "the other project's manager still obeys its pause"
+
+
+@pytest.mark.parametrize("hubless", [False, True], ids=["under the hub", "without the hub"])
+@pytest.mark.parametrize("clear", ["resume", "shutdown"])
+def test_a_pause_is_cleared_where_a_manager_that_has_stopped_read_it(
+    hubbed: _Hubbed, clear: str, hubless: bool
+) -> None:
+    """Review of #259, round 29, 1/8: a pause's boards were the boards the project's live
+    rows recorded. With a manager spawned under the hub and a coder from a plain shell, the
+    pause went on both boards. Once the manager stopped, ``fleet shutdown`` and ``fleet
+    resume`` asked only the coder's, the checkout's, and the hub's stayed on: the next
+    manager spawned under the hub came up staffing nothing. The pause is on every board the
+    project's rows recorded, whichever are live, and the caller's hub does not change that."""
+    coder = _spawned_without_the_hub(hubbed)
+    assert coder.board == hubbed.fleet.id
+    fleet_service.pause(hubbed.fleet)
+    assert sorted(_paused_on(hubbed)) == sorted([hubbed.hub.id, hubbed.fleet.id])
+    fleet_service.stop(hubbed.fleet, fleet_service.MANAGER_LABEL, force=True)
+    fleet_service.stop(hubbed.fleet, hubbed.coder.label, force=True)
+    if hubless:
+        _without_the_hub(hubbed)
+
+    if clear == "resume":
+        fleet_service.resume(hubbed.fleet)
+    else:
+        report = fleet_service.shutdown(hubbed.fleet, force=True)
+        assert report.paused_cleared == [fleet_service._name(hubbed.fleet)], report
+
+    assert _paused_on(hubbed) == [] and not _is_paused(hubbed.fleet)
+
+
+def test_with_nothing_live_a_pause_goes_on_every_board_the_project_read(
+    hubbed: _Hubbed,
+) -> None:
+    """Review of #259, round 29, 1/8: with nothing live, ``fleet pause`` went to the newest
+    row's board, whatever its role: here a coder's, on the checkout's board, while only a
+    manager obeys the pause, and the next one spawned under the hub reads the hub's."""
+    coder = _spawned_without_the_hub(hubbed)
+    for label in (fleet_service.MANAGER_LABEL, hubbed.coder.label, coder.label):
+        fleet_service.stop(hubbed.fleet, label, force=True)
+
+    fleet_service.pause(hubbed.fleet)
+
+    assert sorted(_paused_on(hubbed)) == sorted([hubbed.hub.id, hubbed.fleet.id])
+
+
+def test_under_a_hub_the_phones_task_done_wakes_the_manager_of_the_project_it_names(
+    hubbed: _Hubbed,
+) -> None:
+    """Review of #259, round 26, 6/11: the phone's ``task done`` passed no directory, so of
+    the hub's two managers, the one it woke was the one whose root holds the directory
+    Remote runs in: started in the other project's folder, a done on this project's task
+    woke the other's manager. It writes in the project's root, as the phone's note does."""
+    from aisquare.services.remote_server import live_writes
+
+    other, _ = _another_fleet_on_the_hub(hubbed)
+    hubbed.monkeypatch.chdir(other.root)  # `asq`, and its Remote, started in the other's
+    hubbed.woken.clear()
+
+    live_writes().handlers["task/done"]({"ref": hubbed.task.id, "project": hubbed.fleet.id})
+
+    assert _task_now(hubbed.task.id).status == "done"
+    assert hubbed.woken == [hubbed.fleet.id]
+
+
+def test_under_a_hub_a_task_write_with_no_row_wakes_the_manager_of_the_tasks_own_row(
+    hubbed: _Hubbed, tmp_path: Path
+) -> None:
+    """Review of #259, round 27, 3/7: for a writer with no row, the manager a task write
+    woke was picked by the writer's directory alone. Under a hub with two fleet projects,
+    ``task done`` from ``~`` or an MCP client, outside both roots, woke nobody, and from the
+    other project's folder woke the other's manager. A task write wakes the manager of the
+    task's own row: the one spawned for it, else the row of the session that claimed it.
+    The directory still picks for a task no row works."""
+    other, _ = _another_fleet_on_the_hub(hubbed)
+    spawned_for = _task(hubbed.fleet, "spawned for this one")
+    fleet_service.spawn(hubbed.fleet, "coder", task_id=spawned_for.id, worktree=False)
+    claimed = _task(hubbed.fleet, "claimed, then blocked and reopened")
+    team_service.claim_task(claimed.id, session_ref=hubbed.coder_sid)
+    loose = _task(hubbed.fleet, "nobody's")
+    home = tmp_path / "home"
+    home.mkdir()
+
+    hubbed.woken.clear()
+    team_service.finish_task(spawned_for.id, cwd=home)  # `task done 7` from `~`
+    assert hubbed.woken == [hubbed.fleet.id], "the row spawned for it, retired by the done"
+
+    hubbed.monkeypatch.chdir(other.root)  # and from the other project's folder
+    writes: list[Callable[[], TeamTask]] = [
+        lambda: team_service.review_task(hubbed.task.id),
+        lambda: team_service.block_task(claimed.id, reason="needs a key"),
+        lambda: team_service.reopen_task(claimed.id, reason="try again"),
+    ]
+    for write in writes:
+        hubbed.woken.clear()
+        write()
+        assert hubbed.woken == [hubbed.fleet.id], "the claimant's row"
+
+    hubbed.woken.clear()
+    team_service.finish_task(loose.id)
+    assert hubbed.woken == [other.id], "no row works it: the directory's, as for a note"
+
+
+def test_under_a_hub_the_phones_task_done_naming_no_project_wakes_the_tasks_manager(
+    hubbed: _Hubbed,
+) -> None:
+    """Review of #259, round 27, 3/7: with no ``project``, the phone's ``task done`` wrote in
+    the current project's root, the pinned one's else Remote's directory, so a done on B's
+    task woke A's manager while A was pinned, and a done by id read ``state.json`` and asked
+    git, which it needs for nothing else. It wakes the task's own row's manager and asks
+    no current project."""
+    from aisquare.services import remote_server
+    from aisquare.services.remote_server import live_writes
+
+    other, _ = _another_fleet_on_the_hub(hubbed)
+    hubbed.monkeypatch.chdir(other.root)  # the current project: the other one
+
+    def no_current(ref: str | None) -> ProjectInfo:
+        assert ref is not None, "a done by id asks for no current project"
+        raise AssertionError(ref)
+
+    hubbed.monkeypatch.setattr(remote_server, "_resolve_project", no_current)
+    hubbed.woken.clear()
+
+    live_writes().handlers["task/done"]({"ref": hubbed.task.id})
+
+    assert _task_now(hubbed.task.id).status == "done"
+    assert hubbed.woken == [hubbed.fleet.id]
+
+
+def test_under_a_hub_the_phones_done_naming_no_project_picks_no_manager_by_remotes_folder(
+    hubbed: _Hubbed,
+) -> None:
+    """Review of #259, round 28, 5/10: with no ``project``, the phone's ``task done`` passed
+    no directory, and for a task no row works ``_reading_manager`` took this process's: the
+    folder Remote (or ``asq``) was started in, the heuristic round 26, 6/11 rejected. Started
+    in the other project's folder, a done from the phone woke the other's manager, whichever
+    project the task was for. The phone has no directory: of the hub's two managers it picks
+    neither, and the nudge goes to the board's own project, as for a writer outside every
+    root. A shell's done there still picks by its directory."""
+    from aisquare.services.remote_server import live_writes
+
+    other, _ = _another_fleet_on_the_hub(hubbed)
+    loose = _task(hubbed.fleet, "nobody's")
+    shell = _task(hubbed.fleet, "nobody's either")
+    hubbed.monkeypatch.chdir(other.root)  # `asq`, and its Remote, started in the other's
+    hubbed.woken.clear()
+
+    live_writes().handlers["task/done"]({"ref": loose.id})
+
+    assert _task_now(loose.id).status == "done"
+    assert hubbed.woken == [hubbed.hub.id], "no manager by Remote's folder"
+    hubbed.woken.clear()
+    team_service.finish_task(shell.id)  # `task done` from a shell in the other's folder
+    assert hubbed.woken == [other.id]
+
+
+def test_a_task_write_with_no_row_reads_the_live_rows_once(hubbed: _Hubbed) -> None:
+    """Review of #259, round 28, 7/10: for a writer with no row, ``_nudge_target`` read every
+    live fleet row for the task's own row, then again for the board's managers when no row
+    worked the task: two reads on each phone, shell and MCP task write. One read serves
+    both."""
+    other, _ = _another_fleet_on_the_hub(hubbed)
+    loose = _task(hubbed.fleet, "nobody's")
+    reads: list[int] = []
+    with store_session() as store:
+        real = store.live_fleet_agents
+
+        def counted() -> list[FleetAgent]:
+            reads.append(1)
+            return real()
+
+        hubbed.monkeypatch.setattr(store, "live_fleet_agents", counted)
+        woken = team_service._nudge_target(store, None, hubbed.hub.id, other.root, task=loose)
+
+    assert woken == other.id, "the manager whose root holds the writer's directory"
+    assert len(reads) == 1, reads
+
+
+def test_under_a_hub_shutdown_all_keeps_the_pause_it_says_it_kept(hubbed: _Hubbed) -> None:
+    """Review of #259, round 26, 1/11: under ``--all``, a project that was not confirmed down
+    is named in ``paused_kept``, and another project's pass then cleared the hub's one signal
+    anyway. Each pass clears its own project's pause alone."""
+    other, _ = _another_fleet_on_the_hub(hubbed)
+    fleet_service.pause(other)
+    fleet_service.pause(hubbed.fleet)
+    real = fleet_service._clear_pause
+
+    def other_left_up(targets: Any, report: Any) -> None:
+        report.incomplete_projects.append(other.id)  # a survivor: not confirmed down
+        real(targets, report)
+
+    hubbed.monkeypatch.setattr(fleet_service, "_clear_pause", other_left_up)
+    report = fleet_service.shutdown(force=True)
+
+    assert report.paused_kept == [fleet_service._name(other)], report
+    assert _is_paused(other), "kept, as the report says"
+    assert report.paused_cleared == [fleet_service._name(hubbed.fleet)]
+    assert not _is_paused(hubbed.fleet)
 
 
 def test_task_next_prefers_the_callers_assigned_task_over_the_oldest(
@@ -3230,7 +7287,10 @@ def test_an_unreadable_fleet_row_costs_the_line_and_not_the_board(
 ) -> None:
     """The docstring has promised fail-open since the first version; only
     AmbiguousIdError was ever caught, so any sqlite error propagated out of
-    `hook_session_start` and took the whole board with it (review of #116)."""
+    `hook_session_start` and took the whole board with it (review of #116). Both
+    lookups, by the name and by the session: the hook reads the named row on its own
+    since round 23 of #259, and with that read alone failing, the row recorded against
+    the session still briefs it."""
     task = _task(project, "some task")
     _agent, first = _spawned(project, "coder", task.id, tmux, monkeypatch)
 
@@ -3238,6 +7298,7 @@ def test_an_unreadable_fleet_row_costs_the_line_and_not_the_board(
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(SqliteStore, "get_fleet_agent", boom)
+    monkeypatch.setattr(SqliteStore, "fleet_agent_for_session", boom)
 
     board = team_service.hook_session_start(first, project.root, "startup")
 
@@ -3497,7 +7558,7 @@ def test_the_verifier_cycles_pass_their_session_to_task_next() -> None:
     from aisquare.core import harness
 
     for role in ("tester", "runner", "reviewer", "ui-tester"):
-        first = harness.role_cycle(role, "abcd1234")[0]
+        first = harness.role_cycle(role, "abcd1234", fleet=unscoped)[0]
         assert "task next --status review --as abcd1234" in first, (role, first)
 
 
@@ -3518,7 +7579,10 @@ def test_every_verifying_role_is_known_to_the_assignment(
     from aisquare.core import harness
     from aisquare.services.team import _GATING_ROLES, _VERIFYING_ROLES
 
-    cycles = {role: " ".join(harness.role_cycle(role, "sess-x")) for role in harness.ROLE_PROFILES}
+    cycles = {
+        role: " ".join(harness.role_cycle(role, "sess-x", fleet=unscoped))
+        for role in harness.ROLE_PROFILES
+    }
     pulls_review = {role for role, cycle in cycles.items() if "task next --status review" in cycle}
     gates = {role for role, cycle in cycles.items() if 'note "GATE:' in cycle}
     assert pulls_review == _VERIFYING_ROLES, (
@@ -3673,7 +7737,7 @@ def test_task_next_survives_a_fleet_row_it_cannot_read(
     monkeypatch.setenv("AISQUARE_ROLE", "coder")
     team_service.hook_session_start("sess-plain-r4", project.root, "startup")
 
-    def boom(self: SqliteStore, project_id: str, session_id: str) -> FleetAgent | None:
+    def boom(self: SqliteStore, session_id: str) -> FleetAgent | None:
         raise sqlite3.OperationalError("no such column: worktree")
 
     monkeypatch.setattr(SqliteStore, "fleet_agent_for_session", boom)
@@ -3707,7 +7771,7 @@ def test_a_fleet_row_task_next_cannot_read_is_logged_not_swallowed(
     team_service.hook_session_start(first, project.root, "startup")
 
     def changed(self: SqliteStore, *args: object) -> FleetAgent | None:
-        raise TypeError("fleet_agent_for_session() takes 2 positional arguments")
+        raise TypeError("fleet_agent_for_session() takes 1 positional argument")
 
     monkeypatch.setattr(SqliteStore, "fleet_agent_for_session", changed)
     monkeypatch.setattr(SqliteStore, "get_fleet_agent", changed)
@@ -4142,6 +8206,28 @@ def test_a_symlink_loop_on_the_way_to_a_rows_socket_is_another_path_not_a_traceb
     assert fleet_service.socket_at(coder) == looped, "asked at the path it recorded"
 
 
+def test_a_real_symlink_loop_on_the_way_to_a_rows_socket_is_another_path_on_every_python(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """The test above emulates the `RuntimeError` 3.11 and 3.12 raise. From 3.13 pathlib's
+    `resolve` raises nothing for a loop and hands back the path as far as it got, so on
+    3.13 that emulation runs code no real loop reaches. A real loop here, nothing faked:
+    whatever this Python makes of it, the row is listed and asked at the path it recorded
+    (follow-up of #257)."""
+    if os.name == "nt" or not can_symlink():
+        pytest.skip("a symlink loop is a POSIX shape; NTFS links need a privilege")
+    (tmp_path / "loop").symlink_to(tmp_path / "loop")
+    looped = tmp_path / "loop" / "tmux-1000" / "asq"
+    with pytest.raises(OSError):  # the premise: a real loop, which no stat gets through
+        looped.stat()
+    coder = _recorded_at(_coder(project), looped)
+
+    [listed] = fleet_service.list_agents(project)
+
+    assert listed.agent.id == coder.id and listed.state == "waiting", listed
+    assert listed.socket_at == fleet_service.socket_at(coder) == looped, "the path it recorded"
+
+
 def test_a_row_dead_on_its_own_server_is_ended_and_its_window_killed_there(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4372,6 +8458,41 @@ def test_shutdown_keeps_a_row_live_when_its_pane_was_seen_alive_and_spares_its_s
     assert [s.agent.id for s in fleet_service.list_agents(project)] == [coder.id], "still live"
 
 
+def test_a_row_spawned_during_the_run_whose_agent_may_run_out_of_reach_is_left_live_held(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 7, 7/9: whether a row left live is held was worked out in
+    `_shutdown_row`, apart from `_shutdown_verdict`, and the late rows' path built its row
+    without it: a late row whose server lost its socket file was left live as a pane seen
+    alive, which spares its project's session on that socket (`_spared`), against
+    `ShutdownRow.held`'s own rule. Every row left live takes it from the one verdict."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    fleet_service.spawn(project, "manager")
+    late: list[FleetAgent] = []
+    real_stop, real_kill = fleet_service._stop_row, fleet_service._kill_fleet_sessions
+
+    def stop_and_spawn(*args: object, **kwargs: object) -> fleet_service.StopReceipt:
+        if not late:  # the spawn lands while the manager is being stopped
+            late.append(_coder(project))
+        return real_stop(*args, **kwargs)  # type: ignore[arg-type]
+
+    def kill_then_lose_the_file(*args: object, **kwargs: object) -> None:
+        real_kill(*args, **kwargs)  # type: ignore[arg-type]
+        tmux.running, tmux.socket_file = False, False  # its server lost its socket file
+
+    monkeypatch.setattr(fleet_service, "_stop_row", stop_and_spawn)
+    monkeypatch.setattr(fleet_service, "_kill_fleet_sessions", kill_then_lose_the_file)
+
+    report = fleet_service.shutdown(project, force=True)
+
+    (row,) = report.failed
+    assert row.agent.id == late[0].id
+    assert row.reason.startswith("it was spawned during the shutdown; ")
+    assert "is gone, so no tmux client can" in row.reason and "— left live: " in row.reason
+    assert row.held, "out of reach, as `_shutdown_row` holds such a row"
+    assert fleet_service._spared(report, fleet_service.settings()) == (set(), set())
+
+
 def test_shutdown_records_a_row_spawned_during_the_run(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4520,7 +8641,7 @@ def test_shutdown_keeps_a_surviving_project_paused(
     report = fleet_service.shutdown(project)
 
     assert report.failed and report.sessions_left_up
-    assert fleet_service.is_paused(project), "a surviving fleet keeps its standing order"
+    assert _is_paused(project), "a surviving fleet keeps its standing order"
     assert report.paused_cleared == [] and report.paused_kept == [project.root.name]
 
 
@@ -4575,7 +8696,7 @@ def test_shutdown_reconciles_a_late_row_on_an_initially_absent_socket(
     assert [row.agent.id for row in report.failed] == [late[0].id]
     assert "still alive" in report.failed[0].reason
     assert report.incomplete_projects == [project.id]
-    assert fleet_service.is_paused(project), "a surviving replacement keeps the standing order"
+    assert _is_paused(project), "a surviving replacement keeps the standing order"
     assert report.paused_kept == [project.root.name] and report.paused_cleared == []
 
 
@@ -4606,7 +8727,7 @@ def test_shutdown_keeps_a_late_row_live_when_tmux_left_path_before_the_final_pas
     assert "could not be asked" in report.failed[0].reason
     assert report.incomplete_projects == [project.id]
     tmux.installed = True
-    assert fleet_service.is_paused(project) and report.paused_kept == [project.root.name]
+    assert _is_paused(project) and report.paused_kept == [project.root.name]
     assert [s.agent.id for s in fleet_service.list_agents(project)] == [late[0].id], "still live"
 
 
@@ -4636,7 +8757,7 @@ def test_shutdown_keeps_a_late_row_live_when_the_client_fails_at_execution(
     assert [row.agent.id for row in report.failed] == [late[0].id]
     assert "could not be asked" in report.failed[0].reason
     tmux.exec_unavailable = False
-    assert fleet_service.is_paused(project) and report.paused_kept == [project.root.name]
+    assert _is_paused(project) and report.paused_kept == [project.root.name]
     assert [s.agent.id for s in fleet_service.list_agents(project)] == [late[0].id], "still live"
 
 
@@ -4675,7 +8796,7 @@ def test_shutdown_refuses_when_the_client_goes_away_between_the_guard_and_the_pr
     tmux.installed, tmux.exec_unavailable, tmux.socket_denied = True, False, False
     assert [s.agent.id for s in fleet_service.list_agents(project)] == [coder.id], "untouched"
     assert coder.pane_id in tmux.facts, "the pane was never touched either"
-    assert fleet_service.is_paused(project), "and the standing order stands"
+    assert _is_paused(project), "and the standing order stands"
 
 
 def test_reachable_tells_an_absent_server_from_a_denied_socket() -> None:
@@ -4720,7 +8841,7 @@ def test_shutdown_leaves_a_late_row_live_when_its_socket_is_denied(
     assert [a.id for a in report.stopped] == [coder.id] and report.recorded == []
     assert [row.agent.id for row in report.failed] == [late[0].id]
     assert "could not be asked" in report.failed[0].reason
-    assert fleet_service.is_paused(project) and report.paused_kept == [project.root.name]
+    assert _is_paused(project) and report.paused_kept == [project.root.name]
 
 
 @_needs_a_socket_path
@@ -4780,7 +8901,7 @@ def test_shutdown_reports_a_failed_final_scan_and_keeps_the_pause(
     assert [a.id for a in report.stopped] == [coder.id]
     assert report.late_scan_failed is not None and "database is locked" in report.late_scan_failed
     assert report.incomplete_projects == [project.id]
-    assert fleet_service.is_paused(project) and report.paused_kept == [project.root.name]
+    assert _is_paused(project) and report.paused_kept == [project.root.name]
     assert [s.agent.id for s in fleet_service.list_agents(project)] == [late[0].id], "still live"
 
 
@@ -4974,27 +9095,6 @@ def test_a_release_the_store_refuses_costs_the_release_and_never_the_stop(
     assert "locked" in report.release_failures[0]
 
 
-def test_is_paused_opens_no_store_for_a_disabled_orchestrator(
-    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Review of the fold. The enabled check moved inside the store session, so a
-    disabled orchestrator paid a connect, WAL switch and migration to learn
-    nothing can be paused. Asked first, before any connection."""
-    opens = 0
-    real_open = core_store.open_store
-
-    def counting_open() -> ContextStore:
-        nonlocal opens
-        opens += 1
-        return real_open()
-
-    monkeypatch.setattr(core_store, "open_store", counting_open)
-    monkeypatch.setenv("AISQUARE_TEAM", "0")
-
-    assert fleet_service.is_paused(project) is False
-    assert opens == 0, f"a disabled board opened the store {opens} time(s)"
-
-
 def test_an_interrupt_during_the_stop_loop_does_not_kill_the_fleet(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -5029,7 +9129,7 @@ def test_an_interrupt_during_the_stop_loop_does_not_kill_the_fleet(
         "nothing beyond the row in hand was taken down behind the operator"
     )
     assert _row(second.id).ended_at is None
-    assert fleet_service.is_paused(project), "and the pause is still the manager's standing order"
+    assert _is_paused(project), "and the pause is still the manager's standing order"
 
     # The control: a FAULT in the loop still runs the kill phase — "shutdown means
     # down" holds when something other than a row breaks — and re-raises after.
@@ -5074,7 +9174,7 @@ def test_an_interrupt_before_any_rows_turn_still_carries_the_report(
         "interrupted before anything was stopped; the rest of the fleet was left as it was"
     )
     assert report.stopped == [] and tmux.killed_sessions == []
-    assert fleet_service.is_paused(project)
+    assert _is_paused(project)
 
 
 _SHUTDOWN_PHASES = {
@@ -5396,11 +9496,391 @@ def test_the_pause_pass_reads_and_clears_every_signal_through_one_store(
     monkeypatch.setattr(core_store, "open_store", counting_open)
     report = fleet_service.ShutdownReport()
 
-    fleet_service._clear_pause([(project, []), (plain_project, [])], report)
+    fleet_service._clear_pause([project, plain_project], report)
 
     assert sorted(report.paused_cleared) == sorted([project.root.name, plain_project.root.name])
     assert opens == 1, f"two projects, one connection — not {opens}"
-    assert not fleet_service.is_paused(project) and not fleet_service.is_paused(plain_project)
+    assert not _is_paused(project) and not _is_paused(plain_project)
+
+
+def test_the_pause_pass_asks_git_for_no_project_and_opens_no_store_with_the_board_off(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    plain_project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 30, 7/8: the shutdown's pause pass worked out every target's homes
+    (``fleet._pause_homes``, a ``git rev-parse`` with a 5 s timeout) before the store opened:
+    a forgotten project's too, which the pass then skips, and all of them with the board off,
+    where it stops at the first. ``directory_project`` asked git twice for a root that is not
+    a checkout. Then git was asked once for each visible project, and not at all with the
+    board off, where no store is opened either. Since round 31, 5/7 the pass finds each pause
+    by its name and asks git for none."""
+    from aisquare.core import workspace
+
+    (tmp_path / "gone").mkdir()
+    forgotten = team_project(tmp_path / "gone")
+    with store_session() as store:
+        store.onboard_project(forgotten)
+        store.forget_project(forgotten.id)
+    asked: list[Path] = []
+    real_git = workspace.git_common_root
+
+    def counted_git(start: Path) -> Path | None:
+        asked.append(start.resolve())
+        return real_git(start)
+
+    monkeypatch.setattr(workspace, "git_common_root", counted_git)
+    targets = [project, plain_project, forgotten]
+
+    fleet_service.pause(project)
+    asked.clear()
+    report = fleet_service.ShutdownReport()
+    fleet_service._clear_pause(targets, report)
+    assert (asked, report.paused_cleared) == ([], [fleet_service._name(project)])
+
+    opens = 0
+    real_open = core_store.open_store
+
+    def counting_open() -> ContextStore:
+        nonlocal opens
+        opens += 1
+        return real_open()
+
+    monkeypatch.setattr(core_store, "open_store", counting_open)
+    monkeypatch.setenv("AISQUARE_TEAM", "0")
+    report = fleet_service.ShutdownReport()
+    fleet_service._clear_pause(targets, report)
+    assert (asked, opens, report.pause_scan_failed, report.pause_unsettled) == ([], 0, None, [])
+
+
+def test_a_root_the_pause_pass_cannot_look_at_is_cleared_like_any_other(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    plain_project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 30, 4/8: every project's homes (``fleet._pause_homes``) were worked
+    out in one comprehension under the pass's outer ``try``, so one root that could not be
+    looked at (``Path.exists`` raises ``PermissionError`` for a directory that cannot be
+    searched, on Python 3.11 and 3.12) failed the pass for all: no pause was cleared, and
+    with ``pause_unsettled`` empty the ``--all`` line named no ``fleet resume``. It was that
+    project's failure then. Since round 31, 5/7 the pass looks at no root: a pause is found
+    by its name, and both are cleared."""
+    from aisquare.core import orchestrator
+
+    fleet_service.pause(project)
+    fleet_service.pause(plain_project)
+    real = orchestrator.directory_project
+
+    def unsearchable(cwd: Path | None = None) -> ProjectInfo:
+        if cwd is not None and cwd.resolve() == project.root.resolve():
+            raise PermissionError(13, "Permission denied", str(cwd))
+        return real(cwd)
+
+    monkeypatch.setattr(orchestrator, "directory_project", unsearchable)
+    report = fleet_service.ShutdownReport()
+
+    fleet_service._clear_pause([project, plain_project], report)
+    monkeypatch.setattr(orchestrator, "directory_project", real)
+
+    names = [fleet_service._name(p) for p in (project, plain_project)]
+    assert sorted(report.paused_cleared) == sorted(names)
+    assert not _is_paused(plain_project) and not _is_paused(project)
+    assert (report.pause_unsettled, report.pause_scan_failed) == ([], None)
+    assert report.incomplete_projects == []
+
+
+def test_the_pause_builds_no_row(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 26, 10/11: the boards a pause goes to were found from every row
+    the project ever had, the ended ones too (``fleet shutdown``'s pass over every visible
+    project). Rows are never deleted. Since round 29, 1/8, every board they recorded is
+    asked of the store distinct, and no row is built."""
+    for _ in range(3):
+        fleet_service.stop(project, _coder(project).label, force=True)
+    _coder(project)
+    reads: list[bool] = []
+    real = core_store.SqliteStore.fleet_agents
+
+    def spied(self: Any, project_id: str, *, live_only: bool = False) -> list[FleetAgent]:
+        reads.append(live_only)
+        return real(self, project_id, live_only=live_only)
+
+    monkeypatch.setattr(core_store.SqliteStore, "fleet_agents", spied)
+
+    fleet_service.pause(project)
+    assert _is_paused(project)
+    fleet_service.resume(project)
+    assert not _is_paused(project)
+    report = fleet_service.ShutdownReport()
+    fleet_service._clear_pause([project], report)
+    assert reads == [], "no row is built"
+    with store_session() as store:
+        assert store.fleet_agent_boards(project.id) == [project.id], "one board, four rows"
+
+
+def test_a_resume_writes_off_only_where_the_pause_reads_on(hubbed: _Hubbed) -> None:
+    """Review of #259, round 30, 5/8: ``fleet resume`` wrote ``off`` on every board one of
+    the project's rows ever recorded and both of its homes, and each write is a ``signal``
+    event in the delta of every session on that board. ``fleet-paused.<id>: off`` reached
+    every agent on every hub the project ever ran under, where it had never been paused.
+    Off is written only where the pause reads on; on goes to every board, as before."""
+    w = hubbed
+
+    def signal_events() -> dict[str, int]:
+        with store_session() as store:
+            return {
+                board.id: sum(e.kind == "signal" for e in store.recent_events(board.id, limit=500))
+                for board in (w.hub, w.fleet)
+            }
+
+    before = signal_events()
+    with pytest.raises(FleetError, match="unknown session"):
+        fleet_service.resume(w.fleet, session_ref="ses_nobody")
+    fleet_service.resume(w.fleet)
+    assert signal_events() == before, "paused nowhere: nothing written"
+
+    team_service.set_signal(
+        harness.pause_signal(w.fleet.id, w.fleet.id), "on", project_id=w.fleet.id
+    )
+    assert _paused_on(w) == [w.fleet.id]
+    before = signal_events()
+    fleet_service.resume(w.fleet, session_ref=w.manager_sid)
+    assert _paused_on(w) == [] and not _is_paused(w.fleet)
+    assert signal_events() == {w.hub.id: before[w.hub.id], w.fleet.id: before[w.fleet.id] + 1}
+
+    fleet_service.pause(w.fleet)
+    assert sorted(_paused_on(w)) == sorted([w.hub.id, w.fleet.id]), "on: every board"
+
+
+@pytest.mark.parametrize("live", [True, False], ids=["its manager live", "nothing live"])
+def test_a_pause_goes_only_where_a_manager_of_the_project_reads_or_would_next(
+    hubbed: _Hubbed, tmp_path: Path, live: bool
+) -> None:
+    """Review of #259, round 32, 2/9: ``fleet pause`` set the pause on every board one of
+    the project's rows ever recorded, live or ended. Each write is a ``signal`` event in
+    the delta of every session on that board, and ``fleet resume``, which clears it where it
+    reads on, then wrote ``off`` on each again: a project that ran under another hub a month
+    ago put both in the next prompt of every agent still on that hub. The pause goes where a
+    manager of the project reads, or would next: its newest manager row's board, live or
+    stopped (a restart hands it on), and its homes. With nothing live and a caller without
+    the hub, the stopped manager's hub is still paused."""
+    w = hubbed
+    root = tmp_path / "old-hub"
+    root.mkdir()
+    month_ago = datetime.now(tz=UTC) - timedelta(days=30)
+    with store_session() as store:
+        old = store.onboard_project(ProjectInfo(id=project_id_for(root), root=root))
+        for role in ("manager", "coder"):
+            store.upsert_fleet_agent(
+                FleetAgent(
+                    id=f"agt_old_{role}", project_id=w.fleet.id, label=f"old-{role}",
+                    role=role, pane_id=f"%old-{role}", cwd=w.fleet.root, created_at=month_ago,
+                    ended_at=month_ago + timedelta(days=1), board=old.id,
+                )
+            )  # fmt: skip
+        assert old.id in store.fleet_agent_boards(w.fleet.id)
+    if not live:
+        for label in (fleet_service.MANAGER_LABEL, w.coder.label):
+            fleet_service.stop(w.fleet, label, force=True)
+        _without_the_hub(w)
+
+    def signals_on_the_old_hub() -> int:
+        with store_session() as store:
+            return sum(e.kind == "signal" for e in store.recent_events(old.id, limit=500))
+
+    fleet_service.pause(w.fleet)
+    assert sorted(_paused_on(w)) == sorted([w.hub.id, w.fleet.id])
+    assert _is_paused(w.fleet)
+    fleet_service.resume(w.fleet)
+    assert _paused_on(w) == [] and not _is_paused(w.fleet)
+    assert signals_on_the_old_hub() == 0, "neither the pause nor the resume reached it"
+
+
+@pytest.mark.parametrize("manager", [False, True], ids=["no manager yet", "a stopped manager"])
+def test_a_pause_goes_where_the_live_coders_read(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    manager: bool,
+) -> None:
+    """Review of #259, round 33, 4/10: since round 32 the pause goes on the newest manager
+    row's board and the homes. A project with coders spawned under a hub and no manager yet
+    had no manager row, and a pause from a plain shell went on the checkout's board alone;
+    the manager spawned next from ``asq``, under the coders' hub, read none there and
+    staffed. The boards its live rows recorded are paused too; an ended row's are not.
+    Round 33 asked them only with no manager row at all, and a manager stopped last week on
+    the checkout's board left the coders' hub unpaused (round 34, 2/10)."""
+    hub_root, old_root = tmp_path / "hub", tmp_path / "old-hub"
+    hub_root.mkdir()
+    old_root.mkdir()
+    month_ago = datetime.now(tz=UTC) - timedelta(days=30)
+    with store_session() as store:
+        hub = store.onboard_project(team_project(hub_root))
+        old = store.onboard_project(ProjectInfo(id=project_id_for(old_root), root=old_root))
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_old", project_id=project.id, label="old-coder", role="coder",
+                pane_id="%old", cwd=project.root, created_at=month_ago,
+                ended_at=month_ago + timedelta(days=1), board=old.id,
+            )
+        )  # fmt: skip
+        if manager:  # last week's, from a plain shell: on the checkout's board
+            store.upsert_fleet_agent(
+                FleetAgent(
+                    id="agt_mgr", project_id=project.id, label=fleet_service.MANAGER_LABEL,
+                    role="manager", pane_id="%mgr", cwd=project.root, created_at=month_ago,
+                    ended_at=month_ago + timedelta(days=1), board=project.id,
+                )
+            )  # fmt: skip
+            assert store.fleet_manager_board(project.id) == project.id
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub_root))
+    for _ in range(2):
+        fleet_service.spawn(project, "coder", worktree=False)
+    monkeypatch.delenv("AISQUARE_TEAM_HUB")  # a plain shell
+
+    fleet_service.pause(project)
+
+    with store_session() as store:
+        paused = [
+            board
+            for board in (hub.id, project.id, old.id)
+            for state in [
+                team_service._read_signal(store, board, harness.pause_signal(project.id, board))
+            ]
+            if state is not None and state.value == "on"
+        ]
+    assert sorted(paused) == sorted([hub.id, project.id]), "the coders' hub, and the checkout"
+
+
+def test_a_pause_or_resume_as_a_prefix_of_two_sessions_is_refused_as_ambiguous(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, runner: CliRunner
+) -> None:
+    """Review of #259, round 31, 2/7: ``--as`` is read as a session id prefix, and one that
+    names two sessions raised ``AmbiguousIdError``, a ``LookupError`` and no ``KeyError``:
+    out of ``resume``'s own check with nothing paused, and out of ``set_signal`` on the
+    ``on`` path. The CLI catches only ``FleetError``, so ``fleet resume --as ses_aa`` ended
+    in a traceback, and ``--json`` printed nothing. It is refused, as an ambiguous task is,
+    and nothing is written."""
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        for sid in ("ses_aa1", "ses_aa2"):
+            store.upsert_session(
+                TeamSession(
+                    id=sid, project_id=project.id, role="manager", started_at=now,
+                    last_seen_at=now,
+                )
+            )  # fmt: skip
+    ambiguous = "session 'ses_aa' is ambiguous — use more of the id"
+
+    for verb in (fleet_service.pause, fleet_service.resume):
+        with pytest.raises(FleetError) as refused:
+            verb(project, session_ref="ses_aa")
+        assert str(refused.value) == ambiguous
+        assert not _is_paused(project)
+    fleet_service.pause(project)
+    with pytest.raises(FleetError, match="ambiguous"):
+        fleet_service.resume(project, session_ref="ses_aa")
+    assert _is_paused(project), "still paused"
+
+    result = runner.invoke(app, ["--json", "fleet", "resume", "-P", project.id, "--as", "ses_aa"])
+    assert result.exit_code == 1, result.exception
+    assert json.loads(result.stdout) == {"error": "fleet_error", "detail": ambiguous}
+
+
+@pytest.mark.parametrize("paused", [False, True], ids=["nothing on", "paused"])
+def test_a_resume_looks_its_session_up_once(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    paused: bool,
+) -> None:
+    """Review of #259, round 35, 7/8: since round 34 ``team.set_signals_in`` resolves
+    ``--as`` itself, with no signal to write too, and refuses an unknown or ambiguous one as
+    ``resume``'s own check did; that check, kept from when nothing was written with nothing
+    on, looked the session up a second time on every resume. Once, and still refused."""
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        store.upsert_session(
+            TeamSession(
+                id="ses_one", project_id=project.id, role="manager", started_at=now,
+                last_seen_at=now,
+            )
+        )  # fmt: skip
+    if paused:
+        fleet_service.pause(project)
+    asked: list[str] = []
+    real = SqliteStore.get_session
+
+    def counted(store: SqliteStore, ref: str) -> TeamSession | None:
+        asked.append(ref)
+        return real(store, ref)
+
+    monkeypatch.setattr(SqliteStore, "get_session", counted)
+
+    fleet_service.resume(project, session_ref="ses_one")
+
+    assert asked == ["ses_one"], asked
+    assert not _is_paused(project)
+    with pytest.raises(FleetError, match="unknown session 'ses_none'"):
+        fleet_service.resume(project, session_ref="ses_none")
+
+
+def test_a_pause_is_read_and_cleared_by_its_name_on_any_board_with_no_git(
+    hubbed: _Hubbed, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 31, 5/7: reading or clearing a pause worked out its boards from
+    the project's rows and homes (``fleet._pause_homes``, a ``git rev-parse`` with a 5 s
+    timeout), for ``fleet resume``, ``is_paused`` and each visible project of ``fleet
+    shutdown --all``, every directory 0.8.0 captured included. A signal's name says whose
+    pause it is (``harness.pause_signal``), so it is found by that name on whichever board
+    holds it, one read of the store and no git: on a board no row of the project names too,
+    and never another project's pause on the same board."""
+    from aisquare.core import workspace
+
+    w = hubbed
+    root = tmp_path / "elsewhere"
+    root.mkdir()
+    with store_session() as store:
+        elsewhere = store.onboard_project(ProjectInfo(id=project_id_for(root), root=root))
+        assert elsewhere.id not in store.fleet_agent_boards(w.fleet.id)
+    for board in (w.hub.id, elsewhere.id):
+        team_service.set_signal(harness.pause_signal(w.fleet.id, board), "on", project_id=board)
+    team_service.set_signal(harness.PAUSE_SIGNAL, "on", project_id=w.hub.id)  # the hub's own
+    asked: list[Path] = []
+    real_git = workspace.git_common_root
+
+    def counted_git(start: Path) -> Path | None:
+        asked.append(start)
+        return real_git(start)
+
+    monkeypatch.setattr(workspace, "git_common_root", counted_git)
+
+    assert _is_paused(w.fleet)
+    assert not _is_paused(elsewhere), "the fleet's pause there is not its own"
+    fleet_service.resume(w.fleet)
+    assert not _is_paused(w.fleet)
+    with store_session() as store:
+        name = harness.pause_signal(w.fleet.id, elsewhere.id)
+        there = team_service._read_signal(store, elsewhere.id, name)
+    assert there is not None and there.value == "off", "off on the unrecorded board too"
+    for board in (w.hub.id, elsewhere.id):
+        team_service.set_signal(harness.pause_signal(w.fleet.id, board), "on", project_id=board)
+    report = fleet_service.ShutdownReport()
+    fleet_service._clear_pause([w.fleet, elsewhere], report)
+
+    assert asked == [], "no git"
+    assert report.paused_cleared == [fleet_service._name(w.fleet)]
+    assert not _is_paused(w.fleet)
+    assert _is_paused(w.hub), "the hub's own pause, on the same board, is kept"
 
 
 def test_shutdown_clears_the_fleet_paused_signal(
@@ -5411,11 +9891,11 @@ def test_shutdown_clears_the_fleet_paused_signal(
     spawn nothing while it is set) with no output from either command naming it."""
     _coder(project)
     fleet_service.pause(project)
-    assert fleet_service.is_paused(project)
+    assert _is_paused(project)
 
     report = fleet_service.shutdown(project, force=True)
 
-    assert not fleet_service.is_paused(project)
+    assert not _is_paused(project)
     assert report.paused_cleared == [project.root.name]
     # A shutdown does not put a fleet-paused row on a board that had none.
     assert fleet_service.shutdown(project).paused_cleared == []
@@ -5867,6 +10347,287 @@ def test_shutdown_reports_a_session_it_could_not_recheck_after_a_late_pane_exite
     assert report.incomplete_projects == [project.id], "an unverified session is not down"
 
 
+@pytest.mark.parametrize(
+    "blob",
+    ["not json", "[1, 2]", '{"value": "on", "seq": "x"}', '{"value": "on", "updated_at": 7}'],
+    ids=["not JSON", "not an object", "a bad seq", "a bad updated_at"],
+)
+def test_a_signal_that_does_not_parse_holds_up_only_the_project_whose_pause_it_is(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    runner: CliRunner,
+    blob: str,
+) -> None:
+    """Review of #259, round 32, 6/9: since round 31 every board's signals are read in one
+    pass, and one blob that did not parse raised for every caller: ``fleet resume`` of any
+    project ended in a traceback, and the shutdown pass put every visible project in
+    ``pause_unsettled``, none confirmed down. Another project's blob that does not parse is
+    left out; the project whose pause it is gets a refusal that names it."""
+    root = tmp_path / "other"
+    root.mkdir()
+    with store_session() as store:
+        other = store.onboard_project(ProjectInfo(id=project_id_for(root), root=root))
+        theirs = harness.pause_signal(other.id, other.id)
+        store.set_meta(f"signal/{other.id}/{theirs}", blob)
+        store.set_meta("signal/prj_elsewhere/deploy", blob)  # nobody's pause
+    fleet_service.pause(project)
+    assert _is_paused(project) and not _is_paused(other)
+
+    resumed = runner.invoke(app, ["--json", "fleet", "resume", "-P", project.id])
+
+    assert resumed.exit_code == 0, resumed.output
+    assert not _is_paused(project)
+    with pytest.raises(FleetError) as refused:
+        fleet_service.resume(other)
+    assert str(refused.value) == f"cannot clear the pause: {theirs} on {other.id} could not be read"
+    fleet_service.pause(project)
+    report = fleet_service.ShutdownReport()
+    fleet_service._clear_pause([project, other], report)
+    assert report.paused_cleared == [fleet_service._name(project)], report
+    assert [p.id for p in report.pause_unsettled] == [other.id]
+    name = fleet_service._name(other)
+    assert report.pause_scan_failed == f"{name}: could not be read ({theirs} on {other.id})"
+    assert other.id in report.incomplete_projects and project.id not in report.incomplete_projects
+
+
+@pytest.mark.parametrize("blob", ["not json", "[1, 2]", '{"value": "off", "seq": null}'])
+def test_a_pause_whose_own_signal_does_not_parse_on_a_board_it_goes_to_sets_none(
+    hubbed: _Hubbed, runner: CliRunner, blob: str
+) -> None:
+    """Review of #259, round 33, 1/10: round 32 refused a resume whose own pause did not
+    parse, but ``fleet pause`` set each board in turn, and the write reads the value it
+    replaces: the blob on the board sorted last raised a traceback there, ``--json`` printed
+    nothing, and the boards before it were left paused. Every board is asked before any is
+    written; a blob that does not parse on one is refused, naming it, and none is set."""
+    w = hubbed
+    last = max(w.hub.id, w.fleet.id)  # the boards are set in this order
+    name = harness.pause_signal(w.fleet.id, last)
+    with store_session() as store:
+        store.set_meta(f"signal/{last}/{name}", blob)
+
+    with pytest.raises(FleetError) as refused:
+        fleet_service.pause(w.fleet)
+    assert str(refused.value) == f"cannot set the pause: {name} on {last} could not be read"
+    paused = runner.invoke(app, ["--json", "fleet", "pause", "-P", w.fleet.id])
+    assert paused.exit_code != 0 and isinstance(paused.exception, SystemExit), paused.output
+    assert "could not be read" in json.loads(paused.stdout)["detail"]
+    first = min(w.hub.id, w.fleet.id)
+    with store_session() as store:
+        before = team_service._read_signal(store, first, harness.pause_signal(w.fleet.id, first))
+    assert before is None, "nothing was set, on the board before it either"
+
+    other = "prj_elsewhere"
+    with store_session() as store:
+        store.set_meta(f"signal/{last}/{name}", "{}")  # repaired by hand
+        store.set_meta(f"signal/{other}/{harness.pause_signal(w.fleet.id, other)}", blob)
+    fleet_service.pause(w.fleet)  # its own, on a board it is not set on: no concern
+    assert sorted(_paused_on(w)) == sorted([w.hub.id, w.fleet.id])
+
+
+class _RefusedOn:
+    """A store's connection that refuses ``board``'s signal event as a lock does (or with
+    ``message`` and SQLite's ``code``), in the transaction the boards sorted before it have
+    already written in."""
+
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        board: str,
+        message: str = "database is locked",
+        code: int | None = None,
+    ) -> None:
+        self._conn, self._board, self._message, self._code = conn, board, message, code
+
+    def execute(self, sql: str, params: Sequence[object] = ()) -> sqlite3.Cursor:
+        if sql.startswith("INSERT INTO team_event") and params[1] == self._board:
+            refused = sqlite3.OperationalError(self._message)
+            if self._code is not None:
+                refused.sqlite_errorcode = self._code
+            raise refused
+        return self._conn.execute(sql, params)
+
+    def __enter__(self) -> sqlite3.Connection:
+        return self._conn.__enter__()
+
+    def __exit__(self, *exc: Any) -> bool:
+        return bool(self._conn.__exit__(*exc))
+
+
+@pytest.mark.parametrize("verb", ["pause", "resume"])
+def test_a_pause_or_resume_the_store_refuses_on_a_later_board_writes_none(
+    hubbed: _Hubbed, runner: CliRunner, verb: str
+) -> None:
+    """Review of #259, round 34, 5/10: round 33 made a pause all-or-nothing only when a
+    signal blob did not parse. Each board's was still one ``set_signal`` in a store of its
+    own, so a store error on the board sorted last (``database is locked`` while many
+    agents' hooks write) left the board before it paused, and ``fleet pause`` ended in a
+    traceback, ``--json`` printing nothing. Every board's is written in one transaction in
+    the store the boards were worked out in: refused, none is, and it is said. The lock is
+    an ``OperationalError``, as SQLite's is: only a lock is said as "try again" (round 35,
+    1/8)."""
+    w = hubbed
+    if verb == "resume":
+        fleet_service.pause(w.fleet)
+    before = sorted(_paused_on(w))
+    last = max(w.hub.id, w.fleet.id)  # the boards are written in this order
+    real = SqliteStore.add_signal_events
+
+    def locked_on_last(
+        store: SqliteStore, writes: Sequence[tuple[TeamEvent, str, dict[str, Any]]]
+    ) -> list[TeamEvent]:
+        conn = store._conn
+        store._conn = _RefusedOn(conn, last)  # type: ignore[assignment]
+        try:
+            return real(store, writes)
+        finally:
+            store._conn = conn
+
+    w.monkeypatch.setattr(SqliteStore, "add_signal_events", locked_on_last)
+    signals = {board.id: _events(board, "signal") for board in (w.hub, w.fleet)}
+
+    with pytest.raises(FleetError) as refused:
+        getattr(fleet_service, verb)(w.fleet)
+    doing = "set" if verb == "pause" else "clear"
+    assert str(refused.value).startswith(f"cannot {doing} the pause: the store refused it")
+    assert "database is locked" in str(refused.value) and "nothing was written" in str(
+        refused.value
+    )
+    told = runner.invoke(app, ["--json", "fleet", verb, "-P", w.fleet.id])
+    assert told.exit_code != 0 and isinstance(told.exception, SystemExit), told.output
+    assert "the store refused it" in json.loads(told.stdout)["detail"]
+    assert sorted(_paused_on(w)) == before, "the board before it was not written either"
+    assert {board.id: _events(board, "signal") for board in (w.hub, w.fleet)} == signals
+
+    w.monkeypatch.setattr(SqliteStore, "add_signal_events", real)
+    getattr(fleet_service, verb)(w.fleet)
+    assert sorted(_paused_on(w)) == ([] if verb == "resume" else sorted([w.hub.id, w.fleet.id]))
+
+
+@pytest.mark.parametrize("verb", ["pause", "resume"])
+@pytest.mark.parametrize(
+    ("message", "code"),
+    [
+        ("database or disk is full", sqlite3.SQLITE_FULL),
+        ("attempt to write a readonly database", sqlite3.SQLITE_READONLY),
+        ("disk I/O error", sqlite3.SQLITE_IOERR),
+    ],
+    ids=["full", "readonly", "io"],
+)
+def test_a_pause_or_resume_a_full_or_readonly_store_refuses_is_said_with_no_traceback(
+    hubbed: _Hubbed, runner: CliRunner, verb: str, message: str, code: int
+) -> None:
+    """Review of #259, round 36, 2/9: round 35 re-raised every store error of a pause but a
+    lock, for the CLI's root group to say how to recover from damage. That group maps damage
+    alone: a full disk, a readonly store or an I/O error ended in a traceback, ``--json``
+    printing nothing, as before round 31. Each is a ``fleet_error`` that names it, nothing
+    written, with no "try again", which a lock alone is told."""
+    w = hubbed
+    if verb == "resume":
+        fleet_service.pause(w.fleet)
+    before = sorted(_paused_on(w))
+    last = max(w.hub.id, w.fleet.id)
+    real = SqliteStore.add_signal_events
+
+    def refused_on_last(
+        store: SqliteStore, writes: Sequence[tuple[TeamEvent, str, dict[str, Any]]]
+    ) -> list[TeamEvent]:
+        conn = store._conn
+        store._conn = _RefusedOn(conn, last, message, code)  # type: ignore[assignment]
+        try:
+            return real(store, writes)
+        finally:
+            store._conn = conn
+
+    w.monkeypatch.setattr(SqliteStore, "add_signal_events", refused_on_last)
+
+    with pytest.raises(FleetError) as refused:
+        getattr(fleet_service, verb)(w.fleet)
+    said = str(refused.value)
+    assert message in said and said.endswith("nothing was written"), said
+    told = runner.invoke(app, ["--json", "fleet", verb, "-P", w.fleet.id])
+    assert told.exit_code != 0 and isinstance(told.exception, SystemExit), told.output
+    payload = json.loads(told.stdout)
+    assert payload["error"] == "fleet_error" and message in payload["detail"], payload
+    assert sorted(_paused_on(w)) == before, "nothing was written"
+
+
+def _zero_the_table(table: str) -> None:
+    """Zero the root page of ``table`` in the store, its header kept: the store opens, and
+    a query that reaches the table finds ``database disk image is malformed``."""
+    raw = sqlite3.connect(str(paths.db_path()))
+    raw.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    size = raw.execute("PRAGMA page_size").fetchone()[0]
+    (root,) = raw.execute("SELECT rootpage FROM sqlite_master WHERE name = ?", (table,)).fetchone()
+    raw.close()
+    with paths.db_path().open("r+b") as db:
+        db.seek((root - 1) * size)
+        db.write(bytes(size))
+
+
+@pytest.mark.parametrize("verb", ["pause", "resume"])
+@pytest.mark.parametrize("damage", ["at-query", "at-open"])
+def test_a_pause_or_resume_on_a_damaged_store_is_not_told_to_try_again(
+    hubbed: _Hubbed, runner: CliRunner, verb: str, damage: str
+) -> None:
+    """Review of #259, round 35, 1/8: round 34 said every store error of a pause as "the
+    store refused it — try again", a ``FleetError`` the CLI prints as it is. A store found
+    damaged is one too: ``database disk image is malformed`` from the signals' table, or a
+    ``StoreUnopenable`` from the store the pause opens, and a retry of it never works. Only
+    a lock is said so; damage reaches the CLI's root group, which says to move the store
+    aside, as before."""
+    w = hubbed
+    if verb == "resume":
+        fleet_service.pause(w.fleet)
+    if damage == "at-query":
+        _zero_the_table("team_meta")
+    else:
+        paths.db_path().write_bytes(b"this is not a sqlite database, and open_store must say so")
+
+    with pytest.raises(sqlite3.DatabaseError) as found:
+        getattr(fleet_service, verb)(w.fleet)
+    assert not isinstance(found.value, FleetError)
+    if damage == "at-open":
+        assert isinstance(found.value, core_store.StoreUnopenable)
+        return  # the CLI resolves -P in a store of its own first, and that one says it
+    assert core_store.is_corrupt_error(found.value), found.value
+    told = runner.invoke(app, ["--json", "fleet", verb, "-P", w.fleet.id])
+    assert told.exit_code != 0 and isinstance(told.exception, SystemExit), told.output
+    said = json.loads(told.stdout)
+    assert said["error"] == "store_damaged", said
+    assert said["hint"] == core_store.damaged_store_recovery()
+    assert "try again" not in told.stdout
+
+
+def test_where_a_pause_goes_is_said_with_the_live_rows_boards_wherever_it_is_said() -> None:
+    """Review of #259, round 35, 8/8: since round 34 (2/10) a pause goes on the boards a
+    project's live rows recorded, manager or not, but ``pause``, ``_pause_boards`` and the
+    two store reads it asks still said the old rule: a coder's board is not one, the live
+    rows' boards only while the project has no manager row, a pause besides its homes on the
+    manager's board alone. Someone who trusted them expected ``fleet pause`` to leave a live
+    coder's hub alone. Each says the live rows' boards, as docs/fleet.md does."""
+    said = {
+        name: " ".join((doc or "").split())
+        for name, doc in (
+            ("pause", fleet_service.pause.__doc__),
+            ("_pause_boards", fleet_service._pause_boards.__doc__),
+            ("fleet_agent_boards", SqliteStore.fleet_agent_boards.__doc__),
+            ("fleet_manager_board", SqliteStore.fleet_manager_board.__doc__),
+        )
+    }
+    assert "the boards its live rows recorded" in said["pause"], said["pause"]
+    assert "a live coder's is" in said["_pause_boards"]
+    assert "a coder's board is not one" not in said["_pause_boards"]
+    assert "while the project has no manager row" not in said["fleet_agent_boards"]
+    assert "besides its manager's and its homes" in said["fleet_agent_boards"]
+    assert "besides its homes and the boards its live rows recorded" in said["fleet_manager_board"]
+    docs = " ".join(
+        (Path(__file__).parents[1] / "docs" / "fleet.md").read_text(encoding="utf-8").split()
+    )
+    assert "running or not, the boards its running agents recorded, and the ones a spawn" in docs
+
+
 def test_shutdown_reports_a_pause_signal_it_could_not_read_or_clear(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -5876,7 +10637,7 @@ def test_shutdown_reports_a_pause_signal_it_could_not_read_or_clear(
     spawn nothing, and nothing in the report saying so. Both failures are surfaced
     the way the visible-projects lookup already is, and the report is preserved.
     """
-    real_read = fleet_service._pause_is_on
+    real_read = team_service.board_signals_in
     real_clear = fleet_service._clear_pause_signal
 
     def refuse(*args: object, **kwargs: object) -> bool:
@@ -5886,9 +10647,9 @@ def test_shutdown_reports_a_pause_signal_it_could_not_read_or_clear(
     fleet_service.pause(project)
     name = fleet_service._name(project)
 
-    monkeypatch.setattr(fleet_service, "_pause_is_on", refuse)  # the READ fails
+    monkeypatch.setattr(team_service, "board_signals_in", refuse)  # the READ fails
     report = fleet_service.shutdown(project, force=True)
-    monkeypatch.setattr(fleet_service, "_pause_is_on", real_read)
+    monkeypatch.setattr(team_service, "board_signals_in", real_read)
 
     assert len(report.stopped) == 1, "the report is preserved, not discarded"
     assert report.pause_scan_failed is not None and "locked" in report.pause_scan_failed
@@ -5896,7 +10657,8 @@ def test_shutdown_reports_a_pause_signal_it_could_not_read_or_clear(
     assert report.paused_cleared == [], "nothing is cleared on a signal that could not be read"
     assert report.paused_kept == [], "and nothing is CLAIMED kept either — it was never read"
     assert project.id in report.incomplete_projects, "an unread pause is not a project down"
-    assert fleet_service.is_paused(project), "the pause is in fact still on"
+    assert _is_paused(project), "the pause is in fact still on"
+    assert [p.id for p in report.pause_unsettled] == [project.id], "its resume is owed"
 
     monkeypatch.setattr(fleet_service, "_clear_pause_signal", refuse)  # now the WRITE fails
     second = fleet_service.shutdown(project, force=True)
@@ -5907,11 +10669,13 @@ def test_shutdown_reports_a_pause_signal_it_could_not_read_or_clear(
     assert second.paused_kept == [name], "read ON, not cleared: kept"
     assert second.paused_cleared == []
     assert project.id in second.incomplete_projects
-    assert fleet_service.is_paused(project), "the signal that could not be written stays on"
+    assert _is_paused(project), "the signal that could not be written stays on"
+    assert [p.id for p in second.pause_unsettled] == [project.id]
     # Negative control: with the store answering, the same run clears it and exits clean.
     third = fleet_service.shutdown(project, force=True)
     assert third.pause_scan_failed is None and third.paused_cleared == [name]
-    assert third.incomplete_projects == [] and not fleet_service.is_paused(project)
+    assert third.incomplete_projects == [] and not _is_paused(project)
+    assert third.pause_unsettled == []
 
 
 def test_shutdown_returns_the_report_when_the_pause_lookup_store_is_locked(
@@ -5947,7 +10711,7 @@ def test_shutdown_returns_the_report_when_the_pause_lookup_store_is_locked(
 
     assert coder.id in {a.id for a in report.stopped}
     assert report.paused_cleared == [], "no pause is cleared blind"
-    assert fleet_service.is_paused(project), "every pause is kept"
+    assert _is_paused(project), "every pause is kept"
     assert report.pause_scan_failed is not None and "locked" in report.pause_scan_failed
     assert report.late_scan_failed is None, "the scan itself ran; only the pause lookup failed"
 
@@ -5958,25 +10722,25 @@ def test_shutdown_clears_the_pause_by_the_target_id_not_a_redirected_board(
     """Review of #121, round 8 (P2): with ``AISQUARE_TEAM_HUB`` pointing at project
     A, shutting down explicit project B resolved its pause through cwd and cleared
     A's signal instead — B reported in ``paused_cleared`` while A's agent kept its
-    standing order removed. The pause is read and written by the target project's
-    ID, so the hub cannot redirect it."""
+    standing order removed. The pause is read and written on the board B's agents
+    recorded at spawn (review of #259, round 25, 2/10), so the caller's hub cannot
+    redirect it: B's coder was spawned with no hub, and reads B's own board."""
     hub_root = project.root.parent / "hub-project"
     hub_root.mkdir()
     hub = team_project(hub_root)
     with store_session() as store:
-        store.ensure_project(hub)
+        store.onboard_project(hub)
     fleet_service.pause(hub)
-    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub_root))  # cwd resolution now points at A
-
     _coder(project)
     fleet_service.pause(project)
-    assert fleet_service.is_paused(project) and fleet_service.is_paused(hub)
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub_root))  # cwd resolution now points at A
+    assert _is_paused(project) and _is_paused(hub)
 
     report = fleet_service.shutdown(project, force=True)
 
     assert report.paused_cleared == [project.root.name], "B, not the hub"
-    assert not fleet_service.is_paused(project), "B's own signal is cleared"
-    assert fleet_service.is_paused(hub), "the hub's pause is untouched"
+    assert not _is_paused(project), "B's own signal is cleared"
+    assert _is_paused(hub), "the hub's pause is untouched"
 
 
 def test_shutdown_with_no_agents_takes_the_fleets_session_down_and_reports_nothing_else(
@@ -6172,11 +10936,1223 @@ def test_reap_removes_a_merged_worktree_and_keeps_an_unmerged_one(
     fleet_service.stop(project, "coder-merged", force=True)
     fleet_service.stop(project, "coder-open", force=True)
 
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=merged.cwd)
+
     report = fleet_service.reap(project)
 
     assert report.worktrees_removed == [merged.cwd]
     assert not merged.cwd.exists() and unmerged.cwd.exists()
+    assert report.branches_deleted == [(project.root, branch)], "main holds its tip"
+    assert _git("branch", "--list", branch, cwd=project.root) == ""
     assert fleet_service.reap(project).worktrees_removed == []
+
+
+@pytest.mark.skipif(not can_deny_reads(), reason="mode 000 does not stop this user from reading")
+def test_a_reap_of_every_project_goes_on_past_a_root_or_tree_it_may_not_look_at(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Review of #259, round 43, 1/7: the worktree pass asked ``Path.exists`` of each root's
+    ``.git`` and of each ended agent's tree, which raised ``PermissionError`` for one under a
+    folder this user may not search up to 3.13 (and from 3.14 said False, passing it over in
+    silence). One such project ended ``reap --all`` in a traceback, the projects after it
+    unreaped. Each is kept, and said so, and the sweep goes on."""
+    ended: dict[str, FleetAgent] = {}
+    for name in ("locked/root", "trees", "fine"):
+        root = project.root if name == "fine" else tmp_path / name
+        if name != "fine":
+            root.mkdir(parents=True)
+            _git("init", "-q", "-b", "main", cwd=root)
+            _git("commit", "-q", "--allow-empty", "-m", "init", cwd=root)
+        here = team_project(root)
+        with store_session() as store:
+            store.onboard_project(here)
+        ended[name] = fleet_service.spawn(here, "coder", label="coder-1").agent
+        fleet_service.stop(here, "coder-1", force=True)
+    locked = [tmp_path / "locked", ended["trees"].cwd.parent]
+    for folder in locked:
+        folder.chmod(0)
+    try:
+        report = fleet_service.reap(None)
+    finally:
+        for folder in locked:
+            folder.chmod(0o700)
+
+    assert report.worktrees_removed == [ended["fine"].cwd], "the sweep went on"
+    assert dict(report.worktrees_kept) == {
+        (tmp_path / "locked" / "root").resolve(): "not looked at, nor any tree in it: "
+        "Permission denied",
+        ended["trees"].cwd: "not looked at: Permission denied",
+    }
+    assert ended["trees"].cwd.exists() and (tmp_path / "locked" / "root").exists()
+
+
+def _remote(project: ProjectInfo, tmp_path: Path) -> Path:
+    """A bare remote for the project's repo, ``origin``, with ``main`` pushed to it."""
+    bare = tmp_path / "remote.git"
+    _git("init", "-q", "--bare", str(bare), cwd=tmp_path)
+    _git("remote", "add", "origin", str(bare), cwd=project.root)
+    _git("push", "-q", "origin", "main", cwd=project.root)
+    return bare
+
+
+def _commit(tree: Path, name: str) -> None:
+    (tree / name).write_text(f"{name}\n", encoding="utf-8")
+    _git("add", name, cwd=tree)
+    _git("commit", "-q", "-m", name, cwd=tree)
+
+
+def test_reap_removes_a_worktree_pushed_to_any_remote_branch_and_keeps_its_fleet_branch(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """A coder that pushes onto an integration branch (``push HEAD:feat/…``) never merges
+    into the default branch, and reap kept every such tree: 15 worktrees and 1.2 GB on one
+    night. Pushed anywhere, with nothing uncommitted, the tree holds nothing found only
+    there — it goes. Its ``fleet/…`` branch stays, as main lacks its commits (review of
+    #259, round 14)."""
+    _remote(project, tmp_path)
+    pushed = fleet_service.spawn(project, "coder", label="coder-pushed").agent
+    _commit(pushed.cwd, "feature.txt")
+    _git("push", "-q", "origin", "HEAD:feat/integration", cwd=pushed.cwd)
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=pushed.cwd)
+    assert branch.startswith("fleet/"), branch
+    fleet_service.stop(project, "coder-pushed", force=True)
+    on_main = _git("branch", "--list", "--merged", "main", branch, cwd=project.root)
+    assert on_main == "", "the premise: the commit is not on main"
+
+    report = fleet_service.reap(project)
+
+    assert report.worktrees_removed == [pushed.cwd] and not pushed.cwd.exists()
+    assert report.branches_deleted == [] and report.branches_kept == [(project.root, branch)]
+    assert _git("branch", "--list", branch, cwd=project.root), f"{branch} kept"
+    assert report.worktrees_kept == []
+    assert _git("rev-parse", "origin/feat/integration", cwd=project.root), "the work is safe"
+
+
+def test_a_spawn_for_a_task_whose_tree_was_reaped_carries_on_from_its_branch(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Review of #259, round 14: reap deleted the ``fleet/…`` branch of a tree pushed to an
+    integration branch, so a coder spawned again for the task — reopened by the reviewer —
+    found no branch and started a new one from main, without its own pushed commits, and
+    nothing said so. The branch is kept, and the respawn checks it out, commits and all."""
+    _remote(project, tmp_path)
+    task = _add_task(project, "Wire the auth flow")
+    first = fleet_service.spawn(project, "coder", task_id=task.id).agent
+    _commit(first.cwd, "feature.txt")
+    _git("push", "-q", "origin", "HEAD:feat/integration", cwd=first.cwd)
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=first.cwd)
+    tip = _git("rev-parse", "HEAD", cwd=first.cwd)
+    fleet_service.stop(project, first.label, force=True)
+    assert fleet_service.reap(project).worktrees_removed == [first.cwd]
+
+    again = fleet_service.spawn(project, "coder", task_id=task.id)
+
+    assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=again.agent.cwd) == branch
+    assert _git("rev-parse", "HEAD", cwd=again.agent.cwd) == tip, "its own commits"
+    assert (again.agent.cwd / "feature.txt").exists()
+    assert f"branch {branch} already existed — checked it out" in again.notes
+
+
+#: A worktree and its ``fleet/…`` branch over their lifecycle (docs/fleet.md, "One rule for a
+#: worktree and its branch"): what happened to them → what a restart of the agent does,
+#: and what a new spawn for its task starts on. ``None`` for a restart is "made again, or
+#: kept, on its branch at its tip"; a string is the refusal. A spawn ``"tip"`` lands on the
+#: agent's last commit, ``"main"`` on main's.
+_LIFECYCLE: dict[str, tuple[str | None, str]] = {
+    "tree and branch there": (None, "tip"),
+    "tree deleted by hand": (None, "tip"),
+    "pushed, reaped: branch kept": (None, "tip"),
+    "merged, reaped: branch deleted": ("and so is its branch", "tip"),
+    "tree and branch deleted by hand": ("and so is its branch", "main"),
+}
+
+
+@pytest.mark.parametrize("then", ["restart", "spawn"])
+@pytest.mark.parametrize("case", list(_LIFECYCLE))
+def test_a_worktree_and_its_branch_over_their_lifecycle(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    case: str,
+    then: str,
+) -> None:
+    """Review of #259, rounds 13 to 15: one rule for an agent's tree and its branch. A
+    tree that is gone is made again on the branch its row recorded (deleted by hand, or
+    reaped with the branch kept), and a restart is refused only when that branch is gone,
+    saying so — not blaming ``fleet reap``, which deletes a branch only once main holds it.
+    A spawn for the task asks for the same branch and carries on from it. Refused, nothing
+    is written: the 💤 row stays as it was, no tree is made at its path, and the repo's
+    git config is untouched (round 15 left a note behind for a branch that was gone)."""
+    _remote(project, tmp_path)
+    task = _add_task(project, "Wire the auth flow")
+    coder = fleet_service.spawn(project, "coder", task_id=task.id).agent
+    _commit(coder.cwd, "feature.txt")
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=coder.cwd)
+    tip = _git("rev-parse", "HEAD", cwd=coder.cwd)
+    fleet_service.stop(project, coder.label, force=True)
+    if case == "pushed, reaped: branch kept":
+        _git("push", "-q", "origin", f"{branch}:feat/integration", cwd=project.root)
+        assert fleet_service.reap(project).branches_kept == [(project.root, branch)]
+    elif case == "merged, reaped: branch deleted":
+        _git("merge", "-q", "--ff-only", branch, cwd=project.root)
+        assert fleet_service.reap(project).branches_deleted == [(project.root, branch)]
+    elif case != "tree and branch there":
+        shutil.rmtree(coder.cwd)
+        if case == "tree and branch deleted by hand":
+            _git("update-ref", "-d", f"refs/heads/{branch}", cwd=project.root)
+    refusal, spawned_on = _LIFECYCLE[case]
+
+    if then == "spawn":
+        cwd = fleet_service.spawn(project, "coder", task_id=task.id).agent.cwd
+        assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=cwd) == branch
+        main = _git("rev-parse", "main", cwd=project.root)
+        assert _git("rev-parse", "HEAD", cwd=cwd) == (tip if spawned_on == "tip" else main)
+        return
+    if refusal is not None:
+        git_config = (project.root / ".git" / "config").read_bytes()
+        with store_session() as store:
+            [before] = store.fleet_agents(project.id)
+        with pytest.raises(FleetError) as refused:
+            fleet_service.restart(project, coder.label)
+        said = str(refused.value)
+        assert f"its worktree {coder.cwd} is gone" in said and refusal in said, said
+        assert "fleet reap" not in said, "it says what it found"
+        assert not coder.cwd.exists(), "no tree was made in its place"
+        with store_session() as store:
+            [row] = store.fleet_agents(project.id)
+        assert row == before and row.id == coder.id and row.ended_at is not None
+        assert (project.root / ".git" / "config").read_bytes() == git_config
+        return
+    receipt = fleet_service.restart(project, coder.label)
+    assert receipt.started.cwd == coder.cwd
+    assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=coder.cwd) == branch
+    assert _git("rev-parse", "HEAD", cwd=coder.cwd) == tip, "every commit is there"
+    assert receipt.started.branch == branch, "the replacement's row records it too"
+    remade = f"its worktree {coder.cwd} was gone — made it again on its branch {branch}"
+    assert (remade in receipt.notes) == (case != "tree and branch there"), receipt.notes
+
+
+def _move_to_a_branch_of_its_own(tree: Path, name: str) -> str:
+    """``git checkout -b <name>`` in ``tree``, a commit there, pushed to ``origin``: the tip."""
+    _git("checkout", "-q", "-b", name, cwd=tree)
+    _commit(tree, "fix.txt")
+    _git("push", "-q", "origin", name, cwd=tree)
+    return _git("rev-parse", "HEAD", cwd=tree)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "on a branch of its own, stopped, its tree deleted by hand",
+        "on a branch of its own, exited, reaped",
+        "deleted by hand, then git's worktree list pruned",
+        "its label's earlier tree was on another branch",
+        "its label's earlier tree was on another branch, and it exited, reaped",
+        "on a detached HEAD, stopped, its tree deleted by hand",
+        "on a detached HEAD, exited, reaped",
+    ],
+)
+def test_a_restart_makes_a_gone_tree_again_on_the_branch_its_row_recorded(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path, case: str
+) -> None:
+    """Review of #259, round 15: the branch of a gone tree was looked for in notes in the
+    repo's git config, written only for a ``fleet/…`` branch and keyed by the tree's path,
+    and in git's worktree list. So a coder that moved to ``fix/auth`` and was reaped could
+    not be restarted (no note, and git had forgotten the tree); one whose tree was deleted
+    by hand could not either once any spawn had pruned; and one whose label's earlier
+    tree was reaped from ``fleet/…`` was rebuilt there, on the earlier agent's branch,
+    without its own commits. The row records the branch at spawn, at stop and at reap,
+    and a restart makes the tree again there, at its tip. Round 16: reap wrote the tree's
+    branch to the OLDEST row at its path, and a restart acts on the newest, so the later
+    agent, exited rather than stopped, was rebuilt on the earlier one's branch; and a
+    detached HEAD at stop or reap wrote ``None`` over the branch recorded, so the restart
+    was refused while that branch still held the agent's commits."""
+    _remote(project, tmp_path)
+    task = _add_task(project, "Wire the auth flow")
+    coder = fleet_service.spawn(project, "coder", task_id=task.id).agent
+    _commit(coder.cwd, "feature.txt")
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=coder.cwd)
+    tip = _git("rev-parse", "HEAD", cwd=coder.cwd)
+    if case == "on a branch of its own, stopped, its tree deleted by hand":
+        branch, tip = "fix/auth", _move_to_a_branch_of_its_own(coder.cwd, "fix/auth")
+        fleet_service.stop(project, coder.label, force=True)
+        shutil.rmtree(coder.cwd)
+    elif case == "on a branch of its own, exited, reaped":
+        branch, tip = "fix/auth", _move_to_a_branch_of_its_own(coder.cwd, "fix/auth")
+        tmux.die(coder.pane_id, 0)
+        assert fleet_service.reap(project).worktrees_removed == [coder.cwd]
+    elif case == "deleted by hand, then git's worktree list pruned":
+        fleet_service.stop(project, coder.label, force=True)
+        shutil.rmtree(coder.cwd)
+        _git("worktree", "prune", cwd=project.root)  # as any spawn, or a role's cleanup
+    elif case == "on a detached HEAD, stopped, its tree deleted by hand":
+        _git("checkout", "-q", "--detach", cwd=coder.cwd)  # mid-rebase, say
+        fleet_service.stop(project, coder.label, force=True)
+        shutil.rmtree(coder.cwd)
+    elif case == "on a detached HEAD, exited, reaped":
+        _git("push", "-q", "origin", f"{branch}:feat/integration", cwd=coder.cwd)
+        _git("checkout", "-q", "--detach", cwd=coder.cwd)
+        tmux.die(coder.pane_id, 0)
+        assert fleet_service.reap(project).worktrees_removed == [coder.cwd]
+    else:
+        _git("push", "-q", "origin", f"{branch}:feat/integration", cwd=coder.cwd)
+        fleet_service.stop(project, coder.label, force=True)
+        assert fleet_service.reap(project).branches_kept == [(project.root, branch)]
+        coder = fleet_service.spawn(project, "coder", task_id=task.id).agent
+        assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=coder.cwd) == branch
+        branch, tip = "fix/auth", _move_to_a_branch_of_its_own(coder.cwd, "fix/auth")
+        if case.endswith("exited, reaped"):
+            tmux.die(coder.pane_id, 0)  # no stop: only the reap records its branch
+        else:
+            fleet_service.stop(project, coder.label, force=True)
+        assert fleet_service.reap(project).worktrees_removed == [coder.cwd]
+    assert not coder.cwd.exists()
+
+    receipt = fleet_service.restart(project, coder.label)
+
+    assert receipt.started.cwd == coder.cwd
+    assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=coder.cwd) == branch
+    assert _git("rev-parse", "HEAD", cwd=coder.cwd) == tip, "its own commits"
+    assert f"made it again on its branch {branch}" in " ".join(receipt.notes), receipt.notes
+
+
+@pytest.mark.parametrize("where", ["the main checkout", "another tree"])
+def test_a_restart_refused_for_a_branch_out_elsewhere_says_how_to_free_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path, where: str
+) -> None:
+    """Review of #259, round 16: a restart refused because its gone tree's branch is out in
+    another tree said "remove that tree first" — of the main checkout too, which cannot be
+    removed, and where checking an ended agent's branch out to try its work is common.
+    There it says to switch that checkout to another branch."""
+    coder = fleet_service.spawn(project, "coder", label="coder-x").agent
+    _commit(coder.cwd, "feature.txt")
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=coder.cwd)
+    fleet_service.stop(project, "coder-x", force=True)
+    shutil.rmtree(coder.cwd)
+    _git("worktree", "prune", cwd=project.root)
+    if where == "the main checkout":
+        holder = project.root
+        _git("checkout", "-q", branch, cwd=project.root)
+    else:
+        holder = tmp_path / "elsewhere"
+        _git("worktree", "add", "-q", str(holder), branch, cwd=project.root)
+
+    with pytest.raises(FleetError) as refused:
+        fleet_service.restart(project, "coder-x")
+
+    said = str(refused.value)
+    assert f"{branch} is checked out in {holder.resolve()} now" in said, said
+    way = "switch that checkout to another branch" if holder == project.root else "remove that tree"
+    assert said.endswith(f"carry on there, or {way} first"), said
+
+
+@pytest.mark.parametrize("merge", ["fast-forward", "squash"])
+def test_reap_deletes_a_kept_fleet_branch_once_the_default_branch_has_its_work(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path, merge: str
+) -> None:
+    """Review of #259, round 15: a ``fleet/…`` branch reap kept when its tree went was
+    never looked at again — the tree gone, its row was no candidate — so it stayed for good
+    once merged, and with a squash or rebase merge its tip never reaches the default branch
+    at all. Every reap now asks each branch no tree has out: deleted once the default
+    branch holds its tip, or, pushed, once merging it would change nothing; the rest are
+    named again, each reap, with how to drop them (the CLI)."""
+    _remote(project, tmp_path)
+    branches: dict[str, str] = {}
+    for label in ("coder-merged", "coder-open"):
+        agent = fleet_service.spawn(project, "coder", label=label).agent
+        _commit(agent.cwd, f"{label}.txt")
+        branches[label] = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=agent.cwd)
+        _git("push", "-q", "origin", f"HEAD:feat/{label}", cwd=agent.cwd)
+        fleet_service.stop(project, label, force=True)
+    first = fleet_service.reap(project)
+    assert sorted(first.branches_kept) == sorted((project.root, b) for b in branches.values())
+    assert first.branches_deleted == []
+    done, still = branches["coder-merged"], branches["coder-open"]
+    if merge == "fast-forward":
+        _git("merge", "-q", "--ff-only", done, cwd=project.root)
+    else:
+        _git("merge", "-q", "--squash", done, cwd=project.root)
+        _git("commit", "-q", "-m", "Squash-merge the merged coder's work", cwd=project.root)
+        assert _git("branch", "--list", "--merged", "main", done, cwd=project.root) == ""
+
+    again = fleet_service.reap(project)
+
+    assert again.worktrees_removed == [] and again.branches_deleted == [(project.root, done)]
+    assert _git("branch", "--list", done, cwd=project.root) == ""
+    assert again.branches_kept == [(project.root, still)], "still kept, and named again"
+    assert _git("branch", "--list", still, cwd=project.root)
+
+
+def test_a_squash_merged_branch_goes_where_a_top_level_path_is_named_like_the_default_branch(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Review of #259, round 17: ``git rev-list <tips> --not main --remotes`` had no ``--``,
+    and in a checkout whose top level holds a ``main/`` git exits 128, "ambiguous argument
+    'main': both revision and filename". Read as "nothing pushed", every squash-merged
+    fleet branch was kept, and named again on every reap."""
+    (project.root / "main").mkdir()
+    (project.root / "main" / "README").write_text("a directory named like the branch\n")
+    _git("add", "main", cwd=project.root)
+    _git("commit", "-q", "-m", "a main/ directory", cwd=project.root)
+    _remote(project, tmp_path)
+    agent = fleet_service.spawn(project, "coder", label="coder-squash").agent
+    _commit(agent.cwd, "feature.txt")
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=agent.cwd)
+    _git("push", "-q", "origin", "HEAD:feat/squash", cwd=agent.cwd)
+    fleet_service.stop(project, agent.label, force=True)
+    _git("merge", "-q", "--squash", branch, cwd=project.root)
+    _git("commit", "-q", "-m", "Squash-merge the coder's work", cwd=project.root)
+
+    report = fleet_service.reap(project)
+
+    assert report.worktrees_removed == [agent.cwd]
+    assert report.branches_deleted == [(project.root, branch)] and report.branches_kept == []
+    assert _git("branch", "--list", branch, cwd=project.root) == ""
+
+
+def test_a_reap_with_every_recorded_branch_swept_asks_no_tree_about_branches(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 35, 5/8: round 34 asked every tree what it has out or is
+    rebasing (``git worktree list``, up to four state files a tree) before the sweep's early
+    return. Ended rows are kept for good, so once a project's merged branches were swept,
+    every later reap asked them all for nothing, a live coder's own ``fleet/…`` branch
+    keeping the listing from coming back empty. With no recorded branch left, the sweep asks
+    neither ``--merged`` nor the trees."""
+    _remote(project, tmp_path)
+    agent = fleet_service.spawn(project, "coder", label="coder-done").agent
+    _commit(agent.cwd, "done.txt")
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=agent.cwd)
+    _git("push", "-q", "origin", "HEAD:feat/done", cwd=agent.cwd)
+    fleet_service.stop(project, agent.label, force=True)
+    _git("merge", "-q", "--ff-only", branch, cwd=project.root)
+    assert fleet_service.reap(project).branches_deleted == [(project.root, branch)]
+    fleet_service.spawn(project, "coder", label="coder-live")  # a fleet/… branch of its own
+    asked: list[Path] = []
+    real = fleet_service._branches_in_use
+
+    def counted(root: Path, common: Path) -> set[str] | None:
+        asked.append(root)
+        return real(root, common)
+
+    monkeypatch.setattr(fleet_service, "_branches_in_use", counted)
+    gits: list[tuple[str, ...]] = []
+    real_git = fleet_service._git
+
+    def counted_git(cwd: Path, *args: str) -> object:
+        gits.append(args)
+        return real_git(cwd, *args)
+
+    monkeypatch.setattr(fleet_service, "_git", counted_git)
+
+    again = fleet_service.reap(project)
+
+    assert again.branches_deleted == [] and again.branches_kept == []
+    assert asked == [], "no recorded branch left to judge"
+    assert not any(arg.startswith("--merged=") for args in gits for arg in args), gits
+
+
+def test_a_kept_branch_costs_a_reap_one_git_call_pushed_and_none_unpushed(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 16: a kept branch stays until main has its work, perhaps for
+    good, and every reap asked each one five git commands (``rev-parse``, ``merge-base``,
+    ``for-each-ref --contains``, ``merge-tree``, ``rev-parse ^{tree}``). Whether each is
+    pushed is one ``rev-list`` for them all now: a pushed one costs its ``merge-tree``,
+    an unpushed one (its tree deleted by hand) nothing."""
+    _remote(project, tmp_path)
+    for label in ("coder-a", "coder-b", "coder-c"):
+        agent = fleet_service.spawn(project, "coder", label=label).agent
+        _commit(agent.cwd, f"{label}.txt")
+        if label == "coder-c":
+            fleet_service.stop(project, label, force=True)
+            shutil.rmtree(agent.cwd)  # unpushed, so reap would have kept its tree
+            _git("worktree", "prune", cwd=project.root)
+        else:
+            _git("push", "-q", "origin", f"HEAD:feat/{label}", cwd=agent.cwd)
+            fleet_service.stop(project, label, force=True)
+    assert len(fleet_service.reap(project).branches_kept) == 3
+    real = fleet_service._git
+    asked: list[tuple[str, ...]] = []
+
+    def counted(cwd: Path, *args: str) -> object:
+        asked.append(args)
+        return real(cwd, *args)
+
+    monkeypatch.setattr(fleet_service, "_git", counted)
+
+    again = fleet_service.reap(project)
+
+    assert len(again.branches_kept) == 3 and again.branches_deleted == []
+    commands = [args[0] for args in asked]
+    assert commands.count("merge-tree") == 2, "the two pushed ones"
+    assert commands.count("rev-list") == 1, "one question for all three"
+    assert "merge-base" not in commands and ("--contains" not in sum(asked, ())), asked
+
+
+def test_reap_keeps_a_worktree_with_unpushed_commits_or_uncommitted_changes_and_says_why(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    _remote(project, tmp_path)
+    unpushed = fleet_service.spawn(project, "coder", label="coder-unpushed").agent
+    _commit(unpushed.cwd, "local.txt")
+    dirty = fleet_service.spawn(project, "coder", label="coder-dirty").agent
+    (dirty.cwd / "scratch.txt").write_text("wip\n", encoding="utf-8")  # untracked, not ignored
+    branches = {
+        agent.label: _git("rev-parse", "--abbrev-ref", "HEAD", cwd=agent.cwd)
+        for agent in (unpushed, dirty)
+    }
+    for label in branches:
+        fleet_service.stop(project, label, force=True)
+
+    report = fleet_service.reap(project)
+
+    assert report.worktrees_removed == [] and report.branches_deleted == []
+    kept = dict(report.worktrees_kept)
+    assert kept[unpushed.cwd] == "commits on no remote branch yet — push them, then reap again"
+    assert kept[dirty.cwd] == "uncommitted changes"
+    assert unpushed.cwd.exists() and dirty.cwd.exists()
+    for branch in branches.values():
+        assert _git("branch", "--list", branch, cwd=project.root), f"{branch} kept"
+
+    # Pushed, the next reap takes it; the dirty one is still kept.
+    _git("push", "-q", "origin", "HEAD:feat/later", cwd=unpushed.cwd)
+    again = fleet_service.reap(project)
+    assert again.worktrees_removed == [unpushed.cwd]
+    assert again.branches_deleted == []
+    assert again.branches_kept == [(project.root, branches["coder-unpushed"])]
+    assert dict(again.worktrees_kept) == {dirty.cwd: "uncommitted changes"}
+
+
+@pytest.mark.parametrize("where", ["repo config", "global config"])
+def test_reap_keeps_an_untracked_file_that_status_show_untracked_files_hides(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    where: str,
+) -> None:
+    """``status.showUntrackedFiles=no`` (common in big repos and dotfile setups) hides an
+    untracked file from a plain ``git status --porcelain``, and ``git worktree remove``
+    honours it too: the tree read clean, was pushed, and reap deleted the file. Reap asks
+    for untracked files whatever the config says."""
+    _remote(project, tmp_path)
+    if where == "repo config":
+        _git("config", "status.showUntrackedFiles", "no", cwd=project.root)
+    else:
+        config = tmp_path / "gitconfig"
+        config.write_text("[status]\n\tshowUntrackedFiles = no\n", encoding="utf-8")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    agent = fleet_service.spawn(project, "coder", label="coder-hidden").agent
+    _commit(agent.cwd, "f.txt")
+    _git("push", "-q", "origin", "HEAD:feat/x", cwd=agent.cwd)
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=agent.cwd)
+    precious = agent.cwd / "precious.txt"
+    precious.write_text("only here\n", encoding="utf-8")  # untracked, not ignored
+    assert _git("status", "--porcelain", cwd=agent.cwd) == "", "the premise: git hides it"
+    fleet_service.stop(project, "coder-hidden", force=True)
+
+    report = fleet_service.reap(project)
+
+    assert report.worktrees_removed == [] and report.branches_deleted == []
+    assert dict(report.worktrees_kept) == {agent.cwd: "uncommitted changes"}
+    assert precious.read_text(encoding="utf-8") == "only here\n"
+    assert _git("branch", "--list", branch, cwd=project.root), f"{branch} kept"
+
+
+#: Which branches a reap deletes (docs/fleet.md, ``fleet reap``): a ``fleet/…`` branch an
+#: ended agent's row recorded, no tree has out, goes once main has its work and is named,
+#: kept, until then. Every other branch is not the fleet's and is left as it is, merged or
+#: not: case → ``"deleted"``, ``"kept"`` or ``"left"``.
+_SWEEP: dict[str, str] = {
+    "an ended agent's, merged": "deleted",
+    "an ended agent's, pushed and not merged": "kept",
+    "an ended agent's, merged, named by a live agent whose tree is gone": "left",
+    "made by hand, merged, in a project no agent ran in": "left",
+    "made by hand, merged, beside an ended agent's": "left",
+    "spawned on, then left by its agent for a branch of its own": "left",
+    "an ended agent's own, not fleet/…, merged": "left",
+}
+
+
+@pytest.mark.parametrize("case", list(_SWEEP))
+def test_reap_deletes_only_a_fleet_branch_an_ended_agent_recorded(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path, case: str
+) -> None:
+    """Review of #259, round 16: every reap deleted ANY merged ``fleet/…`` branch no tree
+    had out, in every project it walked — a user's ``git branch fleet/my-own-notes`` in a
+    repo no agent ever ran in included, as ``fleet reap --all`` walks every captured
+    directory. Only a branch an ended agent's row recorded is the fleet's to delete; a
+    branch no row names, or one that is not ``fleet/…``, is never touched; and one a live
+    agent's row names is not deleted under it, its tree gone or not."""
+    _remote(project, tmp_path)
+    if case == "made by hand, merged, in a project no agent ran in":
+        branch = "fleet/my-own-notes"
+        _git("branch", branch, cwd=project.root)
+    else:
+        agent = fleet_service.spawn(project, "coder", label="coder-x").agent
+        branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=agent.cwd)
+        if case == "an ended agent's, pushed and not merged":
+            _commit(agent.cwd, "feature.txt")
+            _git("push", "-q", "origin", "HEAD:feat/integration", cwd=agent.cwd)
+        elif case == "made by hand, merged, beside an ended agent's":
+            branch = "fleet/my-own-notes"
+            _git("branch", branch, cwd=project.root)
+        elif "my-own" in case or "not fleet/…" in case or "left by its agent" in case:
+            _git("switch", "-q", "-c", "my-own", cwd=agent.cwd)
+            _commit(agent.cwd, "mine.txt")
+            _git("push", "-q", "origin", "HEAD:my-own", cwd=agent.cwd)
+            if case == "an ended agent's own, not fleet/…, merged":
+                _git("merge", "-q", "--ff-only", "my-own", cwd=project.root)
+                branch = "my-own"
+        fleet_service.stop(project, "coder-x", force=True)
+        if case == "an ended agent's, merged, named by a live agent whose tree is gone":
+            again = fleet_service.spawn(project, "coder", label="coder-x").agent
+            assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=again.cwd) == branch
+            shutil.rmtree(again.cwd)
+            _git("worktree", "prune", cwd=project.root)  # out of every tree now
+    assert branch in _git("branch", "--list", "--merged", "main", cwd=project.root) or (
+        _SWEEP[case] == "kept"
+    ), "the premise: main holds its tip, so only whose branch it is decides"
+
+    report = fleet_service.reap(project)
+
+    verdict = _SWEEP[case]
+    assert ((project.root, branch) in report.branches_deleted) == (verdict == "deleted"), report
+    assert ((project.root, branch) in report.branches_kept) == (verdict == "kept"), report
+    assert bool(_git("branch", "--list", branch, cwd=project.root)) == (verdict != "deleted")
+
+
+def test_a_reap_deletes_a_done_branch_only_at_the_tip_it_judged(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 33, 6/10: the sweep judged which branches were done (merged, or
+    squashed in) before it took the lock, and under it ran ``git branch -D``, which deletes
+    whatever the ref holds by then. A tip moved in between (a ``git fetch origin
+    fleet/x:fleet/x``, a ``branch -f``) was deleted with commits nobody judged. The delete
+    is made at the judged tip alone: a moved branch is kept, and judged again next reap.
+    One deleted takes its ``branch.<name>`` config with it, as ``branch -D`` did."""
+    task = _add_task(project, "Wire the auth flow")
+    agent = fleet_service.spawn(project, "coder", task_id=task.id).agent
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=agent.cwd)
+    fleet_service.stop(project, agent.label, force=True)
+    _git("config", f"branch.{branch}.remote", "origin", cwd=project.root)  # as `push -u` sets
+    real = fleet_service._squashed
+    fetched: list[str] = []
+
+    def a_fetch_meanwhile(root: Path, tips: Mapping[str, str], default: str) -> set[str]:
+        if not fetched:  # after `--merged` read it done, before the lock
+            tip = _git("commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "fetched", cwd=root)
+            _git("branch", "-f", branch, tip, cwd=root)
+            fetched.append(tip)
+        return real(root, tips, default)
+
+    monkeypatch.setattr(fleet_service, "_squashed", a_fetch_meanwhile)
+
+    first = fleet_service.reap(project)
+
+    assert first.branches_deleted == [], first
+    assert _git("rev-parse", branch, cwd=project.root) == fetched[0], "kept, at its new tip"
+    again = fleet_service.reap(project)
+    assert again.branches_deleted == [] and again.branches_kept == [(project.root, branch)]
+    _git("branch", "-f", branch, "HEAD", cwd=project.root)  # main holds its tip again
+    assert fleet_service.reap(project).branches_deleted == [(project.root, branch)]
+    assert _git("branch", "--list", branch, cwd=project.root) == ""
+    left = subprocess.run(
+        ["git", "config", "--get", f"branch.{branch}.remote"],
+        cwd=project.root,
+        capture_output=True,
+        text=True,
+    )
+    assert (left.returncode, left.stdout) == (1, ""), "its config went with it"
+
+
+def _git_in(tree: Path, *args: str, **env: str) -> subprocess.CompletedProcess[str]:
+    """``git <args>`` in ``tree`` with ``env`` added, whatever it exits with."""
+    return subprocess.run(
+        ["git", "-c", "user.email=fleet@test", "-c", "user.name=fleet", *args],
+        cwd=tree,
+        capture_output=True,
+        text=True,
+        env={**os.environ, **env},
+    )
+
+
+@pytest.mark.parametrize("state", ["rebasing", "rebasing, applying", "updating", "bisecting"])
+def test_a_reap_never_deletes_a_branch_a_worktree_is_rebasing_or_bisecting(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path, state: str
+) -> None:
+    """Review of #259, round 34, 1/10: ``git branch -D`` refuses a branch a worktree has out,
+    is rebasing or is bisecting from; the ``update-ref -d`` round 33 deleted with refuses
+    none, and ``git worktree list`` says ``detached`` of a tree mid-rebase. A merged task
+    branch a hand-made tree was rebasing was deleted, its ``rebase --continue`` failed on the
+    ref, and the rebased commits were left on a detached HEAD. The sweep refuses what ``branch
+    -D`` refuses: a rebase's branch (``head-name``, either backend), the refs its
+    ``--update-refs`` moves, and a bisect's; deleted once the tree is done with it."""
+    _commit(project.root, "a.txt")
+    _commit(project.root, "b.txt")
+    task = _add_task(project, "Wire the auth flow")
+    agent = fleet_service.spawn(project, "coder", task_id=task.id).agent
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=agent.cwd)
+    fleet_service.stop(project, agent.label, force=True)
+    _git("worktree", "remove", str(agent.cwd), cwd=project.root)  # merged: main holds its tip
+    tree = tmp_path / "wt"
+    mine = ("-b", "mine") if state == "updating" else ()
+    _git("worktree", "add", "-q", *mine, str(tree), branch, cwd=project.root)
+    if state == "bisecting":
+        started = _git_in(tree, "bisect", "start", "HEAD", "HEAD~2")  # checks out a.txt's
+    else:  # stopped by a conflict: b.txt is theirs on the commit it is replayed onto
+        _git("switch", "-q", "--detach", f"{branch}~1", cwd=tree)
+        (tree / "b.txt").write_text("theirs\n", encoding="utf-8")
+        _git("add", "b.txt", cwd=tree)
+        _git("commit", "-q", "-m", "theirs", cwd=tree)
+        onto = _git("rev-parse", "HEAD", cwd=tree)
+        _git("switch", "-q", "-", cwd=tree)
+        if state == "updating":  # another branch's rebase, which moves this one as it ends
+            _commit(tree, "c.txt")
+        how = {
+            "rebasing": ("HEAD~1",),
+            "rebasing, applying": ("--apply", "HEAD~1"),
+            "updating": ("--update-refs", "HEAD~2"),
+        }[state]
+        started = _git_in(tree, "rebase", "--onto", onto, *how)
+    listed = _git("worktree", "list", "--porcelain", cwd=project.root).split("\n\n")
+    assert listed[1].endswith("detached"), f"the premise: {listed} ({started.stderr})"
+    refused = _git_in(project.root, "branch", "-D", branch)
+    assert refused.returncode != 0 and "used by worktree" in refused.stderr, "as git refuses"
+
+    report = fleet_service.reap(project)
+
+    assert report.branches_deleted == [], report
+    assert _git("branch", "--list", branch, cwd=project.root)
+    if state == "rebasing":
+        (tree / "b.txt").write_text("ours\n", encoding="utf-8")
+        _git("add", "b.txt", cwd=tree)
+        ended = _git_in(tree, "rebase", "--continue", GIT_EDITOR="true")
+        assert ended.returncode == 0, f"it ends cleanly: {ended.stderr}"
+        assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=tree) == branch
+        return
+    if state == "bisecting":
+        _git("bisect", "reset", cwd=tree)
+    else:
+        _git("rebase", "--abort", cwd=tree)
+    _git("worktree", "remove", "--force", str(tree), cwd=project.root)
+    assert fleet_service.reap(project).branches_deleted == [(project.root, branch)]
+
+
+def test_a_reap_deletes_no_branch_when_git_will_not_list_the_worktrees(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 34, 1/10: a ``git worktree list`` that failed read as no tree
+    having any branch out, and every done ``fleet/…`` branch was deleted, one checked out
+    included. Nothing is known to be free then: none goes, and the next reap asks again."""
+    task = _add_task(project, "Wire the auth flow")
+    agent = fleet_service.spawn(project, "coder", task_id=task.id).agent
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=agent.cwd)
+    fleet_service.stop(project, agent.label, force=True)
+    _git("worktree", "remove", str(agent.cwd), cwd=project.root)
+    real = fleet_service._git
+
+    def no_list(root: Path, *args: str) -> fleet_service._GitResult:
+        if args[:2] == ("worktree", "list"):
+            return fleet_service._GitResult(128, "", "fatal: no")
+        return real(root, *args)
+
+    monkeypatch.setattr(fleet_service, "_git", no_list)
+    assert fleet_service.reap(project).branches_deleted == []
+    assert _git("branch", "--list", branch, cwd=project.root)
+    monkeypatch.setattr(fleet_service, "_git", real)
+    assert fleet_service.reap(project).branches_deleted == [(project.root, branch)]
+
+
+def test_a_reap_inside_a_spawn_never_deletes_the_branch_the_spawn_is_making_its_tree_on(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 16: ``git worktree add -b`` makes the branch first and
+    registers the tree after it, so a reap in between (the manager's, or ``fleet reap``)
+    read a respawned task's branch — recorded by its ended agent, at main's tip — as merged
+    and out of every tree, and deleted it under the spawn. A spawn makes its tree under
+    the lock a reap deletes under: a reap that meets it deletes nothing, and the next
+    one does."""
+    task = _add_task(project, "Wire the auth flow")
+    first = fleet_service.spawn(project, "coder", task_id=task.id).agent
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=first.cwd)
+    fleet_service.stop(project, first.label, force=True)
+    assert fleet_service.reap(project).branches_deleted == [(project.root, branch)], (
+        "main holds its tip"
+    )
+    real = fleet_service._add_worktree
+    meanwhile: list[fleet_service.ReapReport] = []
+
+    def a_reap_in_between(root: Path, path: Path, name: str, *, new: bool = False) -> None:
+        if new:  # `git worktree add -b`, in its two steps: the branch, then the tree
+            _git("branch", name, cwd=root)
+            meanwhile.append(fleet_service.reap(project))
+        real(root, path, name)
+
+    monkeypatch.setattr(fleet_service, "_add_worktree", a_reap_in_between)
+
+    again = fleet_service.spawn(project, "coder", task_id=task.id).agent
+
+    assert [report.branches_deleted for report in meanwhile] == [[]]
+    assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=again.cwd) == branch
+    fleet_service.stop(project, again.label, force=True)
+    assert fleet_service.reap(project).branches_deleted == [(project.root, branch)], (
+        "the next reap does"
+    )
+
+
+@pytest.mark.parametrize("via", ["spawn", "restart"])
+def test_a_reap_never_removes_a_tree_a_spawn_reused_after_it_read_the_rows(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    via: str,
+) -> None:
+    """Review of #259, round 17: reap decided a tree was unused from the rows it read before
+    its loop, and asks each tree a few git questions first. A spawn for the label — or a
+    restart of the agent, which carries on in its tree as it stands — reused the tree
+    meanwhile and wrote its live row; the reap then read the tree as an ended agent's, clean
+    and pushed, and removed it under the new agent. It reads the live rows again, under the
+    lock a spawn reuses trees under, before it removes one."""
+    first = fleet_service.spawn(project, "coder", label="coder-auth").agent
+    fleet_service.stop(project, "coder-auth", force=True)
+    real = fleet_service._default_branch
+    started: list[FleetAgent] = []
+
+    def a_spawn_meanwhile(root: Path) -> str:
+        """Between the reap's read of the rows and its first tree: every question about a
+        tree is asked under the lock since round 18, which a spawn there would wait on."""
+        if not started:
+            if via == "spawn":
+                started.append(fleet_service.spawn(project, "coder", label="coder-auth").agent)
+            else:
+                started.append(fleet_service.restart(project, "coder-auth").started)
+        return real(root)
+
+    monkeypatch.setattr(fleet_service, "_default_branch", a_spawn_meanwhile)
+
+    report = fleet_service.reap(project)
+
+    [again] = started
+    assert again.cwd == first.cwd and again.ended_at is None
+    assert first.cwd.is_dir(), "the new agent's tree is still there"
+    assert report.worktrees_removed == [] and report.worktrees_kept == []
+
+
+@pytest.mark.parametrize("then", ["working", "ended"])
+def test_a_reap_records_no_branch_on_a_row_whose_tree_a_spawn_reused_after_it_read_the_rows(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    then: str,
+) -> None:
+    """Review of #259, round 18: reap recorded the tree's branch on the ended row it had read
+    before its loop, outside the branch lock. A spawn for another task that reused the tree
+    meanwhile had checked out its own branch there, which was written on the old row, and
+    the old row's branch, named by no row then, was never swept. The branch is recorded under
+    the lock, and only on a row no other has followed at the tree since the rows were read:
+    one working there, or one that ended there since."""
+    task_a, task_b = _add_task(project, "First job"), _add_task(project, "Second job")
+    first = fleet_service.spawn(project, "coder", label="coder-auth", task_id=task_a.id).agent
+    fleet_service.stop(project, "coder-auth", force=True)
+    on_a = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=first.cwd)
+    real = fleet_service._default_branch
+    started: list[FleetAgent] = []
+
+    def a_spawn_meanwhile(root: Path) -> str:
+        if not started:
+            receipt = fleet_service.spawn(project, "coder", label="coder-auth", task_id=task_b.id)
+            started.append(receipt.agent)
+            if then == "ended":
+                fleet_service.stop(project, "coder-auth", force=True)
+        return real(root)
+
+    monkeypatch.setattr(fleet_service, "_default_branch", a_spawn_meanwhile)
+
+    report = fleet_service.reap(project)
+
+    [second] = started
+    on_b = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=second.cwd)
+    assert second.cwd == first.cwd and on_b != on_a, "the premise: task B's branch, in A's tree"
+    with store_session() as store:
+        old, new = store.get_fleet_agent(first.id), store.get_fleet_agent(second.id)
+    assert old is not None and old.branch == on_a, "task A's branch, still"
+    assert new is not None and new.branch == on_b
+    assert report.worktrees_removed == [] and first.cwd.is_dir()
+
+
+def test_a_reap_inside_a_spawn_never_removes_the_tree_it_reused_before_its_row(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the race above: a reap between a spawn's reuse of a tree and the row
+    that says an agent works there — the window opening, say — found no live row at the path
+    and removed the tree. A spawn holds the branch lock from the tree until its row, and a
+    reap that meets the lock removes nothing, saying why; the next one asks again."""
+    first = fleet_service.spawn(project, "coder", label="coder-auth").agent
+    fleet_service.stop(project, "coder-auth", force=True)
+    real = fleet_service.open_window
+    meanwhile: list[fleet_service.ReapReport] = []
+
+    def a_reap_first(*args: Any, **kwargs: Any) -> WindowInfo:
+        meanwhile.append(fleet_service.reap(project))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(fleet_service, "open_window", a_reap_first)
+
+    again = fleet_service.spawn(project, "coder", label="coder-auth").agent
+
+    [during] = meanwhile
+    assert during.worktrees_removed == []
+    assert [path for path, _why in during.worktrees_kept] == [first.cwd]
+    assert "holds" in during.worktrees_kept[0][1]
+    assert again.cwd == first.cwd and first.cwd.is_dir()
+    monkeypatch.setattr(fleet_service, "open_window", real)
+    assert fleet_service.reap(project).worktrees_removed == [], "a live agent's, from now on"
+
+
+def test_a_reap_says_why_it_keeps_a_tree_while_a_spawn_holds_the_branch_lock(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 19: a reap took the branch lock before it asked what a tree
+    held. While a spawn held it, a tree with uncommitted work was reported as "another
+    aisquare holds … — try again", not as what to commit; and each reap held the lock
+    through ``git status`` and the push check of every tree it kept, a spawn queued behind.
+    What a tree holds is asked without the lock, and said whoever holds it.
+
+    Round 20: said while the lock is busy, it is what the tree held when asked, beside "not
+    removed now", not a settled reason to keep it. The holder may be a spawn reusing this
+    very tree, mid-checkout: a reap during a respawn said the new agent's tree was kept for
+    the ended one's uncommitted changes."""
+    agent = fleet_service.spawn(project, "coder", label="coder-dirty").agent
+    (agent.cwd / "work.txt").write_text("not committed\n", encoding="utf-8")
+    fleet_service.stop(project, "coder-dirty", force=True)
+    lock = fleet_service._git_common_dir(project.root) / "aisquare-fleet-branches.lock"
+
+    with locking.holding(lock, wait_s=0):  # a spawn, mid `git worktree add`
+        during = fleet_service.reap(project)
+
+    real = fleet_service._why_kept
+    free: list[bool] = []
+
+    def asked(root: Path, tree: Path, default: str) -> str | None:
+        try:
+            with locking.holding(lock, wait_s=0):
+                free.append(True)
+        except TimeoutError:
+            free.append(False)
+        return real(root, tree, default)
+
+    monkeypatch.setattr(fleet_service, "_why_kept", asked)
+    after = fleet_service.reap(project)
+
+    [(path, why)] = during.worktrees_kept
+    assert path == agent.cwd
+    assert why.startswith("not removed now: another aisquare (a spawn or a reap) holds "), why
+    assert why.endswith("; when asked just before, it held: uncommitted changes"), why
+    assert dict(after.worktrees_kept) == {agent.cwd: "uncommitted changes"}
+    assert free == [True], "asked without the lock"
+    assert agent.cwd.is_dir()
+
+
+def test_a_reap_asks_what_a_tree_holds_without_writing_its_index(repo: Path) -> None:
+    """Review of #259, round 20: a reap asks an ended agent's tree what it holds without the
+    branch lock, and ``git status`` writes back the index it refreshed, holding the tree's
+    ``index.lock`` while it does: a respawn's ``git checkout`` there failed on it (77 of 200
+    overlapping checkouts). Asked with ``GIT_OPTIONAL_LOCKS=0``, it writes nothing."""
+    (repo / "file.txt").write_text("committed\n", encoding="utf-8")
+    _git("add", "file.txt", cwd=repo)
+    _git("commit", "-q", "-m", "file", cwd=repo)
+    index = repo / ".git" / "index"
+    later = index.stat().st_mtime_ns + 5_000_000_000
+    os.utime(repo / "file.txt", ns=(later, later))  # the same bytes, a stat to refresh
+    before = index.stat()
+
+    assert fleet_service._why_kept(repo, repo, "main") is None, "the premise: clean, merged"
+
+    after = index.stat()
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+
+
+def test_every_git_command_the_fleet_runs_takes_no_optional_lock(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 20: one seam, so every git command a spawn, a stop and a reap run
+    (status, rev-parse, for-each-ref, worktree list and the rest) takes no optional lock,
+    and a read never holds a lock a write in the same tree needs. But the board's own
+    question, ``rev-parse --git-common-dir`` (``workspace.git_common_root``), which every
+    hook asks too: it takes no lock (round 26, 11/11). Round 27, 4/7: by
+    ``GIT_OPTIONAL_LOCKS=0``, not ``--no-optional-locks``, which a git before 2.15 refuses
+    (exit 129), so every fleet git command failed there; that git ignores the variable.
+    Round 28, 10/10: every git seam, that question's too, runs in the one git environment
+    (``core.spawn.git_env``), so none is left out."""
+    real = subprocess.run
+    gits: list[tuple[list[str], str | None]] = []
+
+    def before_2_15(argv: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(argv, list) and argv and argv[0] == "git":
+            gits.append((argv, (kwargs.get("env") or {}).get("GIT_OPTIONAL_LOCKS")))
+            if "--no-optional-locks" in argv:
+                return subprocess.CompletedProcess(argv, 129, "", "unknown option")
+        return real(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", before_2_15)
+    agent = fleet_service.spawn(project, "coder", label="coder-1").agent
+    (agent.cwd / "work.txt").write_text("not committed\n", encoding="utf-8")
+    fleet_service.stop(project, "coder-1", force=True)
+    report = fleet_service.reap(project)
+
+    assert dict(report.worktrees_kept) == {agent.cwd: "uncommitted changes"}, "status ran"
+    assert {argv[argv.index("-C") + 2] for argv, _ in gits} >= {"status", "worktree", "rev-parse"}
+    assert any(argv[-2:] == ["rev-parse", "--git-common-dir"] for argv, _ in gits)
+    assert [argv for argv, locks in gits if locks != "0"] == []
+
+
+def test_a_spawn_asks_git_for_its_board_with_no_store_open(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 29, 5/8: since round 25 a spawn's board is ``_board_for``, which
+    with no hub runs ``git rev-parse`` (a 5 s timeout), and every spawn ran it inside the
+    store session that also held its one-manager and cap checks. It is asked before the
+    store opens."""
+    monkeypatch.delenv("AISQUARE_TEAM_HUB", raising=False)
+    depth = 0
+
+    @contextmanager
+    def counted() -> Iterator[ContextStore]:
+        nonlocal depth
+        depth += 1
+        try:
+            with store_session() as store:
+                yield store
+        finally:
+            depth -= 1
+
+    asked: list[int] = []
+    real = fleet_service._board_for
+
+    def board_for(project: ProjectInfo) -> str:
+        asked.append(depth)
+        return real(project)
+
+    monkeypatch.setattr(fleet_service, "store_session", counted)
+    monkeypatch.setattr(fleet_service, "_board_for", board_for)
+
+    fleet_service.spawn(project, "coder", worktree=False)
+
+    assert asked == [0], "asked once, with no store open"
+
+
+def test_a_reap_or_a_spawn_asks_git_for_the_branch_locks_directory_once(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 18: every taking of the branch lock asked ``git rev-parse
+    --git-common-dir`` where the lock lives, and a reap takes it for each tree it removes,
+    so it paid one more git process a tree; a spawn asked again to add its exclude line.
+    Each asks once."""
+    for label in ("coder-a", "coder-b", "coder-c"):
+        fleet_service.spawn(project, "coder", label=label)
+        fleet_service.stop(project, label, force=True)
+    real = fleet_service._git
+    asked: list[tuple[str, ...]] = []
+
+    def counted(cwd: Path, *args: str) -> Any:
+        asked.append(args)
+        return real(cwd, *args)
+
+    monkeypatch.setattr(fleet_service, "_git", counted)
+
+    assert len(fleet_service.reap(project).worktrees_removed) == 3
+    assert asked.count(("rev-parse", "--git-common-dir")) == 1
+    asked.clear()
+    fleet_service.spawn(project, "coder", label="coder-d")
+    assert asked.count(("rev-parse", "--git-common-dir")) == 1
+
+
+@pytest.mark.parametrize("moving", [True, False], ids=["moving", "silent"])
+def test_a_waiter_on_the_branch_lock_waits_while_its_holder_moves_on(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, moving: bool
+) -> None:
+    """Review of #259, round 18: the wait on one holder was sized for "at most four git
+    commands", and a spawn now holds the lock through its tree, its window and its row; on a
+    large repo a holder still working went past it, and a restart, its agent stopped, was
+    refused as behind a stuck one. A holder says it moved on as it works, and the waiter's
+    patience is for one step. One that says nothing for the wait is still called stuck.
+
+    Driven by events, not by sleeps against the waiter's patience (round 19): the holder
+    says it moved on each time the waiter looks, and lets go once the waiter has looked
+    more times than its patience lasts; saying nothing, it holds until the waiter gave up.
+    A slow runner only makes each look later."""
+    monkeypatch.setattr(fleet_service, "_HOLDER_LOOK", 0.01)
+    common = fleet_service._git_common_dir(repo)
+    lock = common / "aisquare-fleet-branches.lock"
+    real_look = fleet_service._lock_holder
+    looks: list[str] = []
+    holding, let_go = threading.Event(), threading.Event()
+
+    def look(at: Path) -> str:
+        if moving and holding.is_set():
+            # The holder's next step, said with a word of its own: a waiter that kept its
+            # patience from the first word would be past it by the fifth look.
+            fleet_service._holder_file(at).write_text(f"step {len(looks)}\n")
+            if len(looks) >= 10:
+                let_go.set()
+        looks.append(real_look(at))
+        return looks[-1]
+
+    def a_holder() -> None:
+        with locking.holding(lock, wait_s=5):
+            fleet_service._announce_holder(common)
+            holding.set()
+            let_go.wait(30)
+
+    monkeypatch.setattr(fleet_service, "_lock_holder", look)
+    holder = threading.Thread(target=a_holder)
+    holder.start()
+    try:
+        assert holding.wait(30)
+        if moving:
+            with fleet_service._branches_locked(common, wait=0.05):
+                assert let_go.is_set(), "taken once the holder let go"
+            assert len(looks) > 10, "waited through more looks than its patience lasts"
+        else:
+            with (
+                pytest.raises(FleetError, match="may be stuck"),
+                fleet_service._branches_locked(common, wait=0.05),
+            ):
+                pass
+    finally:
+        let_go.set()
+        holder.join(30)
+
+
+@pytest.mark.parametrize("stepping", [True, False], ids=["git-steps", "blocked"])
+def test_a_holder_of_the_branch_lock_moves_on_only_as_its_git_steps_finish(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, stepping: bool
+) -> None:
+    """Review of #259, round 20: the hold said it still held from a thread of its own, every
+    ``_HOLDER_LOOK`` for as long as it lasted (round 19). That shows the process alive, not
+    moving: a holder blocked under the lock (a state-file ``flock`` on an NFS home whose lock
+    manager is gone, a ``git worktree add`` that will not die on Windows) kept saying so, and
+    every waiter waited on it with no limit. A holder moves on as each git command it runs
+    under the lock finishes; blocked, it says nothing, and a waiter calls it stuck.
+
+    Driven by events: stepping, the holder finishes one git command each time the waiter
+    looks, ten in all, more looks than the waiter's patience lasts, then lets go; blocked, it
+    holds until the waiter gives up, or for 5 s, after which round 19's waiter took the lock."""
+    monkeypatch.setattr(fleet_service, "_HOLDER_LOOK", 0.01)
+    common = fleet_service._git_common_dir(repo)
+    real_look = fleet_service._lock_holder
+    holding, step, stepped, let_go = (threading.Event() for _ in range(4))
+    steps: list[str] = []
+    looks: list[str] = []
+
+    def look(at: Path) -> str:
+        if stepping and holding.is_set() and len(steps) < 10:
+            stepped.clear()
+            step.set()
+            assert stepped.wait(30)
+        looks.append(real_look(at))
+        return looks[-1]
+
+    def a_holder() -> None:
+        with fleet_service._branches_locked(common, wait=0):
+            holding.set()
+            if not stepping:
+                let_go.wait(5)  # alive, and no step of it finishes
+                return
+            while len(steps) < 10:
+                step.wait(30)
+                step.clear()
+                steps.append(fleet_service._git(repo, "rev-parse", "HEAD").stdout)
+                stepped.set()
+
+    monkeypatch.setattr(fleet_service, "_lock_holder", look)
+    holder = threading.Thread(target=a_holder)
+    holder.start()
+    try:
+        assert holding.wait(30)
+        if stepping:
+            with fleet_service._branches_locked(common, wait=0.05):
+                assert len(steps) == 10, "taken once the holder let go"
+            assert len(looks) > 10, "waited through more looks than its patience lasts"
+        else:
+            with (
+                pytest.raises(FleetError, match="may be stuck"),
+                fleet_service._branches_locked(common, wait=0.05),
+            ):
+                pytest.fail("taken: the blocked holder said it held until it let go")
+    finally:
+        let_go.set()
+        holder.join(30)
+
+
+def test_a_spawn_waits_through_a_queue_of_holders_of_the_branch_lock(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 17: the branch lock makes every worktree spawn in a repo wait
+    its turn, and the wait was one 120 s for the lock, so the third of three spawns in a
+    repo whose checkout is slow was refused behind two ``git worktree add``, though nothing
+    was stuck. The wait is per holder now: each says who it is, and another holder than the
+    last one seen starts the wait again."""
+    monkeypatch.setattr(fleet_service, "_BRANCHES_LOCK_WAIT", 0.2)
+    monkeypatch.setattr(fleet_service, "_HOLDER_LOOK", 0.05)
+    common = fleet_service._git_common_dir(repo)
+    first_in = threading.Event()
+    released = threading.Event()
+
+    def a_queue() -> None:
+        """Three holders, each for less than the wait and all of them for more: what a
+        waiter that loses each hand-over sees of three spawns' `git worktree add`. One
+        hold, and a new holder announced every 0.15 s, so no hand-over is the waiter's."""
+        with locking.holding(common / "aisquare-fleet-branches.lock", wait_s=5):
+            for _turn in range(3):
+                fleet_service._announce_holder(common)
+                first_in.set()
+                time.sleep(0.15)
+        released.set()
+
+    queue = threading.Thread(target=a_queue)
+    queue.start()
+    try:
+        first_in.wait(5)
+        with fleet_service._branches_locked(common, wait=fleet_service._BRANCHES_LOCK_WAIT):
+            assert released.is_set(), "taken once the queue let go, 0.45 s on"
+    finally:
+        queue.join()
+
+
+def test_a_holder_of_the_branch_lock_that_never_lets_go_is_called_stuck(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(fleet_service, "_HOLDER_LOOK", 0.05)
+    common = fleet_service._git_common_dir(repo)
+    with locking.holding(common / "aisquare-fleet-branches.lock", wait_s=0):
+        fleet_service._announce_holder(common)
+        started = time.monotonic()
+        with (
+            pytest.raises(FleetError, match=r"has held it for 0\.2 s without letting go"),
+            fleet_service._branches_locked(common, wait=0.2),
+        ):
+            pytest.fail("taken while another held it")
+        assert time.monotonic() - started >= 0.2
+        with (
+            pytest.raises(FleetError, match=r"holds .* — try again$"),
+            fleet_service._branches_locked(common, wait=0),
+        ):
+            pytest.fail("taken while another held it")
 
 
 def test_reap_never_removes_a_live_agents_worktree(
@@ -6278,6 +12254,34 @@ def test_nudge_refuses_a_stale_waiting_row_that_ls_and_tell_call_working(
     ]
 
 
+def test_nudge_reads_the_panes_last_output_in_its_facts(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 5: the nudge ran `list-panes -a`, every pane on the server, for
+    one pane's last output, which the facts it had just read carry (`PaneFacts.last_output`):
+    one more tmux process per nudge, in a sub-agent's CLI process. It reads it there, and
+    still tells a pane that printed just now (working) from a quiet one (waiting)."""
+    manager = fleet_service.spawn(project, "manager").agent
+    tmux.set_command(manager.pane_id, "claude")
+    _stale_board_session(
+        manager, "waiting", seen_ago=team_service._STALE_AFTER + timedelta(minutes=1)
+    )
+    ran: list[tuple[str, ...]] = []
+
+    def run(*args: str, stdin: bytes | None = None) -> str:
+        ran.append(args)
+        return ""
+
+    monkeypatch.setattr(tmux, "run", run)
+
+    tmux.printed(manager.pane_id)  # mid-turn
+    assert fleet_service.nudge_manager(project.id, reason="task_review") is False
+    tmux.printed(manager.pane_id, ago=ACTIVITY_WINDOW + timedelta(seconds=2))
+    assert fleet_service.nudge_manager(project.id, reason="task_review") is True
+
+    assert ran == [], "no list-panes"
+
+
 @pytest.mark.parametrize("command", ["bash", PYTHON_LAUNCHER, "zsh"])
 def test_nudge_needs_the_agent_in_the_foreground(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, command: str
@@ -6329,12 +12333,12 @@ def test_nudge_never_raises(
 
 
 def test_pause_and_resume_flip_the_board_signal(project: ProjectInfo) -> None:
-    assert not fleet_service.is_paused(project)
+    assert not _is_paused(project)
     fleet_service.pause(project)
-    assert fleet_service.is_paused(project)
+    assert _is_paused(project)
     assert _events(project, "signal") == ["fleet-paused: on"]
     fleet_service.resume(project)
-    assert not fleet_service.is_paused(project)
+    assert not _is_paused(project)
     assert _events(project, "signal")[-1] == "fleet-paused: off (was on)"
 
 
@@ -6344,7 +12348,8 @@ def test_pause_with_the_team_disabled_is_a_fleet_error(
     monkeypatch.setenv("AISQUARE_TEAM", "0")
     with pytest.raises(FleetError, match="pause signal"):
         fleet_service.pause(project)
-    assert not fleet_service.is_paused(project)
+    monkeypatch.delenv("AISQUARE_TEAM")
+    assert not _is_paused(project), "nothing was written"
 
 
 # --- rename --------------------------------------------------------------------------
@@ -6461,6 +12466,95 @@ def test_attach_argv_asks_the_server_at_the_path_the_projects_rows_recorded(
     assert fleet_service.attach_argv(project) == [*at_the_path, f"={session}"]
     stranger.sessions[session] = []  # a session of that name on the server `-L` reaches
     assert fleet_service.attach_argv(project) == [*at_the_path, f"={session}"]
+
+
+def test_attach_argv_finds_an_ended_managers_lingering_window_where_its_row_recorded(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Follow-up of #257: with no live row, `fleet attach` fell back to `-L`, so an ended
+    manager whose window lingers (`remain-on-exit`) on a server under another `TMUX_TMPDIR`
+    was not found: "nothing to attach to", while the 💤 row's last screen stood there. The
+    ended rows' recorded paths are asked too, the latest to end first, and `-L` last."""
+    manager = fleet_service.spawn(project, "manager").agent
+    manager, stranger = _behind_a_stranger(tmux, project, manager, monkeypatch)
+    tmux.path = manager.socket_path  # the handle the stranger hands out for that path
+    session = f"asq-{_codename(project)}"
+    at_the_path = ["/fake/tmux", "-S", str(manager.socket_path), "attach-session", "-t"]
+    tmux.die(manager.pane_id, 0)  # the manager exited; its window lingers on its server
+    [listed] = fleet_service.list_agents(project)
+    assert listed.agent.id == manager.id and listed.agent.ended_at is not None
+    assert tmux.has_session(session) and not stranger.has_session(session)
+
+    assert fleet_service.attach_argv(project) == [*at_the_path, f"={session}"]
+
+    # A session of that name on the server `-L` reaches is asked last, not first.
+    stranger.sessions[session] = []
+    assert fleet_service.attach_argv(project) == [*at_the_path, f"={session}"]
+    # And with the lingering window gone, the fallback is still where this shell looks.
+    tmux.kill_window(manager.pane_id)
+    assert fleet_service.attach_argv(project)[:3] == ["/fake/tmux", "-L", "asq-test"]
+
+
+def test_attach_argv_asks_no_server_by_the_name_alone_when_a_live_row_recorded_its_own(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 1: the follow-up that asks the ended rows' servers asked this
+    shell's server (`-L`) last whatever the live rows said. With the live manager's
+    recorded server unreachable (its socket file taken), a shell under another
+    `TMUX_TMPDIR` attached to the session of that name on its own server, which round 29
+    of #257 had refused. An ended row that recorded no path is asked by the name too, so it
+    is left out as well. With no live row, both are asked, as the follow-up meant."""
+    manager = fleet_service.spawn(project, "manager").agent
+    manager, stranger = _behind_a_stranger(tmux, project, manager, monkeypatch)
+    session = f"asq-{_codename(project)}"
+    with store_session() as store:
+        store.upsert_fleet_agent(
+            manager.model_copy(
+                update={
+                    "id": "agt_before_v25",
+                    "label": "manager-0",
+                    "socket_path": None,
+                    "ended_at": manager.created_at,
+                }
+            )
+        )
+    tmux.running = False  # no tmux client reaches the manager's server any more
+    stranger.sessions[session] = []  # a session of that name on the server `-L` reaches
+
+    with pytest.raises(FleetError, match="nothing to attach to"):
+        fleet_service.attach_argv(project)
+
+    with store_session() as store:  # the manager ended: no live row says where to look
+        store.end_fleet_agent(manager.id, exit_status=0)
+    assert fleet_service.attach_argv(project)[:3] == ["/fake/tmux", "-L", "asq-test"]
+
+
+def test_attach_argv_resolves_each_recorded_server_once_however_many_rows_ended_on_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 1: attach worked out where every row the project ever had is
+    asked (`_address`, two paths resolved each), and rows are never deleted. Rows that
+    recorded one server are one question, asked in the order the rows give."""
+    manager = fleet_service.spawn(project, "manager").agent
+    with store_session() as store:
+        ended = store.end_fleet_agent(manager.id, exit_status=0)
+        for n in range(40):
+            store.upsert_fleet_agent(
+                ended.model_copy(update={"id": f"agt_old_{n}", "label": f"coder-{n}"})
+            )
+        assert len(store.fleet_agents(project.id, live_only=False)) == 41
+        assert store.fleet_agents(project.id, live_only=True) == []
+    resolved: list[str] = []
+    address = fleet_service._address
+
+    def counted(agent: FleetAgent, config: FleetSettings | None = None) -> object:
+        resolved.append(agent.id)
+        return address(agent, config)
+
+    monkeypatch.setattr(fleet_service, "_address", counted)
+
+    assert fleet_service.attach_argv(project)[-1] == f"=asq-{_codename(project)}"
+    assert len(resolved) == 1, resolved
 
 
 def test_attach_argv_refuses_when_there_is_no_session_to_attach_to(
@@ -6788,7 +12882,7 @@ def test_switch_moves_a_limited_agent_to_the_account_with_headroom_and_resumes_i
         kept = store.get_task(task.id)
         ended = store.get_session(agent.session_id or "")
     [switched] = [text for kind, text in kinds if kind == "switched"]
-    assert "moved from slot 2 to account 3 (slot 3) (session limit)" in switched
+    assert "moved from account 2 (slot 2) to account 3 (slot 3) (session limit)" in switched
     assert switched.endswith("— resumed its session")
     assert any("headroom:" in note for note in receipt.notes)  # the pick is explained
     # A hand-over is not an exit (finding 6): the claim stays with the session that resumes,
@@ -6858,7 +12952,8 @@ def test_a_switch_picks_by_headroom_before_the_binding_and_the_automatic_one_ref
 
     assert receipt.to_slot == 4  # headroom, not the binding
     assert any(
-        "headroom:" in note and "account 4 is first under 85%" in note for note in receipt.notes
+        "headroom:" in note and "account 4 is first under the 85%-used line" in note
+        for note in receipt.notes
     )
     assert "--to" not in _command(tmux) and _flag(_command(tmux), "--account") == "4"
 
@@ -6873,7 +12968,7 @@ def test_a_switch_picks_by_headroom_before_the_binding_and_the_automatic_one_ref
     )
     manual = fleet_service.switch(project, agent.label, to=None)
     assert manual.to_slot in {2, 3}  # it was on 4; the least-bad of the rest
-    assert any("every account is over 85%" in note for note in manual.notes)
+    assert any("every account is over the 85%-used line" in note for note in manual.notes)
     # …but the automatic hand-over refuses, stops nothing, and says why.
     killed_before = list(tmux.killed)
     with pytest.raises(FleetError, match="no account under the line") as refused:
@@ -7087,7 +13182,8 @@ def test_a_hand_over_that_does_not_complete_leaves_nothing_parked(
         rows = store.fleet_agents(project.id)
     assert released is not None and released.status == "todo" and released.claimed_by is None
     assert any(kind == "task_released" and "hand-over failed" in text for kind, text in kinds)
-    assert any(kind == "agent_exited" for kind, _ in kinds)
+    exited = f"{agent.label} exited (0): {fleet_service.HANDOVER_FAILED}"
+    assert ("agent_exited", exited) in kinds, "not the clean exit a stop announces"
     assert all(row.ended_at is not None for row in rows)  # the old row ended; no replacement
 
 
@@ -7316,7 +13412,7 @@ def test_a_fresh_switch_hands_the_claims_to_the_replacement_and_announces_no_exi
     assert team_service.claim_task(task.id, session_ref=old).status == "doing"
     nudges: list[str] = []
 
-    def nudge(project_id: str, *, reason: str) -> bool:
+    def nudge(project_id: str, *, reason: str, board: str | None = None) -> bool:
         nudges.append(reason)
         return True
 
@@ -7556,7 +13652,7 @@ def test_switch_refuses_without_headroom_the_same_account_or_a_dead_label(
     # the agent is ON 95; the only other one is 99, and that is what it gets, with a note).
     receipt = fleet_service.switch(project, agent.label)
     assert receipt.to_slot == 3
-    assert any("every account is over 85%" in note for note in receipt.notes)
+    assert any("every account is over the 85%-used line" in note for note in receipt.notes)
 
 
 def test_fleet_switch_command_reports_the_move_and_its_json(
@@ -7574,7 +13670,10 @@ def test_fleet_switch_command_reports_the_move_and_its_json(
         app, ["fleet", "switch", agent.label, "--project", project.id, "--reason", "limit"]
     )
     assert result.exit_code == 0, result.output
-    assert f"✓ {agent.label}: moved from slot 2 to slot 3 — started fresh" in result.stdout
+    assert (
+        f"✓ {agent.label}: moved from account 2 (slot 2) to account 3 (slot 3) — started fresh"
+        in result.stdout
+    )
 
     second = runner.invoke(
         app, ["--json", "fleet", "switch", agent.label, "--project", project.id, "--to", "2"]
@@ -7584,6 +13683,16 @@ def test_fleet_switch_command_reports_the_move_and_its_json(
     assert (payload["from_slot"], payload["to_slot"], payload["resumed"]) == (3, 2, False)
     assert payload["started"]["label"] == agent.label and payload["started"]["account_slot"] == 2
     assert payload["stopped"]["ended_at"] is not None
+
+    # A renamed account is that name in the line, as on the board and in `fleet ls`.
+    from aisquare.services import claude_accounts as accounts_service
+
+    accounts_service.set_alias("3", "Side project")
+    third = runner.invoke(
+        app, ["fleet", "switch", agent.label, "--project", project.id, "--to", "side project"]
+    )
+    assert third.exit_code == 0, third.output
+    assert "moved from account 2 (slot 2) to Side project (slot 3)" in third.stdout
 
     refused = runner.invoke(app, ["--json", "fleet", "switch", "ghost", "--project", project.id])
     assert refused.exit_code == 1
@@ -7604,7 +13713,8 @@ def test_restart_and_switch_say_in_their_headline_that_the_first_line_was_not_ty
     line reached its pane (FLEET-5), but the commands' own headline still said "started
     fresh with a hand-off prompt", above a note saying the prompt was NOT typed (review of
     the side/ff-fleet fold). The headline is the board's words, and ``--json`` carries
-    ``prompt_typed``."""
+    ``prompt_typed``, those words (``how``) and the note on why (``failures``), which the
+    phone says them from (sweep 5 of #243)."""
     _two_slots_with_usage(monkeypatch, work=95, personal=10)
     agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
     _with_transcript(agent, tmp_path / "missing.jsonl")  # named, not on disk: a fresh start
@@ -7623,6 +13733,9 @@ def test_restart_and_switch_say_in_their_headline_that_the_first_line_was_not_ty
     assert again.exit_code == 0, again.output
     payload = json.loads(again.stdout)
     assert (payload["resumed"], payload["prompt_typed"]) == (False, False)
+    assert payload["how"] == "started fresh, but its hand-off prompt was NOT typed"
+    (why,) = [note for note in payload["failures"] if "NOT typed" in note]
+    assert why in payload["notes"]
 
 
 @pytest.mark.parametrize(
@@ -8289,6 +14402,114 @@ def test_a_pinned_row_is_never_mistaken_for_the_agent_that_took_its_label(
     assert (new.pane_id, "literal", "/exit") in tmux.typed
 
 
+def test_a_pinned_switch_or_tell_never_reaches_the_agent_that_took_its_label(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """The phone's Switch and Tell, as a sweep of #243 found them (round 4). The manager's
+    own ``fleet switch``, in another process, handed coder-1 on just after the phone had
+    checked its pin. By label, the phone's switch then stopped the replacement and moved
+    it to a third account, and its tell typed into it. Pinned (``agent_id``), as stop
+    and restart were, both refuse the replacement before anything is looked up, typed or
+    filed. Pinned to the row that is there, each goes on as before."""
+    old = _coder(project, label="coder-1")
+    tmux.die(old.pane_id, 1)
+    fleet_service.list_agents(project)
+    new = fleet_service.restart(project, "coder-1").started
+    _board_session(new, "waiting")
+    tmux.set_command(new.pane_id, "claude")
+    typed, killed, spawned = list(tmux.typed), list(tmux.killed), len(tmux.spawned)
+
+    replaced = rf"'coder-1' is another agent now \({new.id}\)"
+    with pytest.raises(NoSuchAgent, match=replaced):
+        fleet_service.switch(project, "coder-1", to="2", agent_id=old.id)
+    with pytest.raises(NoSuchAgent, match=replaced):
+        fleet_service.tell(project, "coder-1", "carry on", agent_id=old.id)
+    assert (tmux.typed, tmux.killed, len(tmux.spawned)) == (typed, killed, spawned)
+    assert _events(project, "note") == []
+
+    with pytest.raises(FleetError, match="no Claude account in slot 2"):
+        fleet_service.switch(project, "coder-1", to="2", agent_id=new.id)
+    assert fleet_service.tell(project, "coder-1", "carry on", agent_id=new.id).delivered
+    assert tmux.typed[len(typed) :] == [
+        (new.pane_id, "paste", "carry on"),
+        (new.pane_id, "key", "Enter"),
+    ]
+
+
+def test_a_switchs_last_check_comes_after_its_own_refusals_and_before_anything_is_stopped(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``before_stop`` is the caller's last word: the phone's dialog guard, whose Escape
+    answers a prompt "No". Asked before the switch's own refusals, that Escape went to an
+    agent the switch then would not move, for a ``to`` that named no account (sweep of
+    #243, round 4). It is asked after them, once, before the session is marked or
+    ``/exit`` typed, and a check that refuses leaves the agent as it was."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _with_transcript(agent, None)
+    before = (len(tmux.typed), len(tmux.killed))
+    asked: list[tuple[int, int]] = []
+
+    def check() -> None:
+        asked.append((len(tmux.typed), len(tmux.killed)))
+
+    with pytest.raises(FleetError, match="no Claude account in slot 9"):
+        fleet_service.switch(project, agent.label, to="9", before_stop=check)
+    with pytest.raises(FleetError, match="already runs on"):
+        fleet_service.switch(project, agent.label, to="2", before_stop=check)
+    assert asked == [], "the switch's own refusals come first"
+
+    def refuse() -> None:
+        check()
+        raise RuntimeError("the dialog guard said no")
+
+    with pytest.raises(RuntimeError, match="the dialog guard said no"):
+        fleet_service.switch(project, agent.label, before_stop=refuse)
+    assert asked == [before] and (len(tmux.typed), len(tmux.killed)) == before
+    assert _session_state(agent.session_id or "") != team_service.HANDOVER_STATE
+
+    receipt = fleet_service.switch(project, agent.label, before_stop=check)
+    assert asked == [before, before], "asked once, before /exit was typed"
+    assert receipt.to_slot == 3 and agent.pane_id in tmux.killed
+
+
+def test_a_restarts_last_check_comes_after_its_own_refusals_and_before_anything_is_stopped(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """As a switch's (sweep of #243, round 4): ``before_stop`` is the phone's dialog guard,
+    whose Escape answers a prompt "No". It is asked after the restart's own refusals, a
+    task closed meanwhile here, and before ``/exit`` is typed. A check that refuses leaves
+    the running agent as it was, and one that passes is asked once."""
+    task = _add_task(project, "Ship auth")
+    closed = _coder(project, label="coder-closed", task_id=task.id)
+    with store_session() as store:
+        store.set_task_status(task.id, "done")
+    agent = _coder(project)
+    before = (len(tmux.typed), len(tmux.killed))
+    asked: list[tuple[int, int]] = []
+
+    def check() -> None:
+        asked.append((len(tmux.typed), len(tmux.killed)))
+
+    with pytest.raises(FleetError, match="is done"):
+        fleet_service.restart(project, closed.label, before_stop=check)
+    assert asked == [], "the restart's own refusals come first"
+
+    def refuse() -> None:
+        check()
+        raise RuntimeError("the dialog guard said no")
+
+    with pytest.raises(RuntimeError, match="the dialog guard said no"):
+        fleet_service.restart(project, agent.label, before_stop=refuse)
+    assert asked == [before] and (len(tmux.typed), len(tmux.killed)) == before
+    with store_session() as store:
+        assert store.fleet_agent_by_label(project.id, agent.label) is not None  # still live
+
+    receipt = fleet_service.restart(project, agent.label, before_stop=check)
+    assert asked == [before, before], "asked once, before /exit was typed"
+    assert receipt.was_running and agent.pane_id in tmux.killed
+
+
 def test_a_refused_restart_of_a_death_no_listing_has_recorded_keeps_the_window(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -8526,7 +14747,7 @@ def test_a_listing_that_lands_inside_a_switch_leaves_the_hand_over_to_it(
     assert team_service.claim_task(task.id, session_ref=old).status == "doing"
     nudges: list[str] = []
 
-    def nudge(project_id: str, *, reason: str) -> bool:
+    def nudge(project_id: str, *, reason: str, board: str | None = None) -> bool:
         nudges.append(reason)
         return True
 
@@ -8658,6 +14879,7 @@ def test_a_restart_says_a_release_its_stop_could_not_make(
     assert receipt.started.ended_at is None
     [said] = [note for note in receipt.notes if note.startswith("claims:")]
     assert "could not be released" in said and "locked" in said
+    assert receipt.failures[0] == said, "what did not happen, as a switch's receipt says it"
     assert _task_now(mine.id).claimed_by == first
 
 
@@ -8668,7 +14890,7 @@ def _recorded_nudges(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """``nudge_manager`` replaced by a recorder: the reasons it was called with."""
     nudges: list[str] = []
 
-    def nudge(project_id: str, *, reason: str) -> bool:
+    def nudge(project_id: str, *, reason: str, board: str | None = None) -> bool:
         nudges.append(reason)
         return True
 
@@ -8729,7 +14951,9 @@ def test_restarting_a_running_agent_hands_its_claims_to_the_replacement_and_anno
 
     freed = _task_now(mine.id)
     assert freed.claimed_by is None and freed.status == "todo"
-    assert _events(project, "agent_exited") == [f"{agent.label} exited (0)"]
+    assert _events(project, "agent_exited") == [
+        f"{agent.label} exited (0): {fleet_service.HANDOVER_FAILED}"
+    ]
     assert nudges == [f"{agent.label} exited"]
 
 
@@ -9500,9 +15724,8 @@ def test_the_spawn_note_names_the_restart_under_the_label_the_agent_was_recorded
         refusals=auto_mode.REFUSAL_THRESHOLD,
     )
     monkeypatch.setattr(auto_mode, "measure_baseline", lambda: auto_mode.Baseline((refused,)))
-    step = "`aisquare fleet restart coder-auth --permission-mode acceptEdits`"
-
     receipt = fleet_service.spawn(project, "coder", label="coder-auth", worktree=False)
+    step = f"`{_fleet('restart', project, 'coder-auth', '--permission-mode', 'acceptEdits')}`"
 
     assert any(step in note for note in receipt.notes), receipt.notes
     tmux.die(receipt.agent.pane_id, 1)
@@ -9559,7 +15782,7 @@ def test_the_auto_mode_evidence_is_read_before_the_window_starts(
     receipt = fleet_service.spawn(project, "coder", worktree=False, label="coder-auth")
 
     assert receipt.agent.label == "coder-auth-2"
-    step = "`aisquare fleet restart coder-auth-2 --permission-mode acceptEdits`"
+    step = f"`{_fleet('restart', project, 'coder-auth-2', '--permission-mode', 'acceptEdits')}`"
     assert any(step in note for note in receipt.notes), receipt.notes
 
 
@@ -10360,7 +16583,7 @@ def test_a_replay_does_not_fall_back_onto_another_kind_of_program(
     message = str(refused.value)
     assert f"{str(aider)!r}, the binary it was launched with, is no longer on your PATH" in message
     assert "'claude' today (chosen by: default)" in message
-    assert "`aisquare fleet spawn coder`" in message and "--bin" not in message
+    assert f"`{_fleet('spawn', project, 'coder')}`" in message and "--bin" not in message
     assert len(tmux.spawned) == started, "nothing was started"
 
     # The other way round: a Claude Code session is not resumed on aider.
@@ -10413,7 +16636,7 @@ def test_a_removed_claude_code_by_another_name_comes_back_on_claude_only_when_kn
     started = len(tmux.spawned)
 
     for fresh in (True, False):
-        with pytest.raises(FleetError, match="`aisquare fleet spawn coder`"):
+        with pytest.raises(FleetError, match=re.escape(f"`{_fleet('spawn', project, 'coder')}`")):
             fleet_service.restart(project, unknown.label, fresh=fresh)
     assert len(tmux.spawned) == started
     resumed = fleet_service.restart(project, joined[0].label)
@@ -10598,7 +16821,7 @@ def test_a_replay_refused_inside_the_replacements_spawn_names_no_bin_either(
     tmux.die(agent.pane_id, 1)
     # The binary goes after the check before the stop has passed.
     monkeypatch.setattr(
-        fleet_service, "_refuse_a_replay_that_cannot_start", lambda agent, session: None
+        fleet_service, "_refuse_a_replay_that_cannot_start", lambda agent, session, project: None
     )
     monkeypatch.setenv("AISQUARE_BIN_CODER", str(tmp_path / "gone" / "claude"))
 
@@ -10855,6 +17078,47 @@ def test_a_switch_that_spawn_would_refuse_is_refused_before_the_stop(
     assert _session_state(agent.session_id or "") == "working", "the session is not marked"
 
 
+@pytest.mark.parametrize("verb", ["restart", "switch"])
+def test_a_restart_or_a_switch_is_refused_a_freed_socket_before_it_stops_the_agent(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    verb: str,
+) -> None:
+    """Review of #259, round 2: the freed-socket refusal ran only inside the spawn, after
+    `stop(..., handover=True)` had typed `/exit`. With this shell's socket file taken from
+    under the server coder-1 runs on, an agent whose own server listens at another path
+    (another `TMUX_TMPDIR`) stopped as asked, and its replacement was refused: the agent
+    was left down, and a switch announced that its replacement did not start. Refused
+    now before anything is stopped, as the replay's other refusals are."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    stranded = _coder(project)  # on this shell's socket path
+    apart = Path("/elsewhere/tmux-1000/asq-test")
+    elsewhere = tmux.per_path[apart] = FakeTmux()
+    window = elsewhere.spawn_window("asq-x", name="coder-2", cwd=project.root, command=["c"])
+    elsewhere.set_command(window.pane_id, "claude")
+    spawned = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    moved = {"socket_path": apart, "pane_id": window.pane_id}
+    with store_session() as store:
+        agent = store.upsert_fleet_agent(spawned.model_copy(update=moved))
+    _with_transcript(agent, None)
+    tmux.running = False  # no tmux client reaches coder-1's server…
+    tmux.socket_file = False  # …because its socket file is gone, not because it exited
+    started = len(tmux.spawned)
+
+    with pytest.raises(FleetError, match=r"not started: .* lost its socket file"):
+        getattr(fleet_service, verb)(project, agent.label)
+
+    assert elsewhere.typed == [] and elsewhere.killed == [], "no /exit typed, nothing killed"
+    assert len(tmux.spawned) == started
+    with store_session() as store:
+        live = {row.id for row in store.fleet_agents(project.id, live_only=True)}
+    assert live == {stranded.id, agent.id}, "both still live"
+    assert _session_state(agent.session_id or "") == "working", "the session is not marked"
+
+
 @pytest.mark.parametrize("verb", ["switch", "restart"])
 def test_a_replacement_whose_prompt_poll_tmux_will_not_answer_keeps_the_claims(
     tmux: FakeTmux,
@@ -10976,3 +17240,369 @@ def test_a_clean_automatic_hand_over_puts_no_note_beside_switched(
     [receipt] = receipts
     assert any(note.startswith("launched as recorded") for note in receipt.notes)
     assert receipt.failures == []
+
+
+def test_a_role_whose_env_file_cannot_be_read_is_refused_before_a_window_or_a_stop(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Follow-up of #257: a reviewer bound to a `GH_TOKEN` file (`team bind --env-file`)
+    whose file cannot be read is refused by the window's `aisquare launch`, rather than
+    started on this shell's credentials. Asked by the spawn, before a window opens, and by
+    a restart, before the running agent is stopped: the window would end as it began."""
+    from aisquare.services import settings as settings_service
+
+    token = tmp_path / "reviewer-gh-token"
+    token.write_text("github_pat_x\n", encoding="utf-8")
+    settings_service.bind_role("reviewer", env_files={"GH_TOKEN": str(token)})
+    reviewer = fleet_service.spawn(project, "reviewer", worktree=False).agent
+    token.unlink()
+    started = len(tmux.spawned)
+    refusal = f"reviewer reads GH_TOKEN from {token}, which cannot be read"
+
+    with pytest.raises(FleetError, match=re.escape(refusal)):
+        fleet_service.spawn(project, "reviewer", worktree=False, label="reviewer-2")
+    with pytest.raises(FleetError, match=re.escape(refusal)):
+        fleet_service.restart(project, reviewer.label)
+
+    assert len(tmux.spawned) == started, "no window"
+    assert tmux.typed == [] and tmux.killed == [], "the running reviewer is not stopped"
+    with store_session() as store:
+        live = store.fleet_agent_by_label(project.id, reviewer.label, live_only=True)
+    assert live is not None and live.id == reviewer.id
+
+
+# --- Claude Code's folder-trust question (core.claude_sharing) ------------------------
+
+TRUST_SCREEN = (
+    (Path(__file__).parent / "fixtures" / "claude_code" / "trust_prompt_2.1.299.txt")
+    .read_text(encoding="utf-8")
+    .splitlines()
+)
+"""The question as ``capture-pane -e`` showed it on Claude Code 2.1.299, escapes and all."""
+
+
+def _signed_in(account: Any, email: str, *, trusted: tuple[str, ...] = ()) -> Path:
+    path = accounts_core.claude_json_path(account)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    projects = {key: {"hasTrustDialogAccepted": True} for key in trusted}
+    body = {"oauthAccount": {"emailAddress": email}, "userID": email, "projects": projects}
+    path.write_text(json.dumps(body, indent=2), encoding="utf-8")
+    return path
+
+
+def test_a_spawn_shares_the_folder_trust_into_the_account_it_picks_and_says_so(
+    fake_home: Path, tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Account 2 said yes to the repository; a coder spawned on account 3 in a worktree of it
+    starts without the question, and the receipt — the manager's view — says why."""
+    root = claude_sharing.project_key(Path(os.path.realpath(project.root)))
+    _signed_in(accounts_core.default_account(), "one@x.dev")
+    second, third = accounts_core.create_account(), accounts_core.create_account()
+    _signed_in(second, "two@x.dev", trusted=(root,))
+    _signed_in(third, "three@x.dev")
+
+    receipt = fleet_service.spawn(project, "coder", worktree=True, account="3")
+
+    assert receipt.agent.cwd != project.root  # its own worktree, covered by the repository
+    data = json.loads(accounts_core.claude_json_path(third).read_text())
+    assert data["projects"] == {root: {"hasTrustDialogAccepted": True}}
+    assert data["oauthAccount"] == {"emailAddress": "three@x.dev"}
+    shared = f"accounts: {root} is trusted on account 2 — now on account 3 too"
+    assert shared in receipt.notes
+    assert receipt.shared == [shared]  # done, not a warning: the receipt says it with a ✓
+    # The plain claude was not the one launched: nothing written there.
+    plain = json.loads(accounts_core.claude_json_path(accounts_core.default_account()).read_text())
+    assert plain["projects"] == {}
+
+
+def test_a_spawn_shares_the_trust_outside_the_branch_lock_and_tells_the_window(
+    fake_home: Path,
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 21: a worktree spawn shared the trust while it held the
+    repository's branch lock, which a reap and every other spawn there queue on, reading
+    and parsing a .claude.json (tens of MB on a long-used account) for each account it
+    asked; the window's `aisquare launch` then read them again. It shares before the lock,
+    reads each file once, and tells the window, whose launch reads none."""
+    root = claude_sharing.project_key(Path(os.path.realpath(project.root)))
+    _signed_in(accounts_core.default_account(), "one@x.dev")
+    second, third = accounts_core.create_account(), accounts_core.create_account()
+    _signed_in(second, "two@x.dev", trusted=(root,))
+    _signed_in(third, "three@x.dev")
+    held: list[bool] = []
+    reads: list[tuple[Path, bool]] = []
+    real_lock, real_read = fleet_service._branches_locked, claude_sharing.read_claude_json
+
+    @contextmanager
+    def locked(common: Path, *, wait: float) -> Iterator[None]:
+        with real_lock(common, wait=wait):
+            held.append(True)
+            try:
+                yield
+            finally:
+                held.pop()
+
+    def read(path: Path) -> dict[str, Any]:
+        reads.append((path, bool(held)))
+        return real_read(path)
+
+    monkeypatch.setattr(fleet_service, "_branches_locked", locked)
+    monkeypatch.setattr(claude_sharing, "read_claude_json", read)
+
+    receipt = fleet_service.spawn(project, "coder", worktree=True, account="3")
+
+    assert receipt.agent.cwd != project.root, "a worktree, made under the lock"
+    assert receipt.shared == [f"accounts: {root} is trusted on account 2 — now on account 3 too"]
+    assert reads and not any(under for _path, under in reads), "none under the branch lock"
+    assert len(reads) == len({path for path, _under in reads}), "each file read once"
+    told = tmux.spawned[-1]["env"]
+    assert isinstance(told, dict) and told[accounts_service.SHARED_ENV] == "3"
+    # A share it could not make is left to the window's launch to try again.
+    accounts_core.claude_json_path(third).write_text("{not json", encoding="utf-8")
+    again = fleet_service.spawn(project, "coder", worktree=True, account="3")
+    assert again.shared == [] and any("could not be shared" in note for note in again.notes)
+    untold = tmux.spawned[-1]["env"]
+    assert isinstance(untold, dict) and accounts_service.SHARED_ENV not in untold
+
+
+def test_a_worktree_spawn_shares_the_trust_its_tree_will_have_not_its_roots(
+    fake_home: Path,
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    repo: Path,
+    tmp_path: Path,
+) -> None:
+    """Review of #259, round 22, 8/9: round 21 moved the spawn's share before the branch lock,
+    for the project's root, and told the window, whose launch then did not share for the
+    tree it starts in. The two scopes differ. An entry on the tree itself (an older Claude
+    Code's, or a hand edit; the fleet reuses one tree per label) was no longer found, and
+    an entry on a root that is a sub-folder of its repository was copied and said shared,
+    though it does not cover the tree. The spawn shares for the tree as it will be."""
+    _signed_in(accounts_core.default_account(), "one@x.dev")
+    second, third = accounts_core.create_account(), accounts_core.create_account()
+    worktrees = fleet_service.settings().worktree_dir
+    tree = claude_sharing.project_key(Path(os.path.realpath(project.root)) / worktrees / "coder-1")
+    _signed_in(second, "two@x.dev", trusted=(tree,))
+    _signed_in(third, "three@x.dev")
+
+    receipt = fleet_service.spawn(project, "coder", worktree=True, account="3")
+
+    assert claude_sharing.project_key(Path(os.path.realpath(receipt.agent.cwd))) == tree
+    assert receipt.shared == [f"accounts: {tree} is trusted on account 2 — now on account 3 too"]
+    data = json.loads(accounts_core.claude_json_path(third).read_text())
+    assert data["projects"] == {tree: {"hasTrustDialogAccepted": True}}
+    told = tmux.spawned[-1]["env"]
+    assert isinstance(told, dict) and told[accounts_service.SHARED_ENV] == "3"
+
+    # A root that is itself a worktree of another checkout: an entry on it covers it, and
+    # not the trees the fleet makes under it, which are their own top levels.
+    checkout = tmp_path / "checkout"
+    _git("worktree", "add", "-q", "-b", "elsewhere", str(checkout), cwd=repo)
+    nested = ProjectInfo(id=project_id_for(checkout), root=checkout, linked_repos=[])
+    with store_session() as store:
+        store.onboard_project(nested)
+    on_root = claude_sharing.project_key(Path(os.path.realpath(checkout)))
+    assert on_root in claude_sharing.trust_scope(checkout).covering, "the premise"
+    _signed_in(second, "two@x.dev", trusted=(on_root,))
+    _signed_in(third, "three@x.dev")
+
+    inside = fleet_service.spawn(nested, "coder", worktree=True, account="3")
+
+    assert inside.agent.cwd != checkout, "its own worktree, under that root"
+    assert inside.shared == [], "the root's entry does not cover the tree"
+    assert json.loads(accounts_core.claude_json_path(third).read_text())["projects"] == {}
+
+
+def test_an_agent_at_the_trust_question_needs_the_human_until_it_is_answered(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    agent = _coder(project)
+    tmux.set_command(agent.pane_id, "claude")
+    tmux.screens[agent.pane_id] = TRUST_SCREEN
+
+    (status,) = fleet_service.list_agents(project)
+
+    assert status.state == "attention"
+    assert status.detail is not None and status.detail.startswith(TRUST_PROMPT)
+    trust = install_route.command_line(["aisquare", "accounts", "trust", str(agent.cwd)])
+    assert trust in status.detail
+    assert fleet_service.status_of(agent).detail == status.detail
+    # `fleet tell` files a board note instead of typing: Enter there picks "No, exit".
+    told = fleet_service.tell(project, agent.label, "start on the task")
+    assert not told.delivered and told.how.startswith("it is attention") and tmux.typed == []
+    # Answered, the screen moves on and so does the state.
+    tmux.screens[agent.pane_id] = ["╭─ Claude Code ─╮", "\u276f "]
+    assert fleet_service.list_agents(project)[0].state == "waiting"
+
+
+def test_an_agent_whose_hooks_have_run_is_never_asked_for_its_screen(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Claude Code runs no hook in a folder nobody trusted: one that has is past the
+    question, and a healthy fleet pays no capture per agent per tick."""
+    agent = _coder(project)
+    tmux.set_command(agent.pane_id, "claude")
+    tmux.screens[agent.pane_id] = TRUST_SCREEN  # what it showed before the yes
+    _board_session(agent, "waiting")
+    tmux.captured.clear()
+    assert fleet_service.list_agents(project)[0].state == "waiting"
+    assert tmux.captured == []
+    # Control: a row no hook has spoken for yet is asked, and only it.
+    fresh = _coder(project)
+    tmux.set_command(fresh.pane_id, "claude")
+    fleet_service.list_agents(project)
+    assert tmux.captured == [fresh.pane_id]
+
+
+def test_an_agent_that_is_not_claude_code_is_never_asked_for_its_screen(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Review of #259, round 14: only Claude Code asks the trust question, and another
+    harness's agent fires no hook, ever. Its pane was captured on every listing, and read
+    as at the question when its screen held the words: ``fleet tell`` filed a note it
+    never reads instead of typing, and Remote pushed a trust card for an agent at work."""
+    agent = _coder(project, binary=sys.executable)  # another harness: no --session-id
+    assert agent.session_id is None and not harness.is_default_agent(agent.binary)
+    tmux.set_command(agent.pane_id, "aider")
+    tmux.screens[agent.pane_id] = TRUST_SCREEN  # the question's words, as it reads them
+    tmux.captured.clear()
+
+    (status,) = fleet_service.list_agents(project)
+
+    assert status.state != "attention" and tmux.captured == []
+    # Control: a Claude Code row no hook has spoken for yet is asked, and read at it.
+    claude = _coder(project)
+    tmux.set_command(claude.pane_id, "claude")
+    tmux.screens[claude.pane_id] = TRUST_SCREEN
+    states = {status.agent.id: status.state for status in fleet_service.list_agents(project)}
+    assert states[claude.id] == "attention" and tmux.captured == [claude.pane_id]
+
+
+def test_a_row_pinned_to_a_session_is_asked_for_its_screen_whatever_its_binary_is_called(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Review of #259, round 15: a row with no session yet was asked about the trust
+    question only when its binary was named ``claude``. Only Claude Code is started on a
+    session id (minted for ``claude`` by name, or one its caller or a resume named), so
+    the ``claude2`` parallel install spawned on a session its caller chose reads at the
+    question as ``attention``, and ``fleet tell`` does not type into it, where Enter picks
+    "No, exit"."""
+    claude2 = _executable(tmp_path / "bin" / "claude2")
+    pinned = "0b3c6a52-9f7e-4d0e-8a51-2f4c1d7e9b60"
+    agent = _coder(project, binary=str(claude2), agent_args=["--session-id", pinned])
+    assert agent.session_id == pinned and not harness.is_default_agent(agent.binary)
+    tmux.set_command(agent.pane_id, "claude2")
+    tmux.screens[agent.pane_id] = TRUST_SCREEN
+
+    (status,) = fleet_service.list_agents(project)
+
+    assert status.state == "attention", status
+    assert status.detail is not None and status.detail.startswith(TRUST_PROMPT)
+    told = fleet_service.tell(project, agent.label, "start on the task")
+    assert not told.delivered and tmux.typed == []
+
+
+def test_an_agent_whose_hooks_run_on_a_hubs_board_is_never_asked_for_its_screen(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under ``AISQUARE_TEAM_HUB`` every session is on the hub's board, and the listing
+    joins its project's own: no row had one, so every listing captured every pane, and
+    an agent whose screen showed the question's words read as at it (review of #259,
+    round 13). Its session is found by its id, in the listing's one store session: a
+    second one was opened for it on every listing, with the store's migration checks
+    (round 16), and handed on to a caller that reads it too."""
+    hub = ProjectInfo(id="prj_hub000000", root=tmp_path / "hub", linked_repos=[])
+    agent = _coder(project)
+    tmux.set_command(agent.pane_id, "claude")
+    tmux.screens[agent.pane_id] = TRUST_SCREEN  # a reviewer reading claude_sharing's fixture
+    now = datetime.now(tz=UTC)
+    assert agent.session_id is not None
+    with store_session() as store:
+        store.onboard_project(hub)
+        store.upsert_session(
+            TeamSession(
+                id=agent.session_id, project_id=hub.id, role=agent.role,
+                started_at=now, last_seen_at=now,
+            )
+        )  # fmt: skip
+    tmux.captured.clear()
+    opens = 0
+    real_open = core_store.open_store
+
+    def counting_open() -> ContextStore:
+        nonlocal opens
+        opens += 1
+        return real_open()
+
+    monkeypatch.setattr(core_store, "open_store", counting_open)
+    looked_up: dict[str, TeamSession | None] = {}
+
+    (status,) = fleet_service.list_agents(project, looked_up=looked_up)
+
+    assert status.session is None, "the premise: the listing joins its own board's sessions"
+    assert status.state != "attention" and tmux.captured == []
+    assert opens == 1, "one store session for the listing, its lookups included"
+    found = looked_up[agent.session_id]
+    assert found is not None and found.project_id == hub.id
+
+
+def test_spawn_never_types_its_prompt_into_the_trust_question(
+    tmux: FakeTmux,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = tmux.pane_facts
+
+    def up_at_the_question(pane_id: str) -> PaneFacts | None:
+        tmux.set_command(pane_id, "claude")
+        tmux.screens[pane_id] = TRUST_SCREEN
+        return original(pane_id)
+
+    monkeypatch.setattr(tmux, "pane_facts", up_at_the_question)
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="start on tsk_1")
+    assert tmux.typed == []
+    assert receipt.prompt_typed == "no"  # `Typed`: NOT typed, never "maybe" or "unsent"
+    note = next(n for n in receipt.notes if "folder-trust question" in n)
+    assert "NOT typed" in note
+    trust = ["aisquare", "accounts", "trust", str(receipt.agent.cwd)]
+    assert install_route.command_line(trust) in note
+    assert clock.now >= PROMPT_TIMEOUT, "waited for a human to answer it first"
+
+
+def test_spawn_types_its_prompt_once_the_trust_question_is_answered(
+    tmux: FakeTmux,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_facts, original_capture = tmux.pane_facts, tmux.capture
+    asked = 0
+
+    def up_at_the_question(pane_id: str) -> PaneFacts | None:
+        tmux.set_command(pane_id, "claude")
+        return original_facts(pane_id)
+
+    def answered_on_the_third_look(pane_id: str, **kwargs: Any) -> Capture:
+        nonlocal asked
+        asked += 1
+        tmux.screens[pane_id] = TRUST_SCREEN if asked < 3 else ["\u276f "]
+        return original_capture(pane_id, **kwargs)
+
+    monkeypatch.setattr(tmux, "pane_facts", up_at_the_question)
+    monkeypatch.setattr(tmux, "capture", answered_on_the_third_look)
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="start on tsk_1")
+    pane = receipt.agent.pane_id
+    assert tmux.typed == [(pane, "paste", "start on tsk_1"), (pane, "key", "Enter")]
+    assert receipt.notes == [] and clock.now < PROMPT_TIMEOUT
+    assert claude_sharing.shows_trust_prompt(TRUST_SCREEN)  # the fixture is the question

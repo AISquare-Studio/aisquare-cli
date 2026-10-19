@@ -37,8 +37,10 @@ on:
     - cron: "20 5 * * *"
   workflow_dispatch:
 
+# Grouped by event as well as ref, as in ci.yml: by ref alone the daily run
+# shared main's group with pushes to main, and one cancelled the other.
 concurrency:
-  group: install-${{ github.workflow }}-${{ github.ref }}
+  group: install-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:

@@ -34,19 +34,18 @@ from typer.testing import CliRunner
 from aisquare.cli import install as install_cli
 from aisquare.cli.app import app as cli_app
 from aisquare.cli.ui import app as ui_app
+from aisquare.cli.ui.remote_control import RemoteController
 from aisquare.cli.ui.sidebar import AccountsSelected, AddProject, ProjectSelected
 from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.cli.ui.views import doctor as doctor_view
 from aisquare.cli.ui.views import explainability as explainability_view
 from aisquare.cli.ui.views import onboard as onboard_view
-from aisquare.cli.ui.views import project as project_view
-from aisquare.cli.ui.views import settings as settings_view
 from aisquare.cli.ui.views import welcome as welcome_view
 from aisquare.cli.ui.views.doctor import DoctorView
-from aisquare.cli.ui.views.project import ProjectView
 from aisquare.core import selfcli
 from aisquare.core.state import get_state, reset_state
 from aisquare.services import claude_accounts as accounts_service
+from aisquare.services import remote_server
 from aisquare.services.install_route import LatestRelease
 from tests.installer_seams import no_real_installer  # noqa: F401 — autouse, applied by import
 from tests.rendered import plain
@@ -60,6 +59,11 @@ _REAL_EXEC_SELF = selfcli.exec_self
 
 #: Textual's own, which a test that records every worker start wraps.
 _REAL_START = Worker._start
+#: How long a scripted read or write holds before it lets go on its own, and how long a test
+#: waits for an event it is owed. Every test lets its holds go and is owed only what comes, so
+#: only a run already gone wrong waits it out. Generous, as a short one is a race with the
+#: runner: on windows-latest a 5 s hold ran out while a test was still typing.
+HOLD_S = 60.0
 
 # --------------------------------------------------------------------------- the view
 
@@ -140,7 +144,7 @@ def test_the_install_route_is_read_off_the_ui_thread_and_update_waits_for_it() -
 
     def held_refusal() -> str | None:
         threads.append(threading.get_ident())
-        release.wait(10)
+        release.wait(HOLD_S)
         return None
 
     view = DoctorView(machine=True, update_refusal=held_refusal)
@@ -171,8 +175,9 @@ def test_only_asqs_own_doctor_is_machine_wide_and_no_doctor_may_be_busy(
     script: Any,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With a project's tab and Onboard really open, so the negative half has copies to see.
-    Update quits only when no Doctor view anywhere still has a fix writing."""
+    """With a project's page and Onboard really open, so the negative half has a copy to see
+    (a project page has no Doctor of its own). Update quits only when no Doctor view anywhere
+    still has a fix writing."""
     monkeypatch.setattr("aisquare.cli.ui.views.doctor._update_refusal", _never_refused)
     seed(tmp_path, ("prj_a", "alpha", None))
 
@@ -183,10 +188,13 @@ def test_only_asqs_own_doctor_is_machine_wide_and_no_doctor_may_be_busy(
         await app.on_add_project(AddProject())
         await settle_page(app)
         doctors = {str(view.id): view.machine for view in app.query(DoctorView)}
-        project = next(v for v in app.query(DoctorView) if v.id == "project-doctor")
+        onboard = next(v for v in app.query(DoctorView) if v.id == "onboard-doctor")
         release = threading.Event()
-        project.run_worker(
-            lambda: release.wait(10), name=doctor_view.FIX_WORKER, thread=True, exit_on_error=False
+        onboard.run_worker(
+            lambda: release.wait(HOLD_S),
+            name=doctor_view.FIX_WORKER,
+            thread=True,
+            exit_on_error=False,
         )  # its fix, still writing
         app.query_one("#doctor-update", Button).press()
         await settle_page(app, group="held")  # the fix is held on purpose: settle no group
@@ -199,8 +207,8 @@ def test_only_asqs_own_doctor_is_machine_wide_and_no_doctor_may_be_busy(
 
     doctors, while_busy, after = drive(fn)
 
-    assert doctors == {"doctor": True, "project-doctor": False, "onboard-doctor": False}
-    assert while_busy is None, "a project tab's fix is still writing"
+    assert doctors == {"doctor": True, "onboard-doctor": False}
+    assert while_busy is None, "the Onboard view's fix is still writing"
     assert after == ("upgrade", "--reopen"), "control: with no fix running it quits"
 
 
@@ -217,7 +225,7 @@ def _held_hand_off(name: str) -> tuple[Any, list[str], Any]:
         assert isinstance(app, ui_app.FleetApp)
         said: list[str] = []
         app.notify = lambda message, **_: said.append(str(message))  # type: ignore[method-assign]
-        app.run_worker(lambda: release.wait(10), name=name, thread=True, exit_on_error=False)
+        app.run_worker(lambda: release.wait(HOLD_S), name=name, thread=True, exit_on_error=False)
         app.query_one("#doctor-update", Button).press()
         await settle_page(app, group="held")  # the worker is held on purpose: settle no group
         refused = app.hand_off
@@ -280,7 +288,7 @@ def test_update_waits_out_every_other_worker_and_starts_no_other_meanwhile(
         exits: list[Any] = []
         app.notify = lambda message, **_: said.append(str(message))  # type: ignore[method-assign]
         app.exit = lambda *_args, **_kwargs: exits.append(app.hand_off)  # type: ignore[method-assign]
-        app.run_worker(lambda: release.wait(10), name=name, thread=True, exit_on_error=False)
+        app.run_worker(lambda: release.wait(HOLD_S), name=name, thread=True, exit_on_error=False)
         app.query_one("#doctor-update", Button).press()
         await settle_page(app, group="held")  # the read is held on purpose: settle no group
         while_held = list(exits)
@@ -325,7 +333,7 @@ def test_update_waits_for_a_cancelled_doctor_run_whose_thread_still_runs(
 
     def held_doctor() -> list[Any]:
         started.set()
-        release.wait(10)
+        release.wait(HOLD_S)
         return []
 
     async def fn(pilot: Pilot[None]) -> tuple[Any, list[Any], list[Any]]:
@@ -337,7 +345,7 @@ def test_update_waits_for_a_cancelled_doctor_run_whose_thread_still_runs(
         app._doctor = held_doctor
         app.run_doctor()
         old = app._doctor_worker
-        assert old is not None and await asyncio.to_thread(started.wait, 10)
+        assert old is not None and await asyncio.to_thread(started.wait, HOLD_S)
         app._doctor = lambda: []
         app.run_doctor()  # the project switch: an exclusive start cancels the held run
         await settle_page(app)
@@ -373,7 +381,7 @@ def test_update_waits_for_a_cancelled_async_thread_worker_whose_thread_still_run
 
     async def held() -> None:
         started.set()
-        release.wait(10)
+        release.wait(HOLD_S)
 
     async def answer() -> str:
         await asyncio.sleep(0)
@@ -387,7 +395,7 @@ def test_update_waits_for_a_cancelled_async_thread_worker_whose_thread_still_run
         app.notify = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
         work = held if shape == "async def" else held()
         worker = app.run_worker(work, name="async-read", thread=True, exit_on_error=False)
-        assert await asyncio.to_thread(started.wait, 10)
+        assert await asyncio.to_thread(started.wait, HOLD_S)
         worker.cancel()
         await settle_page(app)
         app.query_one("#doctor-update", Button).press()
@@ -433,7 +441,7 @@ def test_the_worker_manager_hands_textual_whatever_textual_gave_it(
     seen: list[set[str]] = []
 
     def read() -> str:
-        seen.append(manager.running())
+        seen.append(manager.still_running())
         return "read"
 
     manager._new_worker(read, None, thread=True, exclusive=True, later_keyword="kept")
@@ -491,7 +499,9 @@ def test_update_leaves_a_task_worker_to_the_quit(
         with_the_loader = list(exits)
         app.hand_off = None  # the control: once more, under a thread worker of that name
         exits.clear()
-        app.run_worker(lambda: release.wait(10), name="_loader", thread=True, exit_on_error=False)
+        app.run_worker(
+            lambda: release.wait(HOLD_S), name="_loader", thread=True, exit_on_error=False
+        )
         app.query_one("#doctor-update", Button).press()
         await settle_page(app, group="held")
         under_a_thread = list(exits)
@@ -533,7 +543,7 @@ def test_update_leaves_the_thread_textuals_tree_lists_a_folder_in_to_the_quit(
     def hung(_tree: Any, paths: Any) -> list[Path]:
         if hold.is_set():
             listing.set()
-            release.wait(30)
+            release.wait(HOLD_S)
         return list(paths)
 
     monkeypatch.setattr(onboard_view.ProjectTree, "filter_paths", hung)
@@ -548,7 +558,7 @@ def test_update_leaves_the_thread_textuals_tree_lists_a_folder_in_to_the_quit(
         hold.set()
         reloaded = app.query_one(onboard_view.ProjectTree).reload()
         try:
-            assert await asyncio.to_thread(listing.wait, 10), "the tree lists the home"
+            assert await asyncio.to_thread(listing.wait, HOLD_S), "the tree lists the home"
             listings = [str(w.name) for w in app.workers if w._thread_worker and not w.is_finished]
             update = app.query_one("#doctor-update", Button)
             update.press()
@@ -558,7 +568,7 @@ def test_update_leaves_the_thread_textuals_tree_lists_a_folder_in_to_the_quit(
             exits.clear()
             mine = threading.Event()
             app.run_worker(
-                lambda: mine.wait(10), name="_load_directory", thread=True, exit_on_error=False
+                lambda: mine.wait(HOLD_S), name="_load_directory", thread=True, exit_on_error=False
             )
             update.press()
             await _until(lambda: app.hand_off is not None)
@@ -587,9 +597,14 @@ def test_a_hand_over_kept_waiting_says_by_what_and_a_second_press_calls_it_off(
     hung mount) left asq with nothing on screen after the first toast and nothing to press.
     Past ``_HAND_OFF_PATIENCE`` it names what still runs, and a second press stays in asq:
     no quit when the read ends, and asq's own reads start again. Before that, a second
-    press changes nothing."""
+    press changes nothing.
+
+    The wait is timed by the test's own clock (``_hand_off_clock``), moved by exactly the
+    patience: on the wall clock, against a 0.3 s patience, a slow runner's toast said
+    "after 1 s" where this one said "after 0 s" (CI on 26fb6543)."""
     monkeypatch.setattr("aisquare.cli.ui.views.doctor._update_refusal", _never_refused)
-    monkeypatch.setattr(ui_app, "_HAND_OFF_PATIENCE", 0.3)
+    now = [1000.0]
+    monkeypatch.setattr(ui_app, "_hand_off_clock", lambda: now[0])
     release = threading.Event()
 
     async def fn(pilot: Pilot[None]) -> tuple[list[str], Any, Any, list[Any], bool]:
@@ -605,6 +620,8 @@ def test_a_hand_over_kept_waiting_says_by_what_and_a_second_press_calls_it_off(
         update.press()  # too soon to call it off
         await settle_page(app, group="held")  # the read is held on purpose: settle no group
         early = app.hand_off
+        assert len(said) == 1, "no time has passed: nothing is named yet"
+        now[0] += ui_app._HAND_OFF_PATIENCE  # the wait has lasted its patience, to the second
         await settle_until(app, lambda: len(said) == 2, group="held")
         overdue = app.hand_off
         update.press()
@@ -622,7 +639,7 @@ def test_a_hand_over_kept_waiting_says_by_what_and_a_second_press_calls_it_off(
     assert early == overdue == ("upgrade", "--reopen"), "waiting, the early press ignored"
     assert said[:2] == [
         "asq quits once the reads running end",
-        "Still waiting for a read after 0 s. Press Update or Uninstall again to stay "
+        "Still waiting for a read after 10 s. Press Update or Uninstall again to stay "
         "in asq; quit, and it runs once they end.",
     ], said
     assert said[2:] == ["Called off: asq carries on"], said
@@ -672,6 +689,24 @@ Then = Callable[[ui_app.FleetApp, list[str]], Awaitable[list[str]]]
 """A step after the starts, given the app and every start so far; it says what to return."""
 
 
+async def _settle_reads(app: ui_app.FleetApp) -> None:
+    """Settle until every read that has begun has ended, but the one held on purpose, and so
+    has each start its answer made: the Accounts page's usage, once read, reads the status
+    line's headroom (``UsageRead``). A settle of the messages alone counted that start only
+    if the usage read had ended by then; on windows-latest the control's had and the
+    call-off's had not (CI run 38571988017). A read held for the hand-over has not begun: it
+    is PENDING until it is called off, and ``Worker._start`` makes a start RUNNING at once."""
+
+    def ended() -> bool:
+        return not any(
+            worker.state is WorkerState.RUNNING
+            for worker in app.workers
+            if worker.name != "held" and worker.group != "_loader"
+        )
+
+    await settle_until(app, ended, group="held")
+
+
 def _starts_with_a_hand_over(
     pending: bool, monkeypatch: pytest.MonkeyPatch, *, then: Then | None = None
 ) -> list[str]:
@@ -685,7 +720,7 @@ def _starts_with_a_hand_over(
     app, mounted before the hand-over, and none of its tabs would have a read to start."""
     ui_app._remember_ui_state(ui_app.SELECTED_KEY, None)
     monkeypatch.setattr(accounts_view, "_read_credits", lambda _session: [])
-    monkeypatch.setattr(accounts_service, "read_usage_with_trends", lambda _accounts: {})
+    monkeypatch.setattr(accounts_service, "cached_usage_with_trends", lambda _accounts, **_: {})
     monkeypatch.setattr(explainability_view, "status_report", lambda _project: None)
     # Every start, read as it begins: a quick worker has left ``app.workers`` by the time
     # the steps end, and a read held for the hand-over begins only if it is called off.
@@ -705,30 +740,35 @@ def _starts_with_a_hand_over(
         app.notify = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
         await app.on_accounts_selected(AccountsSelected())
         await settle_page(app)
-        if pending:
-            app.run_worker(lambda: release.wait(10), name="held", thread=True, exit_on_error=False)
-            app.query_one("#doctor-update", Button).press()
-            await settle_page(app, group="held")
-            assert app.hand_off == ("upgrade", "--reopen")
-        mark = len(names)
-        await app.on_project_selected(ProjectSelected("prj_a"))
-        project = app.query_one(ProjectView)
-        project.run_project_doctor()
-        accounts = app.query_one(accounts_view.AccountsView)
-        accounts._on_screen = True
-        accounts.session = SimpleNamespace(source="file")  # type: ignore[assignment]
-        signed_in = SimpleNamespace(signed_in=True, account=SimpleNamespace(slot=2))
-        accounts.overview = SimpleNamespace(accounts=[signed_in])  # type: ignore[assignment]
-        accounts.refresh_readings()
-        welcome = app.query_one(welcome_view.WelcomeView)
-        welcome.look(full=True)
-        welcome.find_candidates()
-        await settle_page(app, group="held")  # the tabs' mounts, which start their reads
-        started = sorted(set(names[mark:]))
-        if then is not None:
-            started = await then(app, names)
-        release.set()
-        return started
+        try:
+            if pending:
+                # Held until the steps end (the ``finally``), however slow the runner.
+                app.run_worker(
+                    lambda: release.wait(HOLD_S), name="held", thread=True, exit_on_error=False
+                )
+                app.query_one("#doctor-update", Button).press()
+                # The press bubbles to the Doctor view, its hand-over to the app: hop by hop.
+                await settle_until(app, lambda: app.hand_off is not None, group="held")
+                assert app.hand_off == ("upgrade", "--reopen")
+            mark = len(names)
+            await app.on_project_selected(ProjectSelected("prj_a"))
+            app.run_doctor()  # what opening the Doctor page, or its Re-run, asks for
+            accounts = app.query_one(accounts_view.AccountsView)
+            accounts._on_screen = True
+            accounts.session = SimpleNamespace(source="file")  # type: ignore[assignment]
+            signed_in = SimpleNamespace(signed_in=True, account=SimpleNamespace(slot=2))
+            accounts.overview = SimpleNamespace(accounts=[signed_in])  # type: ignore[assignment]
+            accounts.refresh_readings()
+            welcome = app.query_one(welcome_view.WelcomeView)
+            welcome.look(full=True)
+            welcome.find_candidates()
+            await _settle_reads(app)  # the tabs' mounts, which start their reads, and theirs
+            started = sorted(set(names[mark:]))
+            if then is not None:
+                started = await then(app, names)
+            return started
+        finally:
+            release.set()
 
     return drive(fn)
 
@@ -775,7 +815,7 @@ def test_a_called_off_hand_over_begins_each_start_that_stood_down_once(
         looks.clear()  # the looks before the hand-over
         mark = len(names)
         app._call_off_hand_off()
-        await settle_page(app, group="held")
+        await _settle_reads(app)
         return sorted(names[mark:])
 
     started = _starts_with_a_hand_over(False, monkeypatch)
@@ -867,7 +907,7 @@ def test_a_read_asked_for_while_a_hand_over_waits_is_held_and_a_write_is_not() -
             assert (first.state, newest.state) == (WorkerState.PENDING, WorkerState.PENDING)
             assert first not in set(app.workers) and newest in set(app.workers)
             assert ran == ["a fix"], "the writer began; the reads are held"
-            assert app._worker_threads.running() == set(), "a held read holds no quit"
+            assert app._worker_threads.still_running() == set(), "a held read holds no quit"
 
             app.hand_off = None  # called off
             assert app._worker_threads.release() == []
@@ -936,10 +976,10 @@ def test_no_start_on_asqs_own_schedule_begins_once_a_hand_over_is_pending(
     assert started == sorted(
         {
             explainability_view.STATUS_WORKER,
-            settings_view.ACCOUNTS_WORKER,
             ui_app._DOCTOR_WORKER,  # the shell's, for the project now chosen
-            project_view.DOCTOR_WORKER,
             accounts_view.USAGE_WORKER,
+            # The status line's dot, read again from the cache as the page's usage lands.
+            ui_app.HEADROOM_WORKER,
             accounts_view.CREDITS_WORKER,
             welcome_view.worker_name("look"),
             welcome_view.worker_name("candidates"),
@@ -949,9 +989,11 @@ def test_no_start_on_asqs_own_schedule_begins_once_a_hand_over_is_pending(
 
 
 class _FakeApp:
-    def __init__(self, hand_off: tuple[str, ...] | None) -> None:
+    def __init__(self, hand_off: tuple[str, ...] | None, remote: Any = None) -> None:
         self.hand_off = hand_off
         self.unsaved = ["the last layout could not be saved"]
+        # Off unless given: nothing for run_ui to wait for.
+        self.remote = remote if remote is not None else RemoteController()
 
     def run(self) -> None:
         return None
@@ -969,6 +1011,100 @@ def test_run_ui_hands_the_terminal_over_only_when_asked(
 
     assert execs == ([hand_off] if hand_off else []), "a plain quit hands nothing over"
     assert "the last layout could not be saved" in capsys.readouterr().err, "said first"
+
+
+def test_run_ui_hands_over_only_once_remote_and_the_phones_writes_are_done(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Update or Uninstall with Remote on: the quit leaves Remote stopping on a thread of its
+    own (``FleetApp.on_unmount``), and ``exec_self`` replaces the process, so nothing after it
+    runs. The hand-over waits for Remote's server and ngrok to stop and for the phones' writes
+    first, or an upgrade would replace the install under a server still answering, and the
+    ngrok that no exit stopped would hold its domain."""
+    order: list[str] = []
+
+    class _Stopping:
+        def wait_until_off(self, timeout: float | None = None) -> bool:
+            order.append("remote off")
+            return True
+
+        def writes_done(self, timeout: float | None = None) -> bool:
+            order.append("the panel's writes")
+            return True
+
+    monkeypatch.setattr(
+        ui_app, "FleetApp", lambda **_options: _FakeApp(("upgrade", "--reopen"), _Stopping())
+    )
+    monkeypatch.setattr(
+        remote_server, "remote_wait_for_writes", lambda undone=None: order.append("writes")
+    )
+    monkeypatch.setattr(selfcli, "exec_self", lambda args: order.append(" ".join(args)))
+
+    ui_app.run_ui()
+
+    assert order == ["remote off", "the panel's writes", "writes", "upgrade --reopen"]
+
+
+def test_run_ui_hands_over_only_once_the_r_panels_writes_have_landed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 4 of #259: the R panel writes ``remote.json`` on a thread of its own, which an exit
+    joins and ``exec_self`` skips. A quit stops nothing when this asq serves no Remote (it is
+    off, or ``aisquare remote serve`` serves it), so nothing waited for a write still waiting
+    on ``remote.json.lock``, and Update dropped it: the write switch the panel showed off
+    stayed on for the phones, and the device it revoked stayed signed in."""
+    from tests.test_remote_control import LockedServer
+
+    server = LockedServer()
+    remote = RemoteController(server=server)
+    remote.set_allow_write(False, wait=False)
+    remote.revoke_device("dev_0000000a", wait=False)
+    assert server.waiting.wait(HOLD_S), "the switch's write waits for the lock"
+    landed: list[bool] = []
+
+    class _Quit(_FakeApp):
+        def run(self) -> None:
+            self.remote.shutdown_for_exit(wait=False)  # what on_unmount does
+            threading.Timer(0.3, server.free.set).start()
+
+    monkeypatch.setattr(ui_app, "FleetApp", lambda **_options: _Quit(("upgrade",), remote))
+    monkeypatch.setattr(remote_server, "remote_wait_for_writes", lambda undone=None: None)
+    monkeypatch.setattr(selfcli, "exec_self", lambda args: landed.append(remote.writes_done(0)))
+    try:
+        ui_app.run_ui()
+    finally:
+        server.free.set()
+
+    assert landed == [True], "the exec came before the panel's writes landed"
+    assert server.allow_write_calls == [False] and server.revoked == ["dev_0000000a"]
+
+
+def test_run_ui_hands_over_only_once_the_phones_farewell_has_gone_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 5 of #259: a turn-off in the R panel, or the auto-off the quit enforces, sends the
+    phones "Remote is off" from a daemon thread, which an exit waits for (`push_drain`, an
+    `atexit` handler). `exec_self` runs no exit handler, so Update and Uninstall killed the
+    farewell mid-send, while a plain quit delivered it."""
+    from aisquare.services import remote_push
+
+    sent = threading.Event()
+
+    def sending() -> None:
+        time.sleep(0.3)  # a TLS handshake with the push service
+        sent.set()
+
+    farewell = threading.Thread(target=sending, daemon=True)
+    monkeypatch.setattr(remote_push, "_push_in_flight", {farewell})
+    farewell.start()
+    landed: list[bool] = []
+    monkeypatch.setattr(ui_app, "FleetApp", lambda **_options: _FakeApp(("upgrade",)))
+    monkeypatch.setattr(remote_server, "remote_wait_for_writes", lambda undone=None: None)
+    monkeypatch.setattr(selfcli, "exec_self", lambda args: landed.append(sent.is_set()))
+
+    ui_app.run_ui()
+
+    assert landed == [True], "the exec came before the farewell went out"
 
 
 # --------------------------------------------------------------------------- the exec

@@ -53,10 +53,12 @@ from textual.widgets import Button, Input, Static
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.sidebar import AccountsSelected, AgentSelected, short_path
+from aisquare.cli.ui.ticks import while_running
 from aisquare.cli.ui.views.onboard import render_verdict
 from aisquare.core.store import store_session
 from aisquare.models import FleetAgent, ProjectInfo
 from aisquare.services import first_run, onboarding
+from aisquare.services import project as project_service
 from aisquare.services.first_run import (
     Candidate,
     Candidates,
@@ -308,7 +310,7 @@ class _Live:
     detail: str | None = None
 
     @property
-    def running(self) -> bool:
+    def counts_as_running(self) -> bool:
         """Seen there by the listing (``first_run.RUNNING``), or just started by this page."""
         return self.state is None or self.state in first_run.RUNNING
 
@@ -494,11 +496,16 @@ class WelcomeView(VerticalScroll):
             self.look(full=True)
             self.find_candidates()
         self._shown = True
-        self._tell_chosen()
+        self.tell_chosen()
         self.paint()
 
-    def _tell_chosen(self) -> None:
-        """Tell the shell which project step 1 is on (:class:`Chosen`)."""
+    def tell_chosen(self) -> None:
+        """Tell the shell which project step 1 is on (:class:`Chosen`).
+
+        The page says it as it is shown, from :meth:`on_show`; the shell asks for it too
+        when it switches back here (``FleetApp.action_welcome``), since a page hidden and
+        shown again before the screen's next layout pass is sent no ``Show``.
+        """
         self.post_message(self.Chosen(self.project.id if self.project is not None else None))
 
     # ------------------------------------------------------------------ workers
@@ -552,6 +559,7 @@ class WelcomeView(VerticalScroll):
             or not self.gh
         )
 
+    @while_running
     def _tick(self) -> None:
         """While shown: look again at what is not ready, list step 1 again when the shell's
         frame lists other projects, and repaint step 3 from the frame."""
@@ -680,7 +688,7 @@ class WelcomeView(VerticalScroll):
             # *Choose another*, or aimed step 3 at it mid-onboarding (review of #257).
             self.project = first.project
             self._follow_project()
-            self._tell_chosen()
+            self.tell_chosen()
         self._show_candidates()
 
     # ------------------------------------------------------------------ step 1
@@ -818,7 +826,7 @@ class WelcomeView(VerticalScroll):
         self.project = project
         self.project_note = None
         self._follow_project()
-        self._tell_chosen()
+        self.tell_chosen()
         self.paint()
 
     # ------------------------------------------------------------------ buttons
@@ -844,7 +852,7 @@ class WelcomeView(VerticalScroll):
                 self.project = None
                 self.steps = {}
                 self.fleet_error = None
-                self._tell_chosen()
+                self.tell_chosen()
                 self.paint()
         elif button.id == "claude-check":
             self.look(full=True)
@@ -1106,8 +1114,10 @@ class WelcomeView(VerticalScroll):
     def _paint_fleet(self, *, waiting: bool) -> None:
         live = self._live()
         manager = live.get("manager")
-        manager_running = manager is not None and manager.running
-        coders = [row for row in live.values() if row.agent.role == "coder" and row.running]
+        manager_running = manager is not None and manager.counts_as_running
+        coders = [
+            row for row in live.values() if row.agent.role == "coder" and row.counts_as_running
+        ]
         up = manager_running and len(coders) >= first_run.CODERS
         ready = self._ready()
         title = Text("3  Fleet", style="bold")
@@ -1150,9 +1160,9 @@ class WelcomeView(VerticalScroll):
         elif manager is not None and not up:
             if "coders" in self.busy:
                 status.append("\nStarting the coders…", style="dim")
-            elif stuck is not None:
+            elif stuck is not None and (listed := self._listed_project()) is not None:
                 status.append(f"\n{stuck} could not be restarted: ", style="dim")
-                status.append(f"aisquare fleet reap --project {self._project_ref()}", style="bold")
+                status.append(project_service.fleet_command("reap", listed), style="bold")
                 status.append(
                     " ends the rows of agents whose windows are gone, and Start the coders then "
                     "starts new ones in their place.",
@@ -1215,7 +1225,7 @@ class WelcomeView(VerticalScroll):
             if row is None:
                 continue
             shown.add(label)
-            if not row.running:
+            if not row.counts_as_running:
                 lines.append(state_line(label, row.state or "unknown", row.detail))
                 # Left out, every press met the same refusal unseen (review of F7).
                 refused = self._refusal_of(row)
@@ -1294,13 +1304,14 @@ class WelcomeView(VerticalScroll):
                 )
         return ended
 
-    def _project_ref(self) -> str:
-        """How a command names the chosen project: its codename once it has one, else its id."""
+    def _listed_project(self) -> ProjectInfo | None:
+        """The chosen project as the frame lists it, so a command names it by the codename
+        it has once it has one (``project_service.fleet_command``)."""
         project = self.project
         if project is None:
-            return ""
+            return None
         listed = next((p for p in _frame_projects(self.app) or [] if p.id == project.id), project)
-        return listed.codename or project.codename or project.id
+        return listed if listed.codename or not project.codename else project
 
     def _waiting_for(self) -> str:
         missing: list[str] = []

@@ -19,6 +19,27 @@ from tests.ci_support import git, repo, request
 TRACE = "trc_01j9q8p3k7zr4m2n6v0c1d8e5f"
 
 
+@pytest.fixture(autouse=True)
+def unhurried_git(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The turn's budget on a clock that does not move, for every ``capture`` and
+    ``project_ref`` here that asks for none of its own.
+
+    ``GIT_BUDGET_SECONDS`` is a product bound: two seconds in front of a developer who
+    has just hit enter, past which the hook fails open. A loaded Windows runner spent it
+    across one capture's four git spawns, and the test read the product's fail-open as a
+    failure of its own (CI of #259, run 38482592483, attempt 1). The budget is judged by
+    the clock it is given, and this one does not run: every git call gets the product's
+    whole allowance as its own ceiling, which the suite still holds git to
+    (``test_git_runs_without_the_traced_identity_and_without_optional_locks``), and
+    nothing accumulates across calls. The tests of the budget itself make their own.
+    """
+    monkeypatch.setattr(
+        ci_snapshot,
+        "new_budget",
+        lambda: ci_snapshot._Budget(ci_snapshot.GIT_BUDGET_SECONDS, clock=lambda: 0.0),
+    )
+
+
 def test_a_clean_tree_snapshots_as_head(tmp_path: Path) -> None:
     root = repo(tmp_path / "r")
     snapshot = ci_snapshot.capture(root, TRACE)
@@ -308,6 +329,30 @@ def test_repo_slug_reads_only_the_path(url: str, slug: str | None) -> None:
 def test_the_budget_never_hands_git_a_zero_timeout() -> None:
     budget = ci_snapshot._Budget(0)
     assert budget.remaining() >= 0.05
+
+
+def test_the_budget_is_judged_by_the_clock_it_is_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Follow-up of #259: the budget read the wall clock itself, so what a capture could
+    do depended on how loaded the runner was (``unhurried_git`` says how that failed). It
+    runs on the clock it is given, and on the module's otherwise: with that one racing
+    three seconds a read, the product's own allowance is spent at its first look, while a
+    capture on the suite's frozen one lands."""
+    now = 0.0
+    budget = ci_snapshot._Budget(2.0, clock=lambda: now)
+    assert budget.remaining() == 2.0 and not budget.spent()
+    now = 1.5
+    assert budget.remaining() == pytest.approx(0.5) and not budget.spent()
+    now = 2.0
+    assert budget.spent() and budget.remaining() == 0.05, "floored, and spent"
+
+    racing = iter(range(0, 10_000, 3))
+    monkeypatch.setattr(ci_snapshot, "_monotonic", lambda: float(next(racing)))
+    root = repo(tmp_path / "r")
+    (root / "tracked.txt").write_text("x\n", encoding="utf-8")
+    assert ci_snapshot.capture(root, "trc_slow") is not None, "the suite's budget: frozen"
+    assert ci_snapshot._Budget(ci_snapshot.GIT_BUDGET_SECONDS).spent(), "the product's: racing"
 
 
 def test_a_trace_id_that_cannot_be_a_ref_still_yields_the_object(tmp_path: Path) -> None:

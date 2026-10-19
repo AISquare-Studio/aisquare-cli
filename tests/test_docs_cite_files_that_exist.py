@@ -53,6 +53,7 @@ DOCS = [
     Path("docs/orchestration.md"),
     Path("docs/reference.md"),
     Path("docs/platform.md"),
+    Path("docs/remote.md"),
 ]
 
 #: References that name a file OUTSIDE this repo, each with the reason it

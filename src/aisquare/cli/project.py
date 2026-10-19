@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shlex
 import sys
 from pathlib import Path
 from typing import Annotated
@@ -25,6 +24,7 @@ from aisquare.core.state_file import StateUnwritableError
 from aisquare.core.store import store_session
 from aisquare.core.workspace import find_project_root, project_id_for
 from aisquare.models import ProjectGroup, ProjectInfo
+from aisquare.services import install_route
 from aisquare.services import project as project_service
 from aisquare.services import project_groups as groups_service
 
@@ -87,13 +87,13 @@ def list_(
             # one" and "add one" named a step already taken, and taken again it
             # changed nothing (review of #171, round 2).
             noun = "directory" if unlisted == 1 else "directories"
-            flags = " --pinned" if pinned else ""
+            shown = ["aisquare", "project", "list", "--all", *(["--pinned"] if pinned else [])]
             if chosen is not None:
-                flags += f" --group {shlex.quote(chosen.name)}"
+                shown += ["--group", chosen.name]
             filtered = (
                 f"No listed {'pinned ' if pinned else ''}projects{where} — {unlisted} captured "
-                f"{noun} hidden (a hooked session ran there): aisquare project list --all"
-                f"{flags}; add one: aisquare project onboard <path>"
+                f"{noun} hidden (a hooked session ran there): "
+                f"{install_route.command_line(shown)}; add one: aisquare project onboard <path>"
             )
         elif pinned:
             filtered = f"No pinned projects{where} — pin one: aisquare project pin <project>"
@@ -125,11 +125,12 @@ def _matching(
 def _positional(value: str) -> str:
     """``value`` as a shell word a command reads as an argument, never as an option.
 
-    ``shlex.quote`` keeps the shell from splitting a name, not Click from reading
-    ``-wip`` as options; ``--`` ends the options first (review of #171, round 2).
+    Quoting keeps the shell from splitting a name, not Click from reading ``-wip`` as
+    options; ``--`` ends the options first (review of #171, round 2). Quoted for this shell
+    (``install_route.command_line``), as every command a person is told to paste is: not by
+    ``shlex.quote``, whose single quotes cmd.exe passes on (review of #259, round 20).
     """
-    word = shlex.quote(value)
-    return f"-- {word}" if value.startswith("-") else word
+    return install_route.command_line(["--", value] if value.startswith("-") else [value])
 
 
 @app.command("switch")
@@ -143,14 +144,59 @@ def switch(name: Annotated[str, typer.Argument(help="Project name or id prefix."
         fail(str(exc), error="ambiguous_project", ref=name)
     except StateUnwritableError as exc:
         fail(str(exc), error="state_unwritable", ref=name)
-    emit_project_action(f"✓ switched to {project.root.name or project.id} ({project.id})", project)
+    emit_project_action(
+        f"✓ switched to {project_service.display_name(project)} ({project.id})", project
+    )
 
 
 @app.command("link")
 def link(repo: Annotated[str, typer.Argument(help="Repository path or URL to link.")]) -> None:
     """Link another repository into the active project."""
     project = project_service.link(repo)
-    emit_project_action(f"✓ linked {repo} into {project.root.name or project.id}", project)
+    emit_project_action(f"✓ linked {repo} into {project_service.display_name(project)}", project)
+
+
+@app.command("rename")
+def rename(
+    nickname: Annotated[
+        str | None,
+        typer.Argument(help="What to call it: any text, up to 255 characters."),
+    ] = None,
+    project: Annotated[
+        str | None,
+        typer.Option(
+            "--project",
+            "-P",
+            help="Project by name, codename, id prefix, nickname or path "
+            "(default: the active project).",
+            metavar="PROJECT",
+        ),
+    ] = None,
+    clear: Annotated[
+        bool, typer.Option("--clear", help="Drop the nickname: the folder's name shows again.")
+    ] = False,
+) -> None:
+    """Give a project a nickname — what the sidebar and the lists call it.
+
+    Free text, like naming a browser tab: what you are doing there. The codename
+    (`fleet rename`) still names its tmux session and branches.
+    """
+    if nickname is None and not clear:
+        fail("pass a nickname, or --clear", error="usage")
+    if nickname is not None and clear:
+        fail("pass a nickname or --clear, not both", error="usage")
+    target = _project_ref(project) if project is not None else project_service.info()
+    try:
+        renamed = project_service.set_nickname(target, nickname)
+    except ValueError as exc:
+        fail(str(exc), error="bad_nickname", ref=target.id)
+    except KeyError:
+        fail(str(project_service.NotAdded(target)), error="not_found", ref=target.id)
+    emit_project_action(
+        f"✓ {project_service.display_name(target)} is now called "
+        f"{project_service.display_name(renamed)}",
+        renamed,
+    )
 
 
 @app.command("onboard")
@@ -174,8 +220,12 @@ def onboard(
         # a blank group went to `create_group`, whose ValueError escaped uncaught after
         # the onboard had committed (review of #203, round 2).
         fail("a group needs a name", error="invalid_group", ref=group)
-    report = project_service.onboard(path, refresh=refresh)
+    try:
+        report = project_service.onboard(path, refresh=refresh)
+    except project_service.NotAFolder as exc:
+        fail(str(exc), error="not_a_directory", ref=str(path or Path.cwd()))
     if name:
+        # A folder: the onboard refused any other path.
         project_id = project_id_for(find_project_root(path or Path.cwd()))
         try:
             with store_session() as store:
@@ -210,7 +260,9 @@ def forget(
     ref: Annotated[str, typer.Argument(help="Project id prefix, name, codename or path.")],
     purge: Annotated[bool, typer.Option("--purge", help=_PURGE_HELP)] = False,
 ) -> None:
-    """Remove a project registration. Refused while it has live fleet agents."""
+    """Remove a project registration. Refused while it has live fleet agents, or while
+    another project's fleet agents read its board (a hub's), live or stopped (a restart
+    would start them under it again)."""
     try:
         report = project_service.forget(ref, purge=purge)
     except KeyError:
@@ -272,13 +324,20 @@ def prune(
     if not missing and not worktrees and not captured_only:
         missing = worktrees = True
     days = _STALE_CAPTURE_DAYS if older_than is None else older_than
+    captured = days if captured_only else None
     candidates = project_service.prune_candidates(
-        missing=missing,
-        worktrees=worktrees,
-        captured_older_than=days if captured_only else None,
+        missing=missing, worktrees=worktrees, captured_older_than=captured
     )
     if yes:
-        emit_prune(project_service.prune(candidates, purge=purge))
+        emit_prune(
+            project_service.prune(
+                candidates,
+                purge=purge,
+                missing=missing,
+                worktrees=worktrees,
+                captured_older_than=captured,
+            )
+        )
         return
     plan = project_service.prune_plan(candidates, purge=purge)
     emit_prune(plan)
@@ -294,7 +353,15 @@ def prune(
     if not typer.confirm(f"Drop {droppable} {noun}?", default=False):
         stdout_console().print("nothing dropped")
         return
-    emit_prune(project_service.prune(candidates, purge=purge))
+    emit_prune(
+        project_service.prune(
+            candidates,
+            purge=purge,
+            missing=missing,
+            worktrees=worktrees,
+            captured_older_than=captured,
+        )
+    )
 
 
 # --- groups, pins and manual order (#140) ---------------------------------------------------
@@ -308,8 +375,12 @@ app.add_typer(group_app, name="group")
 
 
 def _project_id(ref: str) -> str:
+    return _project_ref(ref).id
+
+
+def _project_ref(ref: str) -> ProjectInfo:
     try:
-        return project_service.resolve(ref).id
+        return project_service.resolve(ref)
     except KeyError:
         fail(f"no project matches '{ref}'", error="not_found", ref=ref)
     except ValueError as exc:
@@ -328,7 +399,7 @@ def _emit_layout(message: str, entry: groups_service.UndoEntry | None = None) ->
 
 def _arrangement_json(arrangement: groups_service.Arrangement) -> dict[str, object]:
     def project(p: ProjectInfo) -> dict[str, object]:
-        return {"id": p.id, "name": p.root.name or p.id, "position": p.position}
+        return {"id": p.id, "name": project_service.display_name(p), "position": p.position}
 
     def group(e: groups_service.GroupEntry) -> dict[str, object]:
         return {
@@ -413,7 +484,7 @@ def group_list() -> None:
     for entry in entries:
         pin = " 📌" if entry.group.pinned_at is not None else ""
         fold = " (collapsed)" if entry.group.collapsed else ""
-        names = ", ".join(m.root.name or m.id for m in entry.members) or "—"
+        names = ", ".join(project_service.display_name(m) for m in entry.members) or "—"
         stdout_console().print(f"{entry.group.name}{pin}{fold}: {names}", markup=False)
 
 

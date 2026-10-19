@@ -18,6 +18,10 @@ from aisquare.services import distill
 from aisquare.services import team as team_service
 from tests import fakebin
 
+#: The real ``spawn_drain``, bound at import: conftest's autouse ``no_detached_distill``
+#: replaces the module attribute before each test runs.
+_REAL_SPAWN_DRAIN = distill.spawn_drain
+
 _FAKE_GBRAIN = r"""# Schema-aware fake: `init` records the embedding choice into config.json
 # exactly like real gbrain, and `query` (hybrid) REJECTS a vectorless brain --
 # so the suite exercises the real create-time constraint instead of passing
@@ -200,6 +204,103 @@ def test_distill_all_backfills_past_the_watermark(
     result = runner.invoke(app, ["--json", "team", "distill", "--all"])
     assert json.loads(result.stdout) == {"distilled": 3}  # rescan rebuilt them
     assert len(puts_log.read_text(encoding="utf-8").splitlines()) == 3
+
+
+def test_a_drain_spawned_for_a_board_drains_that_board_whatever_its_directory_resolves(
+    runner: CliRunner,
+    fake_gbrain: Path,
+    work_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 33, 5/10: a board write routed by id (``fleet tell``'s filed
+    note, the phone's note to an agent's or a card's board) spawned its drain with the
+    board's root as the worker's directory alone, and ``team distill`` worked its board out
+    again from there: under the caller's hub, the hub's; with none, the checkout's of that
+    root. The worker is told the board, and drains it wherever it runs and under whatever
+    hub."""
+    hub_root = tmp_path / "hub"
+    hub_root.mkdir()
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub_root))
+    team_service.activate()
+    runner.invoke(app, ["note", "the hub's decision", "--kind", "decision"])
+    hub = team_project(work_dir)
+    monkeypatch.delenv("AISQUARE_TEAM_HUB")
+    _seed_events(runner)  # the checkout's own board, which the worker's directory resolves
+    assert hub.id != team_project(work_dir).id
+
+    seen: dict[str, object] = {}
+    with monkeypatch.context() as spawning:
+        spawning.setattr(subprocess, "Popen", lambda argv, **kw: seen.update(argv=argv, **kw))
+        _REAL_SPAWN_DRAIN(root=work_dir, board=hub.id)
+    argv = seen["argv"]
+    assert isinstance(argv, list) and argv[-5:] == ["--quiet", "team", "distill", "--board", hub.id]
+    assert seen["cwd"] == str(work_dir)
+
+    drained = runner.invoke(app, ["--json", *argv[-4:]])  # the worker, in that directory
+
+    assert json.loads(drained.stdout) == {"distilled": 1}, drained.output
+    puts = (brain.brain_home(hub.id) / "puts.log").read_text(encoding="utf-8").splitlines()
+    assert [slug.split("/")[1] for slug in puts] == ["decision"], "the hub's own pipe"
+    assert distill.drain(work_dir) == 3, "the checkout's pipe was left for its own drain"
+
+
+def test_a_drain_spawned_for_a_board_whose_root_is_gone_still_runs_and_drains_it(
+    runner: CliRunner,
+    fake_gbrain: Path,
+    work_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 37, 3/7: told its board, the worker was still started in the
+    board's root, and with that folder gone (a hub cleaned up, a root moved while its row
+    stays) ``Popen`` raised ``FileNotFoundError``, swallowed: that board's decisions were
+    never distilled. The worker runs where this process does, the real ``Popen`` shows, and
+    drains the board it is told."""
+    hub_root = tmp_path / "hub"
+    hub_root.mkdir()
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub_root))
+    team_service.activate()
+    runner.invoke(app, ["note", "the hub's decision", "--kind", "decision"])
+    hub = team_project(work_dir)
+    monkeypatch.delenv("AISQUARE_TEAM_HUB")
+    hub_root.rmdir()
+    real_popen = subprocess.Popen
+    seen: dict[str, object] = {}
+
+    def popen(argv: list[str], **kw: object) -> None:
+        real_popen([sys.executable, "-c", ""], **kw).wait()  # type: ignore[call-overload]
+        seen.update(argv=argv, **kw)
+
+    with monkeypatch.context() as spawning:
+        spawning.setattr(subprocess, "Popen", popen)
+        _REAL_SPAWN_DRAIN(root=hub_root, board=hub.id)
+    argv = seen.get("argv")
+    assert isinstance(argv, list), "the drain was started"
+    assert argv[-2:] == ["--board", hub.id] and seen["cwd"] is None
+
+    drained = runner.invoke(app, ["--json", *argv[-4:]])
+
+    assert json.loads(drained.stdout) == {"distilled": 1}, drained.output
+
+
+def test_a_drain_that_cannot_be_started_is_logged_with_the_command_that_runs_it(
+    fake_gbrain: Path,
+    work_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Review of #259, round 37, 3/7: a worker ``Popen`` refused was dropped without a word."""
+
+    def popen(argv: list[str], **kw: object) -> None:
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    with caplog.at_level("WARNING", logger="aisquare.services.distill"):
+        _REAL_SPAWN_DRAIN(root=work_dir, board="prj_board")
+
+    (said,) = [record.getMessage() for record in caplog.records]
+    assert "Too many open files" in said and "aisquare team distill --board prj_board" in said
 
 
 def test_distill_cli_reports_count(runner: CliRunner, fake_gbrain: Path, work_dir: Path) -> None:

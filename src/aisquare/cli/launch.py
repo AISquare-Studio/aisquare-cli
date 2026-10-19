@@ -296,7 +296,12 @@ def launch(
             f"role bindings: config unreadable ({profile.notice}) — launching unbound",
             style="dim",
         )
+    if profile.refusal is not None:
+        # A variable the binding reads from a file that cannot be read: launched without
+        # it, a reviewer bound to a token that cannot push runs on this shell's own.
+        fail(profile.refusal, error="env_file_unreadable", detail=profile.refusal)
     env.update(profile.env)
+    env.update(profile.file_env)
     # WHICH ACCOUNT, decided in exactly one place (#145): the flag, else the
     # role's `team bind --account`, else the project's default, else the
     # machine's — `services.claude_accounts.choose`, pinned by
@@ -319,7 +324,16 @@ def launch(
         stderr_console().print(f"accounts: {note}", style="dim")
     if choice.account is not None:
         claude_accounts_core.apply_launch_env(env, choice.account, shell=os.environ)
-    whose = f" ({','.join(sorted(profile.env))})" if profile.env else ""
+    # The folder's trust from whichever account has it, so the agent does not stop at
+    # Claude Code's "trust this folder?" — whose highlighted answer is "No, exit" — for
+    # a folder the human already said yes to on another login (`[accounts] share_trust`).
+    # Not again for the account a fleet spawn just shared into: it says so on the window.
+    settled = env.pop(claude_accounts_service.SHARED_ENV, None)
+    if choice.account is None or settled != str(choice.account.slot):
+        for note in claude_accounts_service.share_for_launch(account=choice.account, env=env):
+            stderr_console().print(f"accounts: {note}", style="dim")
+    carried = sorted({*profile.env, *profile.file_env})
+    whose = f" ({','.join(carried)})" if carried else ""
     if choice.account is not None:
         whose += f" [{choice.describe()}]"
     try:

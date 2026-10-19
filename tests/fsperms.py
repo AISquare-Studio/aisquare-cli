@@ -28,11 +28,12 @@ from __future__ import annotations
 import contextlib
 import getpass
 import os
+import shutil
 import stat
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -173,3 +174,23 @@ def can_symlink() -> bool:
         except (OSError, NotImplementedError):
             return False
         return True
+
+
+def remove_tree(path: Path) -> None:
+    """``shutil.rmtree`` of ``path``, read-only files included.
+
+    git writes its objects read-only, and Windows will not delete a read-only file
+    (``[WinError 5] Access is denied``) where POSIX deletes any file of a folder it may
+    write: a test that deletes a checkout it committed in failed on ``windows-latest`` alone
+    (review of #259, round 43, Windows CI). A file that refuses is made writable and
+    deleted again.
+    """
+
+    def writable_and_again(delete: Callable[[str], object], failed: str, _exc: object) -> None:
+        os.chmod(failed, stat.S_IWRITE)
+        delete(failed)
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=writable_and_again)
+    else:
+        shutil.rmtree(path, onerror=writable_and_again)

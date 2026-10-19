@@ -41,6 +41,7 @@ from aisquare.services import explainability as service
 from aisquare.services import explainability_ops as ops
 from aisquare.services import iam
 from tests.idp_stub import IdentityProviderStub
+from tests.projects import add_project
 
 WORKSPACES = [
     {"id": 42, "uid": "ws-uid-42", "name": "acme", "type": "team", "effective_role": "ADMIN"},
@@ -2783,6 +2784,7 @@ def test_a_purge_signed_out_keeps_its_keys_owed_says_so_and_revokes_after_the_sw
     )
     assert idp.revoked_keys == []
 
+    add_project(tmp_path / "web")  # `use` here names web's destination: web is added (#139)
     again = _json(runner, "explainability", "use", "acme/Frontend")
     assert sorted(again["revocations"]["revoked"]) == ["key-1", "key-2", "key-3"]
     assert sorted(idp.revoked_keys) == ["key-1", "key-2", "key-3"]
@@ -2797,7 +2799,9 @@ def test_use_in_a_directory_nothing_registered_captures_it(
     signed_in: iam.Session,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    project_capture: None,
 ) -> None:
+    """With ``[projects] capture`` on; off, it is refused (tests/test_project_capture_off.py)."""
     fresh = tmp_path / "fresh"
     fresh.mkdir()
     monkeypatch.chdir(fresh)
@@ -2832,9 +2836,10 @@ def test_purging_a_project_takes_its_destination_with_it(
 
 
 def test_studios_of_another_workspace_are_not_listed_under_this_one(
-    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
 ) -> None:
     """The API answers an unhonoured header with the personal workspace's studios."""
+    add_project(tmp_path / "web")
     idp.studios["99"] = [{"id": 701, "uid": "st-701", "name": "Notes", "workspace_id": 7}]
     payload = _json(runner, "explainability", "studios", "--workspace", "guests")
     assert payload["studios"] == []

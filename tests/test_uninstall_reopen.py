@@ -19,6 +19,7 @@ from aisquare.cli import install as install_cli
 from aisquare.cli.app import app
 from aisquare.core import selfcli
 from tests.installer_seams import no_real_installer  # noqa: F401 — autouse, applied by import
+from tests.remote_elsewhere import remote_on_elsewhere
 from tests.test_lifecycle_uninstall import (  # noqa: F401 — `tool` and `world` are fixtures
     Tool,
     World,
@@ -99,6 +100,26 @@ def test_a_refusal_is_read_and_then_asq_comes_back(
 
     assert result.exit_code == 1
     assert "aisquare fleet shutdown --all --yes" in result.output
+    assert reopened == [("prompt", [_ENTER]), ("exec", ["ui"])] and world.events == []
+
+
+def test_a_remote_on_in_another_shell_is_read_and_then_asq_comes_back(
+    runner: CliRunner,
+    tool: Tool,  # noqa: F811
+    world: World,  # noqa: F811
+    isolated_agent_home: Path,
+    reopened: list[tuple[str, list[str]]],
+) -> None:
+    """Follow-up of #259: an `aisquare remote serve` in another terminal refuses asq's
+    Uninstall as live fleet agents do. asq stops its own Remote before it hands over, so
+    the one named is the other's; the plan names it, and asq comes back."""
+    _hooked(isolated_agent_home / ".claude", tool.script)
+
+    with remote_on_elsewhere(by="serve") as named:
+        result = runner.invoke(app, ["uninstall", "--reopen"])
+
+    assert result.exit_code == 1
+    assert f"Remote is on ({named})" in " ".join(result.output.split())
     assert reopened == [("prompt", [_ENTER]), ("exec", ["ui"])] and world.events == []
 
 

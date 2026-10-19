@@ -23,7 +23,9 @@ off to `claude` — arguments after the role are forwarded, so `aisquare launch
 coder --model opus` does what it looks like. (The underlying mechanism is the
 `AISQUARE_ROLE` environment variable; `AISQUARE_ROLE=coder claude` still works
 if you prefer it, and is what you need when launching an agent other than
-`claude` without `--command`.)
+`claude` without `--command` — in a project you added: `aisquare team on` adds
+this one, as `launch` and `team spawn --exec` do. Where nobody added it, a
+session started that way joins no board.)
 
 Every session is told its id, its teammates, and its **role's work cycle**
 automatically — no standing prompts to paste:
@@ -62,6 +64,11 @@ aisquare team spawn planner            # prints: AISQUARE_ROLE=planner claude --
 aisquare team spawn coder --exec       # or replace this terminal with the session
 aisquare team harness                  # the whole role→model matrix + how it resolves now
 ```
+
+With `[projects] capture` off (the default), a role session joins only the board of a
+project someone added. `--exec` adds it, as `aisquare team on` does; a printed line adds
+nothing, so in a directory nobody added the print says so on stderr (under `--json`, in
+`not_added`), naming `aisquare project onboard`.
 
 Availability is *probed*, never assumed — `claude --model` silently
 substitutes the default when a known model isn't available to the account,
@@ -121,14 +128,23 @@ that never opt in see nothing.
 ### Tasks: idempotent, atomic, dependency-aware
 
 ```sh
-aisquare task add "wire auth" --role coder        # idempotent — safe to re-emit
-aisquare task add "ship it" --needs tsk_01k…      # held until its dependency is done
+aisquare task add "wire auth" --role coder        # idempotent — safe to re-emit (#1)
+aisquare task add "ship it" --needs 1             # held until #1 is done
 aisquare task next --role coder --claim --as <id> # atomic claim — exactly one winner; a
                                                   # fleet agent's own assigned task comes first
-aisquare task review tsk_01k… --note "how to verify" --as <id>
-aisquare task reopen tsk_01k… --reason "fails on py3.11" --as <id>
+aisquare task review 1 --note "how to verify" --as <id>
+aisquare task reopen '#1' --reason "fails on py3.11" --as <id>
 aisquare note "JWT it is" --kind decision --as <id>
 ```
+
+Every task has a **number on its board** — `#1`, `#2`, … in the order tasks
+were added to that project — shown beside its id on the board, in `task list`,
+`task show` and every receipt (`✓ claimed: #12 tsk_01k… [doing] …`). Any task
+command, `--needs`, `--task` and the MCP task tools take `12` or `#12` for the
+caller's board (the `--as` session's, else the directory's), or the id as
+before. `12` and `#12` are only ever a number on that board: if it has no task
+#12 it says `no task #12 on this board (<name>)`, rather than matching some
+task's id, here or on another project's board.
 
 Claims are single-`UPDATE` atomic (race-tested), leased (default 120
 minutes), and renewed by the session's own lifecycle hooks — so a dead
@@ -181,10 +197,25 @@ An interactive [Textual](https://textual.textualize.io/) TUI with the
 `[tui]` extra (full-screen Rich fallback without it): every session with a
 live state chip — **▶ working**, **⏸ waiting for input**, **🔔 NEEDS YOU**
 (with a terminal bell) — the open tasks, and a bot-style feed of everything
-the team does. Click any task or feed line for its full detail.
+the team does. A task is one line: its number on the board, a status icon and
+the title, cut with `…` to the width there is, so the table never scrolls
+sideways. Click any task or feed line for its full detail, which starts
+`#12 · doing · tsk_… · claimed by <who> (lease until 14:05) · for coder`.
+The same board is a project's *Board* tab in `asq`.
+
+| Icon | Task |
+| --- | --- |
+| `○` | to do — nobody has it yet |
+| `⧗` | to do, waiting on a task it needs |
+| `▶` | doing — claimed and being worked on |
+| `👀` | in review — waiting to be checked |
+| `⛔` | blocked — the detail says on what |
+| `✓` | done |
+| `✗` | dropped — no longer worth doing |
 
 | Key | Action |
 | --- | --- |
+| `?` | the keys and this icon legend (in `asq` too) |
 | `d` | flip to the done/dropped archive — when it closed, who closed it |
 | `o` | open the author session's transcript at that exact moment |
 | `t` | theme browser — applies live, autosaves |
@@ -193,6 +224,11 @@ the team does. Click any task or feed line for its full detail.
 | `s` | save an SVG screenshot to `~/.aisquare/screenshots/` |
 | `b` | show/hide the board pane |
 | `r` / `q` | refresh now / quit |
+
+Every line between the board's parts drags to resize — the one beside the tasks
+column, the one above the detail, the one between the sessions and the tasks — and
+a double-click puts it back. The sizes are kept in `~/.aisquare/state.json`, one
+for every project's board, and come back at the next launch.
 
 ### Long-term memory (optional, via gbrain)
 
@@ -255,6 +291,44 @@ The clock counts **inbound** messages only — it assumes request/response
 traffic, so a deadline shorter than your slowest tool call would cut a
 client mid-wait (at the 300s default no current tool comes anywhere close).
 
+### Phone control (`aisquare remote`)
+
+The fleet on your phone: one feed of everything waiting on you across every
+project (a permission prompt, a question, a crash, a usage limit), each agent's
+live screen and conversation, the board, and notifications when something needs
+you. Once you allow writes, the phone can answer a prompt, type to an agent, or
+stop, restart or switch it. It is one server on `127.0.0.1:8750` behind your own
+ngrok tunnel, and the page it serves ships inside aisquare-cli.
+
+```sh
+uv tool install --python 3.13 --with tiktoken 'aisquare-cli[remote]'   # pipx, pip or more extras: docs/remote.md
+export AISQUARE_REMOTE_NGROK_URL=https://your-name.ngrok-free.app   # your static domain
+aisquare remote allow-write on       # read-only until you say so
+```
+
+Then press `R` in `aisquare ui` and switch Remote on: the panel starts the server
+and ngrok on that domain itself, and shows the link, a QR code and the passphrase.
+Without the fleet UI, start both yourself instead, never beside the panel: a domain
+holds one tunnel, so a second ngrok on it fails:
+
+```sh
+aisquare remote serve
+ngrok http --url=your-name.ngrok-free.app --inspect=false 127.0.0.1:8750   # in another terminal
+```
+
+Give ngrok `127.0.0.1:8750`, never `8750` alone: it reads that as `localhost`,
+IPv6's `::1` first, where anyone on the machine can listen and be handed every
+phone's requests; and stop it when `serve` stops, or it hands them to whatever
+takes the port next. Every ngrok account has one free static domain: with it the
+link survives a restart, and a notification opens its card rather than the feed.
+On a machine others use, also put `web_addr: false` in `ngrok.yml` (`ngrok config
+edit`): ngrok's local API asks no one for a password. The fleet UI's ngrok runs
+with it off where it can, and its panel says when it could not.
+
+**[The phone control guide](remote.md)** covers unlocking, the needs-you
+cards and quick answers, notifications on iPhone, the security model, and a
+checklist for before you leave the desk.
+
 ### Tuning (environment variables)
 
 Orchestration has no config files — a handful of env knobs:
@@ -287,7 +361,7 @@ launched by number — the c1/c2/c3 shell aliases, without the aliases:
 aisquare accounts list             # who is signed in where, plan, hooks
 aisquare accounts add              # a fresh slot: Claude Code opens, you sign in, it is recorded
 aisquare accounts run 2            # a plain session on account 2 (what a c2 alias did)
-aisquare accounts usage            # the 5-hour and weekly windows, per account
+aisquare accounts usage            # the 5-hour and weekly windows, percent USED, per account
 aisquare accounts remove 2         # forget it; the directory is kept as 2.removed-<stamp>
 
 aisquare launch coder --account 2  # a board role on account 2
@@ -320,9 +394,10 @@ aisquare team bind coder --account work   # the same role binding, from the team
 
 A launch — `aisquare launch`, `fleet spawn`, the manager spawning a coder —
 resolves the account in exactly one order: `--account` on the command line, then
-the role's binding, then the project's default, then the machine's default. With
-none of those set it runs on whatever `claude` the shell already has, exactly as
-before, so a machine that never ran `accounts default` notices nothing. One
+the role's binding, then the project's default, then the account with room
+(`[accounts] pick`, below), then the machine's default. With one login and none
+of those set it runs on whatever `claude` the shell already has, exactly as
+before, so a machine that never added an account notices nothing. One
 resolver answers for every surface, so the fleet UI and a hand-typed launch can
 never disagree about which login an agent gets; `accounts list` stars the
 default and lists the slots in priority order; `doctor` warns when the default is
@@ -331,14 +406,17 @@ longer has.
 
 **Spending several accounts.** With more than one login the interesting
 questions are *where is there room* and *what happens when one runs out*. Both
-are `[accounts]` settings (on the Settings tab, or `aisquare config set`):
+are `[accounts]` settings (in *⚙ Settings ▸ App settings*, or `aisquare config set`), and both
+default to using the room there is:
 
 ```sh
-aisquare config set accounts.pick headroom   # spawns take, in priority order, the first account
-                                             # under switch_at % of its 5-hour window — or the one
-                                             # with the most room when all are over it
+aisquare config set accounts.pick headroom   # the default: spawns take, in priority order, the
+                                             # first account under switch_at % of the fuller of
+                                             # its two windows — or the one with the most room
+                                             # when all are over it (usage up to a minute old)
+aisquare config set accounts.pick default    # …or every spawn on the machine default
 aisquare config set accounts.switch_at 85    # the line (default 85 %)
-aisquare config set accounts.on_limit switch # when an agent hits its limit, move it (default: wait)
+aisquare config set accounts.on_limit wait   # when an agent hits its limit, leave it parked (default: switch)
 aisquare fleet switch coder-auth             # move one by hand: same label, task and worktree,
                                              # on the account with headroom, resuming its session
 aisquare fleet switch coder-auth --to work --fresh   # a named account, and a fresh session with a
@@ -349,7 +427,8 @@ When an agent's turn ends on a usage limit — Claude Code's `StopFailure` hook,
 `You've hit your session limit · resets 12:30am` — its row shows **⏳ limited**
 with the reset time, the manager is woken with the one command that moves it,
 and Claude Code's own wait-and-continue at the reset is left in place. With
-`on_limit = switch` the fleet hands the agent over on its own: it stops the
+`on_limit = switch`, the default, and a second signed-in account to go to, the fleet
+hands the agent over on its own: it stops the
 agent, starts it again on the account with the most headroom, and resumes the
 same session by its transcript (`claude --resume <path>`), unless the limit
 lifts within `wait_if_reset_within_minutes` (a reset ten minutes away is cheaper
@@ -385,6 +464,21 @@ Set **both** variables: `CLAUDE_CONFIG_DIR` alone shares the *default* scratch
 directory with every other account, which looks isolated right up until two
 parallel sessions collide in temp. `--account` sets both for you.
 
+A value that is a secret binds with `--env-file KEY=PATH` instead: the file is
+read at every launch, so config.toml, the launch banner and `team spawn`'s
+printed command hold the path and never the value, and a file that cannot be
+read refuses the launch. A relative PATH is kept as the full path of the file
+`team bind` read, since each launch runs in its own directory (a worktree, the
+project), and one written into config.toml by hand refuses the launch. The
+printed command reads the file when it is pasted, with the reader the launch
+uses (`aisquare team read-env-file`, so `aisquare` must be on that terminal's
+PATH): in a subshell, its trailing newlines and any byte-order mark (which
+Windows editors and PowerShell write) dropped, a token saved as UTF-16 read too,
+and a file that is empty, blank or gone by then stops the line before the role
+starts. The reviewer's
+GitHub token is what it is for (see
+[A reviewer that cannot push](fleet.md#a-reviewer-that-cannot-push)).
+
 For a one-off, `aisquare launch <role> --env KEY=VALUE` merges over the
 binding per key. Shell aliases (`alias claude1='CLAUDE_CONFIG_DIR=… claude'`)
 can **not** be passed to `--command` — an alias is not an executable — but an
@@ -413,4 +507,6 @@ whose hooks went missing is named rather than hidden behind a healthy ✓.
 
 For executions spanning multiple repositories, set
 `AISQUARE_TEAM_HUB=/path/to/hub` in every session; git worktrees already
-share their principal repo's board automatically.
+share their principal repo's board automatically. Fleet agents keep their rows
+in their own projects under a hub; which of the two each read and write goes to
+is one rule, in [the fleet guide](fleet.md#what-runs-where).

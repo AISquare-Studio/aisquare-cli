@@ -8,6 +8,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from aisquare.core import config as core_config
 from aisquare.core import paths
 from aisquare.core.config import AppConfig, RoleLaunchProfile, load_config, save_config
 from aisquare.models import RedactionLevel
@@ -16,6 +17,29 @@ from aisquare.models import RedactionLevel
 def list_values() -> AppConfig:
     """Return the fully-resolved configuration."""
     return load_config()
+
+
+def overrides() -> dict[str, Any]:
+    """The settings the user's file changes from the system defaults, nested as it holds them."""
+    return core_config.overrides(load_config())
+
+
+def reset_settings() -> Path | None:
+    """Every setting back to its system default; returns where the user's file was moved.
+
+    ``None`` when there was nothing to reset — no file, or one that holds no setting —
+    and nothing moved: every setting is at its default already. See
+    ``core.config.reset_config``.
+    """
+    return core_config.reset_config()
+
+
+def anything_to_reset() -> bool:
+    """Whether the user's file holds a setting a reset would undo.
+
+    See ``core.config.holds_a_setting``.
+    """
+    return core_config.holds_a_setting()
 
 
 def get_value(key: str) -> str:
@@ -64,6 +88,7 @@ def bind_role(
     *,
     agent_bin: str | None = None,
     env: dict[str, str] | None = None,
+    env_files: dict[str, str] | None = None,
     unset: Sequence[str] = (),
     args: Sequence[str] = (),
     account: str | None = None,
@@ -75,7 +100,9 @@ def bind_role(
     binding rather than replacing it — otherwise setting a second variable
     would silently drop the first, and the operator would not find out until a
     launch came up on the wrong install. ``unset`` is applied after the merge,
-    which makes "replace this one key" a single call.
+    which makes "replace this one key" a single call. ``env_files`` merges the same
+    way, and a key lives in one of the two maps: bound to a file, it leaves ``env``, and
+    bound to a value, it leaves ``env_files``. ``unset`` takes a key out of both.
 
     ``account`` REPLACES rather than merges — a role runs under one account —
     and ``clear_account`` removes it, leaving the rest of the binding alone.
@@ -88,9 +115,15 @@ def bind_role(
     profile = config.team.profiles.setdefault(role, RoleLaunchProfile())
     if agent_bin is not None:
         profile.bin = agent_bin
-    profile.env.update(env or {})
+    for key, value in (env or {}).items():
+        profile.env[key] = value
+        profile.env_files.pop(key, None)
+    for key, path in (env_files or {}).items():
+        profile.env_files[key] = path
+        profile.env.pop(key, None)
     for key in unset:
         profile.env.pop(key, None)
+        profile.env_files.pop(key, None)
     profile.args.extend(args)
     if clear_account:
         profile.account = None
@@ -100,7 +133,7 @@ def bind_role(
         # finding 13). Both CLIs refuse the pair; this order keeps the service
         # honest for any caller that does not.
         profile.account = account
-    if clear_account and account is None and not (profile.bin or profile.env or profile.args):
+    if clear_account and account is None and not profile.carries_launch:
         # Clearing the only thing bound leaves no binding: the table goes, as
         # `--clear` would take it, rather than an empty `[team.profiles.<role>]`
         # that `launch._declared_roles` would read as an operator-declared role.
@@ -113,7 +146,7 @@ def role_account_bindings(config: AppConfig | None = None) -> dict[str, str]:
     """Role → the account reference its binding names, for every role that names one.
 
     ``config`` is a caller's own read of the file, so a surface that needs other
-    sections too — the Settings tab — reads it once.
+    sections too — App settings — reads it once.
     """
     return {
         role: profile.account

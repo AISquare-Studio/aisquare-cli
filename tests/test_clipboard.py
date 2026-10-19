@@ -27,20 +27,32 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from textual.app import App
 from textual.geometry import Offset
 from textual.pilot import Pilot
 from textual.selection import Selection
 from textual.widgets import Input, Static
 
-from aisquare.cli.ui.clipboard import hedged_copy, missed_copy
+from aisquare.cli.ui.clipboard import (
+    HEDGED_TIMEOUT,
+    MISSED_TIMEOUT,
+    Toast,
+    copy_and_tell,
+    copy_toast,
+)
 from aisquare.core import clipboard
 from aisquare.core.clipboard import Writer, osc52_terminal, pick_writer
-from tests.fake_clipboard import NEEDS_POSIX, REAL_OSC52_TERMINAL, TEXT, install
+from tests.fake_clipboard import NEEDS_POSIX, TEXT, install
 from tests.pane_harness import FakePane, FakeTmux, drag
 from tests.test_terminal_pane import Host, run, synced, wait_until
 
-TERMINAL_APP_MISSED = missed_copy({"TERM_PROGRAM": "Apple_Terminal"})
-ITERM_MISSED = missed_copy({"TERM_PROGRAM": "iTerm.app"})
+TERMINAL_APP_MISSED = copy_toast("drops", "copied", "N characters", None).message
+ITERM_MISSED = copy_toast("asks", "copied", "N characters", None).message
+
+
+def hedged_copy(sent: str) -> str:
+    """What a copy only OSC 52 carried to an unnamed terminal says of ``sent``."""
+    return copy_toast("unknown", "copied", sent, None).message
 
 
 def osc52(text: str) -> str:
@@ -684,23 +696,52 @@ def test_one_table_names_the_terminal_for_doctor_and_for_the_clipboard() -> None
     assert osc52_terminal(stale) == "accepts"
 
 
-def test_a_copy_only_osc52_carried_says_what_became_of_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(clipboard, "osc52_terminal", REAL_OSC52_TERMINAL)
-    assert TERMINAL_APP_MISSED is not None and ITERM_MISSED is not None
-    assert TERMINAL_APP_MISSED.startswith("the copy did not reach the clipboard")
-    assert "Hold Fn while you drag" in TERMINAL_APP_MISSED and "Cmd+C" in TERMINAL_APP_MISSED
+def test_a_copy_only_osc52_carried_says_what_became_of_it() -> None:
+    assert copy_toast("accepts", "copied 3 characters", "3 characters", 3.0) == Toast(
+        "copied 3 characters", "information", 3.0
+    )
+    missed = copy_toast("drops", "copied 3 characters", "3 characters", 3.0)
+    assert missed.message.startswith("the copy did not reach the clipboard")
+    assert "Hold Fn while you drag" in missed.message and "Cmd+C" in missed.message
+    assert (missed.severity, missed.timeout) == ("warning", MISSED_TIMEOUT)
     assert ITERM_MISSED.startswith("the copy did not reach the clipboard")
     assert "Applications in terminal may access clipboard" in ITERM_MISSED
     assert "hold Option while you drag" in ITERM_MISSED and "Cmd+C" in ITERM_MISSED
-    assert missed_copy({"TERM_PROGRAM": "ghostty"}) is None
-    assert missed_copy({}) is None
-    assert hedged_copy("12 characters") == (
+    hedged = copy_toast("unknown", "copied 12 characters", "12 characters", 3.0)
+    assert hedged == Toast(
         "sent 12 characters to your terminal's clipboard (OSC 52) — if paste is empty,"
-        " your terminal ignores it (Terminal.app does)"
+        " your terminal ignores it (Terminal.app does)",
+        "information",
+        HEDGED_TIMEOUT,
     )
     assert not hedged_copy("the link").startswith("copied")
+
+
+def test_an_app_that_is_not_a_clipboard_app_still_never_sends_an_empty_osc52() -> None:
+    """``copy_and_tell``'s fallback went straight to Textual's write, which sends an OSC 52
+    for "" — one that clears the terminal's clipboard (review of #266, round 1)."""
+
+    class Plain(App[None]):
+        def __init__(self) -> None:
+            super().__init__()
+            self.told: list[str] = []
+
+        def notify(self, message: str, **kwargs: Any) -> None:
+            self.told.append(message)
+
+    async def drive() -> tuple[list[str], list[str], str]:
+        app = Plain()
+        writes: list[str] = []
+        async with app.run_test() as pilot:
+            assert app._driver is not None
+            pilot.app._driver.write = writes.append  # type: ignore[method-assign,union-attr]
+            copy_and_tell(app, "", "copied 0 characters")
+            copy_and_tell(app, "abc", "copied 3 characters")
+            await pilot.pause()
+            return _osc52s(writes), app.told, app.clipboard
+
+    osc52s, told, held = run(drive())
+    assert osc52s == [osc52("abc")] and told == ["copied 3 characters"] and held == "abc"
 
 
 # --- every entry point, through the app ------------------------------------------------

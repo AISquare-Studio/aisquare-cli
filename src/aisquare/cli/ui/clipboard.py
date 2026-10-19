@@ -6,23 +6,23 @@
 through :func:`copy_and_tell`, and the toast waits for the native write. It says
 "copied" when that write took the text, or when OSC 52 was the only route and the
 terminal is one known to take it. On Terminal.app or iTerm2, which drop OSC 52, it says
-the copy did not land and how to copy with the terminal's own selection instead
-(:func:`missed_copy`); on a terminal nobody can name — over SSH, behind a multiplexer —
-it says the text was sent through the terminal, and what an empty paste would mean
-(:func:`hedged_copy`). The native half is ``aisquare.core.clipboard``.
+the copy did not land and how to copy with the terminal's own selection instead; on a
+terminal nobody can name — over SSH, behind a multiplexer — it says the text was sent
+through the terminal, and what an empty paste would mean (:func:`copy_toast`). The
+native half is ``aisquare.core.clipboard``.
 """
 
 from __future__ import annotations
 
 import contextlib
 import os
-from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, TypeVar
 
 from textual.app import App
 from textual.message import Message
+from textual.notifications import SeverityLevel
 
 from aisquare.core import clipboard
 
@@ -49,19 +49,34 @@ _MISSED = {
 }
 
 
-def missed_copy(env: Mapping[str, str]) -> str | None:
-    """What a copy only OSC 52 carried says on a terminal known to drop it; else ``None``."""
-    terminal = clipboard.osc52_terminal(env)
-    return _MISSED.get(terminal)
+@dataclass(frozen=True)
+class Toast:
+    """What a copy says, once what became of it is known."""
+
+    message: str
+    severity: SeverityLevel
+    timeout: float | None
 
 
-def hedged_copy(sent: str) -> str:
-    """What a copy only OSC 52 carried says when nobody can name the terminal: it went,
-    and whether it landed is the terminal's to say. ``sent`` names what went."""
-    return (
-        f"sent {sent} to your terminal's clipboard (OSC 52) — if paste is empty, your"
-        " terminal ignores it (Terminal.app does)"
-    )
+def copy_toast(fate: clipboard.Osc52Fate, toast: str, sent: str, timeout: float | None) -> Toast:
+    """What a copy says: ``toast`` (with ``timeout``) when it landed — ``fate`` is then
+    ``"accepts"``, whether the native tool took it or a terminal known to take OSC 52
+    did — else what the terminal makes of an OSC 52 write alone. ``sent`` names the text
+    where "copied" cannot be said.
+
+    The one place a copy's outcome becomes words: the app raises what it returns, and
+    the tests assert on it, so the two cannot drift (review of #266, round 1).
+    """
+    if fate == "accepts":
+        return Toast(toast, "information", timeout)
+    if fate == "unknown":
+        return Toast(
+            f"sent {sent} to your terminal's clipboard (OSC 52) — if paste is empty, your"
+            " terminal ignores it (Terminal.app does)",
+            "information",
+            HEDGED_TIMEOUT,
+        )
+    return Toast(_MISSED[fate], "warning", MISSED_TIMEOUT)
 
 
 def characters(text: str) -> str:
@@ -107,7 +122,7 @@ class ClipboardApp(App[ReturnType]):
         ``toast`` (with ``timeout``) is raised once, when the native write is over, or
         at once with none to wait for (:meth:`_tell_copy`). Without one nothing is said
         either way, as Textual's own copies say nothing. ``sent`` names the text where
-        "copied" cannot be said (:func:`hedged_copy`): its length, unless given.
+        "copied" cannot be said (:func:`copy_toast`): its length, unless given.
         """
         if not text:
             return
@@ -136,19 +151,14 @@ class ClipboardApp(App[ReturnType]):
         """Raise ``toast``, or what became of the copy instead, when one was asked for.
 
         A copy the native tool did not take had OSC 52 alone, and only a terminal known
-        to take it (``core.clipboard.osc52_terminal``) makes that "copied". One known to
-        drop it gets the warning that nothing landed (:func:`missed_copy`); one nobody
-        can name, the hedge (:func:`hedged_copy`).
+        to take it (``core.clipboard.osc52_terminal``) makes that "copied"; the rest is
+        :func:`copy_toast`'s.
         """
         if toast is None:
             return
-        terminal = "accepts" if landed else clipboard.osc52_terminal(os.environ)
-        if terminal == "accepts":
-            self.notify(toast, timeout=timeout, markup=False)
-        elif terminal == "unknown":
-            self.notify(hedged_copy(sent), timeout=HEDGED_TIMEOUT, markup=False)
-        else:
-            self.notify(_MISSED[terminal], severity="warning", timeout=MISSED_TIMEOUT, markup=False)
+        fate = "accepts" if landed else clipboard.osc52_terminal(os.environ)
+        told = copy_toast(fate, toast, sent, timeout)
+        self.notify(told.message, severity=told.severity, timeout=told.timeout, markup=False)
 
 
 def copy_and_tell(
@@ -157,8 +167,12 @@ def copy_and_tell(
     """Copy ``text`` and raise ``toast`` once, or what became of the copy instead.
 
     ``sent`` names the text where "copied" cannot be said (:meth:`ClipboardApp.copy_to_clipboard`).
-    An app that is not a :class:`ClipboardApp` copies Textual's way and says ``toast``.
+    An app that is not a :class:`ClipboardApp` copies Textual's way and says ``toast``;
+    for ``""`` nothing is written or said on either path, since an OSC 52 with an empty
+    payload clears the terminal's clipboard.
     """
+    if not text:
+        return
     if isinstance(app, ClipboardApp):
         app.copy_to_clipboard(text, toast=toast, sent=sent, timeout=timeout)
         return

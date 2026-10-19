@@ -10,7 +10,8 @@ and you are typing into the session itself.
 Three ideas carry the whole feature:
 
 - **One view.** Left: a navigator — `Fleet ▸ projects ▸ agents`, then under a
-  line *⚙ Settings* (App settings, Accounts, Doctor) with a dim status line: the
+  line *⚙ Settings* (App settings, Accounts, Doctor, and *Fleet*'s *Restart all…*
+  and *Stop all…*) with a dim status line: the
   AISquare sign-in and the Claude accounts' headroom as two dots (`?` explains
   the colours; a click opens Accounts). Right: whatever you clicked — onboarding
   for a new directory, a project's manager, an agent's live session, the board,
@@ -333,6 +334,77 @@ server in this boot, or another server on its socket): those it leaves live and
 names, and `fleet shutdown --forget` ends them on your word.
 To take a whole project's fleet down and record every row in one go, use
 `fleet shutdown`.
+
+### `fleet restart --all` / `fleet stop --all`
+
+```sh
+aisquare fleet restart --all
+aisquare fleet restart --all --managers
+aisquare fleet stop --all
+aisquare fleet stop --all --managers
+```
+
+These restart or stop every running agent in every project at once. `--managers`
+acts on the managers alone and leaves their teams. *⚙ Settings ▸ Fleet* in `asq`
+does the same through the same service function (below). An agent is running when
+it has a process: ▶ working, ⏸ waiting, 🔔 needs you, ⏳ limited, or · unknown. Each
+is restarted or stopped the way `fleet restart` and `fleet stop` do it for one agent.
+A restart hands a running agent over and resumes its session from its transcript
+when that is on disk. Each agent is acted on by its row, never by its label, so a
+label that passed to another agent meanwhile never makes that agent the one
+stopped. Some agents are left alone, and each is named with the reason:
+
+- an exited (💤) or lost agent: `exited`, `lost`;
+- the agent running the command: `this session`. That is the row
+  `AISQUARE_FLEET_AGENT` names, and with `restart --as SESSION` also that session's
+  row, so a manager that runs `restart --all` isn't stopped half-way through it;
+- a row held as another tmux server's (`held: …`), whose pane id names another agent;
+- for a restart, an agent whose task is done or dropped (`task is done`), which
+  `fleet restart` would refuse.
+
+The agents are taken one at a time, each project's manager first. Each one is printed
+as it is done, under its project's name, and the count comes last:
+
+```text
+alpha
+  ✓ manager                  manager    stopped and restarted — resumed its session
+  · coder-2                  coder      skipped — task is done
+beta
+  ✗ coder-web                coder      failed — cannot restart 'coder-web': …
+restarted 1 · skipped 1 · failed 1
+```
+
+One agent's failure is only its own line; the rest are still restarted or stopped.
+The command **exits 1** when any agent failed, a project's agents couldn't be read,
+or a stop left claims behind (the same as `fleet stop`). `--json` prints one
+object: `receipts`, each with `project`, `agent`, `outcome` (`done`, `skipped` or
+`failed`) and `why`, plus a restart's `started`, `how`, `resumed`, `was_running`,
+`failures` and `notes`, or a stop's `claims_released` and `release_failed`. The
+object also has `unread`, `summary` and `ok`.
+
+`--all` means every project's fleet, so it is refused with `--project` (as
+`reap --all` is) and with a label. `--managers` is refused without `--all`. With
+`--all`, `--fresh`, `--permission-mode` and `--force` are refused too, because each
+is for one agent. Without `--all`, both commands work as described above. Unlike
+`fleet shutdown`, which takes a project's whole tmux session down, these keep the
+sessions and the server, and a restart brings each agent back.
+
+**In `asq`: *⚙ Settings ▸ Fleet*.** *Restart all…* and *Stop all…* each open a
+dialog. It lists the agents it will act on, grouped by project (the project's name,
+then `label · role · state` for each agent). The agents it leaves are listed dim,
+with the reason. A *Managers only* switch redraws the list and the count, and the
+confirm button names the count (*Restart 4 managers*, *Stop 9 agents*). *Cancel*
+has the focus, and Escape cancels too. When nobody would be acted on, the dialog
+says *nothing to restart* (or *nothing to stop*) and its confirm button stays
+greyed. The list is read when the dialog opens, and read again on confirm. Confirm
+acts only on the agents the dialog showed: one that ended meanwhile is skipped as
+*already exited*, and one started meanwhile is left alone. The work runs off the UI
+thread, with both buttons greyed until it ends. Each agent gets a toast as it is
+done (`✓ restarted manager (alpha) — resumed its session`, `✓ stopped coder-1 (beta)`).
+Then one toast sums it up (`restarted 4 · skipped 1 · failed 0`) and names who was
+skipped or failed, and why. A restart from here never moves your view. Like an agent
+view's Stop and Restart, both buttons and the dialog's confirm ignore a mouse click
+in the second after they appear or move.
 
 ### `fleet shutdown`
 

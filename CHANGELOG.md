@@ -10,6 +10,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 **A hotfix: a copy in `asq` reaches the clipboard on macOS.**
 
+### Added
+- Restart or stop every running agent in every project at once, or only the
+  managers. In `asq`, *⚙ Settings ▸ Fleet* has *Restart all…* and *Stop all…*.
+  Each opens a dialog that lists, by project, the agents it will act on, and has a
+  *Managers only* switch. Its confirm button names the count, and *Cancel* has the
+  focus. On the command line it is `aisquare fleet restart --all [--managers]` and
+  `aisquare fleet stop --all [--managers]`. Both print one line per agent, then
+  the count, and exit 1 if any agent failed. With four managers running, a restart
+  of all of them used to mean clicking into each one. Exited (💤) agents are left
+  as they are, and so is the agent that runs the command, so a manager's
+  `restart --all` doesn't stop itself half-way. A restart resumes each agent's
+  session from its transcript when that is on disk, as a single restart does. An
+  agent that fails doesn't stop the rest: it is named, with the reason.
+
 ### Fixed
 - Run on your Mac, a copy in `asq` reaches your clipboard in Terminal.app and
   in iTerm2 as it comes. 0.8.1 sent every copy as OSC 52 alone, and said "copied" either way:

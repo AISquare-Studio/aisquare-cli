@@ -87,7 +87,13 @@ from aisquare.core.tmux import (
     WindowInfo,
 )
 from aisquare.core.version import __version__
-from aisquare.core.workspace import _gone, _resolved, active_project, git_argv
+from aisquare.core.workspace import (
+    _gone,
+    _resolved,
+    _resolved_or_spelled,
+    active_project,
+    git_argv,
+)
 from aisquare.models import (
     CLOSED_STATUSES,
     ClaudeAccount,
@@ -9341,11 +9347,12 @@ def _say_refused(project_id: str, agent: FleetAgent, what: str, why: str, way_ou
 
 
 def _same_dir(one: Path, other: Path) -> bool:
-    """Whether ``one`` and ``other`` name the same directory, as far as can be told."""
-    try:
-        return one.resolve() == other.resolve()
-    except (OSError, RuntimeError):  # RuntimeError: a symlink loop, on 3.11/3.12
-        return False
+    """Whether ``one`` and ``other`` name the same directory, as far as can be told: each
+    resolved, or as spelled where a symlink loop stops that (``workspace._resolved_or_spelled``,
+    which every Python answers alike: 3.11 and 3.12 raise for a loop, 3.13 does not). Told
+    apart for a loop, a project whose root became one read as moved on 3.11 and 3.12 alone,
+    and its restart was refused for that before its board was asked (CI on 02eabdad)."""
+    return _resolved_or_spelled(one) == _resolved_or_spelled(other)
 
 
 def _exit_command(agent: FleetAgent) -> str:

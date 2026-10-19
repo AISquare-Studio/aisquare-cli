@@ -37,6 +37,10 @@ log = logging.getLogger(__name__)
 WRITE_TIMEOUT = 2.0
 """Seconds one native write may take before it is killed and counted as failed."""
 
+KILL_WAIT = 1.0
+"""Seconds a killed tool gets to exit: one stuck in uninterruptible sleep never does, and
+waiting on it without a bound held up every later copy for good."""
+
 _PROC_VERSION = Path("/proc/version")
 """Says ``microsoft`` on a WSL kernel, where ``WSL_DISTRO_NAME`` may not have been passed."""
 
@@ -135,7 +139,8 @@ def write(writer: Writer, text: str, *, timeout: float | None = None) -> bool:
     keeps serving the selection, and it would hold a pipe open until another copy
     replaced it, so a read of either waited that long. The tool runs in a session of
     its own, so neither the terminal's hangup nor a suspend of this app stops that
-    child. ``timeout`` defaults to :data:`WRITE_TIMEOUT`, read at the call.
+    child. ``timeout`` defaults to :data:`WRITE_TIMEOUT`, read at the call; a tool still
+    running then is killed and given :data:`KILL_WAIT` to go (:func:`_stop`).
 
     Whatever goes wrong is a ``False``: an ``os.environ`` that another thread changes
     while it is copied raises ``RuntimeError``, and so does a spawn during interpreter
@@ -143,29 +148,50 @@ def write(writer: Writer, text: str, *, timeout: float | None = None) -> bool:
     """
     tool = writer.argv[0]
     try:
-        done = subprocess.run(
+        process = subprocess.Popen(
             writer.argv,
-            input=writer.payload(text),
+            stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             env={**os.environ, **dict(writer.env)} if writer.env else None,
-            timeout=WRITE_TIMEOUT if timeout is None else timeout,
-            check=False,
             start_new_session=True,
         )
-    except subprocess.TimeoutExpired:
-        log.warning("clipboard: %s did not finish in time and was stopped", tool)
-        return False
     except OSError as error:
         log.warning("clipboard: %s could not be run: %s", tool, error)
         return False
     except Exception:
         log.warning("clipboard: %s could not be run", tool, exc_info=True)
         return False
-    if done.returncode != 0:
-        log.warning("clipboard: %s exited %d", tool, done.returncode)
+    try:
+        process.communicate(
+            writer.payload(text), timeout=WRITE_TIMEOUT if timeout is None else timeout
+        )
+    except subprocess.TimeoutExpired:
+        log.warning("clipboard: %s did not finish in time and was stopped", tool)
+        _stop(process, tool)
+        return False
+    except Exception:
+        log.warning("clipboard: writing to %s failed", tool, exc_info=True)
+        _stop(process, tool)
+        return False
+    if process.returncode != 0:
+        log.warning("clipboard: %s exited %d", tool, process.returncode)
         return False
     return True
+
+
+def _stop(process: subprocess.Popen[bytes], tool: str) -> None:
+    """Kill ``process`` and wait :data:`KILL_WAIT` for it, no longer: ``subprocess.run``'s own
+    kill waited without a bound, and a tool in uninterruptible sleep never returned."""
+    with contextlib.suppress(OSError):
+        process.kill()
+    try:
+        process.wait(timeout=KILL_WAIT)
+    except subprocess.TimeoutExpired:
+        log.warning("clipboard: %s did not exit when killed, and was left behind", tool)
+    if process.stdin is not None:
+        with contextlib.suppress(OSError, ValueError):
+            process.stdin.close()
 
 
 def osc52_terminal(env: Mapping[str, str]) -> Osc52Terminal:
@@ -213,11 +239,13 @@ _worker_lock = threading.Lock()
 
 
 def submit(writer: Writer, text: str, done: Done) -> None:
-    """Write ``text`` with ``writer`` on the clipboard thread, behind every earlier copy.
+    """Write ``text`` with ``writer`` on the clipboard thread, after the write in progress.
 
-    One thread, first in first out: two copies made in quick succession each spawn a
-    tool, and run side by side the first could finish last and leave its own text on
-    the clipboard. ``done`` is called on that thread once the write is over.
+    One thread: two copies made in quick succession each spawn a tool, and run side by
+    side the first could finish last and leave its own text on the clipboard. Copies
+    that queue up behind a slow write are not each written in turn; only the newest
+    is, since it is what the clipboard ends with, and the ones it overtook are told
+    its outcome (:func:`_drain`). ``done`` is called on that thread once it is known.
     """
     global _worker
     _jobs.put((writer, text, done))
@@ -228,15 +256,28 @@ def submit(writer: Writer, text: str, done: Done) -> None:
 
 
 def _drain() -> None:
-    """The clipboard thread: nothing it runs may end it, or a copy's toast never comes."""
+    """The clipboard thread: nothing it runs may end it, or a copy's toast never comes.
+
+    Every job waiting when a write ends is taken at once and only the newest written.
+    Each written in turn, five copies behind a tool that takes :data:`WRITE_TIMEOUT` (an
+    ``xclip`` at a stale ``DISPLAY``, a cold WSL interop) took ten seconds, their toasts
+    trickling in long after the gestures, for a clipboard that holds the last one only
+    (review of #266, round 1). The overtaken copies are told in order, with the newest
+    write's outcome: their text was meant for the clipboard the newest one now fills.
+    """
     while True:
-        writer, text, done = _jobs.get()
+        batch = [_jobs.get()]
+        with contextlib.suppress(queue.Empty):
+            while True:
+                batch.append(_jobs.get_nowait())
+        writer, text, _ = batch[-1]
         try:
             landed = write(writer, text)
         except Exception:
             log.warning("clipboard: a write failed unexpectedly", exc_info=True)
             landed = False
-        try:
-            done(landed)
-        except Exception:
-            log.warning("clipboard: the copy's outcome could not be told", exc_info=True)
+        for _, _, done in batch:
+            try:
+                done(landed)
+            except Exception:
+                log.warning("clipboard: the copy's outcome could not be told", exc_info=True)

@@ -42,6 +42,8 @@ mangles it."""
 _TOOL = r"""
 import json, os, sys, time
 root = sys.argv[1]
+with open(os.path.join(root, "started.log"), "a", encoding="utf-8") as started:
+    started.write("started\n")
 data = sys.stdin.buffer.read()
 behaviour = open(os.path.join(root, "behaviour"), encoding="utf-8").read().split()
 if "hang" in behaviour:
@@ -75,6 +77,11 @@ class FakeClipboard:
         if not log.exists():
             return []
         return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+
+    def started(self) -> int:
+        """How many times the tool has been run, finished or not."""
+        log = self.root / "started.log"
+        return len(log.read_text(encoding="utf-8").splitlines()) if log.exists() else 0
 
     def payloads(self) -> list[bytes]:
         return [bytes.fromhex(str(call["data"])) for call in self.calls()]

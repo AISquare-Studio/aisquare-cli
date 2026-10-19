@@ -279,7 +279,66 @@ def test_two_quick_writes_leave_the_second_on_the_clipboard(
     while len(told) < 2 and time.monotonic() < deadline:
         time.sleep(0.02)
     assert told == [True, True]
-    assert fake.texts() == ["first", "second"] and fake.clipboard == "second"
+    assert fake.clipboard == "second", fake.texts()
+
+
+@NEEDS_POSIX
+def test_copies_queued_behind_a_slow_write_are_written_once_as_the_newest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Five copies behind a tool that takes the whole timeout took ten seconds each in
+    turn, for a clipboard that holds only the last (review of #266, round 1). The ones
+    the newest overtook are still told, in order, with its outcome."""
+    fake = install(tmp_path, monkeypatch, behaviour="slow-first")
+    writer = clipboard.local_writer()
+    assert writer is not None
+    told: list[tuple[str, bool]] = []
+
+    def done(label: str) -> Callable[[bool], None]:
+        return lambda landed: told.append((label, landed))
+
+    clipboard.submit(writer, "first", done("first"))
+    deadline = time.monotonic() + 10
+    while fake.started() < 1 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    for label in ("second", "third", "fourth"):
+        clipboard.submit(writer, label, done(label))
+    while len(told) < 4 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert told == [("first", True), ("second", True), ("third", True), ("fourth", True)]
+    assert fake.texts() == ["first", "fourth"], "the overtaken copies were never run"
+
+
+def test_a_tool_that_will_not_die_is_left_behind_after_a_bounded_wait(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``subprocess.run`` waited without a bound after its kill, so a tool stuck in
+    uninterruptible sleep held up every later copy for good (review of #266, round 1)."""
+    waits: list[float | None] = []
+
+    class Unkillable:
+        stdin = None
+        returncode = None
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def communicate(self, payload: bytes, timeout: float | None = None) -> None:
+            raise subprocess.TimeoutExpired("pbcopy", timeout or 0)
+
+        def kill(self) -> None:
+            pass
+
+        def wait(self, timeout: float | None = None) -> int:
+            waits.append(timeout)
+            raise subprocess.TimeoutExpired("pbcopy", timeout or 0)
+
+    monkeypatch.setattr(subprocess, "Popen", Unkillable)
+    started = time.monotonic()
+    assert clipboard.write(Writer(("/fake/bin/pbcopy",)), TEXT, timeout=0.1) is False
+    assert time.monotonic() - started < 1
+    assert waits == [clipboard.KILL_WAIT]
+    assert "left behind" in caplog.text
 
 
 # --- what becomes of an OSC 52 ---------------------------------------------------------
@@ -501,7 +560,7 @@ def test_two_quick_copies_leave_the_second_on_the_clipboard_with_a_toast_each(
             return list(host.notices)
 
     assert run(drive()) == ["one", "two"]
-    assert board.texts() == ["first", "second"] and board.clipboard == "second"
+    assert board.clipboard == "second", board.texts()
 
 
 # --- the toast tells what became of the copy -------------------------------------------

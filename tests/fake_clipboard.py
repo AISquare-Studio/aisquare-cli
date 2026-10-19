@@ -111,8 +111,8 @@ def install(
     """A fake ``name`` on PATH, and the native route and the real terminal switched back on.
 
     ``only`` makes it the only directory on PATH, so a real tool of that name — a Mac's
-    own ``pbcopy`` — cannot be found behind it. SSH's variables are cleared: the suite
-    may run over SSH, and the native route stands down there.
+    own ``pbcopy`` — cannot be found behind it. An SSH server above the suite does not
+    make the session remote: the native route would stand down for it.
     """
     reals = (REAL_LOCAL_WRITER, REAL_OSC52_TERMINAL, REAL_CACHED_WRITER)
     assert {real.__module__ for real in reals} == {clipboard.__name__}, (
@@ -135,8 +135,8 @@ def install(
     fake.behaviour = behaviour
     path = str(bin_dir) if only else str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
     monkeypatch.setenv("PATH", path)
-    monkeypatch.delenv("SSH_CONNECTION", raising=False)
-    monkeypatch.delenv("SSH_TTY", raising=False)
+    # The suite may run over SSH or under sudo: an sshd above it is not the test's.
+    monkeypatch.setattr(clipboard, "_under_ssh_server", lambda pid=None: False)
     monkeypatch.setattr(sys, "platform", platform)
     monkeypatch.setattr(clipboard, "local_writer", REAL_LOCAL_WRITER)
     monkeypatch.setattr(clipboard, "osc52_terminal", REAL_OSC52_TERMINAL)

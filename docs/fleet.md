@@ -1575,9 +1575,11 @@ local session it goes to the system clipboard through the platform's own tool:
 else `xclip` or `xsel` under X. It is also sent as OSC 52, which your *outer*
 terminal turns into a clipboard write if it accepts it: Windows Terminal,
 kitty, ghostty, wezterm and foot do, iTerm2 only with its clipboard setting on,
-and Terminal.app never. Over SSH (`SSH_CONNECTION` or `SSH_TTY` set) the native
-tool would write the remote machine's clipboard, not yours, so OSC 52 is the
-only route. The toast says "copied" when the native tool took the text, or
+and Terminal.app never. On a remote session the native tool would write the
+remote machine's clipboard, not yours, so OSC 52 is the only route: over SSH
+(`SSH_CONNECTION` or `SSH_TTY` set, or an `sshd` above `asq`, as under `sudo`
+or `su`), in a Codespace (`CODESPACES`), and in your own tmux when it was last
+attached over SSH (tmux's own `SSH_CONNECTION`, asked at each copy). The toast says "copied" when the native tool took the text, or
 when OSC 52 was the only route (over SSH, or with the tool missing or failing)
 and the terminal is one known to take it: WezTerm and Ghostty by
 `TERM_PROGRAM`, kitty by `KITTY_WINDOW_ID`, Windows Terminal by `WT_SESSION`,

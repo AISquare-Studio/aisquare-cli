@@ -82,6 +82,9 @@ narrowing their environment would be change without a reason:
   * ``core/clipboard.py::write`` — the platform's clipboard tool (``pbcopy``,
     ``clip.exe``, ``wl-copy``, ``xclip``, ``xsel``), handed a copy's text on
     stdin. No model.
+  * ``core/clipboard.py::_ask`` — ``tmux show-environment SSH_CONNECTION`` in the
+    user's own tmux, and ``ps`` for this process's ancestors: whether the session
+    is remote. Strings, no model.
   * ``cli/watch.py::action_open_transcript`` — a pager/viewer on a file.
   * ``core/paths.py::restrict_to_owner`` — ``icacls``, locking the
     credentials file to this account on Windows. A permissions tool, not a
@@ -274,6 +277,9 @@ SEAMS: dict[str, Seam] = {
     ),
     "aisquare/core/clipboard.py::write": Seam(
         EXCLUDED, "the platform's clipboard tool, handed a copy's text on stdin; no model"
+    ),
+    "aisquare/core/clipboard.py::_ask": Seam(
+        EXCLUDED, "`tmux show-environment` and `ps`, asking whether the session is remote"
     ),
     "aisquare/cli/watch.py::action_open_transcript": Seam(
         EXCLUDED, "a pager/viewer on a transcript file"

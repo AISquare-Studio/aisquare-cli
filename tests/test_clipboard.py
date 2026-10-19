@@ -19,6 +19,7 @@ import base64
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -165,7 +166,7 @@ def test_elsewhere_there_is_no_native_writer(platform: str) -> None:
 
 
 @NEEDS_POSIX
-@pytest.mark.parametrize("variable", ["SSH_CONNECTION", "SSH_TTY"])
+@pytest.mark.parametrize("variable", ["SSH_CONNECTION", "SSH_TTY", "CODESPACES"])
 def test_over_ssh_the_native_clipboard_is_the_wrong_machine_s(
     variable: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -173,6 +174,120 @@ def test_over_ssh_the_native_clipboard_is_the_wrong_machine_s(
     assert clipboard.local_writer() is not None, "the premise: pbcopy is found locally"
     monkeypatch.setenv(variable, "10.0.0.2 52144 10.0.0.1 22")
     assert clipboard.local_writer() is None
+
+
+def _proc_tree(root: Path, processes: dict[int, tuple[str, int]]) -> None:
+    """A fake ``/proc``: each pid's ``stat``, ``pid (comm) state ppid …``."""
+    for pid, (comm, ppid) in processes.items():
+        (root / str(pid)).mkdir(parents=True)
+        (root / str(pid) / "stat").write_text(f"{pid} ({comm}) S {ppid} {pid} {pid} 0 -1\n")
+
+
+def test_sudo_or_su_over_ssh_is_remote_by_the_sshd_above_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``sudo``'s env_reset strips SSH's variables, but the login still hangs from an sshd
+    (review of #266, round 1). /proc says every process's parent, whoever owns it."""
+    proc = tmp_path / "proc"
+    _proc_tree(
+        proc,
+        {
+            100: ("python3", 90),
+            90: ("sudo", 80),
+            80: ("bash", 70),
+            70: ("sshd-session", 60),
+            60: ("sshd", 1),
+            1: ("systemd", 0),
+            200: ("python3", 190),
+            190: ("zsh", 180),
+            180: ("gnome-terminal-", 1),
+            300: ("python3", 290),
+            290: ("tmux: server (x)", 1),
+        },
+    )
+    monkeypatch.setattr(clipboard, "_PROC", proc)
+    assert clipboard._ancestors(100) == [
+        "python3",
+        "sudo",
+        "bash",
+        "sshd-session",
+        "sshd",
+        "systemd",
+    ]
+    assert clipboard._under_ssh_server(100)
+    assert not clipboard._under_ssh_server(200), "a local terminal"
+    assert clipboard._ancestors(300) == ["python3", "tmux: server (x)", "systemd"], "a ')'"
+    monkeypatch.setattr(clipboard, "_under_ssh_server", lambda pid=None: True)
+    assert clipboard.session_is_remote({})
+
+
+def test_without_proc_one_ps_names_the_ancestors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """macOS has no /proc: ``ps`` lists every process once, with the full path as comm."""
+    monkeypatch.setattr(clipboard, "_PROC", tmp_path / "no-proc")
+    monkeypatch.setattr(sys, "platform", "darwin")
+    asked: list[list[str]] = []
+    listing = (
+        "  100    90 /usr/local/bin/python3\n"
+        "   90    70 sudo\n"
+        "   70    60 /usr/sbin/sshd-session\n"
+        "   60     1 /usr/sbin/sshd\n"
+        "  400   390 /Applications/Visual Studio Code.app/Contents/MacOS/Electron\n"
+        "    1     0 /sbin/launchd\n"
+    )
+
+    def ask(argv: list[str]) -> str | None:
+        asked.append(argv)
+        return listing
+
+    monkeypatch.setattr(clipboard, "_ask", ask)
+    assert clipboard._ancestors(100) == ["python3", "sudo", "sshd-session", "sshd", "launchd"]
+    assert clipboard._under_ssh_server(100)
+    assert asked[0] == ["ps", "-A", "-o", "pid=,ppid=,comm="]
+    assert not clipboard._under_ssh_server(400)
+
+
+@pytest.mark.parametrize(
+    ("said", "remote"),
+    [
+        ("SSH_CONNECTION=10.0.0.2 52144 10.0.0.1 22\n", True),
+        ("-SSH_CONNECTION\n", False),  # last attached locally: tmux removed it
+        (None, False),  # tmux gone, or never told
+    ],
+    ids=["attached-over-ssh", "attached-locally", "tmux-says-nothing"],
+)
+def test_inside_the_user_s_tmux_its_last_attach_decides(
+    said: str | None, remote: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """asq started in tmux at the desk, reattached over SSH, keeps the environment it
+    started with: no SSH variables, DISPLAY still set (review of #266, round 1)."""
+    asked: list[list[str]] = []
+
+    def ask(argv: list[str]) -> str | None:
+        asked.append(argv)
+        return said
+
+    monkeypatch.setattr(clipboard, "_ask", ask)
+    monkeypatch.setattr(clipboard, "_under_ssh_server", lambda pid=None: True)  # not asked
+    assert clipboard.session_is_remote({"TMUX": "/tmp/tmux-1/default,1,0"}) is remote
+    assert asked == [["tmux", "show-environment", "SSH_CONNECTION"]]
+
+
+def test_inside_the_user_s_tmux_the_writer_is_never_taken_from_the_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its client may reattach from another machine at any moment, and nothing in this
+    process's environment changes when it does."""
+    install(tmp_path, monkeypatch)
+    told: list[bool] = []
+    clipboard.submit(TEXT, told.append)
+    deadline = time.monotonic() + 10
+    while not told and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert isinstance(clipboard.cached_writer(), Writer), "the premise: it was cached"
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1/default,1,0")
+    assert clipboard.cached_writer() is clipboard.Ask.WORKER
 
 
 # --- the write itself ------------------------------------------------------------------

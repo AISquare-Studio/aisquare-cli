@@ -299,15 +299,22 @@ AMBIENT_ENV_VARS = (
     "AISQUARE_RUN_TRACE_ID",
     # A sign-in token in the operator's shell would make every test run as them.
     "AISQUARE_TOKEN",
-    # What `core.browser.open_url` launches. Its `is_headless` also reads
-    # SSH_CONNECTION, SSH_TTY, CI, CODESPACES, DISPLAY and WAYLAND_DISPLAY, and
-    # those stay out on purpose: it answers "headless" whenever stdout is not a
-    # terminal, and under CliRunner or pytest's capture it never is, so no
-    # command a test runs can reach a browser whatever they say — the tests of
-    # the detection itself pass an environ. Clearing CI would cost something:
-    # pytest reads it while it explains a failing assert, and it is why CI's
-    # log shows the whole diff rather than a truncated one.
+    # What `core.browser.open_url` launches. Its `is_headless` also reads CI,
+    # DISPLAY and WAYLAND_DISPLAY, and those stay out on purpose: it answers
+    # "headless" whenever stdout is not a terminal, and under CliRunner or
+    # pytest's capture it never is, so no command a test runs can reach a browser
+    # whatever they say — the tests of the detection itself pass an environ.
+    # Clearing CI would cost something: pytest reads it while it explains a
+    # failing assert, and it is why CI's log shows the whole diff rather than a
+    # truncated one.
     "BROWSER",
+    # `core.browser.REMOTE_MARKERS`, which `is_headless` reads as well. They are
+    # cleared for the clipboard (`core.clipboard.session_is_remote`): a suite run
+    # over SSH or in a Codespace would see every native-clipboard test's copy as
+    # remote, and skip the tool it asserts was run.
+    "SSH_CONNECTION",
+    "SSH_TTY",
+    "CODESPACES",
     # The CI test bed's switches. An operator who has them exported would
     # otherwise run the suite's hooks against THEIR endpoint, with THEIR
     # token — measured once: four real POSTs to a listener during a green

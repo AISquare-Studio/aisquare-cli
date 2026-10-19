@@ -34,6 +34,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Literal
 
+from aisquare.core.browser import REMOTE_MARKERS
+
 log = logging.getLogger(__name__)
 
 WRITE_TIMEOUT = 2.0
@@ -46,6 +48,15 @@ waiting on it without a bound held up every later copy for good."""
 RECHECK = 60.0
 """Seconds a "no tool here" answer stands before the clipboard thread looks again, so a
 tool installed while the app runs is found without a restart."""
+
+ASK_TIMEOUT = 1.0
+"""Seconds ``tmux`` or ``ps`` gets to answer a question about this session (:func:`_ask`)."""
+
+_SSH_SERVERS = frozenset({"sshd", "sshd-session", "sshd-auth", "mosh-server", "dropbear"})
+"""The command names of the servers a remote login hangs from."""
+
+_PROC = Path("/proc")
+"""Where Linux says each process's parent, readable for every process whoever owns it."""
 
 _PROC_VERSION = Path("/proc/version")
 """Says ``microsoft`` on a WSL kernel, where ``WSL_DISTRO_NAME`` may not have been passed."""
@@ -82,9 +93,84 @@ class Writer:
 
 
 def is_remote(env: Mapping[str, str]) -> bool:
-    """Whether this session came in over SSH, where the native clipboard is another
-    machine's than the one the user is looking at."""
-    return bool(env.get("SSH_CONNECTION") or env.get("SSH_TTY"))
+    """Whether the environment says the user sits at another machine: SSH's variables, or a
+    Codespace (``core.browser.REMOTE_MARKERS``). Cheap; :func:`session_is_remote` is sure."""
+    return any(env.get(name) for name in REMOTE_MARKERS)
+
+
+def session_is_remote(env: Mapping[str, str]) -> bool:
+    """Whether the user is looking at this machine from another one, where the native
+    clipboard is the wrong one.
+
+    The environment alone missed two sessions (review of #266, round 1). asq started
+    in the user's own tmux and reattached over SSH keeps the environment it started
+    with, so tmux is asked how its client attached last (``SSH_CONNECTION`` is in its
+    ``update-environment``). And ``sudo`` or ``su`` over SSH strips SSH's variables,
+    while the ``sshd`` the login hangs from is still above this process
+    (:func:`_under_ssh_server`). It asks tmux, reads ``/proc`` or runs ``ps``, so it runs
+    on the clipboard thread only.
+    """
+    if is_remote(env):
+        return True
+    if env.get("TMUX"):
+        said = _ask(["tmux", "show-environment", "SSH_CONNECTION"])
+        return said is not None and said.startswith("SSH_CONNECTION=")
+    return _under_ssh_server()
+
+
+def _under_ssh_server(pid: int | None = None) -> bool:
+    """Whether an SSH or mosh server is among ``pid``'s ancestors (this process's)."""
+    return not _SSH_SERVERS.isdisjoint(_ancestors(os.getpid() if pid is None else pid))
+
+
+def _ancestors(pid: int) -> list[str]:
+    """The command names of ``pid`` and its ancestors, nearest first; none when nobody says.
+
+    Linux's ``/proc`` says without a process; elsewhere one ``ps`` lists them all."""
+    if _PROC.is_dir():
+        return _proc_ancestors(pid)
+    if sys.platform == "win32":
+        return []
+    listed = _ask(["ps", "-A", "-o", "pid=,ppid=,comm="]) or ""
+    parents: dict[int, tuple[int, str]] = {}
+    for line in listed.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) == 3 and fields[0].isdigit() and fields[1].isdigit():
+            parents[int(fields[0])] = (int(fields[1]), os.path.basename(fields[2].strip()))
+    names: list[str] = []
+    while pid in parents and len(names) < 64:
+        pid, name = parents[pid]
+        names.append(name)
+    return names
+
+
+def _proc_ancestors(pid: int) -> list[str]:
+    names: list[str] = []
+    while pid > 0 and len(names) < 64:
+        try:
+            stat = (_PROC / str(pid) / "stat").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            break
+        head, _, rest = stat.rpartition(")")  # "pid (comm) state ppid …"; comm may hold ")"
+        fields = rest.split()
+        if len(fields) < 2 or not fields[1].isdigit():
+            break
+        names.append(head.partition("(")[2])
+        pid = int(fields[1])
+    return names
+
+
+def _ask(argv: list[str]) -> str | None:
+    """What ``argv`` prints, or ``None`` when it cannot run, fails, or outlasts
+    :data:`ASK_TIMEOUT`. Neither ``tmux show-environment`` nor ``ps`` forks a child that
+    keeps a pipe open, so their output is read."""
+    try:
+        done = subprocess.run(
+            argv, capture_output=True, text=True, timeout=ASK_TIMEOUT, check=False
+        )
+    except Exception:
+        return None
+    return done.stdout if done.returncode == 0 else None
 
 
 def in_wsl(env: Mapping[str, str]) -> bool:
@@ -137,11 +223,12 @@ def pick_writer(
 
 
 def local_writer() -> Writer | None:
-    """The native tool for THIS session: none over SSH, else :func:`pick_writer`'s.
+    """The native tool for THIS session: none when it is remote (:func:`session_is_remote`),
+    else :func:`pick_writer`'s.
 
     It asks the system, so it runs on the clipboard thread only (:func:`_resolve`).
     """
-    if is_remote(os.environ):
+    if session_is_remote(os.environ):
         return None
     return pick_writer(os.environ, platform=sys.platform)
 
@@ -155,8 +242,7 @@ class Ask(Enum):
 
 _KEY_VARIABLES = (
     "PATH",
-    "SSH_CONNECTION",
-    "SSH_TTY",
+    *REMOTE_MARKERS,
     "WAYLAND_DISPLAY",
     "DISPLAY",
     "WSL_DISTRO_NAME",
@@ -182,13 +268,16 @@ def cached_writer() -> Writer | Ask | None:
     where every Windows PATH directory is a stat over 9p (review of #266, round 1).
     :attr:`Ask.WORKER` when nothing is known for the environment as it is now (a
     variable in :data:`_KEY_VARIABLES` changed, the last write failed, or a "no tool"
-    answer is older than :data:`RECHECK`).
+    answer is older than :data:`RECHECK`), and always inside the user's tmux, whose
+    client may have reattached from another machine since (:func:`session_is_remote`).
     """
     return _known()
 
 
 def _known() -> Writer | Ask | None:
     """:func:`cached_writer`'s answer, which the clipboard thread asks under its own name."""
+    if os.environ.get("TMUX"):
+        return Ask.WORKER
     key = _writer_key()
     with _cache_lock:
         if _cache is None or _cache[0] != key:

@@ -1975,7 +1975,7 @@ def test_an_answer_that_comes_after_the_human_moved_on_acts_on_its_own_sheet_onl
     answered dialog_open once its sheet is gone says why, but not to press a button that is
     gone with it."""
     late = boot_report["lateAnswers"]
-    not_sent = "coder-1: the second Ctrl-C was not sent — it would exit Claude Code."
+    not_sent = "coder-1: the second Ctrl-C was not sent — it would exit the coding agent."
     assert late["doublePress"] == {"sheet": "Send Ctrl-C?", "toast": not_sent, "exits": 0}
     assert late["doubleUnderASheet"] == {"sheet": "Act on coder-1", "toast": not_sent}
     assert late["doubleElsewhere"] == {"sheet": None, "toast": not_sent}
@@ -2096,7 +2096,7 @@ def test_the_pads_exit_and_rewind_guards_each_ask_before_a_key_goes(
     boot_report: dict[str, Any],
 ) -> None:
     """Only the page asks before ^C or ^D (one interrupts the agent, a second within 3 s exits
-    Claude Code) and before a second Esc within 1.5 s (two open its Rewind selector): the
+    it) and before a second Esc within 1.5 s (two open its rewind): the
     machine lets the first of each through. Nothing tested any of them, nor the resend of a
     second ^C the machine refused. Round-7 verifier: an Esc sheet closed unanswered ended the
     window, so the next tap went with no sheet as the second Esc; only a confirmed one does.
@@ -2269,7 +2269,7 @@ def test_the_transcript_tabs_key_pad_types_nothing_while_a_prompt_may_be_up(
     ⏎ or ``1`` took "1. Yes" and ran the command blind. Each such key asks the machine to
     type nothing while a prompt may be up, and a refusal says where to look. Esc answers a
     prompt only No and stops a turn, so it goes as it does from Live, but a second Esc
-    straight after it, which opens Claude Code's Rewind selector, is not sent from here.
+    straight after it, which opens the agent's rewind, is not sent from here.
     Round-7 verifier: the refused tap reset the window, so a third tap went as the second
     Esc. Each refused tap runs the window on, and an Esc goes once 1.5 s pass without one."""
     pad = boot_report["transcriptPad"]
@@ -2286,7 +2286,7 @@ def test_the_transcript_tabs_key_pad_types_nothing_while_a_prompt_may_be_up(
         "Look at it on Live first."
     )
     assert pad["twice"] == {
-        "toast": "Not sent — two Esc open the Rewind selector. Send it from Live.",
+        "toast": "Not sent — two Esc open the agent's rewind. Send it from Live.",
         "sheet": None,
     }
 

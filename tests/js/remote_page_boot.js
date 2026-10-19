@@ -1554,7 +1554,7 @@ async function lateAnswers() {
   paneCame(page, "coder-2");
   await settle();
   click(buttonNamed(page.main(), "^C"));
-  keys[1].settle({ status: 409, json: { error: "double_press", message: "a second Ctrl-C within 3 s exits Claude Code — send confirm_exit: true" } });
+  keys[1].settle({ status: 409, json: { error: "double_press", message: "a second Ctrl-C within 3 s exits the coding agent — send confirm_exit: true" } });
   await settle();
   const doublePress = {
     sheet: sheetTitle(page), toast: page.toast(), exits: page.sent("api/send-keys").filter((body) => body.confirm_exit).length,
@@ -1721,7 +1721,7 @@ async function lateAnswers() {
       await settle();
     }
     await moveOn(one);
-    sent[1].settle({ status: 409, json: { error: "double_press", message: "a second Ctrl-C within 3 s exits Claude Code — send confirm_exit: true" } });
+    sent[1].settle({ status: 409, json: { error: "double_press", message: "a second Ctrl-C within 3 s exits the coding agent — send confirm_exit: true" } });
     await settle();
     return { sheet: sheetTitle(one), toast: one.toast() };
   };
@@ -2011,7 +2011,7 @@ async function keysInOrder() {
 }
 
 /* The pad's guards, which only the page keeps: ^C and ^D each ask first; a second Esc within
- * 1.5 s asks first (two open Claude Code's Rewind), at once or 1.4 s after the last, again
+ * 1.5 s asks first (two open the agent's rewind), at once or 1.4 s after the last, again
  * once its sheet was closed, and one 2 s (or 1.6 s) after the last does not; a second ^C the
  * machine refuses double_press goes again, with confirm_exit, only once the human says so.
  * After each step: the sheet on screen and how many keys were sent. */
@@ -2019,7 +2019,7 @@ async function padConfirms() {
   let ctrlC = 0;
   const page = await agentView({
     "POST api/send-keys": (body) => (body.keys[0] === "C-c" && body.confirm_exit !== true && ++ctrlC > 1
-      ? { status: 409, json: { error: "double_press", message: "a second Ctrl-C within 3 s exits Claude Code" } }
+      ? { status: 409, json: { error: "double_press", message: "a second Ctrl-C within 3 s exits the coding agent" } }
       : { status: 200, json: { sent: true } }),
   });
   const steps = [];

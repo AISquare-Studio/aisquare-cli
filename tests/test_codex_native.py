@@ -7,12 +7,14 @@ provider credential, production hook trust or model spend is used.
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import os
 import re
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -23,6 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 from aisquare.core import agents, launch_seal, outbox, selfcli
@@ -2535,3 +2538,149 @@ def test_real_codex_approval_and_question_are_answered_from_the_remote_page(
             server.shutdown()
             thread.join(timeout=2)
             shutil.rmtree(outside, ignore_errors=True)
+
+
+class _Remembered(_AtItsLimit):
+    """:class:`_AtItsLimit`, remembering the newest user line of every turn in ``heard``: what
+    reached the provider as a prompt, and what never did."""
+
+    def do_POST(self) -> None:
+        length = int(self.headers["Content-Length"])
+        raw = self.rfile.read(length)
+        if self.path.endswith("/responses"):
+            said = _user_texts(json.loads(raw))
+            self.server.heard.extend(said[-1:])  # type: ignore[attr-defined]
+        self.rfile = io.BytesIO(raw)
+        super().do_POST()
+
+
+@pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
+def test_real_codex_takes_a_phones_prompt_tell_at_its_empty_prompt_and_none_at_its_dialog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SCOPE #113 0.8.1, item 5, through Remote served on loopback as a phone reaches it
+    (uvicorn, the live sources and writes, a password, ``allow_write``). A fresh fleet Codex
+    has fired no hook, so it has no board session to read: Prompt mode refused it as an agent
+    nothing reads. Its quiet empty prompt says where it is, and the line lands as its first
+    prompt. After that turn's ``Stop``, at 100 % of its window, Codex opens ``Switch to
+    gpt-6-luna for lower credit usage?`` (the operator keeps ``[notice] …`` off), which no
+    hook reports: its row reads waiting, and Prompt mode pasted into the dialog, its Enter
+    picking for the human. Prompt and Interrupt & tell are refused at it now, before any
+    key, and the dialog stays the human's. No command runs in Codex's sandbox here."""
+    from aisquare.services import remote_server
+    from tests.remote_kit_helpers import PASSWORD, make_runtime
+
+    binary = shutil.which("codex")
+    assert binary, "AISQUARE_TEST_CODEX requires an installed Codex"
+    native_home = tmp_path / "codex"
+    native_home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    with ThreadingHTTPServer(("127.0.0.1", 0), _Remembered) as provider:
+        provider.resets_at = int(time.time()) + 3 * 3600  # type: ignore[attr-defined]
+        heard: list[str] = []
+        provider.heard = heard  # type: ignore[attr-defined]
+        thread = threading.Thread(target=provider.serve_forever, daemon=True)
+        thread.start()
+        (native_home / "config.toml").write_text(
+            'model = "local-fixture"\nmodel_provider = "local"\n'
+            '[model_providers.local]\nname = "Local fixture"\nwire_api = "responses"\n'
+            f'base_url = "http://127.0.0.1:{provider.server_port}/v1"\n'
+            "requires_openai_auth = false\n"
+            f'[projects.{json.dumps(str(workspace))}]\ntrust_level = "trusted"\n'
+            "[notice]\nhide_rate_limit_model_nudge = false\n",
+            encoding="utf-8",
+        )
+        for key in tuple(os.environ):
+            if key.startswith(("OPENAI_", "ANTHROPIC_", "CODEX_")):
+                monkeypatch.delenv(key)
+        monkeypatch.setenv("CODEX_HOME", str(native_home))
+        monkeypatch.setattr(
+            agents, "_aisquare_command", lambda *args, **kwargs: shlex.join(selfcli.argv_for([]))
+        )
+        agents.install_hooks("codex", native_home)
+        config = load_config()
+        config.fleet.tmux_socket = f"asq-codex-remote-{os.getpid()}"
+        save_config(config)
+        project = team.activate(workspace)
+        srv = fleet.server(config.fleet)
+        runtime = make_runtime()
+        runtime.set_allow_write(True)
+        app = remote_server.build_app(runtime, dist_dir=tmp_path / "dist")
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        served = remote_server._Server(app, port)
+        origin = f"http://127.0.0.1:{port}"
+
+        def screen(pane: str) -> str:
+            return srv.run("capture-pane", "-p", "-t", pane)
+
+        def until(check: Any, seconds: float, what: str, pane: str) -> None:
+            deadline = time.monotonic() + seconds
+            while not check():
+                if time.monotonic() >= deadline:
+                    raise AssertionError(f"{what}:\n{screen(pane)}")
+                time.sleep(0.2)
+
+        def board(agent: Any) -> Any:
+            with store_session() as store:
+                row = store.get_fleet_agent(agent.id)
+                return store.get_session(row.session_id) if row and row.session_id else None
+
+        try:
+            coder = fleet.spawn(
+                project,
+                "coder",
+                agent="codex",
+                worktree=False,
+                agent_args=["--dangerously-bypass-hook-trust"],
+            ).agent
+            served.start_serving()
+            with httpx.Client(base_url=origin, headers={"origin": origin}, timeout=60) as phone:
+                at = f"/r/{runtime.token}/api"
+                assert phone.post(f"{at}/unlock", json={"password": PASSWORD}).status_code == 200
+
+                def tell(text: str, mode: str) -> httpx.Response:
+                    body = {"agent": coder.label, "project": project.id, "text": text, "mode": mode}
+                    return phone.post(f"{at}/agent/tell", json=body)
+
+                until(
+                    lambda: "? for shortcuts" in screen(coder.pane_id) and board(coder) is None,
+                    30,
+                    "a fresh Codex at its empty prompt, no hook yet",
+                    coder.pane_id,
+                )
+                # Typed once its pane has printed nothing for fleet.ACTIVITY_WINDOW: until then
+                # it is "not idle at its prompt yet", and nothing is sent.
+                deadline = time.monotonic() + 30
+                told = tell("reply ok", "prompt")
+                while told.status_code == 409 and told.json()["error"] == "agent_busy":
+                    assert time.monotonic() < deadline, f"{told.text}\n{screen(coder.pane_id)}"
+                    time.sleep(0.5)
+                    told = tell("reply ok", "prompt")
+                assert told.status_code == 200, f"{told.text}\n{screen(coder.pane_id)!r}"
+                assert told.json()["delivered"] is True, told.text
+                until(lambda: "reply ok" in heard, 30, "its first prompt", coder.pane_id)
+                until(
+                    lambda: (session := board(coder)) is not None and session.state == "waiting",
+                    30,
+                    "the turn's Stop",
+                    coder.pane_id,
+                )
+                offer = "Switch to gpt-6-luna"
+                until(lambda: offer in screen(coder.pane_id), 20, "its dialog", coder.pane_id)
+                for mode in ("prompt", "interrupt"):
+                    refused = tell("LIMIT probe", mode)
+                    assert refused.status_code == 409, refused.text
+                    assert refused.json()["error"] == "dialog_open", refused.text
+                time.sleep(1)
+                shown = screen(coder.pane_id)
+                assert offer in shown, "nothing answered the dialog"
+                assert "LIMIT probe" not in shown and "LIMIT probe" not in heard
+        finally:
+            served.stop_serving()
+            if srv.has_session(fleet.session_name(fleet.ensure_codename(project).codename or "")):
+                srv.run("kill-server")
+            provider.shutdown()
+            thread.join(timeout=2)

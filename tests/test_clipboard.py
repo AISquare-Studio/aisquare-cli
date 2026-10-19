@@ -47,7 +47,11 @@ from tests.pane_harness import FakePane, FakeTmux, drag
 from tests.test_terminal_pane import Host, run, synced, wait_until
 
 TERMINAL_APP_MISSED = copy_toast("drops", "copied", "N characters", None).message
-ITERM_MISSED = copy_toast("asks", "copied", "N characters", None).message
+
+
+def iterm_hedge(sent: str) -> str:
+    """What a copy only OSC 52 carried to iTerm2 says of ``sent``."""
+    return copy_toast("asks", "copied", sent, None).message
 
 
 def hedged_copy(sent: str) -> str:
@@ -704,9 +708,16 @@ def test_a_copy_only_osc52_carried_says_what_became_of_it() -> None:
     assert missed.message.startswith("the copy did not reach the clipboard")
     assert "Hold Fn while you drag" in missed.message and "Cmd+C" in missed.message
     assert (missed.severity, missed.timeout) == ("warning", MISSED_TIMEOUT)
-    assert ITERM_MISSED.startswith("the copy did not reach the clipboard")
-    assert "Applications in terminal may access clipboard" in ITERM_MISSED
-    assert "hold Option while you drag" in ITERM_MISSED and "Cmd+C" in ITERM_MISSED
+    # iTerm2's own setting decides, and nothing outside it can see the setting: never a
+    # flat "did not reach", which was wrong for every user who had turned it on.
+    iterm = copy_toast("asks", "copied 3 characters", "3 characters", 3.0)
+    assert iterm == Toast(
+        "sent 3 characters to your terminal's clipboard (OSC 52) — if paste is empty, turn"
+        " on iTerm2 > Settings > General > Selection > 'Applications in terminal may"
+        " access clipboard', or hold ⌥ while you drag",
+        "information",
+        MISSED_TIMEOUT,
+    )
     hedged = copy_toast("unknown", "copied 12 characters", "12 characters", 3.0)
     assert hedged == Toast(
         "sent 12 characters to your terminal's clipboard (OSC 52) — if paste is empty,"
@@ -989,7 +1000,8 @@ def _environ(monkeypatch: pytest.MonkeyPatch, env: dict[str, str]) -> None:
     ("env", "told", "severity"),
     [
         ({"TERM_PROGRAM": "Apple_Terminal"}, TERMINAL_APP_MISSED, "warning"),
-        ({"LC_TERMINAL": "iTerm2"}, ITERM_MISSED, "warning"),
+        # iTerm2 over SSH, whose setting may be on: sent, and what to do if paste is empty.
+        ({"LC_TERMINAL": "iTerm2"}, iterm_hedge(f"{len(TEXT)} characters"), "information"),
         ({"TERM": "xterm-kitty"}, COPIED, "information"),
     ],
     ids=["terminal-app", "iterm2", "kitty"],

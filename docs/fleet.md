@@ -1585,12 +1585,15 @@ when OSC 52 was the only route (over SSH, or with the tool missing or failing)
 and the terminal is one known to take it: WezTerm and Ghostty by
 `TERM_PROGRAM`, kitty by `KITTY_WINDOW_ID`, Windows Terminal by `WT_SESSION`,
 and kitty, Ghostty, WezTerm and foot by the `TERM` ssh carries. In Terminal.app
-or iTerm2 — named by `TERM_PROGRAM`, and iTerm2 over SSH by the `LC_TERMINAL`
-ssh usually carries — it warns that the copy did not reach the clipboard, and
-how to select with the terminal itself. On any terminal nothing names (over
-SSH from Terminal.app, or behind tmux or screen) it says the text was sent to
-your terminal's clipboard (OSC 52), and that an empty paste means the terminal
-ignores it.
+(named by `TERM_PROGRAM`) it warns that the copy did not reach the clipboard,
+and how to select with the terminal itself. In iTerm2 — named by
+`TERM_PROGRAM`, and over SSH by the `LC_TERMINAL` ssh usually carries — it
+says the text was sent to your terminal's clipboard (OSC 52) and, if paste is
+empty, to turn on iTerm2's clipboard setting or hold ⌥ while you drag: whether
+that setting is on, nothing outside iTerm2 can see. On any terminal nothing
+names (over SSH from Terminal.app, or behind tmux or screen) it says the text
+was sent to your terminal's clipboard (OSC 52), and that an empty paste means
+the terminal ignores it.
 
 **Copy and paste on macOS.** Run on your Mac, every copy in `asq` reaches the
 clipboard through `pbcopy`, in any terminal. Over SSH only OSC 52 can carry it
@@ -1602,7 +1605,8 @@ back, so the terminal decides:
   terminal ignored it. Select with the terminal itself instead (below).
 - *iTerm2* accepts it only with *Settings › General › Selection › Applications
   in terminal may access clipboard* turned on. The toast cannot see that
-  setting, so over SSH it warns every time, and names the setting.
+  setting, so over SSH it says the copy was sent through OSC 52 and, if paste
+  is empty, to turn the setting on or hold ⌥ while you drag.
 - *Ghostty, kitty and WezTerm* accept it out of the box.
 
 ⌘C is Terminal.app's and iTerm2's own Copy, so it never reaches `asq`, and it

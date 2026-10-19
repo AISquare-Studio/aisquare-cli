@@ -5,11 +5,12 @@
 ``TextArea`` copies take the same route as the app's. A copy that raises a toast goes
 through :func:`copy_and_tell`, and the toast waits for the native write. It says
 "copied" when that write took the text, or when OSC 52 was the only route and the
-terminal is one known to take it. On Terminal.app or iTerm2, which drop OSC 52, it says
-the copy did not land and how to copy with the terminal's own selection instead; on a
-terminal nobody can name — over SSH, behind a multiplexer — it says the text was sent
-through the terminal, and what an empty paste would mean (:func:`copy_toast`). The
-native half is ``aisquare.core.clipboard``.
+terminal is one known to take it. On Terminal.app, which never implemented OSC 52, it
+says the copy did not land and how to copy with the terminal's own selection instead.
+Elsewhere it says the text was sent through the terminal and what an empty paste would
+mean: on iTerm2, whose own setting decides and cannot be seen from here, which setting
+to turn on; on a terminal nobody can name — over SSH, behind a multiplexer — that the
+terminal ignores it (:func:`copy_toast`). The native half is ``aisquare.core.clipboard``.
 """
 
 from __future__ import annotations
@@ -34,19 +35,16 @@ MISSED_TIMEOUT = 12.0
 HEDGED_TIMEOUT = 8.0
 """Seconds a copy only OSC 52 carried to an unnamed terminal stays on screen."""
 
-_MISSED = {
-    # Keyed by core.terminal.Osc52: Terminal.app is the one terminal that drops OSC 52,
-    # iTerm2 the one that asks for a setting (tests/test_clipboard.py holds the table to it).
-    "drops": (
-        "the copy did not reach the clipboard: Terminal.app ignores an app's clipboard"
-        " writes. Hold Fn while you drag to select, then press Cmd+C."
-    ),
-    "asks": (
-        "the copy did not reach the clipboard: iTerm2 drops an app's clipboard writes"
-        " unless Settings > General > Selection > 'Applications in terminal may access"
-        " clipboard' is on. Or hold Option while you drag to select, then press Cmd+C."
-    ),
-}
+# By core.terminal.Osc52: Terminal.app is the one terminal that drops OSC 52, iTerm2 the
+# one that asks for a setting (tests/test_clipboard.py holds the table to it).
+_MISSED = (
+    "the copy did not reach the clipboard: Terminal.app ignores an app's clipboard"
+    " writes. Hold Fn while you drag to select, then press Cmd+C."
+)
+_ASKS = (
+    "if paste is empty, turn on iTerm2 > Settings > General > Selection > 'Applications"
+    " in terminal may access clipboard', or hold ⌥ while you drag"
+)
 
 
 @dataclass(frozen=True)
@@ -69,14 +67,19 @@ def copy_toast(fate: clipboard.Osc52Fate, toast: str, sent: str, timeout: float 
     """
     if fate == "accepts":
         return Toast(toast, "information", timeout)
-    if fate == "unknown":
-        return Toast(
-            f"sent {sent} to your terminal's clipboard (OSC 52) — if paste is empty, your"
-            " terminal ignores it (Terminal.app does)",
-            "information",
-            HEDGED_TIMEOUT,
-        )
-    return Toast(_MISSED[fate], "warning", MISSED_TIMEOUT)
+    if fate == "drops":
+        return Toast(_MISSED, "warning", MISSED_TIMEOUT)
+    sent_through = f"sent {sent} to your terminal's clipboard (OSC 52)"
+    if fate == "asks":
+        # iTerm2's setting cannot be seen from here, so it is never a flat "did not
+        # reach": for the users who turned it on, that warned at every copy that landed
+        # (review of #266, round 1).
+        return Toast(f"{sent_through} — {_ASKS}", "information", MISSED_TIMEOUT)
+    return Toast(
+        f"{sent_through} — if paste is empty, your terminal ignores it (Terminal.app does)",
+        "information",
+        HEDGED_TIMEOUT,
+    )
 
 
 def characters(text: str) -> str:

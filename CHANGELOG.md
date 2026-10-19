@@ -35,9 +35,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `sudo` or `su` there, in a tmux last attached over SSH, or in a Codespace) OSC
   52 is the only route. The
   toast says "copied" only when the copy can have landed: the native tool took
-  it, or OSC 52 went to a terminal known to take it. In Terminal.app or iTerm2 a
-  copy only OSC 52 carried says it did not reach the clipboard, and how to
-  select with the terminal itself. On a terminal nothing names (over SSH from
+  it, or OSC 52 went to a terminal known to take it. In Terminal.app a copy only
+  OSC 52 carried says it did not reach the clipboard, and how to select with the
+  terminal itself. In iTerm2, whose clipboard setting nothing outside it can
+  see, it says the text was sent through OSC 52 and, if paste is empty, to turn
+  that setting on or hold ⌥ while you drag. On a terminal nothing names (over SSH from
   Terminal.app, or behind tmux or screen) it says the text was sent through OSC
   52, and that an empty paste means the terminal ignored it.
 - A restart no longer takes you off the pane you are on. A restart started

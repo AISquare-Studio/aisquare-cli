@@ -56,6 +56,7 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli import watch
 from aisquare.cli.common import local_time
+from aisquare.cli.ui.clipboard import copy_and_tell
 from aisquare.cli.ui.divider import Divider, floor_of
 from aisquare.cli.ui.ticks import while_running
 from aisquare.core.store import unmet_needs
@@ -769,8 +770,7 @@ class BoardPanel(Vertical):
                 "nothing selected — v enters select mode, then drag", timeout=4, markup=False
             )
             return
-        self.app.copy_to_clipboard(selected)
-        self.notify(f"copied {len(selected)} chars", timeout=3, markup=False)
+        copy_and_tell(self.app, selected, f"copied {len(selected)} chars", timeout=3)
 
     def action_toggle_board(self) -> None:
         """``b``: the board column off or on, and focus with it when it comes back."""

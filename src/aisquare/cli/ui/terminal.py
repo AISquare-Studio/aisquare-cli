@@ -138,6 +138,7 @@ from textual.strip import Strip
 from textual.timer import Timer
 from textual.widget import Widget
 
+from aisquare.cli.ui.clipboard import ClipboardApp, characters, copy_and_tell
 from aisquare.core.keys import (
     EXTENDED_MINIMUM,
     Drop,
@@ -626,7 +627,7 @@ class PaneScreen(Screen[None]):
         self.app.copy_to_clipboard(text)
 
 
-class SelectionHost(App[None]):
+class SelectionHost(ClipboardApp[None]):
     """An app that hosts panes: the app half of pane selection, in one class.
 
     ``FleetApp`` and the test host both derive from this, so the shell and its
@@ -663,19 +664,6 @@ class SelectionHost(App[None]):
 
     def get_default_screen(self) -> Screen[None]:
         return PaneScreen(id="_default")
-
-    def copy_to_clipboard(self, text: str) -> None:
-        """Textual's OSC 52 write — except that nothing is ever written for ``""``.
-
-        An OSC 52 with an empty payload CLEARS the terminal's clipboard, and no
-        gesture in this app means that: Textual's ``screen.copy_text`` produced
-        one whenever the screen's selections extracted as nothing (review of
-        #135, finding 10). Every copy in the app goes through here, so the rule
-        holds for the pane's own paths and Textual's alike.
-        """
-        if not text:
-            return
-        super().copy_to_clipboard(text)
 
     def _end_screen_drag(self) -> None:
         """End the active screen's drag-select the way its ``MouseUp`` would have.
@@ -2623,11 +2611,11 @@ class TerminalPane(Widget, can_focus=True):
         """Copy what the program copied to the outer clipboard, and say so; nothing for none."""
         if not text:
             return
-        self.app.copy_to_clipboard(text)
-        count = len(text)
-        self.notify(
-            f"copied {count} character{'s' if count != 1 else ''} — the agent's own selection",
-            markup=False,
+        copy_and_tell(
+            self.app,
+            text,
+            f"copied {characters(text)} — the agent's own selection",
+            sent=f"the agent's own selection ({characters(text)})",
         )
 
     def _set_own_selection(self, selection: Selection | None) -> None:
@@ -2731,7 +2719,7 @@ class TerminalPane(Widget, can_focus=True):
         return True
 
     def _copy_selection(self, *, standing: bool = True) -> bool:
-        """Copy the selected text to the clipboard (OSC 52); False when nothing is selected.
+        """Copy the selected text to the clipboard; False when nothing is selected.
 
         ``standing`` is whether the highlight survives this copy. The key paths
         clear it immediately afterwards, so telling the user there that "ctrl+c
@@ -2741,13 +2729,8 @@ class TerminalPane(Widget, can_focus=True):
         text = self.selected_text()
         if text is None:
             return False
-        self.app.copy_to_clipboard(text)
-        count = len(text)
         again = " — ctrl+c copies again while the selection stands" if standing else ""
-        self.notify(
-            f"copied {count} character{'s' if count != 1 else ''}{again}",
-            markup=False,
-        )
+        copy_and_tell(self.app, text, f"copied {characters(text)}{again}")
         return True
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:

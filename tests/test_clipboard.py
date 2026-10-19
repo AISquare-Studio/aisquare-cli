@@ -1,31 +1,56 @@
-"""The platform's own clipboard tool, picked for this session and run beside OSC 52.
+"""Copies reach the system clipboard beside OSC 52, and the toast says so only when true.
 
 Hotfix 0.8.2: on macOS every copy said "copied N characters" and left the clipboard
 unchanged, because Textual writes only an OSC 52 escape, which Terminal.app never
 implemented and iTerm2 drops unless a setting is on. ``core.clipboard`` picks the
-platform's own tool and runs it off the event loop, and says what becomes of an OSC 52
-where it was the only route.
+platform's own tool and runs it off the event loop; ``cli.ui.clipboard.ClipboardApp``
+sends the OSC 52 as before and raises the copy's toast once that write is over.
 
-The writer tables are asked with a fake ``which``. The writes run a real fake tool on
-PATH (tests/fake_clipboard.py).
+The writer tables are asked with a fake ``which``. Everything else runs a real fake
+tool on PATH (tests/fake_clipboard.py): the pane's own copies, the agent-selection
+mirror and Textual's ``Input`` through the headless ``Host`` of test_terminal_pane;
+the board's ``c`` and the R panel's Copy link have theirs in test_watch and
+test_ui_remote.
 """
 
 from __future__ import annotations
 
+import base64
 import time
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from textual.geometry import Offset
+from textual.pilot import Pilot
+from textual.selection import Selection
+from textual.widgets import Input, Static
 
+from aisquare.cli.ui.clipboard import hedged_copy, missed_copy
 from aisquare.core import clipboard
 from aisquare.core.clipboard import Writer, osc52_terminal, pick_writer
-from tests.fake_clipboard import NEEDS_POSIX, TEXT, install
+from tests.fake_clipboard import NEEDS_POSIX, REAL_OSC52_TERMINAL, TEXT, install
+from tests.pane_harness import FakePane, FakeTmux, drag
+from tests.test_terminal_pane import Host, run, synced, wait_until
+
+TERMINAL_APP_MISSED = missed_copy({"TERM_PROGRAM": "Apple_Terminal"})
+ITERM_MISSED = missed_copy({"TERM_PROGRAM": "iTerm.app"})
+
+
+def osc52(text: str) -> str:
+    return f"\x1b]52;c;{base64.b64encode(text.encode('utf-8')).decode('ascii')}\a"
 
 
 def tools(*names: str) -> Callable[[str], str | None]:
     """A ``which`` that finds exactly ``names``, under /fake/bin."""
     return lambda name: f"/fake/bin/{name}" if name in names else None
+
+
+@pytest.fixture
+def fake() -> FakeTmux:
+    tmux = FakeTmux()
+    tmux.panes["%1"] = FakePane(screen=[TEXT, "second row", "third row"], cursor=(2, 2))
+    return tmux
 
 
 # --- which tool writes the clipboard ---------------------------------------------------
@@ -227,3 +252,384 @@ def test_osc52_is_dropped_taken_or_unknown_by_what_the_environment_names(
     env: dict[str, str], terminal: str
 ) -> None:
     assert osc52_terminal(env) == terminal
+
+
+def test_a_copy_only_osc52_carried_says_what_became_of_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(clipboard, "osc52_terminal", REAL_OSC52_TERMINAL)
+    assert TERMINAL_APP_MISSED is not None and ITERM_MISSED is not None
+    assert TERMINAL_APP_MISSED.startswith("the copy did not reach the clipboard")
+    assert "Hold Fn while you drag" in TERMINAL_APP_MISSED and "Cmd+C" in TERMINAL_APP_MISSED
+    assert ITERM_MISSED.startswith("the copy did not reach the clipboard")
+    assert "Applications in terminal may access clipboard" in ITERM_MISSED
+    assert "hold Option while you drag" in ITERM_MISSED and "Cmd+C" in ITERM_MISSED
+    assert missed_copy({"TERM_PROGRAM": "ghostty"}) is None
+    assert missed_copy({}) is None
+    assert hedged_copy("12 characters") == (
+        "sent 12 characters to your terminal's clipboard (OSC 52) — if paste is empty,"
+        " your terminal ignores it (Terminal.app does)"
+    )
+    assert not hedged_copy("the link").startswith("copied")
+
+
+# --- every entry point, through the app ------------------------------------------------
+
+
+def _osc52s(writes: list[str]) -> list[str]:
+    return [write for write in writes if "\x1b]52;" in write]
+
+
+@NEEDS_POSIX
+def test_a_drag_release_puts_the_exact_text_on_pbcopy_and_still_sends_osc52(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    board = install(tmp_path, monkeypatch)
+
+    async def drive() -> tuple[str | None, list[str], list[str]]:
+        host = Host(fake.server(tmp_path), "%1")
+        writes: list[str] = []
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            assert host._driver is not None
+            monkeypatch.setattr(host._driver, "write", writes.append)
+            await drag(pilot, pane, (0, 0), (11, 0))
+            await wait_until(pilot, lambda: bool(host.notices))
+            return pane.selected_text(), list(host.notices), writes
+
+    selected, notices, writes = run(drive())
+    assert selected == TEXT, "the premise: the drag took the whole row"
+    assert board.texts() == [TEXT]
+    assert _osc52s(writes) == [osc52(TEXT)]
+    assert notices == [
+        f"copied {len(TEXT)} characters — ctrl+c copies again while the selection stands"
+    ]
+
+
+@NEEDS_POSIX
+def test_ctrl_c_on_a_standing_highlight_puts_the_exact_text_on_pbcopy(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    board = install(tmp_path, monkeypatch)
+
+    async def drive() -> tuple[list[str], list[str]]:
+        host = Host(fake.server(tmp_path), "%1")
+        writes: list[str] = []
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            assert host._driver is not None
+            monkeypatch.setattr(host._driver, "write", writes.append)
+            # Written as a gesture would leave it, with no copy of its own.
+            host.screen.selections = {pane: Selection(Offset(0, 0), Offset(12, 0))}
+            assert pane.selected_text() == TEXT, "the premise"
+            pane.focus()
+            await pilot.pause()
+            await pilot.press("ctrl+c")
+            await wait_until(pilot, lambda: bool(host.notices))
+            return list(host.notices), writes
+
+    notices, writes = run(drive())
+    assert board.texts() == [TEXT]
+    assert _osc52s(writes) == [osc52(TEXT)]
+    assert notices == [f"copied {len(TEXT)} characters"]
+    assert fake.sent() == [], "the copy key copied; nothing reached the agent"
+
+
+@NEEDS_POSIX
+def test_the_agent_s_own_selection_is_mirrored_onto_pbcopy(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claude Code inside the fleet's tmux copies into tmux's paste buffer."""
+    board = install(tmp_path, monkeypatch)
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
+
+    async def drive() -> tuple[list[str], list[str]]:
+        host = Host(fake.server(tmp_path), "%1")
+        writes: list[str] = []
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            assert host._driver is not None
+            monkeypatch.setattr(host._driver, "write", writes.append)
+            await pilot.mouse_down(widget, offset=(0, 0))
+            fake.buffer = TEXT  # the program's release handler ran
+            await pilot.mouse_up(widget, offset=(9, 0))
+            await wait_until(pilot, lambda: bool(host.notices))
+            return list(host.notices), writes
+
+    notices, writes = run(drive())
+    assert board.texts() == [TEXT]
+    assert _osc52s(writes) == [osc52(TEXT)]
+    assert notices == [f"copied {len(TEXT)} characters — the agent's own selection"]
+
+
+@NEEDS_POSIX
+def test_a_textual_input_copy_puts_the_exact_text_on_pbcopy(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``Input``'s copy calls ``app.copy_to_clipboard`` itself, and says nothing."""
+    board = install(tmp_path, monkeypatch)
+
+    async def drive() -> tuple[list[str], list[str], str]:
+        host = Host(fake.server(tmp_path), "%1", with_input=True)
+        writes: list[str] = []
+        async with host.run_test(size=(40, 8)) as pilot:
+            await wait_until(pilot, lambda: synced(host.pane))
+            assert host._driver is not None
+            monkeypatch.setattr(host._driver, "write", writes.append)
+            field = host.query_one("#other", Input)
+            field.value = TEXT
+            field.focus()
+            field.select_all()
+            await pilot.pause()
+            await pilot.press("ctrl+c")
+            await wait_until(pilot, lambda: bool(board.calls()))
+            await pilot.pause(0.1)
+            return list(host.notices), writes, host.clipboard
+
+    notices, writes, held = run(drive())
+    assert board.texts() == [TEXT]
+    assert _osc52s(writes) == [osc52(TEXT)]
+    assert held == TEXT, "App.clipboard, which Input's paste reads, is still set"
+    assert notices == []
+
+
+@NEEDS_POSIX
+def test_an_empty_copy_writes_neither_the_native_clipboard_nor_osc52(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    board = install(tmp_path, monkeypatch)
+
+    async def drive() -> tuple[list[str], list[str]]:
+        host = Host(fake.server(tmp_path), "%1", with_header=True)
+        writes: list[str] = []
+        async with host.run_test(size=(40, 8)) as pilot:
+            await wait_until(pilot, lambda: synced(host.pane))
+            assert host._driver is not None
+            monkeypatch.setattr(host._driver, "write", writes.append)
+            host.copy_to_clipboard("", toast="copied 0 characters")
+            # Textual's own copy of a selection that extracts as nothing.
+            header = host.query_one("#other", Static)
+            host.screen.selections = {header: Selection(Offset(1, 0), Offset(1, 0))}
+            await pilot.pause()
+            await pilot.press("ctrl+c")
+            await pilot.pause(0.3)
+            return list(host.notices), writes
+
+    notices, writes = run(drive())
+    assert board.calls() == []
+    assert _osc52s(writes) == []
+    assert notices == []
+
+
+@NEEDS_POSIX
+def test_two_quick_copies_leave_the_second_on_the_clipboard_with_a_toast_each(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    board = install(tmp_path, monkeypatch, behaviour="slow-first")
+
+    async def drive() -> list[str]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            await wait_until(pilot, lambda: synced(host.pane))
+            host.copy_to_clipboard("first", toast="one")
+            host.copy_to_clipboard("second", toast="two")
+            await wait_until(pilot, lambda: len(host.notices) == 2, timeout=10)
+            return list(host.notices)
+
+    assert run(drive()) == ["one", "two"]
+    assert board.texts() == ["first", "second"] and board.clipboard == "second"
+
+
+# --- the toast tells what became of the copy -------------------------------------------
+
+
+async def _drag_and_wait(
+    host: Host, pilot: Pilot[None], writes: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await wait_until(pilot, lambda: synced(host.pane))
+    assert host._driver is not None
+    monkeypatch.setattr(host._driver, "write", writes.append)
+    await drag(pilot, host.pane, (0, 0), (11, 0))
+
+
+COPIED = f"copied {len(TEXT)} characters — ctrl+c copies again while the selection stands"
+HEDGED = hedged_copy(f"{len(TEXT)} characters")
+SSH = {"SSH_CONNECTION": "10.0.0.2 52144 10.0.0.1 22"}
+
+
+def _environ(monkeypatch: pytest.MonkeyPatch, env: dict[str, str]) -> None:
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+
+
+@NEEDS_POSIX
+@pytest.mark.parametrize(
+    ("env", "told", "severity"),
+    [
+        ({"TERM_PROGRAM": "Apple_Terminal"}, TERMINAL_APP_MISSED, "warning"),
+        ({"LC_TERMINAL": "iTerm2"}, ITERM_MISSED, "warning"),
+        ({"TERM": "xterm-kitty"}, COPIED, "information"),
+    ],
+    ids=["terminal-app", "iterm2", "kitty"],
+)
+def test_over_ssh_only_osc52_is_sent_and_a_named_terminal_s_toast_says_if_it_lands(
+    env: dict[str, str],
+    told: str,
+    severity: str,
+    fake: FakeTmux,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    board = install(tmp_path, monkeypatch)
+    _environ(monkeypatch, SSH | env)
+
+    async def drive() -> tuple[list[str], list[str], list[str]]:
+        host = Host(fake.server(tmp_path), "%1")
+        writes: list[str] = []
+        async with host.run_test(size=(40, 6)) as pilot:
+            await _drag_and_wait(host, pilot, writes, monkeypatch)
+            await wait_until(pilot, lambda: bool(host.notices))
+            await pilot.pause(0.2)
+            return list(host.notices), list(host.severities), writes
+
+    notices, severities, writes = run(drive())
+    assert board.calls() == [], "no native write over SSH"
+    assert _osc52s(writes) == [osc52(TEXT)]
+    assert notices == [told] and severities == [severity]
+
+
+@NEEDS_POSIX
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"TERM": "xterm-256color"},
+        {},
+        {"TERM_PROGRAM": "tmux", "TMUX": "/tmp/tmux-1/default,1,0", "TERM": "tmux-256color"},
+    ],
+    ids=["terminal-app-over-ssh", "nothing-named", "the-host-s-own-tmux"],
+)
+def test_over_ssh_to_an_unknown_terminal_the_toast_says_sent_not_copied(
+    env: dict[str, str], fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Terminal.app over SSH is the case: ssh sends no TERM_PROGRAM, so nothing says the
+    OSC 52 went to a terminal that drops it, and "copied" was a guess. The toast says it
+    was sent through the terminal, and what an empty paste would mean."""
+    board = install(tmp_path, monkeypatch)
+    _environ(monkeypatch, SSH | env)
+
+    async def drive() -> tuple[list[str], list[str], list[str]]:
+        host = Host(fake.server(tmp_path), "%1")
+        writes: list[str] = []
+        async with host.run_test(size=(40, 6)) as pilot:
+            await _drag_and_wait(host, pilot, writes, monkeypatch)
+            await wait_until(pilot, lambda: bool(host.notices))
+            await pilot.pause(0.2)
+            return list(host.notices), list(host.severities), writes
+
+    notices, severities, writes = run(drive())
+    assert board.calls() == [], "no native write over SSH"
+    assert _osc52s(writes) == [osc52(TEXT)]
+    assert notices == [HEDGED] and severities == ["information"]
+    assert not any(notice.startswith("copied") for notice in notices)
+
+
+@NEEDS_POSIX
+def test_the_hedge_names_what_was_sent_the_agent_s_selection_or_the_link(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install(tmp_path, monkeypatch)
+    _environ(monkeypatch, SSH)
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
+
+    async def drive() -> list[str]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            await pilot.mouse_down(widget, offset=(0, 0))
+            fake.buffer = TEXT  # the program's release handler ran
+            await pilot.mouse_up(widget, offset=(9, 0))
+            await wait_until(pilot, lambda: bool(host.notices))
+            host.copy_to_clipboard("https://x.example/r/t/", toast="Link copied", sent="the link")
+            await wait_until(pilot, lambda: len(host.notices) == 2)
+            return list(host.notices)
+
+    assert run(drive()) == [
+        hedged_copy(f"the agent's own selection ({len(TEXT)} characters)"),
+        hedged_copy("the link"),
+    ]
+
+
+@NEEDS_POSIX
+@pytest.mark.parametrize("behaviour", ["missing", "fail", "hang"])
+@pytest.mark.parametrize(
+    ("terminal", "told", "severity"),
+    [
+        ("Apple_Terminal", TERMINAL_APP_MISSED, "warning"),
+        ("", HEDGED, "information"),
+        ("WezTerm", COPIED, "information"),
+    ],
+    ids=["terminal-app", "unknown", "wezterm"],
+)
+def test_a_native_write_that_misses_keeps_the_ui_running_and_the_toast_honest(
+    behaviour: str,
+    terminal: str,
+    told: str,
+    severity: str,
+    fake: FakeTmux,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the native write gone, OSC 52 is all there was: "copied" on a terminal known
+    to take it, the way round on Terminal.app, and the hedge where nobody can say."""
+    if behaviour == "missing":
+        board = install(tmp_path, monkeypatch, "not-pbcopy", only=True)
+    else:
+        board = install(tmp_path, monkeypatch, behaviour=behaviour)
+    monkeypatch.setattr(clipboard, "WRITE_TIMEOUT", 0.5)
+    if terminal:
+        monkeypatch.setenv("TERM_PROGRAM", terminal)
+    ticks: list[float] = []
+
+    async def drive() -> tuple[list[str], list[str], list[str], int]:
+        host = Host(fake.server(tmp_path), "%1")
+        writes: list[str] = []
+        async with host.run_test(size=(40, 6)) as pilot:
+            await _drag_and_wait(host, pilot, writes, monkeypatch)
+            host.set_interval(0.05, lambda: ticks.append(time.monotonic()))
+            await pilot.pause(0.3)
+            during = len(ticks)
+            await wait_until(pilot, lambda: bool(host.notices), timeout=5)
+            await pilot.pause(0.2)
+            return list(host.notices), list(host.severities), writes, during
+
+    notices, severities, writes, during = run(drive())
+    assert board.calls() == []
+    assert _osc52s(writes) == [osc52(TEXT)]
+    assert during >= 3, "the event loop kept running while the tool was written to"
+    assert notices == [told] and severities == [severity]
+
+
+@NEEDS_POSIX
+def test_a_copy_pbcopy_took_says_copied_even_on_terminal_app(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    board = install(tmp_path, monkeypatch)
+    monkeypatch.setenv("TERM_PROGRAM", "Apple_Terminal")
+
+    async def drive() -> list[str]:
+        host = Host(fake.server(tmp_path), "%1")
+        writes: list[str] = []
+        async with host.run_test(size=(40, 6)) as pilot:
+            await _drag_and_wait(host, pilot, writes, monkeypatch)
+            await wait_until(pilot, lambda: bool(host.notices))
+            await pilot.pause(0.2)
+            return list(host.notices)
+
+    assert run(drive()) == [COPIED]
+    assert board.texts() == [TEXT]

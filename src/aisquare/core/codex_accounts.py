@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import os
 from collections.abc import Iterator, Mapping
@@ -48,7 +49,8 @@ from pathlib import Path
 from typing import Any
 
 from aisquare.core import paths
-from aisquare.core.claude_accounts import FailedTurn, LimitNotice
+from aisquare.core.claude_accounts import FailedTurn, LimitNotice, LoginUnreadable
+from aisquare.core.codex_sharing import CodexFolderTrust
 from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage
 
 AGENT = "codex"
@@ -159,14 +161,49 @@ def identity(
 def signed_in(account: ClaudeAccount) -> bool:
     """A login Codex can use: an API key, or ChatGPT tokens beside readable claims."""
     data, claims = _login(account.config_dir)
-    if data is None:
-        return False
+    return data is not None and _usable(data, claims)
+
+
+def _usable(data: Mapping[str, Any], claims: Mapping[str, Any] | None) -> bool:
     if _api_key(data):
         return True
     tokens = data.get("tokens")
     if not isinstance(tokens, dict) or claims is None:
         return False
     return _has(tokens.get("refresh_token")) or _has(tokens.get("access_token"))
+
+
+LOGIN_PARTS = ("id_token", "access_token", "refresh_token", "account_id")
+"""What of ``auth.json``'s ``tokens`` a login's fingerprint digests, beside its API key."""
+
+
+def login_fingerprint(account: ClaudeAccount) -> str | None:
+    """A digest of the login ``auth.json`` holds — its API key and tokens, never their
+    values — or ``None`` when it holds none Codex can use (:func:`signed_in`).
+
+    What a *Log in* opened over a login still on disk waits to see change: ``codex login``
+    replaces the tokens, and the stale ones are a signed-in home. One read of the file, so
+    the digest is of the login it judged usable. An ``auth.json`` there that cannot be read
+    raises ``LoginUnreadable``: ``None`` would let the login it holds land as new."""
+    try:
+        raw = auth_path(account.config_dir).read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise LoginUnreadable(f"its auth.json cannot be read ({exc.strerror or exc})") from exc
+    try:
+        data: Any = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None  # no login Codex can use: whatever it writes next is new
+    if not isinstance(data, dict):
+        return None
+    tokens = data.get("tokens")
+    tokens = tokens if isinstance(tokens, dict) else {}
+    if not _usable(data, _claims(tokens.get("id_token"))):
+        return None
+    parts = [data.get("OPENAI_API_KEY"), *(tokens.get(part) for part in LOGIN_PARTS)]
+    joined = "\0".join(part if isinstance(part, str) else "" for part in parts)
+    return hashlib.sha256(joined.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def plan(account: ClaudeAccount) -> str | None:
@@ -606,3 +643,8 @@ class CodexAccounts:
 
     def failed_turn(self, path: Path) -> FailedTurn | None:
         return failed_turn(path)
+
+    def login_fingerprint(self, account: ClaudeAccount) -> str | None:
+        return login_fingerprint(account)
+
+    trust = CodexFolderTrust()

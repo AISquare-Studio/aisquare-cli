@@ -9,6 +9,7 @@ for this one.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from datetime import datetime
@@ -52,6 +53,9 @@ from aisquare.core.agent_adapters.types import (
     store_dir,
     store_read_only,
 )
+from aisquare.core.claude_accounts import FailedTurn, LimitNotice
+from aisquare.core.claude_sharing import SharingError, TrustScope
+from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage
 
 #: Its native event names, each the kind it decodes to.
 EVENTS: dict[str, EventKind] = {
@@ -175,6 +179,101 @@ def _fake_call(record: Mapping[str, Any], at: datetime | None) -> PendingTool:
     return PendingTool(str(record.get("id")), name, name, kept, at, input_dropped=dropped)
 
 
+class FakeTrust:
+    """Its folder trust: ``trusted.json`` in the home, ``{"yes": [...], "no": [...]}``. A yes
+    records the folder itself and covers that folder alone, its repository root nothing:
+    unlike both real agents, so a service that applies either's rules fails for it."""
+
+    file_name = "trusted.json"
+
+    def scope(self, base: TrustScope) -> TrustScope:
+        return TrustScope(base.folder, str(base.folder), (str(base.folder),))
+
+    def _load(self, account: ClaudeAccount) -> dict[str, list[str]]:
+        try:
+            data = json.loads((account.config_dir / self.file_name).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {"yes": [], "no": []}
+        except (OSError, ValueError) as exc:
+            raise SharingError(f"its {self.file_name} cannot be read ({exc})") from exc
+        return {"yes": list(data.get("yes", [])), "no": list(data.get("no", []))}
+
+    def read(self, account: ClaudeAccount) -> dict[str, bool]:
+        data = self._load(account)
+        return {**dict.fromkeys(data["no"], False), **dict.fromkeys(data["yes"], True)}
+
+    def grant(self, account: ClaudeAccount, *keys: str) -> list[str]:
+        data = self._load(account)
+        written = [key for key in dict.fromkeys(keys) if key not in data["yes"]]
+        if written:
+            data["yes"] += written
+            (account.config_dir / self.file_name).write_text(json.dumps(data), encoding="utf-8")
+        return written
+
+
+class FakeAccounts:
+    """Its numbered login slots: ``login.json`` (``{"user": email, "token": …}``) in the
+    home, signed in by ``fakeagent auth``, read offline, with no usage it can tell."""
+
+    agent = "fake-agent"
+    home_env = "FAKE_AGENT_HOME"
+    extra_env: tuple[str, ...] = ()
+    plain_vars: Mapping[str, str] = {"FAKE_AGENT_HOME": "AISQUARE_PLAIN_FAKE_AGENT_HOME"}
+    dir_name = "fake-agent-accounts"
+    plain_slot = -1
+    plain_label = "plain fakeagent"
+    install_command = "pipx install fake-agent"
+    network_usage = False
+    trust = FakeTrust()
+
+    def sign_in_args(self) -> tuple[str, ...]:
+        return ("auth",)
+
+    def plain_home(self, home: Path, plain: Mapping[str, str]) -> Path:
+        value = plain.get(self.home_env, "").strip()
+        return Path(value).expanduser() if value else home / ".fakeagent"
+
+    def _login(self, account: ClaudeAccount) -> dict[str, Any] | None:
+        try:
+            data = json.loads((account.config_dir / "login.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        usable = isinstance(data, dict) and data.get("user") and data.get("token")
+        return data if usable else None
+
+    def identity(
+        self, account: ClaudeAccount, *, env: Mapping[str, str] | None = None
+    ) -> ClaudeIdentity | None:
+        login = self._login(account)
+        return ClaudeIdentity(email=str(login["user"])) if login is not None else None
+
+    def signed_in(self, account: ClaudeAccount) -> bool:
+        return self._login(account) is not None
+
+    def subscription(self, account: ClaudeAccount) -> str | None:
+        return None
+
+    def token_state(self, account: ClaudeAccount) -> str:
+        return "ok" if self.signed_in(account) else "missing"
+
+    def usage(self, account: ClaudeAccount, *, now: datetime | None, fetch: object) -> ClaudeUsage:
+        return ClaudeUsage(available=False, reason="Fake Agent keeps no usage")
+
+    def limit_from_transcript(
+        self, path: Path, *, now: datetime | None = None
+    ) -> LimitNotice | None:
+        return None
+
+    def failed_turn(self, path: Path) -> FailedTurn | None:
+        return None
+
+    def login_fingerprint(self, account: ClaudeAccount) -> str | None:
+        login = self._login(account)
+        if login is None:
+            return None
+        return hashlib.sha256(str(login["token"]).encode()).hexdigest()
+
+
 class FakeAgentAdapter:
     id = "fake-agent"
     label = "Fake Agent"
@@ -187,7 +286,7 @@ class FakeAgentAdapter:
     hooks_off_setting = '"hooks_off": true'
     exit_command = "/quit"
     key_spellings: Mapping[str, str] = {"M-Enter": "C-o"}
-    accounts = None
+    accounts = FakeAccounts()
     plugin = None
     transcript_reader: AgentTranscript | None = FakeTranscript()
     capabilities = AgentCapabilities(

@@ -861,7 +861,7 @@ def trust(
         Path | None,
         typer.Argument(
             help="The folder to trust on every account (default: this one). In a git "
-            "checkout its repository is trusted, as Claude Code's own yes there would.",
+            "checkout its repository is trusted, as the agent's own yes there would.",
             show_default=False,
         ),
     ] = None,
@@ -873,12 +873,13 @@ def trust(
         ),
     ] = False,
 ) -> None:
-    """Trust a folder on every Claude account at once, so no agent stops at the question.
+    """Trust a folder on every account at once, so no agent stops at the question.
 
-    Claude Code asks "trust this folder?" once per account, and an agent on an account
-    that was never asked waits there for a human. A launch copies the trust from any
-    account that has it (`\\[accounts] share_trust`); this does it now, for every account.
-    Only the folder's trust entry in each account's .claude.json is written.
+    Claude Code and Codex ask "trust this folder?" once per account, and an agent on an
+    account that was never asked waits there for a human. A launch copies the trust from
+    any account of its agent that has it (`\\[accounts] share_trust`); this does it now,
+    for every account. Only the folder's trust entry is written: in a Claude account's
+    .claude.json, as a table appended to a Codex account's config.toml.
     """
     if sync and folder is not None:
         fail("pass a folder, or --sync — not both", error="usage")
@@ -905,6 +906,7 @@ def _trust_report(
             "accounts": [
                 {
                     "slot": change.account.slot,
+                    "agent": change.account.agent,
                     "label": core.label(change.account),
                     "outcome": change.outcome,
                     "folders": list(change.folders),
@@ -1070,6 +1072,8 @@ def run(ctx: typer.Context, slot: SlotRef) -> None:
                 f" ({who})…",
             ),
         )
+        for note in accounts_service.share_for_launch(account=account):
+            stderr_console().print(f"accounts: {note}", style="dim")
         _exec(found.binary, [found.binary, *ctx.args], accounts_service.session_env(account))
         return
     found = accounts_service.install()

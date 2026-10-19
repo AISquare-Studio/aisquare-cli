@@ -128,5 +128,13 @@
   "hooks_off": {
     "file": "config.toml",
     "text": "[features]\nhooks = false\n"
+  },
+  "accounts": {
+    "login": {
+      "auth.json": "{\n  \"auth_mode\": \"chatgpt\",\n  \"OPENAI_API_KEY\": null,\n  \"tokens\": {\n    \"id_token\": \"eyJhbGciOiAibm9uZSJ9.eyJlbWFpbCI6ICJvbmVAZXhhbXBsZS5jb20iLCAiaHR0cHM6Ly9hcGkub3BlbmFpLmNvbS9hdXRoIjogeyJjaGF0Z3B0X3BsYW5fdHlwZSI6ICJwbHVzIiwgImNoYXRncHRfYWNjb3VudF9pZCI6ICJhY2N0LTEifX0.not-a-signature\",\n    \"access_token\": \"access-one\",\n    \"refresh_token\": \"refresh-one\",\n    \"account_id\": \"acct-1\"\n  },\n  \"last_refresh\": \"2026-10-19T10:00:00Z\"\n}"
+    },
+    "relogin": {
+      "auth.json": "{\n  \"auth_mode\": \"chatgpt\",\n  \"OPENAI_API_KEY\": null,\n  \"tokens\": {\n    \"id_token\": \"eyJhbGciOiAibm9uZSJ9.eyJlbWFpbCI6ICJvbmVAZXhhbXBsZS5jb20iLCAiaHR0cHM6Ly9hcGkub3BlbmFpLmNvbS9hdXRoIjogeyJjaGF0Z3B0X3BsYW5fdHlwZSI6ICJwbHVzIiwgImNoYXRncHRfYWNjb3VudF9pZCI6ICJhY2N0LTEifX0.not-a-signature\",\n    \"access_token\": \"access-two\",\n    \"refresh_token\": \"refresh-two\",\n    \"account_id\": \"acct-1\"\n  },\n  \"last_refresh\": \"2026-10-19T10:00:00Z\"\n}"
+    }
   }
 }

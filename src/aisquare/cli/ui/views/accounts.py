@@ -1739,9 +1739,10 @@ class AccountsView(Vertical):
         in a new Codex slot. An existing slot is its own agent's, whatever is passed.
 
         *Add* and *Log in* both come here. A slot still holding a login — an
-        expired or rejected token — is watched for a DIFFERENT login
-        (``login_fingerprint``): the stale one is a signed-in directory, and the
-        window closed at the first poll, before Claude Code had refreshed it. That
+        expired or rejected token, a Codex ``auth.json`` ``codex login`` replaces — is
+        watched for a DIFFERENT login (``login_fingerprint``, the slot's agent's): the
+        stale one is a signed-in directory, and the window closed at the first poll,
+        before Claude Code had refreshed it or ``codex login`` had written. That
         login is read before the window opens (a Claude Code starting there may
         refresh the token at once, which is the new login), off the UI thread
         (:data:`LOGIN_OPEN_WORKER`): on macOS it is a Keychain read.

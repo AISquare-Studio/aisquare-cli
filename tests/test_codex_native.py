@@ -6,11 +6,13 @@ provider credential, production hook trust or model spend is used.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1557,6 +1559,205 @@ def test_real_codex_at_its_usage_limit_reaches_the_board_with_no_stop(
                 srv.run("kill-server")
             server.shutdown()
             thread.join(timeout=2)
+
+
+def _stop_app_servers(*homes: Path) -> None:
+    """Codex 0.162.1 leaves a managed ``app-server`` running per ``CODEX_HOME`` it ran in
+    (``<home>/packages/app-server-daemon/…``): stop those of the homes a test made."""
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            program = (entry / "cmdline").read_bytes().split(b"\0", 1)[0].decode()
+        except (OSError, UnicodeDecodeError):
+            continue
+        if any(program.startswith(f"{home}{os.sep}") for home in homes):
+            with contextlib.suppress(OSError):
+                os.kill(int(entry.name), signal.SIGTERM)
+
+
+@pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
+def test_real_codex_trust_one_slot_gave_reaches_another_and_its_spawn_asks_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SCOPE #113, 0.8.1 item 15, on two loopback Codex slots: the human trusts a repository
+    in Codex's own dialog on slot A, which writes its table into A's config.toml; a coder
+    spawned on slot B in a worktree of it gets that table appended to B's config.toml (the
+    receipt says so with a ✓) and comes to its prompt with no question, where a told line
+    runs. The control: with ``share_trust`` off, slot C's coder meets Codex's question."""
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.core import codex_sharing
+
+    binary = shutil.which("codex")
+    assert binary, "AISQUARE_TEST_CODEX requires an installed Codex"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for args in (["init", "-q", "-b", "main"], ["commit", "-q", "--allow-empty", "-m", "init"]):
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        )
+    root = os.path.realpath(repo)
+    requests: list[dict[str, Any]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            raw = self.rfile.read(int(self.headers["Content-Length"]))
+            if not self.path.endswith("/responses"):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+                return
+            requests.append(json.loads(raw))
+            _answer(self, _message("ok"))
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        provider = (
+            'model = "local-fixture"\nmodel_provider = "local"\n'
+            '[model_providers.local]\nname = "Local fixture"\nwire_api = "responses"\n'
+            f'base_url = "http://127.0.0.1:{server.server_port}/v1"\n'
+            "requires_openai_auth = false\n"
+        )
+        for key in tuple(os.environ):
+            if key.startswith(("OPENAI_", "ANTHROPIC_", "CODEX_")):
+                monkeypatch.delenv(key)
+        monkeypatch.setattr(
+            agents, "_aisquare_command", lambda *args, **kwargs: shlex.join(selfcli.argv_for([]))
+        )
+        given, asked, control = (accounts_core.create_account("codex") for _ in range(3))
+        for slot in (given, asked, control):
+            codex_sharing.config_path(slot.config_dir).write_text(provider, encoding="utf-8")
+            agents.install_hooks("codex", slot.config_dir)
+        config = load_config()
+        config.fleet.tmux_socket = f"asq-codex-trust-{os.getpid()}"
+        save_config(config)
+        project = team.activate(repo)
+        srv = fleet.server(config.fleet)
+        human = f"asq-codex-trust-human-{os.getpid()}"
+        # Only this test's owned hook definitions are trusted by this flag.
+        trusted = ["--dangerously-bypass-hook-trust"]
+
+        def screen(pane: str, socket: str | None = None) -> str:
+            if socket is None:
+                return srv.run("capture-pane", "-p", "-t", pane)
+            argv = ["tmux", "-L", socket, "capture-pane", "-p", "-t", pane]
+            return subprocess.run(argv, capture_output=True, text=True).stdout
+
+        def until(check: Any, seconds: float, what: str, shown: Any) -> None:
+            deadline = time.monotonic() + seconds
+            while not check():
+                if time.monotonic() >= deadline:
+                    raise AssertionError(f"{what}:\n{shown()}")
+                time.sleep(0.2)
+
+        def quiet_at_its_prompt(agent: Any) -> bool:
+            lines = [line.strip() for line in screen(agent.pane_id).splitlines() if line.strip()]
+            return (
+                fleet.status_of(agent).state == "waiting"
+                and bool(lines)
+                and lines[-1].startswith("? for shortcuts")
+            )
+
+        try:
+            # Slot A: the human's yes, in Codex's own dialog.
+            subprocess.run(
+                [
+                    "tmux",
+                    "-L",
+                    human,
+                    "new-session",
+                    "-d",
+                    "-x",
+                    "160",
+                    "-y",
+                    "40",
+                    "-c",
+                    root,
+                    shlex.join(["env", f"CODEX_HOME={given.config_dir}", binary, *trusted]),
+                ],
+                check=True,
+            )
+            until(
+                lambda: "Trust this folder" in screen("0", human),
+                40,
+                "Codex's question on slot A",
+                lambda: screen("0", human),
+            )
+            subprocess.run(["tmux", "-L", human, "send-keys", "-t", "0", "Enter"], check=True)
+            until(
+                lambda: codex_sharing.read_trust(given.config_dir) == {root: True},
+                15,
+                "the yes in slot A's config.toml",
+                lambda: codex_sharing.config_path(given.config_dir).read_text(encoding="utf-8"),
+            )
+            subprocess.run(["tmux", "-L", human, "kill-server"], capture_output=True)
+
+            # Slot B: its spawn copies the table, and its coder asks nothing.
+            before = codex_sharing.config_path(asked.config_dir).read_text(encoding="utf-8")
+            receipt = fleet.spawn(
+                project,
+                "coder",
+                agent="codex",
+                worktree=True,
+                account=str(asked.slot),
+                agent_args=trusted,
+            )
+            name, other = accounts_core.label(asked), accounts_core.label(given)
+            assert receipt.shared == [f"accounts: {root} is trusted on {other} — now on {name} too"]
+            after = codex_sharing.config_path(asked.config_dir).read_text(encoding="utf-8")
+            assert after.startswith(before), "every byte of slot B's own settings kept"
+            assert codex_sharing.read_trust(asked.config_dir) == {root: True}
+            coder = receipt.agent
+            until(
+                lambda: quiet_at_its_prompt(coder), 40, "B's prompt", lambda: screen(coder.pane_id)
+            )
+            time.sleep(8)  # Codex draws its question after its prompt (measured on 0.162.1)
+            assert "Trust this folder" not in screen(coder.pane_id), screen(coder.pane_id)
+            told = fleet.tell(project, coder.label, "reply ok")
+            assert told.delivered and "typed" in told.how, told
+            until(
+                lambda: any("reply ok" in _user_texts(request) for request in requests),
+                20,
+                "the told line ran on slot B",
+                lambda: screen(coder.pane_id),
+            )
+
+            # The control, slot C with share_trust off: Codex's question holds its coder.
+            config = load_config()
+            config.accounts.share_trust = False
+            save_config(config)
+            held = fleet.spawn(
+                project,
+                "coder",
+                agent="codex",
+                worktree=True,
+                account=str(control.slot),
+                agent_args=trusted,
+            )
+            assert held.shared == [] and codex_sharing.read_trust(control.config_dir) == {}
+            until(
+                lambda: "Trust this folder" in screen(held.agent.pane_id),
+                40,
+                "Codex's question on slot C",
+                lambda: screen(held.agent.pane_id),
+            )
+        finally:
+            subprocess.run(["tmux", "-L", human, "kill-server"], capture_output=True)
+            if srv.has_session(fleet.session_name(fleet.ensure_codename(project).codename or "")):
+                srv.run("kill-server")
+            server.shutdown()
+            thread.join(timeout=2)
+            _stop_app_servers(given.config_dir, asked.config_dir, control.config_dir)
 
 
 @pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")

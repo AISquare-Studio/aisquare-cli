@@ -122,5 +122,13 @@
   "hooks_off": {
     "file": "hooks.json",
     "text": "{\"hooks_off\": true}"
+  },
+  "accounts": {
+    "login": {
+      "login.json": "{\"user\": \"one@example.com\", \"token\": \"token-one\"}"
+    },
+    "relogin": {
+      "login.json": "{\"user\": \"one@example.com\", \"token\": \"token-two\"}"
+    }
   }
 }

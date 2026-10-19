@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tomllib
 from collections.abc import Iterator
@@ -30,7 +31,8 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import agents as agent_core
-from aisquare.core import harness
+from aisquare.core import claude_accounts as accounts_core
+from aisquare.core import claude_sharing, harness
 from aisquare.core.agent_adapters import (
     adapter_for_binary,
     adapters,
@@ -40,6 +42,7 @@ from aisquare.core.agent_adapters import (
 )
 from aisquare.core.agent_adapters.types import (
     EVENT_KINDS,
+    AgentAccounts,
     AgentAdapter,
     Approvals,
     PermissionIntent,
@@ -49,12 +52,15 @@ from aisquare.core.agent_adapters.types import (
     hook_args,
     store_dir,
     store_read_only,
+    trusted_by,
     version_in,
 )
 from aisquare.core.config import FleetRoleSettings, load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
+from aisquare.models import ClaudeAccount
 from aisquare.services import agent_events, store_broker
+from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from tests import fakebin
 from tests.fake_agent import FakeAgentAdapter
@@ -533,6 +539,92 @@ def test_resume_exit_mcp_context_teams_and_telemetry(adapter: AgentAdapter, tmp_
         assert any("127.0.0.1:9" in arg for arg in telemetry)
     else:
         assert telemetry == []
+
+
+# --- account slots: a login's fingerprint, folder trust shared between accounts ---------------
+
+
+def _accounts_or_skip(adapter: AgentAdapter, monkeypatch: pytest.MonkeyPatch) -> AgentAccounts:
+    if adapter.accounts is None:
+        pytest.skip(f"{adapter.label} has no account slots")
+    # The login a fixture writes is a file: never a Keychain the test machine has.
+    monkeypatch.setattr(accounts_core, "keychain_platform", lambda: False)
+    return adapter.accounts
+
+
+def _sign_in(adapter: AgentAdapter, account: ClaudeAccount, which: str) -> None:
+    """Write the fixture's ``login`` (or ``relogin``: the same login after a new sign-in)."""
+    for name, text in _fixture(adapter)["accounts"][which].items():
+        path = account.config_dir / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+
+def test_an_accounts_slot_fingerprints_its_login_and_a_new_sign_in_changes_it(
+    adapter: AgentAdapter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``login_fingerprint`` is what a *Log in* over a login still on disk waits to see
+    change (``claude_accounts.sign_in_landed``): none before a login, the same digest while
+    it stands, another once a sign-in replaced it, and never a token."""
+    slot = _accounts_or_skip(adapter, monkeypatch)
+    account = accounts_core.create_account(adapter.id)
+    assert slot.login_fingerprint(account) is None
+    assert accounts_service.sign_in_landed(account) is None
+    _sign_in(adapter, account, "login")
+
+    first = slot.login_fingerprint(account)
+    assert first is not None and len(first) >= 32
+    assert slot.login_fingerprint(account) == first, "read afresh, the same login"
+    written = "".join(_fixture(adapter)["accounts"]["login"].values())
+    assert first not in written, "a digest, never what the login file holds"
+    identity = accounts_service.sign_in_landed(account)
+    assert identity is not None
+    assert accounts_service.sign_in_landed(account, since=first) is None, "the login it opened over"
+
+    _sign_in(adapter, account, "relogin")
+    assert slot.login_fingerprint(account) not in (None, first)
+    assert accounts_service.sign_in_landed(account, since=first) == identity
+
+
+def test_an_accounts_slot_shares_a_folders_trust_between_its_accounts(
+    adapter: AgentAdapter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``trust`` (``types.FolderTrust``): a yes on one account reaches another of the same
+    agent at a launch, in that agent's own file and rules, and touches nothing else there."""
+    slot = _accounts_or_skip(adapter, monkeypatch)
+    trust = slot.trust
+    if trust is None:
+        return  # an agent that asks nothing per folder has no trust to share
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "init"]):
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        )
+    one, two = (accounts_core.create_account(adapter.id) for _ in range(2))
+    for account in (one, two):
+        _sign_in(adapter, account, "login")
+    scope = trust.scope(claude_sharing.trust_scope(repo / "src"))
+    assert scope.folder == Path(os.path.realpath(repo / "src")) and scope.key in scope.covering
+    assert trusted_by(trust.read(one), scope) is None
+
+    assert trust.grant(one, scope.key) == [scope.key]
+    assert trust.grant(one, scope.key) == [], "a key already trusted is left out"
+    assert trusted_by(trust.read(one), scope) == scope.key
+    assert (one.config_dir / trust.file_name).is_file(), "file_name names the file in the home"
+    login = (accounts_core.identity(two), slot.login_fingerprint(two))
+
+    notes = accounts_service.share_for_launch(repo / "src", account=two)
+
+    name, other = accounts_core.label(two), accounts_core.label(one)
+    assert notes == [f"{scope.key} is trusted on {other} — now on {name} too"]
+    assert isinstance(notes[0], accounts_service.SharedNote)
+    assert trusted_by(trust.read(two), scope) == scope.key
+    assert (accounts_core.identity(two), slot.login_fingerprint(two)) == login, "its login kept"
+    assert accounts_service.share_for_launch(repo / "src", account=two) == [], "once"
 
 
 # --- the shared fleet path, with no branch for any agent ---------------------------------

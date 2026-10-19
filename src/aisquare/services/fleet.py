@@ -4125,7 +4125,7 @@ def spawn(
         # sub-folder of its repository, which does not cover the tree, and missed one on the
         # tree itself (round 22). And the window is told, so its launch does not read the
         # same files again; with no account chosen, only the window knows its environment.
-        # An account of another agent's is shared nothing (`share_for_launch`).
+        # Only between accounts of the launch's own agent, in its own file (`share_for_launch`).
         scope = claude_sharing.worktree_scope(project.root, start) if common is not None else start
         shared = claude_accounts_service.share_for_launch(scope, account=choice.account)
         notes.extend(f"accounts: {note}" for note in shared)

@@ -110,5 +110,14 @@
   "hooks_off": {
     "file": "settings.json",
     "text": "{\"disableAllHooks\": true}"
+  },
+  "accounts": {
+    "login": {
+      ".claude.json": "{\n  \"numStartups\": 3,\n  \"oauthAccount\": {\n    \"emailAddress\": \"one@example.com\"\n  },\n  \"userID\": \"user-1\",\n  \"projects\": {}\n}",
+      ".credentials.json": "{\"claudeAiOauth\": {\"accessToken\": \"token-one\", \"expiresAt\": 4102444800000, \"subscriptionType\": \"max\"}}"
+    },
+    "relogin": {
+      ".credentials.json": "{\"claudeAiOauth\": {\"accessToken\": \"token-two\", \"expiresAt\": 4102444800000, \"subscriptionType\": \"max\"}}"
+    }
   }
 }

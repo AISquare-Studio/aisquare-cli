@@ -23,6 +23,7 @@ from aisquare.core import harness, paths
 if TYPE_CHECKING:
     from aisquare.core.agent_adapters.transcripts import PendingTool, TranscriptTail
     from aisquare.core.claude_accounts import FailedTurn, LimitNotice
+    from aisquare.core.claude_sharing import TrustScope
     from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage
 
 
@@ -959,3 +960,63 @@ class AgentAccounts(Protocol):
         ``None`` (an agent whose hooks report every failure: ``None`` always). Read on
         every fleet listing of a working row, so it reads only the transcript's end."""
         ...
+
+    def login_fingerprint(self, account: ClaudeAccount) -> str | None:
+        """A digest of the login stored for ``account`` (its tokens), never a token: what a
+        sign-in window opened over a login still on disk waits to see change, so that login
+        does not count as the new one at the first poll
+        (``services.claude_accounts.sign_in_landed``). ``None`` when no usable login is
+        stored. Read afresh. Raises ``core.claude_accounts.LoginUnreadable`` with the reason
+        when the store would not say (a locked Keychain): ``None`` there would let the
+        login already stored land."""
+        ...
+
+    @property
+    def trust(self) -> FolderTrust | None:
+        """Where the agent records that the human trusts a folder, per account; ``None``
+        for an agent that asks nothing per folder (no trust to share between accounts)."""
+        ...
+
+
+class FolderTrust(Protocol):
+    """One agent's folder-trust records, one set per account home: what ``[accounts]
+    share_trust``, ``accounts trust`` and ``--sync`` copy between that agent's accounts
+    (``services.claude_accounts.share_for_launch``), so an agent on an account that was
+    never asked does not stop at the question a yes on another account answered.
+
+    ``file_name`` names the file that holds them in a note. A scope's ``folder`` is the
+    folder resolved and its ``key`` what a yes there records, the canonical repository
+    root in a git checkout, else the folder (``core.claude_sharing.trust_scope``, which
+    both Claude Code and Codex 0.162.1 record by): :meth:`scope` reads it in the agent's
+    own rules. The records read as ``{key: yes}``, ``False`` for a decision against it
+    that a share never overrides."""
+
+    file_name: str
+
+    def scope(self, base: TrustScope) -> TrustScope:
+        """``base`` in this agent's rules: its spelling of ``key``, and in ``covering`` every
+        entry that decides whether it asks in ``folder``, in the order the agent reads them,
+        the first one there deciding (:func:`trusted_by`)."""
+        ...
+
+    def read(self, account: ClaudeAccount) -> dict[str, bool]:
+        """The account's records, ``{key: trusted}`` in the file's order. Raises
+        ``core.claude_sharing.SharingError`` saying why they cannot be read, its
+        ``NotStartedYet`` when there is nothing to add to yet."""
+        ...
+
+    def grant(self, account: ClaudeAccount, *keys: str) -> list[str]:
+        """Record a yes for each of ``keys`` in the account's file; those written. A key
+        already trusted is left out, and nothing else in the file changes. Raises
+        ``core.claude_sharing.SharingError``, the file left as it was."""
+        ...
+
+
+def trusted_by(records: Mapping[str, bool], scope: TrustScope) -> str | None:
+    """The entry of ``records`` (:meth:`FolderTrust.read`) that trusts ``scope``'s folder,
+    or ``None``: the first of ``scope.covering`` the records hold decides."""
+    for key in scope.covering:
+        said = records.get(key)
+        if said is not None:
+            return key if said else None
+    return None

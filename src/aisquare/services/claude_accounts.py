@@ -16,8 +16,9 @@ way the login "landed" when the directory holds what a signed-in Claude Code
 writes there (on macOS, with the token in its Keychain item) —
 :func:`sign_in_landed` — and nothing here ever writes those files. What the
 accounts SHARE is the exception, and touches no login: a folder's trust entry
-in ``.claude.json``, and (opt-in) ``settings.json`` as a link to the plain
-claude's (:func:`share_for_launch`, ``core.claude_sharing``).
+(each agent's in its own file, ``AgentAccounts.trust``: ``.claude.json``,
+``core.claude_sharing``; a Codex ``config.toml``, ``core.codex_sharing``), and
+(opt-in) ``settings.json`` as a link to the plain claude's (:func:`share_for_launch`).
 
 **Usage is best effort, on purpose.** The percentages come from the endpoint
 Claude Code's own ``/usage`` reads (:data:`USAGE_URL`), called with the access
@@ -35,13 +36,14 @@ role, naming both), the machine and project defaults are one PER AGENT, the
 headroom pick compares one agent's accounts, and a Codex account's usage is
 read OFFLINE from its own sessions' rollouts (``core.codex_accounts``) — no
 request is ever made for it. Its sign-in is ``codex login`` in the slot's
-``CODEX_HOME``, and its arrangement lives in ``agent_account`` (store v29).
+``CODEX_HOME`` (a *Log in* over an ``auth.json`` still there waits for new tokens:
+:func:`login_fingerprint`), its folder trust is shared between Codex slots, and its
+arrangement lives in ``agent_account`` (store v29).
 """
 
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import json
 import os
 import shutil
@@ -60,6 +62,7 @@ from typing import Any, Literal
 from aisquare.core import claude_accounts as core
 from aisquare.core import claude_sharing as sharing
 from aisquare.core import paths
+from aisquare.core.agent_adapters.types import FolderTrust, trusted_by
 from aisquare.core.config import AccountsSettings, FleetSettings, load_config
 from aisquare.core.names import name_key
 from aisquare.core.spawn import untraced_env
@@ -2091,13 +2094,15 @@ def open_sign_in_window(
     )
 
 
-class LoginUnreadable(AccountsError):
+class LoginUnreadable(AccountsError, core.LoginUnreadable):
     """The stored login could not be read (a locked or refusing Keychain): a sign-in window
     opened over it could not tell the login it was opened over from a new one."""
 
 
 def login_fingerprint(account: ClaudeAccount) -> str | None:
-    """A digest of the stored login (its token and expiry), or ``None`` when none is stored.
+    """A digest of the stored login, or ``None`` when none is stored: the account's agent's
+    (``AgentAccounts.login_fingerprint``: Claude Code's token and expiry, Codex's
+    ``auth.json`` tokens).
 
     So a sign-in window opened to RE-authenticate an account can tell the login
     it was opened over from a fresh one: an expired or rejected token is still
@@ -2107,40 +2112,36 @@ def login_fingerprint(account: ClaudeAccount) -> str | None:
     would not say raises :class:`LoginUnreadable` with its reason: ``None`` there
     would let the login already stored count as the new one at the first poll.
     """
-    login = core.stored_login(account, fresh=True)
-    if login.unreadable is not None:
-        raise LoginUnreadable(login.unreadable)
-    return _login_digest(login.credentials) if login.credentials is not None else None
+    try:
+        return core.kind(account.agent).login_fingerprint(account)
+    except core.LoginUnreadable as exc:
+        raise LoginUnreadable(str(exc)) from exc
 
 
 def _login_digest(creds: core.ClaudeCredentials) -> str:
-    """:func:`login_fingerprint` of credentials already read (the usage cache's key too)."""
-    stamp = creds.expires_at.isoformat() if creds.expires_at is not None else ""
-    return hashlib.sha256(f"{creds.access_token}\0{stamp}".encode()).hexdigest()
+    """:func:`login_fingerprint` of Claude Code credentials already read (the usage cache's
+    key too)."""
+    return core.login_digest(creds)
 
 
 def sign_in_landed(account: ClaudeAccount, *, since: str | None = None) -> ClaudeIdentity | None:
-    """Who the directory is now signed in as, once Claude Code has stored its login.
+    """Who the directory is now signed in as, once the agent has stored its login.
 
     ``since`` is :func:`login_fingerprint` as the window opened, for a re-auth:
     the login lands only once the stored one is a different login (a refreshed
-    or new token), not the expired or rejected one the window was opened over.
-    Read afresh, as :func:`login_fingerprint` is, and once. A store that would not
-    say (a Keychain locked mid-window) is no landing: the window keeps waiting.
-
-    Another agent's login is its adapter's to read (Codex's ``auth.json``): it has landed
-    once the slot reads signed in, as before 0.8.1. Such a login has no fingerprint here,
-    so ``since`` tells nothing of it.
+    or new token), not the expired or rejected one the window was opened over —
+    Claude Code's, or the ``auth.json`` a Codex ``login`` writes over. Read afresh,
+    as :func:`login_fingerprint` is, and once. A store that would not say (a
+    Keychain locked mid-window) is no landing: the window keeps waiting.
     """
-    if account.agent != AGENT:
-        return core.identity(account) if core.signed_in(account) else None
     identity = core.identity(account)
     if identity is None:
         return None
-    creds = core.stored_login(account, fresh=True).credentials
-    if creds is None:  # none stored, or the Keychain would not say
+    try:
+        stored = core.kind(account.agent).login_fingerprint(account)
+    except core.LoginUnreadable:
         return None
-    if since is not None and _login_digest(creds) == since:
+    if stored is None or (since is not None and stored == since):
         return None
     return identity
 
@@ -2344,12 +2345,14 @@ def run_session(
 
 @dataclass(frozen=True)
 class TrustChange:
-    """What sharing folder trust did to one account's ``.claude.json``."""
+    """What sharing folder trust did to one account's trust file (``.claude.json``, a
+    Codex ``config.toml``)."""
 
     account: ClaudeAccount
     outcome: Literal["trusted", "already", "skipped", "failed"]
     """``trusted``: entries were written (:attr:`folders`); ``already``: nothing was
-    missing; ``skipped``: Claude Code never started there; ``failed``: :attr:`reason`."""
+    missing; ``skipped``: the agent never started there (Claude Code's); ``failed``:
+    :attr:`reason`."""
     folders: tuple[str, ...] = ()
     reason: str | None = None
 
@@ -2394,66 +2397,73 @@ def share_for_launch(
 
     Right before ``aisquare launch`` replaces itself with the agent, and before ``fleet
     spawn`` opens its window (so the receipt carries the note). The account is ``account``
-    when the launch chose one, else the one whose ``.claude.json`` the launch's ``env``
-    leads Claude Code to (default: this process's), and nothing is done for a directory
-    that is no account of ours. ``folder`` defaults to the working directory; a spawn
-    whose worktree is not made yet passes the scope it will have
-    (:func:`core.claude_sharing.worktree_scope`).
+    when the launch chose one, else the one whose home the launch's ``env`` leads ``agent``
+    to (default: this process's), and nothing is done for a directory that is no account
+    of ours. ``folder`` defaults to the working directory; a spawn whose worktree is not
+    made yet passes the scope it will have (:func:`core.claude_sharing.worktree_scope`).
 
-    - ``share_trust``: when no entry trusts the folder there and another account's does,
-      that entry is copied (:func:`core.claude_sharing.grant_trust`). Trust nobody gave is
-      never written: Claude Code asks, and ``fleet ls`` says the agent waits for it.
-    - ``share_settings``: a managed account's ``settings.json`` becomes a link to the plain
-      claude's, its own kept beside it (:func:`share_settings`).
+    - ``share_trust``: when no entry decides the folder there and another account of the
+      same agent's trusts it, that entry is copied, by the agent's accounts slot
+      (``trust``: Claude Code's ``.claude.json``, ``core.claude_sharing``; Codex's
+      ``config.toml``, ``core.codex_sharing``). Trust nobody gave is never written, nor
+      over an account's own no: the agent asks, and ``fleet ls`` says it waits.
+    - ``share_settings``: a managed Claude Code account's ``settings.json`` becomes a link
+      to the plain claude's, its own kept beside it (:func:`share_settings`); Codex's
+      settings are its own.
 
     The notes say what changed, or why it could not; a launch is never refused for it.
-
-    Claude Code's alone (:func:`_claude_code_accounts`): nothing is shared for a launch of
-    another ``agent``, or into another agent's ``account``, whose home holds no
-    ``.claude.json`` or Claude Code ``settings.json`` (Codex keeps its own trust in its
-    ``config.toml``).
     """
-    if agent != AGENT or (account is not None and account.agent != AGENT):
-        return []
+    whose = account.agent if account is not None else agent
     try:
         knobs = accounts_settings()
         if not (knobs.share_trust or knobs.share_settings):
             return []
-        accounts = _claude_code_accounts()
+        trust = core.kind(whose).trust if whose in core.account_agents() else None
+        accounts = _agent_accounts(whose)
         if len(accounts) < 2:
             return []  # one account: no trust to copy from, no plain claude's settings to link
         target = (
             next((one for one in accounts if one.slot == account.slot), account)
             if account is not None
-            else _account_of_env(os.environ if env is None else env, accounts)
+            else _account_of_env(os.environ if env is None else env, accounts, whose)
         )
         if target is None:
             return []
         notes: list[str] = []
-        if knobs.share_trust:
-            scope = (
+        if knobs.share_trust and trust is not None:
+            base = (
                 folder
                 if isinstance(folder, sharing.TrustScope)
                 else sharing.trust_scope(Path.cwd() if folder is None else folder)
             )
-            notes += _share_trust_into(target, scope, accounts)
-        if knobs.share_settings and target.managed:
+            notes += _share_trust_into(target, trust.scope(base), accounts, trust)
+        if knobs.share_settings and whose == AGENT and target.managed:
             notes += _share_settings_into(target)
         return notes
     except Exception as exc:  # an observer of the launch: it costs the sharing, never the launch
         return [f"nothing was shared into this launch's account ({exc})"]
 
 
+def _agent_accounts(agent: str) -> list[ClaudeAccount]:
+    """:func:`list_accounts`' accounts of ``agent``: the ones its folder trust is shared
+    between, each agent's in its own file (``AgentAccounts.trust``)."""
+    return [account for account in list_accounts() if account.agent == agent]
+
+
 def _claude_code_accounts() -> list[ClaudeAccount]:
-    """:func:`list_accounts`' Claude Code accounts: the only ones folder trust and
-    ``settings.json`` are shared between (``core.claude_sharing`` reads ``.claude.json``)."""
-    return [account for account in list_accounts() if account.agent == AGENT]
+    """:func:`list_accounts`' Claude Code accounts: the only ones ``settings.json`` is
+    shared between (the plain claude's)."""
+    return _agent_accounts(AGENT)
 
 
 def _account_of_env(
-    env: Mapping[str, str], accounts: Sequence[ClaudeAccount]
+    env: Mapping[str, str], accounts: Sequence[ClaudeAccount], agent: str = AGENT
 ) -> ClaudeAccount | None:
-    """The account whose ``.claude.json`` a Claude Code started with ``env`` reads, if ours."""
+    """The account whose home ``agent`` started with ``env`` reads, if ours: for Claude Code,
+    by the ``.claude.json`` it reads (the plain one's is beside its directory)."""
+    if agent != AGENT:
+        home = core.launched_home(agent, env)
+        return next((one for one in accounts if _same_path(one.config_dir, home)), None)
     config = env.get(core.CONFIG_DIR_VAR, "").strip()
     wanted = (
         paths.expand_user(Path(config)) / ".claude.json"
@@ -2467,32 +2477,41 @@ def _same_path(a: Path, b: Path) -> bool:
     return os.path.realpath(a) == os.path.realpath(b)
 
 
+def _decided(records: Mapping[str, bool], scope: sharing.TrustScope) -> bool:
+    """Whether an entry of ``records`` decides ``scope``'s folder: trusted, or the human's no
+    on that account (Codex's ``untrusted``), which no share overrides."""
+    return any(key in records for key in scope.covering)
+
+
 def _share_trust_into(
-    target: ClaudeAccount, scope: sharing.TrustScope, accounts: Sequence[ClaudeAccount]
+    target: ClaudeAccount,
+    scope: sharing.TrustScope,
+    accounts: Sequence[ClaudeAccount],
+    trust: FolderTrust,
 ) -> list[str]:
     """Copy an entry of ``scope`` into ``target`` from the first account with one."""
     name = core.label(target)
     try:
-        own = sharing.read_claude_json(core.claude_json_path(target))
+        own = trust.read(target)
     except sharing.NotStartedYet:
         return []  # its first run asks for a login before any folder
     except sharing.SharingError as exc:
-        return [_trust_not_shared(name, scope, exc)]
-    if sharing.trusted_by(own, scope) is not None:
+        return [_trust_not_shared(target, scope, exc)]
+    if _decided(own, scope):
         return []
     for other in accounts:
         if other.slot == target.slot:
             continue
         try:
-            key = sharing.trusted_by(sharing.read_claude_json(core.claude_json_path(other)), scope)
+            key = trusted_by(trust.read(other), scope)
         except sharing.SharingError:
             continue
         if key is None:
             continue
         try:
-            sharing.grant_trust(core.claude_json_path(target), key)
+            trust.grant(target, key)
         except sharing.SharingError as exc:
-            return [_trust_not_shared(name, scope, exc)]
+            return [_trust_not_shared(target, scope, exc)]
         return [SharedNote(f"{key} is trusted on {core.label(other)} — now on {name} too")]
     return []
 
@@ -2506,60 +2525,92 @@ def trust_command(folder: Path | None) -> str:
     return install_route.command_line(["aisquare", "accounts", "trust", str(folder)])
 
 
-def _trust_not_shared(name: str, scope: sharing.TrustScope, exc: Exception) -> str:
+def _trust_not_shared(target: ClaudeAccount, scope: sharing.TrustScope, exc: Exception) -> str:
     return (
-        f"folder trust could not be shared into {name}: {exc} — approve Claude Code's "
-        f"question there once, or `{trust_command(scope.folder)}`"
+        f"folder trust could not be shared into {core.label(target)}: {exc} — approve "
+        f"{core.agent_label(target.agent)}'s question there once, or "
+        f"`{trust_command(scope.folder)}`"
     )
+
+
+def _trusting_agents() -> list[tuple[str, FolderTrust]]:
+    """Every agent with account slots that records folder trust, with its records' slot."""
+    return [
+        (agent, trust)
+        for agent in core.account_agents()
+        if (trust := core.kind(agent).trust) is not None
+    ]
 
 
 def trust_everywhere(folder: Path) -> tuple[sharing.TrustScope, list[TrustChange]]:
     """Trust ``folder`` on every account at once — ``aisquare accounts trust <dir>``.
 
-    The entry written is the one Claude Code's own yes there would write (the canonical
-    repository root, else the folder: :attr:`~core.claude_sharing.TrustScope.key`). An
-    account any entry already trusts it on is left as it is. The human's own command, so
+    Each agent's accounts in its own file (``AgentAccounts.trust``). The entry written is
+    the one the agent's own yes there would write (the canonical repository root, else the
+    folder: :attr:`~core.claude_sharing.TrustScope.key`). An account any entry already
+    trusts it on is left as it is; one whose entry says no to it (Codex's ``untrusted``) is
+    left too, and reported, as that is the human's to change. The human's own command, so
     ``[accounts] share_trust`` is not consulted.
     """
-    scope = sharing.trust_scope(folder)
+    base = sharing.trust_scope(folder)
     changes: list[TrustChange] = []
-    for account in _claude_code_accounts():
-        path = core.claude_json_path(account)
-        try:
-            if sharing.trusted_by(sharing.read_claude_json(path), scope) is not None:
-                changes.append(TrustChange(account, "already"))
+    for agent, trust in _trusting_agents():
+        scope = trust.scope(base)
+        for account in _agent_accounts(agent):
+            try:
+                records = trust.read(account)
+                if trusted_by(records, scope) is not None:
+                    changes.append(TrustChange(account, "already"))
+                    continue
+                if _decided(records, scope):
+                    said = next(key for key in scope.covering if key in records)
+                    raise sharing.SharingError(
+                        f"its {trust.file_name} says not to trust {said} — change it there"
+                    )
+                written = trust.grant(account, scope.key)
+            except sharing.NotStartedYet as exc:
+                changes.append(TrustChange(account, "skipped", reason=str(exc)))
                 continue
-            written = sharing.grant_trust(path, scope.key)
-        except sharing.NotStartedYet as exc:
-            changes.append(TrustChange(account, "skipped", reason=str(exc)))
-            continue
-        except sharing.SharingError as exc:
-            changes.append(TrustChange(account, "failed", reason=str(exc)))
-            continue
-        changes.append(TrustChange(account, "trusted", folders=tuple(written)))
-    return scope, changes
+            except sharing.SharingError as exc:
+                changes.append(TrustChange(account, "failed", reason=str(exc)))
+                continue
+            changes.append(TrustChange(account, "trusted", folders=tuple(written)))
+    return base, changes
 
 
 def sync_trust() -> tuple[list[TrustChange], int]:
-    """Copy every folder any account trusts into every account — ``accounts trust --sync``.
+    """Copy every folder an account trusts into every account of its agent —
+    ``accounts trust --sync``.
 
     Folders that no longer exist are not copied; their count comes back beside the
-    changes. An account that another entry already trusts a folder on is not given its
-    entry too. One write per account.
+    changes. An account whose own entry already decides a folder (trusted, or the human's
+    no) is not given another. One write per account.
     """
-    accounts = _claude_code_accounts()
-    read: dict[int, dict[str, Any] | sharing.SharingError] = {}
+    changes: list[TrustChange] = []
+    gone: set[str] = set()
+    for agent, trust in _trusting_agents():
+        made, missing = _sync_agent(_agent_accounts(agent), trust)
+        changes += made
+        gone |= missing
+    return changes, len(gone)
+
+
+def _sync_agent(
+    accounts: Sequence[ClaudeAccount], trust: FolderTrust
+) -> tuple[list[TrustChange], set[str]]:
+    """:func:`sync_trust` among one agent's accounts: the changes, and the folders gone."""
+    read: dict[int, dict[str, bool] | sharing.SharingError] = {}
     every: dict[str, None] = {}
     for account in accounts:
         try:
-            data = sharing.read_claude_json(core.claude_json_path(account))
+            records = trust.read(account)
         except sharing.SharingError as exc:
             read[account.slot] = exc
             continue
-        read[account.slot] = data
-        every.update(dict.fromkeys(sharing.trusted_folders(data)))
+        read[account.slot] = records
+        every.update(dict.fromkeys(key for key, yes in records.items() if yes))
     folders = [key for key in every if os.path.isdir(key)]
-    scopes = [(key, sharing.trust_scope(Path(key))) for key in folders]
+    scopes = [(key, trust.scope(sharing.trust_scope(Path(key)))) for key in folders]
     changes: list[TrustChange] = []
     for account in accounts:
         found = read[account.slot]
@@ -2569,17 +2620,17 @@ def sync_trust() -> tuple[list[TrustChange], int]:
             )
             changes.append(TrustChange(account, outcome, reason=str(found)))
             continue
-        missing = [key for key, scope in scopes if sharing.trusted_by(found, scope) is None]
+        missing = [key for key, scope in scopes if not _decided(found, scope)]
         if not missing:
             changes.append(TrustChange(account, "already"))
             continue
         try:
-            written = sharing.grant_trust(core.claude_json_path(account), *missing)
+            written = trust.grant(account, *missing)
         except sharing.SharingError as exc:
             changes.append(TrustChange(account, "failed", reason=str(exc)))
             continue
         changes.append(TrustChange(account, "trusted", folders=tuple(written)))
-    return changes, len(every) - len(folders)
+    return changes, set(every) - set(folders)
 
 
 def settings_source() -> Path:

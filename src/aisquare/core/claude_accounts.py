@@ -72,6 +72,7 @@ tool's own, created here and nowhere else; a role bound with ``team bind
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -86,7 +87,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from aisquare.core import paths
+from aisquare.core import claude_sharing, paths
 from aisquare.core.names import name_flaw, name_key
 from aisquare.core.version import __version__
 from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage
@@ -208,6 +209,14 @@ def plain_home(agent: str, env: Mapping[str, str] | None = None) -> Path:
     if agent == AGENT:
         return default_config_dir(env)
     return kind(agent).plain_home(_home(), plain_environment(env, agent=agent))
+
+
+def launched_home(agent: str, env: Mapping[str, str]) -> Path:
+    """The home ``agent``'s binary started with ``env`` itself reads: its variable there
+    (``CODEX_HOME``), else its default under the user's home. Not :func:`plain_home`, which
+    reads the shell's own variables back from under a slot."""
+    accounts = kind(agent)
+    return accounts.plain_home(_home(), {accounts.home_env: env.get(accounts.home_env, "")})
 
 
 def _managed(slot: int, agent: str = AGENT) -> ClaudeAccount:
@@ -621,6 +630,19 @@ class StoredLogin:
 
     credentials: ClaudeCredentials | None
     unreadable: str | None = None
+
+
+class LoginUnreadable(Exception):
+    """The store an account's login is kept in would not say (a locked or refusing
+    Keychain): raised by an accounts slot's ``login_fingerprint``
+    (``agent_adapters.types.AgentAccounts``), with the reason."""
+
+
+def login_digest(creds: ClaudeCredentials) -> str:
+    """A digest of a Claude Code login (its token and expiry), never the token: the accounts
+    slot's ``login_fingerprint``, and the usage cache's key."""
+    stamp = creds.expires_at.isoformat() if creds.expires_at is not None else ""
+    return hashlib.sha256(f"{creds.access_token}\0{stamp}".encode()).hexdigest()
 
 
 def stored_login(account: ClaudeAccount, *, fresh: bool = False) -> StoredLogin:
@@ -1377,6 +1399,23 @@ def endpoint_usage(
     )
 
 
+class ClaudeFolderTrust:
+    """Claude Code's folder trust: ``projects["<folder>"].hasTrustDialogAccepted`` in each
+    account's ``.claude.json``, under its own lock (``core.claude_sharing``)."""
+
+    file_name = ".claude.json"
+
+    def scope(self, base: claude_sharing.TrustScope) -> claude_sharing.TrustScope:
+        return base  # core.claude_sharing's rules are Claude Code's
+
+    def read(self, account: ClaudeAccount) -> dict[str, bool]:
+        data = claude_sharing.read_claude_json(claude_json_path(account))
+        return dict.fromkeys(claude_sharing.trusted_folders(data), True)
+
+    def grant(self, account: ClaudeAccount, *keys: str) -> list[str]:
+        return claude_sharing.grant_trust(claude_json_path(account), *keys)
+
+
 class ClaudeCodeAccounts:
     """Claude Code's answers to the accounts slot: the functions above, as they were."""
 
@@ -1426,3 +1465,11 @@ class ClaudeCodeAccounts:
     def failed_turn(self, path: Path) -> FailedTurn | None:
         # And every other failed turn, through the same hook.
         return None
+
+    def login_fingerprint(self, account: ClaudeAccount) -> str | None:
+        login = stored_login(account, fresh=True)
+        if login.unreadable is not None:
+            raise LoginUnreadable(login.unreadable)
+        return login_digest(login.credentials) if login.credentials is not None else None
+
+    trust = ClaudeFolderTrust()

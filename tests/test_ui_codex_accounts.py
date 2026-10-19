@@ -441,6 +441,54 @@ def test_sign_in_on_an_existing_codex_slot_runs_codex_login_there_and_keeps_the_
     assert abandoned == [] and account.config_dir.is_dir()  # an existing slot is never discarded
 
 
+def test_log_in_over_a_codex_slots_stale_login_waits_for_codex_login_to_replace_it(
+    windows: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SCOPE #113, 0.8.1 item 11: *Log in* on a Codex row runs ``codex login`` over the
+    auth.json still there, whose tokens already read signed in, so the window closed as
+    landed at its first poll, before anyone had signed in. It is opened over the login's
+    fingerprint and waits for new tokens."""
+    completed: list[int] = []
+
+    def complete(account: ClaudeAccount) -> ClaudeAccountStatus:
+        completed.append(account.slot)
+        return accounts_service.describe(account)
+
+    monkeypatch.setattr(accounts_service, "complete_sign_in", complete)
+    account = core.create_account(CODEX)
+    _sign_in_codex(account.config_dir, "old@example.com")
+    stale = accounts_service.login_fingerprint(account)
+    overview = _real_overview()
+
+    async def go(pilot: Pilot[None]) -> tuple[str | None, bool, bool]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        view.begin_claude_sign_in(account.slot)  # what *Log in* on its row does
+        await settle_until(app, lambda: view.login is not None)
+        assert view.login is not None
+        since = view.login.since
+        view._poll_login()  # the stale tokens: not a landing
+        await pilot.pause()
+        await settle(app)
+        waited = view.login is not None
+        auth = account.config_dir / "auth.json"
+        data = json.loads(auth.read_text(encoding="utf-8"))
+        data["tokens"]["access_token"] = "fresh-access"  # what `codex login` writes
+        auth.write_text(json.dumps(data), encoding="utf-8")
+        view._poll_login()
+        await pilot.pause()
+        await settle(app)
+        return since, waited, view.login is None
+
+    monkeypatch.setattr(TmuxServer, "pane_facts", lambda self, pane: _Alive())
+    since, waited, closed = drive(go, overview=overview)
+    assert stale is not None and since == stale
+    assert waited, "the login it was opened over did not land"
+    assert closed and completed == [account.slot]
+    [window] = windows
+    assert window["command"][-4:] == ["accounts", "run", str(account.slot), "login"]
+
+
 def test_default_on_a_codex_row_sets_the_codex_default_and_leaves_claudes_alone() -> None:
     account = core.create_account(CODEX)
     _sign_in_codex(account.config_dir, "codex@example.com")

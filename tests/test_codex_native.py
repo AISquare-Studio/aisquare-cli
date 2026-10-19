@@ -1409,7 +1409,7 @@ def test_real_codex_at_its_usage_limit_reaches_the_board_with_no_stop(
     """SMOKE3 (tsk_01m4yj1n37f9): a fleet Codex told a line its account cannot pay for fires
     its prompt's hook and no other, and its row read working for good. The fleet's read of
     the row finds the failed turn at the end of its rollout: ``limited`` with the full
-    window's reset, the board told once, the hand-over ``on_limit = "switch"`` asks for.
+    window's reset, the board told once, and no hand-over with no other account to go to.
 
     Past the first turn, at 100 %, Codex offers a cheaper model in a dialog (``Switch to
     gpt-6-luna for lower credit usage? 1/2/3``) while its hooks say waiting, where the Enter
@@ -1545,8 +1545,11 @@ def test_real_codex_at_its_usage_limit_reaches_the_board_with_no_stop(
             with store_session() as store:
                 events = store.recent_events(project.id, limit=20)
             assert [event.kind for event in events].count("limited") == 1, events
-            [argv] = detached
-            assert argv[-4:-2] == ["hand-over", session.id] and argv[-1] == "session limit"
+            # One account, the shell's: since 0.8.1 a limit with nowhere to go starts no
+            # hand-over worker (`claude_accounts.somewhere_to_hand_over`), which could only
+            # say "not switched". The hand-over to a second Codex slot is
+            # tests/test_codex_accounts.py's.
+            assert detached == []
         finally:
             if srv.has_session(fleet.session_name(fleet.ensure_codename(project).codename or "")):
                 srv.run("kill-server")

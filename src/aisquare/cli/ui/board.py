@@ -34,6 +34,7 @@ long as the session lives.
 from __future__ import annotations
 
 import contextlib
+import sys
 import time
 from collections.abc import Mapping
 from datetime import datetime
@@ -107,6 +108,18 @@ BOARD_KEYS: tuple[tuple[str, str], ...] = (
     ("lines", "drag a line to resize; double-click resets it"),
 )
 """The board's own keys, as the help screens list them."""
+MAC_COPY_KEY = ("v  c", "freeze the feed to select text · c copies (not ⌘C)")
+"""The copy row on macOS, where a copy key left unnamed reads as ⌘C: Terminal.app and
+iTerm2 keep ⌘C as their own Copy, so it never reaches the board."""
+
+
+def board_keys() -> tuple[tuple[str, str], ...]:
+    """:data:`BOARD_KEYS` as this machine's help reads them: on macOS with :data:`MAC_COPY_KEY`."""
+    if sys.platform != "darwin":
+        return BOARD_KEYS
+    return tuple(
+        MAC_COPY_KEY if key == MAC_COPY_KEY[0] else (key, what) for key, what in BOARD_KEYS
+    )
 
 
 def status_icon(status: str, *, waiting: bool = False) -> Text:
@@ -118,7 +131,7 @@ def status_icon(status: str, *, waiting: bool = False) -> Text:
 def board_help() -> Text:
     """The board's keys and the icon legend, for a help screen."""
     text = Text()
-    for key, what in BOARD_KEYS:
+    for key, what in board_keys():
         text.append(f"  {key:<11}", style="bold cyan")
         text.append(f" {what}\n")
     text.append("\n  task icons\n", style="bold")

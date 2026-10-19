@@ -247,6 +247,14 @@ class HelpScreen(ModalScreen[None]):
         ("question_mark", "close_help", "close"),
     ]
     BOARD_HEADING: ClassVar[str] = "Board (a project's Board tab, and aisquare board -w)"
+    MAC_COPY_KEYS: ClassVar[tuple[tuple[str, str], ...]] = (
+        ("ctrl+c", "copy a pane's highlight again; ⌘C stays the terminal's"),
+        ("⌘V", "paste into the focused pane or field"),
+        ("⌥ drag", "iTerm2: select with the terminal itself, then ⌘C"),
+        ("fn drag", "Terminal.app, on most Macs: the same"),
+    )
+    """On macOS, after ``drag``: the copy and paste keys a Mac has. Terminal.app and iTerm2
+    keep ⌘C as their own Copy, so it never reaches asq; ⌘V does, as a bracketed paste."""
 
     def __init__(self, escape_key: str, *, at_board: bool = False, capturing: bool = False) -> None:
         super().__init__()
@@ -255,6 +263,11 @@ class HelpScreen(ModalScreen[None]):
         self.capturing = capturing
 
     def compose(self) -> ComposeResult:
+        with VerticalScroll(id="helpbox"):
+            yield Static(self.keys_text())
+
+    def keys_text(self) -> Text:
+        """What the help says: the fleet's keys, the board's, and the legends."""
         text = Text()
         text.append("aisquare fleet — keys\n\n", style="bold")
         for key, what in (
@@ -272,6 +285,7 @@ class HelpScreen(ModalScreen[None]):
             (self.escape_key.upper(), "hand focus from an agent's pane back to the sidebar"),
             ("wheel", "scroll an agent pane; shift/alt+PgUp/PgDn too, shift+Home/End"),
             ("drag", "select text in a pane (double-click: a word) — copied on release"),
+            *(self.MAC_COPY_KEYS if sys.platform == "darwin" else ()),
             ("divider", "drag the line beside the sidebar to resize it; double-click puts it back"),
             ("> < =", "from the sidebar: widen, narrow, reset the divider"),
             ("t", "themes (applied live, autosaved)"),
@@ -326,8 +340,7 @@ class HelpScreen(ModalScreen[None]):
         text.append(" and ⚠ — accounts that need a login (signed out, token expired or refused);\n")
         text.append("     the dot is red when every enabled account needs one\n")
         text.append("\nEsc closes this", style="dim")
-        with VerticalScroll(id="helpbox"):
-            yield Static(text)
+        return text
 
     def on_mount(self) -> None:
         if self.at_board:

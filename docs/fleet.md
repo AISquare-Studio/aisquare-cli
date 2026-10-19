@@ -1524,7 +1524,8 @@ standing highlight again. ⌘V does reach `asq`, as a bracketed paste, and
 pastes into the focused pane or field. To select with the terminal itself while
 `asq` has the mouse, hold Option while dragging in iTerm2, or Fn in
 Terminal.app on most Macs (users report it; Apple does not document it); then
-⌘C copies that selection as it would anywhere else.
+⌘C copies that selection as it would anywhere else. On a Mac the `?` screen
+lists these keys, and the board's copy row names `c`, not ⌘C.
 
 The alt chord's limits are the terminal's and Textual's key parser's, not this
 UI's, and they were measured against the parser (`tests/test_keys.py` feeds it

@@ -24,6 +24,7 @@ from textual.widgets import Button, Static
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli import fleet as fleet_cli
+from aisquare.cli.ui.click_guard import GuardedButton
 from aisquare.cli.ui.sidebar import ROLE_ICON, STATE_CHIP
 from aisquare.cli.ui.terminal import PANE_GONE, TerminalPane
 from aisquare.core.tmux import TmuxServer
@@ -132,7 +133,9 @@ class AgentView(Vertical):
     what repaints, never an optimistic guess. A restart resumes the agent's own
     session when its transcript is on disk, so the manager comes back knowing
     its intake and its coders; the shell then shows the new row if this view is
-    still the one on screen (:class:`AgentRestarted`).
+    still the one on screen (:class:`AgentRestarted`). Both buttons ignore a mouse
+    press that lands just as the view came up or moved under the pointer
+    (:class:`~aisquare.cli.ui.click_guard.GuardedButton`).
     """
 
     DEFAULT_CSS = """
@@ -196,8 +199,10 @@ class AgentView(Vertical):
     def compose(self) -> ComposeResult:
         with Horizontal(id="agent-bar"):
             yield Static(header_text(self.status, self._labels), id="agent-header")
-            yield Button("Stop", id="agent-stop", compact=True)
-            yield Button("Restart", id="agent-restart", compact=True, variant="primary")
+            # Guarded (``click_guard``): a click that was aimed at what this view replaced
+            # must not stop or restart the agent it shows instead.
+            yield GuardedButton("Stop", id="agent-stop", compact=True)
+            yield GuardedButton("Restart", id="agent-restart", compact=True, variant="primary")
         yield TerminalPane(
             shown_pane(self.status),
             server=self.server,

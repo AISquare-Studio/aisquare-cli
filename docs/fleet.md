@@ -1684,7 +1684,10 @@ shows: once its label has passed to a replacement (the manager restarted that
 coder), they say so and leave the replacement alone. A restart from the view
 moves you to the new row only if that view is still on screen when the restart
 ends. If you have opened another agent meanwhile, you stay there, and a toast
-names the restart and its project.
+names the restart and its project. Both buttons ignore a mouse click that
+lands within a second of the view coming up, moving or a dialog over it
+closing, and say so once: that click was aimed at what was there before. Enter
+on the focused button is never ignored.
 
 **A panel reading "No changes this session" sits beside an agent's conversation
 and will not go away.** That is Claude Code's own diff panel (fullscreen

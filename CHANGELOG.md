@@ -35,6 +35,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`✓ restarted manager (alpha) — resumed its session`). A row replaced from
   outside the view (`fleet restart` or `fleet switch` in a shell, the hand-over
   on a usage limit, the phone) never moved the view, and still doesn't.
+- Stop and Restart in an agent's view ignore a mouse click that lands within a
+  second of the view coming up, moving, or a dialog over it closing. Such a
+  click was aimed at whatever was there before, and it no longer stops or
+  restarts the agent now under the pointer. The first ignored click says so
+  (`ignored a click on Restart — the view had just changed under the
+  pointer`). Click again a moment later, or press Enter on the focused button:
+  a key is never ignored.
 
 ### Changed
 - On macOS the help screens name the copy and paste keys a Mac has. The board's

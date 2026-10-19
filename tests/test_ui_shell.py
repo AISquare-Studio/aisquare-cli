@@ -46,6 +46,7 @@ from aisquare.cli.ui import app as app_mod
 from aisquare.cli.ui import app as ui_app
 from aisquare.cli.ui.app import SIDEBAR_WIDTH_KEY, FleetApp, HelpScreen, Panes
 from aisquare.cli.ui.autosave import Autosave
+from aisquare.cli.ui.click_guard import GuardedButton
 from aisquare.cli.ui.divider import WIDEST_ASK, Divider, cells
 from aisquare.cli.ui.groups import DropProject, GroupPicker
 from aisquare.cli.ui.remote_control import RemoteController
@@ -90,6 +91,7 @@ from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, FleetAgentStat
 from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import project_groups as groups_service
+from tests import guard_clock
 from tests.pane_harness import FakePane, FakeTmux, asks_a_server, move, press, release, socket_of
 from tests.ui_workers import settle_page
 
@@ -3834,6 +3836,7 @@ def test_restart_from_the_agent_view_selects_the_new_row_in_the_shell(
         )  # fmt: skip
 
     monkeypatch.setattr(fleet_service, "restart", fake_restart)
+    clock = guard_clock.install(monkeypatch)
 
     async def go(
         pilot: Pilot[None],
@@ -3844,6 +3847,7 @@ def test_restart_from_the_agent_view_selects_the_new_row_in_the_shell(
         view = app.current_view()
         assert isinstance(view, AgentView)
         stop_shown = view.query_one("#agent-stop", Button).display
+        clock.step()  # the 💤 row read, then Restart: past the click guard's window
         await pilot.click("#agent-restart")
         await settle(app)
         await pilot.pause()
@@ -4016,6 +4020,100 @@ def test_a_row_replaced_outside_the_ui_moves_nothing_of_the_users(
 
     before, after = drive(go)
     assert after == before
+
+
+def _acting_fleet(
+    monkeypatch: pytest.MonkeyPatch, script: Script, one: FleetAgentStatus
+) -> list[tuple[str, str]]:
+    """Fake ``restart`` and ``stop`` that record what they were asked to act on."""
+    acted: list[tuple[str, str]] = []
+
+    def fake_restart(
+        project: ProjectInfo, label: str, **kw: object
+    ) -> fleet_service.RestartReceipt:
+        acted.append(("restart", project.id))
+        started = _replacement(one, "agt_b_new")
+        script["prj_b"] = [started]
+        return fleet_service.RestartReceipt(
+            replaced=one.agent, started=started.agent, resumed=True, was_running=True,
+            tmux_session="asq-brave-lynx",
+        )  # fmt: skip
+
+    def fake_stop(project: ProjectInfo, label: str, **kw: object) -> fleet_service.StopReceipt:
+        acted.append(("stop", project.id))
+        return fleet_service.StopReceipt(one.agent, [])
+
+    monkeypatch.setattr(fleet_service, "restart", fake_restart)
+    monkeypatch.setattr(fleet_service, "stop", fake_stop)
+    return acted
+
+
+def test_a_click_on_stop_or_restart_as_the_view_switches_in_acts_on_nothing(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """User feedback (2026-10-19), the other half: a view that came up under a resting
+    pointer took the click aimed at the one before it, on its Stop or Restart. Within
+    CLICK_GUARD of the view switching in, a click on either starts no worker and says
+    so; the same click after it acts."""
+    seed(tmp_path, ("prj_a", "alpha", "amber-otter"), ("prj_b", "beta", "brave-lynx"))
+    script["prj_a"] = [status("prj_a", "manager", "manager", "working")]
+    one = status("prj_b", "manager", "manager", "working")
+    script["prj_b"] = [one]
+    acted = _acting_fleet(monkeypatch, script, one)
+    clock = guard_clock.install(monkeypatch)
+
+    async def go(pilot: Pilot[None]) -> tuple[list[tuple[str, str]], list[str]]:
+        app = fleet_app(pilot)
+        await pilot.click(row_for(app, "agt_a_manager"))
+        await settle(app)
+        clock.step()  # a while on manager 0's pane
+        await pilot.click(row_for(app, "agt_b_manager"))
+        await settle(app)
+        view = app.current_view()
+        assert isinstance(view, AgentView) and view.status.agent.id == "agt_b_manager"
+        await pilot.click(view.query_one("#agent-restart", Button))
+        await pilot.click(view.query_one("#agent-stop", Button))
+        toasts = await _toast_list(app)
+        ignored = list(acted)
+        clock.step()
+        await pilot.click(view.query_one("#agent-restart", Button))
+        await settle(app)
+        return ignored, toasts
+
+    ignored, toasts = drive(go, notifications=True)
+    assert ignored == [], "a click as the view switched in restarted or stopped an agent"
+    for verb in ("Restart", "Stop"):
+        notice = f"ignored a click on {verb} — the view had just changed under the pointer"
+        assert toasts.count(notice) == 1, toasts
+    assert acted == [("restart", "prj_b")], "the click after the window restarts as it did"
+
+
+def test_enter_on_a_focused_restart_is_not_guarded(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A key is a deliberate gesture: Enter on the focused Restart acts at once, however
+    recently the view came up."""
+    seed(tmp_path, ("prj_b", "beta", "brave-lynx"))
+    one = status("prj_b", "manager", "manager", "working")
+    script["prj_b"] = [one]
+    acted = _acting_fleet(monkeypatch, script, one)
+    guard_clock.install(monkeypatch)
+
+    async def go(pilot: Pilot[None]) -> bool:
+        app = fleet_app(pilot)
+        await pilot.click(row_for(app, "agt_b_manager"))
+        await settle(app)
+        view = app.current_view()
+        assert isinstance(view, AgentView)
+        restart = view.query_one("#agent-restart", GuardedButton)
+        guarding = restart.guarding
+        restart.focus()
+        await pilot.press("enter")
+        await settle(app)
+        return guarding
+
+    assert drive(go) is True, "the window was open when Enter was pressed"
+    assert acted == [("restart", "prj_b")]
 
 
 def test_the_sidebar_hides_captured_directories_until_a_shows_them(

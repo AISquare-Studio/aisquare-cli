@@ -38,11 +38,14 @@ from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSessi
 from aisquare.services import fleet as fleet_service
 from aisquare.services import install_route
 from aisquare.services.fleet import (
+    BulkReceipt,
+    BulkReport,
     FleetError,
     FleetUnavailable,
     NoSuchAgent,
     NoSuchProject,
     ReapReport,
+    RestartReceipt,
     ShutdownPlan,
     ShutdownReport,
     ShutdownRow,
@@ -51,6 +54,8 @@ from aisquare.services.fleet import (
     TellResult,
     Typed,
 )
+from tests.cli_tree import NEEDED_UNLESS, root_command
+from tests.rendered import ANSI
 from tests.rendered import plain as _plain
 
 NOW = datetime(2026, 8, 28, 12, 0, tzinfo=UTC)
@@ -898,6 +903,290 @@ def test_stop_says_when_the_release_was_refused(
     assert json.loads(as_json.stdout)["release_failed"] == refused
 
 
+# ── restart --all / stop --all ───────────────────────────────────────────────
+
+OTHER = ProjectInfo(id="prj_03ghi", root=Path("/home/me/work/web"), codename="ruby-fox")
+
+
+def _bulk(monkeypatch: pytest.MonkeyPatch, report: BulkReport) -> Seen:
+    """``fleet_service.bulk`` handing each of ``report``'s receipts to ``on_receipt`` as it
+    goes, as the real one does, then returning the report; the call is recorded."""
+    seen = Seen()
+
+    def fake(*args: Any, **kwargs: Any) -> BulkReport:
+        seen.calls.append((args, dict(kwargs)))
+        on_receipt = kwargs.get("on_receipt")
+        for receipt in report.receipts:
+            if on_receipt is not None:
+                on_receipt(receipt)
+        return report
+
+    monkeypatch.setattr("aisquare.cli.fleet.fleet_service.bulk", fake)
+    return seen
+
+
+def _lines(stdout: str) -> list[str]:
+    """``stdout``'s lines without escape codes, their columns kept (not :func:`_plain`)."""
+    return [line.rstrip() for line in ANSI.sub("", stdout).splitlines()]
+
+
+def _restarted(agent: FleetAgent, project: ProjectInfo = PROJECT) -> BulkReceipt:
+    started = agent.model_copy(update={"id": f"{agent.id}2", "pane_id": "%20"})
+    receipt = RestartReceipt(
+        replaced=agent,
+        started=started,
+        resumed=True,
+        was_running=True,
+        tmux_session=SESSION,
+        notes=["launch replayed"],
+    )
+    return BulkReceipt(project, agent, "done", result=receipt)
+
+
+def _mixed() -> BulkReport:
+    """Two projects: a manager restarted and a coder whose task is done in one, a coder
+    that failed in the other."""
+    web_coder = _agent("coder-web", project=OTHER)
+    return BulkReport(
+        "restart",
+        False,
+        (
+            _restarted(_agent("manager", "manager")),
+            BulkReceipt(PROJECT, _agent("coder-auth"), "skipped", "task is done"),
+            BulkReceipt(OTHER, web_coder, "failed", "cannot restart 'coder-web': tmux said no"),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("argv", "action", "managers_only", "acting"),
+    [
+        (["fleet", "restart", "--all"], "restart", False, None),
+        (["fleet", "restart", "--all", "--managers", "--as", "sess-1"], "restart", True, "sess-1"),
+        (["fleet", "stop", "--all"], "stop", False, None),
+        (["fleet", "stop", "--all", "--managers"], "stop", True, None),
+    ],
+    ids=lambda value: " ".join(value) if isinstance(value, list) else None,
+)
+def test_restart_and_stop_all_ask_the_one_bulk_service(
+    runner: CliRunner,
+    resolved: Seen,
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+    action: str,
+    managers_only: bool,
+    acting: str | None,
+) -> None:
+    bulk = _bulk(monkeypatch, BulkReport(action, managers_only, ()))  # type: ignore[arg-type]
+    _install(monkeypatch, action, RuntimeError("the one-agent path must not be called"))
+
+    result = runner.invoke(app, argv)
+
+    assert result.exit_code == 0, result.output
+    assert bulk.args == (action,)
+    assert bulk.kwargs["managers_only"] is managers_only
+    assert bulk.kwargs["acting_session"] == acting
+    assert resolved.calls == [], "every project: no --project is resolved"
+
+
+def test_all_prints_one_line_per_agent_by_project_then_the_count_and_exits_1_on_a_failure(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _bulk(monkeypatch, _mixed())
+
+    result = runner.invoke(app, ["fleet", "restart", "--all"])
+
+    assert result.exit_code == 1, "one agent failed"
+    assert _lines(result.stdout) == [
+        "api",
+        f"  ✓ {'manager':<24} {'manager':<10} stopped and restarted — resumed its session",
+        f"  · {'coder-auth':<24} {'coder':<10} skipped — task is done",
+        "web",
+        f"  ✗ {'coder-web':<24} {'coder':<10} failed — cannot restart 'coder-web': tmux said no",
+        "restarted 1 · skipped 1 · failed 1",
+    ]
+
+
+def test_all_exits_0_when_nothing_failed(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stopped = StopReceipt(_agent("coder-auth", ended=True, exit_status=0), [_released_task()])
+    _bulk(
+        monkeypatch,
+        BulkReport(
+            "stop",
+            False,
+            (
+                BulkReceipt(PROJECT, _agent("coder-auth"), "done", result=stopped),
+                BulkReceipt(PROJECT, _agent("manager", "manager"), "skipped", "this session"),
+            ),
+        ),
+    )
+
+    result = runner.invoke(app, ["fleet", "stop", "--all"])
+
+    assert result.exit_code == 0, result.output
+    assert _lines(result.stdout) == [
+        "api",
+        f"  ✓ {'coder-auth':<24} {'coder':<10} stopped",
+        f"  · {'manager':<24} {'manager':<10} skipped — this session",
+        "stopped 1 · skipped 1 · failed 0",
+        "  🔓 1 claimed task(s) released back to the board",
+    ]
+
+
+def test_a_stop_whose_claims_stayed_behind_exits_1_as_fleet_stop_does(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stuck = StopReceipt(_agent("coder-auth", ended=True), [], release_failed="database is locked")
+    report = BulkReport("stop", False, (BulkReceipt(PROJECT, _agent(), "done", result=stuck),))
+    _bulk(monkeypatch, report)
+
+    result = runner.invoke(app, ["fleet", "stop", "--all"])
+
+    assert result.exit_code == 1
+    assert "⚠ claims: database is locked" in _plain(result.stdout)
+
+
+def test_all_json_gives_every_receipt_and_the_same_exit_status(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bulk = _bulk(monkeypatch, _mixed())
+
+    result = runner.invoke(app, ["--json", "fleet", "restart", "--all"])
+
+    assert result.exit_code == 1
+    assert bulk.kwargs["on_receipt"] is None, "JSON is one object at the end, nothing before"
+    payload = json.loads(result.stdout)
+    assert set(payload) == {"action", "managers_only", "receipts", "unread", "summary", "ok"}
+    assert payload["action"] == "restart" and payload["managers_only"] is False
+    assert payload["summary"] == {"done": 1, "skipped": 1, "failed": 1} and not payload["ok"]
+    done, skipped, failed = payload["receipts"]
+    assert done["project"] == {"id": PROJECT.id, "name": "api", "codename": "amber-otter"}
+    assert done["agent"]["id"] == "agt_manager" and done["outcome"] == "done"
+    assert done["started"]["id"] == "agt_manager2" and done["how"] == "resumed its session"
+    assert done["was_running"] is True and done["notes"] == ["launch replayed"]
+    assert (skipped["outcome"], skipped["why"]) == ("skipped", "task is done")
+    assert failed["project"]["name"] == "web" and failed["outcome"] == "failed"
+    assert failed["why"] == "cannot restart 'coder-web': tmux said no"
+
+
+def test_a_project_whose_agents_could_not_be_read_is_named_and_exits_1(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _bulk(monkeypatch, BulkReport("stop", False, (), unread=((OTHER, "the store is locked"),)))
+
+    result = runner.invoke(app, ["fleet", "stop", "--all"])
+
+    assert result.exit_code == 1
+    out = _plain(result.stdout)
+    assert "⚠ web: its agents could not be read — the store is locked" in out
+    assert "stopped 0 · skipped 0 · failed 0 · 1 project(s) not read" in out
+
+
+@pytest.mark.parametrize(
+    ("argv", "said"),
+    [
+        (["fleet", "restart", "--all", "--managers"], "nothing to restart: no manager is running"),
+        (["fleet", "stop", "--all"], "nothing to stop: no agent is running in any project"),
+    ],
+)
+def test_all_with_nothing_running_says_so(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch, argv: list[str], said: str
+) -> None:
+    _bulk(monkeypatch, BulkReport(argv[1], "--managers" in argv, ()))  # type: ignore[arg-type]
+
+    result = runner.invoke(app, argv)
+
+    assert result.exit_code == 0, result.output
+    assert said in _plain(result.stdout)
+
+
+@pytest.mark.parametrize(
+    ("argv", "said"),
+    [
+        (["fleet", "restart", "--all", "coder-1"], "--all and a label conflict"),
+        (["fleet", "stop", "coder-1", "--all"], "--all and a label conflict"),
+        (["fleet", "restart", "--all", "--project", "alpha"], "--all and --project conflict"),
+        (["fleet", "stop", "--all", "-P", "alpha"], "--all and --project conflict"),
+        (["fleet", "restart", "--managers"], "--managers goes with --all"),
+        (["fleet", "stop", "coder-1", "--managers"], "--managers goes with --all"),
+        (["fleet", "restart", "--all", "--fresh"], "--fresh is for one agent"),
+        (["fleet", "restart", "--all", "--permission-mode", "auto"], "--permission-mode is for"),
+        (["fleet", "stop", "--all", "--force"], "--force is for one agent"),
+        (["fleet", "stop"], "Missing argument 'label'"),
+        (["fleet", "restart"], "Missing argument 'label'"),
+    ],
+    ids=lambda value: " ".join(value) if isinstance(value, list) else None,
+)
+@pytest.mark.parametrize("as_json", [False, True], ids=["text", "json"])
+def test_the_usage_errors_of_all_are_refused_before_anything_is_asked(
+    runner: CliRunner,
+    resolved: Seen,
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+    said: str,
+    as_json: bool,
+) -> None:
+    services = [
+        _install(monkeypatch, name, RuntimeError("the service must not be called"))
+        for name in ("bulk", "restart", "stop")
+    ]
+
+    result = runner.invoke(app, ["--json", *argv] if as_json else argv)
+
+    assert result.exit_code == 2, result.output
+    if as_json:
+        payload = json.loads(result.stdout)
+        assert payload["error"] == "usage" and said in payload["message"]
+    else:
+        assert said in " ".join(_plain(result.output).replace("│", " ").split())
+    assert all(service.calls == [] for service in services)
+    assert resolved.calls == []
+
+
+@pytest.mark.parametrize("path", sorted(NEEDED_UNLESS), ids=" ".join)
+def test_an_argument_needed_unless_a_flag_stands_in_is_refused_without_either(
+    runner: CliRunner, path: tuple[str, ...]
+) -> None:
+    """``tests/cli_tree.NEEDED_UNLESS`` is what lets the sweeps run these commands' own
+    code; an entry the command no longer needs would fill a word it reads as something
+    else."""
+    argument, flag = NEEDED_UNLESS[path]
+    command = root_command().commands[path[0]].commands[path[1]]  # type: ignore[attr-defined]
+    param = next(p for p in command.params if p.name == argument)
+    assert not param.required and any(flag in p.opts for p in command.params)
+
+    result = runner.invoke(app, ["--json", *path])
+
+    assert result.exit_code == 2
+    assert json.loads(result.stdout)["message"] == f"Missing argument '{argument}'."
+
+
+def test_restart_and_stop_of_one_label_are_as_they_were(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bulk = _install(monkeypatch, "bulk", RuntimeError("--all was not asked"))
+    agent = _agent()
+    restart = _install(
+        monkeypatch,
+        "restart",
+        RestartReceipt(
+            replaced=agent, started=agent, resumed=True, was_running=False, tmux_session=SESSION
+        ),
+    )
+    stop = _install(monkeypatch, "stop", StopReceipt(_agent(ended=True), []))
+
+    assert runner.invoke(app, ["fleet", "restart", "coder-auth"]).exit_code == 0
+    assert runner.invoke(app, ["fleet", "stop", "coder-auth"]).exit_code == 0
+
+    assert restart.calls == [
+        ((PROJECT, "coder-auth"), {"fresh": False, "spawned_by": "user", "permission_mode": None})
+    ]
+    assert stop.calls == [((PROJECT, "coder-auth"), {"force": False})]
+    assert bulk.calls == []
+
+
 # ── shutdown ─────────────────────────────────────────────────────────────────
 
 
@@ -1603,6 +1892,8 @@ def test_pause_of_an_unknown_project_is_not_found(
         (["fleet", "status"], {"list_agents": []}),
         (["fleet", "tell", "coder-auth", "hi"], {"tell": TellResult("yes", "typed")}),
         (["fleet", "stop", "coder-auth"], {"stop": StopReceipt(_agent(), [])}),
+        (["fleet", "restart", "--all"], {"bulk": BulkReport("restart", False, ())}),
+        (["fleet", "stop", "--all", "--managers"], {"bulk": BulkReport("stop", True, ())}),
         (["fleet", "attach"], {"attach_argv": list(ATTACH_ARGV)}),
         (["fleet", "reap"], {"reap": ReapReport()}),
         (["fleet", "rename", "ruby-fox"], {"rename": PROJECT}),

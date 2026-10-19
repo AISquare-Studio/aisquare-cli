@@ -9,13 +9,16 @@ with a manager and a coder.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
+from typer.testing import CliRunner
 
+from aisquare.cli.app import app
 from aisquare.core import tmux as tmux_core
 from aisquare.core.orchestrator import FLEET_AGENT_ENV_VAR, team_project
 from aisquare.core.store import store_session
@@ -23,6 +26,7 @@ from aisquare.models import FleetAgent, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services.fleet import ALREADY_EXITED, THIS_SESSION, BulkReceipt, FleetError
 from tests import fakebin
+from tests.rendered import ANSI
 from tests.test_fleet_service import FakeClock, FakeTmux, _add_task, _board_session, _git
 
 
@@ -357,3 +361,46 @@ def test_nothing_running_is_an_empty_plan_and_a_clean_report(
     report = fleet_service.bulk("restart")
     assert report.receipts == () and report.ok
     assert report.summary() == "restarted 0 · skipped 0 · failed 0"
+
+
+# --- the command line, over the real service -----------------------------------------
+
+
+def test_stop_all_managers_from_the_command_line_stops_both_managers(
+    fleet: Fleet, runner: CliRunner
+) -> None:
+    result = runner.invoke(app, ["fleet", "stop", "--all", "--managers"])
+
+    assert result.exit_code == 0, result.output
+    lines = [line.rstrip() for line in ANSI.sub("", result.stdout).splitlines()]
+    assert lines == [
+        "alpha",
+        f"  ✓ {'manager':<24} {'manager':<10} stopped",
+        "beta",
+        f"  ✓ {'manager':<24} {'manager':<10} stopped",
+        "stopped 2 · skipped 0 · failed 0",
+    ]
+    assert fleet.agents["alpha/coder-1"].id in _live_ids(fleet.alpha)
+
+
+def test_restart_all_from_inside_a_manager_leaves_it_and_says_so_in_json(
+    fleet: Fleet, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = fleet.agents["beta/manager"]
+    monkeypatch.setenv(FLEET_AGENT_ENV_VAR, manager.id)
+
+    result = runner.invoke(app, ["--json", "fleet", "restart", "--all"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    outcomes = {
+        (r["project"]["name"], r["agent"]["label"]): (r["outcome"], r["why"])
+        for r in payload["receipts"]
+    }
+    assert outcomes == {
+        ("alpha", "manager"): ("done", None),
+        ("alpha", "coder-1"): ("done", None),
+        ("beta", "manager"): ("skipped", THIS_SESSION),
+        ("beta", "coder-1"): ("done", None),
+    }
+    assert payload["summary"] == {"done": 3, "skipped": 1, "failed": 0} and payload["ok"]

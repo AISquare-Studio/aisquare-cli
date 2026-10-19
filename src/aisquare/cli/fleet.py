@@ -52,6 +52,22 @@ SessionRef = Annotated[
     str | None,
     typer.Option("--as", help="Acting session id (a manager passes its own).", metavar="SESSION"),
 ]
+EveryAgent = Annotated[
+    bool,
+    typer.Option(
+        "--all",
+        help="Every running agent in every project's fleet, not one label (not with a label "
+        "or --project). Exited (💤) agents are left as they are, and so is the agent running "
+        "this command.",
+    ),
+]
+ManagersOnly = Annotated[
+    bool, typer.Option("--managers", help="With --all: the managers alone, not their teams.")
+]
+
+_USAGE_ERROR: type[Exception] = typer.BadParameter.__bases__[0]
+"""Click's ``UsageError``, which typer vendors: the public ``typer.BadParameter``'s base
+(as ``cli.global_flags`` reaches it)."""
 
 _STATE_CHIP = {
     "working": "▶ working",
@@ -281,7 +297,11 @@ def status(project: ProjectRef = None) -> None:
 
 @app.command("restart")
 def restart(
-    label: Annotated[str, typer.Argument(help="Agent label, e.g. manager or coder-auth.")],
+    ctx: typer.Context,
+    label: Annotated[
+        str | None,
+        typer.Argument(help="Agent label, e.g. manager or coder-auth (not with --all)."),
+    ] = None,
     fresh: Annotated[
         bool,
         typer.Option(
@@ -299,6 +319,8 @@ def restart(
             "spawned before that was recorded (#144).",
         ),
     ] = None,
+    every: EveryAgent = False,
+    managers: ManagersOnly = False,
     project: ProjectRef = None,
     as_session: SessionRef = None,
 ) -> None:
@@ -312,7 +334,22 @@ def restart(
     The replacement is launched as the agent was (#144) — binary, permission
     mode, arguments — not as the role's config reads today; --permission-mode
     changes the mode, and later restarts keep it.
+
+    With --all, every running agent in every project is restarted so, one line
+    each by project, then a count; --managers restarts the managers alone. It
+    exits 1 when any of them failed.
     """
+    label = _one_or_every(
+        ctx,
+        label,
+        every,
+        managers,
+        project,
+        {"--fresh": fresh, "--permission-mode": permission_mode},
+    )
+    if label is None:
+        _bulk("restart", managers_only=managers, acting_session=as_session)
+        return
     target = _project(project)
     try:
         receipt = fleet_service.restart(
@@ -462,15 +499,26 @@ def tell(
 
 @app.command("stop")
 def stop(
-    label: Annotated[str, typer.Argument(help="Agent label.")],
+    ctx: typer.Context,
+    label: Annotated[str | None, typer.Argument(help="Agent label (not with --all).")] = None,
     project: ProjectRef = None,
     force: Annotated[bool, typer.Option("--force", help="Kill without a graceful /exit.")] = False,
+    every: EveryAgent = False,
+    managers: ManagersOnly = False,
 ) -> None:
     """Stop an agent: /exit, a grace period, then the window is killed.
 
     On an agent that already exited (💤) it removes the dead window that
     `remain-on-exit` kept, which is what takes the row off the live listing.
+
+    With --all, every running agent in every project is stopped so, one line
+    each by project, then a count; --managers stops the managers alone. It exits
+    1 when any of them failed.
     """
+    label = _one_or_every(ctx, label, every, managers, project, {"--force": force})
+    if label is None:
+        _bulk("stop", managers_only=managers, acting_session=None)
+        return
     target = _project(project)
     try:
         receipt = fleet_service.stop(target, label, force=force)
@@ -507,6 +555,156 @@ def stop(
         # longer exists is not a clean stop, whichever command produced it, and
         # a script gating on the code must not read it as one (round 5).
         raise typer.Exit(code=1)
+
+
+def _one_or_every(
+    ctx: typer.Context,
+    label: str | None,
+    every: bool,
+    managers: bool,
+    project: str | None,
+    single: Mapping[str, object],
+) -> str | None:
+    """The label ``restart`` or ``stop`` acts on, or ``None`` for ``--all``; the usage errors.
+
+    ``--all`` is every project, so it takes neither a label nor ``--project`` (as ``reap
+    --all`` does not), nor the flags ``single`` names, which are for one agent. ``--managers``
+    narrows ``--all`` and means nothing without it. With neither, a label is required, as it
+    always was.
+    """
+    if managers and not every:
+        raise typer.BadParameter(
+            "--managers goes with --all: it narrows every project's agents to the managers",
+            param_hint="--managers",
+        )
+    if every and label is not None:
+        raise typer.BadParameter(
+            f"--all and a label conflict: --all is every running agent, {label!r} one agent — "
+            "drop one of them",
+            param_hint="--all",
+        )
+    refuse_conflicting_scope(every, project)
+    for flag, value in single.items():
+        if every and value not in (None, False):
+            raise typer.BadParameter(
+                f"{flag} is for one agent and does not go with --all", param_hint=flag
+            )
+    if not every and label is None:
+        # The words typer said when the label was a required argument, through the usage
+        # error typer itself raises (its click is vendored): exit 2, and JSON under --json.
+        raise _USAGE_ERROR("Missing argument 'label'.", ctx)
+    return label
+
+
+def _bulk(
+    action: fleet_service.BulkAction, *, managers_only: bool, acting_session: str | None
+) -> None:
+    """``restart --all`` / ``stop --all``: :func:`fleet_service.bulk`, printed as it goes.
+
+    Each agent's line is printed when it is done with, under its project's name, so a long
+    restart shows how far it got; the count follows. Exits 1 when anything failed
+    (``BulkReport.ok``), as ``stop`` and ``reap`` do.
+    """
+    as_json = get_state().json_output
+    console = stdout_console()
+    heading: list[str] = []
+
+    def said(receipt: fleet_service.BulkReceipt) -> None:
+        if heading[-1:] != [receipt.project.id]:
+            heading.append(receipt.project.id)
+            console.print(_display_name(receipt.project), style="bold", markup=False)
+        for line in _bulk_lines(receipt):
+            console.print(line, markup=False)
+
+    try:
+        report = fleet_service.bulk(
+            action,
+            managers_only=managers_only,
+            acting_session=acting_session,
+            on_receipt=None if as_json else said,
+        )
+    except fleet_service.FleetError as exc:
+        _fail_fleet(exc)
+    if as_json:
+        typer.echo(json.dumps(_bulk_json(report)))
+    else:
+        for unread, why in report.unread:
+            console.print(
+                f"⚠ {_display_name(unread)}: its agents could not be read — {why}", markup=False
+            )
+        if report.receipts or report.unread:
+            console.print(report.summary())
+        else:
+            who = "manager" if managers_only else "agent"
+            console.print(f"nothing to {action}: no {who} is running in any project")
+        released = sum(
+            len(receipt.result.released)
+            for receipt in report.receipts
+            if isinstance(receipt.result, fleet_service.StopReceipt)
+        )
+        _say_released(console, released)
+    if not report.ok:
+        raise typer.Exit(code=1)
+
+
+def _bulk_lines(receipt: fleet_service.BulkReceipt) -> list[str]:
+    """One agent's line in ``--all``'s output, and what did not happen under it."""
+    agent, result = receipt.agent, receipt.result
+    if receipt.outcome == "skipped":
+        said, mark = f"skipped — {receipt.why}", "·"
+    elif receipt.outcome == "failed":
+        said, mark = f"failed — {receipt.why}", "✗"
+    elif isinstance(result, fleet_service.RestartReceipt):
+        before = "stopped and " if result.was_running else ""
+        said, mark = f"{before}restarted — {result.how}", "✓"
+    else:
+        said, mark = "stopped", "✓"
+    lines = [f"  {mark} {agent.label:<24} {agent.role:<10} {said}"]
+    if isinstance(result, fleet_service.RestartReceipt):
+        lines.extend(f"      ⚠ {failure}" for failure in result.failures)
+    if receipt.release_failed:
+        lines.append(f"      ⚠ claims: {receipt.release_failed}")
+    return lines
+
+
+def _bulk_json(report: fleet_service.BulkReport) -> dict[str, object]:
+    def project_of(project: ProjectInfo) -> dict[str, object]:
+        return {"id": project.id, "name": _display_name(project), "codename": project.codename}
+
+    def receipt_of(receipt: fleet_service.BulkReceipt) -> dict[str, object]:
+        out: dict[str, object] = {
+            "project": project_of(receipt.project),
+            "agent": receipt.agent.model_dump(mode="json"),
+            "outcome": receipt.outcome,
+            "why": receipt.why,
+        }
+        result = receipt.result
+        if isinstance(result, fleet_service.RestartReceipt):
+            out |= {
+                "started": result.started.model_dump(mode="json"),
+                "resumed": result.resumed,
+                "how": result.how,
+                "was_running": result.was_running,
+                "failures": result.failures,
+                "notes": result.notes,
+            }
+        elif isinstance(result, fleet_service.StopReceipt):
+            out |= {
+                "claims_released": [task.id for task in result.released],
+                "release_failed": result.release_failed,
+            }
+        return out
+
+    return {
+        "action": report.action,
+        "managers_only": report.managers_only,
+        "receipts": [receipt_of(receipt) for receipt in report.receipts],
+        "unread": [
+            {"project": project_of(project), "reason": why} for project, why in report.unread
+        ],
+        "summary": {outcome: len(report.of(outcome)) for outcome in ("done", "skipped", "failed")},
+        "ok": report.ok,
+    }
 
 
 def _say_released(console: Console, count: int) -> None:

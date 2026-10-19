@@ -125,8 +125,8 @@ adapter.**
 - **Log in on a Codex row waits for the new login.** It ran `codex login` over
   the `auth.json` still in the slot, whose tokens already read signed in, so
   the pane closed at its first poll before anyone had signed in. It now waits
-  for new tokens (a digest of `auth.json`'s, never the tokens:
-  `AgentAccounts.login_fingerprint`).
+  for `codex login` to write `auth.json` anew (a digest of the file, never a
+  value read out of it: `AgentAccounts.login_fingerprint`).
 - **Codex accounts on the status line.** Under *⚙ Settings* the Codex
   accounts have a dot of their own, `● 1× codex`, on a line under Claude's,
   with its own ⚠. The Claude dot is read over the Claude accounts alone.

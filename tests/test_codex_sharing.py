@@ -330,7 +330,8 @@ def test_a_codex_log_in_over_a_stale_auth_json_lands_only_once_its_tokens_change
     assert service.sign_in_landed(account) is not None, "a fresh sign-in has nothing to wait out"
     assert service.sign_in_landed(account, since=since) is None
 
-    _relogin(account)  # rewritten, the same tokens: not a new login
+    auth = account.config_dir / "auth.json"
+    auth.write_bytes(auth.read_bytes())  # written again as it was: not a new login
     assert service.sign_in_landed(account, since=since) is None
     _relogin(account, access_token="access-new", refresh_token="refresh-new")
     landed = service.sign_in_landed(account, since=since)

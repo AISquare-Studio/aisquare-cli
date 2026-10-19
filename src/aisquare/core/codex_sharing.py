@@ -42,8 +42,10 @@ from aisquare.core.claude_sharing import SharingError, TrustScope
 from aisquare.models import ClaudeAccount
 
 CONFIG_FILE = "config.toml"
-TRUSTED = "trusted"
-UNTRUSTED = "untrusted"
+LEVEL_YES = "trusted"
+LEVEL_NO = "untrusted"
+"""The two ``trust_level`` values a ``projects`` table decides by: a yes, and the
+human's no."""
 
 
 def config_path(home: Path) -> Path:
@@ -73,8 +75,8 @@ def read_trust(home: Path) -> dict[str, bool]:
     found: dict[str, bool] = {}
     for key, entry in projects.items():
         level = entry.get("trust_level") if isinstance(entry, dict) else None
-        if level in (TRUSTED, UNTRUSTED):
-            found[key] = level == TRUSTED
+        if level in (LEVEL_YES, LEVEL_NO):
+            found[key] = level == LEVEL_YES
     return found
 
 
@@ -125,7 +127,7 @@ def grant_trust(home: Path, *keys: str) -> list[str]:
             wanted.append(key)
         elif not isinstance(entry, dict):
             raise SharingError(f"its {CONFIG_FILE} has an entry for {key} that is not a table")
-        elif entry.get("trust_level") != TRUSTED:
+        elif entry.get("trust_level") != LEVEL_YES:
             said = entry.get("trust_level")
             raise SharingError(
                 f"its {CONFIG_FILE} has a table for {key} already"
@@ -139,7 +141,7 @@ def grant_trust(home: Path, *keys: str) -> list[str]:
         text += "\n"
     for key in wanted:
         header = json.dumps(key, ensure_ascii=False)
-        text += ("\n" if text else "") + f'[projects.{header}]\ntrust_level = "{TRUSTED}"\n'
+        text += ("\n" if text else "") + f'[projects.{header}]\ntrust_level = "{LEVEL_YES}"\n'
     try:
         body = text.encode("utf-8")
         after = tomllib.loads(text)
@@ -147,7 +149,7 @@ def grant_trust(home: Path, *keys: str) -> list[str]:
         raise SharingError(f"its {CONFIG_FILE} cannot take a [projects] table at its end") from None
     expected = {
         **before,
-        "projects": {**projects, **{key: {"trust_level": TRUSTED} for key in wanted}},
+        "projects": {**projects, **{key: {"trust_level": LEVEL_YES} for key in wanted}},
     }
     if after != expected:
         raise SharingError(f"its {CONFIG_FILE} would read otherwise with the entry appended")

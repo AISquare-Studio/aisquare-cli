@@ -173,16 +173,14 @@ def _usable(data: Mapping[str, Any], claims: Mapping[str, Any] | None) -> bool:
     return _has(tokens.get("refresh_token")) or _has(tokens.get("access_token"))
 
 
-LOGIN_PARTS = ("id_token", "access_token", "refresh_token", "account_id")
-"""What of ``auth.json``'s ``tokens`` a login's fingerprint digests, beside its API key."""
-
-
 def login_fingerprint(account: ClaudeAccount) -> str | None:
-    """A digest of the login ``auth.json`` holds — its API key and tokens, never their
-    values — or ``None`` when it holds none Codex can use (:func:`signed_in`).
+    """A digest of ``auth.json`` as it stands while it holds a login Codex can use
+    (:func:`signed_in`), else ``None``: of the file's bytes, never a value read out of it.
 
     What a *Log in* opened over a login still on disk waits to see change: ``codex login``
-    replaces the tokens, and the stale ones are a signed-in home. One read of the file, so
+    writes the file anew with new tokens, and the stale ones are a signed-in home. A
+    file rewritten with the same bytes is the same login; any other write of it (a new
+    login, or Codex's own refresh of its tokens) is a new one. One read of the file, so
     the digest is of the login it judged usable. An ``auth.json`` there that cannot be read
     raises ``LoginUnreadable``: ``None`` would let the login it holds land as new."""
     try:
@@ -201,9 +199,7 @@ def login_fingerprint(account: ClaudeAccount) -> str | None:
     tokens = tokens if isinstance(tokens, dict) else {}
     if not _usable(data, _claims(tokens.get("id_token"))):
         return None
-    parts = [data.get("OPENAI_API_KEY"), *(tokens.get(part) for part in LOGIN_PARTS)]
-    joined = "\0".join(part if isinstance(part, str) else "" for part in parts)
-    return hashlib.sha256(joined.encode("utf-8", "surrogatepass")).hexdigest()
+    return hashlib.sha256(raw).hexdigest()
 
 
 def plan(account: ClaudeAccount) -> str | None:

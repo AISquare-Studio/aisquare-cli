@@ -1499,23 +1499,35 @@ everywhere.
 a standing highlight, the mirror of Claude Code's own selection, the board's
 `c`, the Remote panel's link, a text field's copy — goes two ways at once. On a
 local session it goes to the system clipboard through the platform's own tool:
-`pbcopy` on macOS, `clip.exe` on WSL, and on Linux `wl-copy`, else `xclip`,
-else `xsel`. It is also sent as OSC 52, which your *outer* terminal turns into
-a clipboard write if it accepts it: Windows Terminal, kitty, ghostty, wezterm
-and foot do, iTerm2 only with its clipboard setting on, and Terminal.app never.
-Over SSH (`SSH_CONNECTION` or `SSH_TTY` set) the native tool would write the
-remote machine's clipboard, not yours, so OSC 52 is the only route. The toast
-after a copy says when it did not land, rather than "copied".
+`pbcopy` on macOS, `clip.exe` on WSL, and on Linux `wl-copy` under Wayland,
+else `xclip` or `xsel` under X. It is also sent as OSC 52, which your *outer*
+terminal turns into a clipboard write if it accepts it: Windows Terminal,
+kitty, ghostty, wezterm and foot do, iTerm2 only with its clipboard setting on,
+and Terminal.app never. Over SSH (`SSH_CONNECTION` or `SSH_TTY` set) the native
+tool would write the remote machine's clipboard, not yours, so OSC 52 is the
+only route. The toast says "copied" when the native tool took the text, or
+when OSC 52 was the only route (over SSH, or with the tool missing or failing)
+and the terminal is one known to take it: WezTerm and Ghostty by
+`TERM_PROGRAM`, kitty by `KITTY_WINDOW_ID`, Windows Terminal by `WT_SESSION`,
+and kitty, Ghostty, WezTerm and foot by the `TERM` ssh carries. In Terminal.app
+or iTerm2 — named by `TERM_PROGRAM`, and iTerm2 over SSH by the `LC_TERMINAL`
+ssh usually carries — it warns that the copy did not reach the clipboard, and
+how to select with the terminal itself. On any terminal nothing names (over
+SSH from Terminal.app, or behind tmux or screen) it says the text was sent to
+your terminal's clipboard (OSC 52), and that an empty paste means the terminal
+ignores it.
 
 **Copy and paste on macOS.** Run on your Mac, every copy in `asq` reaches the
 clipboard through `pbcopy`, in any terminal. Over SSH only OSC 52 can carry it
 back, so the terminal decides:
 
-- *Terminal.app* never implemented OSC 52. A copy over SSH does not reach your
-  clipboard, and the toast says so; select with the terminal itself instead
-  (below).
+- *Terminal.app* never implemented OSC 52, so a copy over SSH does not reach
+  your clipboard. Terminal.app names itself to nothing across SSH, so the toast
+  says the copy was sent through OSC 52 and that an empty paste means the
+  terminal ignored it. Select with the terminal itself instead (below).
 - *iTerm2* accepts it only with *Settings › General › Selection › Applications
-  in terminal may access clipboard* turned on.
+  in terminal may access clipboard* turned on. The toast cannot see that
+  setting, so over SSH it warns every time, and names the setting.
 - *Ghostty, kitty and WezTerm* accept it out of the box.
 
 ⌘C is Terminal.app's and iTerm2's own Copy, so it never reaches `asq`, and it

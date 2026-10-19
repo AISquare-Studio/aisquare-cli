@@ -11,15 +11,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 **A hotfix: a copy in `asq` reaches the clipboard on macOS.**
 
 ### Fixed
-- A copy in `asq` reaches your clipboard in Terminal.app and in iTerm2 as it
-  comes. 0.8.1 sent every copy as OSC 52 alone, and said "copied" either way:
+- Run on your Mac, a copy in `asq` reaches your clipboard in Terminal.app and
+  in iTerm2 as it comes. 0.8.1 sent every copy as OSC 52 alone, and said "copied" either way:
   Terminal.app never implemented OSC 52 and iTerm2 drops it unless its clipboard
   setting is on, so ⌘V pasted what the clipboard held before. On a local session
   a copy now also goes through the platform's own tool (`pbcopy` on macOS,
-  `clip.exe` on WSL, and on Linux `wl-copy`, else `xclip`, else `xsel`), and
-  still as OSC 52. Over SSH OSC 52 is the only route. The toast says "copied"
-  only when the copy can have landed, and otherwise how to copy with the
-  terminal itself.
+  `clip.exe` on WSL, and on Linux `wl-copy` under Wayland, else `xclip` or
+  `xsel` under X), and still as OSC 52. Over SSH OSC 52 is the only route. The
+  toast says "copied" only when the copy can have landed: the native tool took
+  it, or OSC 52 went to a terminal known to take it. In Terminal.app or iTerm2 a
+  copy only OSC 52 carried says it did not reach the clipboard, and how to
+  select with the terminal itself. On a terminal nothing names (over SSH from
+  Terminal.app, or behind tmux or screen) it says the text was sent through OSC
+  52, and that an empty paste means the terminal ignored it.
 
 ### Changed
 - On macOS the help screens name the copy and paste keys a Mac has. The board's

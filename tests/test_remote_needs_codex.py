@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -573,7 +574,8 @@ def test_a_codex_questions_digit_waits_until_its_view_is_drawn(
     )
     monkeypatch.setattr(remote_needs, "NEEDS_RESCAN_AFTER_ANSWER", 0.0)
     runtime.set_allow_write(True)
-    client = make_client(build_app(runtime, dist_dir=tmp_path))
+    app = build_app(runtime, dist_dir=tmp_path)
+    client = make_client(app)
     assert unlock(client, runtime).status_code == 200
     api = f"{base(runtime)}/api"
     tmux.screen = list(early_screen)
@@ -590,3 +592,10 @@ def test_a_codex_questions_digit_waits_until_its_view_is_drawn(
     drawn = client.post(f"{api}/needs/answer", json={"id": card["id"], "keys": ["2"]})
     assert drawn.status_code == 200, drawn.text
     assert tmux.typed == [("keys", "%1", "2")]
+    # The scan each answer starts on a timer ends within the test: one left running scanned
+    # once the test's home was gone, and wrote a store in the run's own.
+    watcher = remote_needs._needs_watcher(app.kit)
+    watcher.stop_watching()
+    for timer in threading.enumerate():
+        if isinstance(timer, threading.Timer) and timer.function == watcher._needs_rescan:
+            timer.join(5.0)

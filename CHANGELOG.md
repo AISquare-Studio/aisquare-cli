@@ -42,8 +42,9 @@ adapter.**
   `install.sh --agent codex`, a Codex account's sign-in, or an `aisquare
   upgrade` that changes the hook definition, open `/hooks` in Codex and trust
   aisquare's hooks; until then the doctor row reads `unverified` and the board
-  sees nothing from that Codex. AISquare never writes Codex's trust records
-  and never adds a trust-bypass flag.
+  sees nothing from that Codex. AISquare never writes Codex's hook trust
+  records and never adds a trust-bypass flag (a folder's trust, which a human
+  gave on another Codex account, is copied: see Added).
 - `agents connect codex` no longer exits 1 with "can't connect … yet" (0.8.0):
   it installs the hooks. Cursor stays detection-only and still refuses.
 - `fleet restart`, `fleet switch` and the usage-limit hand-over now replay a
@@ -107,6 +108,28 @@ adapter.**
   age. A usage limit read off the rollout when a turn stops parks the row
   **limited** and, with `on_limit = "switch"`, hands it to the Codex account
   with the most headroom.
+- **Codex accounts share folder trust, as Claude accounts do.** Codex asks
+  "Trust this folder?" once per `CODEX_HOME`, in a git checkout, and keeps the
+  yes as a `[projects."<repository root>"]` table of `trust_level = "trusted"`
+  in that home's `config.toml`. With `[accounts] share_trust` (on by default)
+  `fleet spawn`, `launch` and `accounts run` on a Codex slot copy the table
+  that covers the folder from another Codex slot that has it, appended to the
+  slot's `config.toml` with every other byte kept, and the receipt says so with
+  a ✓. `aisquare accounts trust [<dir>]` and `--sync` cover Codex slots too.
+  Codex's rules decide, as measured on 0.162.1: the folder's own entry, then
+  its repository root's, nothing above them. A table saying `untrusted` is
+  that account's no and is never overridden; `accounts trust` reports it. A
+  Claude account's yes is never copied to a Codex account, nor the reverse.
+  Behind the accounts slot of the adapter protocol (`AgentAccounts.trust`, a
+  `FolderTrust`), which the conformance suite holds every agent with slots to.
+- **Log in on a Codex row waits for the new login.** It ran `codex login` over
+  the `auth.json` still in the slot, whose tokens already read signed in, so
+  the pane closed at its first poll before anyone had signed in. It now waits
+  for new tokens (a digest of `auth.json`'s, never the tokens:
+  `AgentAccounts.login_fingerprint`).
+- **Codex accounts on the status line.** Under *⚙ Settings* the Codex
+  accounts have a dot of their own, `● 1× codex`, on a line under Claude's,
+  with its own ⚠. The Claude dot is read over the Claude accounts alone.
 - **Codex in the fleet.** `fleet restart`, Restart and a switch onto the same
   account resume the thread the agent's first hook bound (`codex … resume
   <thread>`); a switch onto another account starts fresh with the hand-off
@@ -203,7 +226,12 @@ adapter.**
   claimed: macOS Seatbelt and the Windows sandbox (the broker is POSIX only and was
   measured on Linux bwrap; native Windows has a read-only store and no broker), and
   `recall` on a real gbrain, which no host or CI job has (its query goes as gbrain's
-  positional, as gbrain's source parses one).
+  positional, as gbrain's source parses one). Not shared between Codex accounts:
+  `share_settings` (Claude Code's `settings.json` link has no Codex counterpart;
+  each slot's `config.toml` and `hooks.json` stay its own). Unmeasured: a Codex
+  login kept in the macOS keyring (`cli_auth_credentials_store = "keyring"`),
+  which AISquare does not read (it reads `auth.json` alone), and Codex's folder
+  trust on Windows (its `projects` keys are written as the platform spells a path).
   The transport is a spool directory and a FIFO, not a socket: Codex
   0.162.1's sandbox refuses `connect` on every unix socket (measured). The launch
   records stay as defence in depth: restart, switch, the hand-over and `fleet
@@ -290,6 +318,11 @@ adapter.**
 
 ### Changed
 
+- App settings' *on a usage limit* choice reads *wait for the reset, on the same
+  account*: it said *Claude Code continues by itself*, which a Codex agent does
+  not (it waits for its next prompt). The doctor's Codex headroom row says how
+  much of a window each account has **used**, as the Claude row does, where it
+  said *at or over*.
 - Codex reasoning levels (`minimal` to `ultra`) pass to Codex unchanged; the
   shared name `ultracode` becomes Codex's `max`, with a note. Codex fleet roles
   run `--approve-for-me` by default (Codex's own reviewer), in the store

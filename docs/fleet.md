@@ -11,8 +11,9 @@ Three ideas carry the whole feature:
 
 - **One view.** Left: a navigator — `Fleet ▸ projects ▸ agents`, then under a
   line *⚙ Settings* (App settings, Accounts, Doctor) with a dim status line: the
-  AISquare sign-in and the Claude accounts' headroom as two dots (`?` explains
-  the colours; a click opens Accounts). Right: whatever you clicked — onboarding
+  AISquare sign-in and the Claude accounts' headroom as two dots, and with Codex
+  accounts a line of their own under it, `● 1× codex` (`?` explains the colours;
+  a click opens Accounts). Right: whatever you clicked — onboarding
   for a new directory, a project's manager, an agent's live session, the board,
   the settings, doctor findings with their fixes.
 - **tmux is the substrate.** Agents run as windows of a per-project session on a
@@ -873,6 +874,17 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   accounts trust <dir>`* in `fleet ls`, the sidebar and the Remote, and a spawn
   does not type its prompt into it: it waits for the answer, then leaves the
   prompt untyped with a note.
+
+  Codex accounts share it the same way, among themselves: Codex keeps a yes as a
+  `[projects."<folder>"]` table of `trust_level = "trusted"` in each slot's
+  `config.toml`, so the table that covers the folder is appended to the slot a
+  launch runs on, every other byte of the file kept, the file made if the slot
+  has none. Codex's own rules decide (measured on 0.162.1): it asks only in a git
+  checkout and records the repository's root; the folder's own entry decides
+  first, then the root's, and nothing above them. A table that says
+  `untrusted` is that account's no and is never overridden; `accounts trust`
+  reports it and leaves it to you. A Claude account's yes is not a Codex
+  account's, nor the reverse: each agent asks its own question.
 - **One settings.json.** Opt-in — *share settings.json* in App settings,
   `accounts.share_settings` — every managed account's `settings.json`
   (permissions, hooks, model, status line) becomes a link to the plain claude's,
@@ -954,7 +966,7 @@ aisquare accounts disable 3            # out of automatic selection; enable puts
 aisquare config set accounts.pick default      # spawns stay on the machine default (headroom is the default)
 aisquare config set accounts.on_limit wait     # an agent that hits its limit stays parked (switch is the default)
 aisquare accounts trust                # trust this folder on every account (its repository, in a checkout)
-aisquare accounts trust --sync         # every folder any account trusts, trusted on all of them
+aisquare accounts trust --sync         # every folder an account trusts, on all of its agent's accounts
 aisquare config set accounts.share_trust false # launches stop copying a folder's trust (on by default)
 aisquare accounts settings             # what each account's settings.json is: shared, its own, none
 aisquare accounts settings --sync      # link every managed account's settings.json to the plain claude's

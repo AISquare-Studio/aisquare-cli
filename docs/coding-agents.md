@@ -54,8 +54,9 @@ other hooks and instruction files. Unreadable context files are skipped with a
 note; hooks still install. Codex requires native trust: open `/hooks`
 in Codex, review the definitions and trust them. Reconnect is idempotent and
 does not rewrite an identical file. Changing definitions requires native
-review again. AISquare never writes Codex trust records or automatically adds
-a trust-bypass flag.
+review again. AISquare never writes Codex's hook trust records or automatically
+adds a trust-bypass flag. (A folder's trust is another record: one a human gave on
+one Codex account is copied to the others, [Codex accounts](#codex-accounts).)
 Connect validates and installs hooks before importing global memories. Malformed,
 unreadable or non-regular native settings produce a file repair diagnostic;
 existing settings and memories are preserved on that failure. Updates retain
@@ -251,6 +252,9 @@ item.
 | `/clear` | Row and claims move to the new session. | Same: the row and the claim moved, and the new thread knew its claim. **Differs:** Codex fires no `SessionEnd` for the thread it leaves; the new thread's `SessionStart` (clear) comes with its first prompt. | Smoke 10; live hooks; SMOKE5 (/clear), SMOKE6 (10): the broker takes the new id and refuses the old |
 | A session a tool starts | `CLAUDE_PID` tells the agent's own process from a child it starts. | `CODEX_THREAD_ID`, which Codex sets only in its tools' shells, does the same. A session of another agent than the row's never takes the row, such as a `codex exec` from a Claude Code agent's Bash tool. | Measured on 0.162.1; unit tests (`5898ce7e`, review r2) |
 | Accounts and usage | Numbered slots; usage from the endpoint Claude Code's `/usage` reads | The same slots, on one ladder (`~/.aisquare/codex-accounts/<n>`), with doctor rows. **Differs:** usage is read offline from the account's own rollouts (49 % of 5 h and 8 % of the week in the smoke). It is only as fresh as the last turn, and has no *to the limit* trend. | Smoke 11; SMOKE6 (11) |
+| Folder trust across accounts | `[accounts] share_trust`: a launch copies the folder's entry in `.claude.json` from the account that has it; `accounts trust [--sync]` | Same, among the Codex slots, in each slot's `config.toml`: the `[projects."<root>"]` table of `trust_level = "trusted"` is appended, every other byte kept, and the spawn's receipt says so. **Differs:** Codex asks only in a git checkout, and its yes records the repository root (a worktree's is the main checkout's). The folder's own entry decides first, then the root's, and nothing above them. A table that says `untrusted` is that account's no: a share never overrides it, and `accounts trust` reports it. A Claude account's yes is not a Codex account's, nor the reverse. | Measured on 0.162.1 in scratch homes (`core.codex_sharing`). Live: `test_real_codex_trust_one_slot_gave_reaches_another_and_its_spawn_asks_nothing` (slot A's yes in Codex's own dialog, a spawn on slot B with no question and a told line run; slot C with sharing off meets the question) |
+| *Log in* on an account row | Waits for a different stored login than the expired or rejected one on disk | Same: `codex login` in the slot, and the pane waits for new `auth.json` tokens (a digest of them, never the tokens), not the ones already there. | Unit and UI tests (`tests/test_codex_sharing.py`, `tests/test_ui_codex_accounts.py`); not run live, which needs a real login |
+| The ⚙ Settings status line | `● 2× claude`: the room left across the Claude accounts | `● 1× codex` on a line of its own under it, from Codex's offline readings, with its own ⚠ for a slot that needs a login. | UI tests (`tests/test_ui_settings_hub.py`) |
 | `fleet switch` to another account | Resumes the session on the new account. | **Differs:** a Codex thread lives under its `CODEX_HOME`, so the agent starts fresh with the hand-off prompt (which got through the new home's folder-trust dialog) and its claim moves. A switch onto the same home resumes. | Smoke 12; SMOKE6 (12): the hand-off waited behind the new home's hook-review dialog and was sent once |
 | Claim, review, done | Board tasks | Same: a Codex coder claimed a task and sent it to review, and a Codex tester marked it done. | Smoke 13; SMOKE5 (round trip), SMOKE6 (13): all through brokers |
 | Board calls from inside the agent | No sandbox: `aisquare` runs as the user. | Same since `e8436fa3`: a sandboxed fleet Codex runs under the fleet's `aisquare` permission profile, and its board calls succeed on the first, sandboxed attempt, through its launch's broker. **Differs:** Codex sandboxes its tools. The whole aisquare store is read-only to it, and its board calls run outside the sandbox from the broker's whitelist, as its own sessions ([the broker's whitelist](#the-brokers-whitelist)). A restart, switch, hand-over or `tell` queue runs from the row's launch record only, written by its spawner and its own hook where the sandbox cannot write: binary, arguments, permission, role, agent, directory, account, transcript and thread; a row without one, or a project whose directory in the store is not the record's, is refused. What is typed into a pane or kills a window goes to the pane the record places (socket and pane), never the row's, and a failed turn's limit is read from the record's transcript. A pick in its own `/permissions`, or a `codex` started by hand, uses its own sandbox ([the sandbox and the store](#the-sandbox-and-the-aisquare-store)). | Filed by the smoke: every call needed an escalation. Live sandbox: a note and a task claim succeeded sandboxed, through the broker; a direct write to `context.db` and an `--as` of another session were refused (review r9 of #113). Writes to the read-only paths were refused, and the launch record held (`ca6d43ea`, `8337e88c`, review r2; review r3; one launch record, review r4: a sandboxed reviewer's rewrites of its thread, home, role, binary and account replayed as recorded, the project's directory refused; review r5: a row pointed at another pane or transcript is refused or ignored). SMOKE4 (seal restart, seal switch, seal hand-over, tell queue, pane): tampered rows replayed as recorded, the marker never ran. SMOKE5 and SMOKE6 (store, broker writes, identity, malformed, after exit, fleet ops, refusals recorded, seals, launch inputs): the store read-only, 30 and 31 protocol calls on their first try, every refusal logged |
@@ -291,7 +295,9 @@ on a usage limit.
   a login, the slot is recorded and `agents connect codex --config-dir <slot>`
   installs AISquare's hooks there (Codex asks you to trust them on its first
   session). A slot nothing signed into is discarded. `accounts run <n>` starts
-  `codex` on the slot.
+  `codex` on the slot. *Log in* on a row that still holds a login waits for
+  `codex login` to write new tokens (it compares a digest of `auth.json`'s
+  tokens, never the tokens), not the ones already there.
 - **Identity.** Read from the claims of the id token in `auth.json` — `email`,
   and `chatgpt_plan_type` / `chatgpt_account_id` under
   `https://api.openai.com/auth` — decoded locally and never verified, sent or
@@ -340,8 +346,31 @@ on a usage limit.
   agent onto another account (by hand or automatic) starts it fresh with the
   board-built hand-off prompt and moves its claims onto the new session, as
   `--fresh` does. A target on the home the thread ran under resumes it.
-- **Doctor** lists Codex slots and their headroom beside Claude's; reading
-  Codex headroom needs no network, so it does not wait for `--live`.
+- **Folder trust.** Codex asks "Trust this folder?" once per `CODEX_HOME`, in a
+  git checkout, and keeps the yes as a table in that home's `config.toml`:
+  `[projects."<repository root>"]` with `trust_level = "trusted"`. With
+  `[accounts] share_trust` (on by default) a launch on a Codex slot copies the
+  table that covers its folder from another Codex slot that has it, appended to
+  the slot's `config.toml` with every other byte kept (the file is made if the
+  slot has none), and says so on the receipt. `aisquare accounts trust [<dir>]`
+  and `--sync` cover Codex slots too, each in its own file. Measured on 0.162.1:
+  the folder's own entry decides first, then its repository root's (a worktree's
+  root is the main checkout's), and an entry above the repository, or under a
+  symlinked spelling, covers nothing. A table that says `untrusted` is that
+  account's no: Codex opens *Folder access … Open restricted* there instead, and
+  no share overrides it. Codex's config.toml has no lock, so a running Codex that
+  rewrites its own file at the same moment can drop a table just appended; the
+  next launch copies it again.
+- **Status line.** Under *⚙ Settings*, the Codex accounts have a dot of their
+  own on a second line, `● 1× codex`, read like Claude's: the room left across
+  the enabled, signed-in slots, with a ⚠ for one that needs a login.
+- **Doctor** lists Codex slots and their headroom beside Claude's, in the same
+  words (*percent USED*); reading Codex headroom needs no network, so it does
+  not wait for `--live`.
+- **Not shared:** Claude Code's `settings.json` link (`share_settings`) has no
+  Codex counterpart; each slot's `config.toml` and `hooks.json` stay its own. A
+  login kept in the macOS keyring (`cli_auth_credentials_store = "keyring"`) is
+  unmeasured: AISquare reads `auth.json` alone.
 
 ## Native settings
 
@@ -1067,7 +1096,7 @@ another agent's flags or claiming hookless detection is integration.
 |---|------|------|
 | 1 | `src/aisquare/core/agent_adapters/<agent>.py` | A class implementing `AgentAdapter` (`types.py`), with its `AgentCapabilities`. |
 | 2 | `src/aisquare/core/agent_adapters/__init__.py` | One line: `register(<Agent>Adapter())`. |
-| 3 | `tests/fixtures/agent_events/<id>.json` | `events`: a recorded payload for every hook event it installs, with the `AgentEvent` fields it must decode to; `version_output`/`version`; `hooks_off` (the file and text that switch its hooks off). |
+| 3 | `tests/fixtures/agent_events/<id>.json` | `events`: a recorded payload for every hook event it installs, with the `AgentEvent` fields it must decode to; `version_output`/`version`; `hooks_off` (the file and text that switch its hooks off); with account slots, `accounts`: the files a `login` leaves in a slot's home, and a `relogin` (the same login after a new sign-in). |
 | 4 | `tests/test_adapter_contract.py` | Its row in `EXPECTED_PERMISSIONS` (a coder's and a reviewer's flags). |
 | 4a | `tests/fixtures/agent_transcripts/<id>.json` | `moments`: its transcript as it stood at a permission prompt, a question, an interruption and a turn ended on a question (`records`, or the first `lines` of a recorded session file beside it), with what `transcript_reader` must read of each. |
 | 5 | `tests/test_<agent>_native.py`, `tests/run_<agent>_native.py` | The opt-in test against the real binary (`AISQUARE_TEST_<AGENT>=1`), as `test_codex_native.py` and its CI job do for Codex. |
@@ -1083,7 +1112,7 @@ The doctor's sandbox rows (`sandbox-install`, `sandbox-path`, `sandbox-hooks`) a
 agent with `sandboxes_tools`, by its adapter. A `HookSpec` whose command is
 `types.GENERIC_HOOK` installs `aisquare hook event --agent <id> --event <native event>`
 (plus `--config-dir <home>` with `hook_names_home`), which decodes with the adapter.
-Optional slots: numbered login slots (`accounts`, an `AgentAccounts`), the plugin route
+Optional slots: numbered login slots (`accounts`, an `AgentAccounts`, below), the plugin route
 (`plugin`, an `AgentPlugin`), Remote's reading of its session transcript
 (`transcript_reader`, an `AgentTranscript`, below: without one its rows have no card a
 transcript decides and an empty Transcript tab), and native telemetry (`capabilities.native_telemetry` with
@@ -1116,6 +1145,7 @@ attributes and config layers, which a second telemetry agent extends there).
 | `browser_tools(home)` | The browser the agent brings itself, as the doctor's browser-tools line names it (Codex's `browser_use` feature and bundled browser plugin); `None` where the doctor finds it another way. |
 | `mcp_args`, `context_files`, `disable_native_teams` | AISquare's MCP server for this session; the instruction files it reads; the arguments and environment that keep its own sub-agent teams off. |
 | `transcript_reader` | An `AgentTranscript` (`types.py`, the shapes and helpers in `agent_adapters/transcripts.py`), which Remote's needs-you scan and Transcript tab ask of the row's agent (`services.transcript.reader_of`), or `None`. Its `speaker` is how a page names the agent's turns (`* <speaker>`); `tail_facts(file, size, budget, written)` reads the end of the transcript, backwards and within `budget` bytes (`transcripts.lines_backwards`), into a `TranscriptTail`: the calls still waiting for their result, the newest record's kind, the agent's last words, and `cut_at` for a walk that ran out inside the newest model response of a turn still running (Codex's: a rollout's `function_call` without its `function_call_output`, `turn_aborted`, `task_complete`, the response's `token_count` as its end); `page_lines(record, width)` renders one record as the page's lines (`transcripts.YOU`, `speaker_line`, `wrap`, `dim_note`, `question_lines`); `call_asks(tool)` says what a pending call waits on the human for (`question`, its questions in `input["questions"]` as `AskUserQuestion` holds them, `plan`, `subagent` or `tool`); `call_mark(tool)` what its prompt shows of it, to tell several pending calls apart on screen; `answer_keys(kind, options)` the quick answers of a `permission`, `question` or `plan` card on its dialog (every key one of `remote_needs.NEEDS_ANSWER_KEYS`). Claude Code's reads its session JSONL (`claude_transcript.py`), Codex's its rollout (`codex_transcript.py`). |
+| `accounts` | Numbered login slots, an `AgentAccounts` (`types.py`), or `None`: the home's variables and the slots' directory name, the plain slot's number and name, `sign_in_args`, `identity`, `signed_in`, `subscription`, `token_state`, `usage`, `limit_from_transcript`, `failed_turn`; `login_fingerprint(account)`, a digest of the login stored in a slot (never a token), which a *Log in* over a login still on disk waits to see change, `None` with none stored, raising `LoginUnreadable` when the store would not say; and `trust`, a `FolderTrust`, or `None` for an agent that asks nothing per folder: `file_name` (the file in a home that holds it), `scope(base)` (the folder and the key a yes there records, from `core.claude_sharing.trust_scope`, in the agent's own rules: its `covering` entries in the order it reads them), `read(account)` (`{key: trusted}`; `False` is a no that no share overrides; `SharingError`, or `NotStartedYet` with nothing to add to yet) and `grant(account, *keys)` (a yes for each, nothing else in the file changed). `types.trusted_by(records, scope)` is the entry that decides. `share_for_launch`, `accounts trust` and `--sync` copy trust only between accounts of one agent. |
 | `telemetry_args(endpoint, keep_out=)` | Its OpenTelemetry exporter, with `native_telemetry`. The receiver's `Authorization` is never an argument: it reaches the agent in `OTEL_EXPORTER_OTLP_LOGS_HEADERS`, and `keep_out` (the variable, with the operator's own patterns) is what the agent keeps out of its tools' shells (Codex: `shell_environment_policy.exclude`). |
 
 `AgentCapabilities` holds the rest as flags, each documented in `types.py` with the
@@ -1195,6 +1225,12 @@ The store profile is [the sandbox and the store](#the-sandbox-and-the-aisquare-s
   read-only scope or not under a workspace one; or one without a sandbox answers it;
 - an agent declares no `launch_inputs`, a name there is not one path component, or the
   profile's protected set (`store_broker.launch_inputs`) leaves one out;
+- an agent with account slots has no `accounts` fixture; its `login_fingerprint` is
+  `None` for a login, differs between two reads of one login, holds what the login file
+  holds, or stays the same after a `relogin` (`claude_accounts.sign_in_landed` must
+  answer the new login and not the old); or its `trust` does not carry a yes from one
+  account to another at a launch (`share_for_launch`, with the receipt's note), in its
+  own `file_name`, the login there kept;
 - an intent maps to neither flags nor a refusal with a reason; resume arguments are
   empty; the exit command is not a slash command; the MCP arguments do not name the
   server; nothing keeps native teams off; telemetry arguments come without the

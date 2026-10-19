@@ -77,6 +77,9 @@ aisquare
 │                   alias <slot> <name> [--clear] · order <slot>… · move <slot> up|down|top|bottom
 │                   disable <slot> · enable <slot>   — the default, the order, the names
 │                   usage also shows the pace (≈ N min to the limit) — see [accounts] in config
+│                   trust [<dir>] [--sync]   — a folder trusted on every account of each agent:
+│                                              Claude Code's .claude.json, Codex's config.toml
+│                   settings [--sync] [--unshare] — the plain claude's settings.json, shared
 ├── team            on · status · focus <text> · role <name> · log [-n N] · distill [--all]
 │                   spawn <role> [--exec] [--probe/--no-probe] [--refresh]
 │                                 [--effort LEVEL] · harness

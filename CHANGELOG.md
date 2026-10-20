@@ -24,7 +24,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is the agent that runs the command, so a manager's
   `restart --all` doesn't stop itself half-way. A restart resumes each agent's
   session from its transcript when that is on disk, as a single restart does. An
-  agent that fails doesn't stop the rest: it is named, with the reason.
+  agent that fails doesn't stop the rest: it is named, with the reason. While a
+  run from *Settings* goes on, `q` doesn't quit `asq`: it says the run is still going.
 
 ### Fixed
 - Run on your Mac, a copy in `asq` reaches your clipboard in Terminal.app and

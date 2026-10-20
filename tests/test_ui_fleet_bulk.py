@@ -18,6 +18,7 @@ from typing import Any, TypeVar
 import pytest
 from textual.pilot import Pilot
 from textual.widgets import Button, Static, Switch
+from textual.widgets._toast import Toast
 
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.click_guard import GuardedButton
@@ -360,6 +361,43 @@ def test_confirming_runs_the_worker_with_the_buttons_greyed_until_the_summary(
     ]
     summary = [t for t in toasts if t.startswith("stopped ")]
     assert summary == ["stopped 4 · skipped 1 · failed 0\nskipped: tester-1 (beta) — exited"]
+
+
+def test_a_quit_is_refused_while_the_run_goes_on_and_quits_once_it_ended(acted: Acted) -> None:
+    """Review of #266, round 3: ``q`` mid-run tore the screen down and left the terminal
+    blank while the thread stopped or restarted the rest of the agents, minutes for a
+    restart of all, with every toast after the quit lost. Update and Uninstall refused it."""
+    acted.gate = threading.Event()
+
+    async def go(pilot: Pilot[None]) -> tuple[int | None, list[str], int | None]:
+        app = _app(pilot)
+        dialog = await _open(pilot, "stop")
+        _confirm(dialog).press()
+        await settle_page(app, group="nothing-runs-here")  # the bulk worker is held
+        app.sidebar.focus()
+        await pilot.press("q")
+        await settle_page(app, group="nothing-runs-here")
+        refused = app.return_code
+        toasts = [t for t in await _toasts_held(app) if "still running" in t]
+        acted.gate.set()  # type: ignore[union-attr]
+        await settle(app)
+        await pilot.press("q")
+        await pilot.pause()
+        return refused, toasts, app.return_code
+
+    refused, toasts, quit_after = drive(go)
+    assert refused is None, "asq quit under a run of every agent"
+    assert toasts == [
+        "Settings ▸ Fleet's restart or stop of every agent is still running — quit when it ends"
+    ]
+    assert quit_after == 0
+
+
+async def _toasts_held(app: FleetApp) -> list[str]:
+    """The toasts on screen while a worker is held on purpose (``_toast_list`` settles every
+    worker, and would wait for it)."""
+    await settle_page(app, group="nothing-runs-here")
+    return [toast.render().plain for toast in app.screen.query(Toast)]
 
 
 def test_a_restart_of_all_is_told_per_agent_and_never_moves_the_view(acted: Acted) -> None:

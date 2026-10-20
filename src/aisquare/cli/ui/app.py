@@ -1848,6 +1848,23 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if self.content.current == "welcome":
             self.doctor_scope = event.project_id
 
+    async def action_quit(self) -> None:
+        """``q`` and ``ctrl+q``: quit, unless Settings ▸ Fleet's restart or stop of every agent
+        still runs, which is refused with a toast as Update and Uninstall refuse it.
+
+        A quit cannot stop its thread: the screen went, ``asyncio.run`` joined the thread
+        with the terminal blank for as long as the rest of the agents took, minutes for a
+        restart of all, and each agent's toast after the quit was lost (review of #266,
+        round 3). An agent view's own Stop or Restart, a few seconds, is left to the quit.
+        """
+        from aisquare.cli.ui.views.fleet_bulk import BULK_WORKER
+
+        running = self._work_running({BULK_WORKER: _writing_workers()[BULK_WORKER]})
+        if running is not None:
+            self.notify(f"{running} is still running — quit when it ends", severity="warning")
+            return
+        await super().action_quit()
+
     hand_off: tuple[str, ...] | None = None
     """The ``aisquare`` command this terminal goes to when asq quits (``run_ui``)."""
 

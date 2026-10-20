@@ -412,7 +412,8 @@ greyed. The list is read when the dialog opens, and read again on confirm. Confi
 acts only on the agents the dialog showed: one that ended meanwhile is skipped as
 *already exited*, and one started meanwhile is left alone. A project whose agents
 can't be read on confirm is left alone too, and the summary names it and why. The work runs off the UI
-thread, with both buttons greyed until it ends. Each agent gets a toast as it is
+thread, with both buttons greyed until it ends, and `q` refused: a quit can't stop
+it, and would leave the terminal blank until the rest were done. Each agent gets a toast as it is
 done (`✓ restarted manager (alpha) — resumed its session`, `✓ stopped coder-1 (beta)`).
 Then one toast sums it up (`restarted 4 · skipped 1 · failed 0`) and names who was
 skipped or failed, and why. A restart from here never moves your view. Like an agent

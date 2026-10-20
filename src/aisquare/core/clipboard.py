@@ -303,11 +303,11 @@ def cached_writer() -> Writer | Ask | None:
     No PATH scan, no file read, no process: the event loop calls this at every copy,
     and a ``which`` there cost a drag release several to tens of milliseconds on WSL,
     where every Windows PATH directory is a stat over 9p (review of #266, round 1).
+    ``None`` when there is no tool, or the last write failed (:func:`_writer_failed`).
     :attr:`Ask.WORKER` when nothing is known for the environment as it is now (a
-    variable in :data:`_KEY_VARIABLES` changed, the last write failed, or a "no tool"
-    answer is older than :data:`RECHECK`), and inside the user's tmux whenever there is a
-    tool, since its client may have reattached from another machine since
-    (:func:`session_is_remote`).
+    variable in :data:`_KEY_VARIABLES` changed, or a "no tool" answer is older than
+    :data:`RECHECK`), and inside the user's tmux whenever there is a tool, since its
+    client may have reattached from another machine since (:func:`session_is_remote`).
     """
     return _known()
 
@@ -331,6 +331,20 @@ def forget_writer() -> None:
     global _cache
     with _cache_lock:
         _cache = None
+
+
+def _writer_failed() -> None:
+    """Hold a tool whose write failed as no tool, for :data:`RECHECK`: the copies meanwhile
+    are OSC 52's alone, told at once, and the search runs again after that.
+
+    Only dropped from the cache, a broken tool was found again by the next copy and run
+    again. An ``xclip`` that hangs on a stale ``DISPLAY`` then held every copy's toast
+    for :data:`WRITE_TIMEOUT` and :data:`KILL_WAIT` more, for as long as the app ran
+    (review of #266, round 2).
+    """
+    global _cache
+    with _cache_lock:
+        _cache = (_writer_key(), None, _clock())
 
 
 def _resolve() -> Writer | None:
@@ -518,7 +532,7 @@ def _drain() -> None:
             writer = _resolve()
             landed = writer is not None and write(writer, text)
             if writer is not None and not landed:
-                forget_writer()  # gone, or broken: look again at the next copy
+                _writer_failed()  # gone, or broken: not run again until it is looked for
         except Exception:
             log.warning("clipboard: a write failed unexpectedly", exc_info=True)
             landed = False

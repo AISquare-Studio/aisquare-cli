@@ -668,7 +668,7 @@ def test_a_tool_that_will_not_die_is_left_behind_after_a_bounded_wait(
 def test_the_writer_found_is_kept_for_the_environment_and_forgotten_when_it_changes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    fake = install(tmp_path, monkeypatch)
+    install(tmp_path, monkeypatch)
     assert clipboard.cached_writer() is clipboard.Ask.WORKER, "nothing known before a copy"
     told: list[bool] = []
     clipboard.submit(TEXT, told.append)
@@ -685,12 +685,39 @@ def test_the_writer_found_is_kept_for_the_environment_and_forgotten_when_it_chan
     else:
         monkeypatch.setenv("DISPLAY", display)
     assert clipboard.cached_writer() == known
-    fake.behaviour = "fail"  # broken, or gone: looked for again at the next copy
+
+
+@NEEDS_POSIX
+@pytest.mark.parametrize("tmux", [False, True])
+def test_a_tool_that_failed_is_not_run_again_until_it_is_looked_for_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tmux: bool
+) -> None:
+    """Review of #266, round 2: a failed write dropped the cache without a word of why, so
+    the next copy found the same broken tool and ran it again. An ``xclip`` hanging on a
+    stale DISPLAY held every toast for about three seconds, for as long as asq ran. A
+    failure stands as "no tool" stands, for RECHECK: told at once, OSC 52's alone."""
+    fake = install(tmp_path, monkeypatch, behaviour="fail")
+    if tmux:
+        monkeypatch.setenv("TMUX", "/tmp/tmux-1/default,1,0")
+        monkeypatch.setattr(clipboard, "_ask", lambda argv: None)  # attached at the desk
+    now = [1000.0]
+    monkeypatch.setattr(clipboard, "_clock", lambda: now[0])
+    told: list[bool] = []
     clipboard.submit(TEXT, told.append)
-    while len(told) < 2 and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert told == [True, False]
+    _told(1, told)
+    assert (told, fake.started()) == ([False], 1)
+
+    assert clipboard.cached_writer() is None, "known: no tool to wait for"
+    clipboard.submit(TEXT, told.append)
+    _told(2, told)
+    assert (told, fake.started()) == ([False, False], 1), "the broken tool ran again"
+
+    now[0] += clipboard.RECHECK + 1
+    fake.behaviour = ""  # mended meanwhile
     assert clipboard.cached_writer() is clipboard.Ask.WORKER
+    clipboard.submit(TEXT, told.append)
+    _told(3, told)
+    assert (told[-1], fake.started()) == (True, 2)
 
 
 def test_no_tool_found_is_looked_for_again_after_a_while(

@@ -182,6 +182,13 @@ def project_name(project: ProjectInfo) -> str:
     return display_name(project)
 
 
+def agent_name(label: str, project: ProjectInfo | None) -> str:
+    """``coder-1 (alpha)``: an agent's label, with the project that tells one ``manager``
+    from another; the label alone when the project is not known. The one way a toast names
+    an agent across projects: the agent view's restart and Settings ▸ Fleet's alike."""
+    return f"{label} ({project_name(project)})" if project is not None else label
+
+
 def short_path(path: Path, home: Path | None = None) -> str:
     """``~/work/api`` for a path under the home directory; the path itself otherwise."""
     home = Path.home() if home is None else home

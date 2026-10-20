@@ -92,7 +92,7 @@ from aisquare.cli.ui.sidebar import (
     SettingsSelected,
     Sidebar,
     SpawnAgent,
-    project_name,
+    agent_name,
 )
 from aisquare.cli.ui.terminal import EscapeToSidebar, SelectionHost, TerminalPane
 from aisquare.cli.ui.theme import ThemePicker, restore_theme, theme_autosave
@@ -1433,7 +1433,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         receipt = event.receipt
         started = event.agent
         project = self.snapshot.project(started.project_id) if self.snapshot else None
-        named = f"{started.label} ({project_name(project)})" if project else started.label
+        named = agent_name(started.label, project)
         self.notify(f"✓ restarted {named} — {receipt.how}", timeout=6, markup=False)
         for note in receipt.notes:
             self.notify(note, severity="warning", timeout=8, markup=False)

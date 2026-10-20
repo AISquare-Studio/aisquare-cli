@@ -26,7 +26,7 @@ from textual.widgets import Button, Label, Static, Switch
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.click_guard import GuardedButton
-from aisquare.cli.ui.sidebar import STATE_CHIP, project_name
+from aisquare.cli.ui.sidebar import STATE_CHIP, agent_name, project_name
 from aisquare.services import fleet as fleet_service
 
 BULK_WORKER = "fleet-bulk"
@@ -211,8 +211,8 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
 
 
 def named(receipt: fleet_service.BulkReceipt) -> str:
-    """``coder-1 (alpha)``: a label, with the project that tells one ``manager`` from another."""
-    return f"{receipt.agent.label} ({project_name(receipt.project)})"
+    """``coder-1 (alpha)``: the receipt's agent, as every toast names one (``agent_name``)."""
+    return agent_name(receipt.agent.label, receipt.project)
 
 
 def summary_text(report: fleet_service.BulkReport) -> str:

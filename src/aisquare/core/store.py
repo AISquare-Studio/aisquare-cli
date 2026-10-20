@@ -1232,10 +1232,14 @@ class AmbiguousIdError(LookupError):
 
 
 def is_the_home(root: Path) -> bool:
-    """Whether ``root`` is the aisquare home itself (resolved, so a symlink is the same home)."""
+    """Whether ``root`` is the aisquare home itself (resolved, so a symlink is the same home).
+
+    A root that is a symlink loop is not the home: ``resolve`` raises ``RuntimeError`` for
+    one on 3.11 and 3.12 (``OSError`` from 3.13), and ``project prune`` asks this of every
+    row, where a loop is a root it must report, never a traceback."""
     try:
         return root.resolve() == paths.aisquare_home().resolve()
-    except OSError:
+    except (OSError, RuntimeError):
         return False
 
 

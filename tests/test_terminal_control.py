@@ -368,6 +368,11 @@ def test_real_tmux_a_killed_control_client_hands_the_pane_to_polling_within_a_se
 ) -> None:
     """Acceptance 5. The control client killed outright: the pane keeps rendering, by
     polling, within a second — no toast."""
+    # Skipped without tmux already, and Windows has none; ``pytest.skip`` is typed
+    # ``NoReturn``, so this also narrows the platform for mypy, which checks the suite
+    # under Windows too: ``signal.SIGKILL`` is POSIX-only in typeshed.
+    if sys.platform == "win32":
+        pytest.skip("no SIGKILL on Windows")
     pane_id = _window(live, "asq-kill", tmp_path, ["cat"])
 
     async def drive() -> tuple[float, bool, list[str]]:
@@ -442,6 +447,11 @@ def test_real_tmux_fleet_attach_and_its_f12_detach_leave_the_control_client_alon
     """``fleet attach`` is a raw tmux client on the same session, and F12 is bound to
     ``detach-client``: that detaches the raw client, never the UI's control client,
     which goes on bringing frames."""
+    # Skipped without tmux already, and Windows has none; ``pytest.skip`` is typed
+    # ``NoReturn``, so this also narrows the platform for mypy, which checks the suite
+    # under Windows too: ``pty`` is POSIX-only in typeshed.
+    if sys.platform == "win32":
+        pytest.skip("no pty on Windows; fleet attach needs a terminal")
     pane_id = _window(live, "asq-attach", tmp_path, ["cat"])
     session = "asq-attach"
 
@@ -452,7 +462,7 @@ def test_real_tmux_fleet_attach_and_its_f12_detach_leave_the_control_client_alon
             pane.focus()
             await wait_until(pilot, lambda: _serving(pane), timeout=5.0)
             client = _client(pane)
-            import pty  # Unix only, like everything this test drives
+            import pty
 
             fd, terminal = pty.openpty()
             raw = subprocess.Popen(

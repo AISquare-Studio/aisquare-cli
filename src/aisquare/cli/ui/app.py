@@ -10,9 +10,10 @@ loop).
 
 **The TUI holds no state that matters** (§2). Projects come from the store,
 agents from the fleet service, both re-read every two seconds exactly as
-``board -w`` does; the last good frame is kept — and labelled stale — when the
-store cannot be read, because the agents are unaffected by our trouble and a
-blank sidebar would say otherwise.
+``board -w`` does — in a thread, so the UI thread only paints what was read; the
+last good frame is kept — and labelled stale — when the store cannot be read,
+because the agents are unaffected by our trouble and a blank sidebar would say
+otherwise.
 
 **The app's keys belong to the sidebar** (§4.3). ``q`` ``t`` ``r`` ``?`` and the
 palette are declared non-priority and refused by ``check_action`` unless focus
@@ -118,6 +119,7 @@ from aisquare.models import (
     FleetAgentStatus,
     HeadroomSummary,
     ProjectForgetReport,
+    ProjectGroup,
     ProjectInfo,
 )
 from aisquare.services import claude_accounts as accounts_service
@@ -139,6 +141,9 @@ _DoctorReport = tuple[Path | None, list[DoctorCheck]]
 """What the doctor worker hands back: the scope it ran for, and its checks."""
 
 _DOCTOR_WORKER = "doctor"
+FLEET_WORKER = "shell-fleet"
+"""The thread worker that reads the sidebar's frame: the projects, their groups and every
+project's agents (``FleetApp.refresh_data``)."""
 ACCOUNTS_WORKER = "shell-accounts"
 """The thread worker that reads the accounts' frame (``FleetApp.refresh_accounts``)."""
 HEADROOM_WORKER = "sidebar-headroom"
@@ -220,6 +225,50 @@ class FleetSnapshot:
 
     def agent(self, project_id: str, agent_id: str) -> FleetAgentStatus | None:
         return next((s for s in self.agents.get(project_id, []) if s.agent.id == agent_id), None)
+
+
+@dataclass(frozen=True)
+class _FleetRead:
+    """What one read of the fleet found (:func:`_read_fleet`), handed from the thread that
+    read it to the UI thread that paints it (``FleetApp._paint_fleet``).
+
+    ``error`` is why the store could not be read, the rest then empty: the frame on screen
+    is kept, and labelled stale."""
+
+    capturing: bool
+    """``[projects] capture`` as the read found it."""
+    projects: list[ProjectInfo] = field(default_factory=list)
+    groups: list[ProjectGroup] = field(default_factory=list)
+    agents: dict[str, list[FleetAgentStatus]] = field(default_factory=dict)
+    notices: dict[str, str] = field(default_factory=dict)
+    error: str | None = None
+    taken_at: datetime = field(default_factory=datetime.now)
+
+
+def _read_fleet(show_captured: bool) -> _FleetRead:
+    """One frame of the fleet, read on the calling thread: the projects and their groups,
+    then each project's agents. ``list_agents`` asks tmux about every row and ends the dead
+    ones through a store session it opens itself, on this thread too. The captured
+    directories are listed when ``show_captured`` and ``[projects] capture`` both say so."""
+    capturing = project_service.capture_on()
+    try:
+        with store_session() as store:
+            projects = store.list_projects(all=show_captured and capturing)
+            groups = store.project_groups()
+    except Exception as exc:  # the store is briefly unavailable — keep what is shown
+        return _FleetRead(capturing, error=f"{type(exc).__name__}: {exc}")
+    agents: dict[str, list[FleetAgentStatus]] = {}
+    notices: dict[str, str] = {}
+    for project in projects:
+        try:
+            agents[project.id] = fleet_service.list_agents(project)
+        except fleet_service.FleetError as exc:
+            agents[project.id] = []
+            notices[project.id] = f"agents unavailable — {exc}"
+        except Exception as exc:  # a bug in the fleet path must not take the view down
+            agents[project.id] = []
+            notices[project.id] = f"agents unavailable — {type(exc).__name__}: {exc}"
+    return _FleetRead(capturing, projects, groups, agents, notices)
 
 
 class RemoteNews(Message):
@@ -698,6 +747,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """The last frame that was read successfully; ``None`` before the first."""
         self.store_error: str | None = None
         """Why the newest refresh kept the previous frame, or ``None`` when it did not."""
+        self._fleet_worker: Worker[_FleetRead] | None = None
+        """The fleet read in flight, or the last one; only one runs at a time."""
+        self._fleet_owed = False
+        """A frame was asked for while a read was in flight: read once more after it."""
+        self._fleet_after: dict[Worker[_FleetRead], list[Callable[[], object]]] = {}
+        """What waits for a read's frame (``refresh_data(then=…)``), by the read it waits for."""
+        self._fleet_owed_after: list[Callable[[], object]] = []
+        """What waits for the owed read's frame: the read in flight may predate its change."""
         self.doctor_checks: list[DoctorCheck] = []
         """The newest report on the Doctor page; its ✗/⚠ counts are beside *⚙ Settings*."""
         self.doctor_scope: str | None = None
@@ -745,8 +802,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         restore_theme(self)
         self._theme_restored = True
         self.show_captured = _ui_state(SHOW_CAPTURED_KEY) == "1"
-        self.capturing = project_service.capture_on()
-        self.refresh_data()
+        # The first frame is read here, on the UI thread, before anything is drawn: there
+        # is nothing on screen yet for the read to hold up, and what was open last time is
+        # reopened from it below. Every frame after it is read in a thread (`refresh_data`).
+        self._paint_fleet(_read_fleet(self.show_captured))
         self.set_interval(self.refresh_seconds, self.refresh_data)
         # The status line's headroom is the usage cache's, on its own slow clock: never
         # on the two-second tick, which would ask the network as often as it went stale.
@@ -979,20 +1038,90 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     # --- data ---------------------------------------------------------------------------
 
     @while_running
-    def refresh_data(self) -> None:
-        """Re-read projects and agents; keep (and label) the last frame if the store is busy.
+    def refresh_data(self, *, then: Callable[[], object] | None = None) -> None:
+        """Re-read projects and agents OFF the UI thread; :meth:`_fleet_read` paints the frame.
 
-        While asq waits to hand its terminal over too: the reads this starts are held
-        (:class:`_WorkerThreads`), and this one ends on the UI thread before any quit.
+        The read (:func:`_read_fleet`) opens the store and asks ``list_agents`` about
+        every project, and that asks tmux: ~11 ms a project, ~44 ms with four, on the
+        event loop every two seconds (measured 2026-10-20 on an M4 Pro). Every click,
+        scroll or key that landed in that window waited for it — "everything feels
+        sluggish, happens after a tick". It runs in a thread worker now; the snapshot,
+        the sidebar, the open views and the accounts' read are still the UI thread's.
+
+        One read at a time, as :meth:`refresh_accounts` reads the accounts, and for its
+        reasons (no ``exclusive``: a cancelled read keeps its thread). A call that finds
+        a read in flight leaves it be and owes one more, which :meth:`_fleet_read`
+        starts once it has painted: however many ticks, gestures and keys a busy store
+        outlives, they cost one read after it, begun after the last of them, so what
+        they changed is in its frame.
+
+        ``then`` is for a caller that reads the frame next (a restart's new row, a
+        project just onboarded): it is called on the UI thread once a frame read after
+        this call has painted, or once that read found the store unreadable and kept the
+        frame shown.
+
+        While asq waits to hand its terminal over, the read this starts is held
+        (:class:`_WorkerThreads`), and a tick that finds it held asks for nothing more.
         """
+        reading = self._fleet_worker
+        if reading is not None and not reading.is_finished:
+            if reading.state is WorkerState.PENDING:
+                # A read held for a pending hand-over has not begun, and reads what this would.
+                if then is not None:
+                    self._fleet_after.setdefault(reading, []).append(then)
+            else:
+                self._fleet_owed = True
+                if then is not None:
+                    self._fleet_owed_after.append(then)
+            return
+        after = [*self._fleet_owed_after, *([] if then is None else [then])]
+        self._fleet_owed, self._fleet_owed_after = False, []
+        # `a`'s choice is read as the read begins, so one held for a hand-over and started
+        # when it is called off reads what is shown then.
+        self._fleet_worker = self.run_worker(
+            lambda: _read_fleet(self.show_captured),
+            name=FLEET_WORKER,
+            group=FLEET_WORKER,
+            thread=True,
+            exit_on_error=False,
+        )
+        if after:
+            self._fleet_after[self._fleet_worker] = after
+
+    def _fleet_read(self, event: Worker.StateChanged) -> None:
+        """Paint the frame a fleet read answered; then the read that was owed while it ran,
+        if one was (:meth:`refresh_data`), and what waited for this frame, in its turn.
+
+        Every read's answer, not only the newest read's, for the reason
+        ``on_worker_state_changed`` gives the accounts'. A read that raised is painted as
+        one that found the store unreadable: the frame stands, and says so.
+        """
+        worker = event.worker
+        if event.state is WorkerState.CANCELLED:
+            self._fleet_after.pop(worker, None)  # with the app: nothing to paint or owe
+            return
+        result = worker.result if event.state is WorkerState.SUCCESS else None
+        if isinstance(result, _FleetRead):
+            read = result
+        elif event.state is WorkerState.ERROR:
+            read = _FleetRead(
+                self.capturing, error=f"{type(worker.error).__name__}: {worker.error}"
+            )
+        else:
+            return  # still running
+        self._paint_fleet(read)
+        if self._fleet_owed:
+            self.refresh_data()  # the calls this read outlived: one read, after it
+        for then in self._fleet_after.pop(worker, []):
+            self.call_later(then)
+
+    def _paint_fleet(self, read: _FleetRead) -> None:
+        """Paint one read's frame, or keep (and label) the frame shown when the read found
+        the store unreadable. The painting only: nothing here opens the store or asks tmux."""
         sidebar = self.sidebar
-        self.capturing = project_service.capture_on()
-        try:
-            with store_session() as store:
-                projects = store.list_projects(all=self._listing_captured())
-                groups = store.project_groups()
-        except Exception as exc:  # the store is briefly unavailable — keep what is shown
-            self.store_error = f"{type(exc).__name__}: {exc}"
+        self.capturing = read.capturing
+        if read.error is not None:  # the store is briefly unavailable — keep what is shown
+            self.store_error = read.error
             if self.snapshot is None:
                 sidebar.show_notice("store unreadable — nothing to show yet")
             else:
@@ -1002,21 +1131,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                     f"store unreadable — showing the frame from {self.snapshot.taken_at:%H:%M:%S}"
                 )
             return
-        agents: dict[str, list[FleetAgentStatus]] = {}
-        notices: dict[str, str] = {}
-        for project in projects:
-            try:
-                agents[project.id] = fleet_service.list_agents(project)
-            except fleet_service.FleetError as exc:
-                agents[project.id] = []
-                notices[project.id] = f"agents unavailable — {exc}"
-            except Exception as exc:  # a bug in the fleet path must not take the view down
-                agents[project.id] = []
-                notices[project.id] = f"agents unavailable — {type(exc).__name__}: {exc}"
         self.store_error = None
-        self.snapshot = FleetSnapshot(projects, agents, notices)
+        self.snapshot = FleetSnapshot(read.projects, read.agents, read.notices, read.taken_at)
         sidebar.show_notice(None)
-        sidebar.show_projects(projects, agents, notices=notices, groups=groups)
+        sidebar.show_projects(read.projects, read.agents, notices=read.notices, groups=read.groups)
         self._feed_open_views(self.snapshot)
         self.refresh_accounts()
 
@@ -1177,14 +1295,18 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         keeps what its view has; what failing open costs here is a manager
         header that ages until the next read succeeds, while the sidebar carries
         the reason on the project's own card.
+
+        The views are the content switcher's own children, and only they are looked
+        at: a query of the app walked every widget on the screen, three times a frame.
         """
-        for welcome in self.query(WelcomeView):
+        content = self.content
+        for welcome in content.query_children(WelcomeView):
             welcome.note_frame()  # shown or not: what step 3's refusals were about still stands
-        for agent_view in self.query(AgentView):
+        for agent_view in content.query_children(AgentView):
             fresh = snapshot.agent(agent_view.status.agent.project_id, agent_view.status.agent.id)
             if fresh is not None and fresh != agent_view.status:
                 agent_view.refresh_status(fresh)
-        for project_view in self.query(ProjectView):
+        for project_view in content.query_children(ProjectView):
             fresh_project = snapshot.project(project_view.project.id)
             if fresh_project is None:
                 continue  # the row has left the frame: keep what the view has
@@ -1273,6 +1395,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return
         if event.worker.name == PROJECT_REMOVE_WORKER:
             self._project_removal(event)
+            return
+        if event.worker.name == FLEET_WORKER:
+            self._fleet_read(event)
             return
         if event.worker.name == ACCOUNTS_WORKER:
             # Every read's answer, not only the newest read's: a worker is finished
@@ -1423,13 +1548,15 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         put them; the sidebar's next frame lists the new row, and the toast names the
         project, as one ``manager`` reads like another's.
 
-        The view that posted this refreshed the frame first, so the row is
-        normally in the snapshot already; one more read covers a store that
-        was briefly busy. A row still missing is reported, not invented — the
-        next tick lists it. The new pane takes the keyboard, as a selected
-        agent's does (#147): the Restart button that had it went with the view
-        it was on, and focus was left with nobody — where the app's keys are
-        live, so a ``q`` typed at the restarted agent quit the UI.
+        The view that posted this asked for a frame as it did, and frames are
+        read off the UI thread, so the row may not be in the snapshot yet. Then
+        it is looked for again once a frame read after this one has painted,
+        and the old row's view must still be the one on screen by then. A row
+        still missing is reported, not invented — the next tick lists it. The
+        new pane takes the keyboard, as a selected agent's does (#147): the
+        Restart button that had it went with the view it was on, and focus was
+        left with nobody — where the app's keys are live, so a ``q`` typed at
+        the restarted agent quit the UI.
         """
         receipt = event.receipt
         started = event.agent
@@ -1438,12 +1565,17 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.notify(f"✓ restarted {named} — {receipt.how}", timeout=6, markup=False)
         for note in receipt.notes:
             self.notify(note, severity="warning", timeout=8, markup=False)
+        await self._show_restarted(event, read_again=True)
+
+    async def _show_restarted(self, event: AgentRestarted, *, read_again: bool) -> None:
+        """Show the row a restart started, from its old row's view (:meth:`on_agent_restarted`)."""
+        started = event.agent
         if self.content.current != f"agent-{event.replaced.id}":
             return  # the user is elsewhere: nothing of theirs moves
         status = self.snapshot.agent(started.project_id, started.id) if self.snapshot else None
-        if status is None:
-            self.refresh_data()
-            status = self.snapshot.agent(started.project_id, started.id) if self.snapshot else None
+        if status is None and read_again:
+            self.refresh_data(then=lambda: self._show_restarted(event, read_again=False))
+            return
         if status is None:
             self.notify(
                 f"{started.label} restarted — its row appears on the next refresh",
@@ -1784,15 +1916,18 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         event.stop()
         self.run_doctor()
 
-    async def on_project_onboarded(self, event: ProjectOnboarded) -> None:
-        # Asked BEFORE the switch below, which hides whatever the content pane had
-        # focused: only a keyboard still on the Onboard view (or nowhere) is handed on.
+    def on_project_onboarded(self, event: ProjectOnboarded) -> None:
+        """Open the project just onboarded, once a frame that lists it has painted."""
+        # Asked BEFORE the switch, which hides whatever the content pane had focused:
+        # only a keyboard still on the Onboard view (or nowhere) is handed on.
         focused = self.focused
         onboarding = focused is None or any(isinstance(n, OnboardView) for n in focused.ancestors)
-        self.refresh_data()
-        await self.on_project_selected(ProjectSelected(event.project_id))
+        self.refresh_data(then=lambda: self._open_onboarded(event.project_id, onboarding))
+
+    async def _open_onboarded(self, project_id: str, onboarding: bool) -> None:
+        await self.on_project_selected(ProjectSelected(project_id))
         if onboarding:
-            self.call_after_refresh(self._hand_on_after_onboarding, f"project-{event.project_id}")
+            self.call_after_refresh(self._hand_on_after_onboarding, f"project-{project_id}")
 
     def _hand_on_after_onboarding(self, view_id: str) -> None:
         """The Onboard view kept the keyboard on its path box, hidden now: give it the next step.
@@ -2083,6 +2218,7 @@ def _waited_reads() -> dict[str, str]:
 
     return {
         _DOCTOR_WORKER: "the doctor's checks",
+        FLEET_WORKER: "the sidebar's read of the fleet",
         ACCOUNTS_WORKER: "the accounts' read",
         HEADROOM_WORKER: "the accounts' headroom",
         doctor.ROUTE_WORKER: "how aisquare was installed",

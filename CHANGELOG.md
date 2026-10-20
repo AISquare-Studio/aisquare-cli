@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- `asq` no longer stalls every two seconds. The sidebar's refresh read the store
+  and asked tmux about every agent on the UI thread, about 11 ms a project, so a
+  click, a scroll or a key that landed during it waited for it. The refresh now
+  reads in the background and only repaints on the UI thread: with four projects
+  of three agents each, a tick holds the UI for about 2 ms, where it held it for
+  about 117 ms.
+
 ## [0.8.2] - 2026-10-19
 
 **A hotfix: a copy in `asq` reaches the clipboard on macOS. Every agent can now be

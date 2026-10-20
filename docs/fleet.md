@@ -390,9 +390,9 @@ One agent's failure is only its own line; the rest are still restarted or stoppe
 The command **exits 1** when any agent failed, a project's agents couldn't be read,
 or a stop left claims behind (the same as `fleet stop`). `--json` prints one
 object: `receipts`, each with `project`, `agent`, `outcome` (`done`, `skipped` or
-`failed`) and `why`, plus a restart's `started`, `how`, `resumed`, `was_running`,
-`failures` and `notes`, or a stop's `claims_released` and `release_failed`. The
-object also has `unread`, `summary`, `ok` and `interrupted`. Interrupted with
+`failed`) and `why`, plus, for one that was done, the fields `fleet restart --json`
+or `fleet stop --json` prints for that agent (a stop's `agent` is then the row as
+the stop ended it). The object also has `unread`, `summary`, `ok` and `interrupted`. Interrupted with
 Ctrl-C, it **exits 130**, and it still says how far it got: the agents done so far
 (the JSON object under `--json`), the count, and the agent it was on, as `fleet
 shutdown` does. The agents after it are left as they were.

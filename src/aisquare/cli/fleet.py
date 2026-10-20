@@ -363,21 +363,7 @@ def restart(
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
     if get_state().json_output:
-        typer.echo(
-            json.dumps(
-                {
-                    "replaced": receipt.replaced.model_dump(mode="json"),
-                    "started": receipt.started.model_dump(mode="json"),
-                    "resumed": receipt.resumed,
-                    "prompt_typed": fleet_service.prompt_typed_json(receipt.prompt_typed),
-                    "how": receipt.how,
-                    "failures": receipt.failures,
-                    "was_running": receipt.was_running,
-                    "tmux_session": receipt.tmux_session,
-                    "notes": receipt.notes,
-                }
-            )
-        )
+        typer.echo(json.dumps(_restart_json(receipt)))
         return
     console = stdout_console()
     before = "stopped and " if receipt.was_running else ""
@@ -527,17 +513,8 @@ def stop(
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
     agent = receipt.agent
-    released = [task.id for task in receipt.released]
     if get_state().json_output:
-        typer.echo(
-            json.dumps(
-                {
-                    "agent": agent.model_dump(mode="json"),
-                    "claims_released": released,
-                    "release_failed": receipt.release_failed,
-                }
-            )
-        )
+        typer.echo(json.dumps(_stop_json(receipt)))
     else:
         console = stdout_console()
         console.print(f"✓ stopped {agent.label} ({agent.id})")
@@ -711,19 +688,9 @@ def _bulk_json(report: fleet_service.BulkReport) -> dict[str, object]:
         }
         result = receipt.result
         if isinstance(result, fleet_service.RestartReceipt):
-            out |= {
-                "started": result.started.model_dump(mode="json"),
-                "resumed": result.resumed,
-                "how": result.how,
-                "was_running": result.was_running,
-                "failures": result.failures,
-                "notes": result.notes,
-            }
+            out |= _restart_json(result)
         elif isinstance(result, fleet_service.StopReceipt):
-            out |= {
-                "claims_released": [task.id for task in result.released],
-                "release_failed": result.release_failed,
-            }
+            out |= _stop_json(result)  # its `agent` is the row as the stop ended it
         return out
 
     return {
@@ -736,6 +703,32 @@ def _bulk_json(report: fleet_service.BulkReport) -> dict[str, object]:
         "summary": {outcome: len(report.of(outcome)) for outcome in ("done", "skipped", "failed")},
         "ok": report.ok,
         "interrupted": report.interrupted,
+    }
+
+
+def _restart_json(receipt: fleet_service.RestartReceipt) -> dict[str, object]:
+    """One restart as ``fleet restart --json`` prints it, and each of ``restart --all``'s:
+    built twice, the two had drifted, and a script written against one broke on the other
+    (review of #266, round 3)."""
+    return {
+        "replaced": receipt.replaced.model_dump(mode="json"),
+        "started": receipt.started.model_dump(mode="json"),
+        "resumed": receipt.resumed,
+        "prompt_typed": fleet_service.prompt_typed_json(receipt.prompt_typed),
+        "how": receipt.how,
+        "failures": receipt.failures,
+        "was_running": receipt.was_running,
+        "tmux_session": receipt.tmux_session,
+        "notes": receipt.notes,
+    }
+
+
+def _stop_json(receipt: fleet_service.StopReceipt) -> dict[str, object]:
+    """One stop as ``fleet stop --json`` prints it, and each of ``stop --all``'s."""
+    return {
+        "agent": receipt.agent.model_dump(mode="json"),
+        "claims_released": [task.id for task in receipt.released],
+        "release_failed": receipt.release_failed,
     }
 
 

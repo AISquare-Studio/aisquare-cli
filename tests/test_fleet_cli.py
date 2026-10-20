@@ -1110,6 +1110,33 @@ def test_all_json_gives_every_receipt_and_the_same_exit_status(
     assert failed["why"] == "cannot restart 'coder-web': tmux said no"
 
 
+@pytest.mark.parametrize("action", ["restart", "stop"])
+def test_each_all_receipt_s_json_is_the_one_agent_command_s(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch, action: str
+) -> None:
+    """Review of #266, round 3: ``--all`` built each receipt's JSON a second time, and the copy
+    had drifted. A restart had no ``replaced``, ``prompt_typed`` or ``tmux_session``, so a
+    script written against ``fleet restart --json`` broke on ``--all``."""
+    if action == "restart":
+        bulk_receipt = _restarted(_agent("manager", "manager"))
+    else:
+        ended = _agent("coder-auth", ended=True, exit_status=0, worktree=True)
+        stopped = StopReceipt(ended, [_released_task()])
+        bulk_receipt = BulkReceipt(PROJECT, _agent("coder-auth"), "done", result=stopped)
+    _install(monkeypatch, action, bulk_receipt.result)
+    _bulk(monkeypatch, BulkReport(action, False, (bulk_receipt,)))  # type: ignore[arg-type]
+    label = bulk_receipt.agent.label
+
+    one = json.loads(runner.invoke(app, ["--json", "fleet", action, label]).stdout)
+    every = json.loads(runner.invoke(app, ["--json", "fleet", action, "--all"]).stdout)
+
+    [receipt] = every["receipts"]
+    assert {key: receipt[key] for key in one} == one
+    assert set(receipt) - set(one) == {"project", "outcome", "why"} | (
+        {"agent"} if action == "restart" else set()
+    )
+
+
 def _interrupted(monkeypatch: pytest.MonkeyPatch) -> None:
     """``fleet_service.bulk`` interrupted on its second agent, the first restarted and told."""
     done = _restarted(_agent("manager", "manager"))

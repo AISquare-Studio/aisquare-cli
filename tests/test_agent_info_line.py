@@ -3,10 +3,12 @@
 The two were separate builders that had drifted apart (the Manager tab named the model and
 the tmux command, the Agent view the role, the task and the working directory). Now there is
 one, :func:`~aisquare.cli.ui.views.agent.info_line`, in the manager line's shape with the
-effort and the account added: ``🔨 coder-auth  ▶ working  claude-opus-5-5 high  dev · 87%  %4``.
-The account is its NAME (no ``#slot``) and the figure beside it the five-hour window, percent
-USED, never the weekly one. The sidebar's rows say ``#<slot>·<pct>%`` with the same colours,
-from the same helper (:func:`~aisquare.cli.ui.sidebar.session_percent_text`).
+effort and the account added, in the order the owner ruled on #267 — what matters most at a
+glance first, the unbounded detail last but the pane id:
+``🔨 coder-auth  ▶ working  dev · 87%  claude-opus-5-5 high  %4``. The account is its NAME (no
+``#slot``) and the figure beside it the five-hour window, percent USED, never the weekly one.
+The sidebar's rows say ``#<slot>·<pct>%`` with the same colours, from the same helper
+(:func:`~aisquare.cli.ui.sidebar.session_percent_text`).
 """
 
 from __future__ import annotations
@@ -106,41 +108,49 @@ def test_the_manager_tabs_first_line_is_the_agent_views_info_line() -> None:
         assert hint.plain == MANAGER_HINT and _segments(hint) == [(MANAGER_HINT, "dim")]
 
 
-def test_the_info_line_reads_in_the_manager_lines_shape_with_effort_and_account() -> None:
+def test_the_info_line_reads_in_the_owners_order_with_effort_and_account() -> None:
+    """``<icon> <label>  <chip> <state>[(exit)]  <nickname> · <pct>%  <model> <effort>
+    [detail]  <pane id>`` (the owner's rulings on #267): the account and its use right after
+    the state, the model and effort after them, the detail last but the pane id."""
     manager = _status(label="manager", role="manager", state="waiting", effort="xhigh", slot=2)
     coder = _status()
     assert info_line(manager, LABELS, {2: 42.0}).plain == (
-        "🧭 manager  ⏸ waiting  claude-opus-5-5 xhigh  work · 42%  %4"
+        "🧭 manager  ⏸ waiting  work · 42%  claude-opus-5-5 xhigh  %4"
     )
     assert info_line(coder, LABELS, {3: 87.0}).plain == (
-        "🔨 coder-auth  ▶ working  claude-opus-5-5 high  dev · 87%  %4"
+        "🔨 coder-auth  ▶ working  dev · 87%  claude-opus-5-5 high  %4"
+    )
+    full = _status(state="attention", detail="Claude needs your permission", slot=2)
+    assert info_line(full, LABELS, {2: 42.0}).plain == (
+        "🔨 coder-auth  🔔 attention  work · 42%  claude-opus-5-5 high  "
+        "Claude needs your permission  %4"
     )
 
 
 def test_the_effort_follows_the_model_and_is_left_out_while_unknown() -> None:
-    assert "claude-opus-5-5 high  dev" in info_line(_status(), LABELS).plain
+    assert "dev  claude-opus-5-5 high  %4" in info_line(_status(), LABELS).plain
     without = info_line(_status(effort=None), LABELS).plain
-    assert "claude-opus-5-5  dev" in without and "high" not in without
+    assert "dev  claude-opus-5-5  %4" in without and "high" not in without
     # An effort with no model still shows, in its own place.
     alone = info_line(_status(model=None, effort="low"), LABELS)
-    assert "▶ working  low  dev" in alone.plain
+    assert "▶ working  dev  low  %4" in alone.plain
     assert _style_of(alone, "low") == _style_of(info_line(_status(), LABELS), "high")
 
 
 def test_the_account_is_its_name_and_the_session_use_beside_it() -> None:
     status = _status(slot=2)
-    assert "  work · 42%  %4" in info_line(status, LABELS, {2: 42.0}).plain
+    assert "▶ working  work · 42%  claude-opus-5-5" in info_line(status, LABELS, {2: 42.0}).plain
     # Another slot's figure is not this one's, and no figure is no " · ".
-    assert info_line(status, LABELS, {3: 42.0}).plain.endswith("  work  %4")
-    assert info_line(status, LABELS).plain.endswith("  work  %4")
+    assert "▶ working  work  claude-opus-5-5" in info_line(status, LABELS, {3: 42.0}).plain
+    assert "▶ working  work  claude-opus-5-5" in info_line(status, LABELS).plain
     # Without the registry's labels, the built-in name — never "#2".
-    assert info_line(status, None, {2: 42.0}).plain.endswith("  account 2 · 42%  %4")
+    assert "▶ working  account 2 · 42%  claude" in info_line(status, None, {2: 42.0}).plain
 
 
 def test_with_no_slot_the_sessions_account_alone_and_with_neither_no_account() -> None:
     by_hand = _status(slot=None, account="/somewhere/.claude-work")
     line = info_line(by_hand, LABELS, {1: 10.0, 2: 20.0, 3: 30.0}).plain
-    assert line.endswith("  .claude-work  %4"), line  # the label alone: no figure, no " · "
+    assert "▶ working  .claude-work  claude-opus-5-5" in line, line  # no figure, no " · "
     neither = info_line(_status(slot=None, account=None), LABELS, {3: 30.0}).plain
     assert neither == "🔨 coder-auth  ▶ working  claude-opus-5-5 high  %4"
 
@@ -199,16 +209,16 @@ def test_an_exited_row_says_its_exit_once() -> None:
     assert "exit 1" not in line and "exited 1" not in line  # not a second time
     # Another detail on an exited row still shows, in the detail's place.
     gone = info_line(_status(state="exited", exit_status=None, detail="exit 3"), LABELS).plain
-    assert gone == "🔨 coder-auth  💤 exited  claude-opus-5-5 high  dev  exit 3  %4"
+    assert gone == "🔨 coder-auth  💤 exited  dev  claude-opus-5-5 high  exit 3  %4"
 
 
-def test_the_detail_comes_after_the_account_and_its_use_before_the_pane() -> None:
+def test_the_detail_comes_after_the_account_and_the_model_before_the_pane() -> None:
     """The owner's ruling on #267: a detail has no bound, and a line too long for its row is
-    cut at its end, so the detail goes after ``account · pct%`` — what gives way first."""
+    cut at its end, so the detail goes after ``account · pct%`` and the model and effort —
+    what gives way first."""
     status = _status(state="attention", detail="Claude needs your permission", slot=2)
-    assert info_line(status, LABELS, {2: 42.0}).plain == (
-        "🔨 coder-auth  🔔 attention  claude-opus-5-5 high  work · 42%  "
-        "Claude needs your permission  %4"
+    assert info_line(status, LABELS, {2: 42.0}).plain.endswith(
+        "work · 42%  claude-opus-5-5 high  Claude needs your permission  %4"
     )
     # Without an account, the detail follows the effort; without a session, the state.
     alone = _status(state="unknown", detail="tmux unavailable", session=False, slot=None)

@@ -1,8 +1,8 @@
 """The Agent view: the agent info line, Stop and Restart, over the agent's pane.
 
 The info line (:func:`info_line`) is the one the Manager tab shows too: who the
-agent is, its state, the model and effort it runs, the account it runs on with
-that account's session use, and its pane — one builder, so the two never drift
+agent is, its state, the account it runs on with that account's session use, the
+model and effort it runs, and its pane — one builder, so the two never drift
 apart again. It is a one-line :class:`rich.text.Text` built from a
 :class:`FleetAgentStatus`; every field is DATA and is appended as text, never as
 markup, so a label or a model name with brackets in it reaches the screen intact
@@ -78,21 +78,23 @@ def info_line(
     labels: Mapping[int, str] | None = None,
     usage: Mapping[int, float] | None = None,
 ) -> Text:
-    """``🔨 coder-auth  ▶ working  claude-opus-5-5 high  dev · 87%  %4`` — one agent at a glance.
+    """``🔨 coder-auth  ▶ working  dev · 87%  claude-opus-5-5 high  %4`` — one agent at a glance.
 
     The Agent view's header and the Manager tab's first line, both:
-    ``<icon> <label>  <chip> <state>[(exit)]  <model> <effort>  <account> · <pct>%  [detail]
+    ``<icon> <label>  <chip> <state>[(exit)]  <account> · <pct>%  <model> <effort>  [detail]
     <pane id>``. The role icon and the label; the state chip (``💤 exited(N)`` once it
-    ended); the model and the effort the session reported (``TeamSession.effort``, left
-    out while unknown); the account (:func:`account_text`, its NAME alone — no ``#slot``)
-    with its five-hour window percent USED from ``usage`` (slot → percent, the slow
-    headroom read's ``session_by_slot``); the state's detail; and the pane id. No role
-    word, task, working directory or tmux command: the sidebar row says the role, and the
-    attach command is the Settings tab's.
+    ended); the account (:func:`account_text`, its NAME alone — no ``#slot``) with its
+    five-hour window percent USED from ``usage`` (slot → percent, the slow headroom read's
+    ``session_by_slot``); the model and the effort the session reported
+    (``TeamSession.effort``, left out while unknown); the state's detail; and the pane id.
+    No role word, task, working directory or tmux command: the sidebar row says the role,
+    and the attach command is the Settings tab's.
 
-    The detail comes after the account, as the owner ruled on #267: it has no bound (the
-    folder-trust prompt's names a command and a path), and a line too long for its row is
-    cut at its end — so a long detail is what gives way, never the account or its use.
+    The order is the owner's, ruled on #267: a line too long for its row is cut at its end,
+    so what matters most at a glance comes first. The account and its use right after the
+    state — in a 90-column terminal the Agent view's line gets about 38 cells, and a model
+    name before them pushed them off. The detail last but the pane id: it has no bound (the
+    folder-trust prompt's names a command and a path), so it is what gives way first.
 
     Each field is a style of its own and no two neighbours share one, so each reads apart
     at a glance; every one is appended as data.
@@ -107,12 +109,6 @@ def info_line(
     exited = status.state == "exited" and agent.exit_status is not None
     code = f"({agent.exit_status})" if exited else ""
     text.append(f"{chip} {status.state}{code}", style=chip_style)
-    if session is not None and session.model:
-        text.append(SEPARATOR)
-        text.append(session.model, style=MODEL_STYLE)
-    if session is not None and session.effort:
-        text.append(" " if session.model else SEPARATOR)
-        text.append(session.effort, style=EFFORT_STYLE)
     account = account_text(status, labels)
     if account:
         text.append(SEPARATOR)
@@ -122,6 +118,12 @@ def info_line(
         if percent is not None:
             text.append(" · ", style="dim")
             text.append_text(session_percent_text(percent))
+    if session is not None and session.model:
+        text.append(SEPARATOR)
+        text.append(session.model, style=MODEL_STYLE)
+    if session is not None and session.effort:
+        text.append(" " if session.model else SEPARATOR)
+        text.append(session.effort, style=EFFORT_STYLE)
     # An exited row's detail is its exit code, which the chip has already said.
     if status.detail and not (exited and status.detail == f"exit {agent.exit_status}"):
         text.append(SEPARATOR)

@@ -95,6 +95,7 @@ from aisquare.models import (
     FleetAgentStatus,
     HeadroomSummary,
     ProjectInfo,
+    TeamSession,
 )
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import explainability as explainability_service
@@ -563,6 +564,43 @@ def test_the_session_use_rides_the_slow_headroom_read_never_the_tick(
     assert "account 2 · 64%" in after[0] and "71%" not in after[0], after
     assert after[1] == after[0]
     assert row.rstrip().endswith("▶ #2·64%")
+
+
+def test_in_a_90_column_terminal_the_agent_view_keeps_the_account_and_its_use_whole(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner's second ruling on #267: in a 90-column terminal the Agent view's info line
+    gets about 38 cells, and the model name, which came before the account, pushed
+    ``work · 71%`` off the end. The account and its use now come right after the state; the
+    model and the effort are what the bar cuts, with ``…``."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    row = on_slot(status("prj_a", "coder-auth", "coder", "working"), 2)
+    session = TeamSession(
+        id="s-coder",
+        project_id="prj_a",
+        role="coder",
+        started_at=T0,
+        last_seen_at=T0,
+        model="claude-opus-5-5",
+        effort="high",
+    )
+    script["prj_a"] = [row.model_copy(update={"session": session})]
+    monkeypatch.setattr(accounts_service, "slot_labels", lambda store=None: {2: "work"})
+
+    async def go(pilot: Pilot[None]) -> tuple[int, str, str]:
+        app = fleet_app(pilot)
+        await settle(app)
+        await pilot.click(row_for(app, "agt_a_coder-auth"))
+        await settle(app)
+        header = app.query_one("#agent-agt_a_coder-auth #agent-header", Static)
+        (strip,) = header.render_lines(Region(0, 0, header.outer_size.width, 1))
+        return header.content_size.width, strip.text, shown(header)
+
+    width, bar, whole = drive(go, headroom=session_use((2, 71.0)), size=(90, 30))
+    assert 34 <= width <= 42, width  # about 38 cells, as the owner measured
+    assert "claude-opus-5-5 high" in whole  # the line has the model; the bar cannot fit it
+    assert "▶ working  work · 71%" in bar, bar  # the account and its use, whole
+    assert bar.rstrip().endswith("…") and "claude-opus-5-5" not in bar, bar
 
 
 def test_a_project_opened_between_two_ticks_names_its_session_at_once(

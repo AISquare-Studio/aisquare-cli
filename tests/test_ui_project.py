@@ -830,7 +830,7 @@ def test_the_manager_tab_cuts_a_long_detail_on_one_row_as_the_agent_view_does(
     with_manager, no_manager = drive(project, scenario, size=(90, 20))
     assert len(with_manager) == 2, with_manager  # the line on one row, the hint on the next
     line, hint = with_manager
-    assert "claude-opus-5-5 xhigh  work · 42%  waiting" in line, line  # account and use, whole
+    assert "🔔 attention  work · 42%  claude-opus-5-5 xhigh  waiting" in line, line  # whole
     assert line.endswith("…") and "%11" not in line, line  # the detail is what gives way
     assert hint.strip().startswith("type to the manager"), hint
     # No manager: the prose wraps onto as many rows as it needs, and nothing is cut.

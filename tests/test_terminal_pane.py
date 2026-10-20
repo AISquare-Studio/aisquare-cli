@@ -4173,9 +4173,10 @@ def test_a_long_detail_is_what_the_agent_view_cuts_never_the_account_or_its_use(
 ) -> None:
     """The owner's ruling on #267: the detail comes after ``account · pct%``, and the header
     cuts a line too long for its one-row bar at its end, with an ellipsis. The folder-trust
-    prompt's detail names a command and a path; at 90 columns the bar shows the account and
-    its use whole, then the detail's start and ``…``. Before, the header word-wrapped onto a
-    second row its height clipped: what did not fit vanished, with no ``…`` to say so."""
+    prompt's detail names a command and a path; at 90 columns the bar shows the account, its
+    use, the model and the effort whole, then the detail's start and ``…``. Before, the
+    header word-wrapped onto a second row its height clipped: what did not fit vanished,
+    with no ``…`` to say so."""
     from aisquare.cli.ui.views import agent as agent_view
     from aisquare.models import TeamSession
     from aisquare.services import fleet as fleet_service
@@ -4216,9 +4217,9 @@ def test_a_long_detail_is_what_the_agent_view_cuts_never_the_account_or_its_use(
 
     shown, whole = run(drive())
     assert whole.endswith("  %1") and "folder trust" in whole  # the line itself is all there
-    assert "claude-opus-5-5 high  dev · 87%  " in shown, shown  # account and use, whole
+    assert "🔔 attention  dev · 87%  claude-opus-5-5 high  " in shown, shown  # all whole
     assert shown.rstrip().endswith("…"), shown  # the cut is said, and it falls in the detail
-    detail_start = shown.index("dev · 87%") + len("dev · 87%  ")
+    detail_start = shown.index("claude-opus-5-5 high") + len("claude-opus-5-5 high  ")
     assert shown[detail_start:].startswith("waiting"), shown
     assert "%1" not in shown and "trust <" not in shown
 

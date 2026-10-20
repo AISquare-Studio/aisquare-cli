@@ -8,10 +8,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 - In `asq`, every agent has one info line, the same on the Manager tab and in the
-  agent's own view: its label, its state, the model and the effort it runs at, the
-  Claude account it runs on (by name) with how much of that account's five-hour
-  session is used, and its pane, as in
-  `🔨 coder-auth  ▶ working  claude-opus-5-5 high  dev · 87%  %4`. The figure is
+  agent's own view: its label, its state, the Claude account it runs on (by name)
+  with how much of that account's five-hour session is used, the model and the
+  effort it runs at, and its pane, as in
+  `🔨 coder-auth  ▶ working  dev · 87%  claude-opus-5-5 high  %4`. A line too long
+  for its row is cut at its end, so the account and its use stay. The figure is
   green below 70 %, yellow from 70 % and red from 90 %. The agent view no longer
   shows the role, the task or the working directory there.
 - The sidebar's agent rows show the account's slot and its session use after the

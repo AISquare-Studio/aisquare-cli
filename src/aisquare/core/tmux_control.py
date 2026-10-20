@@ -111,6 +111,12 @@ CLIENT_FLAGS = "ignore-size,no-output,no-detach-on-destroy"
 """How the client attaches: out of window sizing, silent until its first batch, and
 moved to another session rather than detached when its own is destroyed."""
 
+STAMP_OPTION = "@asq-sent"
+"""The pane option each input over the pipe sets, in its own chain, to its stamp: what
+tells, after the client died with input unanswered, which of it tmux ran
+(:meth:`ControlClient._input`, :func:`sent_stamp`). A user option, so tmux keeps it
+with the pane and nothing else reads it; settable on a pane since tmux 3.0."""
+
 Deliver = Callable[[Callable[[], object]], object]
 """Run a callable on the consumer's thread, later — never on the reader thread."""
 
@@ -164,6 +170,21 @@ def quote(arg: str) -> str:
             out.append(char)
     out.append('"')
     return "".join(out)
+
+
+def sent_stamp(server: TmuxServer, pane_id: str) -> int | None:
+    """The stamp of the last input over a control client that tmux ran in ``pane_id``, asked
+    by polling; 0 when none ever ran there, ``None`` when the pane is gone.
+
+    ``show-options``, never ``display-message``: a gone pane is a clean ``no such pane``
+    here, where a ``display-message`` format can kill a tmux 3.2a server. An option never
+    set answers empty on 3.2a and ``invalid option`` on 3.4 and later (measured).
+    """
+    try:
+        said = server.run("show-options", "-p", "-v", "-t", pane_id, STAMP_OPTION).strip()
+    except TmuxError as error:
+        return 0 if "invalid option" in str(error) else None
+    return int(said) if said.isdigit() else 0
 
 
 def _command(args: Sequence[str]) -> str:
@@ -486,7 +507,40 @@ class ControlClient:
             [(capture, rows.append, False), (display, facts_answered, False)], chain=True
         )
 
-    def send_keys(self, pane_id: str, *keys: str, done: Done | None = None) -> None:
+    def _input(
+        self,
+        pane_id: str,
+        commands: list[list[str]],
+        done: Done | None,
+        stamp: int | None,
+        *,
+        failed: Callable[[], None] | None = None,
+    ) -> None:
+        """One input for ``pane_id``, as ONE chain: ``commands``, then — given ``stamp`` —
+        ``set-option -p @asq-sent <stamp>`` on the pane. tmux runs a chain back to back and
+        none of it after a command that fails, so the stamp is set exactly when the input
+        ran: when the client dies before answering, :func:`sent_stamp` says, by polling,
+        which inputs tmux ran and which never reached it. ``done`` is delivered the last
+        command's answer, which is the first failure's when one failed; ``failed`` runs
+        here first, on the reader thread, when one did."""
+        chain = [*commands]
+        if stamp is not None:
+            chain.append(["set-option", "-p", "-t", pane_id, STAMP_OPTION, str(stamp)])
+
+        def answered(reply: Reply) -> None:
+            if not reply.ok and failed is not None:
+                failed()
+            if done is not None:
+                self._deliver(partial(done, reply))
+
+        self._pipe_send(
+            [(args, None, False) for args in chain[:-1]] + [(chain[-1], answered, True)],
+            chain=True,
+        )
+
+    def send_keys(
+        self, pane_id: str, *keys: str, done: Done | None = None, stamp: int | None = None
+    ) -> None:
         """:meth:`TmuxServer.send_keys` down the pipe — the same names refused.
 
         Quoted (:func:`quote`), so a key's trailing ``;`` is a character of the key
@@ -495,44 +549,31 @@ class ControlClient:
         if not keys:
             return
         check_key_names(keys)
-        self._pipe_send([(["send-keys", "-t", pane_id, "--", *keys], done, False)])
+        self._input(pane_id, [["send-keys", "-t", pane_id, "--", *keys]], done, stamp)
 
-    def send_literal(self, pane_id: str, text: str, *, done: Done | None = None) -> None:
+    def send_literal(
+        self, pane_id: str, text: str, *, done: Done | None = None, stamp: int | None = None
+    ) -> None:
         """:meth:`TmuxServer.send_literal` down the pipe: the text's bytes, as hex."""
         if text:
-            self.send_bytes(pane_id, text.encode("utf-8"), done=done)
+            self.send_bytes(pane_id, text.encode("utf-8"), done=done, stamp=stamp)
 
-    def send_bytes(self, pane_id: str, data: bytes, *, done: Done | None = None) -> None:
+    def send_bytes(
+        self, pane_id: str, data: bytes, *, done: Done | None = None, stamp: int | None = None
+    ) -> None:
         """:meth:`TmuxServer.send_bytes` down the pipe: hex pairs, in the same chunks, one
-        write. ``done`` is delivered once, after the last chunk: failed if any chunk was."""
+        chain — as the polled path, no chunk after one that failed."""
         chunk = tmux_module._HEX_CHUNK
         pieces = [data[start : start + chunk] for start in range(0, len(data), chunk)]
-        if not pieces:
-            return
-        failed: list[Reply] = []
+        if pieces:
+            hexes = [
+                ["send-keys", "-t", pane_id, "-H", *(f"{b:02x}" for b in piece)] for piece in pieces
+            ]
+            self._input(pane_id, hexes, done, stamp)
 
-        def each(reply: Reply) -> None:
-            if not reply.ok:
-                failed.append(reply)
-
-        def last(reply: Reply) -> None:
-            each(reply)
-            if done is not None:
-                done(failed[0] if failed else reply)
-
-        self._pipe_send(
-            [
-                (
-                    ["send-keys", "-t", pane_id, "-H", *(f"{byte:02x}" for byte in piece)],
-                    last if index == len(pieces) - 1 else each,
-                    False,
-                )
-                for index, piece in enumerate(pieces)
-            ],
-            chain=True,  # as the polled path, no chunk after one that failed
-        )
-
-    def paste(self, pane_id: str, text: str, *, done: Done | None = None) -> bool:
+    def paste(
+        self, pane_id: str, text: str, *, done: Done | None = None, stamp: int | None = None
+    ) -> bool:
         """:meth:`TmuxServer.paste` down the pipe: ``set-buffer`` then ``paste-buffer -p -d``.
 
         ``load-buffer -`` reads the client's stdin, which is this pipe, so the text goes
@@ -545,21 +586,15 @@ class ControlClient:
         if "\x00" in text:
             return False
         name = paste_buffer_name()
-        loaded: list[Reply] = []
-
-        def pasted(reply: Reply) -> None:
-            outcome = loaded[0] if loaded and not loaded[0].ok else reply
-            if not outcome.ok:
-                self._quietly([["delete-buffer", "-b", name]])
-            if done is not None:
-                done(outcome)
-
-        self._pipe_send(
+        self._input(
+            pane_id,
             [
-                (["set-buffer", "-b", name, "--", text], loaded.append, False),
-                (["paste-buffer", "-p", "-d", "-b", name, "-t", pane_id], pasted, False),
+                ["set-buffer", "-b", name, "--", text],
+                ["paste-buffer", "-p", "-d", "-b", name, "-t", pane_id],
             ],
-            chain=True,
+            done,
+            stamp,
+            failed=lambda: self._quietly([["delete-buffer", "-b", name]]),
         )
         return True
 
@@ -679,7 +714,11 @@ class ControlClient:
         if closed:
             return
         failure = Reply(False, [self.reason])
-        for item in pending:
-            if item.done is not None and not item.here:
+        for item in pending:  # the client's own bookkeeping as well: it reads a failure as "none"
+            if item.done is None:
+                continue
+            if item.here:
+                item.done(failure)
+            else:
                 self._deliver(partial(item.done, failure))
         self._deliver(partial(self._on_exit, self.reason))

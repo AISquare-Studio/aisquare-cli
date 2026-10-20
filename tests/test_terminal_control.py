@@ -710,6 +710,61 @@ def test_real_tmux_the_followed_project_ending_does_not_cost_the_other_panes_the
     assert notices == [], notices
 
 
+@_needs_tmux
+def test_real_tmux_keys_in_flight_when_the_client_dies_arrive_once_each_by_polling(
+    live: TmuxServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Input sent down the pipe and not yet answered when the client dies is not lost,
+    and not doubled: what tmux ran is read off the pane's stamp (``@asq-sent``, set in
+    the same chain as each input) and the rest is sent again by polling, in order, ahead
+    of whatever was typed meanwhile. It was lost: killing the client 3 ms into a typed
+    burst lost ``56789abcdef``, or the whole burst (tester of #272, 2 of 6 trials). Here
+    the client is killed right after the tenth of forty keys goes down the pipe, five
+    times; the program records what it reads, raw, and must read every key exactly once."""
+    if sys.platform == "win32":
+        pytest.skip("no SIGKILL on Windows")
+    record = tmp_path / "typed"
+    pane_id = _window(
+        live, "asq-burst", tmp_path, ["sh", "-c", f"stty raw -echo; exec cat > {record}"]
+    )
+    monkeypatch.setattr(terminal_module, "CONTROL_RESTART", 0.0)  # a client again at once
+    sent_over = ControlClient.send_literal
+    kill_after = [0]
+
+    def send_literal(self: ControlClient, pane: str, text: str, **kwargs: Any) -> None:
+        sent_over(self, pane, text, **kwargs)
+        kill_after[0] -= 1
+        if kill_after[0] == 0 and self.pid is not None:
+            os.kill(self.pid, signal.SIGKILL)  # mid-burst: some ran, some are on their way
+
+    monkeypatch.setattr(ControlClient, "send_literal", send_literal)
+    letters = string.ascii_letters
+
+    async def drive() -> tuple[str, str]:
+        host = Host(live, pane_id)
+        expected = ""
+        async with host.run_test(size=(80, 24)) as pilot:
+            pane = host.pane
+            pane.focus()
+            for trial in range(5):
+                # Answered once: a client killed before it ever answered rests the server for
+                # CONTROL_RETRY, as one that never started does.
+                await wait_until(pilot, lambda: _serving(pane) and _client(pane).answered, 5.0)
+                burst = "".join(letters[(trial * 7 + i) % len(letters)] for i in range(40))
+                kill_after[0] = 10
+                for char in burst:
+                    pane.post_message(events.Key(char, char))
+                expected += burst
+                deadline = time.monotonic() + 5.0
+                while len(record.read_text()) < len(expected) and time.monotonic() < deadline:
+                    await pilot.pause(0.05)
+            await pilot.pause(0.5)  # anything doubled late has arrived by now
+        return expected, record.read_text()
+
+    expected, typed = run(drive())
+    assert typed == expected, (len(expected), len(typed))
+
+
 # --- the protocol, line by line ----------------------------------------------------------
 
 

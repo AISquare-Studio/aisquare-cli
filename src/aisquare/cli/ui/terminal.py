@@ -194,7 +194,7 @@ from aisquare.core.tmux import (
     TmuxServer,
     TmuxUnavailable,
 )
-from aisquare.core.tmux_control import CONTROL_MINIMUM, ControlClient, Reply
+from aisquare.core.tmux_control import CONTROL_MINIMUM, ControlClient, Reply, sent_stamp
 from aisquare.services import fleet as fleet_service
 
 CURSOR = Style(reverse=True)
@@ -399,6 +399,35 @@ CONTROL_RETRY = 60.0
 """Seconds before a server whose control client never answered is offered another."""
 CONTROL_RESTART = 5.0
 """Seconds before a server whose control client ran and then ended is offered another."""
+
+InputKind = Literal["key", "text", "bytes", "paste"]
+"""What :meth:`TerminalPane._forward` carries: a tmux key name, typed text, raw bytes (an
+X10 mouse report), or a paste."""
+
+
+class _Input(NamedTuple):
+    """One input on its way to a pane: kept, while it is in flight down the pipe or held
+    behind a recovery, to be sent again the polled way (``TerminalPane._recover_input``)."""
+
+    stamp: int
+    server: TmuxServer
+    pane_id: str
+    kind: InputKind
+    value: str | bytes
+
+
+_LAST_STAMP = [0]
+
+
+def _next_stamp() -> int:
+    """A stamp no input here had before: wall-clock nanoseconds, made strictly increasing.
+
+    The clock rather than a counter so two asq processes typing into one pane — each its
+    own control client — still stamp it in the order they typed, and one's recovery does
+    not take the other's stamp for its own."""
+    _LAST_STAMP[0] = max(_LAST_STAMP[0] + 1, time.time_ns())
+    return _LAST_STAMP[0]
+
 
 _CONTROLS: dict[_ServerKey, _Control] = {}
 """The live control client of each server, with the panes it serves."""
@@ -1077,6 +1106,10 @@ class TerminalPane(Widget, can_focus=True):
     """History lines one wheel notch moves."""
     WHEEL_COALESCE: float = 0.02
     """Seconds mouse events are gathered before one tmux call carries them all."""
+    INPUT_RECOVERY: float = 0.05
+    """Seconds after the control client ended with input in flight before its panes are
+    asked what tmux ran of it (:meth:`_recover_input`): time for tmux to drop the dead
+    client, and with it whatever it had read and not run."""
     CONTROL_COALESCE: float = 0.001
     """The same, down the control client's pipe, where a flush is a write and not a
     process: long enough for the events already queued to join it, and no longer (a
@@ -1171,6 +1204,11 @@ class TerminalPane(Widget, can_focus=True):
         """The wait out of :attr:`CONTROL_FRAME_GAP` before the next control frame."""
         self._generation = 0
         """Counts attaches: a control frame asked before the latest one is dropped."""
+        self._inflight: list[_Input] = []
+        """Input sent down the pipe that tmux has not answered yet, oldest first."""
+        self._held: list[_Input] | None = None
+        """Input typed while :meth:`_recover_input` waits to run, in order; ``None`` when
+        no recovery is waiting."""
         self._resize_timer: Timer | None = None
         self._resize_retry: float = self.RESIZE_RETRY
         self._synced: tuple[str, int, int] | None = None
@@ -1467,6 +1505,7 @@ class TerminalPane(Widget, can_focus=True):
             # 1.0 to 1.5 s after the oldest command waiting was sent.
             link.wedged()
             self._drop_link()
+            self._begin_recovery()
             link = None
         if link is not None:
             # ``%output`` brings the frames; this is the net under it — a pane
@@ -1735,11 +1774,6 @@ class TerminalPane(Widget, can_focus=True):
         if again:
             self._request_frame()
 
-    def _sent(self, link: _Control, reply: Reply) -> None:
-        """A command of this pane's input was answered: a refusal ends control for this attach."""
-        if not reply.ok and link is self._link and link.client.alive:
-            self._control_failed(str(reply.failure()))
-
     def _control_output(self) -> None:
         """The control client heard this pane print: a frame, at most ~60 a second."""
         if self.is_on_screen:
@@ -1764,6 +1798,7 @@ class TerminalPane(Widget, can_focus=True):
         self._watched = None
         self._link = None
         self._capturing = False
+        self._begin_recovery()
         if self.is_mounted and self.pane_id is not None:
             self.refresh_frame()
             self._schedule(self.FAST_INTERVAL)
@@ -2463,36 +2498,126 @@ class TerminalPane(Widget, can_focus=True):
         self._input_arrived()
 
     def _send(self, translation: Translation) -> None:
-        if self.pane_id is None or self.server is None:
-            return
+        self._forward("key" if translation.kind == "key" else "text", translation.value)
+
+    def _forward(self, kind: InputKind, value: str | bytes) -> bool:
+        """The ONE way input reaches the agent: keys, typed text, mouse reports, a paste.
+
+        Down the control client's pipe while it serves the pane, stamped (``_inflight``
+        until tmux answers); the polled way otherwise; and while input the client died
+        with is being recovered, held behind it, so nothing overtakes what is re-sent
+        (:meth:`_recover_input`). False when it went nowhere: the pane says why.
+        """
+        pane_id, server = self.pane_id, self.server
+        if pane_id is None or server is None:
+            return False
+        if self._held is not None:
+            self._held.append(_Input(0, server, pane_id, kind, value))
+            return True
         link = self._control_link()
         if link is not None:
+            item = _Input(_next_stamp(), server, pane_id, kind, value)
             try:
-                done = partial(self._sent, link)
-                if translation.kind == "key":
-                    link.client.send_keys(self.pane_id, translation.value, done=done)
-                else:
-                    link.client.send_literal(self.pane_id, translation.value, done=done)
-                return
+                sent = self._over_pipe(link, item)
             except TmuxError:
                 if link.client.alive:
                     # A key no tmux name spells — refused before anything was sent,
                     # and said as the polled path says it.
                     self._fail(PANE_GONE)
-                    return
-                # The client ended as the key was sent: the key goes the polled way.
+                    return False
+                sent = False  # the client ended as it was sent: the polled way, below
+            if sent:
+                self._inflight.append(item)
+                return True
+        return self._polled(_Input(0, server, pane_id, kind, value))
+
+    def _over_pipe(self, link: _Control, item: _Input) -> bool:
+        """``item`` down the pipe, stamped; False for a paste the pipe cannot carry."""
+        client, value = link.client, item.value
+        done = partial(self._input_answered, link, item.stamp)
+        if item.kind == "paste":
+            assert isinstance(value, str)
+            return client.paste(item.pane_id, value, done=done, stamp=item.stamp)
+        if item.kind == "bytes":
+            assert isinstance(value, bytes)
+            client.send_bytes(item.pane_id, value, done=done, stamp=item.stamp)
+        elif item.kind == "key":
+            assert isinstance(value, str)
+            client.send_keys(item.pane_id, value, done=done, stamp=item.stamp)
+        else:
+            assert isinstance(value, str)
+            client.send_literal(item.pane_id, value, done=done, stamp=item.stamp)
+        return True
+
+    def _polled(self, item: _Input) -> bool:
+        """``item`` the polled way: one tmux process (two for a paste). False on failure."""
+        server, pane_id, value = item.server, item.pane_id, item.value
         try:
-            if translation.kind == "key":
-                self.server.send_keys(self.pane_id, translation.value)
+            if item.kind == "bytes":
+                assert isinstance(value, bytes)
+                server.send_bytes(pane_id, value)
+            elif item.kind == "key":
+                assert isinstance(value, str)
+                server.send_keys(pane_id, value)
+            elif item.kind == "paste":
+                assert isinstance(value, str)
+                server.paste(pane_id, value)
             else:
                 # Hex bytes (``send-keys -H``), which no tmux parser reads: a typed
                 # ``;`` arrives as itself, never as tmux's command separator, and is
                 # a keystroke, not a bracketed paste the agent would see as one.
-                self.server.send_literal(self.pane_id, translation.value)
+                assert isinstance(value, str)
+                server.send_literal(pane_id, value)
         except TmuxUnavailable:
             self._fail(TMUX_UNAVAILABLE)
+            return False
         except TmuxError:
             self._fail(PANE_GONE)
+            return False
+        return True
+
+    def _input_answered(self, link: _Control, stamp: int, reply: Reply) -> None:
+        """tmux answered an input sent down the pipe: it is no longer in flight. A refusal
+        ends control for this attach. A failure because the client ENDED says nothing about
+        whether tmux ran it, so it stays in flight for :meth:`_recover_input` to ask."""
+        if not reply.ok and not link.client.alive:
+            return
+        self._inflight = [item for item in self._inflight if item.stamp != stamp]
+        if not reply.ok and link is self._link:
+            self._control_failed(str(reply.failure()))
+
+    def _begin_recovery(self) -> None:
+        """The client ended with input in flight: hold new input, and recover shortly."""
+        if not self._inflight or self._held is not None:
+            return
+        self._held = []
+        self.set_timer(self.INPUT_RECOVERY, self._recover_input, name="terminal-input-recovery")
+
+    def _recover_input(self) -> None:
+        """Send again, the polled way and in order, what the dead client never ran, then
+        what was typed meanwhile — every input exactly once.
+
+        Its pane's stamp (:func:`~aisquare.core.tmux_control.sent_stamp`) is the newest
+        input tmux RAN there: each input set it in its own chain, so no older one is
+        unrun and no newer one ran. Asked :attr:`INPUT_RECOVERY` after the end, once
+        tmux has dropped the dead client: what it had read and not run is freed with it,
+        never run later. A gone pane's input goes nowhere, as a key into a gone pane
+        always has.
+        """
+        inflight, self._inflight = self._inflight, []
+        held, self._held = self._held or [], None
+        ran: dict[tuple[_ServerKey, str], int | None] = {}
+        for item in inflight:
+            where = (_server_key(item.server), item.pane_id)
+            if where not in ran:
+                ran[where] = sent_stamp(item.server, item.pane_id)
+            last = ran[where]
+            if last is not None and item.stamp > last:
+                self._polled(item)
+        for item in held:
+            self._polled(item)
+        if self.is_mounted:
+            self._schedule(self.FAST_INTERVAL)
 
     def _explain(self, key: str, drop: Drop, version: tuple[int, int] | None) -> None:
         """Say what became of a key that was not sent — from ``translate``'s reason.
@@ -2589,25 +2714,8 @@ class TerminalPane(Widget, can_focus=True):
         self.scrollback = 0
         if self.text_selection is not None:
             self._clear_own_selection()  # input into the agent: the highlight is stale (rule 3)
-        link = self._control_link()
-        try:
-            if link is None or not self._paste_over(link, event.text):
-                self.server.paste(self.pane_id, event.text)
-        except TmuxUnavailable:
-            self._fail(TMUX_UNAVAILABLE)
-        except TmuxError:
-            self._fail(PANE_GONE)
+        self._forward("paste", event.text)
         self._input_arrived()
-
-    def _paste_over(self, link: _Control, text: str) -> bool:
-        """Paste ``text`` through the control client; False when it went nowhere that way —
-        text the pipe cannot carry, or a client that ended — for the polled paste to take."""
-        if self.pane_id is None:
-            return False
-        try:
-            return link.client.paste(self.pane_id, text, done=partial(self._sent, link))
-        except TmuxError:
-            return False
 
     async def _on_click(self, event: events.Click) -> None:
         """Focus the pane; a double click selects the word under the pointer.
@@ -3348,33 +3456,12 @@ class TerminalPane(Widget, can_focus=True):
         facts = self.facts
         if not queue or self.pane_id is None or self.server is None or facts is None:
             return
-        link = self._control_link()
-        if link is not None:
-            done = partial(self._sent, link)
-            try:
-                if facts.mouse_sgr:
-                    text = "".join(_sgr(*event) for event in queue)
-                    link.client.send_literal(self.pane_id, text, done=done)
-                else:
-                    data = b"".join(_x10(*event) for event in queue)
-                    link.client.send_bytes(self.pane_id, data, done=done)
-            except TmuxError:
-                pass  # the client ended as the flush was sent: the polled way, below
-            else:
-                self._input_arrived(urgent=False)
-                return
-        try:
-            if facts.mouse_sgr:
-                self.server.send_literal(self.pane_id, "".join(_sgr(*event) for event in queue))
-            else:
-                self.server.send_bytes(self.pane_id, b"".join(_x10(*event) for event in queue))
-        except TmuxUnavailable:
-            self._fail(TMUX_UNAVAILABLE)
-            return
-        except TmuxError:
-            self._fail(PANE_GONE)
-            return
-        self._input_arrived(urgent=False)
+        if facts.mouse_sgr:
+            sent = self._forward("text", "".join(_sgr(*event) for event in queue))
+        else:
+            sent = self._forward("bytes", b"".join(_x10(*event) for event in queue))
+        if sent:
+            self._input_arrived(urgent=False)
 
     def scroll_history(self, delta: int) -> None:
         """Move the view ``delta`` lines up (positive) into history, clamped; 0 is live."""

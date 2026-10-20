@@ -156,7 +156,13 @@ def split_frontmatter(text: str) -> tuple[str, str]:
 
 def parse_skill(text: str, *, name: str, path: Path, layer: Layer) -> Persona:
     """The recognised test (§3.5, §3.9): a YAML map with a non-empty
-    ``description``, a non-empty body, and a directory name Claude Code accepts."""
+    ``description``, a non-empty body, and a directory name Claude Code accepts.
+
+    Line endings are read as ``\n`` whatever the file holds: a SKILL.md saved on Windows,
+    or checked out there with ``core.autocrlf``, kept a ``\r`` on every line of the body,
+    so the persona it parsed to was not the one the same file is on Linux (the Windows
+    CI leg, ``test_the_per_prompt_delta_and_the_board_carry_no_persona_text``)."""
+    text = text.replace("\r\n", "\n")
     where = path / SKILL_FILE
     try:
         raw, body_text = split_frontmatter(text)

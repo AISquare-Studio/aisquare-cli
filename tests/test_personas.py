@@ -255,8 +255,20 @@ def test_a_broken_directory_is_reported_and_never_stops_or_shadows_the_rest() ->
 
 
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads anything")
-def test_an_unreadable_directory_is_listed_as_invalid() -> None:
+def test_an_unreadable_directory_is_listed_as_invalid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Made unreadable by its mode where there are mode bits. On Windows ``chmod(0)`` only
+    sets the read-only flag, the file stays readable, and the CI leg listed it as a
+    persona; there the read is refused as the OS refuses it, with a ``PermissionError``."""
     skill = _write_skill(_user_layer(), "locked") / "SKILL.md"
+    if os.name == "nt":
+        real = Path.read_bytes
+
+        def refused(path: Path) -> bytes:
+            if path == skill:
+                raise PermissionError(13, "Permission denied", str(path))
+            return real(path)
+
+        monkeypatch.setattr(Path, "read_bytes", refused)
     skill.chmod(0)
     try:
         personas, invalid = core.catalogue(None)
@@ -504,3 +516,21 @@ def test_importing_the_cli_imports_no_yaml_and_reading_a_persona_does() -> None:
     assert "aisquare.cli.persona" in cli_only
     assert not [name for name in cli_only if name.split(".")[0] in {"yaml", "_yaml"}]
     assert "yaml" in reading
+
+
+def test_a_skill_md_with_windows_line_endings_parses_to_the_same_persona(tmp_path: Path) -> None:
+    """A SKILL.md saved on Windows, or checked out there with ``core.autocrlf``, kept a
+    ``\\r`` on every body line, so the Windows CI leg briefed a body line the board never
+    showed. Read with either ending, it is one persona."""
+    text = "---\nname: crlf\ndescription: Line endings.\n---\nFirst line.\nSecond line.\n"
+    lf = core.parse_skill(text, name="crlf", path=tmp_path / "crlf", layer="user")
+    crlf = core.parse_skill(
+        text.replace("\n", "\r\n"), name="crlf", path=tmp_path / "crlf", layer="user"
+    )
+
+    assert "\r" not in crlf.body and "\r" not in crlf.description
+    assert (crlf.body, crlf.description, crlf.frontmatter) == (
+        lf.body,
+        lf.description,
+        lf.frontmatter,
+    )

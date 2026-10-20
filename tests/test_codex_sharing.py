@@ -257,6 +257,41 @@ def test_accounts_trust_and_sync_reach_every_codex_slot_in_its_own_file(
     assert not plain.exists(), "Codex's yes is Codex's: no Claude account is given it"
 
 
+def test_sync_gives_a_codex_slot_every_folder_but_the_one_its_file_refuses(
+    tmp_path: Path, fake_home: Path, runner: CliRunner
+) -> None:
+    """Review r16 of #113, 4/8: ``--sync`` granted every missing folder in one write, and a
+    ``[projects."<key>"]`` table of the slot's own with no ``trust_level`` refused it whole:
+    the account was ``failed``, given none of the others. Each folder is its own grant now,
+    the one refused reported, the rest written."""
+    one, two = tmp_path / "one", tmp_path / "two"
+    one.mkdir()
+    two.mkdir()
+    given = _slot("two@x.dev")
+    codex_sharing.grant_trust(given.config_dir, _real(one), _real(two))
+    held = _slot("three@x.dev", settings=SETTINGS + f"\n[projects.{json.dumps(_real(two))}]\n")
+    assert codex_sharing.read_trust(held.config_dir) == {}, "the premise: no trust_level"
+
+    synced = runner.invoke(app, ["--json", "accounts", "trust", "--sync"])
+
+    assert synced.exit_code == 1, synced.output
+    rows = [row for row in json.loads(synced.stdout)["accounts"] if row["slot"] == held.slot]
+    assert [(row["outcome"], row["folders"]) for row in rows] == [
+        ("trusted", [_real(one)]),
+        ("failed", []),
+    ]
+    assert rows[1]["reason"] == (
+        f"its config.toml has a table for {_real(two)} already — set trust_level = "
+        '"trusted" there if you trust it'
+    )
+    assert codex_sharing.read_trust(held.config_dir) == {_real(one): True}
+
+    again = runner.invoke(app, ["accounts", "trust", "--sync"])
+    assert again.exit_code == 1, again.output
+    lines = [line for line in again.stdout.splitlines() if "account 3:" in line]
+    assert lines == [f"  · account 3: NOT trusted — {rows[1]['reason']}"], again.stdout
+
+
 def test_a_codex_spawn_shares_the_trust_and_its_receipt_says_so(
     fake_home: Path,
     tmux: FakeTmux,  # noqa: F811 - a fixture, by name

@@ -2584,7 +2584,8 @@ def sync_trust() -> tuple[list[TrustChange], int]:
 
     Folders that no longer exist are not copied; their count comes back beside the
     changes. An account whose own entry already decides a folder (trusted, or the human's
-    no) is not given another. One write per account.
+    no) is not given another. One write per account, or one per folder for an account whose
+    file refuses one of them, which keeps the rest (:func:`_grant_each`).
     """
     changes: list[TrustChange] = []
     gone: set[str] = set()
@@ -2627,10 +2628,33 @@ def _sync_agent(
         try:
             written = trust.grant(account, *missing)
         except sharing.SharingError as exc:
-            changes.append(TrustChange(account, "failed", reason=str(exc)))
+            changes += _grant_each(account, trust, missing, exc)
             continue
         changes.append(TrustChange(account, "trusted", folders=tuple(written)))
     return changes, set(every) - set(folders)
+
+
+def _grant_each(
+    account: ClaudeAccount, trust: FolderTrust, keys: Sequence[str], refused: sharing.SharingError
+) -> list[TrustChange]:
+    """``keys`` granted on ``account`` one at a time, once the grant of them all was
+    ``refused`` (the file left as it was): what one folder's entry refuses keeps the others.
+    A Codex ``config.toml`` with a ``[projects."<key>"]`` table of its own for one of them
+    and no ``trust_level`` failed the whole account, every other folder with it (review r16
+    of #113, 4/8). What was written, then what was not; ``refused`` alone when nothing was."""
+    written: list[str] = []
+    reasons: dict[str, None] = {}
+    for key in keys:
+        try:
+            written += trust.grant(account, key)
+        except sharing.SharingError as exc:
+            reasons[str(exc)] = None
+    if not written:
+        return [TrustChange(account, "failed", reason=str(refused))]
+    changes = [TrustChange(account, "trusted", folders=tuple(written))]
+    if reasons:
+        changes.append(TrustChange(account, "failed", reason="; ".join(reasons)))
+    return changes
 
 
 def settings_source() -> Path:

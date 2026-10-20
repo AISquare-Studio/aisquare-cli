@@ -2110,11 +2110,15 @@ def test_live_a_server_under_another_tmux_tmpdir_is_reached_at_the_path_it_said(
     it from any shell."""
     import tempfile
 
-    elsewhere = Path(tempfile.mkdtemp(prefix="asq-", dir="/tmp"))  # an AF_UNIX path is short
+    # An AF_UNIX path is short; resolved, as tmux reports it (macOS's /tmp is /private/tmp).
+    elsewhere = Path(tempfile.mkdtemp(prefix="asq-", dir="/tmp")).resolve()
+    # This shell's own directory: another private one, never the owner's /tmp/tmux-<uid>,
+    # which tests/conftest.py's no_real_fleet refuses every test (board 13220).
+    here = Path(tempfile.mkdtemp(prefix="asq-", dir="/tmp"))
     monkeypatch.setenv("TMUX_TMPDIR", str(elsewhere))
     window = _spawn(live, "asq-test-elk", "w0", CAT)
     recorded = live.server_socket_path()
-    monkeypatch.delenv("TMUX_TMPDIR")
+    monkeypatch.setenv("TMUX_TMPDIR", str(here))
     assert recorded is not None and recorded.parent.parent == elsewhere
     there = live.at(recorded)
     try:
@@ -2126,6 +2130,7 @@ def test_live_a_server_under_another_tmux_tmpdir_is_reached_at_the_path_it_said(
         with contextlib.suppress(TmuxError):
             there.kill_server()
         shutil.rmtree(elsewhere, ignore_errors=True)
+        shutil.rmtree(here, ignore_errors=True)
     assert there.reachable() is False, "no server at the path: tmux says none"
 
 

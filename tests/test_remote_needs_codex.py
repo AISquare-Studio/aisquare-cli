@@ -46,6 +46,14 @@ from tests.remote_kit_helpers import base, make_client, make_runtime, unlock
 from tests.test_remote_needs import FakeTmux, _rooted
 
 ROLLOUT = Path(__file__).parent / "fixtures" / "agent_transcripts" / "codex-0.162.1.jsonl"
+#: Codex 0.162.1's screens, measured (``tests/fixtures/agent_screens/codex.json``), by what
+#: each shows: its own dialogs, and screens with none.
+SCREENS: dict[str, list[str]] = {
+    shown["what"]: shown["rows"]
+    for screens in [json.loads((ROLLOUT.parents[1] / "agent_screens" / "codex.json").read_text())]
+    for part in ("dialogs", "not_dialogs")
+    for shown in screens[part]
+}
 
 #: Each moment of the measured session: how many of the rollout's lines it had written.
 MOMENTS = {
@@ -141,8 +149,11 @@ def project(tmp_path: Path) -> ProjectInfo:
 @pytest.fixture
 def tmux(monkeypatch: pytest.MonkeyPatch) -> FakeTmux:
     """Codex's pane, quiet (an approval view redraws, but tmux's activity is the board's
-    to weigh): the pane's foreground is ``codex``."""
+    to weigh): the pane's foreground is ``codex``, at its empty prompt unless a test draws
+    something else. The scan reads the screen of a Codex with no call pending and no bell,
+    for a dialog of its own (rule 5a); one tmux cannot show holds that agent's cards."""
     pane = FakeTmux(command="codex", quiet_for=120)
+    pane.screen = list(SCREENS["its empty prompt after a turn"])
     monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: pane)
     return pane
 
@@ -267,6 +278,7 @@ def test_a_codex_command_at_work_is_a_pending_tool_to_the_guards_and_no_card(
         project, state="working", seen=_stamp(records[-1]), born=now - timedelta(hours=1),
         rollout=rollout,
     )  # fmt: skip
+    tmux.screen = list(WORKING_SCREEN)  # its turn on screen, the working line over its prompt
     assert _cards(now) == []
     snap = needs_agent_now(project, "coder-1", now=now)
     assert snap.tail is not None
@@ -362,6 +374,7 @@ def test_a_codex_rollout_cut_inside_its_newest_response_says_cut_and_names_no_to
         project, state="working", seen=now - timedelta(minutes=1), born=now - timedelta(hours=1),
         rollout=rollout,
     )  # fmt: skip
+    tmux.screen = list(WORKING_SCREEN)  # its turn on screen, the working line over its prompt
     snap = needs_agent_now(project, "coder-1", now=now)
     assert needs_tool_pending(snap)
     assert _cards(now) == []

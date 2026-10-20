@@ -350,6 +350,55 @@ def test_a_claude_code_row_reads_no_screen(
     assert scan.snaps[0].screen is None
 
 
+#: Codex's folder-trust question in a git checkout no trust covers, before any hook (0.162.1,
+#: measured for task #108): Enter trusts the folder, Esc quits Codex.
+TRUST_DIALOG = [
+    "  Folder access",
+    "  /work/repo",
+    "",
+    "  Trust this folder? Codex can read, edit, and run files here, subject to your permission",
+    "  settings. Folder settings can run code automatically, even without a model request.",
+    "  Continue only if you trust these files. Your trust decision will be saved.",
+    "",
+    f"{CHEVRON} 1. Trust and continue",
+    "  2. Quit",
+    "",
+    "  enter continue · esc quit",
+]
+
+
+def test_an_auto_tell_at_a_fresh_codexs_folder_trust_dialog_sends_no_one_to_interrupt_and_tell(
+    phone: Phone,  # noqa: F811
+    scan: OneRowScan,
+    pane: CodexPane,
+    fleet: FleetCalls,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """SMOKE7 of #113, step A5: the auto tell filed a board note, which a Codex with no hook yet
+    is not shown, and its receipt said "Interrupt & tell types it". Interrupt & tell refuses
+    the dialog before its Escape, so it typed nothing there. The receipt says it types once
+    the dialog is answered; an agent nothing reads at no dialog keeps the old advice
+    (``test_an_auto_tell_to_an_agent_nothing_reads_is_a_board_note_and_never_fleet_tell``)."""
+    _row(project)
+    scan.session, scan.tail, scan.state = None, None, "waiting"
+    pane.screen = TRUST_DIALOG
+
+    response = phone.post("agent/tell", agent=LABEL, agent_id="agt_one", text="read the task")
+
+    assert response.status_code == 200, response.text
+    told = response.json()
+    assert told["delivered"] is False
+    assert told["how"].startswith("it is showing a prompt, which typing would answer — filed as")
+    assert told["how"].endswith(
+        "which it is not shown without aisquare's hooks: once its prompt is answered, "
+        "Interrupt & tell types it"
+    )
+    assert fleet.calls == [] and pane.sent == []
+    refused = phone.post("agent/tell", agent=LABEL, text="read the task", mode="interrupt")
+    assert refused.status_code == 409 and refused.json()["error"] == "dialog_open"
+    assert pane.sent == [], "no Escape: Esc quits Codex at this dialog"
+
+
 # --- stop: the guard before its /exit and Enter ------------------------------------------------
 
 

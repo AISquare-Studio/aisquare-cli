@@ -2817,3 +2817,193 @@ def test_real_codex_at_its_empty_prompt_is_sent_one_ctrl_c_only_once_it_is_confi
                 srv.run("kill-server")
             provider.shutdown()
             thread.join(timeout=2)
+
+
+@pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
+def test_real_codex_dialogs_no_hook_reports_are_cards_on_the_phone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task #108, through Remote served on loopback as a phone reaches it (SMOKE7 of #113's
+    steps A and B). A fleet Codex in a git checkout no trust covers asks ``Trust this
+    folder?``, then reviews its hooks, and after a turn at 100 % of its window (the operator
+    keeps ``[notice] …`` off) opens ``Switch to gpt-6-luna for lower credit usage?``. None
+    fires a hook, so its row read ``waiting`` and the phone had no card and no push, while
+    every tell was refused as a dialog, and the auto tell's receipt sent the human to
+    Interrupt & tell, refused there too. Each dialog is now a card read off Codex's screen,
+    with its words and no quick answers, pushed 30 s after it was first seen, and answered
+    from the phone with the keys the human picks. No command runs in Codex's sandbox."""
+    from aisquare.services import remote_needs, remote_push, remote_server
+    from tests.remote_kit_helpers import PASSWORD, make_runtime
+
+    binary = shutil.which("codex")
+    assert binary, "AISQUARE_TEST_CODEX requires an installed Codex"
+    native_home = tmp_path / "codex"
+    native_home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    git = ["git", "-C", str(workspace), "-c", "user.name=t", "-c", "user.email=t@example.com"]
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+    with ThreadingHTTPServer(("127.0.0.1", 0), _Remembered) as provider:
+        provider.resets_at = int(time.time()) + 3 * 3600  # type: ignore[attr-defined]
+        heard: list[str] = []
+        provider.heard = heard  # type: ignore[attr-defined]
+        thread = threading.Thread(target=provider.serve_forever, daemon=True)
+        thread.start()
+        # No [projects] table: no trust covers the checkout, so Codex asks.
+        (native_home / "config.toml").write_text(
+            'model = "local-fixture"\nmodel_provider = "local"\n'
+            '[model_providers.local]\nname = "Local fixture"\nwire_api = "responses"\n'
+            f'base_url = "http://127.0.0.1:{provider.server_port}/v1"\n'
+            "requires_openai_auth = false\n"
+            "[notice]\nhide_rate_limit_model_nudge = false\n",
+            encoding="utf-8",
+        )
+        for key in tuple(os.environ):
+            if key.startswith(("OPENAI_", "ANTHROPIC_", "CODEX_")):
+                monkeypatch.delenv(key)
+        monkeypatch.setenv("CODEX_HOME", str(native_home))
+        monkeypatch.setattr(
+            agents, "_aisquare_command", lambda *args, **kwargs: shlex.join(selfcli.argv_for([]))
+        )
+        agents.install_hooks("codex", native_home)
+        config = load_config()
+        config.fleet.tmux_socket = f"asq-codex-dialogs-{os.getpid()}"
+        save_config(config)
+        project = team.activate(workspace)
+        srv = fleet.server(config.fleet)
+        runtime = make_runtime()
+        runtime.set_allow_write(True)
+        app = remote_server.build_app(runtime, dist_dir=tmp_path / "dist")
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        served = remote_server._Server(app, port)
+        origin = f"http://127.0.0.1:{port}"
+
+        def screen(pane: str) -> str:
+            return srv.run("capture-pane", "-p", "-t", pane)
+
+        def until(check: Any, seconds: float, what: str, pane: str) -> Any:
+            deadline = time.monotonic() + seconds
+            while not (found := check()):
+                if time.monotonic() >= deadline:
+                    raise AssertionError(f"{what}:\n{screen(pane)}")
+                time.sleep(0.3)
+            return found
+
+        try:
+            coder = fleet.spawn(project, "coder", agent="codex", worktree=False).agent
+            served.start_serving()
+            with httpx.Client(base_url=origin, headers={"origin": origin}, timeout=60) as phone:
+                at = f"/r/{runtime.token}/api"
+                assert phone.post(f"{at}/unlock", json={"password": PASSWORD}).status_code == 200
+
+                def cards() -> list[dict[str, Any]]:
+                    items = phone.get(f"{at}/needs").json()["items"]
+                    return [item for item in items if item["agent"] == coder.label]
+
+                def card(words: str) -> dict[str, Any] | None:
+                    shown = cards()
+                    return shown[0] if shown and shown[0]["excerpt"].startswith(words) else None
+
+                def answer(item: dict[str, Any], *keys: str) -> None:
+                    said = phone.post(f"{at}/needs/answer", json={"id": item["id"], "keys": keys})
+                    assert said.status_code == 200, f"{said.text}\n{screen(coder.pane_id)}"
+
+                def tell(text: str, mode: str) -> httpx.Response:
+                    body = {"agent": coder.label, "project": project.id, "text": text, "mode": mode}
+                    return phone.post(f"{at}/agent/tell", json=body)
+
+                # A: the folder-trust question, before any hook.
+                trust = until(
+                    lambda: card("Trust this folder? Codex can read, edit, and run files here"),
+                    60,
+                    "the folder-trust card",
+                    coder.pane_id,
+                )
+                assert (trust["kind"], trust["answers"]) == ("permission", [])
+                assert trust["reason"] == f"{coder.label} shows a dialog that needs you"
+                (scanned,) = [
+                    item
+                    for item in remote_needs.scan_needs_you(
+                        remote_needs.live_needs_sources(), now=datetime.now(UTC), dismissed=()
+                    )
+                    if item.agent == coder.label
+                ]
+                assert scanned.push_after is not None
+                assert scanned.push_after - scanned.since == timedelta(seconds=30)
+                pushed = remote_push.push_needs_message([scanned], total=1, base_url=None)
+                assert pushed["body"] == f"{coder.label} shows a dialog that needs you"
+                auto = tell("read the task", "auto")
+                assert auto.status_code == 200 and auto.json()["delivered"] is False, auto.text
+                assert auto.json()["how"].endswith(
+                    "once its prompt is answered, Interrupt & tell types it"
+                ), auto.text
+                refused = tell("read the task", "interrupt")
+                assert refused.status_code == 409, refused.text
+                assert refused.json()["error"] == "dialog_open", refused.text
+                answer(trust, "Enter")  # Trust and continue
+
+                # The hook review, as quiet and as hookless: a card of its own, which a key
+                # that moves its highlight keeps.
+                review = until(
+                    lambda: card("Hooks need review"), 40, "the hook-review card", coder.pane_id
+                )
+                assert review["id"] != trust["id"] and review["answers"] == []
+                answer(review, "Down")
+                moved = until(
+                    lambda: card("Hooks need review"), 20, "the review card back", coder.pane_id
+                )
+                assert moved["id"] == review["id"]
+                until(
+                    lambda: "\u203a 2. Trust all and continue" in screen(coder.pane_id),
+                    10,
+                    "its highlight on the second option",
+                    coder.pane_id,
+                )
+                answer(review, "Enter")
+
+                # B: after the turn's Stop, the model dialog.
+                until(
+                    lambda: "? for shortcuts" in screen(coder.pane_id) and not cards(),
+                    40,
+                    "its empty prompt, no card",
+                    coder.pane_id,
+                )
+                deadline = time.monotonic() + 30
+                told = tell("reply ok", "prompt")
+                while told.status_code == 409 and told.json()["error"] == "agent_busy":
+                    assert time.monotonic() < deadline, f"{told.text}\n{screen(coder.pane_id)}"
+                    time.sleep(0.5)
+                    told = tell("reply ok", "prompt")
+                assert told.status_code == 200, f"{told.text}\n{screen(coder.pane_id)!r}"
+                until(lambda: "reply ok" in heard, 30, "its first prompt", coder.pane_id)
+                offer = until(
+                    lambda: card("Approaching rate limits Switch to gpt-6-luna"),
+                    40,
+                    "the model dialog's card",
+                    coder.pane_id,
+                )
+                assert offer["excerpt"] == (
+                    "Approaching rate limits Switch to gpt-6-luna for lower credit usage?"
+                )
+                assert offer["answers"] == []
+                asked = len(heard)
+                answer(offer, "Escape")  # esc back: the current model kept
+                until(
+                    lambda: "? for shortcuts" in screen(coder.pane_id) and not cards(),
+                    20,
+                    "the dialog closed, no card",
+                    coder.pane_id,
+                )
+                assert "Model changed" not in screen(coder.pane_id), "its own model kept"
+                assert len(heard) == asked, "no turn since the dialog: nothing was typed"
+        finally:
+            served.stop_serving()
+            remote_needs._needs_watcher(app.kit).stop_watching()
+            if srv.has_session(fleet.session_name(fleet.ensure_codename(project).codename or "")):
+                srv.run("kill-server")
+            provider.shutdown()
+            thread.join(timeout=2)
+            _stop_app_servers(native_home)

@@ -179,6 +179,16 @@ def _fake_call(record: Mapping[str, Any], at: datetime | None) -> PendingTool:
     return PendingTool(str(record.get("id")), name, name, kept, at, input_dropped=dropped)
 
 
+def dialog_on_screen(rows: Sequence[str]) -> str | None:
+    """Its own dialogs, which fire no hook: the question on a ``?? `` row, the screen's last
+    row its keys, ``(y/n)``. Its prompt is ``fake> ``, a draft after it."""
+    lines = [row.strip() for row in rows if row.strip()]
+    if not lines or lines[-1] != "(y/n)":
+        return None
+    asked = [line.removeprefix("?? ") for line in lines if line.startswith("?? ")]
+    return asked[-1] if asked else ""
+
+
 class FakeTrust:
     """Its folder trust: ``trusted.json`` in the home, ``{"yes": [...], "no": [...]}``. A yes
     records the folder itself and covers that folder alone, its repository root nothing:
@@ -301,6 +311,7 @@ class FakeAgentAdapter:
         # Its end of input ends it, as a shell's does; its Ctrl-C only clears the line. Its
         # empty prompt is not read off its screen, so Remote asks before every Ctrl-D.
         one_press_exits=frozenset({"C-d"}),
+        dialog_on_screen=dialog_on_screen,
         value_options=frozenset(
             {"--model", "--effort", "--title", "--write", "--approvals", "--writable", "--readonly"}
         ),

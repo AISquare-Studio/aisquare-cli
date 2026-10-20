@@ -10,7 +10,9 @@ terminal agent"): a recorded-payload fixture for every hook event it installs
 (``tests/fixtures/agent_events/<id>.json``, with its ``--version`` line and what switches
 its hooks off), a row in :data:`EXPECTED_PERMISSIONS`, and its transcript at four moments
 (``tests/fixtures/agent_transcripts/<id>.json``: a permission prompt up, a question, an
-interruption, a turn ended on a question) for its ``transcript_reader``.
+interruption, a turn ended on a question) for its ``transcript_reader``; and with
+``capabilities.dialog_on_screen``, its screens (``tests/fixtures/agent_screens/<id>.json``:
+each dialog of its own with the words it reads, and screens that show none).
 """
 
 from __future__ import annotations
@@ -68,6 +70,7 @@ from tests.test_fleet_service import FakeTmux
 
 FIXTURES = Path(__file__).parent / "fixtures" / "agent_events"
 TRANSCRIPTS = Path(__file__).parent / "fixtures" / "agent_transcripts"
+SCREENS = Path(__file__).parent / "fixtures" / "agent_screens"
 REGISTERED = tuple(adapter.id for adapter in adapters())
 ALL = (*REGISTERED, FakeAgentAdapter.id)
 
@@ -874,3 +877,79 @@ def test_send_keys_asks_before_the_keys_that_end_the_agent_on_one_press(
         assert refused is not None, f"{adapter.id}: {key} went unasked"
         assert (refused.status, refused.error) == (409, "one_press_exit")
         assert adapter.label in str(refused.extra["reason"]), "the page asks in its name"
+
+
+# --- a dialog of the agent's own that only its screen shows, for Remote's needs-you cards ---
+
+
+def _screens(adapter: AgentAdapter) -> dict[str, Any] | None:
+    """The adapter's screens (``tests/fixtures/agent_screens/<id>.json``): each dialog of its
+    own with the words it reads, and screens with none. ``None`` for an adapter that reads no
+    dialog off its screen, which brings none."""
+    path = SCREENS / f"{adapter.id}.json"
+    if adapter.capabilities.dialog_on_screen is None:
+        assert not path.exists(), f"{adapter.id} reads no dialog off its screen: {path.name}"
+        return None
+    assert path.is_file(), f"add {path.relative_to(SCREENS.parents[1])} for {adapter.id}"
+    screens: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    assert screens["dialogs"] and screens["not_dialogs"]
+    return screens
+
+
+def test_an_agent_reads_its_own_dialogs_off_its_screen(adapter: AgentAdapter) -> None:
+    """``capabilities.dialog_on_screen`` on the agent's recorded screens: each dialog's words,
+    and ``None`` for a screen with no dialog on it (its empty prompt, a draft, a turn)."""
+    screens = _screens(adapter)
+    if screens is None:
+        return
+    read = adapter.capabilities.dialog_on_screen
+    assert read is not None
+    for shown in screens["dialogs"]:
+        assert read(shown["rows"]) == shown["words"], shown["what"]
+    for shown in screens["not_dialogs"]:
+        assert read(shown["rows"]) is None, shown["what"]
+
+
+def test_a_dialog_no_hook_reports_is_a_card_naming_no_agent_with_no_quick_answers(
+    adapter: AgentAdapter, tmp_path: Path
+) -> None:
+    """The shared needs scan asks the adapter what a live row's screen shows, with no call
+    pending and no bell, as a fresh agent has neither: a dialog of its own is a permission
+    card whose reason names who and no agent, its words the excerpt, with no quick answers
+    (a key's meaning differs from one dialog to the next) and its push held 30 s; any other
+    screen is no card. The screen of an agent that reads no dialog off it is never read, so
+    its cards are as they were."""
+    from datetime import UTC, datetime, timedelta
+
+    from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo
+    from aisquare.services import remote_needs
+
+    project = ProjectInfo(id="prj_contract", root=tmp_path)
+    now = datetime(2026, 10, 19, 23, 0, tzinfo=UTC)
+    row = FleetAgent(
+        id="agt_1", project_id=project.id, label="coder-1", role="coder", agent=adapter.id,
+        binary=adapter.binary, pane_id="%1", cwd=tmp_path, created_at=now - timedelta(seconds=20),
+    )  # fmt: skip
+    status = FleetAgentStatus(agent=row, state="waiting", detail="no hooks")
+
+    def cards(rows: list[str] | None) -> list[Any]:
+        def screen() -> list[str] | None:
+            assert rows is not None, f"{adapter.id} reads no dialog off its screen: never read"
+            return rows
+
+        return remote_needs.needs_from_agent(
+            status, None, project=project, events=[], now=now, pane_screen=screen
+        )
+
+    screens = _screens(adapter)
+    if screens is None:
+        assert cards(None) == []
+        return
+    for shown in screens["dialogs"]:
+        (card,) = cards(shown["rows"])
+        assert (card.kind, card.reason) == ("permission", "coder-1 shows a dialog that needs you")
+        assert card.excerpt == remote_needs._needs_excerpt(shown["words"])
+        assert card.answers == ()
+        assert card.push_after == now + timedelta(seconds=30)
+    for shown in screens["not_dialogs"]:
+        assert cards(shown["rows"]) == [], shown["what"]

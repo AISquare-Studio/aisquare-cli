@@ -850,7 +850,6 @@ def test_flush_at_exit_waits_for_the_copy_queued_behind_a_slow_write(
         ({"TERM_PROGRAM": "Apple_Terminal"}, "drops"),
         ({"TERM_PROGRAM": "iTerm.app"}, "asks"),
         ({"LC_TERMINAL": "iTerm2"}, "asks"),  # over SSH: macOS's ssh sends LC_*
-        ({"TERM_PROGRAM": "tmux", "LC_TERMINAL": "iTerm2"}, "asks"),
         ({"TERM_PROGRAM": "WezTerm", "LC_TERMINAL": "iTerm2"}, "accepts"),
         ({"TERM_PROGRAM": "ghostty"}, "accepts"),
         ({"GHOSTTY_RESOURCES_DIR": "/x"}, "accepts"),
@@ -869,6 +868,12 @@ def test_flush_at_exit_waits_for_the_copy_queued_behind_a_slow_write(
         ({"VTE_VERSION": "7800"}, "unknown"),
         # A multiplexer between keeps or passes OSC 52 by its own setting.
         ({"TERM_PROGRAM": "tmux", "TERM": "tmux-256color"}, "unknown"),
+        # …and keeps the variables of whichever terminal started it: tmux started from
+        # iTerm2 over SSH and reattached from kitty still says LC_TERMINAL=iTerm2
+        # (review of #266, round 2).
+        ({"TERM_PROGRAM": "tmux", "LC_TERMINAL": "iTerm2"}, "unknown"),
+        ({"TMUX": "/tmp/tmux-1/default,1,0", "LC_TERMINAL": "iTerm2"}, "unknown"),
+        ({"STY": "1.pts-0.host", "TERM_PROGRAM": "Apple_Terminal"}, "unknown"),
         ({"TMUX": "/tmp/tmux-1/default,1,0", "KITTY_WINDOW_ID": "1"}, "unknown"),
         ({"STY": "1.pts-0.host", "TERM": "screen-256color", "WT_SESSION": "c0ffee"}, "unknown"),
     ],

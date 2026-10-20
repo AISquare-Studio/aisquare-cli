@@ -98,6 +98,12 @@ def test_every_help_row_fits_its_box(monkeypatch: pytest.MonkeyPatch, platform: 
         ("darwin", {"SSH_TTY": "/dev/ttys003"}, False),
         # Terminal.app over SSH names itself to nothing: the plain help.
         ("linux", {"SSH_CONNECTION": "10.0.0.2 1 10.0.0.1 22", "TERM": "xterm-256color"}, False),
+        # A tmux on another machine keeps the LC_TERMINAL of whoever started it, which
+        # may not be who is attached now (review of #266, round 2); on the Mac itself,
+        # the Mac decides.
+        ("linux", {"TMUX": "/tmp/tmux-1/default,1,0", "LC_TERMINAL": "iTerm2"}, False),
+        ("linux", {"STY": "1.pts-0.host", "TERM_PROGRAM": "Apple_Terminal"}, False),
+        ("darwin", {"TMUX": "/tmp/tmux-1/default,1,0", "TERM_PROGRAM": "tmux"}, True),
     ],
     ids=[
         "mac-local",
@@ -108,6 +114,9 @@ def test_every_help_row_fits_its_box(monkeypatch: pytest.MonkeyPatch, platform: 
         "ghostty-into-a-mac",
         "ssh-into-a-mac",
         "terminal-app-over-ssh",
+        "tmux-on-linux-started-from-iterm2",
+        "screen-on-linux-started-from-terminal-app",
+        "tmux-on-the-mac",
     ],
 )
 def test_the_hints_follow_the_users_keyboard_not_the_hosts_os(

@@ -52,7 +52,8 @@ SIGNS: tuple[Sign, ...] = (
     Sign("TERM_PROGRAM", "ghostty", "ghostty", True, "accepts"),
     Sign("TERM_PROGRAM", "vscode", "the VS Code terminal", False),
     Sign("TERM_PROGRAM", "Apple_Terminal", "Terminal.app", False, "drops", mac=True),
-    # An LC_* variable, which macOS's ssh sends by default and the user's tmux keeps.
+    # An LC_* variable, which macOS's ssh sends by default. A tmux keeps the one of
+    # whoever started it, so behind a multiplexer it names nobody (`multiplexed`).
     Sign("LC_TERMINAL", "iTerm2", "iTerm2", False, "asks", mac=True),
     Sign("VTE_VERSION", None, "a VTE terminal (GNOME Terminal, Tilix, …)", False),
     # A terminal's own TERM is the one sign ssh always carries.
@@ -91,6 +92,24 @@ def outer_terminal(environ: Mapping[str, str] | None = None) -> tuple[str, bool 
     return (f"unknown (TERM={term})" if term else "unknown"), None
 
 
+def multiplexed(env: Mapping[str, str]) -> bool:
+    """Whether tmux or screen sits between this session and the terminal.
+
+    The terminal's own variables are then those of whichever terminal started the
+    multiplexer, kept for as long as it runs: tmux refreshes only its
+    ``update-environment`` list on an attach, and ``LC_TERMINAL`` is not on it. Started
+    from iTerm2 over SSH and reattached from kitty, it still says iTerm2 (review of #266,
+    round 2), so behind one no sign names the terminal attached now.
+    """
+    term = env.get("TERM", "")
+    return bool(
+        env.get("TERM_PROGRAM") == "tmux"
+        or env.get("TMUX")
+        or env.get("STY")
+        or term.startswith(("tmux", "screen"))
+    )
+
+
 def mac_keyboard(environ: Mapping[str, str] | None = None, *, platform: str | None = None) -> bool:
     """Whether the user types on a Mac, as far as the session can tell: what decides
     whether the help names ⌘C, ⌘V and ⌥-drag.
@@ -100,11 +119,13 @@ def mac_keyboard(environ: Mapping[str, str] | None = None, *, platform: str | No
     ``sys.platform`` alone was the wrong machine both ways: a Mac user SSHed into Linux
     (where OSC 52 is the only route, and the keys matter most) never saw the hints,
     and a Linux client SSHed into a Mac did (review of #266, round 1). Terminal.app
-    over SSH names itself to nothing, so its user gets the plain help.
+    over SSH names itself to nothing, so its user gets the plain help. Behind tmux or
+    screen the sign may be another terminal's (:func:`multiplexed`), so only a local
+    session on a Mac says so there.
     """
     env = os.environ if environ is None else environ
     sign = sign_of(env)
-    if sign is not None and sign.mac:
+    if sign is not None and sign.mac and not multiplexed(env):
         return True
     system = sys.platform if platform is None else platform
     return system == "darwin" and not any(env.get(name) for name in REMOTE_MARKERS)

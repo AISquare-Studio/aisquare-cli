@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Literal
 
 from aisquare.core.browser import REMOTE_MARKERS
-from aisquare.core.terminal import sign_of
+from aisquare.core.terminal import multiplexed, sign_of
 
 log = logging.getLogger(__name__)
 
@@ -465,26 +465,17 @@ def osc52_terminal(env: Mapping[str, str]) -> Osc52Fate:
     table doctor names the terminal by, so terminal-specific variables outrank a
     ``TERM_PROGRAM`` an outer shell left behind. Terminal.app drops the write, iTerm2
     takes it only with its own setting on, and kitty, Ghostty, WezTerm, foot,
-    alacritty and Windows Terminal take it. A multiplexer in between (tmux, screen)
-    keeps or passes it by its own setting, so nothing behind one is known to take it.
-    Anything else is ``"unknown"``: Terminal.app over SSH among them, whose
-    ``TERM_PROGRAM`` ssh does not send.
+    alacritty and Windows Terminal take it. Behind a multiplexer (tmux, screen) it is
+    always ``"unknown"``: the multiplexer keeps or passes the write by its own setting,
+    and the variables that name the terminal are those of whichever one started it
+    (:func:`~aisquare.core.terminal.multiplexed`), so an iTerm2 hint went to whoever
+    reattached from kitty (review of #266, round 2). Anything else is ``"unknown"`` too:
+    Terminal.app over SSH among them, whose ``TERM_PROGRAM`` ssh does not send.
     """
-    sign = sign_of(env)
-    fate: Osc52Fate = "unknown" if sign is None or sign.osc52 is None else sign.osc52
-    if fate == "accepts" and _multiplexed(env):
+    if multiplexed(env):
         return "unknown"
-    return fate
-
-
-def _multiplexed(env: Mapping[str, str]) -> bool:
-    term = env.get("TERM", "")
-    return bool(
-        env.get("TERM_PROGRAM") == "tmux"
-        or env.get("TMUX")
-        or env.get("STY")
-        or term.startswith(("tmux", "screen"))
-    )
+    sign = sign_of(env)
+    return "unknown" if sign is None or sign.osc52 is None else sign.osc52
 
 
 Done = Callable[[bool], None]

@@ -1605,7 +1605,9 @@ WezTerm also by `TERM_PROGRAM`, Windows Terminal by `WT_SESSION`, and kitty,
 Ghostty, WezTerm, foot and Alacritty by the `TERM` ssh carries. In Terminal.app
 (named by `TERM_PROGRAM`) it warns that the copy did not reach the clipboard,
 and how to select with the terminal itself. In iTerm2 — named by
-`TERM_PROGRAM`, and over SSH by the `LC_TERMINAL` ssh usually carries — it
+`TERM_PROGRAM`, and over SSH by the `LC_TERMINAL` ssh usually carries, though
+not behind tmux or screen, which keep the one of whichever terminal started
+them — it
 says the text was sent to your terminal's clipboard (OSC 52) and, if paste is
 empty, to turn on iTerm2's clipboard setting or hold ⌥ while you drag: whether
 that setting is on, nothing outside iTerm2 can see. On any terminal nothing
@@ -1636,7 +1638,9 @@ Terminal.app on most Macs (users report it; Apple does not document it); then
 ⌘C copies that selection as it would anywhere else. When you type on a Mac —
 `asq` running on it, or reached from Terminal.app or iTerm2 (iTerm2 over SSH
 too, by its `LC_TERMINAL`) — the `?` screen lists these keys, and the board's
-copy row names `c`, not ⌘C.
+copy row names `c`, not ⌘C. Through tmux or screen on another machine they
+are left out: the multiplexer keeps the `LC_TERMINAL` of whichever terminal
+started it, which may not be the one you attached from.
 
 The alt chord's limits are the terminal's and Textual's key parser's, not this
 UI's, and they were measured against the parser (`tests/test_keys.py` feeds it

@@ -75,6 +75,7 @@ Measured on tmux 3.2a (ubuntu-22.04), 3.4 (ubuntu-24.04, as in CI) and 3.8,
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import os
 import queue
@@ -82,6 +83,7 @@ import re
 import subprocess
 import threading
 import time
+import weakref
 from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -221,6 +223,19 @@ def sent_stamp(server: TmuxServer, pane_id: str) -> int | None:
     return int(value) if value.isdigit() else 0
 
 
+_OPEN: weakref.WeakSet[ControlClient] = weakref.WeakSet()
+"""Every client started in this process: their stamps are unset at exit (:func:`_tidy_up`)."""
+
+
+@atexit.register
+def _tidy_up() -> None:
+    """At exit, unset the stamps of clients never closed on purpose — a process that ends
+    without its panes unmounting. Fails open: nothing here may hold the exit up."""
+    for client in list(_OPEN):
+        with contextlib.suppress(Exception):
+            client.unset_stamps()
+
+
 def _command(args: Sequence[str]) -> str:
     return " ".join(quote(arg) for arg in args)
 
@@ -315,6 +330,8 @@ class ControlClient:
         """Why the client ended, once it has."""
         self._pid = os.getpid()
         """Whose stamps this client sets (:func:`stamp_name`): this process's, as made."""
+        self.stamped: set[str] = set()
+        """The panes this client set a stamp on, still set (:meth:`unset_stamps`)."""
         self.detached = False
         """tmux detached the client without a reason (``%exit`` alone): its session was
         destroyed under it, not a failure of the client or the server."""
@@ -351,6 +368,7 @@ class ControlClient:
         writer = threading.Thread(target=self._write_pipe, name="tmux-control-write", daemon=True)
         reader.start()
         writer.start()
+        _OPEN.add(self)
         self._show_pane(pane_id)  # followed; the pane's widget counts itself (watch_pane)
 
     def close_client(self) -> None:
@@ -363,6 +381,19 @@ class ControlClient:
         if self._process is not None:
             with contextlib.suppress(OSError):
                 self._process.terminate()
+
+    def unset_stamps(self, keep: set[str] | None = None) -> None:
+        """Unset this process's stamp of every pane this client stamped, but ``keep``'s —
+        by polling, as the client may be gone. Each asq launch is a new pid, so a stamp
+        left behind is one more variable in the session for its life (review of #272).
+        Called at a deliberate close (``cli.ui.terminal``), and at exit for a client still
+        open then; a pane whose input in flight a recovery has yet to read is kept."""
+        for pane_id in sorted(self.stamped - (keep or set())):
+            with contextlib.suppress(TmuxError):
+                self.server.run(
+                    "set-environment", "-h", "-u", "-t", pane_id, stamp_name(pane_id, self._pid)
+                )
+            self.stamped.discard(pane_id)
 
     def kill_client(self) -> None:
         """End a client that stopped answering; it ends through ``on_exit`` like any other."""
@@ -562,6 +593,7 @@ class ControlClient:
         here first, on the reader thread, when one did."""
         chain = [*commands]
         if stamp is not None:
+            self.stamped.add(pane_id)
             name = stamp_name(pane_id, self._pid)
             chain.append(["set-environment", "-h", "-t", pane_id, name, str(stamp)])
 

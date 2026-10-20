@@ -80,7 +80,11 @@ sets this process's stamp for its pane (a hidden session variable,
 ``core.tmux_control.STAMP_PREFIX``) in its own chain, and what the stamp says tmux
 never ran is sent again by polling, in order, ahead of what was typed meanwhile
 (:meth:`TerminalPane._recover_input`). So does input in flight when the pane lets
-its client go on purpose — a failed command, another server.
+its client go on purpose — a failed command, another server. When tmux will not say
+what ran for :attr:`TerminalPane.INPUT_RECOVERY_GIVE_UP`, the wait ends and the pane
+says :data:`INPUT_UNCONFIRMED`: neither what was in flight nor what was typed since
+is sent, since twice is the worse failure for an agent, and both are counted in a
+warning.
 A server whose client ended is offered a new one after :data:`CONTROL_RESTART`;
 one whose client never answered, or wedged, after :data:`CONTROL_RETRY`; one
 whose client was plainly detached — its session destroyed, the last agent of the
@@ -219,6 +223,9 @@ NOTICE = Style(dim=True, italic=True)
 NO_PANE = "(no agent selected)"
 PANE_GONE = "(pane gone)"
 TMUX_UNAVAILABLE = "(tmux unavailable)"
+INPUT_UNCONFIRMED = "(input not confirmed)"
+"""The notice when tmux never said what ran of input the control client died with
+(:meth:`TerminalPane._give_up_recovery`)."""
 NOTHING_TO_COPY = "nothing to copy — no text under the highlight"
 """What a left drag is told when it left a highlight with no text under it: once for
 the gesture, by :func:`route_selection_gesture`, or by the pane that ran a shift+drag
@@ -519,9 +526,19 @@ class _Control:
             self.close()
 
     def close(self) -> None:
+        """Close the client on purpose, and unset the stamps it set — but those of a pane
+        whose input in flight a recovery has yet to read (``_recover_input``): read as unset,
+        that input would all be sent again. Those go at the app's end."""
         if _CONTROLS.get(self.key) is self:
             del _CONTROLS[self.key]
         self.client.close_client()
+        waiting = {
+            item.pane_id
+            for pane in list(_MOUNTED_PANES)
+            for item in [*pane._inflight, *(pane._held or [])]
+            if _server_key(item.server) == self.key
+        }
+        self.client.unset_stamps(keep=waiting)
 
     def _output(self, pane_ids: set[str]) -> None:
         for pane in list(self.panes):
@@ -1122,6 +1139,9 @@ class TerminalPane(Widget, can_focus=True):
     """Seconds mouse events are gathered before one tmux call carries them all."""
     INPUT_RECOVERY_RETRY: float = 1.0
     """Seconds before a stamp that could not be read is asked again (:meth:`_recover_input`)."""
+    INPUT_RECOVERY_GIVE_UP: float = 10.0
+    """Seconds after a recovery began past which a stamp that still cannot be read ends it
+    (:meth:`_give_up_recovery`): the keys held behind it are not held for ever."""
     INPUT_RECOVERY: float = 0.05
     """Seconds after the control client ended with input in flight before its panes are
     asked what tmux ran of it (:meth:`_recover_input`): time for tmux to drop the dead
@@ -1222,6 +1242,8 @@ class TerminalPane(Widget, can_focus=True):
         """Counts attaches: a control frame asked before the latest one is dropped."""
         self._inflight: list[_Input] = []
         """Input sent down the pipe that tmux has not answered yet, oldest first."""
+        self._recovering_since = 0.0
+        """When the recovery waiting now began (``time.monotonic``)."""
         self._held: list[_Input] | None = None
         """Input typed while :meth:`_recover_input` waits to run, in order; ``None`` when
         no recovery is waiting."""
@@ -1870,7 +1892,7 @@ class TerminalPane(Widget, can_focus=True):
                 return True
         return False
 
-    def _fail(self, notice: str) -> bool:
+    def _fail(self, notice: str, *, toast: bool = True) -> bool:
         """Keep the last frame, show ``notice`` in the bottom row; True when that is new.
 
         The notice replaces the bottom row's text, and a highlight over that
@@ -1899,7 +1921,7 @@ class TerminalPane(Widget, can_focus=True):
             self._clear_own_selection()
         if changed:
             self.refresh()
-        if not self._reported_gone and self.pane_id is not None:
+        if toast and not self._reported_gone and self.pane_id is not None:
             self._reported_gone = True
             self.notify(f"{self.pane_id}: {notice}", severity="warning", markup=False)
         return changed
@@ -2627,7 +2649,34 @@ class TerminalPane(Widget, can_focus=True):
         if not self._inflight or self._held is not None:
             return
         self._held = []
+        self._recovering_since = time.monotonic()
         self.set_timer(self.INPUT_RECOVERY, self._recover_input, name="terminal-input-recovery")
+
+    def _give_up_recovery(self, error: StampUnknown) -> None:
+        """tmux has not said, for :attr:`INPUT_RECOVERY_GIVE_UP`, what ran of the input in
+        flight: end the wait, send nothing, and say so.
+
+        The SAFE choice for each kind, documented as the module's "Falling back" says.
+        The input in flight is not sent again: tmux may yet run it (it reads the pipe
+        itself), and twice is the worse failure for an agent — a second Enter submits
+        twice — where a key missing is seen and typed again. What was typed since is not
+        sent either: sent now, it would go ahead of input tmux may still run, to a server
+        that is not answering. Both are counted in a warning and the pane's notice says
+        :data:`INPUT_UNCONFIRMED`, so neither is dropped without a word; input typed after
+        this goes the usual way.
+        """
+        unconfirmed, self._inflight = len(self._inflight), []
+        unsent, self._held = len(self._held or []), None
+        self.log.warning(f"input recovery gave up: {error}")
+        self.notify(
+            f"tmux did not say whether {unconfirmed} inputs sent to {self.pane_id} reached it: "
+            f"they were not sent again, and the {unsent} typed since were not sent — "
+            "check the pane and type again what is missing",
+            severity="warning",
+            markup=False,
+            timeout=12,
+        )
+        self._fail(INPUT_UNCONFIRMED, toast=False)
 
     def _recover_input(self) -> None:
         """Send again, the polled way and in order, what the dead client never ran, then
@@ -2654,7 +2703,11 @@ class TerminalPane(Widget, can_focus=True):
                 ran[where] = sent_stamp(item.server, item.pane_id)
             except StampUnknown as error:
                 # Not known what ran: nothing is sent or dropped, new input stays held
-                # behind it, and the stamp is asked again (a wedged server answers late).
+                # behind it, and the stamp is asked again (a wedged server answers late)
+                # — for INPUT_RECOVERY_GIVE_UP at most.
+                if time.monotonic() - self._recovering_since >= self.INPUT_RECOVERY_GIVE_UP:
+                    self._give_up_recovery(error)
+                    return
                 self.log.warning(f"input recovery waits: {error}")
                 self.set_timer(
                     self.INPUT_RECOVERY_RETRY, self._recover_input, name="terminal-input-recovery"

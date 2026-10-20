@@ -1096,6 +1096,129 @@ def test_real_tmux_a_stamp_that_cannot_be_read_is_asked_again_not_taken_for_a_go
     assert timeouts == [0], "the stamp read never timed out: this test tested nothing"
 
 
+@_needs_tmux
+def test_real_tmux_a_stamp_that_never_answers_ends_the_wait_and_says_so(
+    live: TmuxServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stamp that is never readable held the keys typed behind it forever, said only in
+    a log line (review of #272, follow-up). After :attr:`TerminalPane.INPUT_RECOVERY_GIVE_UP`
+    the wait ends, and visibly: the pane's notice says input is unconfirmed, a warning
+    counts both kinds, and the SAFE choice is made for each — the input in flight is not
+    sent again (tmux may still run it, and twice is the worse failure: a second Enter
+    submits twice), and what was typed since is not sent either (it would go ahead of
+    input tmux may yet run). Neither is dropped without a word."""
+    if sys.platform == "win32":
+        pytest.skip("no SIGKILL on Windows")
+    pane_id, record = _recording_pane(live, tmp_path, "asq-never")
+    monkeypatch.setattr(TerminalPane, "INPUT_RECOVERY_GIVE_UP", 1.0)
+    monkeypatch.setattr(TerminalPane, "INPUT_RECOVERY_RETRY", 0.2)
+    sent_over = ControlClient.send_literal
+    unread = [True]
+    run_tmux = TmuxServer.run
+
+    def send_literal(self: ControlClient, pane: str, text: str, **kwargs: Any) -> None:
+        if unread[0]:
+            _unread_from(self)
+            unread[0] = False
+        sent_over(self, pane, text, **kwargs)
+
+    def wedged(self: TmuxServer, *args: str, stdin: bytes | None = None) -> str:
+        if args[:1] == ("show-environment",):
+            raise TmuxTimedOut("tmux did not answer within 30s: show-environment …")
+        return run_tmux(self, *args, stdin=stdin)
+
+    async def drive() -> tuple[str, str | None, bool, list[str]]:
+        host = Host(live, pane_id)
+        async with host.run_test(size=(80, 24)) as pilot:
+            pane = host.pane
+            pane.focus()
+            await wait_until(pilot, lambda: _serving(pane) and _client(pane).answered, 5.0)
+            monkeypatch.setattr(ControlClient, "send_literal", send_literal)
+            monkeypatch.setattr(TmuxServer, "run", wedged)
+            for char in "lost":
+                pane.post_message(events.Key(char, char))
+            await wait_until(pilot, lambda: len(pane._inflight) == len("lost"), 2.0)
+            pid = _client(pane).pid
+            assert pid is not None
+            os.kill(pid, signal.SIGKILL)
+            await wait_until(pilot, lambda: pane._held is not None, 2.0)
+            for char in "late":
+                pane.post_message(events.Key(char, char))
+            await wait_until(pilot, lambda: pane._held is None, 3.0)  # the wait has ended
+            notice = pane.notice
+            monkeypatch.setattr(TmuxServer, "run", run_tmux)
+            await pilot.pause(0.5)
+            return record.read_text(), notice, not pane._inflight, list(host.notices)
+
+    typed, notice, settled, notices = run(drive())
+    assert typed == "", typed  # neither sent twice nor sent out of order
+    assert notice == terminal_module.INPUT_UNCONFIRMED, notice
+    assert settled
+    assert any("4 inputs sent" in said and "4 typed since" in said for said in notices), notices
+
+
+def _stamps(live: TmuxServer, session: str, pid: int) -> list[str]:
+    """This process's stamp variables in ``session``: the hidden ones, ``ASQ_SENT_<pid>_*``."""
+    out = live.run("show-environment", "-h", "-t", f"={session}")
+    return [line for line in out.splitlines() if line.startswith(f"ASQ_SENT_{pid}_")]
+
+
+@_needs_tmux
+def test_real_tmux_this_processes_stamps_are_unset_when_its_client_closes(
+    live: TmuxServer, tmp_path: Path
+) -> None:
+    """Each input sets a stamp variable named by asq's pid, and they piled up: one set per
+    pane per asq launch, for the life of the session (review of #272, follow-up). The
+    client unsets this process's own at a deliberate close — the app's end included —
+    and leaves another process's alone."""
+    pane_id = _window(live, "asq-tidy", tmp_path, ["cat"])
+    live.run("set-environment", "-h", "-t", pane_id, "ASQ_SENT_4000000_0", "7")  # another asq's
+
+    async def drive() -> list[str]:
+        host = Host(live, pane_id)
+        async with host.run_test(size=(80, 24)) as pilot:
+            pane = host.pane
+            pane.focus()
+            await wait_until(pilot, lambda: _serving(pane), timeout=5.0)
+            await pilot.press("t", "i", "d", "y")
+            await wait_until(pilot, _row_shows(pane, "tidy"), timeout=2.0)
+            await pilot.pause(0.2)
+            return _stamps(live, "asq-tidy", os.getpid())
+
+    while_typing = run(drive())  # the app ends: its panes unmount, the last closes the client
+    assert len(while_typing) == 1, while_typing  # it did stamp, so the test tests something
+    assert _stamps(live, "asq-tidy", os.getpid()) == []
+    assert _stamps(live, "asq-tidy", 4_000_000) == ["ASQ_SENT_4000000_0=7"]
+
+
+@_needs_tmux
+def test_real_tmux_a_deliberate_close_unsets_the_stamps_nothing_waits_to_read(
+    live: TmuxServer, tmp_path: Path
+) -> None:
+    """A control command failed and the pane let its only client go, with nothing in
+    flight: the stamps it set go with it, there and then. (A pane with input in flight
+    keeps its stamp until the recovery has read it; the app's end tidies it then.)"""
+    pane_id = _window(live, "asq-closing", tmp_path, ["cat"])
+
+    async def drive() -> tuple[list[str], list[str]]:
+        host = Host(live, pane_id)
+        async with host.run_test(size=(80, 24)) as pilot:
+            pane = host.pane
+            pane.focus()
+            await wait_until(pilot, lambda: _serving(pane), timeout=5.0)
+            await pilot.press("o", "k")
+            await wait_until(pilot, _row_shows(pane, "ok"), timeout=2.0)
+            await wait_until(pilot, lambda: not pane._inflight, timeout=2.0)
+            stamped = _stamps(live, "asq-closing", os.getpid())
+            pane._control_failed("a command failed")  # the pane lets its only client go
+            await pilot.pause(0.2)
+            return stamped, _stamps(live, "asq-closing", os.getpid())
+
+    stamped, after = run(drive())
+    assert len(stamped) == 1, stamped
+    assert after == [], after
+
+
 # --- the protocol, line by line ----------------------------------------------------------
 
 

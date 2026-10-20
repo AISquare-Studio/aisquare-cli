@@ -384,6 +384,13 @@ def write(writer: Writer, text: str, *, timeout: float | None = None) -> bool:
     child. ``timeout`` defaults to :data:`WRITE_TIMEOUT`, read at the call; a tool still
     running then is killed and given :data:`KILL_WAIT` to go (:func:`_stop`).
 
+    Its stdin is fed on a thread of its own (:func:`_feed`), and the timeout is the
+    wait's. ``Popen.communicate`` on Windows writes the whole of stdin before its
+    timeout starts (CPython's win32 ``_communicate``), so a ``clip.exe`` that stopped
+    reading a copy larger than the pipe held the one clipboard thread for good (review
+    of #266, round 2). Killed, the tool takes its end of the pipe with it, and the
+    feeding thread ends.
+
     Whatever goes wrong is a ``False``: an ``os.environ`` that another thread changes
     while it is copied raises ``RuntimeError``, and so does a spawn during interpreter
     shutdown (review of #266, round 1).
@@ -404,10 +411,12 @@ def write(writer: Writer, text: str, *, timeout: float | None = None) -> bool:
     except Exception:
         log.warning("clipboard: %s could not be run", tool, exc_info=True)
         return False
+    feeding = threading.Thread(
+        target=_feed, args=(process, writer.payload(text)), name="clipboard-feed", daemon=True
+    )
     try:
-        process.communicate(
-            writer.payload(text), timeout=WRITE_TIMEOUT if timeout is None else timeout
-        )
+        feeding.start()
+        process.wait(timeout=WRITE_TIMEOUT if timeout is None else timeout)
     except subprocess.TimeoutExpired:
         log.warning("clipboard: %s did not finish in time and was stopped", tool)
         _stop(process, tool)
@@ -416,24 +425,37 @@ def write(writer: Writer, text: str, *, timeout: float | None = None) -> bool:
         log.warning("clipboard: writing to %s failed", tool, exc_info=True)
         _stop(process, tool)
         return False
+    feeding.join(KILL_WAIT)  # over already: the tool read to the end before it exited
     if process.returncode != 0:
         log.warning("clipboard: %s exited %d", tool, process.returncode)
         return False
     return True
 
 
+def _feed(process: subprocess.Popen[bytes], payload: bytes) -> None:
+    """Hand ``payload`` to the tool's stdin and close it, on a thread of its own; never
+    raises. A tool that exits or is killed before reading it all is a broken pipe, which
+    ``communicate`` ignored too. The stdin is this thread's to close: closed from another
+    while this one is blocked writing, it waited on the same lock (:func:`write`)."""
+    stdin = process.stdin
+    if stdin is None:
+        return
+    with contextlib.suppress(OSError, ValueError):
+        stdin.write(payload)
+    with contextlib.suppress(OSError, ValueError):
+        stdin.close()
+
+
 def _stop(process: subprocess.Popen[bytes], tool: str) -> None:
     """Kill ``process`` and wait :data:`KILL_WAIT` for it, no longer: ``subprocess.run``'s own
-    kill waited without a bound, and a tool in uninterruptible sleep never returned."""
+    kill waited without a bound, and a tool in uninterruptible sleep never returned. Its
+    stdin is left to :func:`_feed`, which the kill unblocks."""
     with contextlib.suppress(OSError):
         process.kill()
     try:
         process.wait(timeout=KILL_WAIT)
     except subprocess.TimeoutExpired:
         log.warning("clipboard: %s did not exit when killed, and was left behind", tool)
-    if process.stdin is not None:
-        with contextlib.suppress(OSError, ValueError):
-            process.stdin.close()
 
 
 def osc52_terminal(env: Mapping[str, str]) -> Osc52Fate:

@@ -51,6 +51,8 @@ with open(os.path.join(root, "started.log"), "a", encoding="utf-8") as started:
 behaviour = open(os.path.join(root, "behaviour"), encoding="utf-8").read().split()
 if "slow-read" in behaviour:
     time.sleep(0.6)
+if "stall" in behaviour:
+    time.sleep(30)  # stops reading: a clip.exe behind a clipboard another app holds
 data = sys.stdin.buffer.read()
 if "hang" in behaviour:
     time.sleep(30)

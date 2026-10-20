@@ -515,6 +515,40 @@ def test_a_tool_that_is_missing_fails_or_hangs_is_false_and_never_raises(
     assert [record.levelname for record in caplog.records] == ["WARNING"], caplog.text
 
 
+@NEEDS_POSIX
+def test_a_tool_that_stops_reading_cannot_hold_the_write_past_its_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #266, round 2: on Windows ``Popen.communicate`` writes the whole of stdin
+    before its timeout starts (CPython's win32 ``_communicate``), so a ``clip.exe`` that
+    stopped reading a copy larger than the pipe held the one clipboard thread for good.
+    Here ``communicate`` writes as it does there."""
+    fake = install(tmp_path, monkeypatch, behaviour="stall")
+
+    def win32_communicate(
+        self: subprocess.Popen[bytes], input: bytes | None = None, timeout: float | None = None
+    ) -> tuple[None, None]:
+        if self.stdin is not None:
+            self.stdin.write(input or b"")  # all of it, before any timeout logic
+            self.stdin.close()
+        self.wait(timeout)
+        return None, None
+
+    monkeypatch.setattr(subprocess.Popen, "communicate", win32_communicate)
+    writer = Writer((str(fake.root / "bin" / "pbcopy"),))
+    landed: list[bool] = []
+    writing = threading.Thread(
+        target=lambda: landed.append(clipboard.write(writer, "x" * 1_000_000, timeout=0.5)),
+        daemon=True,
+    )
+    started = time.monotonic()
+    writing.start()
+    writing.join(10)
+
+    assert landed == [False], "the write is still blocked on the tool's stdin"
+    assert time.monotonic() - started < 5
+
+
 def test_a_write_that_raises_anything_is_false_and_logged(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -646,9 +680,6 @@ def test_a_tool_that_will_not_die_is_left_behind_after_a_bounded_wait(
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
 
-        def communicate(self, payload: bytes, timeout: float | None = None) -> None:
-            raise subprocess.TimeoutExpired("pbcopy", timeout or 0)
-
         def kill(self) -> None:
             pass
 
@@ -660,7 +691,7 @@ def test_a_tool_that_will_not_die_is_left_behind_after_a_bounded_wait(
     started = time.monotonic()
     assert clipboard.write(Writer(("/fake/bin/pbcopy",)), TEXT, timeout=0.1) is False
     assert time.monotonic() - started < 1
-    assert waits == [clipboard.KILL_WAIT]
+    assert waits == [0.1, clipboard.KILL_WAIT], "the write's own wait, then the kill's"
     assert "left behind" in caplog.text
 
 

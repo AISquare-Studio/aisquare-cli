@@ -2075,12 +2075,15 @@ class SqliteStore:
         return [_row_to_project(row) for row in rows]
 
     def captured_projects(self) -> list[ProjectInfo]:
-        """The registrations a session made on its own that nothing has added on purpose."""
+        """The registrations a session made on its own that nothing has added on purpose.
+
+        Never the aisquare home's: the captain's home board is captured on purpose and never
+        onboarded, and doctor counted it among the scratch directories to prune."""
         rows = self._conn.execute(
             f"SELECT {_PROJECT_COLUMNS} FROM project "
             "WHERE forgotten_at IS NULL AND onboarded_at IS NULL ORDER BY name"
         ).fetchall()
-        return [_row_to_project(row) for row in rows]
+        return [project for project in map(_row_to_project, rows) if not is_the_home(project.root)]
 
     def get_project(
         self, project_id: str, *, include_forgotten: bool = False

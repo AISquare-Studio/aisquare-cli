@@ -260,6 +260,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   none. A *Fork* as another role started without the teammate's persona, which the
   dialog showed and kept; it now keeps it, as *Take over* does, and a persona the
   dialog changed is the dialog's.
+- **`aisquare project prune --captured-only` never takes the captain's home board,**
+  and doctor no longer counts it among the captured directories. The home is
+  captured on purpose and never added, so once the captain sat idle the prune took
+  it for a scratch directory, and `--purge` deleted the captain's board and audit.
 - **A tmux server the fleet starts holds no team variable,** so a window opened on
   it by hand inherits no hub, seat, role or persona from the shell that first
   started it. `aisquare doctor`'s `fleet server env` row warns when a running server

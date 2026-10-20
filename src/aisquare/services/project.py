@@ -654,7 +654,11 @@ def prune_candidates(
     """
 
     def plan(store: ContextStore) -> list[PruneCandidate]:
-        projects = store.list_projects(all=True)
+        # Never the aisquare home's row: the captain's home board, captured on purpose and
+        # never onboarded, so ``--captured-only`` took it for a scratch directory once the
+        # captain sat idle, and ``--purge`` deleted the captain's board and its audit
+        # (review of #240, "also confirmed": prune can purge the home board).
+        projects = [p for p in store.list_projects(all=True) if not is_the_home(p.root)]
         why = _why_stale(
             store,
             missing=missing,

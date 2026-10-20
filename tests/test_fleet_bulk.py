@@ -22,7 +22,7 @@ from aisquare.cli.app import app
 from aisquare.core import tmux as tmux_core
 from aisquare.core.orchestrator import FLEET_AGENT_ENV_VAR, team_project
 from aisquare.core.store import store_session
-from aisquare.models import FleetAgent, ProjectInfo
+from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services.fleet import ALREADY_EXITED, THIS_SESSION, BulkReceipt, FleetError
 from tests import fakebin
@@ -248,6 +248,36 @@ def test_an_agent_this_run_sent_exit_to_and_another_command_ended_failed_not_ski
         if s.state in fleet_service.PROCESS_STATES
     }, "nothing was started in its place"
     assert not report.ok
+
+
+@pytest.mark.parametrize("action", ["restart", "stop"])
+def test_each_turn_looks_at_its_own_row_not_its_whole_project(
+    fleet: Fleet, monkeypatch: pytest.MonkeyPatch, action: fleet_service.BulkAction
+) -> None:
+    """Review of #266, round 3: the look before each turn was the project's whole listing,
+    tmux asked about every pane of it for one row, so a manager and eight coders were
+    listed ten times in one ``restart --all``. Each project is listed once now, by the
+    plan, and each turn asks about its own row (``status_of``)."""
+    listed: list[str] = []
+    looked: list[str] = []
+    real_list, real_status = fleet_service.list_agents, fleet_service.status_of
+
+    def listing(project: ProjectInfo, **kwargs: Any) -> list[FleetAgentStatus]:
+        listed.append(project.id)
+        return real_list(project, **kwargs)
+
+    def looking(agent: FleetAgent) -> FleetAgentStatus:
+        looked.append(agent.id)
+        return real_status(agent)
+
+    monkeypatch.setattr(fleet_service, "list_agents", listing)
+    monkeypatch.setattr(fleet_service, "status_of", looking)
+
+    report = fleet_service.bulk(action)
+
+    assert len(report.of("done")) == 4
+    assert sorted(listed) == sorted([fleet.alpha.id, fleet.beta.id])
+    assert sorted(looked) == sorted(agent.id for agent in fleet.agents.values())
 
 
 def test_a_stop_pinned_to_running_agents_leaves_an_ended_row_and_its_window(

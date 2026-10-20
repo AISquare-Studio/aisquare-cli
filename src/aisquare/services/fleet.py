@@ -7525,9 +7525,24 @@ def _bulk_one(action: BulkAction, row: BulkRow, *, spawned_by: str) -> BulkRecei
 
 
 def _still_running(row: BulkRow) -> None:
-    """Refuse ``row`` (``NoSuchAgent``) unless its project's listing, read now, still has it
-    in one of :data:`PROCESS_STATES`: as ``fleet ls`` reads it, a dead pane recorded."""
-    now = next((s for s in list_agents(row.project) if s.agent.id == row.agent.id), None)
+    """Refuse ``row`` (``NoSuchAgent``) unless the store still holds it live and its agent,
+    looked at now, is in one of :data:`PROCESS_STATES`.
+
+    One row, read again and asked of its own server (:func:`status_of`). The project's
+    whole listing, read before each agent, asked tmux about every pane of the project for
+    one row's answer: a manager and eight coders were listed ten times in one ``restart
+    --all`` (review of #266, round 3). A dead pane it finds is recorded as a listing
+    records one (:func:`_end_dead_rows`): its claims released and the manager told now,
+    not at the next read.
+    """
+    with store_session() as store:
+        agent = store.get_fleet_agent(row.agent.id)
+        project = store.get_project(row.project.id) or row.project
+    now = None if agent is None or agent.ended_at is not None else status_of(agent)
+    if agent is not None and now is not None and now.state not in PROCESS_STATES:
+        tmux_session = session_name(project.codename) if project.codename else None
+        with suppress(Exception):  # the next listing records it; the skip stands either way
+            _end_dead_rows([agent], _observe_sockets([agent], tmux_session))
     if now is None or now.state not in PROCESS_STATES:
         raise NoSuchAgent(f"{row.agent.label!r} ({row.agent.id}) has no process any more")
 

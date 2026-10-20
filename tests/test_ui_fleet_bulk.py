@@ -2,9 +2,11 @@
 
 User feedback (2026-10-19): four managers, and a restart of all of them was a click into
 each, while clicking around between panes had destroyed a manager more than once. The
-listing is scripted per project (``fleet_service.list_agents``), so the dialog's plan and
-the action's second read are the service's own (``bulk_plan``, ``bulk``); only the stop
-and the restart of one agent are stand-ins, which record the row they were asked for.
+listing is scripted per project (``fleet_service.list_agents``), and so is the one look at
+each agent just before its turn (``fleet_service.status_of``), with the scripted rows in
+the store, so the dialog's plan and the action's second read are the service's own
+(``bulk_plan``, ``bulk``); only the stop and the restart of one agent are stand-ins, which
+record the row they were asked for.
 """
 
 from __future__ import annotations
@@ -27,15 +29,26 @@ from aisquare.cli.ui.sidebar import SettingsRow
 from aisquare.cli.ui.views.fleet_bulk import BULK_WORKER, ConfirmBulk
 from aisquare.cli.ui.views.settings_hub import SettingsHubView
 from aisquare.core import tmux as tmux_core
+from aisquare.core.store import store_session
 from aisquare.core.tmux import Completed
-from aisquare.models import FleetAgentStatus, ProjectInfo
+from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from tests.test_ui_shell import _toast_list, seed, settle, shown, status
 from tests.ui_workers import settle_page
 
 T = TypeVar("T")
 SIZE = (140, 44)
-Script = dict[str, list[FleetAgentStatus]]
+
+
+class Script(dict[str, list[FleetAgentStatus]]):
+    """What ``fleet_service.list_agents`` answers, per project id — mutable mid-test. The rows
+    of each list set are recorded in the store, where ``bulk`` reads each row again."""
+
+    def __setitem__(self, project_id: str, statuses: list[FleetAgentStatus]) -> None:
+        super().__setitem__(project_id, statuses)
+        with store_session() as store:
+            for scripted in statuses:
+                store.upsert_fleet_agent(scripted.agent)
 
 
 @pytest.fixture(autouse=True)
@@ -51,13 +64,20 @@ def no_tmux(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def script(monkeypatch: pytest.MonkeyPatch) -> Script:
-    """What ``fleet_service.list_agents`` answers, per project id — mutable mid-test."""
-    agents: Script = {}
+    """What ``fleet_service.list_agents`` answers, per project id, and ``status_of`` for one
+    of those rows (``lost`` for a row no list holds now) — mutable mid-test."""
+    agents = Script()
 
     def fake(project: ProjectInfo, *, live_only: bool = True, **kwargs: Any) -> list[Any]:
         return list(agents.get(project.id, []))
 
+    def one(agent: FleetAgent) -> FleetAgentStatus:
+        listed = (status for rows in agents.values() for status in rows)
+        found = next((status for status in listed if status.agent.id == agent.id), None)
+        return found or FleetAgentStatus(agent=agent, state="lost")
+
     monkeypatch.setattr(fleet_service, "list_agents", fake)
+    monkeypatch.setattr(fleet_service, "status_of", one)
     return agents
 
 

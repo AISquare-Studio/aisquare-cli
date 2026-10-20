@@ -210,9 +210,9 @@ def spawn(
         str | None,
         typer.Option(
             "--account",
-            help="Claude Code account to run under: a slot number, alias or email (see "
-            "`aisquare accounts`); default: the role's binding, the project default, "
-            "then the machine default.",
+            help="Account to run under, one of the agent's own (Claude Code or Codex): a "
+            "slot number, alias or email (see `aisquare accounts`); default: the role's "
+            "binding, the project default, then the machine default.",
             metavar="ACCOUNT",
         ),
     ] = None,

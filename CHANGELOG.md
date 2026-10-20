@@ -383,6 +383,13 @@ adapter.**
 - An auto tell to an agent without aisquare's hooks that shows a dialog (a fresh
   Codex at its folder-trust question) no longer says "Interrupt & tell types it",
   which is refused at that dialog: it types it once the dialog is answered.
+- The ⚙ Settings hub's *Accounts* line, and the help of `fleet spawn --account`
+  and `team bind --account`, name Codex's accounts beside Claude Code's: each
+  takes a slot of the role's own agent, and a bound one wins over that agent's
+  home in `--env` (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`). `accounts trust` heads
+  its report "on every account that can hold it": a Codex home that never
+  started is given the folder's table, where a Claude account that never
+  started is skipped.
 - Remote's Tell (Prompt, Interrupt & tell), Stop, Restart, Switch account and the
   Transcript tab's keys go by a Codex agent's own screen. A quiet pane at its
   empty prompt is at rest, and anything drawn over that prompt is a dialog they

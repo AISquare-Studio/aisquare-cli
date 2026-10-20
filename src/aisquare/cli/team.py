@@ -945,8 +945,9 @@ def bind(
         str | None,
         typer.Option(
             "--account",
-            help="Claude account this role launches under: a slot, alias or email "
-            "(see `aisquare accounts`). Wins over a CLAUDE_CONFIG_DIR in --env.",
+            help="Account this role launches under, one of its agent's own (Claude Code or "
+            "Codex): a slot, alias or email (see `aisquare accounts`). Wins over the "
+            "agent's home in --env (CLAUDE_CONFIG_DIR, CODEX_HOME).",
             metavar="ACCOUNT",
         ),
     ] = None,
@@ -984,10 +985,11 @@ def bind(
     The file is read now as well, so a typo fails here rather than every later
     launch of the role.
 
-    ``--account`` is the one binding the CLI DOES interpret: it names a Claude
-    account the CLI owns (``aisquare accounts``), resolved at every launch by
-    the same resolver ``launch --account`` and ``fleet spawn`` use, and it
-    wins over a ``CLAUDE_CONFIG_DIR`` in ``--env``. It is the role rung of
+    ``--account`` is the one binding the CLI DOES interpret: it names an
+    account the CLI owns of the role's own agent, Claude Code's or Codex's
+    (``aisquare accounts``), resolved at every launch by the same resolver
+    ``launch --account`` and ``fleet spawn`` use, and it wins over the agent's
+    home in ``--env`` (``CLAUDE_CONFIG_DIR``, ``CODEX_HOME``). It is the role rung of
     ``aisquare accounts default`` — role binding, then project default, then
     machine default.
 

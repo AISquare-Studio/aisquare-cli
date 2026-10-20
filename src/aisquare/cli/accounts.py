@@ -924,11 +924,11 @@ def _trust_report(
     else:
         console = stdout_console()
         if scope is not None:
-            head = f"{scope.key} on every account that has started"
+            head = f"{scope.key} on every account that can hold it"
             if scope.key != claude_sharing.project_key(scope.folder):
                 head += f" (it covers {scope.folder})"
         else:
-            head = "every trusted folder on every account that has started"
+            head = "every trusted folder on every account that can hold it"
         mark, style = ("✗ ", "red") if failed else ("✓ ", "green")
         console.print(Text.assemble((mark, style), head))
         for change in changes:

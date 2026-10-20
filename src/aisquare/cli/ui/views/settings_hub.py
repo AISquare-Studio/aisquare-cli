@@ -2,7 +2,7 @@
 
 Three links, each a button with one line saying what is behind it — *App
 settings* (the machine-wide settings, ``views.app_settings``), *Accounts* (the
-AISquare sign-in and the Claude Code accounts, ``views.accounts``) and *Doctor*
+AISquare sign-in and the Claude Code and Codex accounts, ``views.accounts``) and *Doctor*
 (the checks, which opening it runs). A link posts the message the app routes;
 the pages it opens keep *⚙ Settings* highlighted in the sidebar. ↑/↓ move between
 the links, Enter or a click opens one.
@@ -33,7 +33,7 @@ LINKS: tuple[tuple[str, str, str], ...] = (
         "App settings",
         "the machine-wide settings: roles, the fleet, accounts' rules",
     ),
-    ("accounts", "Accounts", "the AISquare sign-in and the Claude Code accounts"),
+    ("accounts", "Accounts", "the AISquare sign-in and the Claude Code and Codex accounts"),
     ("doctor", "Doctor", "the checks — they run when the page opens"),
 )
 """The hub's links, top to bottom: each one's id stem, label and line of description."""

@@ -205,12 +205,13 @@ class RoleLaunchProfile(BaseModel):
     spec; we carry it.
 
     ``account`` is the ONE exception, and it is not that cut coming back: it
-    names a Claude account the CLI itself owns — a slot number, an alias or the
-    email it is signed in as (``aisquare accounts``) — never a path. It is
-    resolved at launch by the one account resolver
-    (``services.claude_accounts.choose``), after ``env``, so a binding that
-    carries both a hand-written ``CLAUDE_CONFIG_DIR`` and an ``account`` runs on
-    the account. Written by ``team bind <role> --account`` and App settings;
+    names an account the CLI itself owns, of the role's own agent (Claude Code
+    or Codex) — a slot number, an alias or the email it is signed in as
+    (``aisquare accounts``) — never a path. It is resolved at launch by the one
+    account resolver (``services.claude_accounts.choose``), after ``env``, so a
+    binding that carries both a hand-written home of its agent
+    (``CLAUDE_CONFIG_DIR``, ``CODEX_HOME``) and an ``account`` runs on the
+    account. Written by ``team bind <role> --account`` and App settings;
     ``None`` means the role expresses no preference and the project or machine
     default applies (#145).
 

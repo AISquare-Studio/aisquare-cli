@@ -76,9 +76,11 @@ answers nothing for :attr:`CONTROL_TIMEOUT` is killed when an idle tick notices,
 1.0 to 1.5 s after the oldest command waiting was sent. A control command that
 fails sends that pane to polling until its next attach. Logged, never toasted.
 Input the client ended with unanswered is neither lost nor doubled: each input
-sets the pane's ``@asq-sent`` stamp in its own chain, and what the stamp says tmux
+sets this process's stamp for its pane (a hidden session variable,
+``core.tmux_control.STAMP_PREFIX``) in its own chain, and what the stamp says tmux
 never ran is sent again by polling, in order, ahead of what was typed meanwhile
-(:meth:`TerminalPane._recover_input`).
+(:meth:`TerminalPane._recover_input`). So does input in flight when the pane lets
+its client go on purpose — a failed command, another server.
 A server whose client ended is offered a new one after :data:`CONTROL_RESTART`;
 one whose client never answered, or wedged, after :data:`CONTROL_RETRY`; one
 whose client was plainly detached — its session destroyed, the last agent of the
@@ -424,11 +426,13 @@ _LAST_STAMP = [0]
 
 
 def _next_stamp() -> int:
-    """A stamp no input here had before: wall-clock nanoseconds, made strictly increasing.
+    """A stamp no input of this process had before: wall-clock nanoseconds, made strictly
+    increasing.
 
-    The clock rather than a counter so two asq processes typing into one pane — each its
-    own control client — still stamp it in the order they typed, and one's recovery does
-    not take the other's stamp for its own."""
+    Each process keeps its own stamps (its pid is in their name,
+    ``core.tmux_control.stamp_name``), so two asq processes typing into one pane never
+    read each other's. The clock rather than a counter for a process that reuses a dead
+    one's pid: what that one left in a session is older than anything this one sends."""
     _LAST_STAMP[0] = max(_LAST_STAMP[0] + 1, time.time_ns())
     return _LAST_STAMP[0]
 
@@ -1430,6 +1434,9 @@ class TerminalPane(Widget, can_focus=True):
         _MOUNTED_PANES.discard(self)
         if self.text_selection is not None:
             self._clear_own_selection()
+        # Nothing recovers after this widget is gone: the app is ending or the view is,
+        # and what the client was sent last it most likely ran.
+        self._inflight, self._held = [], None
         self._drop_link()
         for timer in (self._timer, self._mouse_timer, self._resize_timer, self._frame_timer):
             if timer is not None:
@@ -1633,9 +1640,9 @@ class TerminalPane(Widget, can_focus=True):
         link = self._link
         if link is not None and not link.client.alive:
             # Found ended before its end was delivered (``_control_lost``, which would
-            # have done this): input it took and never answered is recovered from here.
+            # have done this): input it took and never answered is recovered from here
+            # (``_drop_link``).
             self._drop_link()
-            self._begin_recovery()
             link = None
         if link is None:
             if not self._may_control():
@@ -1682,12 +1689,20 @@ class TerminalPane(Widget, can_focus=True):
             link.client.unwatch_pane(watched)
 
     def _drop_link(self) -> None:
-        """Stop using the control client: unwatched, and released."""
+        """Stop using the control client: unwatched, and released.
+
+        When that leaves the client ended — this pane was its last user and closed it, or
+        it had ended already — no answer is coming for the input still in flight, so it
+        is recovered now (:meth:`_recover_input`). Left in ``_inflight``, it was sent again
+        at some later, unrelated client end, out of place (re-review of #272).
+        """
         self._unwatch()
         link, self._link = self._link, None
         self._capturing = False
         if link is not None:
             link.release(self)
+            if not link.client.alive and self.is_mounted:
+                self._begin_recovery()
 
     def _frame_now(self) -> None:
         """A frame as soon as one can come: asked of the control client, or captured here."""
@@ -2532,7 +2547,13 @@ class TerminalPane(Widget, can_focus=True):
                     # and said as the polled path says it.
                     self._fail(PANE_GONE)
                     return False
-                sent = False  # the client ended as it was sent: the polled way, below
+                # The client ended as it was sent: what it left in flight is recovered
+                # (``_drop_link``), and this waits behind that, as a key typed then does.
+                self._drop_link()
+                if self._held is not None:
+                    self._held.append(_Input(0, server, pane_id, kind, value))
+                    return True
+                sent = False
             if sent:
                 self._inflight.append(item)
                 return True

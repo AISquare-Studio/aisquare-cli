@@ -111,11 +111,18 @@ CLIENT_FLAGS = "ignore-size,no-output,no-detach-on-destroy"
 """How the client attaches: out of window sizing, silent until its first batch, and
 moved to another session rather than detached when its own is destroyed."""
 
-STAMP_OPTION = "@asq-sent"
-"""The pane option each input over the pipe sets, in its own chain, to its stamp: what
-tells, after the client died with input unanswered, which of it tmux ran
-(:meth:`ControlClient._input`, :func:`sent_stamp`). A user option, so tmux keeps it
-with the pane and nothing else reads it; settable on a pane since tmux 3.0."""
+STAMP_PREFIX = "ASQ_SENT"
+"""Each input over the pipe sets, in its own chain, a HIDDEN variable of its pane's session
+to its stamp: what tells, after the client died with input unanswered, which of it tmux ran
+(:meth:`ControlClient._input`, :func:`sent_stamp`). One per asq process and pane
+(:func:`stamp_name`), so two processes typing into one pane cannot read each other's.
+
+``set-environment -h``: hidden, so no program started in the session inherits it, and it
+goes with the session. NOT a pane option: ``set-option -p`` made tmux repaint every
+client attached to the server — a ``fleet attach`` on any project — at every key, ~9.8 KB
+a key on a 200x50 terminal (re-review of #272); a hidden variable costs such a client
+nothing, and a paste buffer would show in ``list-buffers`` and the paste-buffer mirror.
+Measured on tmux 3.2a, 3.4 and 3.8."""
 
 Deliver = Callable[[Callable[[], object]], object]
 """Run a callable on the consumer's thread, later — never on the reader thread."""
@@ -172,19 +179,27 @@ def quote(arg: str) -> str:
     return "".join(out)
 
 
-def sent_stamp(server: TmuxServer, pane_id: str) -> int | None:
-    """The stamp of the last input over a control client that tmux ran in ``pane_id``, asked
-    by polling; 0 when none ever ran there, ``None`` when the pane is gone.
+def stamp_name(pane_id: str, pid: int | None = None) -> str:
+    """The variable holding a process's stamp for ``pane_id``: ``%12`` → ``ASQ_SENT_<pid>_12``."""
+    return f"{STAMP_PREFIX}_{os.getpid() if pid is None else pid}_{pane_id.lstrip('%')}"
 
-    ``show-options``, never ``display-message``: a gone pane is a clean ``no such pane``
-    here, where a ``display-message`` format can kill a tmux 3.2a server. An option never
-    set answers empty on 3.2a and ``invalid option`` on 3.4 and later (measured).
+
+def sent_stamp(server: TmuxServer, pane_id: str) -> int | None:
+    """The stamp of the last input this process sent over a control client that tmux ran
+    in ``pane_id``, asked by polling; 0 when none ever ran there, ``None`` when the pane
+    is gone.
+
+    ``show-environment``, never ``display-message``: a gone pane is a clean ``no such
+    session`` here, where a ``display-message`` format can kill a tmux 3.2a server. A
+    variable never set answers ``unknown variable`` (measured on 3.2a, 3.4 and 3.8).
     """
+    name = stamp_name(pane_id)
     try:
-        said = server.run("show-options", "-p", "-v", "-t", pane_id, STAMP_OPTION).strip()
+        said = server.run("show-environment", "-h", "-t", pane_id, name).strip()
     except TmuxError as error:
-        return 0 if "invalid option" in str(error) else None
-    return int(said) if said.isdigit() else 0
+        return 0 if "unknown variable" in str(error) else None
+    value = said.partition("=")[2]
+    return int(value) if value.isdigit() else 0
 
 
 def _command(args: Sequence[str]) -> str:
@@ -279,6 +294,8 @@ class ControlClient:
         """``%output`` lines received per pane (instrumentation, and the mute's proof)."""
         self.reason: str | None = None
         """Why the client ended, once it has."""
+        self._pid = os.getpid()
+        """Whose stamps this client sets (:func:`stamp_name`): this process's, as made."""
         self.detached = False
         """tmux detached the client without a reason (``%exit`` alone): its session was
         destroyed under it, not a failure of the client or the server."""
@@ -517,7 +534,8 @@ class ControlClient:
         failed: Callable[[], None] | None = None,
     ) -> None:
         """One input for ``pane_id``, as ONE chain: ``commands``, then — given ``stamp`` —
-        ``set-option -p @asq-sent <stamp>`` on the pane. tmux runs a chain back to back and
+        ``set-environment -h`` of its session's stamp variable (:data:`STAMP_PREFIX`), set
+        to ``stamp``. tmux runs a chain back to back and
         none of it after a command that fails, so the stamp is set exactly when the input
         ran: when the client dies before answering, :func:`sent_stamp` says, by polling,
         which inputs tmux ran and which never reached it. ``done`` is delivered the last
@@ -525,7 +543,8 @@ class ControlClient:
         here first, on the reader thread, when one did."""
         chain = [*commands]
         if stamp is not None:
-            chain.append(["set-option", "-p", "-t", pane_id, STAMP_OPTION, str(stamp)])
+            name = stamp_name(pane_id, self._pid)
+            chain.append(["set-environment", "-h", "-t", pane_id, name, str(stamp)])
 
         def answered(reply: Reply) -> None:
             if not reply.ok and failed is not None:

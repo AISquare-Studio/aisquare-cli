@@ -797,6 +797,249 @@ def test_real_tmux_keys_in_flight_when_the_client_dies_arrive_once_each_by_polli
     assert typed == expected, (len(expected), len(typed))
 
 
+def _raw_client(live: TmuxServer, session: str) -> tuple[subprocess.Popen[bytes], int]:
+    """``fleet attach``'s argv on a pty of its own: a raw tmux client, and its terminal."""
+    if sys.platform == "win32":  # its callers skip there; this tells mypy, as pty is POSIX's
+        raise AssertionError("fleet attach needs a terminal")
+    import pty
+
+    fd, terminal = pty.openpty()
+    raw = subprocess.Popen(
+        live.attach_argv(session),
+        stdin=terminal,
+        stdout=terminal,
+        stderr=terminal,
+        start_new_session=True,
+        env={**os.environ, "TERM": "xterm-256color"},
+    )
+    os.close(terminal)
+    return raw, fd
+
+
+def _drained(fd: int) -> int:
+    """How many bytes the raw client's terminal has been sent since the last drain."""
+    import select
+
+    count = 0
+    while select.select([fd], [], [], 0)[0]:
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError:
+            break
+        if not chunk:
+            break
+        count += len(chunk)
+    return count
+
+
+@_needs_tmux
+def test_real_tmux_typing_into_an_agent_sends_nothing_to_a_raw_client_elsewhere(
+    live: TmuxServer, tmp_path: Path
+) -> None:
+    """The stamp each input sets (what tells, if the client dies, which of it tmux ran)
+    must cost a ``fleet attach`` client nothing. ``set-option -p`` repainted EVERY attached
+    client on the server at every key, whatever session it was on: 40 keys into one agent
+    sent ~9.8 KB a key to a 200x50 raw client on another project (re-review of #272). A
+    hidden session variable (``set-environment -h``) costs it nothing (measured on 3.2a,
+    3.4 and 3.8)."""
+    if sys.platform == "win32":
+        pytest.skip("no pty on Windows; fleet attach needs a terminal")
+    typed_into = _window(live, "asq-typing", tmp_path, ["cat"], width=100, height=24)
+    _window(live, "asq-elsewhere", tmp_path, ["cat"], width=100, height=24)
+
+    async def drive() -> tuple[int, str]:
+        host = Host(live, typed_into)
+        async with host.run_test(size=(100, 24)) as pilot:
+            pane = host.pane
+            pane.focus()
+            await wait_until(pilot, lambda: _serving(pane), timeout=5.0)
+            raw, fd = _raw_client(live, "asq-elsewhere")
+            try:
+                await wait_until(
+                    pilot,
+                    lambda: len(live.run("list-clients", "-F", "#{client_name}").split()) == 2,
+                    timeout=5.0,
+                )
+                await pilot.pause(0.5)
+                _drained(fd)  # the raw client's own first paint
+                await pilot.pause(0.3)
+                _drained(fd)
+                typed = ""
+                for letter in "stampsmustcostnothing" * 2:
+                    typed += letter
+                    await pilot.press(letter)
+                    await wait_until(pilot, _row_shows(pane, typed), timeout=2.0)
+                await pilot.pause(0.3)
+                return _drained(fd), screen_text(pane)[0]
+            finally:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+                raw.kill()
+                raw.wait()
+
+    sent, row = run(drive())
+    assert row.startswith("stampsmustcostnothing"), row
+    assert sent == 0, f"{sent} bytes to a raw client on another session while typing 42 keys"
+
+
+def _recording_pane(live: TmuxServer, tmp_path: Path, session: str) -> tuple[str, Path]:
+    """A pane whose program records what it reads, raw: what arrived, and in what order."""
+    record = tmp_path / f"{session}.typed"
+    pane_id = _window(live, session, tmp_path, ["sh", "-c", f"stty raw -echo; exec cat > {record}"])
+    return pane_id, record
+
+
+async def _settled(pilot: Any, record: Path, length: int, seconds: float = 3.0) -> str:
+    """The record once it holds ``length`` characters, or what it holds after ``seconds``."""
+    deadline = time.monotonic() + seconds
+    while len(record.read_text()) < length and time.monotonic() < deadline:
+        await pilot.pause(0.05)
+    return record.read_text()
+
+
+def _unread_from(client: ControlClient) -> None:
+    """What ``client`` is sent from now on is written where nothing reads it: unrun, and
+    unanswered, however the platform times the kill (tmux reads a control client's
+    stdin itself, so a kill alone does not stop what was written)."""
+    client._outbox = queue.SimpleQueue()
+
+
+@_needs_tmux
+def test_real_tmux_a_key_sent_as_the_client_ends_waits_behind_the_keys_recovered(
+    live: TmuxServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A key whose write finds the client ended — after ``_control_link`` handed the pane
+    a live link — went the polled way at once, AHEAD of the keys in flight that the
+    recovery was about to send again (re-review of #272). It waits behind them, as every
+    key typed during a recovery does."""
+    if sys.platform == "win32":
+        pytest.skip("no SIGKILL on Windows")
+    pane_id, record = _recording_pane(live, tmp_path, "asq-ahead")
+    sent_over = ControlClient.send_literal
+    calls = [0]
+
+    def send_literal(self: ControlClient, pane: str, text: str, **kwargs: Any) -> None:
+        calls[0] += 1
+        if calls[0] == 1:
+            _unread_from(self)  # keys 1-10: in flight, never run
+        if calls[0] == 11 and self.pid is not None:
+            os.kill(self.pid, signal.SIGKILL)
+            deadline = time.monotonic() + 2
+            while self.alive and time.monotonic() < deadline:
+                time.sleep(0.001)  # ended as this key is written: the write raises
+        sent_over(self, pane, text, **kwargs)
+
+    async def drive() -> str:
+        host = Host(live, pane_id)
+        async with host.run_test(size=(80, 24)) as pilot:
+            pane = host.pane
+            pane.focus()
+            await wait_until(pilot, lambda: _serving(pane) and _client(pane).answered, 5.0)
+            monkeypatch.setattr(ControlClient, "send_literal", send_literal)
+            for char in string.ascii_lowercase[:20]:
+                pane.post_message(events.Key(char, char))
+            return await _settled(pilot, record, 20)
+
+    assert run(drive()) == string.ascii_lowercase[:20]
+
+
+@_needs_tmux
+def test_real_tmux_input_in_flight_at_a_deliberate_close_is_settled_there_not_later(
+    live: TmuxServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A control command failed (``_control_failed``), and the pane let its client go
+    with keys still in flight: they stayed in ``_inflight``, unanswered, and were sent
+    again at some later, unrelated client end — long after, and out of place (re-review
+    of #272). They are recovered at the close, and nothing is sent again later."""
+    if sys.platform == "win32":
+        pytest.skip("no SIGKILL on Windows")
+    pane_id, record = _recording_pane(live, tmp_path, "asq-close")
+    monkeypatch.setattr(terminal_module, "CONTROL_RESTART", 0.0)
+    sent_over = ControlClient.send_literal
+    unread = [True]
+
+    def send_literal(self: ControlClient, pane: str, text: str, **kwargs: Any) -> None:
+        if unread[0]:
+            _unread_from(self)
+            unread[0] = False
+        sent_over(self, pane, text, **kwargs)
+
+    async def drive() -> tuple[str, str]:
+        host = Host(live, pane_id)
+        async with host.run_test(size=(80, 24)) as pilot:
+            pane = host.pane
+            pane.focus()
+            await wait_until(pilot, lambda: _serving(pane) and _client(pane).answered, 5.0)
+            monkeypatch.setattr(ControlClient, "send_literal", send_literal)
+            for char in "closed":
+                pane.post_message(events.Key(char, char))
+            await wait_until(pilot, lambda: len(pane._inflight) == len("closed"), 2.0)
+            pane._control_failed("a command failed")  # the pane lets its only client go
+            at_close = await _settled(pilot, record, len("closed"), 1.0)
+            pane.attach(pane_id)  # a new attach: control again, and a client to end later
+            await wait_until(pilot, lambda: _serving(pane) and _client(pane).answered, 5.0)
+            pid = _client(pane).pid
+            assert pid is not None
+            os.kill(pid, signal.SIGKILL)  # an unrelated end, nothing of its own in flight
+            await pilot.pause(0.5)
+            return at_close, record.read_text()
+
+    at_close, later = run(drive())
+    assert at_close == "closed"
+    assert later == "closed", later
+
+
+@_needs_tmux
+def test_real_tmux_another_asq_typing_into_the_pane_does_not_hide_this_ones_lost_keys(
+    live: TmuxServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two asq processes on one server each have their own control client, and both may
+    type into one pane. With one stamp per pane, the other's later stamp read as this
+    one's own, and this one's unrun keys were taken for run and dropped. Each process
+    keeps its own stamp, by its pid (re-review of #272: the docstring said so, the code
+    did not)."""
+    if sys.platform == "win32":
+        pytest.skip("no SIGKILL on Windows")
+    pane_id, record = _recording_pane(live, tmp_path, "asq-two")
+    sent_over = ControlClient.send_literal
+    unread = [True]
+
+    def send_literal(self: ControlClient, pane: str, text: str, **kwargs: Any) -> None:
+        if unread[0]:
+            _unread_from(self)
+            unread[0] = False
+        sent_over(self, pane, text, **kwargs)
+
+    async def drive() -> str:
+        host = Host(live, pane_id)
+        async with host.run_test(size=(80, 24)) as pilot:
+            pane = host.pane
+            pane.focus()
+            await wait_until(pilot, lambda: _serving(pane) and _client(pane).answered, 5.0)
+            mine = _client(pane)
+            monkeypatch.setattr(ControlClient, "send_literal", send_literal)
+            for char in "mine":
+                pane.post_message(events.Key(char, char))
+            await wait_until(pilot, lambda: len(pane._inflight) == len("mine"), 2.0)
+            monkeypatch.setattr(ControlClient, "send_literal", sent_over)
+            # Another asq process: its own client, its own pid, a later stamp, one key.
+            other = ControlClient(
+                live, deliver=lambda call: call(), on_output=lambda _: None, on_exit=lambda _: None
+            )
+            other._pid = 4_000_000
+            other.start_client(pane_id)
+            answered: list[Reply] = []
+            later = terminal_module._next_stamp()
+            other.send_literal(pane_id, "Z", done=answered.append, stamp=later)
+            await wait_until(pilot, lambda: bool(answered), 2.0)
+            other.close_client()
+            assert mine.pid is not None
+            os.kill(mine.pid, signal.SIGKILL)  # this one's four keys: in flight, never run
+            return await _settled(pilot, record, len("Zmine"))
+
+    assert run(drive()) == "Zmine"
+
+
 # --- the protocol, line by line ----------------------------------------------------------
 
 

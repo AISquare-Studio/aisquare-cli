@@ -2726,12 +2726,17 @@ async def open_stop_dialog(pilot: Pilot[None], app: FleetApp, agent_id: str) -> 
     """
     await pilot.click(row_for(app, agent_id))
     await pilot.pause()
+    await settle(app)
     view = app.current_view()
     assert isinstance(view, AgentView), f"the row opened {type(view).__name__}"
     # Pressed, as Enter on it would: a mouse press this soon after the view came up is the
     # one the click guard drops (``click_guard``, 0.8.2), and the guard is not what is tested.
+    # A press posts its ``Pressed`` and returns, where a pilot click paused after each mouse
+    # event, so the dialog is settled in before a test clicks its buttons: after one pause
+    # windows-latest had it pushed and not yet composed (``NoMatches('#stop-confirm')``).
     view.query_one("#agent-stop", Button).press()
     await pilot.pause()
+    await settle(app)
     screen = app.screen
     assert isinstance(screen, StopAgentScreen), f"Stop opened {type(screen).__name__}"
     return screen

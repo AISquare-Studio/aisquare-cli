@@ -174,8 +174,11 @@ def test_resolve_records_how_and_the_item_leaves_the_list(
     code, data = run_json(runner, "resolve", item["id"][:6], "told the manager: yes")
     assert code == 0 and set(data) == {"item", "action_seq"}
     assert set(data["item"]) == ITEM_KEYS and data["item"]["status"] == "resolved"
+    # Quoted for this shell (``install_route.command_line``): single quotes off Windows,
+    # double quotes on it.
+    quoted = '"told the manager: yes"' if sys.platform == "win32" else "'told the manager: yes'"
     assert last_audit()["utterance"] == (
-        f"aisquare --json captain resolve {item['id'][:6]} 'told the manager: yes'"
+        f"aisquare --json captain resolve {item['id'][:6]} {quoted}"
     ), "the argv as typed, quoting kept"
     assert run_json(runner, "attention")[1]["items"] == []
     # A second resolve is refused in the queue's words (#218 gate 1, blocker 3): no

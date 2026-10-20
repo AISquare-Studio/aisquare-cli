@@ -54,7 +54,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   from every picker and the catalogue, and the voice page does not serve.
   `aisquare doctor` shows one ok row, `captain: off (experimental)`. On, the captain
   is exactly as above; asq reads the switch when it starts. Nothing else reads it:
-  fleets, boards and the store (schema v24) are the same either way.
+  fleets, boards and the store (schema v32) are the same either way.
 - **The persona rides the system prompt too, and a replay keeps it.** For Claude
   Code the launch appends the persona block to the default system prompt
   (`--append-system-prompt-file`, a file under `~/.aisquare/cache/persona-prompts/`;
@@ -64,7 +64,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   system_prompt = false` keeps the briefing alone; an `--append-system-prompt`
   of either spelling on the operator's line wins. codex, aider and any wrapper
   not named `claude` have no seam this launcher knows and get the briefing
-  alone, said in one dim line. `fleet restart` and `fleet switch` replay the
+  alone, said in one dim line, as is a cache the launch cannot write. The
+  system prompt is the launch's for the life of the process, `/clear`
+  included: a persona attached since reaches the agent through the briefing
+  until a restart replays the row's. `fleet restart` and `fleet switch` replay the
   ROW's persona — spawned with, or attached since — never the role's default of
   the day; one that no longer resolves steps down to the role's current
   default, then to none, each said on the receipt and never a refusal (owner
@@ -251,6 +254,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reads its own project's board, where its manager and its teammates read. The
   captain's own window is given the home's root whatever hub started it, and a
   restart replays the board and the hub its row recorded.
+- **A hand-off runs as the persona the Spawn dialog shows.** *Take over* with
+  Persona `(none)` resumed the teammate's session and went on briefing the persona
+  that session had recorded, at every start after it; the session now runs as
+  none. A *Fork* as another role started without the teammate's persona, which the
+  dialog showed and kept; it now keeps it, as *Take over* does, and a persona the
+  dialog changed is the dialog's.
 - **A tmux server the fleet starts holds no team variable,** so a window opened on
   it by hand inherits no hub, seat, role or persona from the shell that first
   started it. `aisquare doctor`'s `fleet server env` row warns when a running server

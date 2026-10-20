@@ -156,11 +156,16 @@ def _persona_system_prompt(
     session-start hook briefs (``personas.briefing``), written under the home
     and appended to the default system prompt, so the persona holds over a
     long session as hook context alone may not (docs/plans/spawn-personas.md
-    §9; gh #210). The hook keeps briefing it: that channel survives ``/clear``,
-    this one does not. ``[persona] system_prompt = false`` keeps the hook
-    alone. Any other binary — codex, aider, a wrapper not named claude — has no
-    seam this launcher knows (codex reads AGENTS.md, aider its own prompts), so
-    it gets the hook alone and one dim line says so. An ``--append-system-prompt``
+    §9; gh #210). The system prompt is the LAUNCH's, for the life of the
+    process: ``/clear`` keeps it, and a persona attached since (``persona
+    attach``) reaches the agent through the hook alone, which briefs the persona
+    the fleet row names at every session start. A restart replays the row's
+    persona, so the two agree again from it on (review of #240, "also
+    confirmed": this docstring said ``/clear`` dropped the system prompt).
+    ``[persona] system_prompt = false`` keeps the hook alone. Any other binary —
+    codex, aider, a wrapper not named claude — has no seam this launcher knows
+    (codex reads AGENTS.md, aider its own prompts), so it gets the hook alone and
+    one dim line says so, as does a cache it cannot write. An ``--append-system-prompt``
     of either spelling already in the arguments is the operator's and wins.
 
     The file is named by the block's own hash: two launches of one persona
@@ -189,9 +194,20 @@ def _persona_system_prompt(
     block = "\n".join(personas.briefing(personas.resolve(name, root))) + "\n"
     digest = hashlib.sha256(block.encode("utf-8")).hexdigest()[:12]
     path = paths.aisquare_home() / "cache" / "persona-prompts" / f"{name}-{digest}.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not path.exists() or path.read_text(encoding="utf-8") != block:
-        path.write_text(block, encoding="utf-8")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists() or path.read_text(encoding="utf-8") != block:
+            path.write_text(block, encoding="utf-8")
+    except OSError as exc:
+        # A cache the launcher cannot write costs the seam, never the launch: the hook
+        # still briefs the persona. Unguarded, an unwritable home ended `launch --persona`
+        # in a traceback (review of #240, "also confirmed": the persona cache).
+        stderr_console().print(
+            f"persona {name}: its system-prompt file could not be written ({exc}) — "
+            "briefed by the session-start hook alone",
+            style="dim",
+        )
+        return []
     return [SYSTEM_PROMPT_FLAG, str(path)]
 
 

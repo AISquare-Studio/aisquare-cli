@@ -158,7 +158,10 @@ prompt must stay exactly the binary's own; an `--append-system-prompt` of either
 spelling on your own line wins over the launch's. Other harnesses — codex, aider,
 a wrapper not named `claude` — have no system-prompt seam this launcher knows
 (codex reads `AGENTS.md`, aider its own prompts), so they get the briefing alone
-and the launch says so in one dim line. A restart or hand-over replays the row's
+and the launch says so in one dim line, as it does when it cannot write the file.
+The system prompt is the launch's for the life of the process: `/clear` keeps
+it, and a persona attached since reaches the agent through the briefing alone
+until a restart. A restart or hand-over replays the row's
 persona: the one it was spawned with or given since; if that no longer resolves,
 the role's current default; if that does not either, none — said on the receipt,
 never a refusal.

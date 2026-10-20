@@ -7129,6 +7129,15 @@ def _respawn(
     # tsk_01m3ns5a736s): the recorded launch was the old role's, so it is replayed only
     # for the same role, and the new one launches as today's config says for it.
     replay = role is None or role == agent.role
+    chosen = _persona_for_replay(project, agent, notes, role=role) if persona is None else persona
+    if resume is not None and session is not None and (session.persona or "") != chosen:
+        # The replacement RESUMES this session, and its start hook asks the row: a row with no
+        # persona asks for nothing, so the session kept the persona it recorded, and the next
+        # start briefed it again. A take-over to Persona (none) went on briefing the old one
+        # (review of #240, "also confirmed": take-over with Persona "(none)"). Set before the
+        # window starts, so its first hook already reads it.
+        with store_session() as store:
+            store.set_session_persona(session.id, chosen or None)
     receipt = spawn(
         project,
         agent.role if replay or role is None else role,
@@ -7142,7 +7151,7 @@ def _respawn(
         size=size,
         permission_mode=permission_mode,
         spec=agent.launch_spec if replay else None,
-        persona=_persona_for_replay(project, agent, notes) if persona is None else persona,
+        persona=chosen,
         # Only Claude Code's hooks write a board session (`agents connect`
         # installs them for Claude Code alone): a row joined to one is Claude
         # Code whatever its binary is called, resumed or `--fresh`.
@@ -7174,7 +7183,9 @@ def _respawn(
     return receipt, resume is not None, notes
 
 
-def _persona_for_replay(project: ProjectInfo, agent: FleetAgent, notes: list[str]) -> str:
+def _persona_for_replay(
+    project: ProjectInfo, agent: FleetAgent, notes: list[str], *, role: str | None = None
+) -> str:
     """The persona a replay runs as: the ROW's, then the role's default, then none; never a refusal.
 
     A restart is the same agent (#144), and the row is the record of how it ran
@@ -7189,6 +7200,10 @@ def _persona_for_replay(project: ProjectInfo, agent: FleetAgent, notes: list[str
     the agent can run without one, and refusing would leave it stopped, the
     failure :func:`_refuse_a_replay_that_cannot_start` exists to prevent
     (owner decision, 2026-09-24).
+
+    ``role`` is the role the replacement runs as when a hand-off changes it
+    (:func:`hand_off`): its default is the step down, and the row's persona is kept
+    whatever the role, as the Spawn dialog shows it.
     """
     if not agent.persona:
         return ""
@@ -7198,7 +7213,7 @@ def _persona_for_replay(project: ProjectInfo, agent: FleetAgent, notes: list[str
         gone = f"persona {agent.persona} no longer resolves ({exc.rule})"
     else:
         return agent.persona
-    fallback = role_settings(agent.role, settings()).persona
+    fallback = role_settings(role or agent.role, settings()).persona
     if not fallback or fallback == agent.persona:
         notes.append(f"{gone} — started without a persona")
         return ""
@@ -7798,10 +7813,12 @@ def hand_off(
         resume=resume,
         size=size,
         spec=agent.launch_spec if replay else None,
+        # ``None`` keeps the source's persona whatever role the fork runs as, as a take-over
+        # keeps it (:func:`_respawn`): the Spawn dialog sends ``None`` when it shows the
+        # teammate's own, and a fork with another role started without it (review of #240,
+        # "also confirmed": fork with a changed role).
         persona=(
-            (_persona_for_replay(project, agent, notes) if replay else None)
-            if persona is None
-            else persona
+            _persona_for_replay(project, agent, notes, role=runs_as) if persona is None else persona
         ),
         claude_code=session is not None,
         start_point=_head_of(Path(agent.cwd)) if own else None,

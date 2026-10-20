@@ -16,7 +16,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli import launch as launch_cli
 from aisquare.cli.app import app
-from aisquare.core import personas
+from aisquare.core import paths, personas
 from aisquare.core.config import AppConfig, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import ContextStore, store_session
@@ -1018,6 +1018,25 @@ def test_launch_persona_on_a_binary_without_a_seam_keeps_the_hook_alone_and_says
     assert spy["argv"] == ["aider"]
     said = result.output + (result.stderr if hasattr(result, "stderr") else "")
     assert "takes no system-prompt flag" in said
+
+
+def test_launch_persona_with_a_cache_it_cannot_write_launches_on_the_hook_alone(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    """Review of #240, "also confirmed": an unwritable persona cache ended ``launch
+    --persona`` in a traceback. The system-prompt file is a second channel: without it the
+    agent still launches, briefed by the session-start hook, and one line says why."""
+    cache = paths.aisquare_home() / "cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / "persona-prompts").write_text("a file where the persona folder goes\n")
+
+    result = runner.invoke(app, ["launch", "coder", "--persona", "skeptic"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["env"]["AISQUARE_PERSONA"] == "skeptic", "the hook channel still has it"
+    assert spy["argv"] == ["claude"]
+    said = result.output + (result.stderr if hasattr(result, "stderr") else "")
+    assert "system-prompt file could not be written" in said
 
 
 def test_launch_persona_leaves_the_operators_own_system_prompt_flag_alone(

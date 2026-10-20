@@ -214,6 +214,42 @@ def test_an_agent_that_ends_after_the_read_is_skipped_on_its_turn_and_left_as_it
         assert coder.pane_id not in tmux.killed[len(killed) :], "its 💤 window was removed"
 
 
+def test_an_agent_this_run_sent_exit_to_and_another_command_ended_failed_not_skipped(
+    fleet: Fleet, tmux: FakeTmux, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #266, round 3: every ``NoSuchAgent`` was "skipped — already exited",
+    the one the hand-over's stop raises after its ``/exit`` too, when another writer (an
+    operator's ``fleet stop``) ended the row in the grace. The run had taken the agent
+    down and started no replacement, and said it had left it alone."""
+    coder = fleet.agents["alpha/coder-1"]
+    _board_session(coder, "working")  # on the board, so the hand-over marks it
+    real_keys = tmux.send_keys
+    stopped: list[fleet_service.StopReceipt] = []
+
+    def exit_then_the_operator_stops_it(pane_id: str, *keys: str) -> None:
+        real_keys(pane_id, *keys)
+        if pane_id == coder.pane_id and not stopped:
+            stopped.append(fleet_service.stop(fleet.alpha, coder.label))  # another terminal
+
+    monkeypatch.setattr(tmux, "send_keys", exit_then_the_operator_stops_it)
+
+    report = fleet_service.bulk("restart")
+
+    outcomes = _outcomes(fleet, report.receipts)
+    assert outcomes.pop("alpha/coder-1") == (
+        "failed",
+        "its /exit was sent, and another command ended it meanwhile; no replacement was started",
+    )
+    assert outcomes == {key: ("done", None) for key in ALL - {"alpha/coder-1"}}
+    assert [s.agent.id for s in stopped] == [coder.id]
+    assert coder.label not in {
+        s.agent.label
+        for s in fleet_service.list_agents(fleet.alpha)
+        if s.state in fleet_service.PROCESS_STATES
+    }, "nothing was started in its place"
+    assert not report.ok
+
+
 def test_a_stop_pinned_to_running_agents_leaves_an_ended_row_and_its_window(
     fleet: Fleet, tmux: FakeTmux
 ) -> None:

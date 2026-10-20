@@ -368,6 +368,8 @@ stopped. Some agents are left alone, and each is named with the reason:
 - an agent that ended after the list was read and before its turn: `already
   exited`. Each agent is looked at again just before it is acted on, so one that
   exited or was stopped meanwhile is not started again, and its 💤 window stays.
+  One that another command ends after this run has sent it `/exit` is not left
+  alone: it fails, and a restart says no replacement was started.
 
 The agents are taken one at a time, each project's manager first. Each one is printed
 as it is done, under its project's name, and the count comes last. A restart's notes

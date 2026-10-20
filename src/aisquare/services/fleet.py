@@ -177,6 +177,15 @@ class NoSuchAgent(FleetError):
     """No live agent with that label in this project."""
 
 
+class EndedMeanwhile(NoSuchAgent):
+    """A stop's ``/exit`` reached the running agent, and another writer ended its row before
+    the stop did (:func:`_stop_row`): this stop took the agent down, and is nobody's.
+
+    Still a :class:`NoSuchAgent` to ``shutdown``, which reads it as a row that went away;
+    :func:`bulk` must not read it as an agent it left alone (review of #266, round 3).
+    """
+
+
 class FleetInterrupted(FleetError):
     """The operator interrupted ``shutdown`` mid-loop; ``report`` says how far it got.
 
@@ -4867,7 +4876,8 @@ def _stop_row(
                 marked = store.get_session(current.session_id) if current.session_id else None
                 if not _handed_over(current, marked, _now()):
                     return StopReceipt(current, [])
-            raise NoSuchAgent(f"{agent.label} ({agent.id}) is no longer live")
+            gone = EndedMeanwhile if exited_here else NoSuchAgent
+            raise gone(f"{agent.label} ({agent.id}) is no longer live")
         # The process is dead or gone by here, so whatever its session still
         # holds is nobody's: a clean ``/exit`` released through the agent's own
         # hook already, a kill fired no hook, and a stop landing in a
@@ -7496,6 +7506,13 @@ def _bulk_one(action: BulkAction, row: BulkRow, *, spawned_by: str) -> BulkRecei
                 spawned_by=spawned_by,
                 before_stop=still_running,
             )
+    except EndedMeanwhile:
+        # This turn's `/exit` took the agent down, and another writer (a `fleet stop`, a
+        # shutdown) ended its row first: never "left alone", and a restart started no
+        # replacement (review of #266, round 3).
+        after = "; no replacement was started" if action == "restart" else ""
+        why = f"its /exit was sent, and another command ended it meanwhile{after}"
+        return BulkReceipt(project, agent, "failed", why)
     except NoSuchAgent:
         # Pinned to the row: it ended between the read and its turn, and its label is free,
         # still its own or another agent's now. Nothing was done to any of them.

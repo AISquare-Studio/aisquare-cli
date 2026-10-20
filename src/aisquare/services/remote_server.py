@@ -2429,6 +2429,67 @@ def remote_keys_spelled(server: TmuxServer, agent: FleetAgent, keys: list[str]) 
     return [older[key].value if key in older else key for key in spelled]
 
 
+def remote_one_press_exit(
+    server: TmuxServer, agent: FleetAgent, keys: list[str], *, label: str
+) -> RequestError | None:
+    """409 ``one_press_exit`` when ``keys``, as the row's agent is sent them
+    (:func:`remote_keys_spelled`), hold a key that agent exits on with ONE press at its empty
+    prompt (``capabilities.one_press_exits``: Codex's ``C-c`` and ``C-d``) and it may be
+    there; ``None`` when none would end it. Its ``reason`` is the message's sentence without
+    the ``confirm_exit`` hint, naming the agent, which the page asks again in.
+
+    It may be there when its screen, read as plain text (``TmuxServer.screen_text``, as
+    ``fleet._idle_screen`` reads it), shows that prompt, or when nothing says it does not:
+    a screen tmux would not show, an agent whose prompt is not read off its screen, or keys
+    sent ahead of the exit key in the same body, which may empty the draft it shows. Codex
+    keeps that prompt on screen through a turn, where its Ctrl-D exits too and its Ctrl-C
+    opens a *Cancel task* / *Exit* choice: both are asked then as well. The double-press
+    guard alone let one Ctrl-C through to a Codex at its empty prompt, which it exits
+    (0.162.1). Only a key some agent exits on asks the row's agent, and only its agent's
+    key reads the screen: Claude Code asks for a second press, and its rows read nothing.
+    """
+    from aisquare.core.agent_adapters import adapters, recorded_adapter
+    from aisquare.core.tmux import TmuxError
+    from aisquare.services import fleet as fleet_service
+
+    exiting = {key for adapter in adapters() for key in adapter.capabilities.one_press_exits}
+    if not exiting.intersection(keys):
+        return None
+    adapter = recorded_adapter(agent.agent)
+    if adapter is None:
+        return None
+    capabilities = adapter.capabilities
+    at = next((i for i, key in enumerate(keys) if key in capabilities.one_press_exits), None)
+    if at is None:
+        return None
+    key, name = _key_said(keys[at]), adapter.label
+    if at > 0:
+        said = f"the keys before the {key} may leave {label} at {name}'s empty prompt"
+    elif capabilities.idle_on_screen is None and not capabilities.idle_prompt_mark:
+        said = f"{label}'s screen does not say whether {name} is at its empty prompt"
+    else:
+        try:
+            screen = server.screen_text(agent.pane_id)
+        except TmuxError as exc:
+            log.debug("remote: %s's screen could not be read: %s", label, exc)
+            said = (
+                f"{label}'s screen could not be read to see whether {name} is at its empty prompt"
+            )
+        else:
+            if not fleet_service._idle_screen(adapter, screen):
+                return None
+            said = f"{label} is at {name}'s empty prompt"
+    reason = f"{said}, where one {key} can exit it"
+    return RequestError(
+        409, "one_press_exit", f"{reason} — send confirm_exit: true to mean it", reason=reason
+    )
+
+
+def _key_said(key: str) -> str:
+    """A tmux key name as a person reads it: ``C-c`` as ``Ctrl-C``, any other as it is."""
+    return f"Ctrl-{key[2:].upper()}" if key.startswith("C-") else key
+
+
 def check_remote_text(text: str, *, pasted: bool = False) -> None:
     """Refuse typed ``text`` holding a control character (C0, DEL or C1) other than
     newline: 400 ``invalid``, naming the pad's key for it. A ``pasted`` text (a tell)
@@ -3662,12 +3723,12 @@ DOUBLE_PRESS = (
 class _ExitKeyGuard:
     """When each agent was last sent Ctrl-C or Ctrl-D (SPEC §2.1, part 2).
 
-    Claude Code exits on a second Ctrl-C ("Press Ctrl-C again to exit"), Codex on the
-    first at its empty prompt, and both on Ctrl-D at an empty prompt (Codex 0.162.1,
+    Claude Code exits on a second Ctrl-C ("Press Ctrl-C again to exit") or Ctrl-D (2.1.304,
     measured), and an exit ends the row, releases its claims and wakes the manager:
     two taps on a phone that lagged, or two in one body, are refused unless the body
     says ``confirm_exit: true``. Per ``(project id, label)``, whichever phone sent the
-    first. The page asks before every one it sends.
+    first. The page asks before every one it sends. An agent that exits on the first at
+    its empty prompt (Codex) has that one refused too (:func:`remote_one_press_exit`).
 
     A press counts once it was sent (:meth:`exit_keys_sent`), not as it is let through: a
     send that failed (400 ``write_failed``) reached no pane, and the tap that followed was
@@ -4022,7 +4083,10 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
         ``"enter": "false"`` is a 400, not an Enter), the keys against the
         allowlist, the caps, no control character in the text, one input per body
         (``text`` went first, so "Esc, then type" arrived as "type, then Esc"), the
-        pane, and the double Ctrl-C. The pane must be running the agent, and be the
+        pane, the double Ctrl-C, and the one Ctrl-C or Ctrl-D that exits the row's agent at
+        its empty prompt (409 ``one_press_exit``, :func:`remote_one_press_exit`: Codex's,
+        its ``reason`` naming it), each sent once the body says ``confirm_exit: true``.
+        The pane must be running the agent, and be the
         row's own: after a tmux restart the row's pane id names another agent's pane
         (409 ``not_agent``, as the actions and quick answers refuse it). The pane is
         judged and typed into under the agent's action lock (:func:`remote_agent_turn`).
@@ -4110,6 +4174,10 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
                 (target.id, label), exits, confirmed=confirmed
             ):
                 raise RequestError(409, "double_press", DOUBLE_PRESS)
+            if not confirmed:
+                exiting = remote_one_press_exit(server, agent, keys, label=label)
+                if exiting is not None:
+                    raise exiting
             pane = agent.pane_id
             wrote = fleet_service.pane_writes(
                 ("the text", lambda: server.send_literal(pane, text)) if text else None,

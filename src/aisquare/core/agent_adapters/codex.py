@@ -364,6 +364,7 @@ class CodexAdapter:
         positional_prompt=True,
         idle_prompt_mark=IDLE_PROMPT_MARK,
         idle_on_screen=idle_on_screen,
+        one_press_exits=frozenset({"C-c", "C-d"}),
         fleet_settings=(
             "notice.hide_rate_limit_model_nudge=true",
             "check_for_update_on_startup=false",

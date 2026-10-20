@@ -2497,7 +2497,7 @@ function measureColumns(box) {
 
 /* Enter is ⏎, as on the input bar: "Enter" overflows its key on a 390 px phone. */
 const PAD_ROW = [["Esc", "Escape"], ["1", "1"], ["2", "2"], ["3", "3"], ["⏎", "Enter"], ["↑", "Up"], ["↓", "Down"]];
-/* ⇧⏎ is a newline in the prompt: the machine sends it as the agent reads one (Codex's C-j). */
+/* ⇧⏎ is a newline in the prompt, sent as the agent reads one (Codex's C-j). */
 const PAD_MORE = [
   ["⇧⏎", "S-Enter"], ["Tab", "Tab"], ["⇧Tab", "BTab"], ["⌫", "BSpace"], ["Space", "Space"], ["←", "Left"], ["→", "Right"],
   ["PgUp", "PageUp"], ["PgDn", "PageDown"], ["Home", "Home"], ["End", "End"], ["y", "y"], ["n", "n"],
@@ -2724,12 +2724,13 @@ function inputBar(pid, label, cleanups, blind, pin) {
     const res = await keysInTurn(pid, label, (at) => apiWrite(writePath("send-keys"), Object.assign({ agent: label, project: pid }, body), what, null, at));
     sending(tapped, -1);
     if (res.ok) return true;
-    if (res.status === 409 && res.error === "double_press") {
+    if (res.status === 409 && /^(double|one)_press/.test(res.error)) {
+      const why = plainText(res.data.reason);
       // Asked on this agent's screen over no sheet: a late answer would sit on another's.
       if (onAgent({ pid, label }) && !sheetOpen()) {
-        confirmSheet("Send " + what + " to " + label + " again?", "A second " + what + " within 3 s exits the coding agent, and " + label + " with it.",
+        confirmSheet("Send " + what + " to " + label + " again?", (why || "A second " + what + " within 3 s exits the coding agent") + ", and " + label + " with it.",
           "Send and exit", () => post(Object.assign({}, body, { confirm_exit: true }), what, tapped));
-      } else toast(label + ": the second " + what + " was not sent — it would exit the coding agent.");
+      } else toast(label + ": the " + (why ? "" : "second ") + what + " was not sent — it would exit the coding agent.");
       return false;
     }
     if (res.status === 409 && res.error === "dialog_open") {
@@ -2754,7 +2755,7 @@ function inputBar(pid, label, cleanups, blind, pin) {
     }
     if (key === "C-c" || key === "C-d") {
       const which = key === "C-c" ? "Ctrl-C" : "Ctrl-D";
-      confirmSheet("Send " + which + "?", which + " interrupts " + label + ", and can exit the coding agent: at an empty prompt, or a second one within 3 s.", "Send " + which,
+      confirmSheet("Send " + which + "?", which + " can interrupt or exit " + label + ".", "Send " + which,
         () => post(body, which, tapped));
       return;
     }

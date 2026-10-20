@@ -255,6 +255,7 @@ def pane(monkeypatch: pytest.MonkeyPatch) -> FakePane:
         socket_path: Path | None = None  # asked by the name (`fleet._address`)
         server_started_at: datetime | None = None  # judged by its own time (`fleet._outlived`)
         created_at = FakePane.STARTED + timedelta(hours=1)
+        agent: str | None = None  # a row from before adapters: Claude Code's
 
     class Store:
         def fleet_agent_by_label(self, *args: object, **kwargs: object) -> Agent:

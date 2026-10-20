@@ -204,6 +204,17 @@ class AgentCapabilities:
     that prompt is at rest, and anything else drawn over the prompt (a dialog, a draft) is
     one they refuse to type into or ``/exit`` through (``services.remote_needs.
     _needs_screen_drawn``)."""
+    one_press_exits: frozenset[str] = frozenset()
+    """The keys, as tmux names them once :attr:`AgentAdapter.key_spellings` has spelled them,
+    that end the agent with ONE press while its screen shows its empty prompt
+    (:attr:`idle_on_screen`, else :attr:`idle_prompt_mark`): Codex's ``C-c`` and ``C-d``
+    (measured on 0.162.1, after a turn and after one Esc as on a fresh start; ``C-d`` with a
+    turn running too, where ``C-c`` opens its ``Cancel task`` / ``Exit`` choice instead;
+    neither over a draft). Remote's ``send-keys`` refuses such a key, unless the sender
+    confirms it, while the screen shows that prompt or cannot say
+    (``services.remote_server.remote_one_press_exit``), as it refuses every agent a second
+    ``C-c`` or ``C-d`` within 3 s. Empty for an agent that asks for a second press first:
+    Claude Code says ``Press Ctrl-C again to exit``, and the same of Ctrl-D (2.1.304)."""
     legacy_fleet_args: bool = False
     """``fleet.roles.<role>.extra_args`` and ``permission_mode`` are in this agent's
     vocabulary (they predate adapters and are Claude Code's); another agent takes only

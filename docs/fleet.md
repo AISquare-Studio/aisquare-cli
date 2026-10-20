@@ -1420,6 +1420,12 @@ that project's board. A project's own board where the checkout is another's is k
 only when the agent's session registered on it, or its task is on it; otherwise it
 was only a default, and the replacement reads the checkout's.
 
+The captain (experimental, [docs/captain.md](captain.md)) is the one exception, both
+ways: its own row reads the home board, and its window is given the home's root,
+whatever hub started it; and a seat it spawns reads that seat's own project's board,
+since the captain's processes carry the home as their hub only to land the captain
+itself there.
+
 | On the session's board (the hub's, under one) | On the row's fleet project (whatever the board) |
 |---|---|
 | Tasks: `task add`, `next`, `claim`, `review`, `done`, `block` and `reopen`. Also the task `fleet spawn --task` gives an agent, looked up (`12`, `#12` or an id) on the board that agent will read; `switch` and `restart` check it, before they stop anything, on the board the replacement will read | Finding a session's row: the hand-over and the `/clear` that keep its claims for the id that follows, and the adoption of that id onto the row, whatever project the row is in |

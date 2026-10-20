@@ -243,6 +243,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Under an exported `AISQUARE_TEAM_HUB`, the captain stays on its home board,
+  and the seats it spawns on their own projects' boards.** 0.8.1's rule holds for
+  every other spawn: a seat reads the board of the hub its spawner honours, and its
+  row records it. The captain's processes carry the home as their hub, which is how
+  the captain itself lands on the home board, so its `spawn` names no hub: the seat
+  reads its own project's board, where its manager and its teammates read. The
+  captain's own window is given the home's root whatever hub started it, and a
+  restart replays the board and the hub its row recorded.
 - **A tmux server the fleet starts holds no team variable,** so a window opened on
   it by hand inherits no hub, seat, role or persona from the shell that first
   started it. `aisquare doctor`'s `fleet server env` row warns when a running server

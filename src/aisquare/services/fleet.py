@@ -2699,21 +2699,33 @@ def _board_for(project: ProjectInfo) -> str:
         raise _unaskable_root(project, exc) from exc
 
 
-def _spawn_board_and_hub(project: ProjectInfo, role: str) -> tuple[str, str]:
+def _spawn_board_and_hub(
+    project: ProjectInfo, role: str, hub: str | None = None
+) -> tuple[str, str]:
     """The board a NEW agent of ``role`` in ``project`` reads, and the ``AISQUARE_TEAM_HUB`` its
-    window is given so that its ``launch`` and hooks resolve that board: the board this process
-    gives it (:func:`_board_for`), under the hub this process honours
-    (:func:`orchestrator.window_team_hub`). A replacement's are its row's instead
-    (:func:`_board_and_hub`).
+    window is given so that its ``launch`` and hooks resolve that board. A replacement's are
+    its row's instead (:func:`_board_and_hub`).
 
-    The captain's own window is given the home's root, and reads the home board, whatever
-    hub this process honours: the home is no checkout, and ``.aisquare`` is itself a
-    project-root marker, so from the home's root a window with no hub read ``$HOME``'s
-    board, and under a shell's hub, the hub's (T2).
+    The board this process gives it (:func:`_board_for`), under the hub this process honours
+    (:func:`orchestrator.window_team_hub`), unless the caller names the ``hub``: ``""`` for
+    none, where a window with no hub reads, the checkout's (:func:`_checkout_board`).
+
+    The captain names none for the seats it spawns (``services.captain.actions``). Its own
+    processes carry the home's root as their hub, which is how the captain itself lands on
+    the home board; honoured as a hub for its seats, every seat it spawned for a project
+    read the home board, where neither its manager nor its teammates read. And the
+    captain's own window is given the home's root, whatever hub this process honours: the
+    home is no checkout, and ``.aisquare`` is itself a project-root marker, so from the
+    home's root a window with no hub read ``$HOME``'s board, and under a shell's hub, the
+    hub's (T2).
     """
     if role == CAPTAIN_ROLE:
-        return project.id, str(project.root)
-    return _board_for(project), orchestrator.window_team_hub()
+        hub = str(project.root)
+    if hub is None:
+        return _board_for(project), orchestrator.window_team_hub()
+    if not hub:
+        return _checkout_board(project), ""
+    return orchestrator.hub_project(hub).id, hub
 
 
 def _checkout_board(project: ProjectInfo) -> str:
@@ -2990,6 +3002,7 @@ def spawn(
     board_and_hub: tuple[str, str] | None = None,
     start_point: str | None = None,
     fork: bool = False,
+    hub: str | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -3016,7 +3029,8 @@ def spawn(
     replacement's too: the board it reads and records in turn, and the hub its window is
     given to resolve it, as :func:`_board_and_hub` answered before the replaced agent was
     stopped; the task is looked up there. A new agent reads the board this process gives
-    it (:func:`_spawn_board_and_hub`).
+    it (:func:`_spawn_board_and_hub`): the board under the hub this process honours, or
+    under ``hub`` when the caller names one, ``""`` for none.
 
     Every ``None`` means "the role's default" (config, then built-in). Refuses
     past ``max_agents_per_project``, a second manager, a worktree in a non-git
@@ -3195,7 +3209,9 @@ def spawn(
         )
     # Before the store opens: with no hub, `_board_for` runs git (review of #259, round 29,
     # 5/8), and the refusals above need neither.
-    board, hub = board_and_hub if board_and_hub is not None else _spawn_board_and_hub(project, role)
+    board, hub = (
+        board_and_hub if board_and_hub is not None else _spawn_board_and_hub(project, role, hub)
+    )
     use_worktree = role_config.worktree if worktree is None else worktree
     with store_session() as store:
         task = _task_for(store, board, task_id)
@@ -3337,9 +3353,9 @@ def spawn(
         # The launcher activates a board BEFORE it hands the agent its `-e` pairs,
         # from its cwd — the brain folder, where `.aisquare` above it is a project
         # marker. With the hub only in `-e`, it onboarded the brain folder (or
-        # `$HOME`, under `~/.aisquare`) as a project; the window's hub
-        # (`_spawn_board_and_hub`) lands the launcher on the home board, which the
-        # store keeps captured (T2).
+        # `$HOME`, under `~/.aisquare`) as a project; the window's hub, the home's
+        # root (`_spawn_board_and_hub`), lands the launcher on the home board, which
+        # the store keeps captured (T2).
         env["AISQUARE_HOME"] = str(paths.aisquare_home().resolve())
         # Claude Code's session-rating survey drew in the captain's pane mid-conversation, and
         # send (rightly) never types into a dialog: every voice line was refused, and from the

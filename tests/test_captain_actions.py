@@ -1238,6 +1238,7 @@ def test_spawn_goes_through_fleet_spawn_marked_as_the_captains(
                 "task_id": "tsk_1",
                 "persona": "skeptic",
                 "spawned_by": "captain",
+                "hub": "",  # the seat's own board, never the home's (no hub)
             },
         )
     ]

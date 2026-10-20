@@ -1752,8 +1752,10 @@ def spawn(
         )
         if refusal is not None:
             raise refusal
+        # No hub: this process carries the home's root as one, which is the captain's own
+        # board and never a board for the seats it spawns (`fleet._spawn_board_and_hub`).
         receipt = fleet.spawn(
-            on, role, label=label, task_id=task, persona=persona, spawned_by="captain"
+            on, role, label=label, task_id=task, persona=persona, spawned_by="captain", hub=""
         )
         agent = receipt.agent
         return Outcome(

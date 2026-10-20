@@ -197,7 +197,9 @@ class ScriptedServer(TmuxServer):
     """
 
     def __init__(self, socket: str) -> None:
-        super().__init__(socket, conf=Path("/nonexistent/fleet-tmux.conf"))
+        # No control client: there is no ``tmux -C`` behind a script, and the fixture's
+        # ``_tmux`` stand-in would read as the real runner (``control_capable``).
+        super().__init__(socket, conf=Path("/nonexistent/fleet-tmux.conf"), control=False)
         self.captures: list[tuple[str, int, int | None]] = []
         self.resizes: list[tuple[str, int, int]] = []
 

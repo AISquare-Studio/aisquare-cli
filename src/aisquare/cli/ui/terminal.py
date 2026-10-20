@@ -71,11 +71,14 @@ At the 20 fps ceiling that is 3.9 % and 5.7 % of one core against the plan's
 15 % go/no-go.
 
 Falling back. A server below 3.2, a fake runner, a client that cannot start,
-one that ends or is killed, and one that answers nothing for
-:attr:`CONTROL_TIMEOUT` send its panes to polling, at once; a control command
-that fails sends that pane to polling until its next attach. Logged, never
-toasted. A server whose client ended is offered a new one after
-:data:`CONTROL_RESTART` (one that never answered: :data:`CONTROL_RETRY`).
+and one that ends or is killed send its panes to polling at once; one that
+answers nothing for :attr:`CONTROL_TIMEOUT` is killed when an idle tick notices,
+1.0 to 1.5 s after the oldest command waiting was sent. A control command that
+fails sends that pane to polling until its next attach. Logged, never toasted.
+A server whose client ended is offered a new one after :data:`CONTROL_RESTART`;
+one whose client never answered, or wedged, after :data:`CONTROL_RETRY`; one
+whose client was plainly detached — its session destroyed, the last agent of the
+project on screen stopped — at the next tick.
 
 Scrollback (§6). The wheel moves our own offset ``k`` over the pane's history,
 and the last-seen pane height goes with every capture: tmux is asked for
@@ -482,13 +485,30 @@ class _Control:
             if pane.pane_id in pane_ids:
                 pane._control_output()
 
+    def wedged(self) -> None:
+        """The client stopped answering: kill it, and rest the server for
+        :data:`CONTROL_RETRY` first — the kill's end may never be delivered (the pane that
+        found it releases the client, which closes it, when it was the only user), and a
+        server that keeps wedging must not cost a spawn and a kill every tick."""
+        _CONTROL_RETRY_AT[self.key] = time.monotonic() + CONTROL_RETRY
+        self.app.log.warning(f"tmux control client on {self.key[0]} stopped answering")
+        self.client.kill_client()
+
     def _exited(self, reason: str) -> None:
-        """The client ended by itself: every pane polls again, and the server rests."""
+        """The client ended by itself: every pane polls again, and the server rests —
+        except after a plain detach (its session destroyed: the last agent of the project
+        on screen stopped), when the next tick may start a client at once."""
         if _CONTROLS.get(self.key) is self:
             del _CONTROLS[self.key]
-        wait = CONTROL_RESTART if self.client.answered else CONTROL_RETRY
-        _CONTROL_RETRY_AT[self.key] = time.monotonic() + wait
-        self.app.log.warning(f"tmux control client on {self.key[0]} ended: {reason}")
+        if self.client.detached and self.client.answered:
+            wait = 0.0
+            self.app.log.info(f"tmux control client on {self.key[0]} detached: its session ended")
+        else:
+            wait = CONTROL_RESTART if self.client.answered else CONTROL_RETRY
+            self.app.log.warning(f"tmux control client on {self.key[0]} ended: {reason}")
+        # The longer rest stands: a wedge recorded its own before this end arrived.
+        rest = max(_CONTROL_RETRY_AT.get(self.key, 0.0), time.monotonic() + wait)
+        _CONTROL_RETRY_AT[self.key] = rest
         panes, self.panes = list(self.panes), weakref.WeakSet()
         for pane in panes:
             pane._control_lost(self)
@@ -1045,7 +1065,8 @@ class TerminalPane(Widget, can_focus=True):
     the input, and the one its echo's ``%output`` asks for."""
     CONTROL_TIMEOUT: float = 1.0
     """Seconds a command may wait for the control client's answer before the client is
-    killed and every pane on it polls."""
+    killed and every pane on it polls — checked at the idle tick, so caught 1.0 to
+    1.5 s after it was sent."""
     RESIZE_DEBOUNCE: float = 0.1
     """Seconds to wait after the last ``Resize`` before telling tmux."""
     RESIZE_RETRY: float = 0.25
@@ -1441,10 +1462,10 @@ class TerminalPane(Widget, can_focus=True):
         if link is None and self._may_control() and _Control.started_for(self) is not None:
             link = self._control_link()  # started here, on screen: the one place one starts
         if link is not None and link.client.stalled(self.CONTROL_TIMEOUT):
-            # Wedged rather than ended: no answer, no end of file. Killed, it ends
-            # through ``_Control._exited`` like any other, and this tick polls.
-            self.log.warning(f"tmux control client on {link.key[0]} stopped answering")
-            link.client.kill_client()
+            # Wedged rather than ended: no answer, no end of file. Killed, with the server
+            # rested first (``wedged``), and this tick polls. Caught at an idle tick, so
+            # 1.0 to 1.5 s after the oldest command waiting was sent.
+            link.wedged()
             self._drop_link()
             link = None
         if link is not None:

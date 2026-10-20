@@ -559,6 +559,157 @@ def test_real_tmux_quoting_survives_the_command_parser(live: TmuxServer, tmp_pat
         client.close_client()
 
 
+def _set_buffers(live: TmuxServer, texts: list[str]) -> dict[str, str | None]:
+    """Each of ``texts`` through ``set-buffer`` down a control client, read back by the
+    polled ``show-buffer``: what tmux's parser made of :func:`quote`'s token (``None``
+    for a command tmux refused)."""
+    answers: list[Reply] = []
+    client = ControlClient(
+        live, deliver=lambda call: call(), on_output=lambda _: None, on_exit=lambda _: None
+    )
+    client.start_client(live.run("list-panes", "-a", "-F", "#{pane_id}").split()[0])
+    try:
+        for index, text in enumerate(texts):
+            client.command(
+                "set-buffer", "-b", f"asq-tilde-{index}", "--", text, done=answers.append
+            )
+        deadline = time.monotonic() + 3
+        while len(answers) < len(texts) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(answers) == len(texts), answers
+        return {
+            text: live.show_buffer(f"asq-tilde-{index}") if answers[index].ok else None
+            for index, text in enumerate(texts)
+        }
+    finally:
+        client.close_client()
+
+
+@_needs_tmux
+def test_real_tmux_a_tilde_anywhere_in_a_pasted_text_arrives_as_itself(
+    live: TmuxServer, tmp_path: Path
+) -> None:
+    """tmux expands a ``~`` that opens a double-quoted string into a home directory: a
+    paste of ``~/x`` arrived as ``$HOME/x``, and ``~~strike~~`` or ``~nosuchuser`` did
+    not parse at all, so the paste was dropped (review of #272). Every ``~`` is spelt
+    ``\\176``, at the start, in the middle, alone, and after another quote."""
+    _window(live, "asq-tilde", tmp_path, ["cat"])
+    texts = ["~/code/app", "~ approx 5", "~", "~root", "~~strike~~ done", "~nosuchuser1234/x"]
+    texts += ["a ~/b", 'x"~"', "trailing ~"]
+    got = _set_buffers(live, texts)
+    assert got == {text: text for text in texts}, got
+
+
+@_needs_tmux
+def test_real_tmux_following_a_pane_leaves_its_sessions_current_window_alone(
+    live: TmuxServer, tmp_path: Path
+) -> None:
+    """Every client attached to a session shares its current window, so following a pane
+    by ``%pane`` (``attach-session -t``/``switch-client -t``) moved a ``fleet attach``
+    client in another terminal onto that agent's window, keys and all (review of #272:
+    a1 → a3 → a2). The client follows the SESSION: the current window stays a1 while the
+    pane on screen is a3, then a2 — and their ``%output`` still arrives."""
+    a1 = _window(live, "asq-current", tmp_path, ["cat"])
+    a2 = _window(live, "asq-current", tmp_path, ["cat"])
+    a3 = _window(live, "asq-current", tmp_path, ["cat"])
+    live.run("select-window", "-t", a1)
+
+    def current() -> str:
+        # A window's ``#{pane_id}`` is its active pane; the session's current window says 1.
+        return live.run(
+            "list-windows", "-t", "=asq-current", "-F", "#{?window_active,#{pane_id},}"
+        ).split()[0]
+
+    async def drive() -> list[tuple[str, str, int]]:
+        host = Host(live, a3)
+        seen: list[tuple[str, str, int]] = []
+        async with host.run_test(size=(80, 24)) as pilot:
+            pane = host.pane
+            pane.focus()
+            for shown in (a3, a2):
+                if shown != pane.pane_id:
+                    pane.attach(shown)
+                await wait_until(pilot, lambda: _serving(pane) and pane.facts is not None, 5.0)
+                await pilot.pause(0.2)
+                before = _client(pane).outputs.get(shown, 0)
+                await pilot.press("q")
+                await wait_until(pilot, _row_shows(pane, "q"), timeout=2.0)
+                seen.append((shown, current(), _client(pane).outputs.get(shown, 0) - before))
+        return seen
+
+    seen = run(drive())
+    assert [(shown, now) for shown, now, _ in seen] == [(a3, a1), (a2, a1)], seen
+    assert all(outputs > 0 for _, _, outputs in seen), seen
+
+
+@_needs_tmux
+def test_real_tmux_a_stalled_client_killed_waits_out_the_retry_before_another_starts(
+    live: TmuxServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A client that stops answering is killed and its panes poll — and the server rests
+    for :data:`~aisquare.cli.ui.terminal.CONTROL_RETRY` before it is offered another. When
+    the pane was the client's only user, its release closed the client before the end of
+    file, no end was delivered, nothing was recorded, and a new client started 634 ms
+    later (review of #272): a server that keeps wedging cost a spawn and a kill a tick."""
+    pane_id = _window(live, "asq-stall", tmp_path, ["cat"])
+    stalls = [True]
+
+    def stalled(self: ControlClient, limit: float) -> bool:
+        return bool(stalls) and stalls.pop()
+
+    async def drive() -> tuple[int | None, list[int | None], float]:
+        host = Host(live, pane_id)
+        async with host.run_test(size=(80, 24)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: _serving(pane), timeout=5.0)
+            first = _client(pane).pid
+            monkeypatch.setattr(ControlClient, "stalled", stalled)
+            await wait_until(pilot, lambda: pane._link is None, timeout=2.0)
+            killed = time.monotonic()
+            seen: list[int | None] = []
+            for _ in range(15):  # 1.5 s: three idle ticks, each of which could start one
+                await pilot.pause(0.1)
+                link = pane._link
+                seen.append(link.client.pid if link is not None else None)
+            key = terminal_module._server_key(live)
+            return first, seen, terminal_module._CONTROL_RETRY_AT.get(key, 0.0) - killed
+
+    first, seen, rests = run(drive())
+    assert first is not None
+    assert seen == [None] * len(seen), f"a new client started: {seen}"
+    assert rests >= terminal_module.CONTROL_RETRY - 1, rests
+
+
+@_needs_tmux
+def test_real_tmux_the_followed_project_ending_does_not_cost_the_other_panes_their_client(
+    live: TmuxServer, tmp_path: Path
+) -> None:
+    """Stopping the last agent of the project on screen destroys its session, and tmux
+    detaches a client from a destroyed session (``%exit``): every pane on the server then
+    polled for :data:`~aisquare.cli.ui.terminal.CONTROL_RESTART`, after an ordinary stop
+    (review of #272). The client asks to stay (``no-detach-on-destroy``, which tmux 3.8
+    honours), and a plain detach is offered a new client at once (3.2a and 3.4 detach
+    whatever the flag says): the next pane shown is served within a second either way."""
+    gone = _window(live, "asq-ends", tmp_path, ["cat"])
+    stays = _window(live, "asq-stays", tmp_path, ["cat"])
+
+    async def drive() -> tuple[float, list[str]]:
+        host = Host(live, gone)
+        async with host.run_test(size=(80, 24)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: _serving(pane), timeout=5.0)
+            live.run("kill-window", "-t", gone)  # its session's last window
+            ended = time.monotonic()
+            pane.attach(stays)
+            await wait_until(pilot, lambda: _serving(pane), timeout=3.0)
+            return time.monotonic() - ended, list(host.notices)
+
+    took, notices = run(drive())
+    print(f"\nthe followed session ended: the next pane served again {took * 1000:.0f} ms later")
+    assert took < 1.5, took
+    assert notices == [], notices
+
+
 # --- the protocol, line by line ----------------------------------------------------------
 
 
@@ -590,6 +741,40 @@ def test_quote_leaves_plain_tokens_and_spells_the_rest_as_one_token() -> None:
     assert quote("") == '""'
     with pytest.raises(TmuxError):
         quote("nul\x00")
+    # tmux reads a ~ opening a quoted string as a home directory: every one is octal.
+    assert quote("~/x") == '"\\176/x"'
+    assert quote("~") == '"\\176"'
+    assert quote("a~b") == '"a\\176b"'
+
+
+def test_an_empty_batch_sends_nothing_rather_than_the_line_that_detaches(tmp_path: Path) -> None:
+    """An empty line detaches a control client; a batch of nothing is no line at all."""
+    client, _ = _detached(FakeTmux().server(tmp_path))
+    client._pipe_send([])
+    client._pipe_send([], chain=True)
+    assert client._outbox.empty()
+    assert not client._pending
+
+
+def test_a_pane_two_widgets_show_stays_wanted_until_both_have_left(tmp_path: Path) -> None:
+    """The manager's pane is shown by the Manager tab and by the manager's own agent view.
+    Muted by pane id, one widget's Hide arriving after the other's Show paused the pane the
+    second still showed (review of #272): it is wanted while ANY widget shows it."""
+    client, _ = _detached(FakeTmux().server(tmp_path))
+    client._followed = "%M"  # followed already: a watch is a continue, not a new follow
+    client.watch_pane("%M")  # the manager's agent view, shown
+    client.watch_pane("%M")  # the Manager tab, shown before the agent view's Hide
+    client.unwatch_pane("%M")  # …which arrives now
+    sent = []
+    while not client._outbox.empty():
+        data = client._outbox.get()
+        assert data is not None
+        sent.append(data)
+    assert "%M" in client._wanted
+    assert b'refresh-client -A "%M:pause"\n' not in sent, sent
+    client.unwatch_pane("%M")  # the second widget leaves too
+    assert "%M" not in client._wanted
+    assert client._outbox.get() == b'refresh-client -A "%M:pause"\n'
 
 
 def test_an_answer_is_matched_by_its_whole_end_line_and_only_ours_are_answers(
@@ -774,7 +959,9 @@ def test_a_control_client_that_will_not_start_leaves_the_pane_polling_and_is_not
     assert polling
     assert shown[0] == "hello"
     assert len(started) == 1, started  # once, then the backoff
-    assert started[0][-5:] == ["attach-session", "-t", "%1", "-f", "ignore-size,no-output"]
+    # By session, never by pane: a pane target moves the session's current window.
+    assert started[0][-5:] == ["attach-session", "-t", "$0", "-f", tmux_control.CLIENT_FLAGS]
+    assert tmux_control.CLIENT_FLAGS == "ignore-size,no-output,no-detach-on-destroy"
 
 
 # --- the polling fallback (acceptance 7) --------------------------------------------------

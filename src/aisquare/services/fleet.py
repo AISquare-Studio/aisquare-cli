@@ -7370,7 +7370,8 @@ def bulk(
     all the same, and only the rows ``shown`` acts on are acted on: an agent started since
     was not shown and is left alone, and one shown that has no process by now is skipped as
     :data:`ALREADY_EXITED`. A row the new read leaves for another reason (its task closed
-    meanwhile) is skipped with that reason.
+    meanwhile) is skipped with that reason, and a project it could not list is left out
+    and named in the report's ``unread``.
 
     ``acting_session`` is the caller's ``--as``: its row is left (:data:`THIS_SESSION`),
     and a restart records it as the one that asked (``spawned_by``).
@@ -7392,11 +7393,19 @@ def bulk(
 
 
 def _as_shown(shown: BulkPlan, now: BulkPlan) -> list[BulkRow]:
-    """The rows ``shown`` drew, as the read made ``now`` finds them (:func:`bulk`)."""
+    """The rows ``shown`` drew, as the read made ``now`` finds them (:func:`bulk`).
+
+    A project ``now`` could not list (``now.unread``) is left out, rows and all: nobody
+    looked at its agents, so none is "already exited" (review of #266, round 2), and the
+    report names the project and why, as it does with no dialog.
+    """
     current = {row.agent.id: row for row in now.rows}
+    unread = {project.id for project, _ in now.unread}
     rows: list[BulkRow] = []
     for row in shown.rows:
         found = current.get(row.agent.id)
+        if row.project.id in unread:
+            continue
         if row.skip is not None:
             rows.append(row)  # left when it was drawn, and left now for the reason it was shown
         elif found is None or found.status.state not in PROCESS_STATES:

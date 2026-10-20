@@ -414,6 +414,37 @@ def test_a_project_whose_agents_cannot_be_read_is_named_and_the_rest_go_on(
     assert not report.ok and report.summary().endswith("· 1 project(s) not read")
 
 
+def test_a_shown_project_the_second_read_cannot_list_is_named_not_called_exited(
+    fleet: Fleet, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #266, round 2: the dialog showed alpha's agents, the read on confirm could
+    not list alpha, and each was skipped as "already exited" while it ran on. Nothing is
+    done there, and the report names the project and why, as it does with no dialog."""
+    shown = fleet_service.bulk_plan("stop")
+    real = fleet_service.list_agents
+
+    def listing(project: ProjectInfo, **kwargs: Any) -> object:
+        if project.id == fleet.alpha.id:
+            raise FleetError("tmux did not answer in time")
+        return real(project, **kwargs)
+
+    monkeypatch.setattr(fleet_service, "list_agents", listing)
+
+    report = fleet_service.bulk("stop", shown=shown)
+
+    assert _outcomes(fleet, report.receipts) == {
+        "beta/manager": ("done", None),
+        "beta/coder-1": ("done", None),
+    }
+    assert [(p.id, why) for p, why in report.unread] == [
+        (fleet.alpha.id, "tmux did not answer in time")
+    ]
+    assert _live_ids(fleet.alpha) == {
+        fleet.agents["alpha/manager"].id,
+        fleet.agents["alpha/coder-1"].id,
+    }
+
+
 def test_each_receipt_is_handed_over_as_it_is_made(fleet: Fleet) -> None:
     seen: list[str] = []
     report = fleet_service.bulk("stop", on_receipt=lambda r: seen.append(r.agent.id))

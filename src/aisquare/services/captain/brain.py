@@ -461,7 +461,7 @@ def _wait_until_ready(
     the captain), or a read here that found no box drawn. A box drawn from the first
     read is typed into at once — a settle there cost every voice turn 2 s (13294).
     """
-    srv = fleet.server_for(agent.tmux_socket)
+    srv = fleet.server_of(agent)
     while True:
         state = fleet.status_of(agent).state
         if state in ("exited", "lost"):

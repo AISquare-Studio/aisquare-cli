@@ -244,6 +244,10 @@ def captain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Captain, C
         return fake.state
 
     class Pane:
+        def at(self, path: Path | None) -> Pane:
+            """The server at ``path`` (0.8.0's ``tmux -S``): this fake is the only one."""
+            return self
+
         def paste(self, pane_id: str, text: str) -> None:
             if fake.paste_fails:
                 raise TmuxError("tmux paste-buffer failed: no server running")

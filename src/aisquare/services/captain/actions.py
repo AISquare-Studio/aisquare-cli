@@ -478,7 +478,7 @@ def _pane_tail(agent: FleetAgent, count: int) -> list[str]:
     at a time, from the deepest line wanted down to the screen's top.
     """
     count = max(1, min(count, READ_MAX))
-    srv = fleet.server_for(agent.tmux_socket)
+    srv = fleet.server_of(agent)
     live = srv.capture(agent.pane_id)
     rows = [_ESCAPES.sub("", line) for line in live.lines]
     while rows and not rows[-1].strip():
@@ -739,7 +739,7 @@ def _ready(
     """
     agent = _live(target, label)
     status = fleet.status_of(agent)
-    srv = fleet.server_for(agent.tmux_socket)
+    srv = fleet.server_of(agent)
     lines: list[str] = []
     if status.state in READY_STATES or status.state == "working":
         lines = _no_trust_dialog(srv, agent, label, verb)
@@ -819,7 +819,7 @@ def _before_telling(target: ProjectInfo, label: str, verb: str) -> None:
     with store_session() as store:
         agent = store.fleet_agent_by_label(target.id, label, live_only=True)
     if agent is not None:
-        _no_prompt(fleet.server_for(agent.tmux_socket), agent, label, verb)
+        _no_prompt(fleet.server_of(agent), agent, label, verb)
 
 
 def _asking_or_idle(lines: Sequence[str]) -> bool:
@@ -1302,7 +1302,7 @@ def _wololo(target: ProjectInfo, label: str, task: str) -> Outcome:
     if status.state != "waiting":
         raise Refused(f"{label} is {status.state} — wololo converts an idle agent only")
     # Before any claim moves: the reassignment is typed into its pane (T1c, 13503).
-    _no_prompt(fleet.server_for(agent.tmux_socket), agent, label, "converted")
+    _no_prompt(fleet.server_of(agent), agent, label, "converted")
     card = _card(target, task)
     if card.status != "todo":
         raise Refused(f"{card.id} is {card.status} — wololo takes a card from the pool")

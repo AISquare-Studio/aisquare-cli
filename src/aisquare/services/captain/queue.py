@@ -391,7 +391,7 @@ class StoreSources:
         """
         agent = status.agent
         try:
-            server = fleet_service.server_for(agent.tmux_socket)
+            server = fleet_service.server_of(agent)
             return list(server.capture(agent.pane_id, height=self._tail_lines).lines)
         except TmuxError as exc:
             log.warning(

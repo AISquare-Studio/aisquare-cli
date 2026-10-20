@@ -351,6 +351,10 @@ def test_wololo_converts_an_idle_agent_and_refuses_a_missing_one(
         """T1c: wololo reads the agent's pane before any claim moves and refuses one it
         cannot read, so this agent sits at Claude Code's real idle box."""
 
+        def at(self, path: Path | None) -> IdlePane:
+            """The server at ``path`` (0.8.0's ``tmux -S``): this fake is the only one."""
+            return self
+
         def capture(self, pane_id: str, **_: object) -> SimpleNamespace:
             assert pane_id == "%7"
             return SimpleNamespace(lines=list(shots.REAL_IDLE_AFTER_STOP))

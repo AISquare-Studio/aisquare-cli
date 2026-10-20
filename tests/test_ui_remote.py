@@ -11,6 +11,7 @@ Every assertion reads what a widget SHOWS.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import os
@@ -47,6 +48,8 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services import remote_page, remote_server
 from aisquare.services.ngrok_tunnel import INSTALL_HINT, NgrokTunnel, build_public_url
 from aisquare.services.remote_server import UNLOCK_GLOBAL_FAILURES, Runtime, UnlockBudget
+from tests import toast_log
+from tests.fake_clipboard import NEEDS_POSIX, TEXT, install
 from tests.test_remote_control import FakeServer, FakeTunnel, SlowServer, fake_tunnel_factory
 from tests.ui_workers import settle_page
 
@@ -444,6 +447,48 @@ def test_copy_stays_visible_beside_a_real_length_ngrok_link(size: tuple[int, int
         assert app.clipboard == link
 
     drive(go, tunnel=fake_tunnel_factory(url=REAL_PUBLIC), size=size)
+
+
+@NEEDS_POSIX
+def test_copy_puts_the_link_on_the_native_clipboard_beside_osc52_and_says_so_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hotfix 0.8.2: on a Mac the link reached only the OSC 52, which Terminal.app ignores,
+    and "Link copied" was said all the same. The host carries the text outside ASCII, so a
+    tool reading the wrong encoding would mangle it."""
+    # Pinned, so sys.platform is never patched while Remote's threads run (review of
+    # #266, round 1): remote_server takes macOS-only paths, through libc, on "darwin".
+    board = install(tmp_path, monkeypatch, platform=None, pin=True)
+
+    async def go(pilot: Pilot[None]) -> tuple[str | None, list[str], list[str]]:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        modal = await open_panel(pilot)
+        modal.query_one("#remote-on", Switch).toggle()
+        await pilot.pause()
+        for _ in range(20):  # the URL arrives from the tunnel's thread
+            if app.remote.public_url is not None:
+                break
+            await asyncio.sleep(0.1)
+        modal.repaint()
+        await pilot.pause()
+        writes: list[str] = []
+        assert app._driver is not None
+        monkeypatch.setattr(app._driver, "write", writes.append)
+        told = toast_log.record(app)
+        modal.query_one("#remote-copy", Button).press()
+        for _ in range(100):
+            if told:
+                break
+            await pilot.pause(0.05)
+        await pilot.pause(0.2)
+        return app.remote.link_url(), list(told), [w for w in writes if "\x1b]52;" in w]
+
+    link, told, osc52 = drive(go, tunnel=fake_tunnel_factory(url=f"https://{TEXT}.ngrok-free.dev"))
+    assert link is not None and TEXT in link, f"the premise: {link!r}"
+    assert board.texts() == [link]
+    assert osc52 == [f"\x1b]52;c;{base64.b64encode(link.encode('utf-8')).decode('ascii')}\a"]
+    assert told == ["Link copied"]
 
 
 def counted(controller: RemoteController) -> list[str]:

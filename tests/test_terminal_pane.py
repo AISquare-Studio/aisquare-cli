@@ -69,6 +69,7 @@ from aisquare.cli.ui.views.agent import AgentView, header_text
 from aisquare.core.keys import Drop
 from aisquare.core.tmux import BUNDLED_CONF, PASTE_BUFFER, TmuxError, TmuxServer
 from aisquare.models import FleetAgent, FleetAgentStatus
+from tests import guard_clock
 from tests.pane_harness import (
     FakePane,
     FakeTmux,
@@ -5280,6 +5281,7 @@ def test_agent_view_offers_stop_and_restart_and_routes_them_through_the_service(
     monkeypatch.setattr(fleet_service, "project_of", lambda agent: project)
     monkeypatch.setattr(fleet_service, "stop", fake_stop)
     monkeypatch.setattr(fleet_service, "restart", fake_restart)
+    clock = guard_clock.install(monkeypatch)  # each click comes after the guard's window
     posted: list[FleetAgent] = []
     tips: list[str] = []
 
@@ -5302,12 +5304,14 @@ def test_agent_view_offers_stop_and_restart_and_routes_them_through_the_service(
             await pilot.pause()
             stop_on_exited, restart_label = stop.display, str(restart.label)
             exited_tip = str(stop.tooltip)
+            clock.step()
             await pilot.click("#agent-restart")
             await wait_until(pilot, lambda: len(refreshed) >= 1 and len(posted) == 1)
             view.refresh_status(_status(state="working"))
             await pilot.pause()
             stop_on_working, restart_label_working = stop.display, str(restart.label)
             tips.extend([exited_tip, str(stop.tooltip)])
+            clock.step()  # Restart's new label moved Stop along the bar
             await pilot.click("#agent-stop")
             await wait_until(pilot, lambda: len(refreshed) >= 2)
             return (
@@ -5449,6 +5453,7 @@ def test_agent_view_stop_says_a_release_the_store_refused(
 
     monkeypatch.setattr(fleet_service, "project_of", lambda agent: project)
     monkeypatch.setattr(fleet_service, "stop", fake_stop)
+    clock = guard_clock.install(monkeypatch)
 
     class ViewHost(App[None]):
         def compose(self) -> ComposeResult:
@@ -5461,6 +5466,7 @@ def test_agent_view_stop_says_a_release_the_store_refused(
         host = ViewHost()
         async with host.run_test(size=(80, 12)) as pilot:
             await pilot.pause()
+            clock.step()  # past the click guard's window
             await pilot.click("#agent-stop")
             await wait_until(pilot, lambda: len(refreshed) >= 1)
             return [(str(toast.message), str(toast.severity)) for toast in host._notifications]

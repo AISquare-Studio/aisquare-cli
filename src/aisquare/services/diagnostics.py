@@ -27,6 +27,7 @@ from aisquare.core.injection import load_last
 from aisquare.core.keys import EXTENDED_MINIMUM
 from aisquare.core.store import damaged_store_recovery, store_session
 from aisquare.core.stubs import stub
+from aisquare.core.terminal import outer_terminal
 from aisquare.core.version import DISTRIBUTION, __version__
 from aisquare.core.workspace import active_project
 from aisquare.models import (
@@ -2074,44 +2075,6 @@ def _check_tmux(server: tmux_core.TmuxServer | None = None) -> DoctorCheck:
         # Failing open costs this line its verdict, not the operator anything
         # else: the fleet re-checks tmux on its first spawn and says so then.
         return _ok(name, f"not evaluated ({exc}) — the fleet checks again on its first spawn")
-
-
-#: How the outer terminal is recognised, from its environment: (variable, value
-#: prefix or ``None`` for "any"), the name, and whether it speaks the kitty
-#: keyboard protocol — which is what decides whether shift+enter and the other
-#: shifted chords reach an agent at all (docs/fleet.md, Keys). First match wins;
-#: ``TERM_PROGRAM`` is checked after the terminal-specific variables because a
-#: multiplexer or an IDE can leave an outer one behind.
-_TERMINAL_SIGNS: tuple[tuple[str, str | None, str, bool], ...] = (
-    ("KITTY_WINDOW_ID", None, "kitty", True),
-    ("GHOSTTY_RESOURCES_DIR", None, "ghostty", True),
-    ("WEZTERM_EXECUTABLE", None, "wezterm", True),
-    ("WT_SESSION", None, "Windows Terminal", False),
-    ("TERM_PROGRAM", "iTerm", "iTerm2", False),
-    ("TERM_PROGRAM", "WezTerm", "wezterm", True),
-    ("TERM_PROGRAM", "ghostty", "ghostty", True),
-    ("TERM_PROGRAM", "vscode", "the VS Code terminal", False),
-    ("TERM_PROGRAM", "Apple_Terminal", "Terminal.app", False),
-    ("VTE_VERSION", None, "a VTE terminal (GNOME Terminal, Tilix, …)", False),
-    ("TERM", "xterm-kitty", "kitty", True),
-    ("TERM", "foot", "foot", True),
-    ("TERM", "alacritty", "alacritty", True),
-)
-
-
-def outer_terminal(environ: Mapping[str, str] | None = None) -> tuple[str, bool | None]:
-    """``(name, speaks the kitty keyboard protocol)`` for the terminal this shell runs in.
-
-    ``None`` for the protocol when the terminal is not recognised — a guess in
-    either direction would send the operator chasing the wrong fix.
-    """
-    env = os.environ if environ is None else environ
-    for variable, prefix, name, kitty in _TERMINAL_SIGNS:
-        value = env.get(variable, "")
-        if value and (prefix is None or value.startswith(prefix)):
-            return name, kitty
-    term = env.get("TERM", "").strip()
-    return (f"unknown (TERM={term})" if term else "unknown"), None
 
 
 def _check_fleet_terminal(

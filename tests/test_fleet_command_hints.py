@@ -128,7 +128,9 @@ _ROW_OF_SESSION = (
 )
 PROJECT_OF: dict[tuple[str, str], str] = {
     ("cli/fleet.py", "_emit_agents"): _TARGET,
-    ("cli/fleet.py", "stop"): _TARGET,
+    ("cli/fleet.py", "_stop_notes"): (
+        _TARGET + ", or under ``--all`` each receipt's own, the project its row was read in"
+    ),
     ("cli/fleet.py", "_emit_shutdown"): _TARGET,
     ("cli/fleet.py", "attach"): _TARGET,
     ("cli/ui/app.py", "FleetApp.on_spawn_agent"): _SHOWN,

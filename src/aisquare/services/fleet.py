@@ -10,6 +10,7 @@ Layout of this module (docs/plans/fleet-tui.md §5.3, §5.7, §7):
 
 - names: codenames, labels, tmux session names, branch names — pure rules;
 - ``spawn`` / ``list_agents`` / ``tell`` / ``stop`` / ``reap`` — the lifecycle;
+- ``bulk`` — restart or stop every running agent of every project at once;
 - ``nudge_manager`` — the wake-up a sub-agent's board write sends the manager;
 - ``pause`` / ``resume`` — a named board signal the manager's cycle respects.
 
@@ -176,6 +177,15 @@ class NoSuchAgent(FleetError):
     """No live agent with that label in this project."""
 
 
+class EndedMeanwhile(NoSuchAgent):
+    """A stop's ``/exit`` reached the running agent, and another writer ended its row before
+    the stop did (:func:`_stop_row`): this stop took the agent down, and is nobody's.
+
+    Still a :class:`NoSuchAgent` to ``shutdown``, which reads it as a row that went away;
+    :func:`bulk` must not read it as an agent it left alone (review of #266, round 3).
+    """
+
+
 class FleetInterrupted(FleetError):
     """The operator interrupted ``shutdown`` mid-loop; ``report`` says how far it got.
 
@@ -185,6 +195,18 @@ class FleetInterrupted(FleetError):
 
     def __init__(self, report: ShutdownReport) -> None:
         super().__init__(report.interrupted or "shutdown interrupted")
+        self.report = report
+
+
+class BulkInterrupted(FleetError):
+    """The operator interrupted :func:`bulk` part-way; ``report`` says how far it got.
+
+    A ``FleetError`` for the same reason as :class:`FleetInterrupted`, whose way it goes:
+    the CLI catches it first, prints the report and exits 130.
+    """
+
+    def __init__(self, report: BulkReport) -> None:
+        super().__init__(report.interrupted or "interrupted")
         self.report = report
 
 
@@ -4589,6 +4611,7 @@ def stop(
     handover: bool = False,
     agent_id: str | None = None,
     nudge: bool = True,
+    live_only: bool = False,
 ) -> StopReceipt:
     """``/exit`` the agent named ``label``, wait ``grace`` seconds, then kill its window.
 
@@ -4610,12 +4633,16 @@ def stop(
     ``/exit`` to the new coder-1, killed it and reported "stopped" (review of
     #138). Pinned, it stops that row or removes that row's window, and refuses
     when neither is left.
+
+    ``live_only`` refuses an ended row as ``handover`` does, its window left as it
+    is: :func:`bulk`'s, which acts on running agents alone. A row that ended after
+    its look and before this read is a 💤 row, never one it says it stopped.
     """
     with store_session() as store:
         try:
             agent = _live_agent(store, project, label, agent_id=agent_id)
         except NoSuchAgent:
-            if handover:
+            if handover or live_only:
                 raise
             ended = (
                 store.fleet_agent_by_label(project.id, label, live_only=False)
@@ -4849,7 +4876,8 @@ def _stop_row(
                 marked = store.get_session(current.session_id) if current.session_id else None
                 if not _handed_over(current, marked, _now()):
                     return StopReceipt(current, [])
-            raise NoSuchAgent(f"{agent.label} ({agent.id}) is no longer live")
+            gone = EndedMeanwhile if exited_here else NoSuchAgent
+            raise gone(f"{agent.label} ({agent.id}) is no longer live")
         # The process is dead or gone by here, so whatever its session still
         # holds is nobody's: a clean ``/exit`` released through the agent's own
         # hook already, a kill fired no hook, and a stop landing in a
@@ -7144,6 +7172,386 @@ def _handoff_prompt(
         "where the previous session left off and do not redo work that is already committed."
     )
     return "\n".join(lines)
+
+
+# --- every agent at once: ``fleet restart|stop --all`` and Settings ▸ Fleet ---------
+
+PROCESS_STATES: frozenset[str] = frozenset(
+    {"working", "waiting", "attention", "limited", "unknown"}
+)
+"""The states in which an agent has a process to stop: what the agent view's Stop is for, and
+the agents :func:`bulk` acts on. An exited (💤) or lost row has none, and is left as it is."""
+
+BulkAction = Literal["restart", "stop"]
+BulkOutcome = Literal["done", "skipped", "failed"]
+
+THIS_SESSION = "this session"
+"""Why :func:`bulk` leaves the caller's own row: a ``restart --all`` run by a manager stopped
+the manager, and the command with it, half-way through."""
+ALREADY_EXITED = "already exited"
+"""Why :func:`bulk` leaves a row the caller was shown that has no process by the time it acts."""
+PROJECT_FORGOTTEN = "its project was forgotten"
+"""Why a restart by :func:`bulk` leaves a running agent of a forgotten project: the spawn of
+its replacement is a deliberate add, and would bring the project back to every listing."""
+
+
+@dataclass(frozen=True)
+class BulkRow:
+    """One agent a :class:`BulkPlan` read: its project, its status then, and why the action
+    leaves it (``None`` when the action acts on it)."""
+
+    project: ProjectInfo
+    status: FleetAgentStatus
+    skip: str | None = None
+
+    @property
+    def agent(self) -> FleetAgent:
+        return self.status.agent
+
+
+@dataclass(frozen=True)
+class BulkPlan:
+    """What :func:`bulk` would do right now, before it does anything (:func:`bulk_plan`).
+
+    ``rows`` are every project's live rows (the managers' alone with ``managers_only``),
+    grouped by project and each project's manager first. ``unread`` are the projects whose
+    agents could not be listed, with why: nothing is done there, and the report says so.
+    """
+
+    action: BulkAction
+    managers_only: bool
+    rows: tuple[BulkRow, ...]
+    unread: tuple[tuple[ProjectInfo, str], ...] = ()
+
+    @property
+    def targets(self) -> list[BulkRow]:
+        """The rows the action acts on."""
+        return [row for row in self.rows if row.skip is None]
+
+    def managers(self) -> BulkPlan:
+        """The same read, the managers' rows alone: the dialog's *Managers only* switch,
+        which redraws from the read it has rather than asking tmux again."""
+        rows = tuple(row for row in self.rows if row.agent.role == "manager")
+        return replace(self, managers_only=True, rows=rows)
+
+
+@dataclass(frozen=True)
+class BulkReceipt:
+    """What :func:`bulk` did to one agent: the ROW it meant (``agent.id``), never a label."""
+
+    project: ProjectInfo
+    agent: FleetAgent
+    outcome: BulkOutcome
+    why: str | None = None
+    """Why it was skipped, or the error it failed with; ``None`` when it was done."""
+    result: StopReceipt | RestartReceipt | None = None
+    """The stop's or the restart's own receipt, when it was done."""
+
+    @property
+    def release_failed(self) -> str | None:
+        """A done stop's claims that could not be given back (:attr:`StopReceipt.release_failed`):
+        the agent is stopped, but not cleanly, as ``fleet stop`` exits 1 for it."""
+        return self.result.release_failed if isinstance(self.result, StopReceipt) else None
+
+
+@dataclass(frozen=True)
+class BulkReport:
+    """Every receipt of one :func:`bulk`, in the order the plan gave them."""
+
+    action: BulkAction
+    managers_only: bool
+    receipts: tuple[BulkReceipt, ...]
+    unread: tuple[tuple[ProjectInfo, str], ...] = ()
+    interrupted: str | None = None
+    """Set when the operator interrupted the run (:class:`BulkInterrupted`): the agent it was
+    on, and that the rest were left as they were. The receipts are the ones made before."""
+
+    def of(self, outcome: BulkOutcome) -> list[BulkReceipt]:
+        return [receipt for receipt in self.receipts if receipt.outcome == outcome]
+
+    @property
+    def ok(self) -> bool:
+        """Nothing failed: no agent, no project's listing, no stop's release, and the run was
+        not interrupted. Exit 0."""
+        return not (
+            self.of("failed")
+            or self.unread
+            or self.interrupted
+            or any(receipt.release_failed for receipt in self.receipts)
+        )
+
+    def summary(self) -> str:
+        """``restarted 4 · skipped 1 · failed 0``, and the projects that could not be read."""
+        done = "restarted" if self.action == "restart" else "stopped"
+        line = (
+            f"{done} {len(self.of('done'))} · skipped {len(self.of('skipped'))} · "
+            f"failed {len(self.of('failed'))}"
+        )
+        if self.unread:
+            line += f" · {len(self.unread)} project(s) not read"
+        return line
+
+
+def bulk_plan(
+    action: BulkAction, *, managers_only: bool = False, acting_session: str | None = None
+) -> BulkPlan:
+    """Every agent :func:`bulk` would act on in every project, and every one it would leave.
+
+    Read as ``fleet ls`` reads each project (:func:`list_agents`, which records a dead pane
+    as it goes), across every registered directory as ``reap --all`` walks them. A row is
+    acted on when it is in one of :data:`PROCESS_STATES`. The rest are left, each with why:
+
+    - the caller's own row (:data:`THIS_SESSION`): the one ``AISQUARE_FLEET_AGENT`` names,
+      and the one ``acting_session`` (``--as``) is bound to;
+    - an exited or lost row, by its state: 💤 agents are left as they are;
+    - a row the listing holds as another server's (``FleetAgentStatus.held``): its pane id
+      is that server's, and a ``/exit`` typed there is typed into another agent;
+    - for a restart, a row whose task is done or dropped, which :func:`restart` refuses;
+    - for a restart, a row of a forgotten project (:data:`PROJECT_FORGOTTEN`).
+
+    Every directory is read, captured ones too, and a forgotten registration that holds a
+    live row, as ``shutdown`` reads them (:func:`_shutdown_targets`): a ``project forget``
+    that races a spawn leaves a tombstone over a running agent, which ``stop --all`` left
+    running on a project nobody lists (review of #266, round 2). Only those with a fleet row
+    are listed, live or recently ended (:meth:`~aisquare.core.store.ContextStore.fleet_label_heads`
+    holds each label's newest): with capture on, every captured directory cost a full
+    listing, a store session and the board's sessions included, for no agent at all (review
+    of #266, round 3).
+    """
+    if action not in ("restart", "stop"):
+        raise ValueError(f"bulk action {action!r} is neither restart nor stop")
+    with store_session() as store:
+        every = store.list_projects(include_forgotten=True)
+        forgotten = store.forgotten_among([project.id for project in every])
+        heads = store.fleet_label_heads()
+        with_rows = {agent.project_id for agent in heads}
+        live = {agent.project_id for agent in heads if agent.ended_at is None}
+        projects = [
+            project
+            for project in every
+            if project.id in with_rows and (project.id not in forgotten or project.id in live)
+        ]
+        own, own_session = _own_rows(store, acting_session)
+    rows: list[BulkRow] = []
+    unread: list[tuple[ProjectInfo, str]] = []
+    for project in projects:
+        try:
+            statuses = list_agents(project)
+            if managers_only:  # before the board is asked about any coder's task
+                statuses = [status for status in statuses if status.agent.role == "manager"]
+            closed = _closed_tasks(statuses) if action == "restart" else {}
+        except Exception as exc:  # one project's listing is its line, never the others'
+            unread.append((project, str(exc) or type(exc).__name__))
+            continue
+        # The manager first, as `shutdown` takes it down first: the one agent that spawns
+        # others, so a stop of its coders before it has nobody to wake (`_manager_first`).
+        statuses.sort(key=lambda status: status.agent.label != MANAGER_LABEL)
+        for status in statuses:
+            agent = status.agent
+            skip: str | None
+            if agent.id in own or (own_session is not None and agent.session_id == own_session):
+                skip = THIS_SESSION
+            elif status.state not in PROCESS_STATES:
+                skip = status.state
+            elif status.held:
+                skip = f"held: {status.detail or ANOTHER_SERVER}"
+            elif action == "restart" and project.id in forgotten:
+                skip = PROJECT_FORGOTTEN
+            else:
+                skip = closed.get(agent.id)
+            rows.append(BulkRow(project, status, skip))
+    return BulkPlan(action, managers_only, tuple(rows), tuple(unread))
+
+
+def _own_rows(store: ContextStore, acting_session: str | None) -> tuple[set[str], str | None]:
+    """The rows the caller runs in, and its session's full id: the row ``AISQUARE_FLEET_AGENT``
+    names, and the live row bound to ``acting_session`` (an id or a prefix of one)."""
+    own: set[str] = set()
+    if (named := orchestrator.env_fleet_agent()) is not None:
+        own.add(named)
+    if not acting_session:
+        return own, None
+    session_id = acting_session
+    with suppress(AmbiguousIdError):
+        if (session := store.get_session(acting_session)) is not None:
+            session_id = session.id
+    if (row := store.fleet_agent_for_session(session_id)) is not None:
+        own.add(row.id)
+    return own, session_id
+
+
+def _closed_tasks(statuses: Sequence[FleetAgentStatus]) -> dict[str, str]:
+    """Why a restart would be refused for its task, by row id: ``task is done``, ``task is
+    dropped``. Read on the board each row reads (:func:`_board_of_row`); a task that cannot
+    be read is left for :func:`restart` to refuse, as it would without ``--all``."""
+    closed: dict[str, str] = {}
+    with store_session() as store:
+        for status in statuses:
+            agent = status.agent
+            if agent.task_id is None:
+                continue
+            with suppress(Exception):
+                task = _team().find_task(store, agent.task_id, _board_of_row(agent))
+                if task is not None and task.status in CLOSED_STATUSES:
+                    closed[agent.id] = f"task is {task.status}"
+    return closed
+
+
+def bulk(
+    action: BulkAction,
+    *,
+    managers_only: bool = False,
+    acting_session: str | None = None,
+    shown: BulkPlan | None = None,
+    on_receipt: Callable[[BulkReceipt], None] | None = None,
+) -> BulkReport:
+    """Restart or stop every running agent in every project: ``fleet restart|stop --all``,
+    and Settings ▸ Fleet in asq.
+
+    Plans first (:func:`bulk_plan`), then acts on each row in turn, pinned to its id
+    (``agent_id``) as the agent view's buttons are: a label the row gave up meanwhile names
+    another agent. Each row is looked at again just before it is acted on, and one that
+    ended since the plan was read is skipped as :data:`ALREADY_EXITED`. A stop is
+    :func:`stop`'s; a restart is :func:`restart`'s, so a running agent is handed over and
+    resumes its session when its transcript is on disk. One agent's failure is its own
+    receipt, never the end of the rest. ``on_receipt`` is called with each receipt as it is
+    made, in this thread: the CLI prints it, asq toasts it.
+
+    ``shown`` is the plan a person confirmed (asq's dialog). The plan is read again here
+    all the same, and only the rows ``shown`` acts on are acted on: an agent started since
+    was not shown and is left alone, and one shown that has no process by now is skipped as
+    :data:`ALREADY_EXITED`. A row the new read leaves for another reason (its task closed
+    meanwhile) is skipped with that reason, and a project it could not list is left out
+    and named in the report's ``unread``.
+
+    ``acting_session`` is the caller's ``--as``: its row is left (:data:`THIS_SESSION`),
+    and a restart records it as the one that asked (``spawned_by``).
+
+    The operator's interrupt (Ctrl-C) is theirs to have, but the agents before it were
+    restarted or stopped, so it goes up as :class:`BulkInterrupted` with the report of
+    how far it got. As a bare ``KeyboardInterrupt``, ``--json`` printed nothing at all,
+    and a script had no record of which agents it had already acted on (review of #266,
+    round 2).
+    """
+    if shown is not None and (shown.action, shown.managers_only) != (action, managers_only):
+        raise ValueError("the plan shown is for another action or scope than the one asked")
+    receipts: list[BulkReceipt] = []
+    unread: tuple[tuple[ProjectInfo, str], ...] = ()
+    doing = "restarting" if action == "restart" else "stopping"
+    where = "before anything was done"
+    try:
+        now = bulk_plan(action, managers_only=managers_only, acting_session=acting_session)
+        unread = now.unread
+        rows = now.rows if shown is None else _as_shown(shown, now)
+        for row in rows:
+            named = f"{row.agent.label} ({_name(row.project)})"
+            if row.skip is not None:
+                receipt = BulkReceipt(row.project, row.agent, "skipped", row.skip)
+            else:
+                where = f"while {doing} {named}"
+                receipt = _bulk_one(action, row, spawned_by=acting_session or "user")
+            receipts.append(receipt)
+            where = f"after {named}"
+            if on_receipt is not None:
+                on_receipt(receipt)
+    except KeyboardInterrupt:
+        said = f"interrupted {where}; the rest were left as they were"
+        report = BulkReport(action, managers_only, tuple(receipts), unread, interrupted=said)
+        raise BulkInterrupted(report) from None
+    return BulkReport(action, managers_only, tuple(receipts), unread)
+
+
+def _as_shown(shown: BulkPlan, now: BulkPlan) -> list[BulkRow]:
+    """The rows ``shown`` drew, as the read made ``now`` finds them (:func:`bulk`).
+
+    A project ``now`` could not list (``now.unread``) is left out, rows and all: nobody
+    looked at its agents, so none is "already exited" (review of #266, round 2), and the
+    report names the project and why, as it does with no dialog.
+    """
+    current = {row.agent.id: row for row in now.rows}
+    unread = {project.id for project, _ in now.unread}
+    rows: list[BulkRow] = []
+    for row in shown.rows:
+        found = current.get(row.agent.id)
+        if row.project.id in unread:
+            continue
+        if row.skip is not None:
+            rows.append(row)  # left when it was drawn, and left now for the reason it was shown
+        elif found is None or found.status.state not in PROCESS_STATES:
+            rows.append(replace(row, skip=ALREADY_EXITED))
+        else:
+            rows.append(found)
+    return rows
+
+
+def _bulk_one(action: BulkAction, row: BulkRow, *, spawned_by: str) -> BulkReceipt:
+    """One row's stop or restart, as its receipt whatever happened.
+
+    The row is looked at again just before it is acted on (:func:`_still_running`): a
+    stop of six agents takes up to half a minute, and one that ended in that time was
+    acted on as it stood by its turn. :func:`restart` works on a row whatever its state,
+    so the exited agent was started again; :func:`stop` removed its 💤 window and said
+    "stopped" (review of #266, round 2). A restart looks in ``before_stop``, after its
+    own refusals and before anything is stopped; a stop looks first, and is pinned to a
+    running row (``live_only``).
+    """
+    project, agent = row.project, row.agent
+
+    def still_running() -> None:
+        _still_running(row)
+
+    try:
+        result: StopReceipt | RestartReceipt
+        if action == "stop":
+            still_running()
+            result = stop(project, agent.label, agent_id=agent.id, live_only=True)
+        else:
+            result = restart(
+                project,
+                agent.label,
+                agent_id=agent.id,
+                spawned_by=spawned_by,
+                before_stop=still_running,
+            )
+    except EndedMeanwhile:
+        # This turn's `/exit` took the agent down, and another writer (a `fleet stop`, a
+        # shutdown) ended its row first: never "left alone", and a restart started no
+        # replacement (review of #266, round 3).
+        after = "; no replacement was started" if action == "restart" else ""
+        why = f"its /exit was sent, and another command ended it meanwhile{after}"
+        return BulkReceipt(project, agent, "failed", why)
+    except NoSuchAgent:
+        # Pinned to the row: it ended between the read and its turn, and its label is free,
+        # still its own or another agent's now. Nothing was done to any of them.
+        return BulkReceipt(project, agent, "skipped", ALREADY_EXITED)
+    except FleetError as exc:
+        return BulkReceipt(project, agent, "failed", str(exc))
+    except Exception as exc:  # one agent's failure is its receipt, never the rest's
+        return BulkReceipt(project, agent, "failed", f"{type(exc).__name__}: {exc}")
+    return BulkReceipt(project, agent, "done", result=result)
+
+
+def _still_running(row: BulkRow) -> None:
+    """Refuse ``row`` (``NoSuchAgent``) unless the store still holds it live and its agent,
+    looked at now, is in one of :data:`PROCESS_STATES`.
+
+    One row, read again and asked of its own server (:func:`status_of`). The project's
+    whole listing, read before each agent, asked tmux about every pane of the project for
+    one row's answer: a manager and eight coders were listed ten times in one ``restart
+    --all`` (review of #266, round 3). A dead pane it finds is recorded as a listing
+    records one (:func:`_end_dead_rows`): its claims released and the manager told now,
+    not at the next read.
+    """
+    with store_session() as store:
+        agent = store.get_fleet_agent(row.agent.id)
+        project = store.get_project(row.project.id) or row.project
+    now = None if agent is None or agent.ended_at is not None else status_of(agent)
+    if agent is not None and now is not None and now.state not in PROCESS_STATES:
+        tmux_session = session_name(project.codename) if project.codename else None
+        with suppress(Exception):  # the next listing records it; the skip stands either way
+            _end_dead_rows([agent], _observe_sockets([agent], tmux_session))
+    if now is None or now.state not in PROCESS_STATES:
+        raise NoSuchAgent(f"{row.agent.label!r} ({row.agent.id}) has no process any more")
 
 
 def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> ReapReport:

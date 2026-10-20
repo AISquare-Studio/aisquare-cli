@@ -59,6 +59,7 @@ from aisquare.cli.ui.groups import (
 )
 from aisquare.cli.ui.terminal import InPlaceField
 from aisquare.models import FleetAgentStatus, HeadroomSummary, ProjectGroup, ProjectInfo
+from aisquare.services import fleet as fleet_service
 from aisquare.services.project import NICKNAME_MAX, display_name
 from aisquare.services.project_groups import Arrangement, GroupEntry, arrange
 
@@ -85,9 +86,11 @@ STATE_CHIP: dict[str, tuple[str, str]] = {
 CUSTOM_ROLE_ICON = "🤖"
 """The icon for a role the table above does not know (a `team bind` role, say)."""
 
-ALIVE_STATES: frozenset[str] = frozenset({"working", "waiting", "attention", "limited", "unknown"})
+ALIVE_STATES: frozenset[str] = fleet_service.PROCESS_STATES
 """States that count toward the card's "agents alive" chip — a limited agent is
-alive and parked (#146), not gone."""
+alive and parked (#146), not gone. The fleet's own set, which Stop and ``--all`` act on:
+a third copy of it could count as alive what they leave, or the reverse (review of #266,
+round 3)."""
 
 
 class AddProject(Message):
@@ -180,6 +183,13 @@ class ResizeSidebar(Message):
 def project_name(project: ProjectInfo) -> str:
     """The display name: the nickname, the root's basename, else the id (§5.7)."""
     return display_name(project)
+
+
+def agent_name(label: str, project: ProjectInfo | None) -> str:
+    """``coder-1 (alpha)``: an agent's label, with the project that tells one ``manager``
+    from another; the label alone when the project is not known. The one way a toast names
+    an agent across projects: the agent view's restart and Settings ▸ Fleet's alike."""
+    return f"{label} ({project_name(project)})" if project is not None else label
 
 
 def short_path(path: Path, home: Path | None = None) -> str:

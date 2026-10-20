@@ -44,6 +44,15 @@ from aisquare.models import (
 _DEFAULT_EMPTY = 'No context entries yet. Add one with: aisquare remember "…"'
 
 
+USAGE_ERROR: type[Exception] = typer.BadParameter.__bases__[0]
+"""Click's ``UsageError``, for a usage error raised by hand: exit 2, and ``{"error": "usage"}``
+under ``--json``. Click is vendored (``typer._click``), and ``import click`` is another
+package whose errors typer does not catch, so like tests/cli_tree.py this stays on the
+public typer surface: ``UsageError`` is the direct base of ``typer.BadParameter``. One
+copy: ``cli.global_flags`` and ``cli.fleet`` each reached it, and a change to the bases
+would have had to find both (review of #266, round 3)."""
+
+
 def refuse_conflicting_scope(every: bool, project: str | None) -> None:
     """``--all`` and ``--project`` name different scopes; both at once is refused.
 

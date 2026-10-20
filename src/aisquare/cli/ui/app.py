@@ -92,6 +92,7 @@ from aisquare.cli.ui.sidebar import (
     SettingsSelected,
     Sidebar,
     SpawnAgent,
+    agent_name,
 )
 from aisquare.cli.ui.terminal import EscapeToSidebar, SelectionHost, TerminalPane
 from aisquare.cli.ui.theme import ThemePicker, restore_theme, theme_autosave
@@ -105,8 +106,10 @@ from aisquare.cli.ui.views.project import ProjectView
 from aisquare.cli.ui.views.remote import RemotePanel
 from aisquare.cli.ui.views.settings_hub import SettingsHubView
 from aisquare.cli.ui.views.welcome import WelcomeView
+from aisquare.core import clipboard
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, store_session
+from aisquare.core.terminal import mac_keyboard
 from aisquare.models import (
     AccountsOverview,
     CheckStatus,
@@ -247,6 +250,14 @@ class HelpScreen(ModalScreen[None]):
         ("question_mark", "close_help", "close"),
     ]
     BOARD_HEADING: ClassVar[str] = "Board (a project's Board tab, and aisquare board -w)"
+    MAC_COPY_KEYS: ClassVar[tuple[tuple[str, str], ...]] = (
+        ("ctrl+c", "copy a pane's highlight again; ⌘C stays the terminal's"),
+        ("⌘V", "paste into the focused pane or field"),
+        ("⌥ drag", "iTerm2: select with the terminal itself, then ⌘C"),
+        ("fn drag", "Terminal.app, on most Macs: the same"),
+    )
+    """On macOS, after ``drag``: the copy and paste keys a Mac has. Terminal.app and iTerm2
+    keep ⌘C as their own Copy, so it never reaches asq; ⌘V does, as a bracketed paste."""
 
     def __init__(self, escape_key: str, *, at_board: bool = False, capturing: bool = False) -> None:
         super().__init__()
@@ -255,6 +266,11 @@ class HelpScreen(ModalScreen[None]):
         self.capturing = capturing
 
     def compose(self) -> ComposeResult:
+        with VerticalScroll(id="helpbox"):
+            yield Static(self.keys_text())
+
+    def keys_text(self) -> Text:
+        """What the help says: the fleet's keys, the board's, and the legends."""
         text = Text()
         text.append("aisquare fleet — keys\n\n", style="bold")
         for key, what in (
@@ -272,6 +288,7 @@ class HelpScreen(ModalScreen[None]):
             (self.escape_key.upper(), "hand focus from an agent's pane back to the sidebar"),
             ("wheel", "scroll an agent pane; shift/alt+PgUp/PgDn too, shift+Home/End"),
             ("drag", "select text in a pane (double-click: a word) — copied on release"),
+            *(self.MAC_COPY_KEYS if mac_keyboard() else ()),
             ("divider", "drag the line beside the sidebar to resize it; double-click puts it back"),
             ("> < =", "from the sidebar: widen, narrow, reset the divider"),
             ("t", "themes (applied live, autosaved)"),
@@ -326,8 +343,7 @@ class HelpScreen(ModalScreen[None]):
         text.append(" and ⚠ — accounts that need a login (signed out, token expired or refused);\n")
         text.append("     the dot is red when every enabled account needs one\n")
         text.append("\nEsc closes this", style="dim")
-        with VerticalScroll(id="helpbox"):
-            yield Static(text)
+        return text
 
     def on_mount(self) -> None:
         if self.at_board:
@@ -1395,7 +1411,17 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.call_after_refresh(pane.focus)
 
     async def on_agent_restarted(self, event: AgentRestarted) -> None:
-        """A restart minted a new row (#138): show it where the old one was.
+        """A restart minted a new row (#138): say so, and show it where the old one was — but
+        only from the old row's own view, still on screen.
+
+        A restart takes seconds, and by its end the user may be on another agent: the new
+        row was shown, selected and focused all the same, which took the screen back to
+        it, with its Stop and Restart under a pointer aimed at the other pane (user
+        feedback, 2026-10-19: "it takes me back to manager 0's pane … that had destroyed
+        my manager session on more than one occasion"). Anywhere else, the view, the
+        sidebar's highlight, the remembered selection and the focus stay where the user
+        put them; the sidebar's next frame lists the new row, and the toast names the
+        project, as one ``manager`` reads like another's.
 
         The view that posted this refreshed the frame first, so the row is
         normally in the snapshot already; one more read covers a store that
@@ -1405,7 +1431,15 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         it was on, and focus was left with nobody — where the app's keys are
         live, so a ``q`` typed at the restarted agent quit the UI.
         """
+        receipt = event.receipt
         started = event.agent
+        project = self.snapshot.project(started.project_id) if self.snapshot else None
+        named = agent_name(started.label, project)
+        self.notify(f"✓ restarted {named} — {receipt.how}", timeout=6, markup=False)
+        for note in receipt.notes:
+            self.notify(note, severity="warning", timeout=8, markup=False)
+        if self.content.current != f"agent-{event.replaced.id}":
+            return  # the user is elsewhere: nothing of theirs moves
         status = self.snapshot.agent(started.project_id, started.id) if self.snapshot else None
         if status is None:
             self.refresh_data()
@@ -1814,6 +1848,23 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if self.content.current == "welcome":
             self.doctor_scope = event.project_id
 
+    async def action_quit(self) -> None:
+        """``q`` and ``ctrl+q``: quit, unless Settings ▸ Fleet's restart or stop of every agent
+        still runs, which is refused with a toast as Update and Uninstall refuse it.
+
+        A quit cannot stop its thread: the screen went, ``asyncio.run`` joined the thread
+        with the terminal blank for as long as the rest of the agents took, minutes for a
+        restart of all, and each agent's toast after the quit was lost (review of #266,
+        round 3). An agent view's own Stop or Restart, a few seconds, is left to the quit.
+        """
+        from aisquare.cli.ui.views.fleet_bulk import BULK_WORKER
+
+        running = self._work_running({BULK_WORKER: _writing_workers()[BULK_WORKER]})
+        if running is not None:
+            self.notify(f"{running} is still running — quit when it ends", severity="warning")
+            return
+        await super().action_quit()
+
     hand_off: tuple[str, ...] | None = None
     """The ``aisquare`` command this terminal goes to when asq quits (``run_ui``)."""
 
@@ -1979,6 +2030,7 @@ def _writing_workers() -> dict[str, str]:
         agent,
         doctor,
         explainability,
+        fleet_bulk,
         onboard,
         project,
         settings,
@@ -1996,6 +2048,7 @@ def _writing_workers() -> dict[str, str]:
         settings.NICKNAME_WORKER: "a project's rename",
         agent.STOP_WORKER: "an agent's stop",
         agent.RESTART_WORKER: "an agent's restart",
+        fleet_bulk.BULK_WORKER: "Settings ▸ Fleet's restart or stop of every agent",
         explainability.SAVE_WORKER: "Explainability's setup",
         explainability.REGISTER_WORKER: "Explainability's registration",
         explainability.SHIP_WORKER: "Explainability's ship",
@@ -2024,6 +2077,7 @@ def _waited_reads() -> dict[str, str]:
         app_settings,
         doctor,
         explainability,
+        fleet_bulk,
         welcome,
     )
 
@@ -2039,6 +2093,7 @@ def _waited_reads() -> dict[str, str]:
         agent.LABELS_WORKER: "an agent's account names",
         board.LABELS_WORKER: "a board's account names",
         explainability.STATUS_WORKER: "Explainability's status",
+        fleet_bulk.PLAN_WORKER: "Settings ▸ Fleet's read of the running agents",
         app_settings.ACCOUNTS_WORKER: "App settings' accounts",
         welcome.worker_name("look"): "Welcome's checks",
         welcome.worker_name("candidates"): "Welcome's folder list",
@@ -2145,6 +2200,10 @@ def run_ui(**options: Any) -> None:
             try:
                 if pushes is not None:
                     pushes.push_drain()
+                # A copy made just before the press is still queued or being written on the
+                # clipboard thread: `flush` runs at exit, and the exec runs no exit handler,
+                # so pbcopy got it cut short or never (review of #266, round 3).
+                clipboard.flush()
             except KeyboardInterrupt:
                 remote_server._remote_quit_now(undone)
     # The terminal is ours again, and Remote, its ngrok, the panel's writes, the phones' and

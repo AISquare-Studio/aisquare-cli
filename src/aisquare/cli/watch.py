@@ -308,7 +308,6 @@ def _build_app_class(interval: float) -> Any:
     costs a ``git rev-parse`` (mutating ``os.environ`` to pin it would leak
     process-wide).
     """
-    from textual.app import App as TextualApp
     from textual.app import ComposeResult
     from textual.binding import Binding
     from textual.containers import Vertical
@@ -318,6 +317,7 @@ def _build_app_class(interval: float) -> Any:
 
     from aisquare.cli.ui.autosave import Autosave
     from aisquare.cli.ui.board import BoardHelp, BoardPanel
+    from aisquare.cli.ui.clipboard import ClipboardApp
     from aisquare.cli.ui.theme import theme_autosave
 
     class ThemePicker(ModalScreen[None]):
@@ -361,7 +361,7 @@ def _build_app_class(interval: float) -> Any:
         def action_close_picker(self) -> None:
             self.dismiss(None)
 
-    class BoardApp(TextualApp[None]):
+    class BoardApp(ClipboardApp[None]):
         TITLE = "aisquare board"
         BINDINGS: ClassVar = [
             ("q", "quit", "quit"),

@@ -6,7 +6,90 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.8.1] - 2026-10-13
+## [0.8.2] - 2026-10-19
+
+**A hotfix: a copy in `asq` reaches the clipboard on macOS. Every agent can now be
+restarted or stopped at once. A restart no longer takes you off the pane you are on,
+and Stop or Restart no longer acts on a click aimed at what was under the pointer a
+moment before.**
+
+### Added
+- Restart or stop every running agent in every project at once, or only the
+  managers. In `asq`, *⚙ Settings ▸ Fleet* has *Restart all…* and *Stop all…*.
+  Each opens a dialog that lists, by project, the agents it will act on, and has a
+  *Managers only* switch. Its confirm button names the count, and *Cancel* has the
+  focus. On the command line it is `aisquare fleet restart --all [--managers]` and
+  `aisquare fleet stop --all [--managers]`. Both print one line per agent, then
+  the count, and exit 1 if any agent failed. Interrupted with Ctrl-C, they still
+  say how far they got (`--json` too) and exit 130. With four managers running, a restart
+  of all of them used to mean clicking into each one. Exited (💤) agents are left
+  as they are, and so is one that exits or is stopped while the run goes on. So
+  is the agent that runs the command, so a manager's
+  `restart --all` doesn't stop itself half-way. A restart resumes each agent's
+  session from its transcript when that is on disk, as a single restart does. An
+  agent that fails doesn't stop the rest: it is named, with the reason. While a
+  run from *Settings* goes on, `q` doesn't quit `asq`: it says the run is still going.
+
+### Fixed
+- Run on your Mac, a copy in `asq` reaches your clipboard in Terminal.app and
+  in iTerm2 as it comes. 0.8.1 sent every copy as OSC 52 alone, and said "copied" either way:
+  Terminal.app never implemented OSC 52 and iTerm2 drops it unless its clipboard
+  setting is on, so ⌘V pasted what the clipboard held before. On a local session
+  a copy now also goes through the platform's own tool (`pbcopy` on macOS,
+  `clip.exe` on Windows and on WSL with interop on, and on Linux and the BSDs
+  `wl-copy` under Wayland, else `xclip` or `xsel` under X), and still as OSC 52.
+  A tool that fails is not run again for a minute, so a broken one doesn't hold
+  up each copy's toast.
+  On a remote session (over SSH, under `sudo` or `su` there, in a tmux last
+  attached over SSH, or in a Codespace) OSC 52 is the only route. Inside tmux,
+  tmux's word on its last attach decides, so a tmux created over SSH and
+  attached at the machine since is local. The toast says
+  "copied" only when the copy can have landed: the native tool took it, or OSC
+  52 went to a terminal known to take it. In Terminal.app a copy only
+  OSC 52 carried says it did not reach the clipboard, and how to select with the
+  terminal itself. In iTerm2, whose clipboard setting nothing outside it can
+  see, it says the text was sent through OSC 52 and, if paste is empty, to turn
+  that setting on or hold ⌥ while you drag. On a terminal nothing names (over SSH from
+  Terminal.app, or behind tmux or screen) it says the text was sent through OSC
+  52, and that an empty paste means the terminal ignored it.
+- A restart no longer takes you off the pane you are on. A restart started
+  from an agent's view showed the new row when it finished, wherever you had
+  gone meanwhile: on manager 1's pane, manager 0's restart took the screen back
+  to manager 0, with its Stop and Restart under the pointer aimed at manager 1.
+  The view now follows the new row only while the restarted agent's view is
+  still the one on screen. Anywhere else your view, the sidebar's highlight,
+  the selection asq reopens at and the keyboard stay where they were. The
+  sidebar lists the new row, and a toast names the restart and its project
+  (`✓ restarted manager (alpha) — resumed its session`). A row replaced from
+  outside the view (`fleet restart` or `fleet switch` in a shell, the hand-over
+  on a usage limit, the phone) never moved the view, and still doesn't.
+- Stop and Restart in an agent's view ignore a mouse click that lands within a
+  second of the view coming up, moving, or a dialog over it closing. Such a
+  click was aimed at whatever was there before, and it no longer stops or
+  restarts the agent now under the pointer. The first ignored click says so
+  (`ignored a click on Restart — the view had just changed under the
+  pointer`), and it doesn't take the keyboard focus either, so the next Enter
+  goes where it was going. Click again a moment later, or press Enter on the
+  focused button: a key is never ignored.
+
+### Changed
+- When you type on a Mac (`asq` on your Mac, or reached from Terminal.app or
+  iTerm2, iTerm2 over SSH included, but not through tmux or screen on another
+  machine, which keep the terminal of whoever started them) the help screens
+  name the copy and paste keys a Mac has, whatever machine `asq` runs on. The board's
+  copy row names `c`, not ⌘C, which Terminal.app and iTerm2 keep as their own
+  Copy, and the fleet's `?` lists ctrl+c, ⌘V and the terminal's own selection
+  (Option-drag in iTerm2, Fn-drag in Terminal.app on most Macs). docs/fleet.md
+  has "Copy and paste on macOS", and its mouse section no longer lists iTerm2
+  among the terminals that accept OSC 52 as they come.
+- `aisquare doctor`'s `fleet terminal` row names iTerm2 over SSH by the
+  `LC_TERMINAL=iTerm2` that ssh sends, though not behind tmux or screen, which keep
+  the terminal of whoever started them. It names Ghostty and WezTerm by their `TERM`
+  (`xterm-ghostty`, `wezterm`) when their own variables are gone, as over SSH, and
+  says both speak the kitty keyboard protocol. It said `unknown (TERM=…)` for all
+  three. The row and the copy's toast read one table of terminals.
+
+## [0.8.1] - 2026-10-19
 
 **The fleet on your phone: `aisquare remote`, through your own ngrok tunnel.**
 - One server on `127.0.0.1:8750` serves a page that ships with aisquare-cli,
@@ -3836,7 +3919,8 @@ First release — a portable memory layer for coding agents.
 - **Diagnostics & config** — `status`, `doctor` (dependency + setup health with
   fixes), the `config` group, and `log` (captured prompt history).
 
-[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.6.0...v0.7.0

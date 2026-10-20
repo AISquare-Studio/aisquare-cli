@@ -10,7 +10,8 @@ and you are typing into the session itself.
 Three ideas carry the whole feature:
 
 - **One view.** Left: a navigator — `Fleet ▸ projects ▸ agents`, then under a
-  line *⚙ Settings* (App settings, Accounts, Doctor) with a dim status line: the
+  line *⚙ Settings* (App settings, Accounts, Doctor, and *Fleet*'s *Restart all…*
+  and *Stop all…*) with a dim status line: the
   AISquare sign-in and the Claude accounts' headroom as two dots (`?` explains
   the colours; a click opens Accounts). Right: whatever you clicked — onboarding
   for a new directory, a project's manager, an agent's live session, the board,
@@ -333,6 +334,95 @@ server in this boot, or another server on its socket): those it leaves live and
 names, and `fleet shutdown --forget` ends them on your word.
 To take a whole project's fleet down and record every row in one go, use
 `fleet shutdown`.
+
+### `fleet restart --all` / `fleet stop --all`
+
+```sh
+aisquare fleet restart --all
+aisquare fleet restart --all --managers
+aisquare fleet stop --all
+aisquare fleet stop --all --managers
+```
+
+These restart or stop every running agent in every project at once. `--managers`
+acts on the managers alone and leaves their teams. *⚙ Settings ▸ Fleet* in `asq`
+does the same through the same service function (below). An agent is running when
+it has a process: ▶ working, ⏸ waiting, 🔔 needs you, ⏳ limited, or · unknown. Each
+is restarted or stopped the way `fleet restart` and `fleet stop` do it for one agent.
+A restart hands a running agent over and resumes its session from its transcript
+when that is on disk. Each agent is acted on by its row, never by its label, so a
+label that passed to another agent meanwhile never makes that agent the one
+stopped. Some agents are left alone, and each is named with the reason:
+
+- an exited (💤) or lost agent: `exited`, `lost`;
+- the agent running the command: `this session`. That is the row
+  `AISQUARE_FLEET_AGENT` names, and with `restart --as SESSION` also that session's
+  row, so a manager that runs `restart --all` isn't stopped half-way through it;
+- a row held as another tmux server's (`held: …`), whose pane id names another agent;
+- for a restart, an agent whose task is done or dropped (`task is done`), which
+  `fleet restart` would refuse;
+- for a restart, an agent of a project you forgot (`its project was forgotten`).
+  A `project forget` that races a spawn can leave a running agent on it. Its
+  replacement would add the project back, so the restart leaves it, and
+  `stop --all` stops it, as `fleet shutdown --all` does;
+- an agent that ended after the list was read and before its turn: `already
+  exited`. Each agent is looked at again just before it is acted on, so one that
+  exited or was stopped meanwhile is not started again, and its 💤 window stays.
+  One that another command ends after this run has sent it `/exit` is not left
+  alone: it fails, and a restart says no replacement was started.
+
+The agents are taken one at a time, each project's manager first. Each one is printed
+as it is done, under its project's name, and the count comes last. A restart's notes
+follow its line, as `fleet restart` prints them, with ⚠ on the ones that say what
+didn't happen. A stop's follow it as `fleet stop` prints them: the `fleet reap` that
+removes the worktree it left, and each claim it put back, by title:
+
+```text
+alpha
+  ✓ manager                  manager    stopped and restarted — resumed its session
+  · coder-2                  coder      skipped — task is done
+beta
+  ✗ coder-web                coder      failed — cannot restart 'coder-web': …
+restarted 1 · skipped 1 · failed 1
+```
+
+One agent's failure is only its own line; the rest are still restarted or stopped.
+The command **exits 1** when any agent failed, a project's agents couldn't be read,
+or a stop left claims behind (the same as `fleet stop`). `--json` prints one
+object: `receipts`, each with `project`, `agent`, `outcome` (`done`, `skipped` or
+`failed`) and `why`, plus, for one that was done, the fields `fleet restart --json`
+or `fleet stop --json` prints for that agent (a stop's `agent` is then the row as
+the stop ended it). The object also has `unread`, `summary`, `ok` and `interrupted`. Interrupted with
+Ctrl-C, it **exits 130**, and it still says how far it got: the agents done so far
+(the JSON object under `--json`), the count, and the agent it was on, as `fleet
+shutdown` does. The agents after it are left as they were.
+
+`--all` means every project's fleet, so it is refused with `--project` (as
+`reap --all` is) and with a label. `--managers` is refused without `--all`. With
+`--all`, `--fresh`, `--permission-mode` and `--force` are refused too, because each
+is for one agent. Without `--all`, both commands work as described above. Unlike
+`fleet shutdown`, which takes a project's whole tmux session down, these keep the
+sessions and the server, and a restart brings each agent back.
+
+**In `asq`: *⚙ Settings ▸ Fleet*.** *Restart all…* and *Stop all…* each open a
+dialog. It lists the agents it will act on, grouped by project (the project's name,
+then `label · role · state` for each agent). The agents it leaves are listed dim,
+with the reason. A *Managers only* switch redraws the list and the count, and the
+confirm button names the count (*Restart 4 managers*, *Stop 9 agents*). *Cancel*
+has the focus, and Escape cancels too. When nobody would be acted on, the dialog
+says *nothing to restart* (or *nothing to stop*) and its confirm button stays
+greyed. The list is read when the dialog opens, and read again on confirm. Confirm
+acts only on the agents the dialog showed: one that ended meanwhile is skipped as
+*already exited*, and one started meanwhile is left alone. A project whose agents
+can't be read on confirm is left alone too, and the summary names it and why. The work runs off the UI
+thread, with both buttons greyed until it ends, and `q` refused: a quit can't stop
+it, and would leave the terminal blank until the rest were done. Each agent gets a toast as it is
+done (`✓ restarted manager (alpha) — resumed its session`, `✓ stopped coder-1 (beta)`).
+Then one toast sums it up (`restarted 4 · skipped 1 · failed 0`) and names who was
+skipped or failed, and why. A restart from here never moves your view. Like an agent
+view's Stop and Restart, both buttons and the dialog's confirm ignore a mouse click
+in the second after they appear or move. An ignored click on the confirm button
+leaves the focus on *Cancel*.
 
 ### `fleet shutdown`
 
@@ -1442,21 +1532,23 @@ transcript to select *in Claude Code*, which copies on release by itself
 (double- and triple-click are its word and line selection). Claude's own copy
 runs `wl-copy`/`xclip` in the agent's environment — the tmux server's, which may
 have no display — and inside tmux writes the tmux paste buffer, so after a
-left-button release the UI reads tmux's buffers and mirrors one written since the
-press to your clipboard (OSC 52), the same way its own copies arrive — the same
-words selected twice included, and a copy that lands as late as about 0.65 s
-after the release, unless you press a mouse button first. Claude Code's selection
+left-button release the UI reads tmux's buffers and copies one written since the
+press to your clipboard by the route its own copies take (*Where a copy goes*,
+below) — the same words selected twice included, and a copy that lands as late
+as about 0.65 s after the release, unless you press a mouse button first. Claude
+Code's selection
 is copy-only by design: there is no "select in the prompt and paste over it"
 in Claude Code in any terminal. While such a program owns the mouse the UI's
 own drag-select stands down; **shift+drag** is the one gesture that always
 selects locally, in every pane, and copies on release. In a pane whose program
 does not track the mouse (a shell, the classic renderer) nothing changed:
 Drag to select text in a pane (double-click selects a word): it is copied to
-your clipboard on release (OSC 52 — your terminal has to accept it; Windows
-Terminal, kitty, wezterm, iTerm2 and foot do), and ctrl+c or cmd+c copies it
+your clipboard on release (*Where a copy goes*, below), and ctrl+c copies it
 again while the highlight stands — from the pane or from the sidebar — and then
 clears it (when two panes hold a highlight, the one made most recently goes
-first). Only a left-button drag is a copy, so a right-click over a highlight
+first). cmd+c does the same in a terminal that passes it on; Terminal.app and
+iTerm2 keep it as their own Copy (*Copy and paste on macOS*, below). Only a
+left-button drag is a copy, so a right-click over a highlight
 leaves your clipboard alone — and a right click followed by a left click is one
 click, not a double click — and so does a drag somewhere else entirely while a
 highlight stands. The highlight does not outlive what it means: typing or
@@ -1492,6 +1584,72 @@ keyboard protocol (kitty, ghostty, wezterm, foot, recent alacritty): in
 VTE-based terminals and Windows Terminal, shift+enter arrives as plain enter
 and the UI never fakes it — `\` then Enter inserts a newline in Claude Code
 everywhere.
+
+**Where a copy goes.** Every copy the UI makes — a release in a pane, ctrl+c on
+a standing highlight, the mirror of Claude Code's own selection, the board's
+`c`, the Remote panel's link, a text field's copy — goes two ways at once. On a
+local session it goes to the system clipboard through the platform's own tool:
+`pbcopy` on macOS; `clip.exe` on Windows, and on WSL while interop is on; and
+on Linux (WSLg included) and the BSDs `wl-copy` under Wayland, else `xclip` or
+`xsel` under X. A tool that fails or hangs is not run again for a minute, so
+a broken one (an `xclip` whose display has gone) doesn't hold up every copy's
+toast: those copies go by OSC 52 alone. It is also sent as OSC 52, which your *outer*
+terminal turns into a clipboard write if it accepts it: Windows Terminal,
+kitty, ghostty, wezterm and foot do, iTerm2 only with its clipboard setting on,
+and Terminal.app never. On a remote session the native tool would write the
+remote machine's clipboard, not yours, so OSC 52 is the only route: over SSH
+(`SSH_CONNECTION` or `SSH_TTY` set, or an `sshd` above `asq`, as under `sudo`
+or `su`), in a Codespace (`CODESPACES`), and in your own tmux when it was last
+attached over SSH (tmux's own `SSH_CONNECTION`, asked at each copy). Inside tmux
+its answer outranks `asq`'s own SSH variables, so a tmux created over SSH and
+attached at the machine since is local. GNU screen, zellij and dtach have no
+such answer to give: one started at the machine and reattached over SSH keeps
+writing the machine's clipboard, and says "copied". If you reattach from other
+machines, run `asq` in tmux. The
+toast says "copied" when the native tool took the text, or when OSC 52 was the
+only route (over SSH, or with the tool missing or failing) and the terminal is
+one known to take it: kitty, Ghostty and WezTerm by their own variables
+(`KITTY_WINDOW_ID`, `GHOSTTY_RESOURCES_DIR`, `WEZTERM_EXECUTABLE`), Ghostty and
+WezTerm also by `TERM_PROGRAM`, Windows Terminal by `WT_SESSION`, and kitty,
+Ghostty, WezTerm, foot and Alacritty by the `TERM` ssh carries. In Terminal.app
+(named by `TERM_PROGRAM`) it warns that the copy did not reach the clipboard,
+and how to select with the terminal itself. In iTerm2 — named by
+`TERM_PROGRAM`, and over SSH by the `LC_TERMINAL` ssh usually carries, though
+not behind tmux or screen, which keep the one of whichever terminal started
+them — it
+says the text was sent to your terminal's clipboard (OSC 52) and, if paste is
+empty, to turn on iTerm2's clipboard setting or hold ⌥ while you drag: whether
+that setting is on, nothing outside iTerm2 can see. On any terminal nothing
+names (over SSH from Terminal.app, or behind tmux or screen) it says the text
+was sent to your terminal's clipboard (OSC 52), and that an empty paste means
+the terminal ignores it.
+
+**Copy and paste on macOS.** Run on your Mac, every copy in `asq` reaches the
+clipboard through `pbcopy`, in any terminal. Over SSH only OSC 52 can carry it
+back, so the terminal decides:
+
+- *Terminal.app* never implemented OSC 52, so a copy over SSH does not reach
+  your clipboard. Terminal.app names itself to nothing across SSH, so the toast
+  says the copy was sent through OSC 52 and that an empty paste means the
+  terminal ignored it. Select with the terminal itself instead (below).
+- *iTerm2* accepts it only with *Settings › General › Selection › Applications
+  in terminal may access clipboard* turned on. The toast cannot see that
+  setting, so over SSH it says the copy was sent through OSC 52 and, if paste
+  is empty, to turn the setting on or hold ⌥ while you drag.
+- *Ghostty, kitty and WezTerm* accept it out of the box.
+
+⌘C is Terminal.app's and iTerm2's own Copy, so it never reaches `asq`, and it
+does not need to: a drag copies on release with no key, and ctrl+c copies a
+standing highlight again. ⌘V does reach `asq`, as a bracketed paste, and
+pastes into the focused pane or field. To select with the terminal itself while
+`asq` has the mouse, hold Option while dragging in iTerm2, or Fn in
+Terminal.app on most Macs (users report it; Apple does not document it); then
+⌘C copies that selection as it would anywhere else. When you type on a Mac —
+`asq` running on it, or reached from Terminal.app or iTerm2 (iTerm2 over SSH
+too, by its `LC_TERMINAL`) — the `?` screen lists these keys, and the board's
+copy row names `c`, not ⌘C. Through tmux or screen on another machine they
+are left out: the multiplexer keeps the `LC_TERMINAL` of whichever terminal
+started it, which may not be the one you attached from.
 
 The alt chord's limits are the terminal's and Textual's key parser's, not this
 UI's, and they were measured against the parser (`tests/test_keys.py` feeds it
@@ -1635,7 +1793,14 @@ hand-over is already moving (a `fleet switch`, by hand or on a usage limit, or
 another restart) is not restarted or switched again: that hand-over starts the
 replacement itself. The agent view's **Stop** and **Restart** act on the row it
 shows: once its label has passed to a replacement (the manager restarted that
-coder), they say so and leave the replacement alone.
+coder), they say so and leave the replacement alone. A restart from the view
+moves you to the new row only if that view is still on screen when the restart
+ends. If you have opened another agent meanwhile, you stay there, and a toast
+names the restart and its project. Both buttons ignore a mouse click that
+lands within a second of the view coming up, moving or a dialog over it
+closing, and say so once: that click was aimed at what was there before. An
+ignored click doesn't take the keyboard focus either, so the next Enter goes
+where it was going. Enter on the focused button is never ignored.
 
 **A panel reading "No changes this session" sits beside an agent's conversation
 and will not go away.** That is Claude Code's own diff panel (fullscreen

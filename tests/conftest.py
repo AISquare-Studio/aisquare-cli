@@ -299,15 +299,22 @@ AMBIENT_ENV_VARS = (
     "AISQUARE_RUN_TRACE_ID",
     # A sign-in token in the operator's shell would make every test run as them.
     "AISQUARE_TOKEN",
-    # What `core.browser.open_url` launches. Its `is_headless` also reads
-    # SSH_CONNECTION, SSH_TTY, CI, CODESPACES, DISPLAY and WAYLAND_DISPLAY, and
-    # those stay out on purpose: it answers "headless" whenever stdout is not a
-    # terminal, and under CliRunner or pytest's capture it never is, so no
-    # command a test runs can reach a browser whatever they say — the tests of
-    # the detection itself pass an environ. Clearing CI would cost something:
-    # pytest reads it while it explains a failing assert, and it is why CI's
-    # log shows the whole diff rather than a truncated one.
+    # What `core.browser.open_url` launches. Its `is_headless` also reads CI,
+    # DISPLAY and WAYLAND_DISPLAY, and those stay out on purpose: it answers
+    # "headless" whenever stdout is not a terminal, and under CliRunner or
+    # pytest's capture it never is, so no command a test runs can reach a browser
+    # whatever they say — the tests of the detection itself pass an environ.
+    # Clearing CI would cost something: pytest reads it while it explains a
+    # failing assert, and it is why CI's log shows the whole diff rather than a
+    # truncated one.
     "BROWSER",
+    # `core.browser.REMOTE_MARKERS`, which `is_headless` reads as well. They are
+    # cleared for the clipboard (`core.clipboard.session_is_remote`): a suite run
+    # over SSH or in a Codespace would see every native-clipboard test's copy as
+    # remote, and skip the tool it asserts was run.
+    "SSH_CONNECTION",
+    "SSH_TTY",
+    "CODESPACES",
     # The CI test bed's switches. An operator who has them exported would
     # otherwise run the suite's hooks against THEIR endpoint, with THEIR
     # token — measured once: four real POSTs to a listener during a green
@@ -330,6 +337,16 @@ AMBIENT_ENV_VARS = (
     "EDITOR",  # core.editor: a seam that escapes its patch launches the real one
     "VISUAL",  # same
     "TERM",  # rendering assertions vary by terminal
+    # What a copy's toast says becomes of an OSC 52 (`core.clipboard.osc52_terminal`):
+    # the tests that ask it, with the real classifier back, would read the terminal
+    # that ran the suite — Terminal.app's "did not reach the clipboard", or kitty's
+    # "copied" where an unnamed terminal's hedge is asserted. TMUX and TERM, which it
+    # reads too, are above.
+    "TERM_PROGRAM",
+    "LC_TERMINAL",
+    "KITTY_WINDOW_ID",
+    "WT_SESSION",
+    "STY",
     "TMUX_TMPDIR",  # core.tmux socket path
     "TMUX",  # services.fleet: shutdown's "inside the fleet's own server" guard
     # How a terminal renders. Read by the libraries rather than by `src/`, which
@@ -583,6 +600,30 @@ def no_real_keychain(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     core.forget_keychain_reads()
     yield
     core.forget_keychain_reads()
+
+
+@pytest.fixture(autouse=True)
+def no_native_clipboard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never write the clipboard of the machine the suite runs on.
+
+    On a local session every copy in the TUI also runs the platform's clipboard tool
+    (``core.clipboard.local_writer``): ``pbcopy`` on a Mac, ``wl-copy`` on a Wayland
+    desktop. Left to it, the pane tests would overwrite the developer's clipboard
+    hundreds of times, and each copy's toast would wait on a real process. Here a copy
+    carries OSC 52 alone, to a terminal known to take it (``osc52_terminal``), so its
+    toast is the caller's own "copied …" that the gesture tests assert, raised at once
+    (``cached_writer`` says no tool, so nothing waits on the clipboard thread). The
+    tests of the native route and of the other terminals put the real functions back,
+    beside a fake tool on PATH (tests/fake_clipboard.py). ``native_writer`` is the search
+    inside tmux, where only the remote question is asked again at each copy.
+    """
+    from aisquare.core import clipboard
+
+    clipboard.forget_writer()
+    monkeypatch.setattr(clipboard, "local_writer", lambda: None)
+    monkeypatch.setattr(clipboard, "native_writer", lambda: None)
+    monkeypatch.setattr(clipboard, "cached_writer", lambda: None)
+    monkeypatch.setattr(clipboard, "osc52_terminal", lambda env: "accepts")
 
 
 @pytest.fixture(autouse=True)

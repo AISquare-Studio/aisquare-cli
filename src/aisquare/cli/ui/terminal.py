@@ -75,6 +75,10 @@ and one that ends or is killed send its panes to polling at once; one that
 answers nothing for :attr:`CONTROL_TIMEOUT` is killed when an idle tick notices,
 1.0 to 1.5 s after the oldest command waiting was sent. A control command that
 fails sends that pane to polling until its next attach. Logged, never toasted.
+Input the client ended with unanswered is neither lost nor doubled: each input
+sets the pane's ``@asq-sent`` stamp in its own chain, and what the stamp says tmux
+never ran is sent again by polling, in order, ahead of what was typed meanwhile
+(:meth:`TerminalPane._recover_input`).
 A server whose client ended is offered a new one after :data:`CONTROL_RESTART`;
 one whose client never answered, or wedged, after :data:`CONTROL_RETRY`; one
 whose client was plainly detached — its session destroyed, the last agent of the

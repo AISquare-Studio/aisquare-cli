@@ -368,6 +368,29 @@ def test_inside_the_user_s_tmux_its_last_attach_decides(
     assert asked == [["tmux", "show-environment", "SSH_CONNECTION"]]
 
 
+@pytest.mark.parametrize(
+    ("said", "remote"),
+    [
+        ("-SSH_CONNECTION\n", False),  # attached at the machine since
+        ("SSH_CONNECTION=10.0.0.3 40000 10.0.0.1 22\n", True),
+        (None, True),  # tmux says nothing: the process's own variables are all there is
+    ],
+    ids=["attached-locally-since", "attached-over-ssh", "tmux-says-nothing"],
+)
+def test_a_tmux_created_over_ssh_is_local_once_tmux_says_its_last_attach_was(
+    said: str | None, remote: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #266, round 3: asq started in a tmux created over SSH keeps SSH's variables
+    for good, and they decided before tmux was asked. Attached later at the Mac itself,
+    every copy went to OSC 52 alone, which Terminal.app drops: #66 again."""
+    monkeypatch.setattr(clipboard, "_ask", lambda argv: said)
+    monkeypatch.setattr(clipboard, "_under_ssh_server", lambda pid=None: True)  # not asked
+    env = {"TMUX": "/tmp/tmux-1/default,1,0", "SSH_CONNECTION": "10.0.0.2 52144 10.0.0.1 22"}
+    assert clipboard.session_is_remote(env) is remote
+    assert clipboard.session_is_remote({**env, "SSH_TTY": "/dev/pts/3"}) is remote
+    assert clipboard.session_is_remote({**env, "CODESPACES": "true"}), "a Codespace is remote"
+
+
 def test_inside_the_user_s_tmux_the_writer_is_never_taken_from_the_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

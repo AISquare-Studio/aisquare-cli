@@ -37,7 +37,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   A tool that fails is not run again for a minute, so a broken one doesn't hold
   up each copy's toast.
   On a remote session (over SSH, under `sudo` or `su` there, in a tmux last
-  attached over SSH, or in a Codespace) OSC 52 is the only route. The toast says
+  attached over SSH, or in a Codespace) OSC 52 is the only route. Inside tmux,
+  tmux's word on its last attach decides, so a tmux created over SSH and
+  attached at the machine since is local. The toast says
   "copied" only when the copy can have landed: the native tool took it, or OSC
   52 went to a terminal known to take it. In Terminal.app a copy only
   OSC 52 carried says it did not reach the clipboard, and how to select with the

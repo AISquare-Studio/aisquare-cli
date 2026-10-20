@@ -56,6 +56,10 @@ tool installed while the app runs is found without a restart."""
 ASK_TIMEOUT = 1.0
 """Seconds ``tmux`` or ``ps`` gets to answer a question about this session (:func:`_ask`)."""
 
+_ATTACH_MARKERS = ("SSH_CONNECTION", "SSH_TTY")
+"""The ``REMOTE_MARKERS`` that name the client a session started under, which a multiplexer's
+reattach leaves stale; the others say where the machine itself is."""
+
 _SSH_SERVERS = frozenset({"sshd", "sshd-session", "sshd-auth", "mosh-server", "dropbear"})
 """The command names of the servers a remote login hangs from."""
 
@@ -110,13 +114,21 @@ def session_is_remote(env: Mapping[str, str]) -> bool:
     while the ``sshd`` the login hangs from is still above this process
     (:func:`_under_ssh_server`). It asks tmux, reads ``/proc`` or runs ``ps``, so it runs
     on the clipboard thread only.
+
+    Inside tmux, tmux's answer decides whichever way it points, and the process's own SSH
+    variables only when tmux says nothing: they are as stale after a reattach in the other
+    direction. A tmux created over SSH and attached at the machine later still had them,
+    and ``pbcopy`` never ran (review of #266, round 3). A Codespace is remote whoever
+    attaches.
     """
-    if is_remote(env):
+    if any(env.get(name) for name in REMOTE_MARKERS if name not in _ATTACH_MARKERS):
         return True
     if env.get("TMUX"):
         said = _ask(["tmux", "show-environment", "SSH_CONNECTION"])
-        return said is not None and said.startswith("SSH_CONNECTION=")
-    return _under_ssh_server()
+        if said is not None:
+            return said.startswith("SSH_CONNECTION=")
+        return is_remote(env)
+    return is_remote(env) or _under_ssh_server()
 
 
 def _under_ssh_server(pid: int | None = None) -> bool:

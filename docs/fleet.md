@@ -1596,7 +1596,9 @@ and Terminal.app never. On a remote session the native tool would write the
 remote machine's clipboard, not yours, so OSC 52 is the only route: over SSH
 (`SSH_CONNECTION` or `SSH_TTY` set, or an `sshd` above `asq`, as under `sudo`
 or `su`), in a Codespace (`CODESPACES`), and in your own tmux when it was last
-attached over SSH (tmux's own `SSH_CONNECTION`, asked at each copy). The
+attached over SSH (tmux's own `SSH_CONNECTION`, asked at each copy). Inside tmux
+its answer outranks `asq`'s own SSH variables, so a tmux created over SSH and
+attached at the machine since is local. The
 toast says "copied" when the native tool took the text, or when OSC 52 was the
 only route (over SSH, or with the tool missing or failing) and the terminal is
 one known to take it: kitty, Ghostty and WezTerm by their own variables

@@ -10,8 +10,11 @@ Only plumbing lives here — no policy, no store, no Textual. The rendering tric
 the UI relies on is ``capture`` : one tmux process runs ``capture-pane -e``
 (the screen, with colours) and ``display-message`` (cursor, size, dead flag) in
 sequence, so a frame costs one fork. Input goes back through ``send-keys`` (named
-keys), ``send-keys -l`` (literal text) and ``load-buffer`` + ``paste-buffer -p``
-(bracketed paste, so the agent sees one paste and not N Enters).
+keys), ``send-keys -H`` (literal text, as hex) and ``load-buffer`` + ``paste-buffer -p``
+(bracketed paste, so the agent sees one paste and not N Enters). The pane on
+screen sends the same commands down ONE control-mode client per server instead
+(``core.tmux_control``, built from :func:`frame_commands`); this module is the
+polled path, and every other caller's.
 
 ``_tmux`` is the ONE spawn seam (``core.spawn.SEAMS``), ruled EXCLUDED and
 stripped: the server inherits the environment of whoever starts it and hands it
@@ -47,7 +50,8 @@ Verified against tmux 3.7c (``tests/test_tmux.py`` re-verifies the live ones):
   ``history_size`` silently. ``-e`` re-encodes attributes (a reset arrives as
   ``ESC[39m``, not the ``ESC[0m`` the program wrote).
 * ``-f file`` at server start SWALLOWS configuration errors: tmux queues them
-  for the first attached client, which the fleet never has, and the command
+  for the first attached client — the only one the fleet attaches is the UI's
+  control client (``core.tmux_control``), which shows no one — and the command
   exits 0. ``source-file`` on a running server reports them on stderr with
   status 1 — so that, on a throwaway server, is :meth:`TmuxServer.check_conf`.
 * ``window_activity_flag`` is set the moment a window exists — before its
@@ -802,6 +806,80 @@ def _data_arg(value: str) -> str:
     return value
 
 
+def frame_bound(scrollback: int, height: int | None) -> int | None:
+    """The pane height a scrolled frame is bounded to (§6), or ``None`` for history-to-bottom.
+
+    Only a scrolled frame is bounded, and only with a height the caller saw: a live
+    frame is exactly the screen already.
+    """
+    return height if scrollback and height is not None and height > 0 else None
+
+
+def frame_commands(
+    pane_id: str, scrollback: int, height: int | None, flags: bool
+) -> tuple[list[str], list[str]]:
+    """The two commands of one frame: ``capture-pane`` and ``display-message``.
+
+    One list of arguments each, so a frame is the same two commands whichever way it
+    reaches the server: chained with ``;`` in one process (:meth:`TmuxServer.capture`),
+    or as two lines down the control client's pipe (``core.tmux_control``).
+    """
+    window = ["-E", str(height - 1 - scrollback)] if height is not None else []
+    marks = ["-F"] if flags else []
+    capture = [
+        "capture-pane", "-p", "-e", "-N", *marks, "-S", str(-scrollback), *window,
+        "-t", pane_id,
+    ]  # fmt: skip
+    return capture, ["display-message", "-p", "-t", pane_id, _FACTS_FORMAT]
+
+
+def parse_frame(
+    rows: list[str], facts_line: str, flags: bool
+) -> tuple[list[str], list[bool] | None, PaneFacts]:
+    """One frame's rows and facts line as the frame: the lines, their wrap flags, the facts."""
+    facts = _facts(facts_line)
+    if not flags:
+        return rows, None, facts
+    # ``-F`` puts the line's flags, then one space, before the line — before
+    # its escapes too (measured on 3.7c: ``W \x1b[31m…``). A blank row is
+    # ``- `` and an empty flags column never happens, so ``partition`` is
+    # exact; a flag other than ``W`` (``X`` extended cells, ``H`` hyperlinks)
+    # rides in the same column and is ignored here.
+    lines: list[str] = []
+    wrapped: list[bool] = []
+    for row in rows:
+        mark, _, text = row.partition(" ")
+        lines.append(text)
+        wrapped.append("W" in mark)
+    return lines, wrapped, facts
+
+
+def framed(
+    rows: list[str], wrapped: list[bool] | None, facts: PaneFacts, scrollback: int
+) -> Capture:
+    """The :class:`Capture` a frame's parsed rows make: one screen, at the offset tmux honoured."""
+    return Capture(
+        lines=rows[: facts.height],
+        facts=facts,
+        scrollback=min(scrollback, facts.history_size),
+        wrapped=None if wrapped is None else wrapped[: facts.height],
+    )
+
+
+def paste_buffer_name() -> str:
+    """A paste buffer name no other paste can be using (:data:`PASTE_BUFFER`)."""
+    return f"{PASTE_BUFFER}-{os.getpid()}-{next(_PASTE_SEQUENCE)}"
+
+
+def check_key_names(keys: Sequence[str]) -> None:
+    """Refuse a key no tmux key name spells — see :meth:`TmuxServer.send_keys`."""
+    for key in keys:
+        if not key or any(
+            char.isspace() or unicodedata.category(char) in ("Cc", "Cs") for char in key
+        ):
+            raise TmuxError(f"{key!r} is not a tmux key name")
+
+
 DEFAULT_WINDOW_WIDTH = 120
 DEFAULT_WINDOW_HEIGHT = 40
 """The geometry a window is born with when nobody says (#149).
@@ -856,6 +934,7 @@ class TmuxServer:
         conf: Path | None = None,
         runner: Runner | None = None,
         path: Path | None = None,
+        control: bool | None = None,
     ) -> None:
         self.socket = socket
         self.path = path
@@ -864,6 +943,9 @@ class TmuxServer:
         self._binary = binary
         self._conf = conf
         self._runner: Runner = runner or _tmux
+        self._control = control
+        """Whether a control-mode client (``core.tmux_control``) may be started on this
+        server — ``None`` decides by the runner (:attr:`control_capable`)."""
         #: The bundled conf once this instance has verified it on disk. A frame
         #: is one tmux command, and re-reading the file for each of twenty
         #: frames a second bought nothing: tmux reads it only when the server
@@ -889,6 +971,17 @@ class TmuxServer:
         except TmuxUnavailable:
             return False
         return True
+
+    @property
+    def control_capable(self) -> bool:
+        """Whether a control-mode client may be started on this server.
+
+        Said when the handle is made (``control=``); otherwise only a handle that runs
+        the real tmux (:func:`_tmux`) says yes. A test's fake :data:`Runner` plays tmux
+        for the commands it is handed and has no ``tmux -C`` behind it, so a pane on
+        one polls, as every pane did before the control client.
+        """
+        return self._runner is _tmux if self._control is None else self._control
 
     def version(self) -> tuple[int, int] | None:
         """The version of the tmux binary on PATH, or ``None`` when it cannot be read.
@@ -1038,7 +1131,12 @@ class TmuxServer:
         if path is None or path == self.path:
             return self
         return TmuxServer(
-            self.socket, binary=self._binary, conf=self._conf, runner=self._runner, path=path
+            self.socket,
+            binary=self._binary,
+            conf=self._conf,
+            runner=self._runner,
+            path=path,
+            control=self._control,
         )
 
     def run(self, *args: str, stdin: bytes | None = None) -> str:
@@ -1585,17 +1683,11 @@ class TmuxServer:
         version, because an unknown flag fails the whole frame.
         """
         scrollback = max(0, scrollback)
-        bound = height if scrollback and height is not None and height > 0 else None
+        bound = frame_bound(scrollback, height)
         rows, wrapped, facts = self._frame(pane_id, scrollback, bound, flags)
         if bound is not None and len(rows) < facts.height:
             rows, wrapped, facts = self._frame(pane_id, scrollback, None, flags)
-        effective = min(scrollback, facts.history_size)
-        return Capture(
-            lines=rows[: facts.height],
-            facts=facts,
-            scrollback=effective,
-            wrapped=None if wrapped is None else wrapped[: facts.height],
-        )
+        return framed(rows, wrapped, facts, scrollback)
 
     def capture_history(self, pane_id: str, *, history: int) -> Capture:
         """Scrollback PLUS the live screen, oldest row first, in ONE contiguous frame.
@@ -1623,29 +1715,10 @@ class TmuxServer:
     def _frame(
         self, pane_id: str, scrollback: int, height: int | None, flags: bool
     ) -> tuple[list[str], list[bool] | None, PaneFacts]:
-        window = ["-E", str(height - 1 - scrollback)] if height is not None else []
-        marks = ["-F"] if flags else []
-        out = self.run(
-            "capture-pane", "-p", "-e", "-N", *marks, "-S", str(-scrollback), *window,
-            "-t", pane_id,
-            ";", "display-message", "-p", "-t", pane_id, _FACTS_FORMAT,
-        )  # fmt: skip
+        capture, display = frame_commands(pane_id, scrollback, height, flags)
+        out = self.run(*capture, ";", *display)
         body = out.rstrip("\n").split("\n")
-        rows, facts = body[:-1], _facts(body[-1])
-        if not flags:
-            return rows, None, facts
-        # ``-F`` puts the line's flags, then one space, before the line — before
-        # its escapes too (measured on 3.7c: ``W \x1b[31m…``). A blank row is
-        # ``- `` and an empty flags column never happens, so ``partition`` is
-        # exact; a flag other than ``W`` (``X`` extended cells, ``H`` hyperlinks)
-        # rides in the same column and is ignored here.
-        lines: list[str] = []
-        wrapped: list[bool] = []
-        for row in rows:
-            mark, _, text = row.partition(" ")
-            lines.append(text)
-            wrapped.append("W" in mark)
-        return lines, wrapped, facts
+        return parse_frame(body[:-1], body[-1], flags)
 
     # --- input --------------------------------------------------------------------------
 
@@ -1672,11 +1745,7 @@ class TmuxServer:
         """
         if not keys:
             return
-        for key in keys:
-            if not key or any(
-                char.isspace() or unicodedata.category(char) in ("Cc", "Cs") for char in key
-            ):
-                raise TmuxError(f"{key!r} is not a tmux key name")
+        check_key_names(keys)
         self.run("send-keys", "-t", pane_id, "--", *(_data_arg(key) for key in keys))
 
     def send_literal(self, pane_id: str, text: str) -> None:
@@ -1735,7 +1804,7 @@ class TmuxServer:
         """
         if not text:
             return
-        buffer_name = f"{PASTE_BUFFER}-{os.getpid()}-{next(_PASTE_SEQUENCE)}"
+        buffer_name = paste_buffer_name()
         try:
             self.run("load-buffer", "-b", buffer_name, "-", stdin=text.encode("utf-8"))
         except TmuxTimedOut as exc:

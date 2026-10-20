@@ -1061,7 +1061,8 @@ def needs_from_agent(
        gpt-6-luna for lower credit usage?`` after a turn's ``Stop`` and ``Implement this
        plan?`` after a Plan-mode turn's (measured on 0.162.1).
        Before rules 6, 9 and 10, whose answers are words and an Enter typed at the prompt,
-       into the dialog while it is up. An agent whose adapter reads none is never asked;
+       into the dialog while it is up. An agent whose adapter reads none is never asked, nor
+       one in a turn, as its board and its listing both read it ``working``;
     6. no pending tool, and the newest record an interruption later than the session's last
        hook, or one only Claude Code's own records follow (a local or ``!`` command run at
        the prompt since, which fires no hook either) → ``interrupted``, whatever the row
@@ -1180,7 +1181,10 @@ def needs_from_agent(
     asked = asking if call is None else None
     drawn = None if asked is None else _needs_drawn_dialog(screen)
     # Rule 5a: a dialog no hook reported, which words typed by rules 6, 9 and 10 would answer.
-    shown = None if pending or attention else _needs_screen_dialog(agent, screen)
+    # None is drawn while a turn runs, so the screen is not captured then (review r16 of
+    # #113, 6/8): a row with no session yet (its folder trust, its hook review) is read.
+    turning = status.state == "working" and session is not None and session.state == "working"
+    shown = None if pending or attention or turning else _needs_screen_dialog(agent, screen)
     if shown is not None:
         return [_needs_screen_dialog_item(status, shown, project=project, name=name, now=now)]
     if pending:

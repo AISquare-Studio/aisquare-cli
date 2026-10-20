@@ -12,6 +12,7 @@ codex.json``). A Claude Code row is the control: its screen is never read for th
 
 from __future__ import annotations
 
+import json
 import textwrap
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -26,10 +27,13 @@ from aisquare.services.remote_server import Runtime, build_app
 from tests.remote_kit_helpers import base, make_client, unlock
 from tests.test_remote_needs import FakeTmux
 from tests.test_remote_needs_codex import (  # noqa: F401 - fixtures, by name
+    ROLLOUT,
     SCREENS,
     _codex_agent,
     _moment,
+    _moved,
     _stamp,
+    _write,
     project,
     runtime,
     tmux,
@@ -294,3 +298,64 @@ def test_a_plan_proposed_in_plan_mode_is_its_implement_dialogs_card(
     (card,) = _cards(now)
 
     assert (card.kind, card.excerpt, card.answers) == ("permission", "Implement this plan?", ())
+
+
+# --- a turn running: no dialog to look for ------------------------------------------------------
+
+
+def _screens_read(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The labels whose pane the scan captures (``_needs_screen_read``), once each a time."""
+    read: list[str] = []
+    screen = remote_needs._needs_screen_read
+
+    def needs_screen_read(status: FleetAgentStatus) -> list[str] | None:
+        read.append(status.agent.label)
+        return screen(status)
+
+    monkeypatch.setattr(remote_needs, "_needs_screen_read", needs_screen_read)
+    return read
+
+
+def test_a_codex_mid_turn_with_no_call_pending_has_its_screen_read_for_no_dialog(
+    tmp_path: Path,
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    tmux: FakeTmux,  # noqa: F811
+) -> None:
+    """Review r16 of #113, 6/8: rule 5a captured the pane of every Codex with no call pending
+    and no bell on every 3 s scan, one thinking between its calls too, and none of the
+    dialogs it looks for is drawn while a turn runs. Its board and its listing say a turn
+    runs (``working``): no capture."""
+    now = datetime.now(UTC)
+    # The measured session's second turn, its prompt written and no call made yet.
+    lines = ROLLOUT.read_text(encoding="utf-8").splitlines()[:19]
+    records = _moved([json.loads(line) for line in lines], now - timedelta(seconds=2))
+    rollout = _write(tmp_path / "rollout-thinking.jsonl", records)
+    _codex_agent(
+        project, state="working", seen=now - timedelta(seconds=2), born=now - timedelta(hours=1),
+        rollout=rollout,
+    )  # fmt: skip
+    tmux.screen = list(SCREENS["a turn running"])
+    read = _screens_read(monkeypatch)
+
+    assert _cards(now) == []
+    assert read == []
+
+
+def test_a_fresh_codex_that_reads_working_at_its_folder_trust_question_is_still_read(
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    tmux: FakeTmux,  # noqa: F811
+) -> None:
+    """The control: a Codex with no board session reads ``working`` while its pane prints
+    (SMOKE7), and its first dialogs come before any hook. Its screen is read, and the card
+    is made."""
+    now = datetime.now(UTC)
+    _fresh(project, now=now)
+    tmux.screen, tmux.quiet_for = list(TRUST), 1
+    read = _screens_read(monkeypatch)
+
+    (card,) = _cards(now)
+
+    assert card.reason == "t5 shows a dialog that needs you"
+    assert read == ["t5"]

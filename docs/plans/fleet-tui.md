@@ -145,7 +145,11 @@ started when a pane first goes on screen with a live frame:
   `%output` is only the signal that a frame is due; its bytes are never read into
   a screen (that would be option A).
 - *It follows the pane on screen.* tmux sends `%output` only for the session a
-  client is attached to, so the client moves there (`switch-client -t %pane`).
+  client is attached to, so the client moves there. It switches by session
+  (`switch-client -t $id`), never by `%pane`: a pane target also makes that pane's
+  window the session's current window. Every client attached to the session
+  shares that window, so a `fleet attach` in another terminal would be moved,
+  keys and all. A pane in a non-current window still sends `%output`.
   Every other pane of that session is muted with `refresh-client -A %N:pause`.
   `:off`, the mute this paragraph first named, **freezes** the pane when every
   attached client is a control client that turned it off: tmux stops reading it,

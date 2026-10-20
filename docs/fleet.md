@@ -1524,10 +1524,12 @@ the control client's pipe (or, polling, one process each), so `ctrl+X ctrl+K`
 and vim's `gg`/`dd` arrive in order. *The UI's pipe to tmux:* the pane on screen
 renders and takes input over ONE `tmux -C` client per server. It is attached to
 that pane's session, and every other pane there is paused for it, so a hidden
-agent sends it nothing and keeps running. tmux counts it as an attached,
-focused client: with `focus-events on`, an agent that asked for focus reports
-is told it has focus while it is on screen, and that it lost it when you move
-to another agent's session or quit `asq`. A key reaches the screen in about a
+agent sends it nothing and keeps running. It never changes which window is the
+session's current one, so a `fleet attach` open on the same project stays where
+you left it. tmux counts it as an attached, focused client, like a `fleet attach`
+client on that project. With `focus-events on`, the agent in the project's
+current window is told it has focus while `asq` shows that project, and that it
+lost focus when you move to another project or quit `asq`. A key reaches the screen in about a
 millisecond (it was 60 ms or more polled). On tmux older than 3.2, or if that
 client cannot start or ends, the pane polls tmux as before, without a word on
 screen. *Escape hatch:* `[fleet] escape_key` (default `f12`) is

@@ -12,9 +12,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   trackpad gesture scrolls while you make it instead of when you stop. The pane
   on screen now talks to tmux through one control-mode client per server
   (`tmux -C`) instead of a tmux process per key and per frame. Agents you aren't
-  looking at send that client nothing and keep running as before, and no window
-  changes size. tmux counts the client as attached and focused, so an agent
-  that asks for focus events is told when it's on screen and when you leave it.
+  looking at send that client nothing and keep running as before. No window
+  changes size, and a `fleet attach` open on the same project stays on the
+  window it was on. tmux counts the client as attached and focused, as it counts
+  a `fleet attach` client, so the agent in the project's current window is told
+  it has focus while you're on that project, if it asks for focus events.
   On tmux older than 3.2, or if that client can't start or stops, the pane polls
   tmux as before. Polling is quicker too: typing no longer holds frames back
   until you stop, and an echo that takes longer than 50 ms no longer waits half a

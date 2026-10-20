@@ -435,7 +435,10 @@ the same contract `fleet shutdown` and `fleet reap` keep for the same fact.
 empty prompt (kept under an empty composer through a turn) is showing a dialog or
 a draft that `/exit` and its Enter would answer, so nothing is
 typed: the window is killed at once and the output says why (`killed` under
-`--json`).
+`--json`). The automatic usage-limit hand-over, which nobody watches, presses Esc
+there first (the agent's `dismiss_key`), and types `/exit` once the empty prompt
+is back, so the agent's `SessionEnd` ends the session it leaves; a screen Esc does
+not bring back is killed as above.
 
 **When tmux cannot confirm the pane died** — a wedged server, a `tmux` that
 left `PATH`, a socket that is there but refuses this user (`Permission denied`)
@@ -932,7 +935,11 @@ details):
   **fresh** onto another account: its thread lives under the old `CODEX_HOME` and
   cannot be resumed from another, so the replacement starts with the hand-off
   prompt and takes the claims over at its first start. A target on the home the
-  thread ran under resumes it.
+  thread ran under resumes it. At its limit, a Codex whose operator keeps the
+  *Switch to gpt-6-luna?* dialog on (`[notice] hide_rate_limit_model_nudge =
+  false`) shows that dialog under the error. The automatic hand-over answers it
+  with Esc (keep the current model) before its `/exit`, so the session it leaves
+  ends, and `doctor` stops listing it as parked.
 - **Restart resumes the thread.** `fleet restart` (and the agent view's Restart)
   relaunches a Codex agent as `codex <options> resume <thread id> -- <continue
   line>`, the thread its first hook bound, on the same account; a row whose agent

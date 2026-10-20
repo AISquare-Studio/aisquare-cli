@@ -469,6 +469,20 @@ adapter.**
   only when its screen shows its empty prompt, whatever its hooks say, and a
   board note says why. `fleet stop` types no `/exit` into a dialog or a draft: it
   kills the window and says so.
+- The automatic usage-limit hand-over of a Codex agent at that dialog ends the
+  session it leaves. With the dialog kept on (`[notice]
+  hide_rate_limit_model_nudge = false`), Codex opens it under a turn that hit
+  the limit. The hand-over killed the window there with no `/exit`, so Codex's
+  `SessionEnd` never ran: the old session stayed ⏳ limited on the board, and
+  `aisquare doctor` warned of an agent parked on a Codex usage limit until the
+  reset while the agent ran on the account with room. Now the hand-over
+  presses Esc first, which leaves the dialog on the current model, then types
+  `/exit` at the prompt that comes back, as Remote's Switch with
+  `dismiss_dialog` does. A screen Esc does not bring back to the empty prompt
+  is killed as before, and nothing else is typed into it. A `fleet stop`,
+  `fleet switch` or `fleet restart` you run still kills the window at a
+  dialog. The key is the adapter's (`dismiss_key`), so a new agent names its
+  own.
 - A usage error under `python -m aisquare` names the program `aisquare`. A
   command a sandboxed Codex agent ran through its broker said *Usage: python -m
   aisquare task …*, which the agent cannot type.

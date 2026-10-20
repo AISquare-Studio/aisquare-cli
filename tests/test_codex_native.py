@@ -3337,7 +3337,21 @@ def test_real_codex_after_a_pad_esc_takes_interrupt_and_tell_and_opens_no_transc
                     "the turn's Stop",
                     pane,
                 )
-                until(lambda: "? for shortcuts" in screen(pane), 20, "its idle prompt", pane)
+                # Its Stop hook says waiting before the turn is over on screen, and an Esc then
+                # stops the turn instead: the pad's Esc goes once Codex is at rest, as a human
+                # sees it, its status line gone and its pane quiet.
+                capabilities = get_adapter("codex").capabilities
+                idle, working = capabilities.idle_on_screen, capabilities.working_on_screen
+                assert idle is not None and working is not None
+
+                def at_rest() -> bool:
+                    rows = screen(pane).splitlines()
+                    facts = srv.pane_facts(pane)
+                    output = None if facts is None else facts.last_output
+                    quiet = output is not None and datetime.now(UTC) - output > timedelta(seconds=2)
+                    return idle(rows) and not working(rows) and quiet
+
+                until(at_rest, 30, "at rest after its turn", pane)
 
                 body = {"agent": coder.label, "project": project.id, "keys": ["Escape"]}
                 pressed = phone.post(f"{at}/send-keys", json=body)

@@ -126,13 +126,12 @@ def drive(
     scenario: Callable[[Pilot[None], Host], Coroutine[Any, Any, T]],
     *,
     refresh_seconds: float = 60.0,
-    size: tuple[int, int] = (120, 50),
 ) -> T:
     """Run ``scenario`` against a mounted Project view and return what it observed."""
 
     async def run() -> T:
         host = Host(project, refresh_seconds=refresh_seconds)
-        async with host.run_test(size=size) as pilot:
+        async with host.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             return await scenario(pilot, host)
 
@@ -782,60 +781,6 @@ def test_refresh_status_pushes_the_managers_state(project: ProjectInfo) -> None:
     assert attached == "%11"  # the manager's pane, not the coder's
     assert button_back is True and pane_after is False  # no manager in the snapshot → button
     assert "no live tmux session" in attach_after  # the coder has no session to attach to
-
-
-def test_the_manager_tab_cuts_a_long_detail_on_one_row_as_the_agent_view_does(
-    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The owner's ruling on #267: the Manager tab's info line behaves as the Agent view's
-    header does. A long detail — the folder-trust prompt's names a command and a path — is
-    cut on the line's one row with ``…``, the account and its use whole before it, where it
-    used to wrap the line onto two or three rows. The dim hint keeps its own second row, and
-    the prose that says there is no manager still wraps."""
-    from aisquare.services import claude_accounts as accounts_service
-
-    monkeypatch.setattr(accounts_service, "slot_labels", lambda store=None: {2: "work"})
-    manager = fake_agent(project, pane_id="%11").model_copy(update={"account_slot": 2})
-    session = TeamSession(
-        id="s-manager",
-        project_id=project.id,
-        role="manager",
-        started_at=manager.created_at,
-        last_seen_at=manager.created_at,
-        model="claude-opus-5-5",
-        effort="xhigh",
-    )
-    status = FleetAgentStatus(
-        agent=manager,
-        state="attention",
-        detail=fleet_service.trust_prompt_detail(project.root / "a [deep] folder" / "repo"),
-        session=session,
-    )
-
-    def rows(widget: Widget) -> list[str]:
-        width, height = widget.outer_size
-        return [strip.text.rstrip() for strip in widget.render_lines(Region(0, 0, width, height))]
-
-    async def scenario(pilot: Pilot[None], host: Host) -> tuple[list[str], list[str]]:
-        view = host.query_one(ProjectView)
-        view.show_usage({2: 42.0})
-        view.refresh_status([status])
-        await settle(pilot)
-        header = host.query_one("#manager-header", Static)
-        with_manager = rows(header)
-        view.refresh_status([])
-        await settle(pilot)
-        return with_manager, rows(header)
-
-    with_manager, no_manager = drive(project, scenario, size=(90, 20))
-    assert len(with_manager) == 2, with_manager  # the line on one row, the hint on the next
-    line, hint = with_manager
-    assert "🔔 attention  work · 42%  claude-opus-5-5 xhigh  waiting" in line, line  # whole
-    assert line.endswith("…") and "%11" not in line, line  # the detail is what gives way
-    assert hint.strip().startswith("type to the manager"), hint
-    # No manager: the prose wraps onto as many rows as it needs, and nothing is cut.
-    assert len(no_manager) > 2 and not any(row.endswith("…") for row in no_manager)
-    assert "has no manager yet" in " ".join(no_manager)
 
 
 def test_the_manager_tab_says_the_manager_exited_and_how_to_bring_it_back(

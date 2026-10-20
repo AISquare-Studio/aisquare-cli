@@ -73,10 +73,17 @@ PANE_STYLE = "dim italic"
 """Dim, and italic so it never runs into a dim ``💤`` or ``·`` chip with nothing between."""
 
 
+LABEL_KEEP = 6
+"""The label characters a line too narrow for its row keeps before its ``…``: below that the
+label stays at this and the line is cut at its end as any other (the owner's ruling 3)."""
+
+
 def info_line(
     status: FleetAgentStatus,
     labels: Mapping[int, str] | None = None,
     usage: Mapping[int, float] | None = None,
+    *,
+    width: int | None = None,
 ) -> Text:
     """``🔨 coder-auth  ▶ working  dev · 87%  claude-opus-5-5 high  %4`` — one agent at a glance.
 
@@ -96,15 +103,43 @@ def info_line(
     name before them pushed them off. The detail last but the pane id: it has no bound (the
     folder-trust prompt's names a command and a path), so it is what gives way first.
 
+    ``width`` is the row's, once it has one (:class:`InfoLine`). A line wider than it gives
+    way in its LABEL first, as the sidebar's rows do: the label is ellipsised so that
+    ``<icon> <label…>  <chip> <state>  <account> · <pct>%`` and the ``…`` that cuts the rest
+    fit — a spawned agent's ``coder-01m5d34v`` pushed ``work · 42%`` off 37 cells. It keeps
+    :data:`LABEL_KEEP` characters at least; a row too narrow even then is cut at its end
+    (``plain claude · 42%`` does not fit beside ``coder-…`` there). A line that fits keeps
+    its whole label.
+
     Each field is a style of its own and no two neighbours share one, so each reads apart
     at a glance; every one is appended as data.
     """
+    label = Text(status.agent.label, style=LABEL_STYLE)
+    text, essential = _info_line(status, label, labels, usage)
+    if width is not None and text.cell_len > width:
+        # The label's room: the row, less what must stay whole after it, less one cell for
+        # the ``…`` that cuts the rest — the pane id always follows.
+        room = width - 1 - (essential - label.cell_len)
+        if label.cell_len > room:
+            label.truncate(max(room, LABEL_KEEP + 1), overflow="ellipsis")
+            text, _ = _info_line(status, label, labels, usage)
+    return text
+
+
+def _info_line(
+    status: FleetAgentStatus,
+    label: Text,
+    labels: Mapping[int, str] | None,
+    usage: Mapping[int, float] | None,
+) -> tuple[Text, int]:
+    """:func:`info_line` with ``label`` as given, and the cells up to the end of what a narrow
+    row keeps whole: the label, the state, and the account with its use."""
     agent = status.agent
     session = status.session
     chip, chip_style = STATE_CHIP.get(status.state, ("·", "dim"))
     text = Text(no_wrap=True, overflow="ellipsis")
     text.append(f"{ROLE_ICON.get(agent.role, '🤖')} ")
-    text.append(agent.label, style=LABEL_STYLE)
+    text.append_text(label)
     text.append(SEPARATOR)
     exited = status.state == "exited" and agent.exit_status is not None
     code = f"({agent.exit_status})" if exited else ""
@@ -118,6 +153,7 @@ def info_line(
         if percent is not None:
             text.append(" · ", style="dim")
             text.append_text(session_percent_text(percent))
+    essential = text.cell_len
     if session is not None and session.model:
         text.append(SEPARATOR)
         text.append(session.model, style=MODEL_STYLE)
@@ -130,7 +166,46 @@ def info_line(
         text.append(status.detail, style=DETAIL_STYLE)
     text.append(SEPARATOR)
     text.append(agent.pane_id, style=PANE_STYLE)
-    return text
+    return text, essential
+
+
+class InfoLine(Static):
+    """A header that paints :func:`info_line` fitted to its own width, and again on a resize.
+
+    The Agent view's header and the Manager tab's both: one widget, so the two give way
+    alike. :meth:`show_text` paints anything else (the Manager tab's no-manager prose), and
+    a resize leaves that as it is.
+    """
+
+    def __init__(self, *, id: str | None = None) -> None:
+        super().__init__(id=id)
+        self._line: tuple[FleetAgentStatus, Mapping[int, str], Mapping[int, float]] | None = None
+        self._painted: tuple[object, ...] | None = None
+
+    def show_line(
+        self, status: FleetAgentStatus, labels: Mapping[int, str], usage: Mapping[int, float]
+    ) -> None:
+        """Paint ``status``'s info line, and keep it fitted to the width from here on."""
+        self._line = (status, labels, usage)
+        self._paint()
+
+    def show_text(self, text: Text) -> None:
+        """Paint ``text`` as it is; a resize does not touch it."""
+        self._line = self._painted = None
+        self.update(text)
+
+    def on_resize(self) -> None:
+        self._paint(layout=False)
+
+    def _paint(self, *, layout: bool = True) -> None:
+        if self._line is None:
+            return
+        width = self.content_size.width or None
+        wanted = (*self._line, width)
+        if wanted != self._painted:
+            self._painted = wanted
+            status, labels, usage = self._line
+            self.update(info_line(status, labels, usage, width=width), layout=layout)
 
 
 class SlotLabels:
@@ -258,12 +333,10 @@ class AgentView(Vertical):
         self.usage: Mapping[int, float] = usage or {}
         """Slot → session percent USED, as the shell's slow headroom read last handed it."""
 
-    def _info(self) -> Text:
-        return info_line(self.status, self.labels.labels, self.usage)
-
     def _paint_info(self) -> None:
         if self.is_mounted:
-            self.query_one("#agent-header", Static).update(self._info())
+            header = self.query_one("#agent-header", InfoLine)
+            header.show_line(self.status, self.labels.labels, self.usage)
 
     @on(Worker.StateChanged)
     def _labels_answered(self, event: Worker.StateChanged) -> None:
@@ -278,7 +351,9 @@ class AgentView(Vertical):
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="agent-bar"):
-            yield Static(self._info(), id="agent-header")
+            header = InfoLine(id="agent-header")
+            header.show_line(self.status, self.labels.labels, self.usage)
+            yield header
             # Guarded (``click_guard``): a click that was aimed at what this view replaced
             # must not stop or restart the agent it shows instead.
             yield GuardedButton("Stop", id="agent-stop", compact=True)

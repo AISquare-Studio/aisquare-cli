@@ -566,17 +566,20 @@ def test_the_session_use_rides_the_slow_headroom_read_never_the_tick(
     assert row.rstrip().endswith("▶ #2·64%")
 
 
-def test_in_a_90_column_terminal_the_agent_view_keeps_the_account_and_its_use_whole(
+def test_in_a_90_column_terminal_the_agent_view_gives_way_in_its_label_first(
     tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The owner's second ruling on #267: in a 90-column terminal the Agent view's info line
-    gets about 38 cells, and the model name, which came before the account, pushed
-    ``work · 71%`` off the end. The account and its use now come right after the state; the
-    model and the effort are what the bar cuts, with ``…``."""
-    seed(tmp_path, ("prj_a", "alpha", None))
-    row = on_slot(status("prj_a", "coder-auth", "coder", "working"), 2)
+    """The owner's rulings 2 and 3 on #267, in the real app in a 90-column terminal: the Agent
+    view's info line gets about 37 cells. The account and its use come right after the state,
+    and when the line does not fit, the LABEL gives way first — the labels ``fleet spawn``
+    gives (``<role>-<task id[:8]>``) pushed ``work · 42%`` off the line — so ``<icon>
+    <label…>  <chip> <state>  <account> · <pct>%`` stays whole and the rest is cut after it.
+    The label keeps six characters; beside an unaliased ``plain claude · 42%`` or
+    ``account 4 · 42%`` even that is too wide, and the line is cut at its end. At 140
+    columns the label is whole again."""
+    seed(tmp_path, ("prj_a", "alpha", None), ("prj_b", "beta", None))
     session = TeamSession(
-        id="s-coder",
+        id="s-1",
         project_id="prj_a",
         role="coder",
         started_at=T0,
@@ -584,23 +587,122 @@ def test_in_a_90_column_terminal_the_agent_view_keeps_the_account_and_its_use_wh
         model="claude-opus-5-5",
         effort="high",
     )
-    script["prj_a"] = [row.model_copy(update={"session": session})]
-    monkeypatch.setattr(accounts_service, "slot_labels", lambda store=None: {2: "work"})
 
-    async def go(pilot: Pilot[None]) -> tuple[int, str, str]:
+    def row(
+        project_id: str, label: str, role: str, state: str, slot: int, minute: int
+    ) -> FleetAgentStatus:
+        spawned = on_slot(status(project_id, label, role, state, minute=minute), slot)
+        return spawned.model_copy(update={"session": session})
+
+    script["prj_a"] = [
+        row("prj_a", "coder-01k8zq7m", "coder", "working", 3, 1),
+        row("prj_a", "coder-01m5d34v", "coder", "working", 1, 2),
+        row("prj_a", "tester-01m5d34v", "tester", "waiting", 4, 3),
+    ]
+    script["prj_b"] = [row("prj_b", "coder-01m5d34v", "coder", "attention", 2, 1)]
+    # Slots 1 and 4 unaliased: the registry's built-in names, "plain claude" and "account 4".
+    monkeypatch.setattr(accounts_service, "slot_labels", lambda store=None: {2: "work", 3: "max"})
+
+    async def bar(pilot: Pilot[None], agent_id: str) -> tuple[int, str]:
+        app = fleet_app(pilot)
+        await pilot.click(row_for(app, agent_id))
+        await settle(app)
+        header = app.query_one(f"#agent-{agent_id} #agent-header", Static)
+        (strip,) = header.render_lines(Region(0, 0, header.outer_size.width, 1))
+        return header.content_size.width, strip.text.strip()
+
+    async def go(pilot: Pilot[None]) -> dict[str, tuple[int, str]]:
         app = fleet_app(pilot)
         await settle(app)
-        await pilot.click(row_for(app, "agt_a_coder-auth"))
+        seen = {
+            agent_id: await bar(pilot, agent_id)
+            for agent_id in (
+                "agt_a_coder-01k8zq7m",
+                "agt_a_coder-01m5d34v",
+                "agt_a_tester-01m5d34v",
+                "agt_b_coder-01m5d34v",
+            )
+        }
+        await pilot.resize_terminal(140, 30)
         await settle(app)
-        header = app.query_one("#agent-agt_a_coder-auth #agent-header", Static)
-        (strip,) = header.render_lines(Region(0, 0, header.outer_size.width, 1))
-        return header.content_size.width, strip.text, shown(header)
+        seen["wide"] = await bar(pilot, "agt_a_coder-01k8zq7m")
+        return seen
 
-    width, bar, whole = drive(go, headroom=session_use((2, 71.0)), size=(90, 30))
-    assert 34 <= width <= 42, width  # about 38 cells, as the owner measured
-    assert "claude-opus-5-5 high" in whole  # the line has the model; the bar cannot fit it
-    assert "▶ working  work · 71%" in bar, bar  # the account and its use, whole
-    assert bar.rstrip().endswith("…") and "claude-opus-5-5" not in bar, bar
+    seen = drive(
+        go, headroom=session_use((1, 42.0), (2, 42.0), (3, 42.0), (4, 42.0)), size=(90, 30)
+    )
+    widths = {width for agent_id, (width, _) in seen.items() if agent_id != "wide"}
+    assert widths == {37}, seen  # about 38 cells, as the owner measured
+    assert seen["agt_a_coder-01k8zq7m"][1] == "🔨 coder-01k8…  ▶ working  max · 42%…"
+    assert seen["agt_b_coder-01m5d34v"][1] == "🔨 coder-…  🔔 attention  work · 42%…"
+    # Too narrow even at the label's floor: the floor, then the line cut at its end.
+    assert seen["agt_a_coder-01m5d34v"][1] == "🔨 coder-…  ▶ working  plain claude …"
+    assert seen["agt_a_tester-01m5d34v"][1] == "🧪 tester…  ⏸ waiting  account 4 · 4…"
+    width, wide = seen["wide"]
+    assert width > 60 and wide.startswith("🔨 coder-01k8zq7m  ▶ working  max · 42%  claude"), wide
+
+
+def test_at_90_columns_the_manager_tab_cuts_its_info_line_and_shows_its_hint_whole(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner's ruling on #267, in the real app in a 90-column terminal (a 57-cell header):
+    the Manager tab's info line is cut on its one row with ``…``, as the Agent view's is — a
+    long detail (the folder-trust prompt's) used to wrap it over two to four rows — while the
+    dim hint under it shows whole. Under one nowrap rule for both, the hint was cut before
+    "F12 returns to the sidebar" (review of #267). With the manager gone, the prose that says
+    so wraps and nothing is cut. Acceptance (a), mounted: the Manager tab's line is the
+    manager's Agent view line, text and styles."""
+    seed(tmp_path, ("prj_a", "alpha", "amber-otter"))
+    row = on_slot(status("prj_a", "manager", "manager", "attention"), 2)
+    session = TeamSession(
+        id="s-manager",
+        project_id="prj_a",
+        role="manager",
+        started_at=T0,
+        last_seen_at=T0,
+        model="claude-opus-5-5",
+        effort="xhigh",
+    )
+    detail = fleet_service.trust_prompt_detail(tmp_path / "a [deep] folder" / "repo")
+    script["prj_a"] = [row.model_copy(update={"session": session, "detail": detail})]
+    monkeypatch.setattr(accounts_service, "slot_labels", lambda store=None: {2: "work"})
+
+    def rows(widget: Widget) -> list[str]:
+        width, height = widget.outer_size
+        lines = widget.render_lines(Region(0, 0, width, height))
+        return [strip.text.strip() for strip in lines]
+
+    async def go(pilot: Pilot[None]) -> tuple[int, list[str], list[str], bool, list[str], bool]:
+        app = fleet_app(pilot)
+        await settle(app)
+        await pilot.click(row_for(app, "agt_a_manager"))
+        await settle(app)
+        agent_header = app.query_one("#agent-agt_a_manager #agent-header", Static)
+        await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
+        await settle(app)
+        app.refresh_data()
+        await settle(app)
+        header = app.query_one("#project-prj_a #manager-header", Static)
+        hint = app.query_one("#project-prj_a #manager-hint", Static)
+        same = header.content == agent_header.content  # plain and spans alike
+        seen = header.content_size.width, rows(header), rows(hint), same
+        script["prj_a"] = []
+        app.refresh_data()
+        await settle(app)
+        return *seen, rows(header), hint.display
+
+    width, line, hint, same, gone, hint_after = drive(
+        go, headroom=session_use((2, 42.0)), size=(90, 30)
+    )
+    assert width == 57, width  # a 90-column terminal, the default sidebar
+    assert len(line) == 1, line  # the info line on one row…
+    assert line[0].startswith("🧭 manager  🔔 attention  work · 42%  claude"), line
+    assert line[0].endswith("…"), line  # …cut at its end, and the cut is said
+    assert same, "the Manager tab's line is the Agent view's, text and styles"
+    assert "F12 returns to the sidebar" in " ".join(hint), hint  # the hint, whole
+    assert " ".join(hint).startswith("type to the manager as you would to any Claude session")
+    assert len(gone) > 2 and not any(r.endswith("…") for r in gone), gone  # prose wraps
+    assert "has no manager yet" in " ".join(gone) and hint_after is False
 
 
 def test_a_project_opened_between_two_ticks_names_its_session_at_once(

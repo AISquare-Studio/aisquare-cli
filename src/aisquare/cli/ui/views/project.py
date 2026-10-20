@@ -36,7 +36,7 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.board import BoardPanel
 from aisquare.cli.ui.terminal import PANE_GONE, TerminalPane
-from aisquare.cli.ui.views.agent import SlotLabels, info_line, shown_pane
+from aisquare.cli.ui.views.agent import InfoLine, SlotLabels, shown_pane
 from aisquare.cli.ui.views.explainability import ExplainabilityView
 from aisquare.cli.ui.views.settings import SettingsView
 from aisquare.core.tmux import TmuxServer
@@ -48,21 +48,8 @@ SPAWN_WORKER = "spawn-manager"
 """Name of the worker that starts the manager; how its result is told apart."""
 
 MANAGER_HINT = "type to the manager as you would to any Claude session · F12 returns to the sidebar"
-
-
-def manager_text(
-    status: FleetAgentStatus,
-    labels: Mapping[int, str] | None = None,
-    usage: Mapping[int, float] | None = None,
-) -> Text:
-    """The Manager tab's header: the agent info line every Agent view shows
-    (:func:`~aisquare.cli.ui.views.agent.info_line`), then one dim line of how to use the tab.
-
-    The tmux attach command is not here: it is the project's, and the Settings tab shows it.
-    """
-    text = info_line(status, labels, usage)
-    text.append("\n" + MANAGER_HINT, style="dim")
-    return text
+"""The dim line under the manager's info line: how to use the tab. The tmux attach command is
+not here: it is the project's, and the Settings tab shows it."""
 
 
 def no_manager_text(
@@ -120,14 +107,18 @@ def exited_manager(agents: Sequence[FleetAgentStatus]) -> FleetAgentStatus | Non
 class ManagerTab(Vertical):
     """The manager's live session — or the button that starts one."""
 
-    # ``-info``: the header shows the manager's info line, then the hint, and is fitted as
-    # the Agent view's header is — each line on its own row, cut at its end with ``…``, so a
-    # long detail gives way rather than wrapping the line onto two or three rows. The prose
-    # that says there is no manager wraps, as it always did.
+    # ``-info``: the header shows the manager's info line
+    # (:class:`~aisquare.cli.ui.views.agent.InfoLine`, the Agent view's) and is fitted as the
+    # Agent view's header is — one row, its label giving way first, then cut at its end with
+    # ``…``, so a long detail gives way rather than wrapping the line onto two or three rows.
+    # The hint is a widget of its own and wraps: under the one rule, a 57-cell header (a
+    # 90-column terminal) cut it before "F12 returns to the sidebar" (review of #267). The
+    # prose that says there is no manager wraps, as it always did.
     DEFAULT_CSS = """
     ManagerTab { height: 1fr; }
     ManagerTab #manager-header { height: auto; padding: 0 1; }
     ManagerTab #manager-header.-info { text-wrap: nowrap; text-overflow: ellipsis; }
+    ManagerTab #manager-hint { height: auto; padding: 0 1; }
     ManagerTab #start-manager { margin: 1 1; }
     ManagerTab #manager-pane { height: 1fr; }
     """
@@ -150,7 +141,10 @@ class ManagerTab(Vertical):
         """Slot → session percent USED, as the shell's slow headroom read last handed it."""
 
     def compose(self) -> ComposeResult:
-        yield Static(id="manager-header")
+        yield InfoLine(id="manager-header")
+        hint = Static(Text(MANAGER_HINT, style="dim"), id="manager-hint")
+        hint.display = False
+        yield hint
         yield Button("Start manager", id="start-manager", variant="primary")
         yield TerminalPane(
             None, escape_key=self.escape_key, placeholder=PANE_GONE, id="manager-pane"
@@ -173,8 +167,8 @@ class ManagerTab(Vertical):
     def _paint_manager(self) -> None:
         """Repaint the header for the manager on show — the no-manager text is left as it is."""
         if self.status is not None and self.is_mounted:
-            header = self.query_one("#manager-header", Static)
-            header.update(manager_text(self.status, self.labels.labels, self.usage))
+            header = self.query_one("#manager-header", InfoLine)
+            header.show_line(self.status, self.labels.labels, self.usage)
 
     def refresh_from_service(self) -> None:
         """Ask the fleet service who the manager is (the standalone path)."""
@@ -209,18 +203,19 @@ class ManagerTab(Vertical):
         manager, and this tab showed that one and typed into it.
         """
         self.status = status
-        header = self.query_one("#manager-header", Static)
+        header = self.query_one("#manager-header", InfoLine)
         button = self.query_one("#start-manager", Button)
         pane = self.query_one("#manager-pane", TerminalPane)
         header.set_class(status is not None, "-info")
+        self.query_one("#manager-hint", Static).display = status is not None
         if status is None:
-            header.update(no_manager_text(self.project, unavailable, exited=exited))
+            header.show_text(no_manager_text(self.project, unavailable, exited=exited))
             button.display = True
             pane.display = False
             if pane.pane_id is not None:
                 pane.attach(None)
             return
-        header.update(manager_text(status, self.labels.labels, self.usage))
+        header.show_line(status, self.labels.labels, self.usage)
         self.labels.ask(self)
         button.display = False
         pane.display = True

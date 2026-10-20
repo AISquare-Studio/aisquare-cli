@@ -22,7 +22,6 @@ from rich.text import Text
 
 from aisquare.cli.ui.sidebar import GREEN, RED, YELLOW, agent_row_text, session_percent_text
 from aisquare.cli.ui.views.agent import info_line
-from aisquare.cli.ui.views.project import MANAGER_HINT, manager_text
 from aisquare.models import ClaudeAccount, ClaudeUsage, FleetAgent, FleetAgentStatus, TeamSession
 from aisquare.services import claude_accounts as accounts_service
 
@@ -91,21 +90,11 @@ def _style_of(text: Text, field: str) -> str:
 
 
 # --- one builder for both views ---------------------------------------------------------
-
-
-def test_the_manager_tabs_first_line_is_the_agent_views_info_line() -> None:
-    """Acceptance (a): the same status gives the same line, text and styles, on both."""
-    for status in (
-        _status(label="manager", role="manager", state="waiting", slot=2),
-        _status(state="exited", exit_status=1, detail="exit 1"),
-        _status(slot=None, account=None, model=None, effort=None, session=False),
-    ):
-        usage = {2: 42.0, 3: 87.0}
-        line = info_line(status, LABELS, usage)
-        first, hint = manager_text(status, LABELS, usage).split("\n")
-        assert first.plain == line.plain
-        assert first.spans == line.spans
-        assert hint.plain == MANAGER_HINT and _segments(hint) == [(MANAGER_HINT, "dim")]
+#
+# Acceptance (a) — the Manager tab's line is the Agent view's for the same status — holds by
+# construction: ``ManagerTab`` paints :func:`info_line` itself. It is checked mounted, text
+# and styles, in tests/test_ui_shell.py
+# (``test_at_90_columns_the_manager_tab_cuts_its_info_line_and_shows_its_hint_whole``).
 
 
 def test_the_info_line_reads_in_the_owners_order_with_effort_and_account() -> None:
@@ -125,6 +114,58 @@ def test_the_info_line_reads_in_the_owners_order_with_effort_and_account() -> No
         "🔨 coder-auth  🔔 attention  work · 42%  claude-opus-5-5 high  "
         "Claude needs your permission  %4"
     )
+
+
+def _cut(line: Text, width: int) -> str:
+    """What a ``nowrap`` / ``text-overflow: ellipsis`` row of ``width`` cells shows of ``line``."""
+    if line.cell_len <= width:
+        return line.plain
+    shown = line.copy()
+    shown.truncate(width, overflow="ellipsis")
+    return shown.plain
+
+
+def test_a_line_too_wide_gives_way_in_its_label_first() -> None:
+    """The owner's ruling 3 on #267: at about 37 cells (the Agent view in a 90-column
+    terminal) a spawned agent's label pushed ``max · 42%`` off the line. The label is cut
+    first, as the sidebar's rows cut theirs, so ``<icon> <label…>  <chip> <state>  <account>
+    · <pct>%`` and the ``…`` that cuts the rest fit; model, effort, detail and pane id are
+    cut after that, at the line's end. A line that fits keeps its whole label."""
+    usage = {1: 42.0, 2: 42.0, 3: 42.0, 4: 42.0}
+    labels = {2: "work", 3: "max"}  # 1 and 4 unaliased: "plain claude", "account 4"
+    coder = _status(label="coder-01k8zq7m", slot=3)
+    line = info_line(coder, labels, usage, width=37)
+    assert _cut(line, 37) == "🔨 coder-01k8…  ▶ working  max · 42%…"
+    assert line.plain.endswith("max · 42%  claude-opus-5-5 high  %4")  # the rest, there to cut
+    wide = info_line(coder, labels, usage, width=87)
+    assert wide.plain == "🔨 coder-01k8zq7m  ▶ working  max · 42%  claude-opus-5-5 high  %4"
+    assert info_line(coder, labels, usage).plain == wide.plain  # no width: the whole label
+    # A label that fits its room is not cut, though the rest is.
+    assert _cut(info_line(_status(slot=3), labels, usage, width=37), 37) == (
+        "🔨 coder-auth  ▶ working  max · 42% …"
+    )
+
+
+def test_the_label_keeps_six_characters_and_a_narrower_row_is_cut_at_its_end() -> None:
+    """Ruling 3's floor, with the labels ``fleet spawn`` gives (``<role>-<task id[:8]>``) and
+    the built-in names of unaliased accounts: ``plain claude · 42%`` cannot stay whole beside
+    even ``coder-…``, so the label stops at six characters and the line is cut at its end."""
+    usage = {1: 42.0, 2: 42.0, 4: 42.0}
+    labels = {2: "work"}
+
+    def at_37(**fields: object) -> str:
+        return _cut(info_line(_status(**fields), labels, usage, width=37), 37)  # type: ignore[arg-type]
+
+    assert at_37(label="coder-01m5d34v", slot=1) == "🔨 coder-…  ▶ working  plain claude …"
+    assert at_37(label="tester-01m5d34v", role="tester", state="waiting", slot=4) == (
+        "🧪 tester…  ⏸ waiting  account 4 · 4…"
+    )
+    assert at_37(label="coder-01m5d34v", state="attention", slot=2) == (
+        "🔨 coder-…  🔔 attention  work · 42%…"
+    )
+    # The manager's label is shorter than the floor: never cut.
+    manager = _status(label="manager", role="manager", state="waiting", slot=1)
+    assert info_line(manager, labels, usage, width=37).plain.startswith("🧭 manager  ⏸")
 
 
 def test_the_effort_follows_the_model_and_is_left_out_while_unknown() -> None:
@@ -269,5 +310,3 @@ def test_bracketed_labels_and_model_names_render_literally() -> None:
     line = info_line(status, labels, {2: 30.0}).plain
     for literal in ("[bold]coder[/bold]", "[red]opus[/]", "[x]", "[i]work[/i]", "[link=x]y[/link]"):
         assert literal in line
-    # …and through manager_text, which a Static renders as it is handed.
-    assert "[bold]coder[/bold]" in manager_text(status, labels).plain

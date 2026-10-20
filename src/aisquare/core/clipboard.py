@@ -475,8 +475,11 @@ _pending = 0
 """Copies submitted and not yet told: what :func:`flush` waits for."""
 _idle = threading.Condition()
 
-FLUSH_TIMEOUT = WRITE_TIMEOUT + KILL_WAIT
-"""Seconds :func:`flush` waits at exit: the longest one write can take."""
+FLUSH_TIMEOUT = 2 * (ASK_TIMEOUT + WRITE_TIMEOUT + KILL_WAIT)
+"""Seconds :func:`flush` waits at exit: the longest two batches can take, each a question
+about the session (:data:`ASK_TIMEOUT`, ``tmux`` or ``ps`` in :func:`_resolve`) and one
+write. The copy made at quit can wait behind the write in progress, so it is in the
+second; one write's worth gave up before it was made (review of #266, round 2)."""
 
 
 def submit(text: str, done: Done) -> None:

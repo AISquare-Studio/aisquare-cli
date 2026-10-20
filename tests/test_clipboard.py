@@ -783,6 +783,33 @@ def test_flush_waits_for_the_queued_copies_and_no_longer_than_it_is_told(
     assert clipboard.flush(10), "and it ends once the stuck tool is killed"
 
 
+@NEEDS_POSIX
+def test_flush_at_exit_waits_for_the_copy_queued_behind_a_slow_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #266, round 2: ``flush`` waited for one write, but the copy made at quit
+    can be queued behind the write in progress, and inside tmux each batch asks tmux first.
+    It gave up part-way, and the daemon thread died with the last copy unwritten. Here the
+    write in progress, then tmux's answer and the quit copy's own write, take about four
+    seconds: under the old three, inside the new bound of two whole batches."""
+    fake = install(tmp_path, monkeypatch, behaviour="slow-write")
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1/default,1,0")
+
+    def slow_ask(argv: list[str]) -> str | None:
+        time.sleep(0.9)  # tmux, slow to answer, inside ASK_TIMEOUT
+        return None
+
+    monkeypatch.setattr(clipboard, "_ask", slow_ask)
+    clipboard.submit("first", lambda landed: None)
+    deadline = time.monotonic() + 10
+    while fake.started() < 1 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    clipboard.submit("second", lambda landed: None)  # the copy made just before quitting
+
+    assert clipboard.flush() is True
+    assert fake.texts() == ["first", "second"]
+
+
 # --- what becomes of an OSC 52 ---------------------------------------------------------
 
 

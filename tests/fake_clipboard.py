@@ -58,6 +58,8 @@ if "fail" in behaviour:
     sys.exit(3)
 if "slow-first" in behaviour and data == "first".encode():
     time.sleep(0.6)
+if "slow-write" in behaviour:
+    time.sleep(1.5)
 with open(os.path.join(root, "calls.jsonl"), "a", encoding="utf-8") as calls:
     calls.write(json.dumps({
         "argv": sys.argv[2:], "data": data.hex(), "lc_all": os.environ.get("LC_ALL"),

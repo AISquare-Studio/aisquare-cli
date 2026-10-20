@@ -389,6 +389,16 @@ adapter.**
 - Remote's sheets and refusals for Ctrl-C, Ctrl-D and a second Esc speak of the
   coding agent, not Claude Code. One Ctrl-C at Codex's empty prompt exits it, and
   two Esc open its transcript, where Enter rewinds.
+- One Ctrl-C or Ctrl-D sent to a Codex agent at its empty prompt is asked about
+  first, as a second one within 3 s is for every agent. Codex exits on that one
+  press (Ctrl-D with a turn running too), and Remote's guard refused only a
+  second, so a `send-keys` call with one `C-c` exited the agent, ended its row
+  and woke the manager. Now `send-keys` answers 409 `one_press_exit`, typing
+  nothing, while Codex's screen shows its empty prompt or cannot be read, and
+  sends the key once the body says `confirm_exit: true`; the page asks again in
+  the machine's words, naming the agent. Over a draft the key goes as before.
+  A Claude Code agent, which asks for a second press, is unchanged. The keys
+  are the adapter's (`AgentCapabilities.one_press_exits`).
 - A store this process may not write (a sandbox, or a directory without write
   permission) is no longer called damaged. 0.8.0 answered with "Move it aside
   and re-create: mv context.db context.db.broken", which loses the board's

@@ -475,9 +475,10 @@ one row, `Esc 1 2 3 ⏎ ↑ ↓ More` (⏎ being Enter), with the rest under Mor
 a narrower phone More takes the line under the seven, and below 360 px the
 eight are two rows of four, More last. More's ⇧⏎ is a newline in the prompt,
 sent as the agent reads one (Codex takes Ctrl-J, and submits on Shift-Enter).
-Ctrl-C and Ctrl-D ask first, and a second one within 3 seconds asks again,
-because the coding agent exits on it (Claude Code on a second Ctrl-C, Codex on
-the first at an empty prompt, both on Ctrl-D there). A second Esc within a
+Ctrl-C and Ctrl-D ask first, and the machine asks again before one that exits
+the coding agent: a second within 3 seconds (Claude Code exits on a second of
+either), and for Codex, which exits on one at its empty prompt, the first while
+its screen shows that prompt or cannot be read. A second Esc within a
 second and a half of the last one sent asks too, again after its sheet was
 closed unanswered, and from the Transcript tab is not sent, nor is any Esc there
 until a second and a half passes with none tapped: two in a row open the agent's
@@ -756,7 +757,10 @@ does, and nothing is typed while the agent may be showing a prompt (409
 `api/panes` and a transcript page name the agent they were read from
 (`agent_id`); sent with the keys, as the page sends it, nothing is typed once
 another agent holds the label, or none does yet, after a restart or a switch
-(409 `stale`).
+(409 `stale`). A `C-c` or `C-d` that may exit the coding agent is refused until
+the body says `"confirm_exit": true`: a second within 3 seconds (409
+`double_press`), or the first to a Codex agent that may be at its empty prompt,
+where one exits it (409 `one_press_exit`, whose `reason` says why).
 
 The code is `src/aisquare/services/remote_server.py` (the server and its gates)
 and `src/aisquare/services/remote_page.py` (the bundled page, whose files are in

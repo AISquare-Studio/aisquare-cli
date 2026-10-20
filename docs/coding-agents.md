@@ -244,7 +244,7 @@ item.
 | Remote: quick answers | The dialog's digits and Esc | The same keys, measured on 0.162.1: `1` approves (*Yes, proceed*), `2` is *Yes, and don't ask again*, Esc is *No* and stops the turn; a question's options take their digit (picked and sent), and Esc stops the turn. **Differs:** Codex records a call before its hooks run and draws its view only after them, so a tap that comes first is refused ("shows no prompt now") until the view is on screen (`working_on_screen`/`idle_on_screen` read it). | Live: the question's first tap was held, and the retry picked Blue. Unit: the hold through the answer route |
 | Remote: Transcript tab | The session JSONL, under `* claude` | The rollout, under `* codex`: the human's words, the agent's, each call as one line, a question in full, an interruption and a proposed plan; Codex's own context (`<environment_context>`, AGENTS.md) is left out. Load older reads at most 2 MB a page, as for Claude Code. | Live; unit over the measured rollout, padded with 3 MB of output |
 | Remote: Tell, Stop, Restart and Switch from the phone | Typed, or refused while a dialog may be up, by the board, the transcript and the pane's quiet. | **Differs:** decided by Codex's own screen. A quiet pane at its empty prompt (`? for shortcuts`, or `esc again to edit previous message` after one Esc) is at rest. Anything else drawn over that prompt is a dialog: the *Switch to gpt-6-luna?* dialog Codex opens after a turn's `Stop`, which no hook reports, its folder-trust, hook-review and approval views, its transcript after a second Esc (where Enter rewinds), a draft. Prompt and Interrupt & tell refuse it before any key; Stop, Restart and Switch refuse it, or press Esc first with `dismiss_dialog`. A fresh Codex, which has fired no hook, takes a Prompt tell at its empty prompt. | Live remote: `test_real_codex_takes_a_phones_prompt_tell_at_its_empty_prompt_and_none_at_its_dialog`, through Remote served on loopback: the fresh agent's line reached the provider as its first prompt, and at the dialog Prompt and Interrupt & tell were 409 `dialog_open`, the dialog left unanswered. Unit: `tests/test_remote_codex.py` |
-| Remote: key pad | ⇧⏎ (More) goes as `S-Enter`, its newline (`C-j` on a tmux below 3.5). | **Differs:** ⇧⏎ goes as `C-j`, Codex's newline; `S-Enter` submits. One Ctrl-C at its empty prompt exits Codex, where Claude Code waits for a second, and Ctrl-D there exits both; two Esc open its transcript, where Enter rewinds. The page's sheets word each for any agent. | Measured on 0.162.1 under tmux 3.7c. Unit: `tests/test_remote_codex.py` |
+| Remote: key pad | ⇧⏎ (More) goes as `S-Enter`, its newline (`C-j` on a tmux below 3.5). | **Differs:** ⇧⏎ goes as `C-j`, Codex's newline; `S-Enter` submits. One Ctrl-C or Ctrl-D at its empty prompt exits Codex (Ctrl-D with a turn running too; a Ctrl-C there opens its *Cancel task* / *Exit* choice), where Claude Code says *Press Ctrl-C again to exit*, and the same of Ctrl-D: `send-keys` asks first (409 `one_press_exit`) while Codex's screen shows that prompt or cannot be read, as it asks before any agent's second press, and the page asks again in the machine's words. Over a draft neither exits it, and the key goes. Two Esc open its transcript, where Enter rewinds. | Measured on 0.162.1 under tmux 3.7c, Claude Code on 2.1.304. Unit: `tests/test_remote_codex.py`; live: a single `C-c` from the API to an idle fleet Codex is refused and Codex runs on (`tests/test_codex_native.py`) |
 | Remote: Card tab (explainability) | Judged by the doctor's checks, the proxy's among them. | **Differs:** judged by its own telemetry's lane, which needs insight shipping on and POSIX, never by the proxy, which does not carry its traffic. The card names it (`policy.source`). | Unit: `tests/test_remote_codex.py` |
 | ⏳ limited and `on_limit = "switch"` | The `StopFailure` hook. Claude Code's own wait-and-continue runs at the reset. | **Differs:** Codex has no `StopFailure`, and 0.162.1 fires no `Stop` for a turn that ends on its limit. The limit is read off the rollout at `Stop` and `Interrupt`, and by the fleet's read of a row its board says is working; nothing continues at the reset. | Live: a team plan at its spend cap (SMOKE3) and a loopback provider answering the same `429` (`tests/test_codex_native.py`). SMOKE4 (limit-ls, on_limit=switch), SMOKE5 (limit) and SMOKE6 (limit): one limited event at the provider's reset, then the hand-over to the next slot with the recorded flags |
 | Manager continuation | The `Stop` hook's "keep going" decision | Same: "Blocked by hook: 1 board update(s)…", and the manager went on. | Smoke 6 |
@@ -1167,6 +1167,11 @@ and what a pane whose hooks say waiting, or one `fleet stop` would `/exit`, must
 mark: Codex under `--no-alt-screen`, its empty composer with only its footer below; Remote's
 agent actions read the agent's screen by it, a quiet pane at that prompt at rest and anything
 drawn over it a dialog they refuse),
+`one_press_exits` (the keys, as the agent is sent them past `key_spellings`, that end it with
+one press at that empty prompt: Codex's `C-c` and `C-d`; Remote's `send-keys` refuses one
+unconfirmed, 409 `one_press_exit`, while the screen shows that prompt or cannot say, as it
+refuses every agent a second within 3 s; empty for an agent that asks for a second press,
+Claude Code's; each must be a key the pad reaches the agent as),
 `fleet_settings` (`-c` settings a fleet window's agent launches with unless the
 operator's config sets the key: Codex's `notice.hide_rate_limit_model_nudge=true` and
 `check_for_update_on_startup=false`),
@@ -1248,7 +1253,11 @@ The store profile is [the sandbox and the store](#the-sandbox-and-the-aisquare-s
   needs scan, given its facts, makes no permission card on its `answer_keys` or no
   question card on its keys for each option, or a key is one a phone may not send; or a
   page of its transcript does not name the human (`> you`) and the agent
-  (`* <speaker>`).
+  (`* <speaker>`);
+- a key in its `one_press_exits` is not one a pad key reaches the agent as (past its
+  `key_spellings`), or Remote's `send-keys`, with nothing to say the agent is not at its
+  empty prompt, sends one of them unasked, refuses a `C-c` or `C-d` it does not declare,
+  or refuses without naming the agent (409 `one_press_exit`, its `reason`).
 
 The fake adapter was written from this section alone. Besides the cases above it is
 spawned through `services.fleet.spawn` with a stub binary, its window's `aisquare

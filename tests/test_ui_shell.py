@@ -2516,6 +2516,55 @@ def test_ticks_while_a_fleet_read_is_in_flight_start_no_second_read_and_cost_one
     assert "🔔" in after  # …whose frame is the one painted last
 
 
+def test_a_fleet_read_that_hangs_labels_the_frame_kept_once_it_has_waited_long_enough(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read that HANGS, not one that fails — a store on a hung mount, a wedged tmux at
+    30 s a call — left the sidebar silently stale: each tick only owed one more read,
+    and nothing raised to label the frame (review of #272). Before the read moved off
+    the UI thread the whole UI froze, which was worse but obvious. Once a read has been
+    in flight :data:`~aisquare.cli.ui.app.FLEET_STALE_AFTER`, a tick says the frame shown
+    is an old one; the read's own frame takes the notice away."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    monkeypatch.setattr(app_mod, "FLEET_STALE_AFTER", 0.3)
+    hold, asked, gate = threading.Event(), threading.Event(), threading.Event()
+
+    def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        if hold.is_set():
+            hold.clear()
+            asked.set()
+            gate.wait(FLEET_HOLD_S)
+        return [status(project.id, "manager", "manager", "working")]
+
+    monkeypatch.setattr(fleet_service, "list_agents", fake)
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, str, str, bool]:
+        app = fleet_app(pilot)
+        notice = app.sidebar.query_one("#projects-notice", Static)
+        hold.set()
+        try:
+            app.refresh_data()  # a tick whose read hangs
+            assert await asyncio.to_thread(asked.wait, FLEET_HOLD_S), "the tick read"
+            app.refresh_data()  # a tick before the bound: nothing to say yet
+            await pilot.pause()
+            early = bool(notice.display)
+            await asyncio.sleep(0.4)
+            app.refresh_data()  # a tick after it
+            await pilot.pause()
+            late = shown(notice) if notice.display else ""
+            stale = app.snapshot is not None and app.snapshot.stale_since is not None
+        finally:
+            gate.set()
+        await settle(app)
+        return early, late, shown(notice) if notice.display else "", stale
+
+    early, late, after, stale = drive(go)
+    assert not early
+    assert "showing the frame from" in late, late
+    assert stale
+    assert after == "", after  # the read's own frame, painted at last, clears it
+
+
 def test_agent_errors_fail_open_with_the_cost_shown(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -144,6 +144,12 @@ _DOCTOR_WORKER = "doctor"
 FLEET_WORKER = "shell-fleet"
 """The thread worker that reads the sidebar's frame: the projects, their groups and every
 project's agents (``FleetApp.refresh_data``)."""
+FLEET_STALE_AFTER = 6.0
+"""Seconds a fleet read may run — three ticks — before a tick says the frame shown is old.
+
+A read that HANGS rather than fails (a store on a hung mount, a wedged tmux at 30 s a
+call) raises nothing for the store-unreadable notice to say, and each tick only owes one
+more read: the sidebar went silently stale (review of #272)."""
 ACCOUNTS_WORKER = "shell-accounts"
 """The thread worker that reads the accounts' frame (``FleetApp.refresh_accounts``)."""
 HEADROOM_WORKER = "sidebar-headroom"
@@ -751,6 +757,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """The fleet read in flight, or the last one; only one runs at a time."""
         self._fleet_owed = False
         """A frame was asked for while a read was in flight: read once more after it."""
+        self._fleet_since = 0.0
+        """When the fleet read in flight began running (``time.monotonic``)."""
         self._fleet_after: dict[Worker[_FleetRead], list[Callable[[], object]]] = {}
         """What waits for a read's frame (``refresh_data(then=…)``), by the read it waits for."""
         self._fleet_owed_after: list[Callable[[], object]] = []
@@ -1073,11 +1081,13 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                 self._fleet_owed = True
                 if then is not None:
                     self._fleet_owed_after.append(then)
+                self._label_a_hung_read()
             return
         after = [*self._fleet_owed_after, *([] if then is None else [then])]
         self._fleet_owed, self._fleet_owed_after = False, []
         # `a`'s choice is read as the read begins, so one held for a hand-over and started
         # when it is called off reads what is shown then.
+        self._fleet_since = time.monotonic()
         self._fleet_worker = self.run_worker(
             lambda: _read_fleet(self.show_captured),
             name=FLEET_WORKER,
@@ -1108,12 +1118,25 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                 self.capturing, error=f"{type(worker.error).__name__}: {worker.error}"
             )
         else:
+            if event.state is WorkerState.RUNNING:
+                self._fleet_since = time.monotonic()  # a read held for a hand-over begins now
             return  # still running
         self._paint_fleet(read)
         if self._fleet_owed:
             self.refresh_data()  # the calls this read outlived: one read, after it
         for then in self._fleet_after.pop(worker, []):
             self.call_later(then)
+
+    def _label_a_hung_read(self) -> None:
+        """A tick found the read in flight: once it has run :data:`FLEET_STALE_AFTER`, say the
+        frame shown is the one from before it. Its own frame, when it comes, clears this."""
+        if self.snapshot is None or time.monotonic() - self._fleet_since < FLEET_STALE_AFTER:
+            return
+        if self.snapshot.stale_since is None:
+            self.snapshot = replace(self.snapshot, stale_since=datetime.now())
+        self.sidebar.show_notice(
+            f"still reading the fleet — showing the frame from {self.snapshot.taken_at:%H:%M:%S}"
+        )
 
     def _paint_fleet(self, read: _FleetRead) -> None:
         """Paint one read's frame, or keep (and label) the frame shown when the read found
@@ -1819,11 +1842,20 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.notify(said, title="not removed", severity="error", timeout=12, markup=False)
 
     async def _forget_views(self, project_id: str) -> None:
-        """A removed project leaves the screen: its card with the next frame, its page and
-        its agents' panes now. What was open on it moves to the next project in the list,
-        else the one before it, else Welcome."""
+        """A removed project leaves the screen with the frame read after its removal: its
+        card, its page and its agents' panes. What was open on it moves to the next project
+        in the list, else the one before it, else Welcome — the next that FRAME lists.
+
+        Read off that frame (``refresh_data(then=)``), not the one shown: the read is off
+        the UI thread, and right after ``refresh_data()`` the snapshot is still the frame
+        from before the removal, which lists what someone else removed meanwhile (review
+        of #272).
+        """
         order = [card.project.id for card in self.sidebar.query(ProjectCard)]
-        self.refresh_data()
+        self.refresh_data(then=lambda: self._leave_forgotten(project_id, order))
+
+    async def _leave_forgotten(self, project_id: str, order: list[str]) -> None:
+        """:meth:`_forget_views` once the frame after the removal is in."""
         views = [
             view
             for view in self.content.children

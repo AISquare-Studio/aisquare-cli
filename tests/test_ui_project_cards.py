@@ -38,7 +38,7 @@ from aisquare.cli.ui.sidebar import (
 from aisquare.cli.ui.views.agent import AgentView
 from aisquare.cli.ui.views.project import ProjectView
 from aisquare.core.store import store_session
-from aisquare.models import FleetAgent, ProjectInfo
+from aisquare.models import FleetAgent, ProjectForgetReport, ProjectInfo
 from aisquare.services import install_route
 from aisquare.services import project as project_service
 from tests.test_ui_shell import (
@@ -586,6 +586,39 @@ def test_remove_asks_first_then_forgets_the_project_and_its_views_go_with_it(
     assert (seen["current"], seen["selected"]) == ("project-prj_c", "project:prj_c"), (
         "what was open on it moves to the next project in the list"
     )
+
+
+def test_removing_a_project_moves_to_a_neighbour_the_next_frame_still_lists(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Where a removal moves to is read off the frame read AFTER it (``refresh_data(then=)``),
+    not the one before: the read is off the UI thread now, and right after
+    ``refresh_data()`` the snapshot is still the old frame (review of #272). Here another
+    process forgot the next project while this one was being removed: the old frame still
+    listed it, and the removal moved onto a project that was gone."""
+    seed(tmp_path, ("prj_a", "alpha", None), ("prj_b", "beta", None), ("prj_c", "gamma", None))
+    forget = project_service.forget_project
+
+    def and_another(project: ProjectInfo) -> ProjectForgetReport:
+        with store_session() as store:
+            gamma = store.get_project("prj_c")
+        assert gamma is not None
+        forget(gamma)  # someone else's removal, between this frame and the next
+        return forget(project)
+
+    monkeypatch.setattr(project_service, "forget_project", and_another)
+
+    async def go(pilot: Pilot[None]) -> tuple[str | None, str | None]:
+        app = fleet_app(pilot)
+        await _click(pilot, card_for(app, "prj_b").query_one(ProjectTitle))
+        app.sidebar.open_menu("prj_b")
+        await settle(app)
+        await _menu(pilot, "remove")
+        await pilot.click("#confirm-remove-yes")
+        await settle(app)
+        return _view_id(app), app.sidebar.selected_key
+
+    assert drive(go) == ("project-prj_a", "project:prj_a")
 
 
 def test_remove_names_the_command_that_brings_it_back_quoted(

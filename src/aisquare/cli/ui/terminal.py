@@ -200,7 +200,13 @@ from aisquare.core.tmux import (
     TmuxServer,
     TmuxUnavailable,
 )
-from aisquare.core.tmux_control import CONTROL_MINIMUM, ControlClient, Reply, sent_stamp
+from aisquare.core.tmux_control import (
+    CONTROL_MINIMUM,
+    ControlClient,
+    Reply,
+    StampUnknown,
+    sent_stamp,
+)
 from aisquare.services import fleet as fleet_service
 
 CURSOR = Style(reverse=True)
@@ -1114,6 +1120,8 @@ class TerminalPane(Widget, can_focus=True):
     """History lines one wheel notch moves."""
     WHEEL_COALESCE: float = 0.02
     """Seconds mouse events are gathered before one tmux call carries them all."""
+    INPUT_RECOVERY_RETRY: float = 1.0
+    """Seconds before a stamp that could not be read is asked again (:meth:`_recover_input`)."""
     INPUT_RECOVERY: float = 0.05
     """Seconds after the control client ended with input in flight before its panes are
     asked what tmux ran of it (:meth:`_recover_input`): time for tmux to drop the dead
@@ -2631,16 +2639,31 @@ class TerminalPane(Widget, can_focus=True):
         was written may still run after the client process is gone, until tmux notices;
         asked :attr:`INPUT_RECOVERY` after the end, the stamp is past that: what tmux had
         read and not run is freed with the dead client, never run later. A gone pane's
-        input goes nowhere, as a key into a gone pane always has.
+        input goes nowhere, as a key into a gone pane always has. A stamp tmux did not
+        answer about (``StampUnknown``: a timeout) is asked again
+        :attr:`INPUT_RECOVERY_RETRY` later, everything held meanwhile: read as a gone
+        pane, the input in flight was dropped though tmux might still run it (tester of
+        #272).
         """
+        ran: dict[tuple[_ServerKey, str], int | None] = {}
+        for item in self._inflight:
+            where = (_server_key(item.server), item.pane_id)
+            if where in ran:
+                continue
+            try:
+                ran[where] = sent_stamp(item.server, item.pane_id)
+            except StampUnknown as error:
+                # Not known what ran: nothing is sent or dropped, new input stays held
+                # behind it, and the stamp is asked again (a wedged server answers late).
+                self.log.warning(f"input recovery waits: {error}")
+                self.set_timer(
+                    self.INPUT_RECOVERY_RETRY, self._recover_input, name="terminal-input-recovery"
+                )
+                return
         inflight, self._inflight = self._inflight, []
         held, self._held = self._held or [], None
-        ran: dict[tuple[_ServerKey, str], int | None] = {}
         for item in inflight:
-            where = (_server_key(item.server), item.pane_id)
-            if where not in ran:
-                ran[where] = sent_stamp(item.server, item.pane_id)
-            last = ran[where]
+            last = ran[(_server_key(item.server), item.pane_id)]
             if last is not None and item.stamp > last:
                 self._polled(item)
         for item in held:

@@ -184,20 +184,39 @@ def stamp_name(pane_id: str, pid: int | None = None) -> str:
     return f"{STAMP_PREFIX}_{os.getpid() if pid is None else pid}_{pane_id.lstrip('%')}"
 
 
+class StampUnknown(TmuxError):
+    """tmux did not say what ran in a pane (:func:`sent_stamp`): the question timed out, or
+    failed for a reason that is not tmux's answer about the pane. Not "the pane is gone" —
+    whatever is in flight may still run — so whoever asked asks again."""
+
+
+_GONE = re.compile(
+    r"no such session|no such pane|can't find |no server running|error connecting to "
+)
+"""tmux's answers that there is nothing to type into: the pane's session, the pane, or the
+whole server gone (``core.tmux._ABSENT`` says the last two)."""
+
+
 def sent_stamp(server: TmuxServer, pane_id: str) -> int | None:
     """The stamp of the last input this process sent over a control client that tmux ran
-    in ``pane_id``, asked by polling; 0 when none ever ran there, ``None`` when the pane
-    is gone.
+    in ``pane_id``, asked by polling; 0 when none ever ran there, ``None`` when tmux says the
+    pane is gone. Raises :class:`StampUnknown` when tmux said neither.
 
     ``show-environment``, never ``display-message``: a gone pane is a clean ``no such
     session`` here, where a ``display-message`` format can kill a tmux 3.2a server. A
-    variable never set answers ``unknown variable`` (measured on 3.2a, 3.4 and 3.8).
+    variable never set answers ``unknown variable`` (measured on 3.2a, 3.4 and 3.8). A
+    timeout was read as a gone pane, and the input in flight dropped though tmux might
+    still run it (tester of #272).
     """
     name = stamp_name(pane_id)
     try:
         said = server.run("show-environment", "-h", "-t", pane_id, name).strip()
     except TmuxError as error:
-        return 0 if "unknown variable" in str(error) else None
+        if "unknown variable" in str(error):
+            return 0
+        if _GONE.search(str(error)) or isinstance(error, TmuxUnavailable):
+            return None
+        raise StampUnknown(f"could not read {pane_id}'s stamp: {error}") from error
     value = said.partition("=")[2]
     return int(value) if value.isdigit() else 0
 

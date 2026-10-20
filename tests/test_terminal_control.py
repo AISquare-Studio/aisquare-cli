@@ -42,6 +42,7 @@ from aisquare.core.tmux import (
     Completed,
     TmuxError,
     TmuxServer,
+    TmuxTimedOut,
     _tmux,
 )
 from aisquare.core.tmux_control import ControlClient, Reply, quote
@@ -860,10 +861,15 @@ def test_real_tmux_typing_into_an_agent_sends_nothing_to_a_raw_client_elsewhere(
                     lambda: len(live.run("list-clients", "-F", "#{client_name}").split()) == 2,
                     timeout=5.0,
                 )
-                await pilot.pause(0.5)
-                _drained(fd)  # the raw client's own first paint
-                await pilot.pause(0.3)
-                _drained(fd)
+                # The raw client's own paint, and the redraw tmux makes when its queries
+                # of the terminal time out (5 s: this pty answers none) — then quiet.
+                attached, quiet_since = time.monotonic(), time.monotonic()
+                while time.monotonic() - attached < 12:
+                    await pilot.pause(0.1)
+                    if _drained(fd):
+                        quiet_since = time.monotonic()
+                    elif time.monotonic() - attached > 5.5 and time.monotonic() - quiet_since > 1:
+                        break
                 typed = ""
                 for letter in "stampsmustcostnothing" * 2:
                     typed += letter
@@ -1040,6 +1046,56 @@ def test_real_tmux_another_asq_typing_into_the_pane_does_not_hide_this_ones_lost
     assert run(drive()) == "Zmine"
 
 
+@_needs_tmux
+def test_real_tmux_a_stamp_that_cannot_be_read_is_asked_again_not_taken_for_a_gone_pane(
+    live: TmuxServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stamp read that FAILS — a server wedged past the command timeout — says nothing
+    about what ran, and was read as "the pane is gone": the input in flight was dropped,
+    though tmux might still run it later (tester of #272). It is asked again, the keys
+    held meanwhile, and once it answers each key arrives exactly once."""
+    if sys.platform == "win32":
+        pytest.skip("no SIGKILL on Windows")
+    pane_id, record = _recording_pane(live, tmp_path, "asq-unread")
+    sent_over = ControlClient.send_literal
+    unread = [True]
+    timeouts = [1]
+    run_tmux = TmuxServer.run
+
+    def send_literal(self: ControlClient, pane: str, text: str, **kwargs: Any) -> None:
+        if unread[0]:
+            _unread_from(self)
+            unread[0] = False
+        sent_over(self, pane, text, **kwargs)
+
+    def wedged_once(self: TmuxServer, *args: str, stdin: bytes | None = None) -> str:
+        if args[:1] == ("show-environment",) and timeouts[0]:
+            timeouts[0] -= 1
+            raise TmuxTimedOut("tmux did not answer within 30s: show-environment …")
+        return run_tmux(self, *args, stdin=stdin)
+
+    async def drive() -> str:
+        host = Host(live, pane_id)
+        async with host.run_test(size=(80, 24)) as pilot:
+            pane = host.pane
+            pane.focus()
+            await wait_until(pilot, lambda: _serving(pane) and _client(pane).answered, 5.0)
+            monkeypatch.setattr(ControlClient, "send_literal", send_literal)
+            monkeypatch.setattr(TmuxServer, "run", wedged_once)
+            for char in "wedge":
+                pane.post_message(events.Key(char, char))
+            await wait_until(pilot, lambda: len(pane._inflight) == len("wedge"), 2.0)
+            pid = _client(pane).pid
+            assert pid is not None
+            os.kill(pid, signal.SIGKILL)
+            await wait_until(pilot, lambda: pane._held is not None, 2.0)
+            pane.post_message(events.Key("!", "!"))  # typed while the stamp cannot be read
+            return await _settled(pilot, record, len("wedge!"), 5.0)
+
+    assert run(drive()) == "wedge!"
+    assert timeouts == [0], "the stamp read never timed out: this test tested nothing"
+
+
 # --- the protocol, line by line ----------------------------------------------------------
 
 
@@ -1075,6 +1131,38 @@ def test_quote_leaves_plain_tokens_and_spells_the_rest_as_one_token() -> None:
     assert quote("~/x") == '"\\176/x"'
     assert quote("~") == '"\\176"'
     assert quote("a~b") == '"a\\176b"'
+
+
+class _Answering(TmuxServer):
+    """A server whose every command is answered ``answer`` — a string, or a raised error."""
+
+    def __init__(self, answer: str | TmuxError) -> None:
+        super().__init__("asq-test-stamp", control=False)
+        self.answer = answer
+
+    def run(self, *args: str, stdin: bytes | None = None) -> str:
+        if isinstance(self.answer, TmuxError):
+            raise self.answer
+        return self.answer
+
+
+def test_a_stamp_read_tells_a_gone_pane_from_an_answer_it_could_not_get() -> None:
+    """``None`` is tmux saying the pane (or its whole server) is gone: nothing to type
+    into. A timeout, or any error that is not tmux's answer about the pane, is
+    :class:`~aisquare.core.tmux_control.StampUnknown` — what ran is not known, and the
+    recovery asks again (tester of #272: it was ``None`` too, and the input dropped)."""
+    name = tmux_control.stamp_name("%5")
+    assert tmux_control.sent_stamp(_Answering(f"{name}=17\n"), "%5") == 17
+    assert tmux_control.sent_stamp(_Answering(TmuxError(f"unknown variable: {name}")), "%5") == 0
+    assert tmux_control.sent_stamp(_Answering(TmuxError("no such session: %5")), "%5") is None
+    gone = TmuxError("no server running on /tmp/tmux-501/asq")
+    assert tmux_control.sent_stamp(_Answering(gone), "%5") is None
+    for unknown in (
+        TmuxTimedOut("tmux did not answer within 30s: show-environment …"),
+        TmuxError("could not run tmux: [Errno 24] Too many open files"),
+    ):
+        with pytest.raises(tmux_control.StampUnknown):
+            tmux_control.sent_stamp(_Answering(unknown), "%5")
 
 
 def test_an_empty_batch_sends_nothing_rather_than_the_line_that_detaches(tmp_path: Path) -> None:

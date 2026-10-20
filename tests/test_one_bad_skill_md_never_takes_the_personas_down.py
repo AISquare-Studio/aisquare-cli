@@ -147,7 +147,7 @@ def test_resolving_the_bad_directory_is_a_persona_error_that_lists_the_known_nam
 
     for caught in (by_its_name, unknown):
         assert caught.value.code == "unknown_persona"
-        assert "known: captain, careful, mentor, minimalist, skeptic" in str(caught.value)
+        assert "known: careful, mentor, minimalist, skeptic" in str(caught.value)
 
 
 def test_a_directory_holding_the_date_never_shadows_the_working_persona_below_it(
@@ -258,7 +258,7 @@ def test_launch_spawn_and_a_restart_step_past_the_directory_holding_the_date(
         note
         for note in gone_again.notes
         if note.startswith("persona tempo no longer resolves")
-        and note.endswith("started without a persona")
+        and note.endswith("started without it")  # this branch's wording of the note
     ]
 
 

@@ -13,7 +13,8 @@ and with Esc, a ``request_user_input`` in Plan mode answered with a digit, a pla
   ``input``, ``local_shell_call`` with an ``action``), a call's result
   (``function_call_output``/``custom_tool_call_output``, paired by ``call_id``) and
   ``reasoning``. A ``user`` message that is Codex's own context (``<environment_context>``,
-  ``<turn_aborted>``, AGENTS.md) is in a tag held closed, as Claude Code's own records are.
+  ``<turn_aborted>``, AGENTS.md) is in one of its own tags held closed, as Claude Code's own
+  records are.
   ``compacted`` records a compaction. The ``event_msg`` copies of these (``item_completed``,
   ``user_message``, ``agent_message``) are not read again.
 - **A turn** opens with ``event_msg`` ``task_started`` and ends with ``task_complete``
@@ -74,9 +75,24 @@ _QUESTION_TOOL = "request_user_input"
 """Codex's tool for asking the human (Plan mode only, 0.162.1): ``questions`` of ``id``,
 ``header``, ``question`` and ``options`` of ``label`` and ``description``."""
 
-_OWN_TEXT = re.compile(r"\s*<([a-z_][a-z0-9_-]*)>")
-"""How a ``user`` message Codex writes itself begins: ``<environment_context>``,
-``<turn_aborted>``, ``<user_instructions>``, its tag held closed (:func:`_own`)."""
+_OWN_TAGS = (
+    "environment_context",
+    "turn_aborted",
+    "user_action",
+    "recommended_plugins",
+    "user_shell_command",
+    "subagent_notification",
+    "skill",
+    "user_instructions",
+)
+"""The tags Codex wraps the context it writes as a ``user`` message in. Measured in 0.162.1
+rollouts: ``environment_context``, ``turn_aborted``, ``user_action`` (a ``/review``'s
+results) and ``recommended_plugins``. Named beside them in its binary: ``user_shell_command``
+(a ``!`` command), ``subagent_notification`` and ``skill``; ``user_instructions`` is an
+earlier version's AGENTS.md. Any other tag is the human's (review r16 of #113, 1/8)."""
+_OWN_TEXT = re.compile(rf"\s*<({'|'.join(_OWN_TAGS)})>")
+"""How a ``user`` message Codex writes itself begins: one of :data:`_OWN_TAGS`, held closed
+(:func:`_own`)."""
 _INSTRUCTIONS = "# AGENTS.md instructions for "
 """How the AGENTS.md Codex hands the model as a ``user`` message begins."""
 
@@ -157,9 +173,11 @@ def _message_text(payload: Mapping[str, Any]) -> str:
 
 
 def _own(text: str) -> bool:
-    """Whether a ``user`` message is Codex's own context, not the human's words: its tag held
-    closed (:data:`_OWN_TEXT`), or the AGENTS.md it passes on. Text a person typed that only
-    starts like one is theirs, as typed."""
+    """Whether a ``user`` message is Codex's own context, not the human's words: one of its
+    tags held closed (:data:`_OWN_TEXT`), or the AGENTS.md it passes on. Text a person typed
+    that only starts like one is theirs, as typed, and so is a prompt that opens with a tag
+    of its own (``<task>…</task> …``): taken for context, it was missing from the Transcript
+    tab, and the tail read ``own`` until the agent answered (review r16 of #113, 1/8)."""
     if text.startswith(_INSTRUCTIONS):
         return True
     opening = _OWN_TEXT.match(text)

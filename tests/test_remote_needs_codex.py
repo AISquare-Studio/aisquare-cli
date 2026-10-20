@@ -477,6 +477,69 @@ def test_a_codex_rollout_is_a_page_of_its_turns_under_its_own_speaker(
     assert page["stamps"]["0"].endswith("+00:00")
 
 
+def _prompted(tmp_path: Path, text: str, newest: datetime) -> Path:
+    """The measured session past its turn that ended asking, then the human's next prompt
+    ``text``, in the order Codex writes a turn's start (``task_started``, ``turn_context``,
+    the prompt): its next turn begun, the agent yet to answer."""
+    lines = ROLLOUT.read_text(encoding="utf-8").splitlines()
+    records = [json.loads(line) for line in lines[: MOMENTS["asked"] + 4]]
+    prompt = records[-1]["payload"]
+    assert (prompt["role"], prompt["content"][0]["text"]) == ("user", "ASK"), "the premise"
+    prompt["content"][0]["text"] = text
+    return _write(tmp_path / "rollout-prompted.jsonl", _moved(records, newest))
+
+
+@pytest.mark.parametrize("length", ["parsed", "too long to parse"])
+def test_a_prompt_that_opens_with_a_tag_of_its_own_is_the_humans_not_codexs(
+    tmp_path: Path, project: ProjectInfo, length: str
+) -> None:
+    """Review r16 of #113, 1/8: any lowercase tag held closed read as Codex's own context
+    (``<environment_context>``), and a line too long to parse did on its opening tag alone.
+    A prompt that opens ``<task>…</task>`` was missing from the Transcript tab, and the tail
+    read ``own`` until the agent answered. Codex's own tags are measured; another is the
+    human's."""
+    now = datetime.now(UTC)
+    text = "<task>Fix the login bug</task> and add a test"
+    if length != "parsed":
+        text += " " + "x" * MAX_LINE
+    rollout = _prompted(tmp_path, text, now - timedelta(seconds=5))
+    _codex_agent(
+        project, state="working", seen=now - timedelta(seconds=5), born=now - timedelta(hours=1),
+        rollout=rollout,
+    )  # fmt: skip
+
+    tail = transcript.read_transcript_tail(rollout, agent="codex")
+    assert tail is not None and tail.newest == "user_prompt"
+    if length == "parsed":
+        lines = _plain(_page("coder-1", project)["lines"])
+        assert lines[-3:] == ["> you", "  <task>Fix the login bug</task> and add a test", ""]
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        "<environment_context>\n  <cwd>/work/alpha</cwd>\n</environment_context>",
+        "<user_action>\n  <action>review</action>\n</user_action>",
+        "<recommended_plugins>\nHere is a list of plugins\n</recommended_plugins>",
+    ],
+)
+def test_codexs_own_context_written_as_a_user_message_is_still_its_own(
+    tmp_path: Path, project: ProjectInfo, context: str
+) -> None:
+    """The control: what Codex 0.162.1 writes as a ``user`` message of its own (measured in
+    its rollouts) is no prompt of the human's, on the page or to the tail."""
+    now = datetime.now(UTC)
+    rollout = _prompted(tmp_path, context, now - timedelta(seconds=5))
+    _codex_agent(
+        project, state="working", seen=now - timedelta(seconds=5), born=now - timedelta(hours=1),
+        rollout=rollout,
+    )  # fmt: skip
+
+    tail = transcript.read_transcript_tail(rollout, agent="codex")
+    assert tail is not None and tail.newest == "own"
+    assert "> you" not in _plain(_page("coder-1", project)["lines"])[-3:]
+
+
 def test_load_older_on_a_codex_rollout_reads_one_budget_a_page_and_reaches_its_start(
     tmp_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

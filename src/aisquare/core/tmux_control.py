@@ -85,7 +85,7 @@ import threading
 import time
 import weakref
 from collections import deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from functools import partial
 
@@ -96,6 +96,7 @@ from aisquare.core.tmux import (
     Capture,
     TmuxError,
     TmuxServer,
+    TmuxTimedOut,
     TmuxUnavailable,
     check_key_names,
     frame_bound,
@@ -191,6 +192,11 @@ class StampUnknown(TmuxError):
     failed for a reason that is not tmux's answer about the pane. Not "the pane is gone" —
     whatever is in flight may still run — so whoever asked asks again."""
 
+    def __init__(self, message: str, *, timed_out: bool) -> None:
+        super().__init__(message)
+        self.timed_out = timed_out
+        """The question timed out: a wedged server, which answers once it resumes."""
+
 
 _GONE = re.compile(
     r"no such session|no such pane|can't find |no server running|error connecting to "
@@ -218,7 +224,10 @@ def sent_stamp(server: TmuxServer, pane_id: str) -> int | None:
             return 0
         if _GONE.search(str(error)) or isinstance(error, TmuxUnavailable):
             return None
-        raise StampUnknown(f"could not read {pane_id}'s stamp: {error}") from error
+        timed_out = isinstance(error, TmuxTimedOut)
+        raise StampUnknown(
+            f"could not read {pane_id}'s stamp: {error}", timed_out=timed_out
+        ) from error
     value = said.partition("=")[2]
     return int(value) if value.isdigit() else 0
 
@@ -229,11 +238,13 @@ _OPEN: weakref.WeakSet[ControlClient] = weakref.WeakSet()
 
 @atexit.register
 def _tidy_up() -> None:
-    """At exit, unset the stamps of clients never closed on purpose — a process that ends
-    without its panes unmounting. Fails open: nothing here may hold the exit up."""
+    """At exit, close the clients never closed on purpose — a process that ends without its
+    panes unmounting — so a healthy one unsets its stamps. Bounded: down the pipe, at most
+    :meth:`ControlClient.close_client`'s 0.2 s join a client, never a polled call."""
     for client in list(_OPEN):
-        with contextlib.suppress(Exception):
-            client.unset_stamps()
+        if client.alive:
+            with contextlib.suppress(Exception):
+                client.close_client()
 
 
 def _command(args: Sequence[str]) -> str:
@@ -331,7 +342,8 @@ class ControlClient:
         self._pid = os.getpid()
         """Whose stamps this client sets (:func:`stamp_name`): this process's, as made."""
         self.stamped: set[str] = set()
-        """The panes this client set a stamp on, still set (:meth:`unset_stamps`)."""
+        """The panes this client set a stamp on, still set (:meth:`close_client`)."""
+        self._writer: threading.Thread | None = None
         self.detached = False
         """tmux detached the client without a reason (``%exit`` alone): its session was
         destroyed under it, not a failure of the client or the server."""
@@ -366,34 +378,53 @@ class ControlClient:
         # (``tests/test_config_writes_stay_in_the_cli.py``, ``_is_method_on_a_local``).
         reader = threading.Thread(target=self._read_pipe, name="tmux-control-read", daemon=True)
         writer = threading.Thread(target=self._write_pipe, name="tmux-control-write", daemon=True)
+        self._writer = writer
         reader.start()
         writer.start()
         _OPEN.add(self)
         self._show_pane(pane_id)  # followed; the pane's widget counts itself (watch_pane)
 
-    def close_client(self) -> None:
-        """End the client on purpose: nothing is delivered for it any more."""
+    @property
+    def healthy(self) -> bool:
+        """Running, answered at least once, and nothing waiting long for an answer."""
+        return self._alive and self.answered and not self.stalled(1.0)
+
+    def close_client(self, *, keep: Collection[str] = ()) -> None:
+        """End the client on purpose: nothing is delivered for it any more. A healthy one
+        is first told to unset this process's stamps (:data:`STAMP_PREFIX`) of the panes it
+        stamped, but ``keep`` — a pane whose input in flight a recovery has yet to read.
+
+        Each asq launch is a new pid, so a stamp left behind is one more variable in the
+        session for its life (review of #272). Down the PIPE, never polled: tmux reads a
+        control client's stdin itself, runs what is written, and ends the client at the
+        end of it — so the unsets are lines and the end is closing stdin, which costs
+        nothing even with the server frozen (tmux runs them when it resumes; measured on
+        3.2a, 3.4 and 3.8). Polled, they cost 30 s a pane on the UI thread there, and
+        quitting took a minute. A client that is not healthy is ended as it is, its stamps
+        left: a hidden variable left behind is harmless.
+        """
+        healthy = self.healthy
         with self._lock:
             self._closed = True
             self._alive = False
             self._pending.clear()
-        self._outbox.put(None)
-        if self._process is not None:
+        if healthy:
+            gone = sorted(self.stamped - set(keep))
+            lines = "".join(
+                _command(["set-environment", "-h", "-u", "-t", pane, stamp_name(pane, self._pid)])
+                + "\n"
+                for pane in gone
+            )
+            if lines:
+                self._outbox.put(lines.encode("utf-8"))
+            self.stamped.difference_update(gone)
+        self._outbox.put(None)  # the writer closes stdin: the end, after the unsets
+        writer = self._writer
+        if writer is not None and writer is not threading.current_thread():
+            writer.join(timeout=0.2)  # in the pipe before this returns; bounded either way
+        if not healthy and self._process is not None:
             with contextlib.suppress(OSError):
                 self._process.terminate()
-
-    def unset_stamps(self, keep: set[str] | None = None) -> None:
-        """Unset this process's stamp of every pane this client stamped, but ``keep``'s —
-        by polling, as the client may be gone. Each asq launch is a new pid, so a stamp
-        left behind is one more variable in the session for its life (review of #272).
-        Called at a deliberate close (``cli.ui.terminal``), and at exit for a client still
-        open then; a pane whose input in flight a recovery has yet to read is kept."""
-        for pane_id in sorted(self.stamped - (keep or set())):
-            with contextlib.suppress(TmuxError):
-                self.server.run(
-                    "set-environment", "-h", "-u", "-t", pane_id, stamp_name(pane_id, self._pid)
-                )
-            self.stamped.discard(pane_id)
 
     def kill_client(self) -> None:
         """End a client that stopped answering; it ends through ``on_exit`` like any other."""

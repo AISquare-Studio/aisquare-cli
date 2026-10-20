@@ -209,6 +209,7 @@ class AgentView(Vertical):
             server=self.server,
             escape_key=self.escape_key,
             placeholder=PANE_GONE,
+            label=self.status.agent.label,
             id="agent-pane",
         )
 
@@ -232,6 +233,7 @@ class AgentView(Vertical):
         self.query_one("#agent-header", Static).update(header_text(status, self._labels))
         self._paint_actions()
         self._refresh_labels()
+        self.pane.label = status.agent.label
         if (wanted := shown_pane(status)) != self.pane.pane_id:
             self.pane.attach(wanted)
 

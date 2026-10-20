@@ -1097,24 +1097,26 @@ def test_real_tmux_a_stamp_that_cannot_be_read_is_asked_again_not_taken_for_a_go
 
 
 @_needs_tmux
-def test_real_tmux_a_stamp_that_never_answers_ends_the_wait_and_says_so(
+def test_real_tmux_a_stamp_that_keeps_failing_fast_ends_the_wait_and_says_so(
     live: TmuxServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A stamp that is never readable held the keys typed behind it forever, said only in
-    a log line (review of #272, follow-up). After :attr:`TerminalPane.INPUT_RECOVERY_GIVE_UP`
-    the wait ends, and visibly: the pane's notice says input is unconfirmed, a warning
-    counts both kinds, and the SAFE choice is made for each — the input in flight is not
-    sent again (tmux may still run it, and twice is the worse failure: a second Enter
-    submits twice), and what was typed since is not sent either (it would go ahead of
-    input tmux may yet run). Neither is dropped without a word."""
+    """A stamp read that keeps FAILING — not timing out: an error that is not tmux's
+    answer about the pane — held the keys typed behind it forever, said only in a log
+    line (review of #272, follow-up). After :attr:`TerminalPane.INPUT_RECOVERY_ATTEMPTS`
+    such failures the wait ends, and visibly: the pane's notice says input is
+    unconfirmed, a warning names the agent and counts both kinds, and the SAFE choice is
+    made for each — the input in flight is not sent again (tmux may still run it, and
+    twice is the worse failure: a second Enter submits twice), and what was typed since
+    is not sent either (it would go ahead of input tmux may yet run)."""
     if sys.platform == "win32":
         pytest.skip("no SIGKILL on Windows")
     pane_id, record = _recording_pane(live, tmp_path, "asq-never")
-    monkeypatch.setattr(TerminalPane, "INPUT_RECOVERY_GIVE_UP", 1.0)
-    monkeypatch.setattr(TerminalPane, "INPUT_RECOVERY_RETRY", 0.2)
+    monkeypatch.setattr(TerminalPane, "INPUT_RECOVERY_ATTEMPTS", 3, raising=False)
+    monkeypatch.setattr(TerminalPane, "INPUT_RECOVERY_RETRY", 0.1)
     sent_over = ControlClient.send_literal
     unread = [True]
     run_tmux = TmuxServer.run
+    failures = [0]
 
     def send_literal(self: ControlClient, pane: str, text: str, **kwargs: Any) -> None:
         if unread[0]:
@@ -1122,19 +1124,21 @@ def test_real_tmux_a_stamp_that_never_answers_ends_the_wait_and_says_so(
             unread[0] = False
         sent_over(self, pane, text, **kwargs)
 
-    def wedged(self: TmuxServer, *args: str, stdin: bytes | None = None) -> str:
+    def failing(self: TmuxServer, *args: str, stdin: bytes | None = None) -> str:
         if args[:1] == ("show-environment",):
-            raise TmuxTimedOut("tmux did not answer within 30s: show-environment …")
+            failures[0] += 1
+            raise TmuxError("could not run tmux: [Errno 24] Too many open files")
         return run_tmux(self, *args, stdin=stdin)
 
     async def drive() -> tuple[str, str | None, bool, list[str]]:
         host = Host(live, pane_id)
         async with host.run_test(size=(80, 24)) as pilot:
             pane = host.pane
+            pane.label = "coder-auth"  # what the agent view names its pane
             pane.focus()
             await wait_until(pilot, lambda: _serving(pane) and _client(pane).answered, 5.0)
             monkeypatch.setattr(ControlClient, "send_literal", send_literal)
-            monkeypatch.setattr(TmuxServer, "run", wedged)
+            monkeypatch.setattr(TmuxServer, "run", failing)
             for char in "lost":
                 pane.post_message(events.Key(char, char))
             await wait_until(pilot, lambda: len(pane._inflight) == len("lost"), 2.0)
@@ -1154,7 +1158,110 @@ def test_real_tmux_a_stamp_that_never_answers_ends_the_wait_and_says_so(
     assert typed == "", typed  # neither sent twice nor sent out of order
     assert notice == terminal_module.INPUT_UNCONFIRMED, notice
     assert settled
-    assert any("4 inputs sent" in said and "4 typed since" in said for said in notices), notices
+    assert failures[0] == 3, failures  # counted by attempts, not by the clock
+    said = [line for line in notices if "4 inputs sent" in line and "4 typed since" in line]
+    assert said and "coder-auth" in said[0] and pane_id not in said[0], notices
+
+
+@_needs_tmux
+def test_real_tmux_a_stamp_read_that_times_out_is_waited_out_however_long_the_freeze(
+    live: TmuxServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stamp read that TIMES OUT is a wedged server, and a wedged server answers once it
+    resumes: it never counts toward giving up. Counted by the clock from the recovery's
+    start, the first 30 s timeout was already past a 10 s cap — it gave up without one
+    retry and dropped the keys held behind it: a 130 s freeze delivered 'abcdefghijK'
+    where 'abcdefghijKLMNO' was typed (re-review of #272). Here each timed-out read
+    outlasts the old cap, and every key arrives once, in order."""
+    if sys.platform == "win32":
+        pytest.skip("no SIGKILL on Windows")
+    pane_id, record = _recording_pane(live, tmp_path, "asq-frozen")
+    monkeypatch.setattr(TerminalPane, "INPUT_RECOVERY_GIVE_UP", 0.3, raising=False)  # the old cap
+    monkeypatch.setattr(TerminalPane, "INPUT_RECOVERY_ATTEMPTS", 1, raising=False)
+    monkeypatch.setattr(TerminalPane, "INPUT_RECOVERY_RETRY", 0.1)
+    sent_over = ControlClient.send_literal
+    unread = [True]
+    run_tmux = TmuxServer.run
+    timeouts = [3]
+
+    def send_literal(self: ControlClient, pane: str, text: str, **kwargs: Any) -> None:
+        if unread[0]:
+            _unread_from(self)
+            unread[0] = False
+        sent_over(self, pane, text, **kwargs)
+
+    def frozen(self: TmuxServer, *args: str, stdin: bytes | None = None) -> str:
+        if args[:1] == ("show-environment",) and timeouts[0]:
+            timeouts[0] -= 1
+            time.sleep(0.4)  # longer than the old cap, as 30 s was longer than 10
+            raise TmuxTimedOut("tmux did not answer within 30s: show-environment …")
+        return run_tmux(self, *args, stdin=stdin)
+
+    async def drive() -> str:
+        host = Host(live, pane_id)
+        async with host.run_test(size=(80, 24)) as pilot:
+            pane = host.pane
+            pane.focus()
+            await wait_until(pilot, lambda: _serving(pane) and _client(pane).answered, 5.0)
+            monkeypatch.setattr(ControlClient, "send_literal", send_literal)
+            monkeypatch.setattr(TmuxServer, "run", frozen)
+            for char in "abcdefghij":
+                pane.post_message(events.Key(char, char))
+            await wait_until(pilot, lambda: len(pane._inflight) == 10, 2.0)
+            pid = _client(pane).pid
+            assert pid is not None
+            os.kill(pid, signal.SIGKILL)
+            await wait_until(pilot, lambda: pane._held is not None, 2.0)
+            for char in "KLMNO":
+                pane.post_message(events.Key(char, char))
+            return await _settled(pilot, record, len("abcdefghijKLMNO"), 6.0)
+
+    assert run(drive()) == "abcdefghijKLMNO"
+    assert timeouts == [0]
+
+
+@_needs_tmux
+def test_real_tmux_quitting_with_the_server_frozen_returns_at_once(
+    live: TmuxServer, tmp_path: Path
+) -> None:
+    """Unsetting the stamps at the client's close was one polled call per stamped pane,
+    on the UI thread: with the server frozen, 30 s each — quitting with two stamped panes
+    took 60 s, where it took none before (re-review of #272). The unsets go down the pipe
+    and stdin closes; tmux runs them when it can, and nothing waits for it."""
+    if sys.platform == "win32":
+        pytest.skip("no SIGSTOP on Windows")
+    first = _window(live, "asq-freeze", tmp_path, ["cat"])
+    second = _window(live, "asq-freeze", tmp_path, ["cat"])
+    server_pid = int(live.run("display-message", "-p", "#{pid}").strip())
+
+    stopped: list[float] = []
+
+    async def drive() -> None:
+        host = Host(live, first)
+        async with host.run_test(size=(80, 24)) as pilot:
+            pane = host.pane
+            pane.focus()
+            for shown in (first, second):  # two panes stamped
+                if shown != pane.pane_id:
+                    pane.attach(shown)
+                await wait_until(pilot, lambda: _serving(pane) and pane.facts is not None, 5.0)
+                await pilot.press("s")
+                await wait_until(pilot, _row_shows(pane, "s"), timeout=2.0)
+                await wait_until(pilot, lambda: not pane._inflight, timeout=2.0)
+            os.kill(server_pid, signal.SIGSTOP)  # frozen as the app quits
+            stopped.append(time.monotonic())
+
+    try:
+        run(drive())
+        took = time.monotonic() - stopped[0]
+    finally:
+        os.kill(server_pid, signal.SIGCONT)
+    deadline = time.monotonic() + 3
+    while _stamps(live, "asq-freeze", os.getpid()) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    print(f"\nquit with the server frozen: the app ended in {took:.2f} s")
+    assert took < 1.0, took
+    assert _stamps(live, "asq-freeze", os.getpid()) == []  # ...and tmux ran the unsets after
 
 
 def _stamps(live: TmuxServer, session: str, pid: int) -> list[str]:
@@ -1187,6 +1294,9 @@ def test_real_tmux_this_processes_stamps_are_unset_when_its_client_closes(
 
     while_typing = run(drive())  # the app ends: its panes unmount, the last closes the client
     assert len(while_typing) == 1, while_typing  # it did stamp, so the test tests something
+    deadline = time.monotonic() + 1  # down the pipe: tmux runs the unsets as the client ends
+    while _stamps(live, "asq-tidy", os.getpid()) and time.monotonic() < deadline:
+        time.sleep(0.02)
     assert _stamps(live, "asq-tidy", os.getpid()) == []
     assert _stamps(live, "asq-tidy", 4_000_000) == ["ASQ_SENT_4000000_0=7"]
 
@@ -1211,7 +1321,9 @@ def test_real_tmux_a_deliberate_close_unsets_the_stamps_nothing_waits_to_read(
             await wait_until(pilot, lambda: not pane._inflight, timeout=2.0)
             stamped = _stamps(live, "asq-closing", os.getpid())
             pane._control_failed("a command failed")  # the pane lets its only client go
-            await pilot.pause(0.2)
+            deadline = time.monotonic() + 1  # down the pipe, run as the client ends
+            while _stamps(live, "asq-closing", os.getpid()) and time.monotonic() < deadline:
+                await pilot.pause(0.02)
             return stamped, _stamps(live, "asq-closing", os.getpid())
 
     stamped, after = run(drive())

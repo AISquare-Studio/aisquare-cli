@@ -81,7 +81,8 @@ sets this process's stamp for its pane (a hidden session variable,
 never ran is sent again by polling, in order, ahead of what was typed meanwhile
 (:meth:`TerminalPane._recover_input`). So does input in flight when the pane lets
 its client go on purpose — a failed command, another server. When tmux will not say
-what ran for :attr:`TerminalPane.INPUT_RECOVERY_GIVE_UP`, the wait ends and the pane
+what ran (it refuses :attr:`TerminalPane.INPUT_RECOVERY_ATTEMPTS` times; a timeout is
+waited out), the wait ends and the pane
 says :data:`INPUT_UNCONFIRMED`: neither what was in flight nor what was typed since
 is sent, since twice is the worse failure for an agent, and both are counted in a
 warning.
@@ -526,19 +527,19 @@ class _Control:
             self.close()
 
     def close(self) -> None:
-        """Close the client on purpose, and unset the stamps it set — but those of a pane
-        whose input in flight a recovery has yet to read (``_recover_input``): read as unset,
-        that input would all be sent again. Those go at the app's end."""
+        """Close the client on purpose; a healthy one unsets the stamps it set on the way
+        (``ControlClient.close_client``) — but those of a pane whose input in flight a
+        recovery has yet to read (``_recover_input``): read as unset, that input would all
+        be sent again. Those stay, harmless."""
         if _CONTROLS.get(self.key) is self:
             del _CONTROLS[self.key]
-        self.client.close_client()
         waiting = {
             item.pane_id
             for pane in list(_MOUNTED_PANES)
             for item in [*pane._inflight, *(pane._held or [])]
             if _server_key(item.server) == self.key
         }
-        self.client.unset_stamps(keep=waiting)
+        self.client.close_client(keep=waiting)
 
     def _output(self, pane_ids: set[str]) -> None:
         for pane in list(self.panes):
@@ -1139,9 +1140,13 @@ class TerminalPane(Widget, can_focus=True):
     """Seconds mouse events are gathered before one tmux call carries them all."""
     INPUT_RECOVERY_RETRY: float = 1.0
     """Seconds before a stamp that could not be read is asked again (:meth:`_recover_input`)."""
-    INPUT_RECOVERY_GIVE_UP: float = 10.0
-    """Seconds after a recovery began past which a stamp that still cannot be read ends it
-    (:meth:`_give_up_recovery`): the keys held behind it are not held for ever."""
+    INPUT_RECOVERY_ATTEMPTS: int = 10
+    """Stamp reads that FAIL, not time out, before a recovery ends unconfirmed
+    (:meth:`_give_up_recovery`): ~10 s at :attr:`INPUT_RECOVERY_RETRY`, so the keys held
+    behind a stamp tmux refuses to give are not held for ever. A read that TIMES OUT is
+    a wedged server, which answers once it resumes, and never counts: counted by the
+    clock from the recovery's start, the first 30 s timeout was already past a 10 s cap,
+    and a 130 s freeze dropped the held keys (re-review of #272)."""
     INPUT_RECOVERY: float = 0.05
     """Seconds after the control client ended with input in flight before its panes are
     asked what tmux ran of it (:meth:`_recover_input`): time for tmux to drop the dead
@@ -1183,10 +1188,14 @@ class TerminalPane(Widget, can_focus=True):
         server: TmuxServer | None = None,
         escape_key: str = "f12",
         placeholder: str = NO_PANE,
+        label: str | None = None,
         id: str | None = None,
     ) -> None:
         super().__init__(id=id)
         self.pane_id = pane_id
+        self.label = label
+        """What the pane shows, as a person names it — the agent's label — for what it says
+        about it (:meth:`_give_up_recovery`); the pane id when ``None``."""
         self.server = server
         self.escape_key = escape_key
         self.placeholder = placeholder
@@ -1242,8 +1251,8 @@ class TerminalPane(Widget, can_focus=True):
         """Counts attaches: a control frame asked before the latest one is dropped."""
         self._inflight: list[_Input] = []
         """Input sent down the pipe that tmux has not answered yet, oldest first."""
-        self._recovering_since = 0.0
-        """When the recovery waiting now began (``time.monotonic``)."""
+        self._recovery_failures = 0
+        """Stamp reads of the recovery waiting now that failed without timing out."""
         self._held: list[_Input] | None = None
         """Input typed while :meth:`_recover_input` waits to run, in order; ``None`` when
         no recovery is waiting."""
@@ -2649,12 +2658,12 @@ class TerminalPane(Widget, can_focus=True):
         if not self._inflight or self._held is not None:
             return
         self._held = []
-        self._recovering_since = time.monotonic()
+        self._recovery_failures = 0
         self.set_timer(self.INPUT_RECOVERY, self._recover_input, name="terminal-input-recovery")
 
     def _give_up_recovery(self, error: StampUnknown) -> None:
-        """tmux has not said, for :attr:`INPUT_RECOVERY_GIVE_UP`, what ran of the input in
-        flight: end the wait, send nothing, and say so.
+        """tmux has refused, :attr:`INPUT_RECOVERY_ATTEMPTS` times, to say what ran of the
+        input in flight: end the wait, send nothing, and say so.
 
         The SAFE choice for each kind, documented as the module's "Falling back" says.
         The input in flight is not sent again: tmux may yet run it (it reads the pipe
@@ -2669,7 +2678,8 @@ class TerminalPane(Widget, can_focus=True):
         unsent, self._held = len(self._held or []), None
         self.log.warning(f"input recovery gave up: {error}")
         self.notify(
-            f"tmux did not say whether {unconfirmed} inputs sent to {self.pane_id} reached it: "
+            f"tmux did not say whether {unconfirmed} inputs sent to {self.label or self.pane_id} "
+            "reached it: "
             f"they were not sent again, and the {unsent} typed since were not sent — "
             "check the pane and type again what is missing",
             severity="warning",
@@ -2689,8 +2699,9 @@ class TerminalPane(Widget, can_focus=True):
         asked :attr:`INPUT_RECOVERY` after the end, the stamp is past that: what tmux had
         read and not run is freed with the dead client, never run later. A gone pane's
         input goes nowhere, as a key into a gone pane always has. A stamp tmux did not
-        answer about (``StampUnknown``: a timeout) is asked again
-        :attr:`INPUT_RECOVERY_RETRY` later, everything held meanwhile: read as a gone
+        answer about (``StampUnknown``) is asked again :attr:`INPUT_RECOVERY_RETRY` later,
+        everything held meanwhile — a timeout however long the freeze, a failure
+        :attr:`INPUT_RECOVERY_ATTEMPTS` times: read as a gone
         pane, the input in flight was dropped though tmux might still run it (tester of
         #272).
         """
@@ -2703,11 +2714,14 @@ class TerminalPane(Widget, can_focus=True):
                 ran[where] = sent_stamp(item.server, item.pane_id)
             except StampUnknown as error:
                 # Not known what ran: nothing is sent or dropped, new input stays held
-                # behind it, and the stamp is asked again (a wedged server answers late)
-                # — for INPUT_RECOVERY_GIVE_UP at most.
-                if time.monotonic() - self._recovering_since >= self.INPUT_RECOVERY_GIVE_UP:
-                    self._give_up_recovery(error)
-                    return
+                # behind it, and the stamp is asked again — a timeout as long as it
+                # takes (a wedged server answers once it resumes), a failure
+                # INPUT_RECOVERY_ATTEMPTS times.
+                if not error.timed_out:
+                    self._recovery_failures += 1
+                    if self._recovery_failures >= self.INPUT_RECOVERY_ATTEMPTS:
+                        self._give_up_recovery(error)
+                        return
                 self.log.warning(f"input recovery waits: {error}")
                 self.set_timer(
                     self.INPUT_RECOVERY_RETRY, self._recover_input, name="terminal-input-recovery"

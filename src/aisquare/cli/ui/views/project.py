@@ -215,6 +215,7 @@ class ManagerTab(Vertical):
         header.update(manager_text(status))
         button.display = False
         pane.display = True
+        pane.label = status.agent.label
         if (wanted := shown_pane(status)) != pane.pane_id:
             if wanted is not None:
                 # The row's own server, where its spawn said it listened: `-L` by the name

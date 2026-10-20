@@ -9,9 +9,9 @@ This guard covers every other one: a view switched to, a button that appears,
 a layout that moves a button, a dialog closing off it.
 
 :class:`GuardedButton` ignores a mouse press that lands within
-:data:`CLICK_GUARD` seconds of its own place on screen changing. A key press
-(enter on the focused button) is a deliberate gesture, and so is
-:meth:`Button.press`; neither is guarded.
+:data:`CLICK_GUARD` seconds of its own place on screen changing, and the press
+does not take the focus either. A key press (enter on the focused button) is a
+deliberate gesture, and so is :meth:`Button.press`; neither is guarded.
 """
 
 from __future__ import annotations
@@ -43,8 +43,8 @@ class GuardedButton(Button):
     the last one. A view switched to, the button mounted or shown again, and a bar
     re-laid out around it all change that region, and each starts the window again.
     So does its screen becoming the current one again (``App.screen_change_signal``),
-    as when a dialog over it closes. An ignored press posts nothing, and the first
-    one in a window says so, quietly.
+    as when a dialog over it closes. An ignored press posts nothing and leaves the focus
+    where it was, and the first one in a window says so, quietly.
 
     A drop-in: the same constructor, and a press it lets through posts the same
     ``Button.Pressed``, so an ``@on(Button.Pressed, "#id")`` handler stays as it is.
@@ -78,6 +78,13 @@ class GuardedButton(Button):
         """Whether a mouse press now would be ignored."""
         changed = self._changed_at
         return changed is not None and clock() - changed < CLICK_GUARD
+
+    def focus_on_click(self) -> bool:
+        # Textual focuses on the mouse-down, before the click is dropped below. Enter is
+        # never guarded, so a Stop focused by an ignored click was pressed by the next
+        # Enter, and in ConfirmBulk that click took the focus off Cancel (review of #266,
+        # round 2).
+        return not self.guarding and super().focus_on_click()
 
     async def _on_click(self, event: events.Click) -> None:
         # No super() call: Textual dispatches Button._on_click itself after this one, and

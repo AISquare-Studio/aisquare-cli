@@ -253,6 +253,27 @@ def test_escape_and_cancel_close_the_dialog_and_act_on_nobody(acted: Acted) -> N
     assert acted.calls == []
 
 
+def test_a_click_on_confirm_as_the_dialog_appears_leaves_cancel_the_focus(acted: Acted) -> None:
+    """Review of #266, round 2: the click the guard ignored still took the focus off
+    Cancel on its mouse-down, and the Enter after it ran Stop all."""
+
+    async def go(pilot: Pilot[None]) -> tuple[str | None, bool]:
+        app = _app(pilot)
+        dialog = await _open(pilot, "stop")
+        dialog.query_one("#bulk-confirm", GuardedButton).changed_under_pointer()
+        await pilot.click(_confirm(dialog))
+        await settle(app)
+        focused = app.focused.id if app.focused else None
+        await pilot.press("enter")
+        await settle(app)
+        return focused, isinstance(app.screen, ConfirmBulk)
+
+    focused, still_open = drive(go)
+    assert focused == "bulk-cancel"
+    assert not still_open, "the Enter went to Cancel"
+    assert acted.calls == []
+
+
 def test_nothing_running_says_so_and_offers_nothing_to_confirm(
     tmp_path: Path, script: Script
 ) -> None:

@@ -142,6 +142,33 @@ def test_a_dialog_closing_off_the_button_guards_it_again(clock: GuardClock) -> N
     assert told == [NOTICE]
 
 
+def test_an_ignored_click_leaves_the_focus_where_it_was_for_the_next_enter(
+    clock: GuardClock,
+) -> None:
+    """Review of #266, round 2: Textual focuses a widget on the mouse-down, before the click
+    the guard drops. The ignored click left the keyboard on Restart, and the user's next
+    Enter, meant for what they were typing into, pressed it."""
+
+    async def go(pilot: Pilot[None], host: Host) -> tuple[str | None, list[str], str | None]:
+        button = await _shown(pilot, host)
+        host.query_one("#neighbour", Button).focus()
+        await settle_page(host)
+        await pilot.click(button)
+        await settle_page(host)
+        ignored_on = host.focused.id if host.focused else None
+        await pilot.press("enter")
+        await settle_page(host)
+        clock.step()
+        await pilot.click(button)  # a click the guard lets through focuses it, as a Button's does
+        await settle_page(host)
+        return ignored_on, host.pressed, host.focused.id if host.focused else None
+
+    ignored_on, pressed, after = drive(go)
+    assert ignored_on == "neighbour"
+    assert pressed == ["neighbour", "restart"]
+    assert after == "restart"
+
+
 def test_a_key_or_a_press_from_code_is_not_guarded(clock: GuardClock) -> None:
     """Enter on the focused button is a deliberate gesture, whenever it comes."""
 

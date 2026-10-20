@@ -407,7 +407,8 @@ done (`✓ restarted manager (alpha) — resumed its session`, `✓ stopped code
 Then one toast sums it up (`restarted 4 · skipped 1 · failed 0`) and names who was
 skipped or failed, and why. A restart from here never moves your view. Like an agent
 view's Stop and Restart, both buttons and the dialog's confirm ignore a mouse click
-in the second after they appear or move.
+in the second after they appear or move. An ignored click on the confirm button
+leaves the focus on *Cancel*.
 
 ### `fleet shutdown`
 
@@ -1772,8 +1773,9 @@ moves you to the new row only if that view is still on screen when the restart
 ends. If you have opened another agent meanwhile, you stay there, and a toast
 names the restart and its project. Both buttons ignore a mouse click that
 lands within a second of the view coming up, moving or a dialog over it
-closing, and say so once: that click was aimed at what was there before. Enter
-on the focused button is never ignored.
+closing, and say so once: that click was aimed at what was there before. An
+ignored click doesn't take the keyboard focus either, so the next Enter goes
+where it was going. Enter on the focused button is never ignored.
 
 **A panel reading "No changes this session" sits beside an agent's conversation
 and will not go away.** That is Claude Code's own diff panel (fullscreen

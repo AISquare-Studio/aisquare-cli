@@ -59,8 +59,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   click was aimed at whatever was there before, and it no longer stops or
   restarts the agent now under the pointer. The first ignored click says so
   (`ignored a click on Restart — the view had just changed under the
-  pointer`). Click again a moment later, or press Enter on the focused button:
-  a key is never ignored.
+  pointer`), and it doesn't take the keyboard focus either, so the next Enter
+  goes where it was going. Click again a moment later, or press Enter on the
+  focused button: a key is never ignored.
 
 ### Changed
 - When you type on a Mac (`asq` on your Mac, or reached from Terminal.app or

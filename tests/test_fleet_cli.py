@@ -1259,6 +1259,22 @@ def test_the_usage_errors_of_all_are_refused_before_anything_is_asked(
     assert resolved.calls == []
 
 
+def test_click_s_usage_error_is_reached_in_one_place() -> None:
+    """Review of #266, round 3: ``cli.fleet`` reached click's ``UsageError`` through the
+    bases of ``typer.BadParameter`` a second time, beside ``cli.global_flags``. A change to
+    those bases would have had to find both, and the copy missed would raise the wrong
+    class: the ``Missing argument 'label'.`` above would then be a traceback."""
+    import aisquare
+
+    src = Path(aisquare.__file__).parent
+    reaching = sorted(
+        path.relative_to(src).as_posix()
+        for path in src.rglob("*.py")
+        if "BadParameter.__bases__" in path.read_text(encoding="utf-8")
+    )
+    assert reaching == ["cli/common.py"]
+
+
 @pytest.mark.parametrize("path", sorted(NEEDED_UNLESS), ids=" ".join)
 def test_an_argument_needed_unless_a_flag_stands_in_is_refused_without_either(
     runner: CliRunner, path: tuple[str, ...]

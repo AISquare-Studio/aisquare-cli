@@ -25,7 +25,7 @@ from typing import Annotated, NoReturn
 import typer
 from rich.console import Console
 
-from aisquare.cli.common import fail, refuse_conflicting_scope
+from aisquare.cli.common import USAGE_ERROR, fail, refuse_conflicting_scope
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.models import FleetAgentStatus, ProjectInfo
@@ -64,10 +64,6 @@ EveryAgent = Annotated[
 ManagersOnly = Annotated[
     bool, typer.Option("--managers", help="With --all: the managers alone, not their teams.")
 ]
-
-_USAGE_ERROR: type[Exception] = typer.BadParameter.__bases__[0]
-"""Click's ``UsageError``, which typer vendors: the public ``typer.BadParameter``'s base
-(as ``cli.global_flags`` reaches it)."""
 
 _STATE_CHIP = {
     "working": "▶ working",
@@ -562,7 +558,7 @@ def _one_or_every(
     if not every and label is None:
         # The words typer said when the label was a required argument, through the usage
         # error typer itself raises (its click is vendored): exit 2, and JSON under --json.
-        raise _USAGE_ERROR("Missing argument 'label'.", ctx)
+        raise USAGE_ERROR("Missing argument 'label'.", ctx)
     return label
 
 

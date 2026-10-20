@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
 import pytest
-from textual import on
+from textual import events, on
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
 from textual.pilot import Pilot
@@ -167,6 +167,59 @@ def test_an_ignored_click_leaves_the_focus_where_it_was_for_the_next_enter(
     assert ignored_on == "neighbour"
     assert pressed == ["neighbour", "restart"]
     assert after == "restart"
+
+
+async def _release(pilot: Pilot[None], button: GuardedButton) -> None:
+    """The mouse-up of a press already down on ``button``, and the click Textual makes of it
+    (``Pilot.click`` is the three events at one instant)."""
+    await pilot._post_mouse_events([events.MouseUp, events.Click], button)
+
+
+def test_a_press_held_across_the_window_s_start_gets_one_verdict_for_focus_and_press(
+    clock: GuardClock,
+) -> None:
+    """Review of #266, round 3: the focus was judged at the mouse-down and the press again at
+    the click, on the mouse-up. Down on a button at rest, the bar re-laid out under the
+    held button before the release: the click was ignored, the focus taken all the same,
+    and the next Enter pressed it. One verdict now, the mouse-down's, for both."""
+
+    async def go(pilot: Pilot[None], host: Host) -> tuple[list[str], str | None]:
+        button = await _shown(pilot, host)
+        clock.step()
+        host.query_one("#neighbour", Button).focus()
+        await settle_page(host)
+        await pilot.mouse_down(button)
+        await settle_page(host)
+        button.changed_under_pointer()  # the bar moves it while the button is held
+        await _release(pilot, button)
+        await settle_page(host)
+        return host.pressed, host.focused.id if host.focused else None
+
+    pressed, focused = drive(go)
+    assert (pressed, focused) == (["restart"], "restart"), "focus and press must agree"
+
+
+def test_a_press_down_inside_the_window_is_ignored_though_released_after_it(
+    clock: GuardClock,
+) -> None:
+    """The reverse straddle: the mouse-down lands in the window, aimed at the old view, and
+    the mouse-up comes after the window ended. The focus stayed where it was, and the
+    press went through on the button that had just appeared."""
+
+    async def go(pilot: Pilot[None], host: Host) -> tuple[list[str], str | None, list[str]]:
+        button = await _shown(pilot, host)
+        host.query_one("#neighbour", Button).focus()
+        await settle_page(host)
+        await pilot.mouse_down(button)
+        await settle_page(host)
+        clock.step()
+        await _release(pilot, button)
+        await settle_page(host)
+        return host.pressed, host.focused.id if host.focused else None, host.notices()
+
+    pressed, focused, told = drive(go)
+    assert (pressed, focused) == ([], "neighbour")
+    assert told == [NOTICE]
 
 
 def test_a_key_or_a_press_from_code_is_not_guarded(clock: GuardClock) -> None:

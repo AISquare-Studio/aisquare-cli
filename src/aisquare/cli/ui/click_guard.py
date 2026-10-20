@@ -44,7 +44,8 @@ class GuardedButton(Button):
     re-laid out around it all change that region, and each starts the window again.
     So does its screen becoming the current one again (``App.screen_change_signal``),
     as when a dialog over it closes. An ignored press posts nothing and leaves the focus
-    where it was, and the first one in a window says so, quietly.
+    where it was, and the first one in a window says so, quietly. The verdict is made once
+    per press, at its mouse-down, and stands for the focus and the click alike.
 
     A drop-in: the same constructor, and a press it lets through posts the same
     ``Button.Pressed``, so an ``@on(Button.Pressed, "#id")`` handler stays as it is.
@@ -53,6 +54,9 @@ class GuardedButton(Button):
     _placed_at: Region = NULL_REGION
     _changed_at: float | None = None
     _told_at: float | None = None
+    _down_guarded: bool | None = None
+    """The verdict on the press in progress, made at its mouse-down (:meth:`focus_on_click`);
+    ``None`` once its click has used it."""
 
     def on_mount(self) -> None:
         self.screen.screen_layout_refresh_signal.subscribe(self, self._laid_out, immediate=True)
@@ -83,13 +87,20 @@ class GuardedButton(Button):
         # Textual focuses on the mouse-down, before the click is dropped below. Enter is
         # never guarded, so a Stop focused by an ignored click was pressed by the next
         # Enter, and in ConfirmBulk that click took the focus off Cancel (review of #266,
-        # round 2).
-        return not self.guarding and super().focus_on_click()
+        # round 2). Asked once per mouse-down on the button, so the verdict is kept here
+        # for the click, which comes at the mouse-up: judged again there, a press held
+        # across the window's start or end got one verdict for the focus and the other
+        # for the press, and a Stop focused by a click then ignored was pressed by the
+        # next Enter all the same (review of #266, round 3).
+        self._down_guarded = self.guarding
+        return not self._down_guarded and super().focus_on_click()
 
     async def _on_click(self, event: events.Click) -> None:
         # No super() call: Textual dispatches Button._on_click itself after this one, and
         # ``prevent_default`` is what stops it (``MessagePump._get_dispatch_methods``).
-        if not self.guarding:
+        guarded = self.guarding if self._down_guarded is None else self._down_guarded
+        self._down_guarded = None
+        if not guarded:
             return
         event.prevent_default()
         event.stop()

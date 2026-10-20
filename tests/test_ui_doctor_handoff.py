@@ -822,7 +822,16 @@ def test_a_called_off_hand_over_begins_each_start_that_stood_down_once(
     owed = _starts_with_a_hand_over(True, monkeypatch, then=call_off)
 
     assert owed == sorted(
-        [*started, ui_app.ACCOUNTS_WORKER, welcome_view.worker_name("validate")]
+        [
+            *started,
+            ui_app.FLEET_WORKER,
+            ui_app.ACCOUNTS_WORKER,
+            # The fleet read's frame asks for the accounts once it has painted, as every
+            # frame does: the tick reads in a thread, so its ask comes after the call-off
+            # and no longer folds into the held read.
+            ui_app.ACCOUNTS_WORKER,
+            welcome_view.worker_name("validate"),
+        ]
     ), "each start that stood down, once, and nothing else"
     assert looks == [True], "the look held is the full one asked for"
 

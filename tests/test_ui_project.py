@@ -783,6 +783,35 @@ def test_refresh_status_pushes_the_managers_state(project: ProjectInfo) -> None:
     assert "no live tmux session" in attach_after  # the coder has no session to attach to
 
 
+def test_a_resize_after_the_manager_leaves_keeps_the_no_manager_text(
+    project: ProjectInfo,
+) -> None:
+    """Review of #267 (2b1d37a3): the Manager tab's header refits the info line on every
+    resize (``InfoLine``), and once the manager has left it shows the no-manager prose
+    instead. The line it last fitted must be forgotten then: kept, the next resize painted
+    the departed manager's line back over "has no manager yet"."""
+    manager = fake_agent(project, pane_id="%11")
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, str, str]:
+        view = host.query_one(ProjectView)
+        view.refresh_status([FleetAgentStatus(agent=manager, state="working")])
+        await settle(pilot)
+        header = host.query_one("#manager-header", Static)
+        shown_manager = shown(header)
+        view.refresh_status([])  # the manager leaves the frame
+        await settle(pilot)
+        left = shown(header)
+        await pilot.resize_terminal(100, 40)  # …and the window is resized
+        await settle(pilot)
+        return shown_manager, left, shown(header)
+
+    shown_manager, left, resized = drive(project, scenario)
+    assert "🧭 manager" in shown_manager and "▶ working" in shown_manager  # not vacuous
+    for text in (left, resized):
+        assert "has no manager yet" in text, text
+        assert "🧭 manager" not in text and "%11" not in text, text  # no stale info line
+
+
 def test_the_manager_tab_says_the_manager_exited_and_how_to_bring_it_back(
     project: ProjectInfo,
 ) -> None:

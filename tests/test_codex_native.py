@@ -1583,6 +1583,220 @@ def _stop_app_servers(*homes: Path) -> None:
 
 
 @pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
+def test_real_codex_at_its_switch_dialog_is_handed_over_and_the_session_it_leaves_ends(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SMOKE7 of #113, on two loopback Codex slots: a coder's first prompt meets its slot's
+    usage limit, and Codex draws *Switch to gpt-6-luna for lower credit usage?* under the
+    error (the operator keeps ``[notice] hide_rate_limit_model_nudge = false``). The fleet's
+    read parks it and asks for the hand-over, whose worker moves it to the slot with room.
+    The worker's stop presses Esc (Codex's ``dismiss_key``), which leaves the dialog for
+    the empty prompt, then ``/exit``: Codex's own ``SessionEnd`` ends the session it
+    leaves, its process is gone with its window, and the doctor names no agent parked on
+    a limit. Killed at the dialog, that session stayed limited and the doctor warned until
+    the reset while the agent ran on the other slot."""
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.core import codex_sharing
+    from aisquare.services import diagnostics, hooks
+    from tests.test_codex_accounts import _rollout, _token_count, _window
+
+    binary = shutil.which("codex")
+    assert binary, "AISQUARE_TEST_CODEX requires an installed Codex"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    room_requests: list[dict[str, Any]] = []
+
+    class Limit(BaseHTTPRequestHandler):
+        """The slot at its limit, as a plan's own five-hour window answers it (SMOKE7's
+        provider): ``LIMIT`` is a ``429 usage_limit_reached`` with that window at 100 % in
+        its headers, which is what opens the dialog under the error (0.162.1). The spend
+        cap's ``429`` (:class:`_AtItsLimit`) names no window, and opens none."""
+
+        def do_POST(self) -> None:
+            raw = self.rfile.read(int(self.headers["Content-Length"]))
+            if not self.path.endswith("/responses"):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+                return
+            said = _user_texts(json.loads(raw))
+            resets: int = self.server.resets_at  # type: ignore[attr-defined]
+            window = {
+                "x-codex-primary-used-percent": "100.0",
+                "x-codex-primary-window-minutes": "300",
+                "x-codex-primary-reset-at": str(resets),
+            }
+            if not (said and said[-1].startswith("LIMIT")):
+                _answer(self, _message("ok"), window)
+                return
+            body = json.dumps(
+                {
+                    "error": {
+                        "type": "usage_limit_reached",
+                        "message": "You've hit your usage limit.",
+                        "plan_type": "plus",
+                        "resets_at": resets,
+                    }
+                }
+            ).encode()
+            self.send_response(429)
+            self.send_header("Content-Type", "application/json")
+            for name, value in window.items():
+                self.send_header(name, value)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    class Room(BaseHTTPRequestHandler):
+        """The slot with room: every turn answered, its five-hour window at 20 %."""
+
+        def do_POST(self) -> None:
+            raw = self.rfile.read(int(self.headers["Content-Length"]))
+            if not self.path.endswith("/responses"):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+                return
+            room_requests.append(json.loads(raw))
+            _answer(self, _message("ok"), {"x-codex-primary-used-percent": "20.0"})
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    with (
+        ThreadingHTTPServer(("127.0.0.1", 0), Limit) as limit,
+        ThreadingHTTPServer(("127.0.0.1", 0), Room) as room,
+    ):
+        limit.resets_at = int(time.time()) + 3 * 3600  # type: ignore[attr-defined]
+        threads = [threading.Thread(target=s.serve_forever, daemon=True) for s in (limit, room)]
+        for thread in threads:
+            thread.start()
+        for key in tuple(os.environ):
+            if key.startswith(("OPENAI_", "ANTHROPIC_", "CODEX_")):
+                monkeypatch.delenv(key)
+        monkeypatch.setattr(
+            agents, "_aisquare_command", lambda *args, **kwargs: shlex.join(selfcli.argv_for([]))
+        )
+        full, roomy = (accounts_core.create_account("codex") for _ in range(2))
+        nudge = "[notice]\nhide_rate_limit_model_nudge = false\n"
+        for slot, server, extra in ((full, limit, nudge), (roomy, room, "")):
+            codex_sharing.config_path(slot.config_dir).write_text(
+                'model = "local-fixture"\nmodel_provider = "local"\n'
+                '[model_providers.local]\nname = "Local fixture"\nwire_api = "responses"\n'
+                f'base_url = "http://127.0.0.1:{server.server_port}/v1"\n'
+                "requires_openai_auth = false\n"
+                f'[projects.{json.dumps(str(workspace))}]\ntrust_level = "trusted"\n' + extra,
+                encoding="utf-8",
+            )
+            # A login the hand-over may move an agent onto, no operator token in it.
+            (slot.config_dir / "auth.json").write_text(
+                json.dumps({"OPENAI_API_KEY": "sk-local-dummy-not-a-key"}), encoding="utf-8"
+            )
+            agents.install_hooks("codex", slot.config_dir)
+        # The room slot's last reading, as an earlier turn there left it: the automatic
+        # hand-over takes only an account it can read under `switch_at`.
+        now = datetime.now(tz=UTC)
+        _rollout(roomy.config_dir, [_token_count(now, _window(20, 300, now + timedelta(hours=4)))])
+        config = load_config()
+        config.fleet.tmux_socket = f"asq-codex-handover-{os.getpid()}"
+        config.accounts.on_limit = "switch"
+        save_config(config)
+        # The fleet's read below asks for the worker; it runs here, in this process.
+        detached: list[list[str]] = []
+        monkeypatch.setattr(hooks, "_detach", detached.append)
+        project = team.activate(workspace)
+        srv = fleet.server(config.fleet)
+        offer = "Switch to gpt-6-luna"
+
+        def screen(pane: str) -> str:
+            return srv.run("capture-pane", "-p", "-t", pane)
+
+        def until(check: Any, seconds: float, what: str, shown: Any) -> None:
+            deadline = time.monotonic() + seconds
+            while not check():
+                if time.monotonic() >= deadline:
+                    raise AssertionError(f"{what}:\n{shown()}")
+                time.sleep(0.2)
+
+        try:
+            coder = fleet.spawn(
+                project,
+                "coder",
+                agent="codex",
+                worktree=False,
+                account=str(full.slot),
+                prompt="LIMIT please",
+                agent_args=["--dangerously-bypass-hook-trust"],
+            ).agent
+            until(
+                lambda: offer in screen(coder.pane_id),
+                40,
+                "the dialog under its limit",
+                lambda: screen(coder.pane_id),
+            )
+            pid = int(srv.run("display-message", "-p", "-t", coder.pane_id, "#{pane_pid}"))
+            until(
+                lambda: fleet.status_of(coder).state == "limited",
+                20,
+                "the fleet's read parks it",
+                lambda: screen(coder.pane_id),
+            )
+            with store_session() as store:
+                row = store.get_fleet_agent(coder.id)
+                assert row is not None and row.session_id is not None
+                left = row.session_id
+            assert detached and left in detached[0], detached
+            [parked] = [
+                c for c in diagnostics._other_accounts_checks() if c.name == "codex-account-limits"
+            ]
+            assert "parked on a Codex usage limit" in parked.detail, parked
+
+            hooks.hand_over(left, reason="5h limit")
+
+            until(
+                lambda: not Path(f"/proc/{pid}").exists(),
+                10,
+                "its Codex process gone",
+                lambda: Path(f"/proc/{pid}/cmdline").read_bytes(),
+            )
+            # By its process: the kill of its session's one window ended the server, and the
+            # replacement's new one numbers its first pane %0 again.
+            panes = srv.run("list-panes", "-a", "-F", "#{pane_pid}").split()
+            assert str(pid) not in panes, "its window gone"
+            with store_session() as store:
+                session = store.get_session(left)
+                [replacement] = store.fleet_agents(project.id, live_only=True)
+                kinds = [event.kind for event in store.recent_events(project.id, limit=30)]
+            assert session is not None and session.ended_at is not None, "its SessionEnd ran"
+            assert [
+                c for c in diagnostics._other_accounts_checks() if c.name == "codex-account-limits"
+            ] == [], "no agent parked on a Codex usage limit"
+            assert replacement.account_slot == roomy.slot and replacement.label == coder.label
+            assert "switched" in kinds and "agent_exited" not in kinds
+            until(
+                lambda: any(
+                    "under another Codex account" in text
+                    for request in room_requests
+                    for text in _user_texts(request)
+                ),
+                40,
+                "the hand-off prompt on the slot with room",
+                lambda: screen(replacement.pane_id),
+            )
+        finally:
+            if srv.has_session(fleet.session_name(fleet.ensure_codename(project).codename or "")):
+                srv.run("kill-server")
+            for server in (limit, room):
+                server.shutdown()
+            for thread in threads:
+                thread.join(timeout=2)
+            _stop_app_servers(full.config_dir, roomy.config_dir)
+
+
+@pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
 def test_real_codex_trust_one_slot_gave_reaches_another_and_its_spawn_asks_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

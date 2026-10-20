@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tomllib
 from collections.abc import Iterator
+from dataclasses import replace
 from importlib import import_module
 from pathlib import Path, PureWindowsPath
 from typing import Any, cast, get_args
@@ -531,6 +532,10 @@ def test_resume_exit_mcp_context_teams_and_telemetry(adapter: AgentAdapter, tmp_
     resume = adapter.resume_args("native-1", transcript)
     assert resume and ("native-1" in resume or str(transcript) in resume)
     assert adapter.exit_command.startswith("/") and "\n" not in adapter.exit_command
+    # One tmux key, and never one that answers a dialog with its highlighted choice.
+    key = adapter.dismiss_key
+    assert key and not any(char.isspace() for char in key), key
+    assert key not in {"Enter", "C-m", "KPEnter", "Space"}, key
     mcp = adapter.mcp_args("/opt/aisquare", ["serve", "--stdio"], ["AISQUARE_HOME"])
     assert any("/opt/aisquare" in arg for arg in mcp)
     files = adapter.context_files(tmp_path)
@@ -696,6 +701,45 @@ def test_the_fake_agent_runs_through_the_fleet_like_any_other(
     tmux.honours_exit = False
     fleet_service.stop(project, label, grace=0)
     assert (receipt.agent.pane_id, "literal", "/quit") in tmux.typed
+
+
+def test_the_hand_over_dismisses_a_dialog_with_the_fake_agents_own_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_agent: FakeAgentAdapter
+) -> None:
+    """The automatic hand-over's stop (``dismiss_dialog``) presses the row's adapter's
+    ``dismiss_key`` at a screen that does not show its empty prompt, then that adapter's
+    exit command once the prompt is back: no key of Codex's or Claude Code's."""
+    config = load_config()
+    config.fleet.roles["coder"] = FleetRoleSettings(worktree=False)
+    save_config(config)
+    bin_dir = tmp_path / "bin"
+    fakebin.executable_fake(
+        bin_dir, "fakeagent", windows="echo fake agent\nset /p line=", posix="read line"
+    )
+    fakebin.prepend_to_path(bin_dir, monkeypatch)
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: tmux)
+    monkeypatch.setattr(fleet_service, "_sleep", lambda seconds: None)
+    agent = fleet_service.spawn(team_project(tmp_path), "coder", agent="fake-agent").agent
+    # Its screen read as Codex's is (an empty-prompt mark), at a dialog its own key closes.
+    monkeypatch.setattr(
+        fake_agent, "capabilities", replace(fake_agent.capabilities, idle_prompt_mark="fake>")
+    )
+    tmux.screens[agent.pane_id] = ["Really quit? [y/N]"]
+    send_keys = tmux.send_keys
+
+    def keys(pane_id: str, *names: str) -> None:
+        send_keys(pane_id, *names)
+        if names == (fake_agent.dismiss_key,):
+            tmux.screens[pane_id] = ["fake> "]
+
+    monkeypatch.setattr(tmux, "send_keys", keys)
+
+    stopped = fleet_service.stop(team_project(tmp_path), agent.label, grace=0, dismiss_dialog=True)
+
+    typed = [(kind, text) for pane, kind, text in tmux.typed if pane == agent.pane_id]
+    assert typed[:2] == [("key", "C-g"), ("literal", "/quit")], typed
+    assert stopped.killed is None and stopped.dismissed is not None
 
 
 # --- the transcript, for Remote's needs-you cards and Transcript tab --------------------

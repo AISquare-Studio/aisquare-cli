@@ -47,10 +47,15 @@ from tests.test_remote_needs import FakeTmux, _rooted
 
 ROLLOUT = Path(__file__).parent / "fixtures" / "agent_transcripts" / "codex-0.162.1.jsonl"
 #: Codex 0.162.1's screens, measured (``tests/fixtures/agent_screens/codex.json``), by what
-#: each shows: its own dialogs, and screens with none.
+#: each shows: its own dialogs, and screens with none. UTF-8, its chevrons and box rules:
+#: read in the locale's encoding, Windows' cp1252 could not decode it.
 SCREENS: dict[str, list[str]] = {
     shown["what"]: shown["rows"]
-    for screens in [json.loads((ROLLOUT.parents[1] / "agent_screens" / "codex.json").read_text())]
+    for screens in [
+        json.loads(
+            (ROLLOUT.parents[1] / "agent_screens" / "codex.json").read_text(encoding="utf-8")
+        )
+    ]
     for part in ("dialogs", "not_dialogs")
     for shown in screens[part]
 }

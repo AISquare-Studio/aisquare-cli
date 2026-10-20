@@ -1745,9 +1745,24 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.post_message(AgentSelected(agent.project_id, agent.id))
 
     def on_stop_agent(self, event: StopAgent) -> None:
-        """The agent view's Stop button, or ``x`` on the selected row: one question first."""
+        """The agent view's Stop button, or ``x`` on the selected row: one question first.
+
+        A frame whose read of the agent's project failed lists none of its agents
+        (``refresh_data`` fails open with the cost shown), and Stop was then refused as
+        "no longer listed" for an agent that still ran (review of #240, "also confirmed":
+        Stop after a failed refresh). Its open view still holds the status it last
+        showed, and the dialog asks the service about that row, which decides.
+        """
         project = self.snapshot.project(event.project_id) if self.snapshot else None
         status = self.snapshot.agent(event.project_id, event.agent_id) if self.snapshot else None
+        if (
+            status is None
+            and self.snapshot is not None
+            and event.project_id in self.snapshot.notices
+        ):
+            view = self.current_view()
+            if isinstance(view, AgentView) and view.status.agent.id == event.agent_id:
+                status = view.status
         if project is None or status is None:
             self.notify("that agent is no longer listed", severity="warning", timeout=4)
             return

@@ -17,7 +17,7 @@ What it is, and what it is not:
   A pane that printed is captured — the two commands ``core.tmux`` builds
   (:func:`~aisquare.core.tmux.frame_commands`), down the same pipe — and the
   frame is their answer, parsed as a polled frame is.
-* It follows the pane on screen (:meth:`ControlClient.watch`). tmux sends
+* It follows the pane on screen (:meth:`ControlClient.watch_pane`). tmux sends
   ``%output`` only for the panes of the session a client is attached to, so the
   client moves to that pane's session (``switch-client -t %pane`` — each project
   is its own ``asq-<codename>`` session) and PAUSES every other pane of it, so a
@@ -110,7 +110,7 @@ class Reply:
     ok: bool
     lines: list[str]
 
-    def error(self) -> TmuxError:
+    def failure(self) -> TmuxError:
         return TmuxError("\n".join(self.lines).strip() or "tmux refused the command")
 
 
@@ -152,7 +152,7 @@ def _command(args: Sequence[str]) -> str:
     return " ".join(quote(arg) for arg in args)
 
 
-def _spawn(argv: list[str]) -> subprocess.Popen[bytes]:
+def _spawn_client(argv: list[str]) -> subprocess.Popen[bytes]:
     """THE seam (``core.spawn.SEAMS``): start one ``tmux -C`` client, identity stripped.
 
     Stripped like ``core.tmux._tmux``: ``attach-session`` starts a server when none
@@ -194,7 +194,7 @@ class ControlClient:
     ``on_output`` is delivered the set of watched panes that printed since it was
     last delivered — at most one delivery waiting at a time, however much they
     print. ``on_exit`` is delivered once, with tmux's reason, when the client ends
-    without :meth:`close`, after every command still waiting has been answered as
+    without :meth:`close_client`, after every command still waiting has been answered as
     failed.
     """
 
@@ -248,17 +248,22 @@ class ControlClient:
     def pid(self) -> int | None:
         return None if self._process is None else self._process.pid
 
-    def start(self, pane_id: str) -> None:
+    def start_client(self, pane_id: str) -> None:
         """Attach to ``pane_id``'s session and follow it. Raises :class:`TmuxError` when no
         process could be started; one that starts and is refused ends through ``on_exit``."""
         argv = self.server.argv("-C", "attach-session", "-t", pane_id, "-f", CLIENT_FLAGS)
-        self._process = _spawn(argv)
+        self._process = _spawn_client(argv)
         self._alive = True
-        threading.Thread(target=self._read, name="tmux-control-read", daemon=True).start()
-        threading.Thread(target=self._write, name="tmux-control-write", daemon=True).start()
-        self.watch(pane_id)
+        # Bound to locals before they start: ``worker.start()`` is a thread's, where a
+        # bare ``.start()`` reads as every project ``start`` to the call-graph guards
+        # (``tests/test_config_writes_stay_in_the_cli.py``, ``_is_method_on_a_local``).
+        reader = threading.Thread(target=self._read_pipe, name="tmux-control-read", daemon=True)
+        writer = threading.Thread(target=self._write_pipe, name="tmux-control-write", daemon=True)
+        reader.start()
+        writer.start()
+        self.watch_pane(pane_id)
 
-    def close(self) -> None:
+    def close_client(self) -> None:
         """End the client on purpose: nothing is delivered for it any more."""
         with self._lock:
             self._closed = True
@@ -269,7 +274,7 @@ class ControlClient:
             with contextlib.suppress(OSError):
                 self._process.terminate()
 
-    def kill(self) -> None:
+    def kill_client(self) -> None:
         """End a client that stopped answering; it ends through ``on_exit`` like any other."""
         if self._process is not None:
             with contextlib.suppress(OSError):
@@ -282,34 +287,31 @@ class ControlClient:
 
     # --- following the pane on screen --------------------------------------------------
 
-    def watch(self, pane_id: str) -> None:
+    def watch_pane(self, pane_id: str) -> None:
         """``pane_id`` is on screen: deliver its output, and follow it."""
         with self._lock:
-            if pane_id in self._wanted:
-                self._wanted.remove(pane_id)
-            self._wanted.append(pane_id)
+            self._wanted = [*(pane for pane in self._wanted if pane != pane_id), pane_id]
             self._muted.discard(pane_id)
             follow = self._followed != pane_id
             self._followed = pane_id
         if follow:
-            self._follow(pane_id)
+            self._follow_pane(pane_id)
         else:
             self._quietly([["refresh-client", "-A", f"{pane_id}:continue"]])
 
-    def unwatch(self, pane_id: str) -> None:
+    def unwatch_pane(self, pane_id: str) -> None:
         """``pane_id`` left the screen: pause it, and follow the pane on screen before it."""
         with self._lock:
-            if pane_id in self._wanted:
-                self._wanted.remove(pane_id)
+            self._wanted = [pane for pane in self._wanted if pane != pane_id]
             self._muted.add(pane_id)
             after = self._wanted[-1] if self._wanted else None
             if self._followed == pane_id:
                 self._followed = None
         self._quietly([["refresh-client", "-A", f"{pane_id}:pause"]])
         if after is not None and self._followed is None:
-            self.watch(after)
+            self.watch_pane(after)
 
-    def _follow(self, pane_id: str) -> None:
+    def _follow_pane(self, pane_id: str) -> None:
         """Move to ``pane_id``'s session with every other pane of it paused first.
 
         The panes are asked for (``list-panes -s``), then ONE write pauses all but the
@@ -338,16 +340,18 @@ class ControlClient:
             self._quietly(batch)
 
         with contextlib.suppress(TmuxError):
-            self._send([(["list-panes", "-s", "-t", pane_id, "-F", "#{pane_id}"], listed, True)])
+            self._pipe_send(
+                [(["list-panes", "-s", "-t", pane_id, "-F", "#{pane_id}"], listed, True)]
+            )
 
     def _quietly(self, batch: list[list[str]]) -> None:
         """The client's own bookkeeping, in one write; its answers matter to nobody."""
         with contextlib.suppress(TmuxError):
-            self._send([(args, None, True) for args in batch])
+            self._pipe_send([(args, None, True) for args in batch])
 
     # --- what callers ask for -----------------------------------------------------------
 
-    def _send(
+    def _pipe_send(
         self, commands: Sequence[tuple[Sequence[str], Done | None, bool]], *, chain: bool = False
     ) -> None:
         """Queue ``commands`` as one write, each answered in order. Raises when ended.
@@ -375,7 +379,7 @@ class ControlClient:
 
     def command(self, *args: str, done: Done | None = None) -> None:
         """Run one tmux command; ``done`` is delivered its :class:`Reply`."""
-        self._send([(args, done, False)])
+        self._pipe_send([(args, done, False)])
 
     def capture(
         self,
@@ -388,9 +392,9 @@ class ControlClient:
     ) -> None:
         """:meth:`TmuxServer.capture` down the pipe: ``done`` is delivered the frame, or why not."""
         scrollback = max(0, scrollback)
-        self._frame(pane_id, scrollback, frame_bound(scrollback, height), flags, done)
+        self._pipe_frame(pane_id, scrollback, frame_bound(scrollback, height), flags, done)
 
-    def _frame(
+    def _pipe_frame(
         self,
         pane_id: str,
         scrollback: int,
@@ -401,13 +405,13 @@ class ControlClient:
         capture, display = frame_commands(pane_id, scrollback, bound, flags)
         rows: list[Reply] = []
 
-        def shown(reply: Reply) -> None:
+        def facts_answered(reply: Reply) -> None:
             first = rows[0] if rows else Reply(False, ["no capture answered"])
             if not first.ok:
-                done(first.error())
+                done(first.failure())
                 return
             if not reply.ok or not reply.lines:
-                done(reply.error())
+                done(reply.failure())
                 return
             try:
                 lines, wrapped, facts = parse_frame(first.lines, reply.lines[-1], flags)
@@ -418,7 +422,7 @@ class ControlClient:
                 # A stale height hint gave a short frame: asked again unbounded,
                 # as the polled capture does.
                 try:
-                    self._frame(pane_id, scrollback, None, flags, done)
+                    self._pipe_frame(pane_id, scrollback, None, flags, done)
                 except TmuxError as error:
                     done(error)
                 return
@@ -426,7 +430,9 @@ class ControlClient:
 
         # Chained, never two lines: see the module docstring for what a lone
         # ``display-message`` of a gone pane does to tmux 3.2a.
-        self._send([(capture, rows.append, False), (display, shown, False)], chain=True)
+        self._pipe_send(
+            [(capture, rows.append, False), (display, facts_answered, False)], chain=True
+        )
 
     def send_keys(self, pane_id: str, *keys: str, done: Done | None = None) -> None:
         """:meth:`TmuxServer.send_keys` down the pipe — the same names refused.
@@ -437,7 +443,7 @@ class ControlClient:
         if not keys:
             return
         check_key_names(keys)
-        self._send([(["send-keys", "-t", pane_id, "--", *keys], done, False)])
+        self._pipe_send([(["send-keys", "-t", pane_id, "--", *keys], done, False)])
 
     def send_literal(self, pane_id: str, text: str, *, done: Done | None = None) -> None:
         """:meth:`TmuxServer.send_literal` down the pipe: the text's bytes, as hex."""
@@ -462,7 +468,7 @@ class ControlClient:
             if done is not None:
                 done(failed[0] if failed else reply)
 
-        self._send(
+        self._pipe_send(
             [
                 (
                     ["send-keys", "-t", pane_id, "-H", *(f"{byte:02x}" for byte in piece)],
@@ -496,7 +502,7 @@ class ControlClient:
             if done is not None:
                 done(outcome)
 
-        self._send(
+        self._pipe_send(
             [
                 (["set-buffer", "-b", name, "--", text], loaded.append, False),
                 (["paste-buffer", "-p", "-d", "-b", name, "-t", pane_id], pasted, False),
@@ -507,7 +513,7 @@ class ControlClient:
 
     # --- the pipe ----------------------------------------------------------------------
 
-    def _write(self) -> None:
+    def _write_pipe(self) -> None:
         process = self._process
         assert process is not None and process.stdin is not None
         fd = process.stdin.fileno()
@@ -520,7 +526,7 @@ class ControlClient:
         with contextlib.suppress(OSError):
             process.stdin.close()
 
-    def _read(self) -> None:
+    def _read_pipe(self) -> None:
         process = self._process
         assert process is not None and process.stdout is not None
         fd = process.stdout.fileno()
@@ -534,7 +540,7 @@ class ControlClient:
         except OSError:
             pass
         finally:
-            self._ended(process)
+            self._client_ended(process)
 
     def _heard(self, line: bytes) -> None:
         """One line from tmux: a block's line, its end, or a notification."""
@@ -601,7 +607,7 @@ class ControlClient:
         if panes:
             self._on_output(panes)
 
-    def _ended(self, process: subprocess.Popen[bytes]) -> None:
+    def _client_ended(self, process: subprocess.Popen[bytes]) -> None:
         with contextlib.suppress(OSError, subprocess.SubprocessError):
             process.wait(timeout=5)
         complaint = b""

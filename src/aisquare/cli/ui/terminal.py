@@ -407,7 +407,8 @@ class _Control:
     """One server's control client and the panes that joined it: their go-between.
 
     Started by the first pane that goes on screen with a live frame on a server
-    (:meth:`join`), and closed when the last pane that joined leaves it
+    (:meth:`started_for`), joined by every pane on that server that goes on screen
+    after it (:meth:`serving`), and closed when the last pane that joined leaves it
     (:meth:`release`) — the app's views stay mounted, so in the shell that is when
     the app ends. What it hears goes to its panes: a pane that printed is captured
     again (:meth:`TerminalPane._control_output`), and the client's end sends every
@@ -423,34 +424,45 @@ class _Control:
         )
 
     @classmethod
-    def join(cls, pane: TerminalPane) -> _Control | None:
-        """``pane``'s server's control client, started for it when there is none yet.
-
-        A new client is started only for a pane that has shown a live frame:
-        ``attach-session`` starts a server when none is running, and a frame is what
-        says this one is. And not again for a while after one ended
-        (:data:`CONTROL_RETRY`, :data:`CONTROL_RESTART`): a server that refuses the
-        client must not cost a process at every attach.
-        """
-        server, pane_id = pane.server, pane.pane_id
-        if server is None or pane_id is None:
+    def serving(cls, pane: TerminalPane) -> _Control | None:
+        """``pane``'s server's live control client, joined by ``pane``; ``None`` when there
+        is none. Never starts one: :meth:`started_for` does, from the frame timer alone."""
+        if pane.server is None:
             return None
-        key = _server_key(server)
-        link = _CONTROLS.get(key)
+        link = _CONTROLS.get(_server_key(pane.server))
         if link is not None and (link.app is not pane.app or not link.client.alive):
             link.close()
             link = None
-        if link is None:
-            if pane.facts is None or time.monotonic() < _CONTROL_RETRY_AT.get(key, 0.0):
-                return None
-            link = cls(key, pane.app, server)
-            try:
-                link.client.start(pane_id)
-            except TmuxError as error:
-                pane.log.warning(f"tmux control mode unavailable on {key[0]}: {error}")
-                _CONTROL_RETRY_AT[key] = time.monotonic() + CONTROL_RETRY
-                return None
-            _CONTROLS[key] = link
+        if link is not None:
+            link.panes.add(pane)
+        return link
+
+    @classmethod
+    def started_for(cls, pane: TerminalPane) -> _Control | None:
+        """A new control client for ``pane``'s server, joined by ``pane``.
+
+        Only for a pane that has shown a live frame: ``attach-session`` starts a
+        server when none is running, and a frame is what says this one is. And not
+        again for a while after one ended (:data:`CONTROL_RETRY`,
+        :data:`CONTROL_RESTART`): a server that refuses the client must not cost a
+        process at every tick. Called by :meth:`TerminalPane._tick` alone: the frame
+        timer of a pane on screen is what "lazily" means here, and an attach, a show
+        or a key joins a client that is already up (:meth:`serving`) or polls.
+        """
+        server, pane_id = pane.server, pane.pane_id
+        if server is None or pane_id is None or pane.facts is None:
+            return None
+        key = _server_key(server)
+        if key in _CONTROLS or time.monotonic() < _CONTROL_RETRY_AT.get(key, 0.0):
+            return None
+        link = cls(key, pane.app, server)
+        try:
+            link.client.start_client(pane_id)
+        except TmuxError as error:
+            pane.log.warning(f"tmux control mode unavailable on {key[0]}: {error}")
+            _CONTROL_RETRY_AT[key] = time.monotonic() + CONTROL_RETRY
+            return None
+        _CONTROLS[key] = link
         link.panes.add(pane)
         return link
 
@@ -463,7 +475,7 @@ class _Control:
     def close(self) -> None:
         if _CONTROLS.get(self.key) is self:
             del _CONTROLS[self.key]
-        self.client.close()
+        self.client.close_client()
 
     def _output(self, pane_ids: set[str]) -> None:
         for pane in list(self.panes):
@@ -1426,11 +1438,13 @@ class TerminalPane(Widget, can_focus=True):
             self._schedule(self.IDLE_INTERVAL)
             return
         link = self._control_link()
+        if link is None and self._may_control() and _Control.started_for(self) is not None:
+            link = self._control_link()  # started here, on screen: the one place one starts
         if link is not None and link.client.stalled(self.CONTROL_TIMEOUT):
             # Wedged rather than ended: no answer, no end of file. Killed, it ends
             # through ``_Control._exited`` like any other, and this tick polls.
             self.log.warning(f"tmux control client on {link.key[0]} stopped answering")
-            link.client.kill()
+            link.client.kill_client()
             self._drop_link()
             link = None
         if link is not None:
@@ -1557,30 +1571,34 @@ class TerminalPane(Widget, can_focus=True):
             self._drop_link()
             link = None
         if link is None:
-            if (
-                not CONTROL_MODE
-                or self._polling
-                or self.pane_id is None
-                or self.server is None
-                or not self.server.control_capable
-                or not self.is_on_screen
-            ):
+            if not self._may_control():
                 return None
-            version = self._server_version()
-            if version is None or version < CONTROL_MINIMUM:
-                return None
-            link = _Control.join(self)
+            link = _Control.serving(self)
             if link is None:
                 return None
             self._link = link
         if self._watched != self.pane_id and self.pane_id is not None and self.is_on_screen:
             try:
-                link.client.watch(self.pane_id)
+                link.client.watch_pane(self.pane_id)
             except TmuxError:
                 self._drop_link()
                 return None
             self._watched = self.pane_id
         return link if self._watched is not None else None
+
+    def _may_control(self) -> bool:
+        """Whether this pane may use a control client now (:meth:`_control_link`)."""
+        if (
+            not CONTROL_MODE
+            or self._polling
+            or self.pane_id is None
+            or self.server is None
+            or not self.server.control_capable
+            or not self.is_on_screen
+        ):
+            return False
+        version = self._server_version()
+        return version is not None and version >= CONTROL_MINIMUM
 
     def _serving(self) -> _Control | None:
         """The control client, when it is serving the pane on screen right now."""
@@ -1594,7 +1612,7 @@ class TerminalPane(Widget, can_focus=True):
         watched, self._watched = self._watched, None
         link = self._link
         if link is not None and watched is not None and link.client.alive:
-            link.client.unwatch(watched)
+            link.client.unwatch_pane(watched)
 
     def _drop_link(self) -> None:
         """Stop using the control client: unwatched, and released."""
@@ -1699,7 +1717,7 @@ class TerminalPane(Widget, can_focus=True):
     def _sent(self, link: _Control, reply: Reply) -> None:
         """A command of this pane's input was answered: a refusal ends control for this attach."""
         if not reply.ok and link is self._link and link.client.alive:
-            self._control_failed(str(reply.error()))
+            self._control_failed(str(reply.failure()))
 
     def _control_output(self) -> None:
         """The control client heard this pane print: a frame, at most ~60 a second."""

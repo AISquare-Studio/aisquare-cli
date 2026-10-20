@@ -537,7 +537,7 @@ def test_real_tmux_quoting_survives_the_command_parser(live: TmuxServer, tmp_pat
     client = ControlClient(
         live, deliver=lambda call: call(), on_output=lambda _: None, on_exit=lambda _: None
     )
-    client.start(live.run("list-panes", "-a", "-F", "#{pane_id}").split()[0])
+    client.start_client(live.run("list-panes", "-a", "-F", "#{pane_id}").split()[0])
     try:
         client.command("set-buffer", "-b", "asq-quote-probe", "--", weird, done=answers.append)
         deadline = time.monotonic() + 3
@@ -546,7 +546,7 @@ def test_real_tmux_quoting_survives_the_command_parser(live: TmuxServer, tmp_pat
         assert answers and answers[0].ok, answers
         assert live.run("show-buffer", "-b", "asq-quote-probe") == weird
     finally:
-        client.close()
+        client.close_client()
 
 
 # --- the protocol, line by line ----------------------------------------------------------
@@ -618,7 +618,7 @@ def test_a_chain_that_fails_early_is_answered_once_and_its_rest_with_that_failur
     failure — and the answer after the chain goes to the command after the chain."""
     client, _ = _detached(FakeTmux().server(tmp_path))
     answers: list[tuple[str, Reply]] = []
-    client._send(
+    client._pipe_send(
         [
             (["capture-pane", "-t", "%7"], lambda r: answers.append(("capture", r)), False),
             (["display-message", "-t", "%7"], lambda r: answers.append(("display", r)), False),
@@ -672,7 +672,7 @@ def test_an_ended_client_answers_what_waits_and_says_why(tmp_path: Path) -> None
     client.command("display-message", done=answers.append)
     process = subprocess.Popen([sys.executable, "-c", "pass"], stderr=subprocess.PIPE)
     client._heard(b"%exit server exited")
-    client._ended(process)
+    client._client_ended(process)
     assert answers == [Reply(False, ["server exited"])]
     assert "server exited" in delivered
     assert not client.alive
@@ -695,9 +695,9 @@ def test_the_control_client_is_started_without_the_tracing_identity(
 
     name = next(iter(IDENTITY_ENV_VARS))
     monkeypatch.setenv(name, "inherited")
-    monkeypatch.setattr(subprocess, "Popen", popen)  # what ``_spawn`` calls
+    monkeypatch.setattr(subprocess, "Popen", popen)  # what ``_spawn_client`` calls
     with pytest.raises(TmuxError):
-        tmux_control._spawn(["tmux", "-C", "attach-session"])
+        tmux_control._spawn_client(["tmux", "-C", "attach-session"])
     assert name not in seen["env"]
     assert seen["start_new_session"] is True
 
@@ -717,7 +717,7 @@ def test_a_server_too_old_or_a_fake_runner_never_starts_a_control_client(
         started.append(argv)
         raise TmuxError("not in this test")
 
-    monkeypatch.setattr(tmux_control, "_spawn", spawn)
+    monkeypatch.setattr(tmux_control, "_spawn_client", spawn)
     for version, control in (("tmux 3.7c", None), ("tmux 3.1c", True)):
         fake = FakeTmux()
         fake.version = version
@@ -746,7 +746,7 @@ def test_a_control_client_that_will_not_start_leaves_the_pane_polling_and_is_not
         started.append(argv)
         raise TmuxError("refused")
 
-    monkeypatch.setattr(tmux_control, "_spawn", spawn)
+    monkeypatch.setattr(tmux_control, "_spawn_client", spawn)
     fake = FakeTmux()
     fake.panes["%1"] = FakePane(screen=["hello"])
     server = TmuxServer(

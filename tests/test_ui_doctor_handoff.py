@@ -42,7 +42,7 @@ from aisquare.cli.ui.views import explainability as explainability_view
 from aisquare.cli.ui.views import onboard as onboard_view
 from aisquare.cli.ui.views import welcome as welcome_view
 from aisquare.cli.ui.views.doctor import DoctorView
-from aisquare.core import selfcli
+from aisquare.core import clipboard, selfcli
 from aisquare.core.state import get_state, reset_state
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import remote_server
@@ -1105,6 +1105,34 @@ def test_run_ui_hands_over_only_once_the_phones_farewell_has_gone_out(
     ui_app.run_ui()
 
     assert landed == [True], "the exec came before the farewell went out"
+
+
+def test_run_ui_hands_over_only_once_the_copy_made_before_the_press_is_written(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #266, round 3: the clipboard thread's copies are flushed at exit
+    (``clipboard.flush``, an ``atexit`` handler), and ``exec_self`` runs no exit handler. A
+    long selection copied just before Update reached ``pbcopy`` cut short, or never."""
+    written: list[str] = []
+
+    def slow_write(writer: clipboard.Writer, text: str, *, timeout: float | None = None) -> bool:
+        time.sleep(0.3)  # feeding a long selection to pbcopy
+        written.append(text)
+        return True
+
+    monkeypatch.setattr(clipboard, "_resolve", lambda: clipboard.Writer(("pbcopy",)))
+    monkeypatch.setattr(clipboard, "write", slow_write)
+    told: list[bool] = []
+    clipboard.submit("a long pane selection", told.append)
+    landed: list[list[str]] = []
+    monkeypatch.setattr(ui_app, "FleetApp", lambda **_options: _FakeApp(("upgrade",)))
+    monkeypatch.setattr(remote_server, "remote_wait_for_writes", lambda undone=None: None)
+    monkeypatch.setattr(selfcli, "exec_self", lambda args: landed.append(list(written)))
+
+    ui_app.run_ui()
+
+    assert landed == [["a long pane selection"]], "the exec came before the copy was written"
+    assert clipboard.flush(5) and told == [True]
 
 
 # --------------------------------------------------------------------------- the exec

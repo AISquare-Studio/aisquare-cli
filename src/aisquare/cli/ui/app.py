@@ -106,6 +106,7 @@ from aisquare.cli.ui.views.project import ProjectView
 from aisquare.cli.ui.views.remote import RemotePanel
 from aisquare.cli.ui.views.settings_hub import SettingsHubView
 from aisquare.cli.ui.views.welcome import WelcomeView
+from aisquare.core import clipboard
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.terminal import mac_keyboard
@@ -2182,6 +2183,10 @@ def run_ui(**options: Any) -> None:
             try:
                 if pushes is not None:
                     pushes.push_drain()
+                # A copy made just before the press is still queued or being written on the
+                # clipboard thread: `flush` runs at exit, and the exec runs no exit handler,
+                # so pbcopy got it cut short or never (review of #266, round 3).
+                clipboard.flush()
             except KeyboardInterrupt:
                 remote_server._remote_quit_now(undone)
     # The terminal is ours again, and Remote, its ngrok, the panel's writes, the phones' and

@@ -1632,7 +1632,10 @@ class TerminalPane(Widget, can_focus=True):
         """
         link = self._link
         if link is not None and not link.client.alive:
+            # Found ended before its end was delivered (``_control_lost``, which would
+            # have done this): input it took and never answered is recovered from here.
             self._drop_link()
+            self._begin_recovery()
             link = None
         if link is None:
             if not self._may_control():
@@ -2515,10 +2518,10 @@ class TerminalPane(Widget, can_focus=True):
         pane_id, server = self.pane_id, self.server
         if pane_id is None or server is None:
             return False
+        link = self._control_link()  # first: finding the client ended begins a recovery
         if self._held is not None:
             self._held.append(_Input(0, server, pane_id, kind, value))
             return True
-        link = self._control_link()
         if link is not None:
             item = _Input(_next_stamp(), server, pane_id, kind, value)
             try:
@@ -2603,10 +2606,11 @@ class TerminalPane(Widget, can_focus=True):
 
         Its pane's stamp (:func:`~aisquare.core.tmux_control.sent_stamp`) is the newest
         input tmux RAN there: each input set it in its own chain, so no older one is
-        unrun and no newer one ran. Asked :attr:`INPUT_RECOVERY` after the end, once
-        tmux has dropped the dead client: what it had read and not run is freed with it,
-        never run later. A gone pane's input goes nowhere, as a key into a gone pane
-        always has.
+        unrun and no newer one ran. tmux reads a control client's stdin itself, so what
+        was written may still run after the client process is gone, until tmux notices;
+        asked :attr:`INPUT_RECOVERY` after the end, the stamp is past that: what tmux had
+        read and not run is freed with the dead client, never run later. A gone pane's
+        input goes nowhere, as a key into a gone pane always has.
         """
         inflight, self._inflight = self._inflight, []
         held, self._held = self._held or [], None

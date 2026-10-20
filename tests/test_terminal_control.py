@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import queue
 import shutil
 import signal
 import statistics
@@ -718,9 +719,16 @@ def test_real_tmux_keys_in_flight_when_the_client_dies_arrive_once_each_by_polli
     and not doubled: what tmux ran is read off the pane's stamp (``@asq-sent``, set in
     the same chain as each input) and the rest is sent again by polling, in order, ahead
     of whatever was typed meanwhile. It was lost: killing the client 3 ms into a typed
-    burst lost ``56789abcdef``, or the whole burst (tester of #272, 2 of 6 trials). Here
-    the client is killed right after the tenth of forty keys goes down the pipe, five
-    times; the program records what it reads, raw, and must read every key exactly once."""
+    burst lost ``56789abcdef``, or the whole burst (tester of #272, 2 of 6 trials).
+
+    Five bursts of forty keys, the client killed right after the tenth goes down the
+    pipe; the program records what it reads, raw, and must read every key exactly once.
+    tmux reads a control client's stdin itself, so what was written may still run after
+    the kill — the even trials leave that to the platform's timing. The odd ones make
+    the ten unrun (written where nothing reads them) and hold the client's end until the
+    rest of the burst is handled, the order Linux showed: the rest finds the client
+    ended (``_control_link``) before its end is delivered. Without recovery 60 of 200
+    keys arrived; with it but not from that path, all 200, out of order."""
     if sys.platform == "win32":
         pytest.skip("no SIGKILL on Windows")
     record = tmp_path / "typed"
@@ -730,12 +738,30 @@ def test_real_tmux_keys_in_flight_when_the_client_dies_arrive_once_each_by_polli
     monkeypatch.setattr(terminal_module, "CONTROL_RESTART", 0.0)  # a client again at once
     sent_over = ControlClient.send_literal
     kill_after = [0]
+    held_end: dict[str, list[Callable[[], object]] | None] = {"calls": None}
+    """While a list, the dying client's end is held there and delivered late."""
+    released: list[Callable[[Callable[[], object]], object]] = []
 
     def send_literal(self: ControlClient, pane: str, text: str, **kwargs: Any) -> None:
+        late_end = held_end["calls"]
+        if late_end is not None and kill_after[0] == 10:
+            # tmux reads a control client's stdin itself, so killing the client does not
+            # stop what was written reaching tmux: the keys tmux would have read and freed
+            # with the dead client, or never read, are made so here — written to a pipe
+            # nobody drains — so all ten are unrun, whatever the platform's timing.
+            self._outbox = queue.SimpleQueue()
         sent_over(self, pane, text, **kwargs)
         kill_after[0] -= 1
         if kill_after[0] == 0 and self.pid is not None:
+            if late_end is not None:
+                # The order Linux showed: the rest of the burst finds the client ended
+                # before its end is delivered (``_control_link``, not ``_control_lost``).
+                released.append(self._deliver)
+                self._deliver = late_end.append
             os.kill(self.pid, signal.SIGKILL)  # mid-burst: some ran, some are on their way
+            deadline = time.monotonic() + 2
+            while late_end is not None and self.alive and time.monotonic() < deadline:
+                time.sleep(0.001)
 
     monkeypatch.setattr(ControlClient, "send_literal", send_literal)
     letters = string.ascii_letters
@@ -752,9 +778,15 @@ def test_real_tmux_keys_in_flight_when_the_client_dies_arrive_once_each_by_polli
                 await wait_until(pilot, lambda: _serving(pane) and _client(pane).answered, 5.0)
                 burst = "".join(letters[(trial * 7 + i) % len(letters)] for i in range(40))
                 kill_after[0] = 10
+                late_end: list[Callable[[], object]] | None = [] if trial % 2 else None
+                held_end["calls"] = late_end  # both orders of the end and the rest
                 for char in burst:
                     pane.post_message(events.Key(char, char))
                 expected += burst
+                if late_end is not None:
+                    await pilot.pause(0.3)  # the whole burst handled, the end still held
+                    for call in late_end:
+                        released[-1](call)
                 deadline = time.monotonic() + 5.0
                 while len(record.read_text()) < len(expected) and time.monotonic() < deadline:
                     await pilot.pause(0.05)

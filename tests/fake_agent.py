@@ -298,6 +298,9 @@ class FakeAgentAdapter:
         hook_names_home=True,
         strict_hooks_file=True,
         sandboxes_tools=True,
+        # Its end of input ends it, as a shell's does; its Ctrl-C only clears the line. Its
+        # empty prompt is not read off its screen, so Remote asks before every Ctrl-D.
+        one_press_exits=frozenset({"C-d"}),
         value_options=frozenset(
             {"--model", "--effort", "--title", "--write", "--approvals", "--writable", "--readonly"}
         ),

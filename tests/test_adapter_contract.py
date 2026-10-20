@@ -812,3 +812,65 @@ def test_the_transcript_page_names_the_human_and_the_agent(
     page = transcript.read_page(path, agent=adapter.id, width=60)
     assert YOU in page.lines and speaker_line(reader.speaker) in page.lines
     assert page.more is False and page.lines[-1] == ""
+
+
+# --- Remote's key pad: the keys that end the agent on one press --------------------------
+
+
+def test_the_one_press_exits_are_keys_the_pad_reaches_the_agent_with(
+    adapter: AgentAdapter,
+) -> None:
+    """``capabilities.one_press_exits`` names keys as the agent is sent them: each is what a
+    key the pad sends becomes past the adapter's ``key_spellings``. A key no pad key becomes
+    (``^C``, ``C-C``) guards nothing, and the press it meant goes unasked. An adapter that
+    declares one reads its empty prompt off its screen, or every press of it is asked."""
+    from aisquare.services import remote_server
+
+    exits = adapter.capabilities.one_press_exits
+    assert isinstance(exits, frozenset)
+    spellings = adapter.key_spellings
+    for key in exits:
+        pads = [key, *(pad for pad, sent in spellings.items() if sent == key)]
+        assert any(
+            remote_server.REMOTE_KEY_NAME.fullmatch(pad) and spellings.get(pad, pad) == key
+            for pad in pads
+        ), f"{adapter.id}: no pad key reaches it as {key!r}"
+
+
+def test_send_keys_asks_before_the_keys_that_end_the_agent_on_one_press(
+    adapter: AgentAdapter, tmp_path: Path
+) -> None:
+    """Remote's ``send-keys`` asks the row's adapter which keys end its agent with one press at
+    its empty prompt, never its name: with nothing to say the agent is not there (a screen
+    tmux would not show), each of its own is refused unconfirmed (409 ``one_press_exit``,
+    naming the agent), and any other exit key goes as a first press. Claude Code declares
+    none and Codex Ctrl-C and Ctrl-D; the fake ends on Ctrl-D alone, so a service that
+    knows Codex's pair fails here for it."""
+    from datetime import UTC, datetime
+
+    from aisquare.core.tmux import TmuxError
+    from aisquare.models import FleetAgent
+    from aisquare.services import remote_server
+
+    class Unread:
+        def screen_text(self, pane_id: str) -> list[str]:
+            raise TmuxError("capture-pane: server exited unexpectedly")
+
+    row = FleetAgent(
+        id="agt_1", project_id="prj_contract", label="coder-1", role="coder", agent=adapter.id,
+        binary=adapter.binary, pane_id="%1", cwd=tmp_path, created_at=datetime.now(UTC),
+    )  # fmt: skip
+    exits = adapter.capabilities.one_press_exits
+    for key in sorted(remote_server.EXIT_KEYS | exits):
+        refused = remote_server.remote_one_press_exit(
+            Unread(),  # type: ignore[arg-type]
+            row,
+            [key],
+            label=row.label,
+        )
+        if key not in exits:
+            assert refused is None, f"{adapter.id}: {key} asked"
+            continue
+        assert refused is not None, f"{adapter.id}: {key} went unasked"
+        assert (refused.status, refused.error) == (409, "one_press_exit")
+        assert adapter.label in str(refused.extra["reason"]), "the page asks in its name"

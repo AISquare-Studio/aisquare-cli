@@ -1,5 +1,5 @@
 """Remote's agent actions, key pad and explainability card for a Codex agent (SCOPE #113 0.8.1,
-items 4, 5 and 7).
+items 4, 5 and 7), and the one Ctrl-C or Ctrl-D that exits it at its empty prompt.
 
 The phone's writes go through the real handlers, needs-you's predicates and its snapshot
 (``remote_needs._needs_snapshot``, which asks the pane); only the project's scan is faked
@@ -437,6 +437,143 @@ def test_the_pad_offers_the_new_line_and_the_server_takes_it() -> None:
     assert '["⇧⏎", "S-Enter"]' in page and '"S-Enter": "New line"' in page
     assert remote_server.check_remote_key_names(["S-Enter"]) == ["S-Enter"]
     assert "S-Enter" in remote_server.REMOTE_KEY_VOCABULARY
+
+
+# --- the key pad: the one press that exits Codex ----------------------------------------------
+
+
+@pytest.mark.parametrize("key", ["C-c", "C-d"])
+@pytest.mark.parametrize(
+    "screen",
+    [
+        pytest.param(IDLE, id="after-a-turn"),
+        pytest.param(ESC_AGAIN, id="after-one-esc"),
+        pytest.param(WORKING, id="mid-turn"),
+    ],
+)
+def test_one_exit_key_to_a_codex_at_its_empty_prompt_is_sent_only_once_confirmed(
+    phone: Phone,  # noqa: F811
+    pane: CodexPane,
+    project: ProjectInfo,  # noqa: F811
+    key: str,
+    screen: list[str],
+) -> None:
+    """Measured on 0.162.1 under tmux 3.7c: one Ctrl-C at Codex's empty prompt exits it, a
+    fresh one's, after a turn and after one Esc alike, and one Ctrl-D does with a turn running
+    too (a Ctrl-C there opens its ``Cancel task`` / ``Exit`` choice). The double-press guard
+    refused only a second press within 3 s, so an API caller's one key exited the agent,
+    ended its row and woke the manager. It is refused now, nothing typed, naming the agent
+    for the page's sheet, and sent once confirmed; a second press is still the double press."""
+    _row(project)
+    pane.screen = screen
+    refused = _tap(phone, key)
+    assert refused.status_code == 409, refused.text
+    said = {"C-c": "Ctrl-C", "C-d": "Ctrl-D"}[key]
+    reason = f"coder-1 is at Codex's empty prompt, where one {said} can exit it"
+    assert refused.json() == {
+        "error": "one_press_exit",
+        "message": f"{reason} — send confirm_exit: true to mean it",
+        "reason": reason,
+    }
+    assert pane.sent == []
+    confirmed = phone.post("send-keys", agent=LABEL, keys=[key], confirm_exit=True)
+    assert confirmed.status_code == 200, confirmed.text
+    assert pane.keys() == [key]
+    again = _tap(phone, key)
+    assert again.status_code == 409 and again.json()["error"] == "double_press"
+    assert pane.keys() == [key]
+
+
+@pytest.mark.parametrize("key", ["C-c", "C-d"])
+def test_an_exit_key_to_a_codex_over_its_draft_goes_as_a_first_press(
+    phone: Phone,  # noqa: F811
+    pane: CodexPane,
+    project: ProjectInfo,  # noqa: F811
+    key: str,
+) -> None:
+    """Over a draft neither key ends Codex: its Ctrl-C clears the draft, its Ctrl-D does
+    nothing (0.162.1). It goes unasked, as any agent's first press does."""
+    _row(project)
+    pane.screen = DRAFT
+    response = _tap(phone, key)
+    assert response.status_code == 200, response.text
+    assert pane.keys() == [key]
+
+
+def test_a_codex_exit_key_after_other_keys_in_its_body_is_asked_whatever_the_screen(
+    phone: Phone,  # noqa: F811
+    pane: CodexPane,
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """The screen is read before the body's keys: the keys ahead of the exit key may empty the
+    draft it shows, and the Ctrl-C then lands at the empty prompt."""
+    _row(project)
+    pane.screen = DRAFT
+    refused = _tap(phone, "C-u", "C-c")
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["message"] == (
+        "the keys before the Ctrl-C may leave coder-1 at Codex's empty prompt, where one "
+        "Ctrl-C can exit it — send confirm_exit: true to mean it"
+    )
+    assert pane.sent == []
+
+
+def test_a_codex_whose_screen_tmux_cannot_show_is_asked_before_its_exit_key(
+    phone: Phone,  # noqa: F811
+    pane: CodexPane,
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """Unknown is not a draft: nothing says the key would not land at its empty prompt."""
+    _row(project)
+    pane.unreadable = True
+    refused = _tap(phone, "C-d")
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["message"] == (
+        "coder-1's screen could not be read to see whether Codex is at its empty prompt, where "
+        "one Ctrl-D can exit it — send confirm_exit: true to mean it"
+    )
+    assert pane.sent == []
+
+
+def test_a_claude_code_row_keeps_its_double_press_and_reads_no_screen(
+    phone: Phone,  # noqa: F811
+    pane: CodexPane,
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The control: Claude Code asks for a second press (``Press Ctrl-C again to exit``, and
+    the same of Ctrl-D, measured on 2.1.304). Its first goes as it went, with no screen read,
+    and a second within 3 s is the double press its own tests pin."""
+    _row(project, agent="claude-code")
+    pane.command, pane.screen = "claude", IDLE
+
+    def unread(pane_id: str) -> list[str]:
+        raise AssertionError("read Claude Code's screen")
+
+    monkeypatch.setattr(pane, "screen_text", unread)
+    assert _tap(phone, "C-c").status_code == 200
+    second = _tap(phone, "C-d")
+    assert second.status_code == 409 and second.json()["error"] == "double_press"
+    assert pane.keys() == ["C-c"]
+
+
+def test_only_a_key_some_agent_exits_on_asks_the_rows_agent() -> None:
+    """Every other key goes as it went: neither the row's agent nor its screen is asked."""
+
+    class Unread:
+        def screen_text(self, pane_id: str) -> list[str]:
+            raise AssertionError("read the screen")
+
+    class Row:
+        pane_id = "%1"
+
+        @property
+        def agent(self) -> str:
+            raise AssertionError("asked the row's agent")
+
+    keys = ["Enter", "Escape", "1", "BTab", "Up", "C-u", "C-l", "C-j"]
+    exiting = remote_server.remote_one_press_exit(Unread(), Row(), keys, label=LABEL)  # type: ignore[arg-type]
+    assert exiting is None
 
 
 # --- Codex's screen: the empty prompt after an Esc --------------------------------------------

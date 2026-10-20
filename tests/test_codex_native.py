@@ -2684,3 +2684,136 @@ def test_real_codex_takes_a_phones_prompt_tell_at_its_empty_prompt_and_none_at_i
                 srv.run("kill-server")
             provider.shutdown()
             thread.join(timeout=2)
+
+
+class _SaysOk(BaseHTTPRequestHandler):
+    """A loopback Responses provider whose every turn says ``ok``."""
+
+    def do_POST(self) -> None:
+        self.rfile.read(int(self.headers["Content-Length"]))
+        if not self.path.endswith("/responses"):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"{}")
+            return
+        _answer(self, _message("ok"))
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+
+@pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
+def test_real_codex_at_its_empty_prompt_is_sent_one_ctrl_c_only_once_it_is_confirmed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through Remote served on loopback as a phone or a script reaches it (uvicorn, the live
+    sources and writes, a password, ``allow_write``). One Ctrl-C, or one Ctrl-D, at Codex
+    0.162.1's empty prompt exits it, and ``send-keys`` refused only a second press within
+    3 s: one ``C-c`` from the API ended a fleet Codex. Now each is 409 ``one_press_exit``
+    and Codex runs on at its prompt. Over a draft the ``C-c`` goes, and clears it, Codex
+    still running; once confirmed, the one ``C-c`` at its empty prompt goes, and exits it.
+    No command runs in Codex's sandbox here."""
+    from aisquare.services import remote_server
+    from tests.remote_kit_helpers import PASSWORD, make_runtime
+
+    binary = shutil.which("codex")
+    assert binary, "AISQUARE_TEST_CODEX requires an installed Codex"
+    native_home = tmp_path / "codex"
+    native_home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    with ThreadingHTTPServer(("127.0.0.1", 0), _SaysOk) as provider:
+        thread = threading.Thread(target=provider.serve_forever, daemon=True)
+        thread.start()
+        (native_home / "config.toml").write_text(
+            'model = "local-fixture"\nmodel_provider = "local"\n'
+            '[model_providers.local]\nname = "Local fixture"\nwire_api = "responses"\n'
+            f'base_url = "http://127.0.0.1:{provider.server_port}/v1"\n'
+            "requires_openai_auth = false\n"
+            f'[projects.{json.dumps(str(workspace))}]\ntrust_level = "trusted"\n',
+            encoding="utf-8",
+        )
+        for key in tuple(os.environ):
+            if key.startswith(("OPENAI_", "ANTHROPIC_", "CODEX_")):
+                monkeypatch.delenv(key)
+        monkeypatch.setenv("CODEX_HOME", str(native_home))
+        monkeypatch.setattr(
+            agents, "_aisquare_command", lambda *args, **kwargs: shlex.join(selfcli.argv_for([]))
+        )
+        agents.install_hooks("codex", native_home)
+        config = load_config()
+        config.fleet.tmux_socket = f"asq-codex-ctrlc-{os.getpid()}"
+        save_config(config)
+        project = team.activate(workspace)
+        srv = fleet.server(config.fleet)
+        runtime = make_runtime()
+        runtime.set_allow_write(True)
+        app = remote_server.build_app(runtime, dist_dir=tmp_path / "dist")
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        served = remote_server._Server(app, port)
+        origin = f"http://127.0.0.1:{port}"
+
+        def screen(pane: str) -> str:
+            return srv.run("capture-pane", "-p", "-t", pane)
+
+        def until(check: Any, seconds: float, what: str, pane: str) -> None:
+            deadline = time.monotonic() + seconds
+            while not check():
+                if time.monotonic() >= deadline:
+                    raise AssertionError(f"{what}:\n{screen(pane)}")
+                time.sleep(0.2)
+
+        def running(pane: str) -> bool:
+            return fleet._runs_the_agent(srv.pane_facts(pane))
+
+        try:
+            coder = fleet.spawn(
+                project,
+                "coder",
+                agent="codex",
+                worktree=False,
+                agent_args=["--dangerously-bypass-hook-trust"],
+            ).agent
+            pane = coder.pane_id
+            served.start_serving()
+            with httpx.Client(base_url=origin, headers={"origin": origin}, timeout=60) as phone:
+                at = f"/r/{runtime.token}/api"
+                assert phone.post(f"{at}/unlock", json={"password": PASSWORD}).status_code == 200
+
+                def send(**body: Any) -> httpx.Response:
+                    body = {"agent": coder.label, "project": project.id, **body}
+                    return phone.post(f"{at}/send-keys", json=body)
+
+                until(lambda: "? for shortcuts" in screen(pane), 30, "its empty prompt", pane)
+                for key in ("C-c", "C-d"):
+                    refused = send(keys=[key])
+                    assert refused.status_code == 409, f"{refused.text}\n{screen(pane)}"
+                    assert refused.json()["error"] == "one_press_exit", refused.text
+                    assert "Codex's empty prompt" in refused.json()["reason"], refused.text
+                time.sleep(2)
+                assert running(pane), f"Codex exited:\n{screen(pane)}"
+                assert "? for shortcuts" in screen(pane), "still at its empty prompt"
+
+                assert send(text="half a line").status_code == 200
+                until(lambda: "half a line" in screen(pane), 10, "the draft", pane)
+                cleared = send(keys=["C-c"])
+                assert cleared.status_code == 200, f"{cleared.text}\n{screen(pane)}"
+                until(lambda: "half a line" not in screen(pane), 10, "the draft cleared", pane)
+                time.sleep(2)
+                assert running(pane), f"Codex exited:\n{screen(pane)}"
+
+                time.sleep(remote_server.EXIT_KEY_REPEAT_SECONDS)  # past the double press
+                meant = send(keys=["C-c"], confirm_exit=True)
+                assert meant.status_code == 200, f"{meant.text}\n{screen(pane)}"
+                deadline = time.monotonic() + 20
+                while running(pane):
+                    assert time.monotonic() < deadline, f"Codex runs on:\n{screen(pane)}"
+                    time.sleep(0.2)
+        finally:
+            served.stop_serving()
+            if srv.has_session(fleet.session_name(fleet.ensure_codename(project).codename or "")):
+                srv.run("kill-server")
+            provider.shutdown()
+            thread.join(timeout=2)

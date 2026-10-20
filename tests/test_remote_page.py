@@ -2125,6 +2125,27 @@ def test_the_pads_exit_and_rewind_guards_each_ask_before_a_key_goes(
     assert pad["keys"] == [["C-c"], ["C-c"], ["C-c", "confirm_exit"], *escapes]
 
 
+def test_one_press_that_can_exit_the_agent_asks_again_in_its_agents_words(
+    boot_report: dict[str, Any],
+) -> None:
+    """Codex exits on one Ctrl-D at its empty prompt (0.162.1): the machine refuses it
+    ``one_press_exit``, its ``reason`` naming the agent, and the page asks again in those words
+    before it sends the key with ``confirm_exit``, as it asks before a second press."""
+    pad = boot_report["padOnePressExit"]
+    assert pad["steps"] == [
+        ["^D", "Send Ctrl-D?", "Ctrl-D can interrupt or exit coder-1.", 0],
+        [
+            "Send Ctrl-D",
+            "Send Ctrl-D to coder-1 again?",
+            "coder-1 is at Codex's empty prompt, where one Ctrl-D can exit it, and coder-1 "
+            "with it.",
+            1,
+        ],
+        ["Send and exit", None, None, 2],
+    ]
+    assert pad["keys"] == [["C-d"], ["C-d", "confirm_exit"]]
+
+
 def test_a_page_that_slept_holds_its_keys_until_the_machine_says_what_is_on_screen(
     boot_report: dict[str, Any],
 ) -> None:

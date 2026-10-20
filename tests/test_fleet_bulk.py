@@ -165,6 +165,72 @@ def test_an_exited_agent_is_left_as_it_is(
     assert report.ok
 
 
+def _ends_when_alpha_is_done(
+    fleet: Fleet, end: Callable[[FleetAgent], None]
+) -> Callable[[BulkReceipt], None]:
+    """An ``on_receipt`` that ends ``beta/coder-1`` once alpha's coder is done with: after
+    bulk's own read, before beta's turn, as a crash in a long ``stop --all`` would."""
+    coder = fleet.agents["beta/coder-1"]
+
+    def hook(receipt: BulkReceipt) -> None:
+        if receipt.agent.id == fleet.agents["alpha/coder-1"].id:
+            end(coder)
+
+    return hook
+
+
+@pytest.mark.parametrize("shown", [False, True])
+@pytest.mark.parametrize("how", ["exits", "stopped elsewhere"])
+@pytest.mark.parametrize("action", ["restart", "stop"])
+def test_an_agent_that_ends_after_the_read_is_skipped_on_its_turn_and_left_as_it_is(
+    fleet: Fleet, tmux: FakeTmux, action: fleet_service.BulkAction, how: str, shown: bool
+) -> None:
+    """Review of #266, round 2: the turn acted on whatever the row was by then. A coder
+    that exited during the run was started again by a restart, and a stop removed its 💤
+    window and said "stopped"; one stopped from its own view meanwhile came back."""
+    coder = fleet.agents["beta/coder-1"]
+
+    def end(agent: FleetAgent) -> None:
+        if how == "exits":
+            tmux.die(agent.pane_id, 0)
+        else:
+            fleet_service.stop(fleet.beta, agent.label, agent_id=agent.id)
+
+    plan = fleet_service.bulk_plan(action) if shown else None
+    killed = list(tmux.killed)
+
+    report = fleet_service.bulk(action, shown=plan, on_receipt=_ends_when_alpha_is_done(fleet, end))
+
+    outcomes = _outcomes(fleet, report.receipts)
+    assert outcomes.pop("beta/coder-1") == ("skipped", ALREADY_EXITED)
+    assert outcomes == {key: ("done", None) for key in ALL - {"beta/coder-1"}}
+    with store_session() as store:
+        assert not [
+            agent
+            for agent in store.fleet_agents(fleet.beta.id, live_only=True)
+            if agent.label == coder.label
+        ], "the agent that ended was started again"
+    if how == "exits":
+        assert coder.pane_id not in tmux.killed[len(killed) :], "its 💤 window was removed"
+
+
+def test_a_stop_pinned_to_running_agents_leaves_an_ended_row_and_its_window(
+    fleet: Fleet, tmux: FakeTmux
+) -> None:
+    """``live_only``: the turn's last word, for a row that ends after bulk's look at it and
+    before the stop reads it. The 💤 row keeps its last screen, and nothing says stopped."""
+    coder = fleet.agents["alpha/coder-1"]
+    tmux.die(coder.pane_id, 3)
+    fleet_service.list_agents(fleet.alpha)  # the listing records the death
+
+    with pytest.raises(fleet_service.NoSuchAgent):
+        fleet_service.stop(fleet.alpha, coder.label, agent_id=coder.id, live_only=True)
+
+    assert coder.pane_id not in tmux.killed
+    fleet_service.stop(fleet.alpha, coder.label, agent_id=coder.id)  # the 💤 row's own Stop
+    assert coder.pane_id in tmux.killed
+
+
 @pytest.mark.parametrize("action", ["restart", "stop"])
 def test_the_row_the_command_runs_in_is_never_acted_on(
     fleet: Fleet, monkeypatch: pytest.MonkeyPatch, action: fleet_service.BulkAction

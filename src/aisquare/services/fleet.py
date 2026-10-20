@@ -4590,6 +4590,7 @@ def stop(
     handover: bool = False,
     agent_id: str | None = None,
     nudge: bool = True,
+    live_only: bool = False,
 ) -> StopReceipt:
     """``/exit`` the agent named ``label``, wait ``grace`` seconds, then kill its window.
 
@@ -4611,12 +4612,16 @@ def stop(
     ``/exit`` to the new coder-1, killed it and reported "stopped" (review of
     #138). Pinned, it stops that row or removes that row's window, and refuses
     when neither is left.
+
+    ``live_only`` refuses an ended row as ``handover`` does, its window left as it
+    is: :func:`bulk`'s, which acts on running agents alone. A row that ended after
+    its look and before this read is a 💤 row, never one it says it stopped.
     """
     with store_session() as store:
         try:
             agent = _live_agent(store, project, label, agent_id=agent_id)
         except NoSuchAgent:
-            if handover:
+            if handover or live_only:
                 raise
             ended = (
                 store.fleet_agent_by_label(project.id, label, live_only=False)
@@ -7354,10 +7359,12 @@ def bulk(
 
     Plans first (:func:`bulk_plan`), then acts on each row in turn, pinned to its id
     (``agent_id``) as the agent view's buttons are: a label the row gave up meanwhile names
-    another agent. A stop is :func:`stop`'s; a restart is :func:`restart`'s, so a running
-    agent is handed over and resumes its session when its transcript is on disk. One
-    agent's failure is its own receipt, never the end of the rest. ``on_receipt`` is called
-    with each receipt as it is made, in this thread: the CLI prints it, asq toasts it.
+    another agent. Each row is looked at again just before it is acted on, and one that
+    ended since the plan was read is skipped as :data:`ALREADY_EXITED`. A stop is
+    :func:`stop`'s; a restart is :func:`restart`'s, so a running agent is handed over and
+    resumes its session when its transcript is on disk. One agent's failure is its own
+    receipt, never the end of the rest. ``on_receipt`` is called with each receipt as it is
+    made, in this thread: the CLI prints it, asq toasts it.
 
     ``shown`` is the plan a person confirmed (asq's dialog). The plan is read again here
     all the same, and only the rows ``shown`` acts on are acted on: an agent started since
@@ -7400,23 +7407,51 @@ def _as_shown(shown: BulkPlan, now: BulkPlan) -> list[BulkRow]:
 
 
 def _bulk_one(action: BulkAction, row: BulkRow, *, spawned_by: str) -> BulkReceipt:
-    """One row's stop or restart, as its receipt whatever happened."""
+    """One row's stop or restart, as its receipt whatever happened.
+
+    The row is looked at again just before it is acted on (:func:`_still_running`): a
+    stop of six agents takes up to half a minute, and one that ended in that time was
+    acted on as it stood by its turn. :func:`restart` works on a row whatever its state,
+    so the exited agent was started again; :func:`stop` removed its 💤 window and said
+    "stopped" (review of #266, round 2). A restart looks in ``before_stop``, after its
+    own refusals and before anything is stopped; a stop looks first, and is pinned to a
+    running row (``live_only``).
+    """
     project, agent = row.project, row.agent
+
+    def still_running() -> None:
+        _still_running(row)
+
     try:
-        result: StopReceipt | RestartReceipt = (
-            stop(project, agent.label, agent_id=agent.id)
-            if action == "stop"
-            else restart(project, agent.label, agent_id=agent.id, spawned_by=spawned_by)
-        )
+        result: StopReceipt | RestartReceipt
+        if action == "stop":
+            still_running()
+            result = stop(project, agent.label, agent_id=agent.id, live_only=True)
+        else:
+            result = restart(
+                project,
+                agent.label,
+                agent_id=agent.id,
+                spawned_by=spawned_by,
+                before_stop=still_running,
+            )
     except NoSuchAgent:
-        # Pinned to the row: it ended between the read and its turn, and its label is free
-        # or another agent's now. Nothing was done to either.
+        # Pinned to the row: it ended between the read and its turn, and its label is free,
+        # still its own or another agent's now. Nothing was done to any of them.
         return BulkReceipt(project, agent, "skipped", ALREADY_EXITED)
     except FleetError as exc:
         return BulkReceipt(project, agent, "failed", str(exc))
     except Exception as exc:  # one agent's failure is its receipt, never the rest's
         return BulkReceipt(project, agent, "failed", f"{type(exc).__name__}: {exc}")
     return BulkReceipt(project, agent, "done", result=result)
+
+
+def _still_running(row: BulkRow) -> None:
+    """Refuse ``row`` (``NoSuchAgent``) unless its project's listing, read now, still has it
+    in one of :data:`PROCESS_STATES`: as ``fleet ls`` reads it, a dead pane recorded."""
+    now = next((s for s in list_agents(row.project) if s.agent.id == row.agent.id), None)
+    if now is None or now.state not in PROCESS_STATES:
+        raise NoSuchAgent(f"{row.agent.label!r} ({row.agent.id}) has no process any more")
 
 
 def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> ReapReport:

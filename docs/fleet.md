@@ -360,7 +360,10 @@ stopped. Some agents are left alone, and each is named with the reason:
   row, so a manager that runs `restart --all` isn't stopped half-way through it;
 - a row held as another tmux server's (`held: …`), whose pane id names another agent;
 - for a restart, an agent whose task is done or dropped (`task is done`), which
-  `fleet restart` would refuse.
+  `fleet restart` would refuse;
+- an agent that ended after the list was read and before its turn: `already
+  exited`. Each agent is looked at again just before it is acted on, so one that
+  exited or was stopped meanwhile is not started again, and its 💤 window stays.
 
 The agents are taken one at a time, each project's manager first. Each one is printed
 as it is done, under its project's name, and the count comes last:

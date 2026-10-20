@@ -19,7 +19,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `aisquare fleet stop --all [--managers]`. Both print one line per agent, then
   the count, and exit 1 if any agent failed. With four managers running, a restart
   of all of them used to mean clicking into each one. Exited (💤) agents are left
-  as they are, and so is the agent that runs the command, so a manager's
+  as they are, and so is one that exits or is stopped while the run goes on. So
+  is the agent that runs the command, so a manager's
   `restart --all` doesn't stop itself half-way. A restart resumes each agent's
   session from its transcript when that is on disk, as a single restart does. An
   agent that fails doesn't stop the rest: it is named, with the reason.

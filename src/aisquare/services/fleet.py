@@ -7312,17 +7312,24 @@ def bulk_plan(
     Every directory is read, captured ones too, and a forgotten registration that holds a
     live row, as ``shutdown`` reads them (:func:`_shutdown_targets`): a ``project forget``
     that races a spawn leaves a tombstone over a running agent, which ``stop --all`` left
-    running on a project nobody lists (review of #266, round 2).
+    running on a project nobody lists (review of #266, round 2). Only those with a fleet row
+    are listed, live or recently ended (:meth:`~aisquare.core.store.ContextStore.fleet_label_heads`
+    holds each label's newest): with capture on, every captured directory cost a full
+    listing, a store session and the board's sessions included, for no agent at all (review
+    of #266, round 3).
     """
     if action not in ("restart", "stop"):
         raise ValueError(f"bulk action {action!r} is neither restart nor stop")
     with store_session() as store:
         every = store.list_projects(include_forgotten=True)
         forgotten = store.forgotten_among([project.id for project in every])
+        heads = store.fleet_label_heads()
+        with_rows = {agent.project_id for agent in heads}
+        live = {agent.project_id for agent in heads if agent.ended_at is None}
         projects = [
             project
             for project in every
-            if project.id not in forgotten or store.fleet_agents(project.id, live_only=True)
+            if project.id in with_rows and (project.id not in forgotten or project.id in live)
         ]
         own, own_session = _own_rows(store, acting_session)
     rows: list[BulkRow] = []

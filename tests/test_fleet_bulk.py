@@ -280,6 +280,31 @@ def test_each_turn_looks_at_its_own_row_not_its_whole_project(
     assert sorted(looked) == sorted(agent.id for agent in fleet.agents.values())
 
 
+def test_the_plan_lists_no_directory_without_a_fleet_row(
+    fleet: Fleet, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #266, round 3: every registered directory was listed, each captured one
+    too, a store session and the board's sessions apiece, to find four managers. One
+    with no fleet row, live or ended, has no agent to list."""
+    quiet = _project(tmp_path, "quiet")
+    exited = fleet.agents["beta/coder-1"]
+    listed: list[str] = []
+    real = fleet_service.list_agents
+
+    def listing(project: ProjectInfo, **kwargs: Any) -> list[FleetAgentStatus]:
+        listed.append(project.id)
+        return real(project, **kwargs)
+
+    monkeypatch.setattr(fleet_service, "list_agents", listing)
+    fleet_service.stop(fleet.beta, exited.label, agent_id=exited.id)  # an ended row stays listed
+
+    plan = fleet_service.bulk_plan("stop")
+
+    assert quiet.id not in listed
+    assert sorted(listed) == sorted([fleet.alpha.id, fleet.beta.id])
+    assert {row.project.id for row in plan.rows} == {fleet.alpha.id, fleet.beta.id}
+
+
 def test_a_stop_pinned_to_running_agents_leaves_an_ended_row_and_its_window(
     fleet: Fleet, tmux: FakeTmux
 ) -> None:

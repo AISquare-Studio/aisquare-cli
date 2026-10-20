@@ -693,6 +693,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self._headroom_due = True
         """Read the headroom once the next accounts frame lands: the first frame at start,
         and the one after the Accounts page changed something (``AccountsChanged``)."""
+        self.session_usage: dict[int, float] = {}
+        """Slot → five-hour window percent USED from the last headroom read
+        (``HeadroomSummary.session_by_slot``): what the agent rows and info lines show. It
+        is the slow read's, handed on when it lands — the two-second tick reads no usage."""
         self.escape_key = escape_key or fleet_service.settings().escape_key
         self.snapshot: FleetSnapshot | None = None
         """The last frame that was read successfully; ``None`` before the first."""
@@ -1154,6 +1158,13 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if event.state is WorkerState.SUCCESS and isinstance(result, tuple):
             summary, every_needs_login = result
             self.sidebar.show_headroom(summary, every_needs_login=every_needs_login)
+            # The per-slot session use rides this read to every open info line; the views
+            # never read usage themselves, and the two-second tick never asks for it.
+            self.session_usage = summary.session_by_slot
+            for view in self.query(AgentView):
+                view.show_usage(self.session_usage)
+            for project_view in self.query(ProjectView):
+                project_view.show_usage(self.session_usage)
         if event.state in (WorkerState.SUCCESS, WorkerState.ERROR) and self._headroom_owed:
             self.refresh_headroom()
 
@@ -1376,7 +1387,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.notify("that project is no longer listed", severity="warning", timeout=4)
             return
         view_id = f"project-{project.id}"
-        await self._show(view_id, lambda: ProjectView(project, id=view_id))
+        await self._show(
+            view_id, lambda: ProjectView(project, id=view_id, usage=self.session_usage)
+        )
         self.sidebar.select(f"project:{project.id}")
         self.doctor_scope = project.id
         self._remember_selection(f"project:{project.id}")
@@ -1387,7 +1400,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.notify("that agent is no longer listed", severity="warning", timeout=4)
             return
         view_id = f"agent-{status.agent.id}"
-        await self._show(view_id, lambda: AgentView(status, id=view_id))
+        await self._show(view_id, lambda: AgentView(status, usage=self.session_usage, id=view_id))
         self.sidebar.select(f"agent:{status.agent.id}")
         self.doctor_scope = event.project_id
         self._remember_selection(f"agent:{event.project_id}/{status.agent.id}")
@@ -1452,7 +1465,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             )
             return
         view_id = f"agent-{status.agent.id}"
-        await self._show(view_id, lambda: AgentView(status, id=view_id))
+        await self._show(view_id, lambda: AgentView(status, usage=self.session_usage, id=view_id))
         self.sidebar.select(f"agent:{status.agent.id}")
         self.doctor_scope = started.project_id
         self._remember_selection(f"agent:{started.project_id}/{status.agent.id}")

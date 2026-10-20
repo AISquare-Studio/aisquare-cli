@@ -44,7 +44,7 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui import app as app_mod
 from aisquare.cli.ui import app as ui_app
-from aisquare.cli.ui.app import SIDEBAR_WIDTH_KEY, FleetApp, HelpScreen, Panes
+from aisquare.cli.ui.app import SIDEBAR_WIDTH_KEY, FleetApp, HeadroomReader, HelpScreen, Panes
 from aisquare.cli.ui.autosave import Autosave
 from aisquare.cli.ui.click_guard import GuardedButton
 from aisquare.cli.ui.divider import WIDEST_ASK, Divider, cells
@@ -87,7 +87,16 @@ from aisquare.core.locking import lock_exclusive, unlock
 from aisquare.core.state_file import update_state
 from aisquare.core.store import ContextStore, SqliteStore, store_session
 from aisquare.core.tmux import Completed
-from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, FleetAgentStatus, ProjectInfo
+from aisquare.models import (
+    CheckStatus,
+    ClaudeAccount,
+    DoctorCheck,
+    FleetAgent,
+    FleetAgentStatus,
+    HeadroomSummary,
+    ProjectInfo,
+)
+from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import project_groups as groups_service
@@ -190,12 +199,14 @@ def drive(
     doctor: Callable[[], list[DoctorCheck]] | None = None,
     notifications: bool = False,
     size: tuple[int, int] = SIZE,
+    headroom: HeadroomReader | None = None,
 ) -> T:
     """Run ``fn`` against a mounted ``FleetApp`` (no timer refresh; a stub doctor).
 
     ``notifications`` opts the screen's ``ToastRack`` in — ``run_test`` leaves it
     out by default, and without it a ``notify`` goes nowhere to be read.
     ``size`` is the terminal's; a test about a laptop passes a narrow one.
+    ``headroom`` stands in for the slow usage read; the app's own when not given.
 
     The start-up doctor run has been painted before ``fn`` starts. It is a thread
     worker, and a test that ended before its result was handled had that result
@@ -205,7 +216,11 @@ def drive(
     """
 
     async def run() -> T:
-        app = FleetApp(refresh_seconds=3600, doctor=doctor or (lambda: []))
+        app = (
+            FleetApp(refresh_seconds=3600, doctor=doctor or (lambda: []))
+            if headroom is None
+            else FleetApp(refresh_seconds=3600, doctor=doctor or (lambda: []), headroom=headroom)
+        )
         async with app.run_test(size=size, notifications=notifications) as pilot:
             await pilot.pause()
             await settle(app)
@@ -416,6 +431,113 @@ def test_agent_rows_show_role_icon_state_chip_and_exit_status(
     assert "🔔" not in manager and "▶" not in manager
     # The card's chips: three alive (the exited one is not), one needing the user.
     assert chips.rstrip().endswith("3 · 🔔1")
+
+
+def on_screen(row: AgentRow) -> str:
+    """The strip a row composites across its whole width, its padding included.
+
+    :func:`composited` crops to ``size``, the content area: a padded row loses as many cells
+    off its end as its padding is wide — the end being what these tests are about.
+    """
+    (strip,) = row.render_lines(Region(0, 0, row.outer_size.width, 1))
+    return strip.text
+
+
+def on_slot(row: FleetAgentStatus, slot: int) -> FleetAgentStatus:
+    """``row`` spawned on account ``slot`` (``FleetAgent.account_slot``)."""
+    return row.model_copy(update={"agent": row.agent.model_copy(update={"account_slot": slot})})
+
+
+def session_use(*by_slot: tuple[int, float]) -> Callable[..., HeadroomSummary]:
+    """A headroom read answering ``by_slot`` as each account's five-hour window USED."""
+
+    def read(accounts: Sequence[ClaudeAccount] | None) -> HeadroomSummary:
+        return HeadroomSummary(level="good", percent_left=50.0, session_by_slot=dict(by_slot))
+
+    return read
+
+
+def test_an_agent_row_gives_way_in_its_label_never_in_its_account_and_session_use(
+    tmp_path: Path, script: Script
+) -> None:
+    """The owner's option C: ``#<slot>·<pct>%`` after the state chip — the slot number here,
+    for want of room. At the default width of 30 a long label is ellipsised so the suffix is
+    whole; with no figure the slot alone, with no slot nothing, and an exited row keeps its
+    ``💤 exited(N)``."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    script["prj_a"] = [
+        on_slot(status("prj_a", "manager", "manager", "waiting"), 1),
+        on_slot(status("prj_a", "coder-01k8zq7mab", "coder", "working", minute=1), 3),
+        on_slot(status("prj_a", "coder-auth", "coder", "working", minute=2), 4),
+        status("prj_a", "scout-1", "scout", "attention", minute=3),
+        on_slot(status("prj_a", "tester-1", "tester", "exited", minute=4, exit_status=3), 3),
+    ]
+
+    async def go(pilot: Pilot[None]) -> tuple[int, list[str]]:
+        app = fleet_app(pilot)
+        await settle(app)  # the headroom read follows the first accounts frame
+        rows = [on_screen(row) for row in card_for(app, "prj_a").query(AgentRow)]
+        return app.sidebar.size.width, rows
+
+    width, rows = drive(go, headroom=session_use((1, 42.0), (3, 87.0)))
+    assert width == 30
+    manager, long, coder, scout, tester = (row.strip() for row in rows)
+    assert manager.startswith("🧭 manager") and manager.endswith("⏸ #1·42%")
+    assert long.endswith("▶ #3·87%"), long  # the whole suffix…
+    assert "…" in long and "coder-01k8zq7mab" not in long  # …and the label gave way
+    assert long.startswith("🔨 coder-01k8")
+    assert coder.endswith("▶ #4") and "%" not in coder  # no figure for slot 4: the slot alone
+    assert "#" not in scout and scout.endswith("🔔")  # no slot: nothing
+    assert tester.endswith("💤 exited(3)") and "#" not in tester
+
+
+def test_the_session_use_rides_the_slow_headroom_read_never_the_tick(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Acceptance (e): the figures on the rows and the info lines are the headroom read's
+    (``HeadroomSummary.session_by_slot``), handed to the widgets when it lands. Ticks of the
+    two-second clock read no usage — any other usage read fails the test — and a view opened
+    between two reads shows the last figure at once. The manager's Agent view and the
+    Manager tab show the same line (acceptance (a), mounted)."""
+    seed(tmp_path, ("prj_a", "alpha", "amber-otter"))
+    script["prj_a"] = [
+        on_slot(status("prj_a", "manager", "manager", "waiting"), 2),
+        on_slot(status("prj_a", "coder-auth", "coder", "working", minute=1), 2),
+    ]
+    reads: list[int] = []
+    answer = session_use((2, 71.0))
+
+    def headroom(accounts: Sequence[ClaudeAccount] | None) -> HeadroomSummary:
+        reads.append(1)
+        return answer(accounts)
+
+    def no_usage_read(*args: object, **kwargs: object) -> object:
+        raise AssertionError("usage was read outside the headroom read")
+
+    for name in ("cached_usage", "read_usage", "usage", "read_fleet_headroom"):
+        monkeypatch.setattr(accounts_service, name, no_usage_read)
+
+    async def go(pilot: Pilot[None]) -> tuple[int, int, str, str, str]:
+        app = fleet_app(pilot)
+        await settle(app)
+        first = len(reads)
+        await pilot.click(row_for(app, "agt_a_manager"))
+        await settle(app)
+        agent_header = shown(app.query_one("#agent-agt_a_manager #agent-header", Static))
+        await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
+        await settle(app)
+        for _ in range(3):
+            app.refresh_data()
+            await settle(app)
+        manager_header = shown(app.query_one("#project-prj_a #manager-header", Static))
+        row = on_screen(row_for(app, "agt_a_coder-auth"))
+        return first, len(reads), agent_header, manager_header, row
+
+    first, after, agent_header, manager_header, row = drive(go, headroom=headroom)
+    assert first == 1 and after == 1, "the ticks read no usage"
+    assert "account 2 · 71%" in agent_header
+    assert manager_header.splitlines()[0] == agent_header
+    assert row.rstrip().endswith("▶ #2·71%")
 
 
 def test_the_card_names_the_project_not_its_codename_and_a_path_tells_twins_apart(

@@ -1,13 +1,15 @@
-"""The Agent view: a header (label, role, state, task, cwd, exit) over the agent's pane.
+"""The Agent view: the agent info line, Stop and Restart, over the agent's pane.
 
-docs/plans/fleet-tui.md §4.2: "header (label, role, state, model, cwd or
-worktree, task) + actions + the ``TerminalPane``". The header is a one-line
-:class:`rich.text.Text` built from a :class:`FleetAgentStatus` — every field
-is DATA and is appended as text, never as markup, so a label or a path with
-brackets in it reaches the screen intact (tests/test_console_markup.py's
-rule). The shell calls :meth:`AgentView.refresh_status` on its poll; a changed
-``pane_id`` (a restart) re-attaches the pane. Actions (stop, restart, open in
-tmux, transcript) are the shell's buttons and land with it.
+The info line (:func:`info_line`) is the one the Manager tab shows too: who the
+agent is, its state, the model and effort it runs, the account it runs on with
+that account's session use, and its pane — one builder, so the two never drift
+apart again. It is a one-line :class:`rich.text.Text` built from a
+:class:`FleetAgentStatus`; every field is DATA and is appended as text, never as
+markup, so a label or a model name with brackets in it reaches the screen intact
+(tests/test_console_markup.py's rule). The shell calls
+:meth:`AgentView.refresh_status` on its poll, and :meth:`AgentView.show_usage`
+when its slow headroom read lands; a changed ``pane_id`` (a restart) re-attaches
+the pane.
 """
 
 from __future__ import annotations
@@ -20,12 +22,13 @@ from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
+from textual.widget import Widget
 from textual.widgets import Button, Static
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli import fleet as fleet_cli
 from aisquare.cli.ui.click_guard import GuardedButton
-from aisquare.cli.ui.sidebar import ROLE_ICON, STATE_CHIP
+from aisquare.cli.ui.sidebar import ROLE_ICON, STATE_CHIP, session_percent_text
 from aisquare.cli.ui.terminal import PANE_GONE, TerminalPane
 from aisquare.core.tmux import TmuxServer
 from aisquare.models import FleetAgent, FleetAgentStatus
@@ -35,7 +38,7 @@ from aisquare.services import team as team_service
 
 SEPARATOR = "  "
 LABELS_TTL = 30.0
-"""How long the header keeps the slot labels before asking the registry again."""
+"""How long a view keeps the slot labels before asking the registry again."""
 LABELS_WORKER = "agent-account-labels"
 
 
@@ -60,31 +63,106 @@ def account_text(status: FleetAgentStatus, labels: Mapping[int, str] | None = No
     return ""
 
 
-def header_text(status: FleetAgentStatus, labels: Mapping[int, str] | None = None) -> Text:
-    """One line: ``🔨 coder-auth  coder  ▶ working  account 2  task 01k…  ~/repo ⎇  exited 1``."""
+LABEL_STYLE = "bold"
+DETAIL_STYLE = "italic"
+"""Not dim: the ``💤`` and ``·`` chips are, and the detail follows them."""
+MODEL_STYLE = "dim cyan"
+EFFORT_STYLE = "cyan"
+ACCOUNT_STYLE = "blue"
+PANE_STYLE = "dim italic"
+"""Dim, and italic so it never runs into a dim ``💤`` or ``·`` chip with nothing between."""
+
+
+def info_line(
+    status: FleetAgentStatus,
+    labels: Mapping[int, str] | None = None,
+    usage: Mapping[int, float] | None = None,
+) -> Text:
+    """``🔨 coder-auth  ▶ working  claude-opus-5-5 high  dev · 87%  %4`` — one agent at a glance.
+
+    The Agent view's header and the Manager tab's first line, both: the role icon and the
+    label, the state chip (``💤 exited(N)`` once it ended), the state's detail, the model
+    and the effort the session reported (``TeamSession.effort``, left out while unknown),
+    the account (:func:`account_text`, its NAME alone — no ``#slot``) with its five-hour
+    window percent USED from ``usage`` (slot → percent, the slow headroom read's
+    ``session_by_slot``), and the pane id. No role word, task, working directory or tmux
+    command: the sidebar row says the role, and the attach command is the Settings tab's.
+
+    Each field is a style of its own and no two neighbours share one, so each reads apart
+    at a glance; every one is appended as data.
+    """
     agent = status.agent
+    session = status.session
     chip, chip_style = STATE_CHIP.get(status.state, ("·", "dim"))
     text = Text(no_wrap=True, overflow="ellipsis")
     text.append(f"{ROLE_ICON.get(agent.role, '🤖')} ")
-    text.append(agent.label, style="bold")
-    text.append(SEPARATOR + agent.role, style="cyan")
+    text.append(agent.label, style=LABEL_STYLE)
     text.append(SEPARATOR)
-    text.append(f"{chip} {status.state}", style=chip_style)
-    if status.detail:
-        text.append(f" ({status.detail})", style="dim")
-    if status.session is not None and status.session.model:
-        text.append(SEPARATOR + status.session.model, style="dim")
-    on = account_text(status, labels)
-    if on:
-        text.append(SEPARATOR + on, style="dim")
-    if agent.task_id:
-        text.append(SEPARATOR + f"task {agent.task_id[-8:]}", style="dim")
-    text.append(SEPARATOR + str(agent.cwd), style="dim")
-    if agent.worktree:
-        text.append(" ⎇", style="dim")
-    if agent.exit_status is not None:
-        text.append(SEPARATOR + f"exited {agent.exit_status}", style="bold red")
+    exited = status.state == "exited" and agent.exit_status is not None
+    code = f"({agent.exit_status})" if exited else ""
+    text.append(f"{chip} {status.state}{code}", style=chip_style)
+    # An exited row's detail is its exit code, which the chip has just said.
+    if status.detail and not (exited and status.detail == f"exit {agent.exit_status}"):
+        text.append(SEPARATOR)
+        text.append(status.detail, style=DETAIL_STYLE)
+    if session is not None and session.model:
+        text.append(SEPARATOR)
+        text.append(session.model, style=MODEL_STYLE)
+    if session is not None and session.effort:
+        text.append(" " if session.model else SEPARATOR)
+        text.append(session.effort, style=EFFORT_STYLE)
+    account = account_text(status, labels)
+    if account:
+        text.append(SEPARATOR)
+        text.append(account, style=ACCOUNT_STYLE)
+        slot = agent.account_slot
+        percent = (usage or {}).get(slot) if slot is not None else None
+        if percent is not None:
+            text.append(" · ", style="dim")
+            text.append_text(session_percent_text(percent))
+    text.append(SEPARATOR)
+    text.append(agent.pane_id, style=PANE_STYLE)
     return text
+
+
+class SlotLabels:
+    """The slot labels a view names accounts by, asked of the registry OFF the UI thread.
+
+    A store open is a blocking call with a busy timeout of seconds — the Accounts page
+    runs its writes as thread workers for exactly that reason — so a view never opens it
+    on the event loop: it paints the last good map (the built-in names before the first
+    answer) and repaints when the worker answers (review of #205, second round). The
+    Agent view and the Manager tab each hold one; at most one read per ``LABELS_TTL``.
+    """
+
+    def __init__(self) -> None:
+        self.labels: Mapping[int, str] = {}
+        self._asked_at: float | None = None
+
+    def ask(self, node: Widget) -> None:
+        """Read the labels in a thread worker of ``node``'s, unless one was asked lately."""
+        now = time.monotonic()
+        if self._asked_at is not None and now - self._asked_at < LABELS_TTL:
+            return
+        self._asked_at = now
+        node.run_worker(
+            accounts_service.slot_labels,
+            name=LABELS_WORKER,
+            group=LABELS_WORKER,
+            exclusive=True,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def answered(self, event: Worker.StateChanged) -> bool:
+        """Take the map a read of :meth:`ask`'s answered; whether there is one to paint."""
+        if event.worker.group != LABELS_WORKER or event.state is not WorkerState.SUCCESS:
+            return False
+        result = event.worker.result
+        if not isinstance(result, dict):
+            return False
+        self.labels = result
+        return True
 
 
 def shown_pane(status: FleetAgentStatus) -> str | None:
@@ -125,7 +203,7 @@ _SHOWS_STOP: frozenset[str] = _STOPPABLE | {"exited"}
 
 
 class AgentView(Vertical):
-    """One agent: who it is, the two actions that change it, then the live session.
+    """One agent: its info line, the two actions that change it, then the live session.
 
     **Stop** and **Restart** (#138) are the actions §4.2 promised and this view
     never had: a manager ended with ctrl+c inside its window showed 💤 forever
@@ -152,6 +230,7 @@ class AgentView(Vertical):
         *,
         server: TmuxServer | None = None,
         escape_key: str | None = None,
+        usage: Mapping[int, float] | None = None,
         id: str | None = None,
     ) -> None:
         super().__init__(id=id)
@@ -161,45 +240,31 @@ class AgentView(Vertical):
         # (`FleetAgentStatus.socket_at`); the escape key comes from ``[fleet]``.
         self.server = server or TmuxServer(status.agent.tmux_socket).at(status.socket_at)
         self.escape_key = escape_key or fleet_service.settings().escape_key
-        self._labels: Mapping[int, str] = {}
-        self._labels_asked_at: float | None = None
+        self.labels = SlotLabels()
+        self.usage: Mapping[int, float] = usage or {}
+        """Slot → session percent USED, as the shell's slow headroom read last handed it."""
 
-    def _refresh_labels(self) -> None:
-        """Ask the registry for the slot labels OFF the UI thread, at most every LABELS_TTL s.
+    def _info(self) -> Text:
+        return info_line(self.status, self.labels.labels, self.usage)
 
-        A store open is a blocking call with a busy timeout of seconds — the
-        Accounts page runs its writes as thread workers for exactly that
-        reason — so the header never opens it on the event loop: it paints the
-        last good map (the built-in names before the first answer) and repaints
-        when the worker answers (review of #205, second round).
-        """
-        now = time.monotonic()
-        if self._labels_asked_at is not None and now - self._labels_asked_at < LABELS_TTL:
-            return
-        self._labels_asked_at = now
-        self.run_worker(
-            accounts_service.slot_labels,
-            name=LABELS_WORKER,
-            group=LABELS_WORKER,
-            exclusive=True,
-            thread=True,
-            exit_on_error=False,
-        )
+    def _paint_info(self) -> None:
+        if self.is_mounted:
+            self.query_one("#agent-header", Static).update(self._info())
 
     @on(Worker.StateChanged)
     def _labels_answered(self, event: Worker.StateChanged) -> None:
-        if event.worker.group != LABELS_WORKER:
-            return
-        if event.state is WorkerState.SUCCESS and isinstance(event.worker.result, dict):
-            self._labels = event.worker.result
-            if self.is_mounted:
-                self.query_one("#agent-header", Static).update(
-                    header_text(self.status, self._labels)
-                )
+        if self.labels.answered(event):
+            self._paint_info()
+
+    def show_usage(self, usage: Mapping[int, float]) -> None:
+        """The accounts' session use from the shell's headroom read — never the 2 s tick."""
+        if usage != self.usage:
+            self.usage = usage
+            self._paint_info()
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="agent-bar"):
-            yield Static(header_text(self.status, self._labels), id="agent-header")
+            yield Static(self._info(), id="agent-header")
             # Guarded (``click_guard``): a click that was aimed at what this view replaced
             # must not stop or restart the agent it shows instead.
             yield GuardedButton("Stop", id="agent-stop", compact=True)
@@ -214,14 +279,14 @@ class AgentView(Vertical):
 
     def on_mount(self) -> None:
         self._paint_actions()
-        self._refresh_labels()
+        self.labels.ask(self)
 
     @property
     def pane(self) -> TerminalPane:
         return self.query_one("#agent-pane", TerminalPane)
 
     def refresh_status(self, status: FleetAgentStatus) -> None:
-        """New facts about the same agent: redraw the header, re-attach on a new pane.
+        """New facts about the same agent: redraw the info line, re-attach on a new pane.
 
         Detached from a row that turned ``lost`` or was held as another server's
         (:func:`shown_pane`), whose id may name another agent's pane by now.
@@ -229,9 +294,9 @@ class AgentView(Vertical):
         self.status = status
         if not self.is_mounted:
             return
-        self.query_one("#agent-header", Static).update(header_text(status, self._labels))
+        self._paint_info()
         self._paint_actions()
-        self._refresh_labels()
+        self.labels.ask(self)
         if (wanted := shown_pane(status)) != self.pane.pane_id:
             self.pane.attach(wanted)
 

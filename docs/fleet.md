@@ -535,7 +535,7 @@ Replaces this terminal with `tmux attach` on the project's fleet session — the
 full-fidelity escape hatch. Under `--json` it prints the command it would run
 instead of running it. The session is found on the server the project's live
 agents are on, at the socket their spawns recorded (`tmux -S`), the line the
-Manager tab prints, so it works from a shell under another `TMUX_TMPDIR`. With
+project's Settings tab prints, so it works from a shell under another `TMUX_TMPDIR`. With
 no live agent, the servers its ended agents were on are asked, the latest to
 end first: an ended manager's window lingers there and holds the session, the
 screen behind the 💤 row. Last, the socket this shell's tmux looks at, but
@@ -1329,7 +1329,7 @@ asq` looks from the asking shell. Under another `TMUX_TMPDIR`, `-L` reaches
 another server on the same name, or none, and every server numbers its panes
 from `%0`, so its panes would answer for the agents' ids: a dead one there read
 as a running agent's exit and ended its row. A row from before 0.8.0 recorded
-no socket and is asked by name. The Manager tab's attach line names the
+no socket and is asked by name. The Settings tab's attach line names the
 server the same way.
 
 **Under a hub: one board, many fleet projects.** With `AISQUARE_TEAM_HUB` set,

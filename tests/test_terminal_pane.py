@@ -65,7 +65,7 @@ from aisquare.cli.ui.terminal import (
     route_gesture_start,
     route_selection_gesture,
 )
-from aisquare.cli.ui.views.agent import AgentView, header_text
+from aisquare.cli.ui.views.agent import AgentView, info_line
 from aisquare.core.keys import Drop
 from aisquare.core.tmux import BUNDLED_CONF, PASTE_BUFFER, TmuxError, TmuxServer
 from aisquare.models import FleetAgent, FleetAgentStatus
@@ -4106,19 +4106,17 @@ def _status(
     return FleetAgentStatus.model_validate({"agent": agent, "state": state, "held": held})
 
 
-def test_header_text_carries_every_field_as_data() -> None:
-    text = str(header_text(_status(label="[coder-1]", exit_status=1, state="exited")))
+def test_the_info_line_carries_every_field_as_data() -> None:
+    text = str(info_line(_status(label="[coder-1]", exit_status=1, state="exited")))
     assert "[coder-1]" in text  # brackets survive: appended as text, never markup
-    assert "coder" in text and "exited" in text
-    assert "task 89abcdef" in text
-    # `str(Path(...))`, not the literal: the header renders the path the
-    # platform's way, and the point of this assertion is the BRACKETS
-    # surviving as text rather than becoming markup — not the separator.
-    assert str(_CWD) in text
-    assert "exited 1" in text
+    assert "💤 exited(1)" in text  # the exit status as the manager line always showed it
+    # The info line is the Manager tab's shape: no task, no working directory (the path
+    # with brackets in it), and no separate "exited N" beside the chip.
+    assert "task" not in text and "89abcdef" not in text
+    assert str(_CWD) not in text and "exited 1" not in text
     # The negative: absent facts leave no trace.
-    bare = str(header_text(_status(task_id=None, exit_status=None)))
-    assert "task " not in bare and "exited" not in bare
+    bare = str(info_line(_status(task_id=None, exit_status=None)))
+    assert "exited" not in bare and "(" not in bare
 
 
 def test_agent_view_reads_the_account_labels_off_the_ui_thread_and_repaints(

@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- In `asq`, every agent has one info line, the same on the Manager tab and in the
+  agent's own view: its label, its state, the model and the effort it runs at, the
+  Claude account it runs on (by name) with how much of that account's five-hour
+  session is used, and its pane, as in
+  `🔨 coder-auth  ▶ working  claude-opus-5-5 high  dev · 87%  %4`. The figure is
+  green below 70 %, yellow from 70 % and red from 90 %. The agent view no longer
+  shows the role, the task or the working directory there.
+- The sidebar's agent rows show the account's slot and its session use after the
+  state chip, as in `▶ #3·87%`. A long label is shortened to make room, never the
+  figure. The figures come from the usage read the status line already makes, so
+  nothing more is asked of the network.
+- The command that attaches a terminal to the project's tmux session moved from
+  the Manager tab to the project's Settings tab.
+
 ## [0.8.2] - 2026-10-19
 
 **A hotfix: a copy in `asq` reaches the clipboard on macOS. Every agent can now be

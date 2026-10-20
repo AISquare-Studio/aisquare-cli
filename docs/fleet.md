@@ -1580,11 +1580,13 @@ and Terminal.app never. On a remote session the native tool would write the
 remote machine's clipboard, not yours, so OSC 52 is the only route: over SSH
 (`SSH_CONNECTION` or `SSH_TTY` set, or an `sshd` above `asq`, as under `sudo`
 or `su`), in a Codespace (`CODESPACES`), and in your own tmux when it was last
-attached over SSH (tmux's own `SSH_CONNECTION`, asked at each copy). The toast says "copied" when the native tool took the text, or
-when OSC 52 was the only route (over SSH, or with the tool missing or failing)
-and the terminal is one known to take it: WezTerm and Ghostty by
-`TERM_PROGRAM`, kitty by `KITTY_WINDOW_ID`, Windows Terminal by `WT_SESSION`,
-and kitty, Ghostty, WezTerm and foot by the `TERM` ssh carries. In Terminal.app
+attached over SSH (tmux's own `SSH_CONNECTION`, asked at each copy). The
+toast says "copied" when the native tool took the text, or when OSC 52 was the
+only route (over SSH, or with the tool missing or failing) and the terminal is
+one known to take it: kitty, Ghostty and WezTerm by their own variables
+(`KITTY_WINDOW_ID`, `GHOSTTY_RESOURCES_DIR`, `WEZTERM_EXECUTABLE`), Ghostty and
+WezTerm also by `TERM_PROGRAM`, Windows Terminal by `WT_SESSION`, and kitty,
+Ghostty, WezTerm, foot and Alacritty by the `TERM` ssh carries. In Terminal.app
 (named by `TERM_PROGRAM`) it warns that the copy did not reach the clipboard,
 and how to select with the terminal itself. In iTerm2 — named by
 `TERM_PROGRAM`, and over SSH by the `LC_TERMINAL` ssh usually carries — it

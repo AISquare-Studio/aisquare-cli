@@ -663,6 +663,50 @@ def test_with_no_other_account_a_limit_starts_no_hand_over_and_posts_nothing_of_
     assert len(started) == 1
 
 
+def test_a_row_with_no_agent_recorded_counts_no_codex_account_as_somewhere_to_go(
+    fake_home: Path, work: ProjectInfo, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r16 of #113, 3/8: a row from before adapters records no agent, and is Claude
+    Code's (``recorded_adapter``, the switch's launch record). The hook asked
+    ``somewhere_to_hand_over`` with that ``None``, which counts every agent's accounts: a
+    signed-in Codex one started a worker whose pick, among Claude Code's, could only refuse
+    and post "not switched" at each limit, and Remote held the limit's push 90 s for it."""
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
+    started: list[list[str]] = []
+    monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
+    mine = _slot("work@example.com", "tok-work")
+    codex = core.create_account("codex")
+    (codex.config_dir / "auth.json").write_text(json.dumps({"OPENAI_API_KEY": "sk-test"}))
+    _session(work, "sess-fleet")
+    _fleet_row(work, "agt_legacy", "coder-db", "sess-fleet")
+    with store_session() as store:
+        row = store.fleet_agent_for_session("sess-fleet")
+        assert row is not None and row.agent is None, "the premise: no agent recorded"
+        store.upsert_fleet_agent(row.model_copy(update={"account_slot": mine.slot}))
+    assert service.somewhere_to_hand_over(mine.slot), "the premise: every agent's, the Codex"
+
+    _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
+
+    assert started == []
+    now = datetime.now(UTC)
+    with store_session() as store:
+        session = store.get_session("sess-fleet")
+        row = store.fleet_agent_for_session("sess-fleet")
+    assert isinstance(session, TeamSession) and row is not None
+    status = FleetAgentStatus(agent=row, state="limited", session=session)
+    (card,) = remote_needs.needs_from_agent(
+        status,
+        None,
+        project=work,
+        events=[],
+        now=now,
+        accounts=AccountsSettings(on_limit="switch"),
+        hands_over=remote_needs.live_needs_sources().hands_over,
+    )
+    assert card.kind == "limited"
+    assert card.push_after == card.since, "no other Claude account: pushed at once"
+
+
 def test_with_the_registry_unreadable_a_limit_still_reaches_the_worker_that_says_why(
     fake_home: Path, work: ProjectInfo, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -394,9 +394,15 @@ def _hand_over_if_configured(failure: team_service.TurnFailure) -> None:
                 session_id=session.id,
             )
             return
-    # As `fleet.switch` reads where the agent is, and Remote's scan asks the same.
+    from aisquare.core.agent_adapters import DEFAULT_AGENT
+
+    # As `fleet.switch` reads where the agent is, and Remote's scan asks the same. A row
+    # with no agent recorded is Claude Code's, as its launch record says (`recorded_adapter`):
+    # asked of every agent's accounts, a signed-in Codex one started a worker that could
+    # only refuse (review r16 of #113, 3/8).
     leaving = claude_accounts_service.leaving_slot(agent.account_slot, session.account)
-    if not claude_accounts_service.somewhere_to_hand_over(leaving, agent=agent.agent):
+    whose = agent.agent or DEFAULT_AGENT
+    if not claude_accounts_service.somewhere_to_hand_over(leaving, agent=whose):
         # One account: `wait`, with no board note on every limit that it is. A registry
         # that cannot be read is no answer, and goes on to the worker, which says so.
         return

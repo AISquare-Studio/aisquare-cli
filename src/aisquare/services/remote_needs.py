@@ -1516,9 +1516,13 @@ def _needs_limited_item(
         detail["resets_at"] = _iso_seconds(resets)
 
     def handed_over() -> bool:
+        from aisquare.core.agent_adapters import DEFAULT_AGENT
+
         account = session.account if session is not None else None
         leaving = claude_accounts_service.leaving_slot(agent.account_slot, account)
-        return hands_over(leaving, agent.agent)
+        # A row with no agent recorded is Claude Code's, as the switch moves it (review r16
+        # of #113, 3/8): every agent's accounts held its push 90 s for a refusal.
+        return hands_over(leaving, agent.agent or DEFAULT_AGENT)
 
     return _needs_item(
         "limited",

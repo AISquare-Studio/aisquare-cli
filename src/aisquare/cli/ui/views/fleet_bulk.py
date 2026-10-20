@@ -192,6 +192,10 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
         confirm.label = (
             f"{verb} {count_words(count, managers_only=plan.managers_only)}" if count else verb
         )
+        # A new label is not a layout change in Textual, so the button kept the width it was
+        # laid out at, for "Restart" while the plan was read: "Restart 2 managers" read
+        # "Restart 2" (tester-pr266-ui, real UI).
+        confirm.refresh(layout=True)
         confirm.disabled = count == 0
 
     @on(Button.Pressed, "#bulk-confirm")

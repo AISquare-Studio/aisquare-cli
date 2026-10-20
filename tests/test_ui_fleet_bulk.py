@@ -235,6 +235,43 @@ def test_the_managers_only_switch_redraws_the_list_and_the_count(two_projects: S
     assert everyone[1] == "Restart 4 agents" and len(everyone[0]) == 8
 
 
+def test_the_confirm_button_is_as_wide_as_the_count_it_names(
+    two_projects: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """tester-pr266-ui, real UI: the button was laid out for "Restart" while the plan was
+    read, and a new label is not a layout change in Textual, so "Restart 2 managers" read
+    "Restart 2" (and "Restart 4 agents" did, or not, by which came first). Here the read
+    is held until the dialog has been laid out, as it was there."""
+    read = threading.Event()
+    real = fleet_service.bulk_plan
+
+    def held(*args: Any, **kwargs: Any) -> fleet_service.BulkPlan:
+        assert read.wait(10), "the test never let the plan be read"
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(fleet_service, "bulk_plan", held)
+
+    async def go(pilot: Pilot[None]) -> list[tuple[str, int]]:
+        app = _app(pilot)
+        app.query_one("#fleet-restart-all", Button).press()
+        await settle_page(app, group="nothing-runs-here")
+        dialog = app.screen
+        assert isinstance(dialog, ConfirmBulk) and str(_confirm(dialog).label) == "Restart"
+        read.set()
+        seen = []
+        for value in (False, True):
+            dialog.query_one("#bulk-managers", Switch).value = value
+            await settle(app)
+            confirm = _confirm(dialog)
+            seen.append((str(confirm.label), confirm.content_size.width))
+        return seen
+
+    seen = drive(go)
+    assert [label for label, _ in seen] == ["Restart 4 agents", "Restart 2 managers"]
+    for label, width in seen:
+        assert width >= len(label), f"{label!r} is cut to {width} cells"
+
+
 def test_escape_and_cancel_close_the_dialog_and_act_on_nobody(acted: Acted) -> None:
     async def go(pilot: Pilot[None]) -> list[bool]:
         app = _app(pilot)

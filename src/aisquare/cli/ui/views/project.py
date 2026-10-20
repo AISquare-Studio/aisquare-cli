@@ -120,9 +120,14 @@ def exited_manager(agents: Sequence[FleetAgentStatus]) -> FleetAgentStatus | Non
 class ManagerTab(Vertical):
     """The manager's live session — or the button that starts one."""
 
+    # ``-info``: the header shows the manager's info line, then the hint, and is fitted as
+    # the Agent view's header is — each line on its own row, cut at its end with ``…``, so a
+    # long detail gives way rather than wrapping the line onto two or three rows. The prose
+    # that says there is no manager wraps, as it always did.
     DEFAULT_CSS = """
     ManagerTab { height: 1fr; }
     ManagerTab #manager-header { height: auto; padding: 0 1; }
+    ManagerTab #manager-header.-info { text-wrap: nowrap; text-overflow: ellipsis; }
     ManagerTab #start-manager { margin: 1 1; }
     ManagerTab #manager-pane { height: 1fr; }
     """
@@ -207,6 +212,7 @@ class ManagerTab(Vertical):
         header = self.query_one("#manager-header", Static)
         button = self.query_one("#start-manager", Button)
         pane = self.query_one("#manager-pane", TerminalPane)
+        header.set_class(status is not None, "-info")
         if status is None:
             header.update(no_manager_text(self.project, unavailable, exited=exited))
             button.display = True

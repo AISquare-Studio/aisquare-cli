@@ -8,7 +8,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.8.2] - 2026-10-19
 
-**A hotfix: a copy in `asq` reaches the clipboard on macOS.**
+**A hotfix: a copy in `asq` reaches the clipboard on macOS. Every agent can now be
+restarted or stopped at once. A restart no longer takes you off the pane you are on,
+and Stop or Restart no longer acts on a click aimed at what was under the pointer a
+moment before.**
 
 ### Added
 - Restart or stop every running agent in every project at once, or only the
@@ -79,6 +82,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (Option-drag in iTerm2, Fn-drag in Terminal.app on most Macs). docs/fleet.md
   has "Copy and paste on macOS", and its mouse section no longer lists iTerm2
   among the terminals that accept OSC 52 as they come.
+- `aisquare doctor`'s `fleet terminal` row names iTerm2 over SSH by the
+  `LC_TERMINAL=iTerm2` that ssh sends, though not behind tmux or screen, which keep
+  the terminal of whoever started them. It names Ghostty and WezTerm by their `TERM`
+  (`xterm-ghostty`, `wezterm`) when their own variables are gone, as over SSH, and
+  says both speak the kitty keyboard protocol. It said `unknown (TERM=…)` for all
+  three. The row and the copy's toast read one table of terminals.
 
 ## [0.8.1] - 2026-10-19
 

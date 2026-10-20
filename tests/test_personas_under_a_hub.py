@@ -197,3 +197,81 @@ def test_condensing_a_skill_over_the_hard_cap_keeps_its_frontmatter_and_files(
     assert front["metadata"] == {"owner": "platform", "persona-source": str(source.resolve())}
     assert result.persona.files == ["reference/checklist.md"]
     assert result.persona.body == "Short."
+
+
+# --- F6: a hand-launched session with no fleet row, in a repository nobody added ---------
+
+
+def test_a_hand_launched_session_under_a_hub_is_briefed_from_its_directorys_layer(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No fleet row, and the repository is not added, so the cycle names no project: the
+    briefing fell back to the board's root, the hub's, and told the session the persona
+    ``launch --persona`` had just found was missing (review of #201, F6)."""
+    _project_persona(repo, "reporev")
+    hub_root = tmp_path / "hub"
+    hub_root.mkdir()
+    with store_session() as store:
+        store.onboard_project(orchestrator.directory_project(hub_root))
+    monkeypatch.setenv(orchestrator.TEAM_HUB_ENV_VAR, str(hub_root))
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    monkeypatch.setenv(orchestrator.PERSONA_ENV_VAR, "reporev")
+    monkeypatch.delenv(orchestrator.FLEET_AGENT_ENV_VAR, raising=False)
+    monkeypatch.chdir(repo)
+
+    started = team_service.hook_session_start(CLEARED, repo, "startup")
+
+    assert _block("reporev") in started, started[-600:]
+    assert "no persona named" not in started
+
+
+# --- F7: the persona never reaches the tmux server's own environment ---------------------
+
+
+def test_no_tmux_command_hands_the_server_this_sessions_persona(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The server a command starts keeps the starter's environment, and a window opened by
+    hand in it (``prefix c``) inherits it: a manager launched ``--persona skeptic`` that
+    started the server made every such window skeptic (review of #201, F7)."""
+    import subprocess
+
+    from aisquare.core import tmux as tmux_core
+
+    seen: list[dict[str, str]] = []
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        seen.append(env)
+        return subprocess.CompletedProcess(argv, 0, b"tmux 3.5\n", b"")
+
+    monkeypatch.setenv(orchestrator.PERSONA_ENV_VAR, "skeptic")
+    monkeypatch.setenv("AISQUARE_ROLE", "manager")
+    monkeypatch.setattr("aisquare.core.tmux.subprocess.run", run)
+
+    tmux_core._tmux(["tmux", "-L", "asq-test", "new-session", "-d"], None)
+
+    [env] = seen
+    assert orchestrator.PERSONA_ENV_VAR not in env
+    assert env["AISQUARE_ROLE"] == "manager"  # main's, and out of this PR (a follow-up)
+
+
+# --- F8: the owed briefing resolves in the row's own project -----------------------------
+
+
+def test_a_busy_seat_under_a_hub_is_owed_its_own_repositorys_persona(
+    hubbed: _Hubbed,
+) -> None:
+    """The owed briefing a busy seat's next prompt hands over resolves the persona in the
+    row's project, not the session's board's: under a hub that is the hub's, and a
+    project-layer persona became "no persona named" (review of #201, F1, pinned by F8)."""
+    w = hubbed
+    _project_persona(w.fleet.root, "reporev")
+    _board_session(w.coder, "working")
+
+    receipt = fleet_service.attach_persona(w.fleet, w.coder.label, "reporev")
+    prompt = team_service.hook_prompt_heartbeat(w.coder_sid, w.fleet.root)
+
+    assert receipt.delivered == "noted"
+    assert _block("reporev") in prompt, prompt[-600:]

@@ -1862,6 +1862,7 @@ def hook_session_start(
         # names was read once, above, for the persona, the assignment and the cycle's project.
         assigned = _assignment(store, session.id, project.id, named=named)
         _settle_owed_persona(store, session)  # this start briefs the persona itself
+        fleet = _cycle_project(store, project, cwd, session.id, named=named)
         # Presence is board state, not feed traffic: /clear cycles, resumes and
         # ephemeral `claude -p` children would otherwise spam join/left pairs.
         return collision + _render_board(
@@ -1873,8 +1874,11 @@ def hook_session_start(
             assigned=assigned,
             briefing=True,
             persona_note=persona_note,
+            # Asked only when the briefing needs it: one git call, which a session with no
+            # persona, or one whose cycle names its project, never pays.
+            persona_root=_directory_root(cwd) if session.persona and fleet is None else None,
             labels=lambda: slot_labels_via(store),
-            fleet=_cycle_project(store, project, cwd, session.id, named=named),
+            fleet=fleet,
         )
 
 
@@ -2736,6 +2740,7 @@ def _render_board(
     persona_note: str | None = None,
     labels: Mapping[int, str] | Callable[[], Mapping[int, str]] | None = None,
     fleet: ProjectInfo | None = None,
+    persona_root: Path | None = None,
 ) -> str:
     """The board, and for ``me`` the protocol and its role's cycle, whose fleet commands
     name ``fleet`` (:func:`_cycle_project`). ``briefing`` is SessionStart's alone: it adds
@@ -2824,10 +2829,12 @@ def _render_board(
             *_role_cycle(me, fleet),
         ]
         if briefing and me.persona:
-            # The cycle's project, the session's own (its fleet row's, else its
-            # directory's), whose layer the persona was checked against at spawn and
-            # launch; the board's is the hub's under one (review of #201, F1).
-            lines += _persona_briefing(me.persona, (fleet or project).root)
+            # The session's own project, whose layer the persona was checked against
+            # at spawn and launch: the cycle's (its fleet row's, else its directory's
+            # when registered), else ``persona_root``, the directory's own. The
+            # board's is the hub's under one (review of #201, F1 and F6).
+            root = fleet.root if fleet is not None else (persona_root or project.root)
+            lines += _persona_briefing(me.persona, root)
         if briefing and persona_note:
             lines.append(persona_note)
     lines.append("</aisquare-team>")
@@ -3483,6 +3490,18 @@ def _persona_briefing(name: str, root: Path, *, without: str = "launched without
     except Exception as exc:
         reason = getattr(exc, "rule", None) or f"{type(exc).__name__}: {exc}"
         return [f'persona "{name}": {reason} — {without}']
+
+
+def _directory_root(cwd: Path | None) -> Path | None:
+    """The root of ``cwd``'s own project, the hub aside (``orchestrator.directory_project``):
+    the persona layer ``launch --persona`` checked (``cli.launch._check_persona``). For a
+    session with no fleet row in a directory nobody added, the briefing had only the board's
+    root, the hub's under one, and said a persona the launch had found was missing (review
+    of #201, F6). ``None`` when the directory cannot be read (a symlink loop)."""
+    try:
+        return orchestrator.directory_project(cwd).root
+    except OSError:
+        return None
 
 
 def _asked_persona(

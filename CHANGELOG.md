@@ -313,8 +313,8 @@ adapter.**
   waits for a hand-over only when another Codex account can take it, and a long
   rollout no longer reads as a tool still pending, which refused the phone's
   tells, restarts and switches. The Transcript tab shows the conversation under
-  `* codex`. A plan Codex proposes in Plan mode is no card yet: its *Implement
-  this plan?* dialog leaves no record.
+  `* codex`. A plan Codex proposes in Plan mode leaves no record of its
+  *Implement this plan?* dialog: that is a dialog's card (Fixed, below).
 - Remote's key pad has ⇧⏎ (under More), a newline in the agent's prompt. It
   reaches a Codex agent as Ctrl-J, since Codex submits on Shift-Enter, and a
   Claude Code agent as Shift-Enter, or as Ctrl-J on a tmux older than 3.5.
@@ -367,6 +367,22 @@ adapter.**
 
 ### Fixed
 
+- Remote has a needs-you card and a push for a Codex agent at a dialog of its own
+  that no hook reports: the folder-trust question Codex asks in a git checkout no
+  trust covers and its hook review before its first prompt, *Switch to
+  gpt-6-luna for lower credit usage?* after a turn's `Stop`, and *Implement this
+  plan?* after a Plan-mode turn's. The row read `waiting` and the phone showed
+  nothing, while Remote refused every tell as a dialog. The card reads "<name>
+  shows a dialog that needs you", quotes the dialog's words and has no quick
+  answers: Enter trusts the folder and Esc quits Codex there, and a digit on the
+  hook review only moves its highlight, so the key pad answers it. It is pushed
+  30 s after the scan first saw it, as Claude Code's folder-trust card is after
+  its start. While it is up it takes the place of an *asked* card, whose reply's
+  Enter would answer it. Codex's adapter reads these dialogs off its screen
+  (`AgentCapabilities.dialog_on_screen`, new); Claude Code's cards are unchanged.
+- An auto tell to an agent without aisquare's hooks that shows a dialog (a fresh
+  Codex at its folder-trust question) no longer says "Interrupt & tell types it",
+  which is refused at that dialog: it types it once the dialog is answered.
 - Remote's Tell (Prompt, Interrupt & tell), Stop, Restart, Switch account and the
   Transcript tab's keys go by a Codex agent's own screen. A quiet pane at its
   empty prompt is at rest, and anything drawn over that prompt is a dialog they

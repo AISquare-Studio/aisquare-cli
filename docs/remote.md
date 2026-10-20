@@ -302,7 +302,7 @@ aisquare --json remote needs
 
 | kind | means |
 | --- | --- |
-| permission | an agent waits for you to allow a tool (a Bash command, an edit), or shows one of Claude Code's own dialogs |
+| permission | an agent waits for you to allow a tool (a Bash command, an edit), or shows a dialog of its own: one of Claude Code's, or one Codex draws that fires no hook (its folder-trust question and hook review before its first prompt, *Switch to gpt-6-luna?* or *Implement this plan?* after a turn), read off its screen, quoted on the card and pushed 30 s after it was first seen |
 | question | an agent asks you a question with options |
 | plan | an agent asks you to approve its plan |
 | board_question | the manager asks on the board, or a coder asks you (no `--to`, or `--to user`, `human`, `owner`, `all` or `everyone`), or asks the manager when no manager is there to answer it (below) |
@@ -377,8 +377,10 @@ back a second later if the prompt is still there. So does one whose answer went 
 and whose Enter did not: the reply says the answer waits at the agent's prompt,
 and Enter on the key pad sends it. Anything else (one of
 Claude Code's own dialogs, a form an MCP server asks you to fill in, a question of
-several answers) is answered from the agent's key pad. The board keeps the words
-of only the first thing a turn asks for. A form an MCP server asks for while its
+several answers) is answered from the agent's key pad. So is a dialog of Codex's own
+that fires no hook (its folder-trust question, its hook review, *Switch to
+gpt-6-luna?*, *Implement this plan?*): Enter and Esc mean something else in each.
+The board keeps the words of only the first thing a turn asks for. A form an MCP server asks for while its
 tool runs is a card without quick answers when it is that first thing, or when
 it comes straight after the tool's own permission prompt. When the agent already
 went on past an earlier prompt in the same turn, the form reads as its tool's

@@ -240,7 +240,7 @@ item.
 | Prompt capture (`aisquare log`) | `UserPromptSubmit` | Same, with `source=codex`. | Smoke 4; live hooks; SMOKE6 (4) |
 | ▶ working / ⏸ waiting | From its hooks; a fresh agent is waiting from its `SessionStart`, which fires once it sits at its prompt | Same, from Codex's hooks. | Smoke 5. Claude Code's fresh agent: SMOKE2 (it read working until a first prompt), fixed in `c29a2670`; SMOKE6 (5) |
 | 🔔 attention | `Notification`: a permission prompt or a question | 🔔 for an approval the human answers ("Codex needs your approval") and for `request_user_input`. None for one Codex's automatic reviewer decides under `--approve-for-me`. **Differs:** Codex fires `PermissionRequest` with the same payload for both, so the reviewer is read from the session's rollout. Codex also redraws its approval view every second, so pane activity does not clear the bell. It clears when Codex's working line (`esc to interrupt`) is back on the screen, which is the moment the human allows the command, or on Esc, `Stop` or the next prompt. | Smoke 5 failed both ways (seven false bells for one task; a real approval read working). Fixed in `3b11964c`, `182f70e7` and `467d4ef4` (review r2). Live sandbox: a reviewed escalation rang no bell, attention held through the redraws, and the row read working within 5 s of `y`, while the approved 8 s command still ran. SMOKE2 (5) and SMOKE6 (5): no bell under `--approve-for-me`; under `workspace:ask` the bell held 11 s and 15 s unanswered, then read working within 0.5 s of `y` |
-| Remote: needs-you cards | From the session JSONL: a pending tool with the bell is a permission card, `AskUserQuestion` a question, `ExitPlanMode` a plan, an Esc *interrupted*, a turn that ends on a question *asked*. | Same, from its rollout: an approval the human answers (the call without its result, and the bell) is a permission card naming `exec_command` and its command; `request_user_input` (Plan mode) a question card; `turn_aborted` an *interrupted* card; a turn's last words ending on a question an *asked* card. A limited agent's push waits 90 s for a hand-over only when another Codex account can take it, and a rollout past the tail's 512 KiB reads as what its last turn did, never as a tool pending for good. **Differs:** a plan proposed in Plan mode is no card: its *Implement this plan?* dialog opens after the turn's `Stop` and leaves no record. | Live: `test_real_codex_approval_and_question_are_answered_from_the_remote_page`. Unit: `tests/test_remote_needs_codex.py`, over a rollout measured on 0.162.1 (`tests/fixtures/agent_transcripts/`) |
+| Remote: needs-you cards | From the session JSONL: a pending tool with the bell is a permission card, `AskUserQuestion` a question, `ExitPlanMode` a plan, an Esc *interrupted*, a turn that ends on a question *asked*. | Same, from its rollout: an approval the human answers (the call without its result, and the bell) is a permission card naming `exec_command` and its command; `request_user_input` (Plan mode) a question card; `turn_aborted` an *interrupted* card; a turn's last words ending on a question an *asked* card. A limited agent's push waits 90 s for a hand-over only when another Codex account can take it, and a rollout past the tail's 512 KiB reads as what its last turn did, never as a tool pending for good. **Differs:** a dialog of Codex's own that no hook reports is a card read off its screen (`dialog_on_screen`): its folder-trust question in a git checkout no trust covers and its hook review before its first prompt, *Switch to gpt-6-luna for lower credit usage?* after a turn's `Stop`, and *Implement this plan?* after a Plan-mode turn's. The card says "<name> shows a dialog that needs you" and quotes the dialog's words, with no quick answers (Enter trusts the folder and Esc quits Codex there; a digit on the hook review only moves the highlight), so the key pad answers it; it is pushed 30 s after the scan first saw it, as Claude Code's folder-trust card is after its start. While it is up it takes the place of an *asked*, *interrupted* or *failed* card, whose words and Enter would answer it. So a plan proposed in Plan mode is no *plan* card, as its *Implement this plan?* dialog leaves no record: it is that dialog's card, the plan in the transcript above it. | Live: `test_real_codex_approval_and_question_are_answered_from_the_remote_page`; `test_real_codex_dialogs_no_hook_reports_are_cards_on_the_phone` (folder trust, hook review and *Switch to gpt-6-luna?* in a fleet window, each a card on Remote served on loopback); *Implement this plan?* measured in a fleet window on 0.162.1. Unit: `tests/test_remote_needs_codex.py`, over a rollout measured on 0.162.1 (`tests/fixtures/agent_transcripts/`); `tests/test_remote_dialogs_codex.py`, over screens measured on 0.162.1 (`tests/fixtures/agent_screens/`) |
 | Remote: quick answers | The dialog's digits and Esc | The same keys, measured on 0.162.1: `1` approves (*Yes, proceed*), `2` is *Yes, and don't ask again*, Esc is *No* and stops the turn; a question's options take their digit (picked and sent), and Esc stops the turn. **Differs:** Codex records a call before its hooks run and draws its view only after them, so a tap that comes first is refused ("shows no prompt now") until the view is on screen (`working_on_screen`/`idle_on_screen` read it). | Live: the question's first tap was held, and the retry picked Blue. Unit: the hold through the answer route |
 | Remote: Transcript tab | The session JSONL, under `* claude` | The rollout, under `* codex`: the human's words, the agent's, each call as one line, a question in full, an interruption and a proposed plan; Codex's own context (`<environment_context>`, AGENTS.md) is left out. Load older reads at most 2 MB a page, as for Claude Code. | Live; unit over the measured rollout, padded with 3 MB of output |
 | Remote: Tell, Stop, Restart and Switch from the phone | Typed, or refused while a dialog may be up, by the board, the transcript and the pane's quiet. | **Differs:** decided by Codex's own screen. A quiet pane at its empty prompt (`? for shortcuts`, or `esc again to edit previous message` after one Esc) is at rest. Anything else drawn over that prompt is a dialog: the *Switch to gpt-6-luna?* dialog Codex opens after a turn's `Stop`, which no hook reports, its folder-trust, hook-review and approval views, its transcript after a second Esc (where Enter rewinds), a draft. Prompt and Interrupt & tell refuse it before any key; Stop, Restart and Switch refuse it, or press Esc first with `dismiss_dialog`. A fresh Codex, which has fired no hook, takes a Prompt tell at its empty prompt. | Live remote: `test_real_codex_takes_a_phones_prompt_tell_at_its_empty_prompt_and_none_at_its_dialog`, through Remote served on loopback: the fresh agent's line reached the provider as its first prompt, and at the dialog Prompt and Interrupt & tell were 409 `dialog_open`, the dialog left unanswered. Unit: `tests/test_remote_codex.py` |
@@ -1102,6 +1102,7 @@ another agent's flags or claiming hookless detection is integration.
 | 3 | `tests/fixtures/agent_events/<id>.json` | `events`: a recorded payload for every hook event it installs, with the `AgentEvent` fields it must decode to; `version_output`/`version`; `hooks_off` (the file and text that switch its hooks off); with account slots, `accounts`: the files a `login` leaves in a slot's home, and a `relogin` (the same login after a new sign-in). |
 | 4 | `tests/test_adapter_contract.py` | Its row in `EXPECTED_PERMISSIONS` (a coder's and a reviewer's flags). |
 | 4a | `tests/fixtures/agent_transcripts/<id>.json` | `moments`: its transcript as it stood at a permission prompt, a question, an interruption and a turn ended on a question (`records`, or the first `lines` of a recorded session file beside it), with what `transcript_reader` must read of each. |
+| 4b | `tests/fixtures/agent_screens/<id>.json` | With `capabilities.dialog_on_screen` only: `dialogs`, its screens at each dialog of its own (`rows`, as `capture-pane -p` gives them) with the `words` it must read of each, and `not_dialogs`, screens with none (its empty prompt, a draft, a turn). |
 | 5 | `tests/test_<agent>_native.py`, `tests/run_<agent>_native.py` | The opt-in test against the real binary (`AISQUARE_TEST_<AGENT>=1`), as `test_codex_native.py` and its CI job do for Codex. |
 | 6 | `docs/coding-agents.md` | Its setup and native settings. |
 
@@ -1118,7 +1119,8 @@ agent with `sandboxes_tools`, by its adapter. A `HookSpec` whose command is
 Optional slots: numbered login slots (`accounts`, an `AgentAccounts`, below), the plugin route
 (`plugin`, an `AgentPlugin`), Remote's reading of its session transcript
 (`transcript_reader`, an `AgentTranscript`, below: without one its rows have no card a
-transcript decides and an empty Transcript tab), and native telemetry (`capabilities.native_telemetry` with
+transcript decides and an empty Transcript tab), Remote's reading of a dialog of its own that
+fires no hook off its screen (`capabilities.dialog_on_screen`, with 4b), and native telemetry (`capabilities.native_telemetry` with
 `telemetry_args`; the receiver in `services/native_telemetry.py` reads Codex's OTel
 attributes and config layers, which a second telemetry agent extends there).
 
@@ -1172,6 +1174,13 @@ one press at that empty prompt: Codex's `C-c` and `C-d`; Remote's `send-keys` re
 unconfirmed, 409 `one_press_exit`, while the screen shows that prompt or cannot say, as it
 refuses every agent a second within 3 s; empty for an agent that asks for a second press,
 Claude Code's; each must be a key the pad reaches the agent as),
+`dialog_on_screen` (what a dialog of its own on its screen asks, the words above its
+options, or `None` for a screen with none, a draft and a turn included: Remote's needs-you
+scan reads it for a row with no call pending and no bell, and a dialog it reads is a
+`permission` card with no quick answers, pushed 30 s after the scan first saw it; Codex's
+folder trust and hook review before its first prompt, and its *Switch to gpt-6-luna?* and
+*Implement this plan?* after a turn's `Stop`, fire no hook. An agent whose every dialog reaches the board through a hook
+leaves it `None`, and its screen is not read for one),
 `fleet_settings` (`-c` settings a fleet window's agent launches with unless the
 operator's config sets the key: Codex's `notice.hide_rate_limit_model_nudge=true` and
 `check_for_update_on_startup=false`),
@@ -1257,10 +1266,18 @@ The store profile is [the sandbox and the store](#the-sandbox-and-the-aisquare-s
 - a key in its `one_press_exits` is not one a pad key reaches the agent as (past its
   `key_spellings`), or Remote's `send-keys`, with nothing to say the agent is not at its
   empty prompt, sends one of them unasked, refuses a `C-c` or `C-d` it does not declare,
-  or refuses without naming the agent (409 `one_press_exit`, its `reason`).
+  or refuses without naming the agent (409 `one_press_exit`, its `reason`);
+- an agent with `dialog_on_screen` brings no `tests/fixtures/agent_screens/<id>.json`, or
+  one without it brings one; it misreads the words of one of its dialogs, or reads a
+  dialog on a screen that shows none; or the shared needs scan, given a fresh row (no
+  session, no call pending) and one of its dialogs on screen, makes no `permission` card,
+  one whose reason names an agent, one with quick answers or one pushed sooner than 30 s,
+  or a card for a screen with none. Of an agent without it, the scan reads no screen.
 
 The fake adapter was written from this section alone. Besides the cases above it is
 spawned through `services.fleet.spawn` with a stub binary, its window's `aisquare
 launch` builds its argv, and `fleet stop` types its `/quit`, with no change to any
 shared service. Its transcript is a log of its own (`heard`, `said`, `run`, `pick`,
-`ran`, `halt`, `over` records), and its dialogs take `y`/`n` and arrows, never digits.
+`ran`, `halt`, `over` records), and its dialogs take `y`/`n` and arrows, never digits. A
+dialog of its own asks on a `?? ` row and ends its screen on `(y/n)`, which its
+`dialog_on_screen` reads.

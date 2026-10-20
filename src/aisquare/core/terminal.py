@@ -40,6 +40,10 @@ class Sign:
     """``None`` where nobody has said."""
     mac: bool = False
     """Only ever runs on a Mac, so the user's keyboard is a Mac's (:func:`mac_keyboard`)."""
+    sent: bool = False
+    """Sent by ssh from the client's terminal, not set by a terminal on this machine: behind a
+    multiplexer it is whoever started it, and doctor names no terminal by it there
+    (:func:`outer_terminal`)."""
 
 
 SIGNS: tuple[Sign, ...] = (
@@ -54,7 +58,7 @@ SIGNS: tuple[Sign, ...] = (
     Sign("TERM_PROGRAM", "Apple_Terminal", "Terminal.app", False, "drops", mac=True),
     # An LC_* variable, which macOS's ssh sends by default. A tmux keeps the one of
     # whoever started it, so behind a multiplexer it names nobody (`multiplexed`).
-    Sign("LC_TERMINAL", "iTerm2", "iTerm2", False, "asks", mac=True),
+    Sign("LC_TERMINAL", "iTerm2", "iTerm2", False, "asks", mac=True, sent=True),
     Sign("VTE_VERSION", None, "a VTE terminal (GNOME Terminal, Tilix, …)", False),
     # A terminal's own TERM is the one sign ssh always carries.
     Sign("TERM", "xterm-kitty", "kitty", True, "accepts"),
@@ -68,10 +72,12 @@ after the terminal-specific variables because a multiplexer or an IDE can leave 
 one behind, and ``TERM`` last: anything in between may set it to a name of its own."""
 
 
-def sign_of(env: Mapping[str, str]) -> Sign | None:
+def sign_of(env: Mapping[str, str], *, sent: bool = True) -> Sign | None:
     """The first of :data:`SIGNS` the environment shows; ``None`` for a terminal it names
-    not at all."""
+    not at all. ``sent=False`` passes over the signs ssh sent (:attr:`Sign.sent`)."""
     for sign in SIGNS:
+        if sign.sent and not sent:
+            continue
         value = env.get(sign.variable, "")
         if value and (sign.prefix is None or value.startswith(sign.prefix)):
             return sign
@@ -83,9 +89,14 @@ def outer_terminal(environ: Mapping[str, str] | None = None) -> tuple[str, bool 
 
     ``None`` for the protocol when the terminal is not recognised — a guess in either
     direction would send the operator chasing the wrong fix.
+
+    Behind tmux or screen the ``LC_TERMINAL`` ssh sent names whoever started it
+    (:func:`multiplexed`), and is passed over: a tmux started over SSH from iTerm2 and
+    reattached from kitty was named iTerm2, with no kitty keyboard protocol (review of
+    #266, round 3). The terminal's own variables are read there as they always were.
     """
     env = os.environ if environ is None else environ
-    sign = sign_of(env)
+    sign = sign_of(env, sent=not multiplexed(env))
     if sign is not None:
         return sign.name, sign.kitty
     term = env.get("TERM", "").strip()

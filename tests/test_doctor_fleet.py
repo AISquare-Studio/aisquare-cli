@@ -1432,6 +1432,22 @@ def test_outer_terminal_recognition(env: dict[str, str], name: str, kitty: bool 
     assert outer_terminal(env) == (name, kitty)
 
 
+def test_behind_a_multiplexer_the_terminal_ssh_named_is_nobody_s() -> None:
+    """Review of #266, round 3: the ``LC_TERMINAL`` ssh sends is kept by a tmux for as long
+    as it runs. Started over SSH from iTerm2 and reattached from kitty, the row said
+    iTerm2 with no kitty keyboard protocol, and sent the user after a shift+enter fix for
+    a terminal they were not using. The row said "unknown" there before that sign."""
+    iterm = {"LC_TERMINAL": "iTerm2", "LC_TERMINAL_VERSION": "3.5.4"}
+    assert outer_terminal(iterm) == ("iTerm2", False), "over SSH, with nothing between"
+    behind_tmux = {**iterm, "TMUX": "/tmp/tmux-1/default,1,0", "TERM": "tmux-256color"}
+    assert outer_terminal(behind_tmux) == ("unknown (TERM=tmux-256color)", None)
+    behind_screen = {**iterm, "STY": "1234.pts-0.host", "TERM": "screen", "VTE_VERSION": "7800"}
+    assert outer_terminal(behind_screen) == ("a VTE terminal (GNOME Terminal, Tilix, …)", False)
+
+    check = _terminal_row(FakeServer(version=(3, 7), absent=True), behind_tmux)
+    assert "outer terminal unknown (TERM=tmux-256color) (protocol unknown" in check.detail
+
+
 # --- the dead-manager line (#138) --------------------------------------------------------
 
 

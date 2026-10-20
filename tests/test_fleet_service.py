@@ -815,6 +815,7 @@ def test_spawn_manager_builds_the_launch_command_and_records_the_row(
         "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0",
         "AISQUARE_TEAM_HUB": "",  # no hub here, so none from the server either
         "AISQUARE_EXPLAINABILITY_TARGET": "",  # nor a deployment override
+        "AISQUARE_PERSONA": "",  # no persona: blank, never the server's (review of #201, F3)
     }
     assert spawned["cwd"] == project.root and agent.cwd == project.root and not agent.worktree
     assert agent.pane_id == "%1" and agent.binary == "claude" and agent.spawned_by == "user"
@@ -1856,6 +1857,7 @@ def test_spawn_can_keep_native_agent_teams_on(
         "AISQUARE_FLEET_AGENT": agent.id,
         "AISQUARE_TEAM_HUB": "",
         "AISQUARE_EXPLAINABILITY_TARGET": "",
+        "AISQUARE_PERSONA": "",
     }
 
 

@@ -216,7 +216,7 @@ def import_source(
         return _import_with_llm(
             src,
             text,
-            original=probe,
+            original=probe or _over_the_cap(text, refusal, base=base, layer=layer),
             where=where,
             base=base,
             layer=layer,
@@ -277,6 +277,29 @@ def import_source(
         warnings=core.warnings(persona),
         skipped_links=skipped,
     )
+
+
+def _over_the_cap(
+    text: str, refusal: PersonaError | None, *, base: Path, layer: Layer
+) -> Persona | None:
+    """A skill refused ONLY for its body's size, read with a stand-in body; else ``None``.
+
+    The size is what ``--condense`` exists for, and such a skill is a skill in every other
+    respect: its frontmatter and its supporting files are kept like a parsed one's
+    (``_import_with_llm``'s ``original``). Without it, the keep applied only between the
+    soft and the hard cap, and a body over the hard cap lost everything else again
+    (review of #201, F5). The frontmatter is parsed by the same rules; one they refuse
+    keeps nothing.
+    """
+    if refusal is None or refusal.code != "too_large":
+        return None
+    try:
+        raw, _body = core.split_frontmatter(text.replace("\r\n", "\n"))
+        return core.parse_skill(
+            f"---\n{raw}---\nstand-in\n", name=_PROBE_NAME, path=base / _PROBE_NAME, layer=layer
+        )
+    except PersonaError:
+        return None
 
 
 def _not_recognised(where: Path | str, rule: str, line: int | None) -> PersonaError:

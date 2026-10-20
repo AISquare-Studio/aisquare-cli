@@ -3071,6 +3071,12 @@ def spawn(
     # server's frozen environment would name (review of #170, D1b round 2, B1).
     # A replacement's is the hub of the board its row recorded (`_board_and_hub`).
     env[orchestrator.TEAM_HUB_ENV_VAR] = hub
+    # The persona as THIS spawn chose it, blank for none. ``launch`` exports
+    # AISQUARE_PERSONA only when it is given one, and the private tmux server keeps the
+    # environment of whoever started it: a manager launched with ``--persona skeptic``
+    # that started the server gave every persona-less seat on it, and every replay of
+    # one, its skeptic briefing (review of #201, F3).
+    env[orchestrator.PERSONA_ENV_VAR] = chosen_persona or ""
     # The deployment override too, for the same reason: the tab resolves the
     # key's deployment, and shows the target, with THIS process's variable,
     # and the window's `launch` has to trace where the tab says. Blank for
@@ -4719,14 +4725,19 @@ def attach_persona(
     team = _team()
     note = f"persona {persona.name} attached to {label}"
     try:
+        # On the board the agent reads, as its spawn recorded it (``_board_of_row``), the
+        # rule ``tell``'s note keeps: resolved from the caller, under a hub the line went to
+        # whichever board the caller resolved, and a hub nobody added (with ``[projects]
+        # capture`` off) raised ``NotAdded`` out of the command (review of #201, F4).
         team.add_note(
             f"{note} (replaces {replaced})" if replaced else note,
             session_ref=sender,
             to_role=label,
             kind="persona_attached",
             cwd=project.root,
+            board_id=_board_of_row(agent),
         )
-    except team.TeamDisabledError as exc:
+    except (team.TeamDisabledError, project_service.NotAdded) as exc:
         raise FleetError(f"cannot record the attachment on the board: {exc}") from exc
     except KeyError as exc:
         raise FleetError(f"unknown sender session {sender!r}") from exc

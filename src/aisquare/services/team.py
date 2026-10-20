@@ -2824,7 +2824,10 @@ def _render_board(
             *_role_cycle(me, fleet),
         ]
         if briefing and me.persona:
-            lines += _persona_briefing(me.persona, project.root)
+            # The cycle's project, the session's own (its fleet row's, else its
+            # directory's), whose layer the persona was checked against at spawn and
+            # launch; the board's is the hub's under one (review of #201, F1).
+            lines += _persona_briefing(me.persona, (fleet or project).root)
         if briefing and persona_note:
             lines.append(persona_note)
     lines.append("</aisquare-team>")
@@ -3520,7 +3523,11 @@ def _asked_persona(
             "— started without an attached persona"
         )
         return orchestrator.env_persona(), note, None
-    if named is not None and named.project_id == project_id and named.persona:
+    # The row is this board's when its project is, or when its spawn recorded this board
+    # (``fleet_agent.board``): under ``AISQUARE_TEAM_HUB`` every seat is in its own
+    # project and on the hub's board, and comparing the project alone dropped every
+    # attached persona at the next start (review of #201, F2).
+    if named is not None and project_id in (named.project_id, named.board) and named.persona:
         return named.persona, None, named
     return orchestrator.env_persona(), None, named
 
@@ -3636,7 +3643,9 @@ def _owed_persona_briefing(store: ContextStore, session: TeamSession) -> str:
         lines: list[str] = []
         name = owed.row.persona
         if name:
-            root = _project_root(store, session.project_id) or owed.row.cwd
+            # The row's own project, as attach resolved it; the session's is the board's,
+            # the hub's under one (review of #201, F1).
+            root = _project_root(store, owed.row.project_id) or owed.row.cwd
             lines = _persona_briefing(name, root, without=_ATTACHED_WITHOUT)
             if len(lines) > 1:  # the block; a single line is why it could not be loaded
                 replaced = owed.replaced if owed.replaced != name else None

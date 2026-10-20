@@ -614,12 +614,14 @@ def no_native_clipboard(monkeypatch: pytest.MonkeyPatch) -> None:
     toast is the caller's own "copied …" that the gesture tests assert, raised at once
     (``cached_writer`` says no tool, so nothing waits on the clipboard thread). The
     tests of the native route and of the other terminals put the real functions back,
-    beside a fake tool on PATH (tests/fake_clipboard.py).
+    beside a fake tool on PATH (tests/fake_clipboard.py). ``native_writer`` is the search
+    inside tmux, where only the remote question is asked again at each copy.
     """
     from aisquare.core import clipboard
 
     clipboard.forget_writer()
     monkeypatch.setattr(clipboard, "local_writer", lambda: None)
+    monkeypatch.setattr(clipboard, "native_writer", lambda: None)
     monkeypatch.setattr(clipboard, "cached_writer", lambda: None)
     monkeypatch.setattr(clipboard, "osc52_terminal", lambda env: "accepts")
 

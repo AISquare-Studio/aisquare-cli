@@ -249,12 +249,21 @@ def pick_writer(
 
 def local_writer() -> Writer | None:
     """The native tool for THIS session: none when it is remote (:func:`session_is_remote`),
-    else :func:`pick_writer`'s.
+    else :func:`native_writer`'s.
 
     It asks the system, so it runs on the clipboard thread only (:func:`_resolve`).
     """
     if session_is_remote(os.environ):
         return None
+    return native_writer()
+
+
+def native_writer() -> Writer | None:
+    """This machine's tool (:func:`pick_writer`), whether or not the user sits at it: what
+    :func:`_resolve` keeps inside tmux, where only the remote question is asked again.
+
+    It scans PATH and reads files, so it runs on the clipboard thread only.
+    """
     return pick_writer(os.environ, platform=sys.platform)
 
 
@@ -272,11 +281,14 @@ _KEY_VARIABLES = (
     "DISPLAY",
     "WSL_DISTRO_NAME",
     "WSL_INTEROP",
+    "TMUX",
 )
-"""Every variable :func:`local_writer`'s answer depends on: a change to one asks again."""
+"""Every variable :func:`local_writer`'s answer depends on: a change to one asks again.
+``TMUX`` too, since inside tmux the cache holds another question's answer (:func:`_resolve`)."""
 
 _cache: tuple[tuple[str, ...], Writer | None, float] | None = None
-"""``(environment key, writer, when found)``, the last answer :func:`_resolve` found."""
+"""``(environment key, writer, when found)``, the last answer :func:`_resolve` found: outside
+tmux :func:`local_writer`'s, inside it :func:`native_writer`'s."""
 _cache_lock = threading.Lock()
 _clock = time.monotonic
 
@@ -293,23 +305,24 @@ def cached_writer() -> Writer | Ask | None:
     where every Windows PATH directory is a stat over 9p (review of #266, round 1).
     :attr:`Ask.WORKER` when nothing is known for the environment as it is now (a
     variable in :data:`_KEY_VARIABLES` changed, the last write failed, or a "no tool"
-    answer is older than :data:`RECHECK`), and always inside the user's tmux, whose
-    client may have reattached from another machine since (:func:`session_is_remote`).
+    answer is older than :data:`RECHECK`), and inside the user's tmux whenever there is a
+    tool, since its client may have reattached from another machine since
+    (:func:`session_is_remote`).
     """
     return _known()
 
 
 def _known() -> Writer | Ask | None:
     """:func:`cached_writer`'s answer, which the clipboard thread asks under its own name."""
-    if os.environ.get("TMUX"):
-        return Ask.WORKER
     key = _writer_key()
     with _cache_lock:
         if _cache is None or _cache[0] != key:
             return Ask.WORKER
         _, writer, found = _cache
-    if writer is None and _clock() - found > RECHECK:
-        return Ask.WORKER
+    if writer is None:
+        return Ask.WORKER if _clock() - found > RECHECK else None
+    if os.environ.get("TMUX"):
+        return Ask.WORKER  # the tool is known; whose clipboard it writes is asked per copy
     return writer
 
 
@@ -321,15 +334,29 @@ def forget_writer() -> None:
 
 
 def _resolve() -> Writer | None:
-    """On the clipboard thread: the writer for this environment, cached or found now."""
+    """On the clipboard thread: the writer for this environment, cached or found now.
+
+    Inside the user's tmux the cache keeps the tool (:func:`native_writer`), and only
+    tmux's own word on its last attach is asked at each copy (:func:`session_is_remote`):
+    the rest of the search cannot change on a reattach, and run at every copy it cost
+    each toast a ``which`` per tool, on WSL a scan of the Windows PATH over 9p (review of
+    #266, round 2). Outside tmux nothing in this process changes whether the session is
+    remote, so the cache keeps :func:`local_writer`'s whole answer.
+    """
     global _cache
     known = _known()
     if not isinstance(known, Ask):
         return known
+    tmux = bool(os.environ.get("TMUX"))
     key = _writer_key()
-    writer = local_writer()
     with _cache_lock:
-        _cache = (key, writer, _clock())
+        writer = _cache[1] if _cache is not None and _cache[0] == key else None
+    if writer is None:
+        writer = native_writer() if tmux else local_writer()
+        with _cache_lock:
+            _cache = (key, writer, _clock())
+    if writer is not None and tmux and session_is_remote(os.environ):
+        return None
     return writer
 
 

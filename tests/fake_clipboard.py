@@ -32,6 +32,8 @@ REAL_OSC52_TERMINAL = clipboard.osc52_terminal
 """The same, for the classifier the fixture answers "accepts" for."""
 REAL_CACHED_WRITER = clipboard.cached_writer
 """The same, for the cache the fixture says holds no tool."""
+REAL_NATIVE_WRITER = clipboard.native_writer
+"""The same, for the search inside tmux."""
 
 NEEDS_POSIX = pytest.mark.skipif(
     sys.platform == "win32", reason="the fake tool is a /bin/sh script on PATH"
@@ -126,7 +128,7 @@ def install(
     answers the fake — for a test whose app runs threads that read ``sys.platform``
     too (Remote's, in ``FleetApp``).
     """
-    reals = (REAL_LOCAL_WRITER, REAL_OSC52_TERMINAL, REAL_CACHED_WRITER)
+    reals = (REAL_LOCAL_WRITER, REAL_OSC52_TERMINAL, REAL_CACHED_WRITER, REAL_NATIVE_WRITER)
     assert {real.__module__ for real in reals} == {clipboard.__name__}, (
         "tests.fake_clipboard was first imported inside a test, after the suite's stand-in"
         " replaced local_writer: import it at the top of the test module"
@@ -160,8 +162,10 @@ def install(
         monkeypatch.setattr(
             clipboard, "local_writer", lambda: None if clipboard.is_remote(os.environ) else pinned
         )
+        monkeypatch.setattr(clipboard, "native_writer", lambda: pinned)
     else:
         monkeypatch.setattr(clipboard, "local_writer", REAL_LOCAL_WRITER)
+        monkeypatch.setattr(clipboard, "native_writer", REAL_NATIVE_WRITER)
     monkeypatch.setattr(clipboard, "osc52_terminal", REAL_OSC52_TERMINAL)
     monkeypatch.setattr(clipboard, "cached_writer", REAL_CACHED_WRITER)
     clipboard.forget_writer()

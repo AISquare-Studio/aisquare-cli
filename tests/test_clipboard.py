@@ -384,6 +384,49 @@ def test_inside_the_user_s_tmux_the_writer_is_never_taken_from_the_cache(
     assert clipboard.cached_writer() is clipboard.Ask.WORKER
 
 
+def _told(count: int, told: list[bool]) -> None:
+    deadline = time.monotonic() + 10
+    while len(told) < count and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(told) == count, "the clipboard thread never told the copy"
+
+
+@NEEDS_POSIX
+def test_inside_tmux_the_tool_is_found_once_and_only_its_last_attach_is_asked_each_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #266, round 2: inside tmux every copy ran the whole search again (on WSL a
+    scan of the Windows PATH over 9p) when only the remote question can change on a
+    reattach. The tool is kept for the environment; tmux is asked at every copy."""
+    fake = install(tmp_path, monkeypatch)
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1/default,1,0")
+    picked: list[str] = []
+    real_pick = clipboard.pick_writer
+
+    def picking(*args: Any, **kwargs: Any) -> Writer | None:
+        picked.append("pick")
+        return real_pick(*args, **kwargs)
+
+    monkeypatch.setattr(clipboard, "pick_writer", picking)
+    attached = [None, None, "SSH_CONNECTION=10.0.0.2 51000 10.0.0.1 22\n"]
+    asked: list[list[str]] = []
+
+    def ask(argv: list[str]) -> str | None:
+        asked.append(argv)
+        return attached[len(asked) - 1]
+
+    monkeypatch.setattr(clipboard, "_ask", ask)
+    told: list[bool] = []
+    for count, text in enumerate(("one", "two", "three"), start=1):
+        clipboard.submit(text, told.append)
+        _told(count, told)
+
+    assert told == [True, True, False], "reattached over SSH: the native clipboard is not theirs"
+    assert fake.texts() == ["one", "two"]
+    assert picked == ["pick"]
+    assert asked == [["tmux", "show-environment", "SSH_CONNECTION"]] * 3
+
+
 @NEEDS_POSIX
 def test_a_test_s_copy_can_reach_no_tool_but_the_fake(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -1159,11 +1159,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             summary, every_needs_login = result
             self.sidebar.show_headroom(summary, every_needs_login=every_needs_login)
             # The per-slot session use rides this read to every open info line; the views
-            # never read usage themselves, and the two-second tick never asks for it.
+            # never read usage themselves, and the two-second tick never asks for it. Asked
+            # of the switcher that holds the views, as `_forget_views` does, whatever screen
+            # is on top (review of #267, 2).
             self.session_usage = summary.session_by_slot
-            for view in self.query(AgentView):
+            content = self.content
+            for view in content.query(AgentView):
                 view.show_usage(self.session_usage)
-            for project_view in self.query(ProjectView):
+            for project_view in content.query(ProjectView):
                 project_view.show_usage(self.session_usage)
         if event.state in (WorkerState.SUCCESS, WorkerState.ERROR) and self._headroom_owed:
             self.refresh_headroom()
@@ -1387,12 +1390,21 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.notify("that project is no longer listed", severity="warning", timeout=4)
             return
         view_id = f"project-{project.id}"
-        await self._show(
-            view_id, lambda: ProjectView(project, id=view_id, usage=self.session_usage)
-        )
+        await self._show(view_id, lambda: self._project_view(project, view_id))
         self.sidebar.select(f"project:{project.id}")
         self.doctor_scope = project.id
         self._remember_selection(f"project:{project.id}")
+
+    def _project_view(self, project: ProjectInfo, view_id: str) -> ProjectView:
+        """A new Project view, handed the frame already read: its Settings tab names the
+        session to attach to at once, not "no live tmux session" until the next tick
+        (review of #267, 7). Not a frame whose fleet read failed open, as
+        :meth:`_feed_open_views` does not push one."""
+        view = ProjectView(project, id=view_id, usage=self.session_usage)
+        snapshot = self.snapshot
+        if snapshot is not None and snapshot.notices.get(project.id) is None:
+            view.refresh_status(snapshot.agents.get(project.id, []))
+        return view
 
     async def on_agent_selected(self, event: AgentSelected) -> None:
         status = self.snapshot.agent(event.project_id, event.agent_id) if self.snapshot else None

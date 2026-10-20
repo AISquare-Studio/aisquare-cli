@@ -33,7 +33,7 @@ import sys
 import threading
 import tomllib
 from collections.abc import Callable, Coroutine, Iterator, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -573,7 +573,8 @@ def test_the_settings_tab_shows_how_to_attach_and_says_so_when_there_is_nothing_
     """The tmux attach command moved off the Manager tab's line to the project's Settings
     tab: a labelled read-only row, from the shell's frames. The manager's session first; a
     ``lost`` row or one held as another server's is no session to attach to, and with none
-    the row is a dim note."""
+    the row is a dim note. Before any frame it says nothing: "no live tmux session" there
+    may be false (review of #267, 7)."""
     manager = fake_agent(project, pane_id="%11")
     coder = fake_agent(project, pane_id="%12", label="coder-auth")
     elsewhere = tmp_path / "tmux 1000" / "$asq"
@@ -611,13 +612,79 @@ def test_the_settings_tab_shows_how_to_attach_and_says_so_when_there_is_nothing_
             str(elsewhere),
             *attach,
         ]
-    for note in (before, none_live, no_rows):
+    assert before == "", "no frame yet: nothing said"
+    for note in (none_live, no_rows):
         assert "no live tmux session" in note and "tmux -" not in note
     assert settings_view_module.attach_line([row(manager)]).plain == (
         f"{command}tmux -L {PRIVATE_SOCKET} attach -t =asq-amber-otter"
     )
     nothing = settings_view_module.attach_line([])
     assert str(nothing.style) == "dim"
+
+
+def test_the_attach_line_repaints_only_when_it_changes(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #267, 6: every two-second frame repainted the attach line of every open
+    project, with a layout pass, though the command had not changed. A frame that names the
+    same command repaints nothing, a new state on the row included; the frame that ends the
+    session repaints once, and the next one, which says the same, does not."""
+    manager = fake_agent(project, pane_id="%11")
+    live = FleetAgentStatus(agent=manager, state="waiting", tmux_session="asq-amber-otter")
+    painted: list[str] = []
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[str]:
+        view = host.query_one(ProjectView)
+        line = host.query_one("#attach-line", Static)
+        real = line.update
+
+        def update(content: Any = "", *, layout: bool = True) -> None:
+            painted.append(str(content))
+            real(content, layout=layout)
+
+        monkeypatch.setattr(line, "update", update)
+        for frame in ([live], [live], [live.model_copy(update={"state": "working"})], [], []):
+            view.refresh_status(frame)
+            await pilot.pause()
+        return painted
+
+    seen = drive(project, scenario)
+    assert len(seen) == 2, seen  # the first frame, then the one that ended the session
+    assert "attach -t =asq-amber-otter" in seen[0] and "no live tmux session" in seen[1]
+
+
+def test_the_settings_tab_attaches_where_fleet_attach_does_live_rows_before_ended_ones(
+    project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Review of #267, 1: an ENDED manager is listed while its window stands (#138), and
+    ranked by its label alone the Settings tab named its server ahead of a live coder's — not
+    the server ``aisquare fleet attach`` reaches (``services.fleet.attach_argv``: the rows
+    that have not ended, the manager first, then the ended ones, the latest to end first)."""
+    now = datetime.now(tz=UTC)
+    old, new, older = tmp_path / "old" / "asq", tmp_path / "new" / "asq", tmp_path / "older"
+    manager = fake_agent(project, pane_id="%11")
+    coder = fake_agent(project, pane_id="%12", label="coder-auth")
+    tester = fake_agent(project, pane_id="%13", label="tester-1")
+
+    def row(agent: FleetAgent, at: Path, ended: datetime | None = None) -> FleetAgentStatus:
+        ended_row = agent.model_copy(update={"ended_at": ended, "exit_status": 0})
+        return FleetAgentStatus(
+            agent=ended_row if ended is not None else agent,
+            state="exited" if ended is not None else "working",
+            tmux_session="asq-amber-otter",
+            socket_at=at,
+        )
+
+    def server(rows: list[FleetAgentStatus]) -> str:
+        line = settings_view_module.attach_line(rows).plain
+        return install_route.split_line(line.removeprefix("Attach in a terminal: "))[2]
+
+    exited_manager = row(manager, old, ended=now)
+    assert server([exited_manager, row(coder, new)]) == str(new)  # the live coder's
+    assert server([row(coder, new), row(manager, old)]) == str(old)  # a live manager's first
+    # No live row: the latest to end, as the 💤 row's attach stands for.
+    early = row(tester, older, ended=now - timedelta(minutes=5))
+    assert server([early, exited_manager]) == str(old)
 
 
 def test_no_button_and_no_spawn_when_a_manager_already_runs(

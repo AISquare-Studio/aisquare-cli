@@ -496,48 +496,93 @@ def test_the_session_use_rides_the_slow_headroom_read_never_the_tick(
 ) -> None:
     """Acceptance (e): the figures on the rows and the info lines are the headroom read's
     (``HeadroomSummary.session_by_slot``), handed to the widgets when it lands. Ticks of the
-    two-second clock read no usage — any other usage read fails the test — and a view opened
-    between two reads shows the last figure at once. The manager's Agent view and the
-    Manager tab show the same line (acceptance (a), mounted)."""
+    two-second clock read no usage, and any other usage read is recorded — not raised: every
+    usage read runs in a thread worker that does not exit on error, where a raise only marks
+    the worker failed (review of #267, 3). A view opened between two reads shows the last
+    figure at once; one already open takes the next read's figure as it lands, a modal on
+    top or not (review of #267, 2 and 5). The manager's Agent view and the Manager tab show
+    the same line (acceptance (a), mounted)."""
     seed(tmp_path, ("prj_a", "alpha", "amber-otter"))
     script["prj_a"] = [
         on_slot(status("prj_a", "manager", "manager", "waiting"), 2),
         on_slot(status("prj_a", "coder-auth", "coder", "working", minute=1), 2),
     ]
-    reads: list[int] = []
-    answer = session_use((2, 71.0))
+    reads: list[float] = []
+    figure = [71.0]
 
     def headroom(accounts: Sequence[ClaudeAccount] | None) -> HeadroomSummary:
-        reads.append(1)
-        return answer(accounts)
+        reads.append(figure[0])
+        return session_use((2, figure[0]))(accounts)
 
-    def no_usage_read(*args: object, **kwargs: object) -> object:
-        raise AssertionError("usage was read outside the headroom read")
+    elsewhere: list[str] = []
 
-    for name in ("cached_usage", "read_usage", "usage", "read_fleet_headroom"):
-        monkeypatch.setattr(accounts_service, name, no_usage_read)
+    def reader(name: str) -> Callable[..., object]:
+        def read(*args: object, **kwargs: object) -> object:
+            elsewhere.append(name)
+            raise AssertionError(f"usage was read outside the headroom read: {name}")
 
-    async def go(pilot: Pilot[None]) -> tuple[int, int, str, str, str]:
+        return read
+
+    for name in ("cached_usage", "cached_usage_with_trends", "read_usage", "usage"):
+        monkeypatch.setattr(accounts_service, name, reader(name))
+    monkeypatch.setattr(accounts_service, "read_fleet_headroom", reader("read_fleet_headroom"))
+
+    def headers(app: FleetApp) -> tuple[str, str]:
+        agent = shown(app.query_one("#agent-agt_a_manager #agent-header", Static))
+        manager = shown(app.query_one("#project-prj_a #manager-header", Static))
+        return agent, manager.splitlines()[0]
+
+    async def go(pilot: Pilot[None]) -> tuple[list[float], tuple[str, str], tuple[str, str], str]:
         app = fleet_app(pilot)
         await settle(app)
-        first = len(reads)
         await pilot.click(row_for(app, "agt_a_manager"))
         await settle(app)
-        agent_header = shown(app.query_one("#agent-agt_a_manager #agent-header", Static))
         await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
         await settle(app)
         for _ in range(3):
             app.refresh_data()
             await settle(app)
-        manager_header = shown(app.query_one("#project-prj_a #manager-header", Static))
-        row = on_screen(row_for(app, "agt_a_coder-auth"))
-        return first, len(reads), agent_header, manager_header, row
+        opened = headers(app)
+        # The next slow read, with both views open and a modal over them.
+        figure[0] = 64.0
+        app.action_help()
+        await settle(app)
+        assert isinstance(app.screen, HelpScreen)
+        app.refresh_headroom()
+        await settle(app)
+        app.pop_screen()
+        await settle(app)
+        return list(reads), opened, headers(app), on_screen(row_for(app, "agt_a_coder-auth"))
 
-    first, after, agent_header, manager_header, row = drive(go, headroom=headroom)
-    assert first == 1 and after == 1, "the ticks read no usage"
+    seen, opened, after, row = drive(go, headroom=headroom)
+    assert seen == [71.0, 64.0], "one read at start, one asked for: the ticks read no usage"
+    assert elsewhere == [], f"usage read outside the headroom read: {elsewhere}"
+    agent_header, manager_first = opened
     assert "account 2 · 71%" in agent_header
-    assert manager_header.splitlines()[0] == agent_header
-    assert row.rstrip().endswith("▶ #2·71%")
+    assert manager_first == agent_header
+    assert "account 2 · 64%" in after[0] and "71%" not in after[0], after
+    assert after[1] == after[0]
+    assert row.rstrip().endswith("▶ #2·64%")
+
+
+def test_a_project_opened_between_two_ticks_names_its_session_at_once(
+    tmp_path: Path, script: Script
+) -> None:
+    """Review of #267, 7: a new Project view waited for the next tick for its rows, and its
+    Settings tab said "no live tmux session" until then while the frame the app already
+    held named one. The view is handed that frame as it is built."""
+    seed(tmp_path, ("prj_a", "alpha", "amber-otter"))
+    manager = status("prj_a", "manager", "manager", "waiting")
+    script["prj_a"] = [manager.model_copy(update={"tmux_session": "asq-amber-otter"})]
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
+        await settle(app)  # no tick: the app refreshes every hour here
+        return shown(app.query_one("#project-prj_a #attach-line", Static))
+
+    line = drive(go)
+    assert line == f"Attach in a terminal: tmux -L {PRIVATE_SOCKET} attach -t =asq-amber-otter"
 
 
 def test_the_card_names_the_project_not_its_codename_and_a_path_tells_twins_apart(

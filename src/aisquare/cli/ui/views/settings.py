@@ -22,7 +22,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from rich.text import Text
+from rich.style import StyleType
+from rich.text import Span, Text
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, VerticalScroll
@@ -73,20 +74,37 @@ def attach_command(status: FleetAgentStatus) -> str | None:
 
 
 def attached_status(agents: Sequence[FleetAgentStatus]) -> FleetAgentStatus | None:
-    """The row whose tmux session a terminal attaches to: the live manager first, else the
-    first other row on a live session.
+    """The row whose tmux session a terminal attaches to, in the order ``aisquare fleet
+    attach`` asks the servers (``services.fleet.attach_argv``): the rows that have not ended,
+    the manager first, then the ended ones whose window still stands, the latest to end first.
 
-    Not a ``lost`` row (its pane, and maybe its session, is gone), nor one held as another
-    server's: what answers at its socket is not the server it started on.
+    An ENDED manager is listed while its window stands (#138), and ranked by its label alone
+    it named its server ahead of a live coder's — not the server ``fleet attach`` reaches
+    (review of #267, 1). Not a ``lost`` row either (its pane, and maybe its session, is
+    gone), nor one held as another server's: what answers at its socket is not the server
+    it started on.
     """
-    live = [s for s in agents if s.tmux_session and s.state != "lost" and not s.held]
-    managers = [s for s in live if s.agent.label == fleet_service.MANAGER_LABEL]
-    return next(iter(managers + live), None)
+    usable = [s for s in agents if s.tmux_session and s.state != "lost" and not s.held]
+    live = sorted(
+        (s for s in usable if s.agent.ended_at is None),
+        key=lambda s: s.agent.label != fleet_service.MANAGER_LABEL,
+    )
+    ended = sorted(
+        (s for s in usable if s.agent.ended_at is not None),
+        key=lambda s: s.agent.ended_at or s.agent.created_at,
+        reverse=True,
+    )
+    return next(iter([*live, *ended]), None)
 
 
-def attach_line(agents: Sequence[FleetAgentStatus]) -> Text:
+def attach_line(agents: Sequence[FleetAgentStatus] | None) -> Text:
     """``Attach in a terminal: tmux -L asq attach -t =asq-<codename>`` — or a dim note when the
-    project has no live tmux session to attach to."""
+    project has no live tmux session to attach to.
+
+    ``None`` is no frame yet: nothing is said rather than a "no session" that may be false.
+    """
+    if agents is None:
+        return Text()
     status = attached_status(agents)
     command = attach_command(status) if status is not None else None
     if command is None:
@@ -114,8 +132,12 @@ class SettingsView(VerticalScroll):
     def __init__(self, project: ProjectInfo, *, id: str | None = None) -> None:
         super().__init__(id=id)
         self.project = project
-        self.agents: list[FleetAgentStatus] = []
-        """The project's agent rows as the shell's last frame listed them."""
+        self.agents: list[FleetAgentStatus] | None = None
+        """The project's agent rows as the shell's last frame listed them; ``None`` before
+        the first."""
+        self._attach_painted: tuple[str, list[Span], StyleType] | None = None
+        """The attach line as last painted: a frame that changes nothing repaints nothing.
+        Its text, spans and style — ``Text``'s own ``==`` leaves the style out."""
 
     def show_agents(self, agents: Sequence[FleetAgentStatus]) -> None:
         """The project's rows from the shell's frame: the attach line follows its session."""
@@ -124,7 +146,11 @@ class SettingsView(VerticalScroll):
             line = self.query_one("#attach-line", Static)
         except NoMatches:  # not composed yet: compose reads self.agents
             return
-        line.update(attach_line(self.agents))
+        wanted = attach_line(self.agents)
+        painted = (wanted.plain, wanted.spans, wanted.style)
+        if painted != self._attach_painted:
+            self._attach_painted = painted
+            line.update(wanted)
 
     def show_project(self, project: ProjectInfo) -> None:
         """The project as the store has it now: the title, the codename line and the field.
@@ -165,7 +191,9 @@ class SettingsView(VerticalScroll):
             )
             yield Button("Save", id="save-nickname", variant="primary")
         yield Static(fleet_id_line(self.project), id="fleet-id")
-        yield Static(attach_line(self.agents), id="attach-line")
+        attach = attach_line(self.agents)
+        self._attach_painted = (attach.plain, attach.spans, attach.style)
+        yield Static(attach, id="attach-line")
         # The command in bold, not in backticks: the note is a ``Text``, which shows them.
         yield Static(
             Text.assemble(

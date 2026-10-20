@@ -210,7 +210,9 @@ def ordered_agents(statuses: Iterable[FleetAgentStatus]) -> list[FleetAgentStatu
 
 
 LABEL_WIDTH = 13
-"""The cells an agent row gives its label when there is room, so the chips line up."""
+"""The cells an agent row gives its label when there is room, so the chips line up on rows
+that fit. A row that would not fit gives cells back from its label, the ``#N·NN%`` held
+whole at the right: a wide chip (``🔔``, ``💤 exited(N)``) or ``100%`` sits further left."""
 
 
 def agent_row_text(

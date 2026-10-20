@@ -4063,10 +4063,11 @@ class SqliteStore:
         done; tell the manager" — and a nudge went out to the manager each time
         for nothing; reopened and claimed by someone else, the same row ordered
         a busy agent to stand down (review of #135). What the operator sees: the
-        agent header's ``task 01k…`` chip goes with it — the agent is no longer
-        on that task — while the label (``coder-<task>``) and the branch keep
-        the task's short id, so the row still says what it was spawned for
-        (review of #135, second round, finding 7).
+        row no longer names the task — the agent is no longer on it — while the
+        label (``coder-<task>``) and the branch keep the task's short id, so the
+        row still says what it was spawned for (review of #135, second round,
+        finding 7). The agent info line shows no task at all since #267: the
+        label is the tie there.
         """
         cursor = self._conn.execute(
             "UPDATE fleet_agent SET task_id = NULL WHERE task_id = ? AND ended_at IS NULL",

@@ -225,8 +225,8 @@ context for its GATE note — nothing to claim, work or verify. `task next` puts
 the assigned task first — for the agent's own session, and for a verifier's
 cycle or the MCP server's `task_next` running under the same window (the order
 only; a claim needs the session). The assignment ends when its task is done or
-dropped: nothing is said about it afterwards, and the agent header's `task …`
-chip goes with it — the label and the branch keep the task's short id. The
+dropped: nothing is said about it afterwards, and the row no longer names the
+task — the label and the branch keep the task's short id. The
 row is written after the window starts, so `aisquare launch` inside the window
 waits for it (ten seconds at most) before it starts the agent: the first hook
 always finds the row.
@@ -762,7 +762,8 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   machine default, which with one login only is whatever `claude` the shell
   already has — exactly what it ran on before any of this existed; with several,
   the one with room comes before it (*Headroom*, below). The
-  agent's header and `fleet ls` show the slot it was resolved to.
+  agent's info line and `fleet ls` name the account it was resolved to, and its
+  sidebar row shows the slot (`#2`).
 - **Headroom.** By default — `[accounts] pick = "headroom"`, *launches pick* in
   App settings — the machine default gives way to the account with room
   (`aisquare config set accounts.pick default` keeps it): every enabled, signed-in account's
